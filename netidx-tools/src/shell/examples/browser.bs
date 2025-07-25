@@ -92,70 +92,80 @@ let title_bottom = select command_mode {
     false => line(#style:style(#fg:`Cyan), "[path] ([selected_path])"),
     true => line(#style:style(#fg:`Cyan), ":[command]")
 };
-let handle_event = |e: Event| -> [`Stop, `Continue] select e {
-    `Key(e) => select e.code {
-        e@ `Left if !command_mode => {
-            select e ~ selected.x {
-                e if e <= 1 =>
-                    viewport <- uniq(e ~ { viewport with x: max(0, viewport.x - 1) }),
-                e => selected <- e ~ { selected with x: selected.x - 1 }
-            };
-            `Stop
-        },
-        e@ `Right if !command_mode => {
-            let limit = array::len(visible_columns);
-            let clim = array::len(structure.columns) - array::len(visible_columns);
-            select e ~ selected.x {
-                x if x >= limit =>
-                    viewport <- uniq(x ~ { viewport with x: min(clim, viewport.x + 1) }),
-                e => selected <- e ~ {selected with x: selected.x + 1}
-            };
-            `Stop
-        },
-        e@ `Down if !command_mode => {
-            let rlim = array::len(structure.rows) - array::len(visible_rows);
-            let limit = array::len(visible_rows) - 1;
-            select e ~ selected.y {
-                x if x >= limit =>
-                    viewport <- uniq(x ~ { viewport with y: min(rlim, viewport.y + 1) }),
-                e => selected <- e ~ { selected with y: selected.y + 1 }
-            };
-            `Stop
-        },
-        e@ `Up if !command_mode => {
-            select e ~ selected.y {
-                e if e <= 0 =>
-                    viewport <- uniq(e ~ { viewport with y: max(0, viewport.y - 1) }),
-                e => selected <- e ~ { selected with y: selected.y - 1 }
-            };
-            `Stop
-        },
-        e@ `Enter if !command_mode => {
-            path <- e ~ (structure.rows)[selected.y]?;
-            selected <- e ~ { x: 1, y: 0 };
-            viewport <- e ~ { x: 0, y: 0 };
-            `Stop
-        },
-        e@ `Backspace if !command_mode => select e ~ str::dirname(path) {
-            null as _ => `Stop,
-            s => {
-                path <- s;
-                selected <- s ~ { x: 1, y: 0 };
-                viewport <- s ~ { x: 0, y: 0 };
-                `Stop
-            }
-        },
-        `Char(":") if !command_mode => {
-            command <- "";
-            command_mode <- true;
-            `Stop
-        },
-        `Esc if command_mode => {
-            command_mode <- false;
-            `Stop
-        },
-        _ => `Continue
+let handle_key = |e: KeyCode| -> [`Stop, `Continue] select e {
+    e@ `Left if !command_mode => {
+        select e ~ selected.x {
+            e if e <= 1 =>
+                viewport <- uniq(e ~ { viewport with x: max(0, viewport.x - 1) }),
+            e => selected <- e ~ { selected with x: selected.x - 1 }
+        };
+        `Stop
     },
+    e@ `Right if !command_mode => {
+        let limit = array::len(visible_columns);
+        let clim = array::len(structure.columns) - array::len(visible_columns);
+        select e ~ selected.x {
+            x if x >= limit =>
+                viewport <- uniq(x ~ { viewport with x: min(clim, viewport.x + 1) }),
+            e => selected <- e ~ {selected with x: selected.x + 1}
+        };
+        `Stop
+    },
+    e@ `Down if !command_mode => {
+        let rlim = array::len(structure.rows) - array::len(visible_rows);
+        let limit = array::len(visible_rows) - 1;
+        select e ~ selected.y {
+            x if x >= limit =>
+                viewport <- uniq(x ~ { viewport with y: min(rlim, viewport.y + 1) }),
+            e => selected <- e ~ { selected with y: selected.y + 1 }
+        };
+        `Stop
+    },
+    e@ `Up if !command_mode => {
+        select e ~ selected.y {
+            e if e <= 0 =>
+                viewport <- uniq(e ~ { viewport with y: max(0, viewport.y - 1) }),
+            e => selected <- e ~ { selected with y: selected.y - 1 }
+        };
+        `Stop
+    },
+    e@ `Enter if !command_mode => {
+        path <- e ~ (structure.rows)[selected.y]?;
+        selected <- e ~ { x: 1, y: 0 };
+        viewport <- e ~ { x: 0, y: 0 };
+        `Stop
+    },
+    e@ `Backspace if !command_mode => select e ~ str::dirname(path) {
+        null as _ => `Stop,
+        s => {
+            path <- s;
+            selected <- s ~ { x: 1, y: 0 };
+            viewport <- s ~ { x: 0, y: 0 };
+            `Stop
+        }
+    },
+    e@ `Char(":") if !command_mode => {
+        command <- dbg(e) ~ "";
+        command_mode <- e ~ true;
+        `Stop
+    },
+    `Char(c) if command_mode => {
+        command <- c ~ "[dbg(command)][dbg(c)]";
+        `Stop
+    },
+    e@ `Backspace if command_mode && (command != "") => {
+        let len = str::len(command) - 1;
+        command <- e ~ str::sub(#start:0, #len, command)?;
+        `Stop
+    },
+    `Esc if command_mode => {
+        command_mode <- false;
+        `Stop
+    },
+    _ => `Continue
+};
+let handle_event = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(e) => handle_key(dbg(e.code)),
     _ => `Continue
 };
 let grid = table(

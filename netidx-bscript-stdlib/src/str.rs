@@ -1,8 +1,9 @@
 use crate::{deftype, CachedArgs, CachedVals, EvalCached};
 use anyhow::Result;
 use arcstr::{literal, ArcStr};
+use compact_str::format_compact;
 use netidx::{path::Path, subscriber::Value, utils};
-use netidx_bscript::{err, Ctx, ExecCtx, UserEvent};
+use netidx_bscript::{err, errf, Ctx, ExecCtx, UserEvent};
 use netidx_value::ValArray;
 use smallvec::SmallVec;
 use std::cell::RefCell;
@@ -603,7 +604,7 @@ struct SubEv(String);
 
 impl EvalCached for SubEv {
     const NAME: &str = "string_sub";
-    deftype!("str", "fn(#start:i64, #len:i64, string) -> string");
+    deftype!("str", "fn(#start:i64, #len:i64, string) -> [string, error]");
 
     fn eval(&mut self, from: &CachedVals) -> Option<Value> {
         match &from.0[..] {
@@ -620,7 +621,7 @@ impl EvalCached for SubEv {
                 }
                 Some(Value::String(ArcStr::from(&self.0)))
             }
-            _ => err!("sub args must be non negative"),
+            v => errf!("sub args must be non negative {v:?}"),
         }
     }
 }
