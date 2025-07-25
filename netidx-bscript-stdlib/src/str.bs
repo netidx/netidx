@@ -71,4 +71,9 @@ pub let len = |s| 'string_len;
 /// both #start and #len are unicode character indexes,
 /// not byte indexes. e.g. str::sub(#start:0, #len:2, "💖💖💖")
 /// will return "💖💖"
-pub let sub = |#start, #len, s| 'string_sub
+pub let sub = |#start, #len, s| 'string_sub;
+
+/// parse the specified string as a value. return the value on success or an
+/// error on failure. Note, if you feed the parser a well formed error then
+/// parse will also return an error
+pub let parse = |s| 'string_parse

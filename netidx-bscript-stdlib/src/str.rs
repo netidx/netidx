@@ -628,6 +628,26 @@ impl EvalCached for SubEv {
 
 type Sub = CachedArgs<SubEv>;
 
+#[derive(Debug, Default)]
+struct ParseEv;
+
+impl EvalCached for ParseEv {
+    const NAME: &str = "string_parse";
+    deftype!("str", "fn(string) -> Any");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[0] {
+            Some(Value::String(s)) => match s.parse::<Value>() {
+                Ok(v) => Some(v),
+                Err(e) => Some(Value::Error(e.to_string().into())),
+            },
+            _ => None,
+        }
+    }
+}
+
+type Parse = CachedArgs<ParseEv>;
+
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
     ctx.register_builtin::<StartsWith>()?;
     ctx.register_builtin::<EndsWith>()?;
@@ -652,5 +672,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<Sprintf>()?;
     ctx.register_builtin::<Len>()?;
     ctx.register_builtin::<Sub>()?;
+    ctx.register_builtin::<Parse>()?;
     Ok(literal!(include_str!("str.bs")))
 }

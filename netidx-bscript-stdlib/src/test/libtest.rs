@@ -1151,6 +1151,19 @@ run!(str_sub, STR_SUB, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const STR_PARSE: &str = r#"
+  str::parse("42")
+"#;
+
+#[cfg(test)]
+run!(str_parse, STR_PARSE, |v: Result<&Value>| {
+    match v {
+        Ok(Value::I64(42)) => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const RE_IS_MATCH: &str = r#"
   re::is_match(#pat:r'[\\[\\]0-9]+', r'foo[0]')
 "#;
