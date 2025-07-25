@@ -207,7 +207,6 @@ impl Type {
                 Ok(true)
             }
             (Self::Any, _) => Ok(true),
-            (_, Self::Any) => Ok(false),
             (Self::Bottom, _) | (_, Self::Bottom) => Ok(true),
             (Self::Primitive(p0), Self::Primitive(p1)) => Ok(p0.contains(*p1)),
             (
@@ -362,7 +361,8 @@ impl Type {
             (Self::Fn(f0), Self::Fn(f1)) => {
                 Ok(f0.as_ptr() == f1.as_ptr() || f0.contains_int(env, hist, f1)?)
             }
-            (_, Self::TVar(_))
+            (_, Self::Any)
+            | (_, Self::TVar(_))
             | (Self::TVar(_), _)
             | (Self::Fn(_), _)
             | (Self::ByRef(_), _)

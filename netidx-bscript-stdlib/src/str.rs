@@ -598,6 +598,35 @@ impl EvalCached for LenEv {
 
 type Len = CachedArgs<LenEv>;
 
+#[derive(Debug, Default)]
+struct SubEv(String);
+
+impl EvalCached for SubEv {
+    const NAME: &str = "string_sub";
+    deftype!("str", "fn(#start:i64, #len:i64, string) -> string");
+
+    fn eval(&mut self, from: &CachedVals) -> Option<Value> {
+        match &from.0[..] {
+            [Some(Value::I64(start)), Some(Value::I64(len)), Some(Value::String(s))]
+                if *start >= 0 && *len >= 0 =>
+            {
+                let start = *start as usize;
+                let end = start + *len as usize;
+                self.0.clear();
+                for (i, c) in s.chars().enumerate() {
+                    if i >= start && i < end {
+                        self.0.push(c);
+                    }
+                }
+                Some(Value::String(ArcStr::from(&self.0)))
+            }
+            _ => err!("sub args must be non negative"),
+        }
+    }
+}
+
+type Sub = CachedArgs<SubEv>;
+
 pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<ArcStr> {
     ctx.register_builtin::<StartsWith>()?;
     ctx.register_builtin::<EndsWith>()?;
@@ -621,5 +650,6 @@ pub(super) fn register<C: Ctx, E: UserEvent>(ctx: &mut ExecCtx<C, E>) -> Result<
     ctx.register_builtin::<StringToUpper>()?;
     ctx.register_builtin::<Sprintf>()?;
     ctx.register_builtin::<Len>()?;
+    ctx.register_builtin::<Sub>()?;
     Ok(literal!(include_str!("str.bs")))
 }

@@ -65,4 +65,10 @@ pub let to_upper = |s| 'string_to_upper;
 pub let sprintf = |fmt, @args| 'string_sprintf;
 
 /// return the length of the string in bytes
-pub let len = |s| 'string_len
+pub let len = |s| 'string_len;
+
+/// extract a substring of s starting at #start with lenth #len.
+/// both #start and #len are unicode character indexes,
+/// not byte indexes. e.g. str::sub(#start:0, #len:2, "💖💖💖")
+/// will return "💖💖"
+pub let sub = |#start, #len, s| 'string_sub

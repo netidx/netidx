@@ -1138,6 +1138,19 @@ run!(str_len, STR_LEN, |v: Result<&Value>| {
 });
 
 #[cfg(test)]
+const STR_SUB: &str = r#"
+  str::sub(#start:1, #len:2, "💗💖🍇")
+"#;
+
+#[cfg(test)]
+run!(str_sub, STR_SUB, |v: Result<&Value>| {
+    match v {
+        Ok(Value::String(s)) if &*s == "💖🍇" => true,
+        _ => false,
+    }
+});
+
+#[cfg(test)]
 const RE_IS_MATCH: &str = r#"
   re::is_match(#pat:r'[\\[\\]0-9]+', r'foo[0]')
 "#;

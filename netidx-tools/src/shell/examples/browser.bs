@@ -73,12 +73,12 @@ let rows = array::map(visible_rows, |row| {
     &tui::table::row(select mode {
         `List => [
             cell(line(name)),
-            cell(line("[any(uniq(row) ~ "#SUB", net::subscribe("[row]"))]"))
+            cell(line("[any(uniq(row) ~ "#SUB", throttle(net::subscribe("[row]")))]"))
         ],
         `Table => {
             let a = array::map(visible_columns, |col| {
                 let path = "[row]/[col]";
-                let v = any(uniq(path) ~ "#SUB", net::subscribe(path));
+                let v = any(uniq(path) ~ "#SUB", throttle(net::subscribe(path)));
                 cell(line("[v]"))
             });
             let name = cell(#style:gutter, line(name));
@@ -86,9 +86,15 @@ let rows = array::map(visible_rows, |row| {
         }
     })
 });
+let command_mode = false;
+let command = "";
+let title_bottom = select command_mode {
+    false => line(#style:style(#fg:`Cyan), "[path] ([selected_path])"),
+    true => line(#style:style(#fg:`Cyan), ":[command]")
+};
 let handle_event = |e: Event| -> [`Stop, `Continue] select e {
     `Key(e) => select e.code {
-        e@ `Left => {
+        e@ `Left if !command_mode => {
             select e ~ selected.x {
                 e if e <= 1 =>
                     viewport <- uniq(e ~ { viewport with x: max(0, viewport.x - 1) }),
@@ -96,7 +102,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             };
             `Stop
         },
-        e@ `Right => {
+        e@ `Right if !command_mode => {
             let limit = array::len(visible_columns);
             let clim = array::len(structure.columns) - array::len(visible_columns);
             select e ~ selected.x {
@@ -106,7 +112,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             };
             `Stop
         },
-        e@ `Down => {
+        e@ `Down if !command_mode => {
             let rlim = array::len(structure.rows) - array::len(visible_rows);
             let limit = array::len(visible_rows) - 1;
             select e ~ selected.y {
@@ -116,7 +122,7 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             };
             `Stop
         },
-        e@ `Up => {
+        e@ `Up if !command_mode => {
             select e ~ selected.y {
                 e if e <= 0 =>
                     viewport <- uniq(e ~ { viewport with y: max(0, viewport.y - 1) }),
@@ -124,13 +130,13 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
             };
             `Stop
         },
-        e@ `Enter => {
+        e@ `Enter if !command_mode => {
             path <- e ~ (structure.rows)[selected.y]?;
             selected <- e ~ { x: 1, y: 0 };
             viewport <- e ~ { x: 0, y: 0 };
             `Stop
         },
-        e@ `Backspace => select e ~ str::dirname(path) {
+        e@ `Backspace if !command_mode => select e ~ str::dirname(path) {
             null as _ => `Stop,
             s => {
                 path <- s;
@@ -138,6 +144,15 @@ let handle_event = |e: Event| -> [`Stop, `Continue] select e {
                 viewport <- s ~ { x: 0, y: 0 };
                 `Stop
             }
+        },
+        `Char(":") if !command_mode => {
+            command <- "";
+            command_mode <- true;
+            `Stop
+        },
+        `Esc if command_mode => {
+            command_mode <- false;
+            `Stop
         },
         _ => `Continue
     },
@@ -155,7 +170,7 @@ let grid = table(
 let surround = block(
     #border:&`None,
     #border_style:&style(#fg:`Yellow),
-    #title_bottom:&line(#style:style(#fg:`Cyan), "[path] ([selected_path])"),
+    #title_bottom:&title_bottom,
     #size:&size,
     &grid
 );
