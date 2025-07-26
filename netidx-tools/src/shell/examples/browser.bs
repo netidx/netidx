@@ -24,14 +24,15 @@ let run_command = |c: string, path: string| {
     command_error <- errors
 };
 
+let title_style = style(#fg:`Indexed(202));
 let title_bottom = select command_mode {
-    true => line(#style:style(#fg:`Cyan), ":[command]"),
+    true => line(#style:title_style, ":[command]"),
     false => {
         let spans = [
             span("[path] ([selected_path])"),
             span(#style:style(#fg:`Red), "  [any(" ", command_error)]")
         ];
-        line(#style:style(#fg:`Cyan), spans)
+        line(#style:title_style, spans)
     }
 };
 
@@ -93,14 +94,17 @@ let browser = browser(
     #cursor,
     #selected_row: &selected_row,
     #selected_path: &selected_path,
+    #style:style(#fg:`Indexed(227), #bg:`Indexed(234)),
+    #selected_style:style(#bg:`Indexed(20)),
+    #header_style:style(#fg:`Indexed(111)),
     #size,
     path
 );
 
 let block = block(
     #border:&`None,
-    #border_style:&style(#fg:`Yellow),
     #title_bottom:&title_bottom,
+    #style:&style(#bg:`Indexed(234)),
     #size:&size,
     &browser
 );
