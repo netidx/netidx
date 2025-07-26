@@ -507,6 +507,7 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for Ref {
 pub(crate) struct StringInterpolate<C: Ctx, E: UserEvent> {
     spec: Expr,
     typ: Type,
+    typs: Box<[Type]>,
     args: Box<[Cached<C, E>]>,
 }
 
@@ -518,12 +519,13 @@ impl<C: Ctx, E: UserEvent> StringInterpolate<C, E> {
         top_id: ExprId,
         args: &[Expr],
     ) -> Result<Node<C, E>> {
-        let args = args
+        let args: Box<[Cached<C, E>]> = args
             .iter()
             .map(|e| Ok(Cached::new(compile(ctx, e.clone(), scope, top_id)?)))
             .collect::<Result<_>>()?;
+        let typs = args.iter().map(|c| c.node.typ().clone()).collect();
         let typ = Type::Primitive(Typ::String.into());
-        Ok(Box::new(Self { spec, typ, args }))
+        Ok(Box::new(Self { spec, typ, typs, args }))
     }
 }
 
@@ -537,14 +539,10 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
         if updated && determined {
             BUF.with_borrow_mut(|buf| {
                 buf.clear();
-                for c in &self.args {
+                for (typ, c) in self.typs.iter().zip(self.args.iter()) {
                     match c.cached.as_ref().unwrap() {
                         Value::String(s) => write!(buf, "{s}"),
-                        v => write!(
-                            buf,
-                            "{}",
-                            TVal { env: &ctx.env, typ: c.node.typ(), v }
-                        ),
+                        v => write!(buf, "{}", TVal { env: &ctx.env, typ, v }),
                     }
                     .unwrap()
                 }
@@ -582,8 +580,12 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StringInterpolate<C, E> {
     }
 
     fn typecheck(&mut self, ctx: &mut ExecCtx<C, E>) -> Result<()> {
-        for a in &mut self.args {
-            wrap!(a.node, a.node.typecheck(ctx))?
+        for (i, a) in self.args.iter_mut().enumerate() {
+            wrap!(a.node, a.node.typecheck(ctx))?;
+            self.typs[i] = a.node.typ().with_deref(|t| match t {
+                None => Type::Any,
+                Some(t) => t.clone(),
+            });
         }
         Ok(())
     }

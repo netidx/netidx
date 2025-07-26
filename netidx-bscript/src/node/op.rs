@@ -297,10 +297,15 @@ macro_rules! arith_op {
                 let typ = Type::Primitive(Typ::number());
                 let lhs = self.lhs.node.typ();
                 let rhs = self.rhs.node.typ();
+                match (lhs.with_deref(|t| t.cloned()), rhs.with_deref(|t| t.cloned())) {
+                    (None, None) | (Some(_), Some(_)) => (),
+                    (Some(t), None) => { let _ = rhs.contains(&ctx.env, &t); }
+                    (None, Some(t)) => { let _ = lhs.contains(&ctx.env, &t); },
+                }
                 wrap!(self.lhs.node, typ.check_contains(&ctx.env, lhs))?;
                 wrap!(self.rhs.node, typ.check_contains(&ctx.env, rhs))?;
                 let ut = wrap!(self, lhs.union(&ctx.env, rhs))?;
-                wrap!(self,self.typ.check_contains(&ctx.env, &ut))
+                wrap!(self, self.typ.check_contains(&ctx.env, &ut))
             }
         }
     }

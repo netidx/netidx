@@ -182,7 +182,9 @@ impl<C: Ctx, E: UserEvent> CallSite<C, E> {
                 (None, None) => bail!("unexpected args"),
             }
         }
-        let rf = (f.init)(ctx, &self.args, self.top_id)?;
+        let mut rf = (f.init)(ctx, &self.args, self.top_id)?;
+        // for type directed pretty printing to work
+        let _ = rf.typecheck(ctx, &mut self.args);
         self.function = Some((f.id, rf));
         Ok(())
     }

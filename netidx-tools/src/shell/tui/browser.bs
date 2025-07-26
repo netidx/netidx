@@ -14,7 +14,7 @@ pub let browser = |
     #cursor: MoveCursor = never(),
     #selected_row: &string = &never(),
     #selected_path: &string = &never(),
-    #flex: Flex = `Center,
+    #flex: Flex = `SpaceBetween,
     #rate: duration = duration:0.5s,
     #size: Size,
     path: string
@@ -59,27 +59,34 @@ pub let browser = |
         (structure.rows)[start .. end]?
     };
     let content_widths: Array<i64> = [];
+    let get_width = |i| {
+        let errors = never();
+        any(content_widths[i]?, i ~ 0)
+    };
     let { total: _, cols: visible_columns, widths }:
         { total: i64, cols: Array<string>, widths: Array<Constraint> } = {
-        let init = { total: 4, cols: [], widths: [`Min(4)] };
-        let candidates = (structure.columns)[viewport.x ..]?;
-        let candidates = array::enumerate(candidates);
+        let name_width = max(4, get_width(0));
+        let max_width = size.width / 2;
+        let init = {
+            total: size.width - name_width,
+            cols: [],
+            widths: [`Min(name_width)]
+        };
+        let candidates = array::enumerate((structure.columns)[viewport.x ..]?);
+        let candidates = any(content_widths ~ candidates, candidates);
         array::fold(candidates, init, |{total, cols, widths}, (i, col)| {
-            let content_width = {
-                let errors = never();
-                any(content_widths[i]?, 0)
-            };
-            let len = max(str::len(col), content_width);
-            select max(10, len) + total {
-                l if l <= size.width => {
-                    total: l,
+            let len = min(max_width, max(str::len(col), get_width(i + 1)));
+            select total {
+                x if x > 0 => {
+                    total: x - len - 4,
                     cols: array::push(cols, col),
-                    widths: array::push(widths, `Min(len))
+                    widths: array::push(widths, `Min(len + 4))
                 },
-                _ => {total, cols, widths}
+                x => { total: x - len - 4, cols, widths }
             }
         })
     };
+    let visible_columns: Array<string> = uniq(visible_columns);
     *selected_row <- visible_rows[selected.y]?;
     *selected_path <- select mode {
         `List => "[*selected_row]",
@@ -101,20 +108,21 @@ pub let browser = |
             },
             `Table => {
                 let a = array::map(visible_columns, |col| {
-                    let v = throttle(#rate, net::subscribe("[row]/[col]"));
-                    "[any(uniq(path) ~ "#SUB", v)]"
+                    let path = "[row]/[col]";
+                    "[any(uniq(path) ~ "#SUB", throttle(#rate, net::subscribe(path)))]"
                 });
                 array::push_front(a, name)
             }
         }
     });
-    content_widths <- array::fold(rows, [], |acc, row| {
-        let row = array::map(row, |s| str::len(s));
-        select acc {
-            [] => row,
-            acc => array::map(array::zip(row, acc), |(l0, l1)| max(l0, l1))
-        }
-    });
+    content_widths <- throttle(#rate:duration:1.0s,
+        array::fold(rows, [], |acc, row| {
+            let row = array::map(row, |s| str::len(s));
+            select acc {
+                [] => row,
+                acc => array::map(array::zip(row, acc), |(l0, l1)| max(l0, l1))
+            }
+        }));
     let rows = array::map(rows, |row|
         &tui::table::row(array::map(array::enumerate(row), |(i, s)| select i {
             0 => cell(#style:header_style, line(s)),

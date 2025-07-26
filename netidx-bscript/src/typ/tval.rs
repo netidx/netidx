@@ -1,5 +1,5 @@
-use super::Type;
-use crate::{env::Env, Ctx, UserEvent};
+use super::{PrintFlag, Type};
+use crate::{env::Env, typ::format_with_flags, Ctx, UserEvent};
 use fxhash::FxHashSet;
 use netidx::publisher::Value;
 use netidx_value::NakedValue;
@@ -19,12 +19,14 @@ impl<'a, C: Ctx, E: UserEvent> TVal<'a, C, E> {
         hist: &mut FxHashSet<(usize, usize)>,
     ) -> fmt::Result {
         if !self.typ.is_a(&self.env, &self.v) {
-            return write!(
-                f,
-                "error, type {} does not match value {}",
-                self.typ,
-                NakedValue(self.v)
-            );
+            return format_with_flags(PrintFlag::DerefTVars.into(), || {
+                write!(
+                    f,
+                    "error, type {} does not match value {}",
+                    self.typ,
+                    NakedValue(self.v)
+                )
+            });
         }
         match (&self.typ, &self.v) {
             (Type::Primitive(_) | Type::Bottom | Type::Any | Type::Fn(_), v) => {

@@ -135,7 +135,7 @@ run!(undefined, UNDEFINED, |v: Result<&Value>| match v {
 const FIRST_CLASS_LAMBDAS: &str = r#"
 {
   let doit = |x| x + 1;
-  let g = |f: fn(Number) -> Number, y| f(y) + 1;
+  let g = |f: fn<'a: Number>('a) -> 'a, y| f(y) + 1;
   g(doit, 1)
 }
 "#;
