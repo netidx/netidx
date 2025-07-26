@@ -1,3 +1,16 @@
-let foo = [1, 2, 3, 4, 5];
-let bar = ["1", "2", "3", "4", "5"];
-(array::len(foo), array::len(bar))
+let rows = array::map(visible_rows, |row| {
+    let name = select str::basename(row) { null as _ => "", s => s };
+    select mode {
+        `List => {
+            let v = throttle(#rate, net::subscribe("[row]"));
+            []
+        },
+        `Table => {
+            let a = array::map(visible_columns, |col| {
+                let v = throttle(#rate, net::subscribe("[row]/[col]"));
+                "[any(uniq(path) ~ "#SUB", v)]"
+            });
+            array::push_front(a, name)
+        }
+    }
+})

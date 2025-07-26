@@ -94,9 +94,6 @@ let browser = browser(
     #cursor,
     #selected_row: &selected_row,
     #selected_path: &selected_path,
-    #style:style(#fg:`Indexed(227), #bg:`Indexed(234)),
-    #selected_style:style(#bg:`Indexed(20)),
-    #header_style:style(#fg:`Indexed(111)),
     #size,
     path
 );

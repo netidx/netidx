@@ -58,6 +58,17 @@ fn trace() -> bool {
     TRACE.load(Ordering::Relaxed)
 }
 
+#[macro_export]
+macro_rules! tdbg {
+    ($e:expr) => {
+        if $crate::trace() {
+            dbg!($e)
+        } else {
+            $e
+        }
+    };
+}
+
 thread_local! {
     /// thread local shared refs structure
     pub static REFS: RefCell<Refs> = RefCell::new(Refs::new());

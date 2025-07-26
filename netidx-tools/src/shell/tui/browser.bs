@@ -8,9 +8,9 @@ type MoveCursor = [
 ];
 
 pub let browser = |
-    #selected_style: Style = style(#bg:`Yellow, #fg:`White),
-    #header_style: Style = style(#bg:`Indexed(235), #fg:`Cyan),
-    #style: Style = style(#bg:`Indexed(234), #fg:`Gray),
+    #selected_style: Style = style(#bg:`Indexed(20), #fg:`Indexed(227)),
+    #header_style: Style = style(#fg:`Indexed(111)),
+    #style: Style = style(#fg:`Indexed(227), #bg:`Indexed(234)),
     #cursor: MoveCursor = never(),
     #selected_row: &string = &never(),
     #selected_path: &string = &never(),
@@ -19,8 +19,8 @@ pub let browser = |
     #size: Size,
     path: string
 | -> Tui {
-    let selected = { x: 1, y: 0 };
-    let viewport = { x: 0, y: 0 };
+    let selected: {x: i64, y: i64} = { x: 1, y: 0 };
+    let viewport: {x: i64, y: i64} = { x: 0, y: 0 };
     select uniq(path) {
         p => {
             selected <- p ~ { x: 1, y: 0 };
@@ -58,12 +58,18 @@ pub let browser = |
         let end = min(len, viewport.y + size.height - 1);
         (structure.rows)[start .. end]?
     };
+    let content_widths: Array<i64> = [];
     let { total: _, cols: visible_columns, widths }:
         { total: i64, cols: Array<string>, widths: Array<Constraint> } = {
         let init = { total: 4, cols: [], widths: [`Min(4)] };
         let candidates = (structure.columns)[viewport.x ..]?;
-        array::fold(candidates, init, |{total, cols, widths}, col| {
-            let len = str::len(col);
+        let candidates = array::enumerate(candidates);
+        array::fold(candidates, init, |{total, cols, widths}, (i, col)| {
+            let content_width = {
+                let errors = never();
+                any(content_widths[i]?, 0)
+            };
+            let len = max(str::len(col), content_width);
             select max(10, len) + total {
                 l if l <= size.width => {
                     total: l,
@@ -88,22 +94,32 @@ pub let browser = |
     };
     let rows = array::map(visible_rows, |row| {
         let name = select str::basename(row) { null as _ => "", s => s };
-        &tui::table::row(select mode {
+        select mode {
             `List => {
                 let v = throttle(#rate, net::subscribe("[row]"));
-                [cell(line(name)), cell(line("[any(uniq(row) ~ "#SUB", v)]"))]
+                [name, "[any(uniq(row) ~ "#SUB", v)]"]
             },
             `Table => {
                 let a = array::map(visible_columns, |col| {
-                    let path = "[row]/[col]";
-                    let v = throttle(#rate, net::subscribe(path));
-                    cell(line("[any(uniq(path) ~ "#SUB", v)]"))
+                    let v = throttle(#rate, net::subscribe("[row]/[col]"));
+                    "[any(uniq(path) ~ "#SUB", v)]"
                 });
-                let name = cell(#style:header_style, line(name));
                 array::push_front(a, name)
             }
-        })
+        }
     });
+    content_widths <- array::fold(rows, [], |acc, row| {
+        let row = array::map(row, |s| str::len(s));
+        select acc {
+            [] => row,
+            acc => array::map(array::zip(row, acc), |(l0, l1)| max(l0, l1))
+        }
+    });
+    let rows = array::map(rows, |row|
+        &tui::table::row(array::map(array::enumerate(row), |(i, s)| select i {
+            0 => cell(#style:header_style, line(s)),
+            _ => cell(line(s))
+        })));
     select cursor {
         `Left(n) => select n ~ selected.x {
             e if e <= 1 =>

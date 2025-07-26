@@ -241,7 +241,11 @@ impl<C: Ctx, E: UserEvent> Update<C, E> for StructWith<C, E> {
                         match r {
                             None => bail!("struct has no field named {n}"),
                             Some((i, typ)) => {
-                                typ.check_contains(&ctx.env, &rep.n.node.typ())?;
+                                wrap!(rep.n.node, rep.n.node.typecheck(ctx))?;
+                                wrap!(
+                                    rep.n.node,
+                                    typ.check_contains(&ctx.env, &rep.n.node.typ())
+                                )?;
                                 rep.index = Some(i);
                             }
                         }
