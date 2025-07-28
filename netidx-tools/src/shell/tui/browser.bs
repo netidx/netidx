@@ -80,7 +80,7 @@ pub let browser = |
                 x if x > 0 => {
                     total: x - len - 4,
                     cols: array::push(cols, col),
-                    widths: array::push(widths, `Min(len + 4))
+                    widths: array::push(widths, `Min(len))
                 },
                 x => { total: x - len - 4, cols, widths }
             }
