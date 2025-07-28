@@ -124,3 +124,59 @@ pub mod subscriber;
 #[cfg(test)]
 mod test;
 pub mod tls;
+
+use anyhow::Result;
+use publisher::{Publisher, PublisherBuilder};
+use subscriber::{Subscriber, SubscriberBuilder};
+
+/// A complete internal only netidx setup. This will allow the current
+/// program to talk to itself (and child processes) over netidx. This
+/// is useful for tests, as well as a fallback of last resort when
+/// there is no usable netidx config, but a program could still be
+/// useful without netidx.
+///
+/// Note, when you drop this the internal resolver server will shut
+/// down and your publisher/subscriber will no longer be usable.
+pub struct InternalOnly {
+    _resolver: resolver_server::Server,
+    subscriber: Subscriber,
+    publisher: Publisher,
+}
+
+impl InternalOnly {
+    pub fn subscriber(&self) -> &Subscriber {
+        &self.subscriber
+    }
+
+    pub fn publisher(&self) -> &Publisher {
+        &self.publisher
+    }
+
+    pub async fn new() -> Result<Self> {
+        let resolver = {
+            use resolver_server::config::{self, file};
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![file::MemberServerBuilder::default()
+                    .auth(file::Auth::Anonymous)
+                    .addr("127.0.0.1:0".parse()?)
+                    .bind_addr("127.0.0.1".parse()?)
+                    .build()?])
+                .build()?;
+            let cfg = config::Config::from_file(cfg)?;
+            resolver_server::Server::new(cfg, false, 0).await?
+        };
+        let addr = *resolver.local_addr();
+        let cfg = {
+            use config::{self, file, DefaultAuthMech};
+            let cfg = file::ConfigBuilder::default()
+                .addrs(vec![(addr, file::Auth::Anonymous)])
+                .default_auth(DefaultAuthMech::Anonymous)
+                .default_bind_config("local")
+                .build()?;
+            config::Config::from_file(cfg)?
+        };
+        let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
+        let subscriber = SubscriberBuilder::new(cfg).build()?;
+        Ok(Self { _resolver: resolver, publisher, subscriber })
+    }
+}
