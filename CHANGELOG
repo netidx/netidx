@@ -1,3 +1,19 @@
+* 0.28.3
+
+- update deps
+
+- remove all uses of lazy_static from the tree
+
+- split Value out of netidx-netproto into it's own crate
+  - it was getting big, so this improves compile times
+  - it's useful for external projects that aren't very netidx related
+
+- split bscript into a separate project called graphix (different
+  tree). Turns out graphix (nee bscript) is actually bigger than all
+  of the rest of netidx put together now, plus it's getting pretty
+  general purpose, and as such it deserves it's own project that just
+  depends on netidx instead of being part of it.
+
 * 0.28.2
 
 - Update all dependencies
