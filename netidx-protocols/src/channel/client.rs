@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,
-    pool::{Pool, Pooled},
+    pool::Pooled,
     subscriber::{Event, SubId, Subscriber, UpdatesFlags, Val, Value},
 };
 use std::{
@@ -11,10 +11,6 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Mutex, time};
-
-lazy_static! {
-    static ref BATCHES: Pool<Vec<Value>> = Pool::new(100, 10_000);
-}
 
 struct Receiver {
     updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,

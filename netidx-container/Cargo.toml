@@ -2,7 +2,7 @@
 name = "netidx-container"
 version = "0.28.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "netidx embeddable database"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -10,7 +10,7 @@ repository = "https://github.com/estokes/netidx"
 readme = "../README.md"
 documentation = "https://docs.rs/netidx-container"
 keywords = ["networking", "distributed", "kerberos", "database"]
-categories = ["network-programming"]
+categories = ["network-programming", "database"]
 
 [features]
 default = []

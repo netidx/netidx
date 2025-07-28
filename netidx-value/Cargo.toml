@@ -1,30 +1,33 @@
 [package]
-name = "netidx-netproto"
+name = "netidx-value"
 version = "0.28.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 homepage = "https://netidx.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
-description = "netidx wire protocol"
+description = "netidx value type"
 documentation = "https://docs.rs/netidx-netproto"
 readme = "../README.md"
 license = "MIT"
-categories = ["network-programming"]
+categories = ["network-programming", "data-structures"]
 
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
-globset = { workspace = true }
+chrono = { workspace = true }
+combine = { workspace = true }
+compact_str = { workspace = true }
+enumflags2 = { workspace = true }
+fish-printf = { workspace = true }
+fxhash = { workspace = true }
+indexmap = { workspace = true }
 netidx-core = { version = "0.28.0", path = "../netidx-core" }
-netidx-derive = { version = "0.22", path = "../netidx-derive" }
-netidx-value = { version = "0.28.0", path = "../netidx-value" }
+rust_decimal = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 seq-macro = { workspace = true }
 smallvec = { workspace = true }
-
-[dev-dependencies]
-proptest = "1"
-chrono = { workspace = true }
-rust_decimal = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }

@@ -88,7 +88,7 @@ impl Router {
         &mut self,
         pool: &Pool<Vec<(usize, T)>>,
         batch: &Pooled<Vec<T>>,
-    ) -> impl Iterator<Item = (Option<Arc<Referral>>, Pooled<Vec<(usize, T)>>)>
+    ) -> impl Iterator<Item = (Option<Arc<Referral>>, Pooled<Vec<(usize, T)>>)> + use<T>
     where
         T: ToPath + Clone + Send + Sync + 'static,
     {

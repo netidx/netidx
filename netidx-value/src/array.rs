@@ -1,5 +1,5 @@
-use crate::value::Value;
-use anyhow::Result;
+use crate::Value;
+use anyhow::{bail, Result};
 use bytes::{Buf, BufMut};
 use netidx_core::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC},

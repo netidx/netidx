@@ -20,7 +20,7 @@ use std::{
     fmt::Debug,
     mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
@@ -320,9 +320,8 @@ impl PBuf {
 
 impl Default for PBuf {
     fn default() -> Self {
-        lazy_static! {
-            static ref POOL: Pool<Vec<u8>> = Pool::new(10, BUF << 2);
-        }
+        static POOL: LazyLock<Pool<Vec<u8>>> = LazyLock::new(|| Pool::new(10, BUF << 2));
+
         Self { data: POOL.take(), pos: 0 }
     }
 }
@@ -345,7 +344,7 @@ unsafe impl BufMut for PBuf {
     unsafe fn advance_mut(&mut self, cnt: usize) {
         let new = self.data.len() + cnt;
         assert!(new <= self.data.capacity());
-        self.data.set_len(new)
+        unsafe { self.data.set_len(new) }
     }
 
     fn chunk_mut(&mut self) -> &mut UninitSlice {
@@ -492,19 +491,15 @@ impl ReadChannel {
         batch: &mut Vec<T>,
     ) -> Result<()> {
         batch.push(self.receive().await?);
-	let mut n = self.buf.remaining();
+        let mut n = self.buf.remaining();
         while self.buf.has_remaining() {
             let t = T::decode(&mut self.buf);
-            trace!(
-                "receive_batch remains {} decoded {:?}",
-                self.buf.remaining(),
-                t
-            );
+            trace!("receive_batch remains {} decoded {:?}", self.buf.remaining(), t);
             batch.push(t?);
-	    if n - self.buf.remaining() > 8 * 1024 * 1024 {
-		n = self.buf.remaining();
-		task::yield_now().await
-	    }
+            if n - self.buf.remaining() > 8 * 1024 * 1024 {
+                n = self.buf.remaining();
+                task::yield_now().await
+            }
         }
         Ok::<_, anyhow::Error>(())
     }
@@ -515,19 +510,15 @@ impl ReadChannel {
         F: FnMut(T),
     {
         f(self.receive().await?);
-	let mut n = self.buf.remaining();
+        let mut n = self.buf.remaining();
         while self.buf.has_remaining() {
             let t = T::decode(&mut self.buf);
-            trace!(
-                "receive_batch_fn remains {} decoded {:?}",
-                self.buf.remaining(),
-                t
-            );
+            trace!("receive_batch_fn remains {} decoded {:?}", self.buf.remaining(), t);
             f(t?);
-	    if n - self.buf.remaining() > 8 * 1024 * 1024 {
-		n = self.buf.remaining();
-		task::yield_now().await
-	    }
+            if n - self.buf.remaining() > 8 * 1024 * 1024 {
+                n = self.buf.remaining();
+                task::yield_now().await
+            }
         }
         Ok::<_, anyhow::Error>(())
     }

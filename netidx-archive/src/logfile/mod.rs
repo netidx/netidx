@@ -36,6 +36,7 @@ use std::{
     ops::{Bound, RangeBounds},
     path::Path as FilePath,
     str::FromStr,
+    sync::LazyLock,
 };
 
 #[derive(Debug, Clone)]
@@ -307,16 +308,16 @@ impl FromValue for Seek {
     }
 }
 
-lazy_static! {
-    static ref PM_POOL: Pool<Vec<PathMapping>> = Pool::new(10, 100_000);
-    pub static ref BATCH_POOL: Pool<Vec<BatchItem>> = Pool::new(10, 100_000);
-    pub(crate) static ref CURSOR_BATCH_POOL: Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> =
-        Pool::new(100, 10_000);
-    static ref IDX_POOL: Pool<Vec<(Id, Path)>> = Pool::new(10, 100_000);
-    pub(crate) static ref IMG_POOL: Pool<FxHashMap<Id, Event>> = Pool::new(100, 10_000);
-    static ref EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
-    static ref TO_READ_POOL: Pool<Vec<usize>> = Pool::new(10, 100_000);
-}
+static PM_POOL: LazyLock<Pool<Vec<PathMapping>>> =
+    LazyLock::new(|| Pool::new(10, 100_000));
+pub static BATCH_POOL: LazyLock<Pool<Vec<BatchItem>>> =
+    LazyLock::new(|| Pool::new(10, 100_000));
+pub(crate) static CURSOR_BATCH_POOL: LazyLock<
+    Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+> = LazyLock::new(|| Pool::new(100, 10_000));
+pub(crate) static IMG_POOL: LazyLock<Pool<FxHashMap<Id, Event>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+static EPSILON: chrono::Duration = chrono::Duration::microseconds(1);
 
 #[derive(Debug, Clone, Copy)]
 enum Timestamp {
@@ -446,7 +447,7 @@ impl Cursor {
         match self.start {
             Bound::Unbounded => false,
             Bound::Excluded(st) => {
-                self.current.map(|pos| st + *EPSILON == pos).unwrap_or(false)
+                self.current.map(|pos| st + EPSILON == pos).unwrap_or(false)
             }
             Bound::Included(st) => self.current.map(|pos| st == pos).unwrap_or(false),
         }
@@ -461,7 +462,7 @@ impl Cursor {
         match self.end {
             Bound::Unbounded => false,
             Bound::Excluded(en) => {
-                self.current.map(|pos| en - *EPSILON == pos).unwrap_or(false)
+                self.current.map(|pos| en - EPSILON == pos).unwrap_or(false)
             }
             Bound::Included(en) => self.current.map(|pos| en == pos).unwrap_or(false),
         }
@@ -480,13 +481,13 @@ impl Cursor {
                     self.current = Some(ts);
                 }
                 (Bound::Unbounded, Bound::Excluded(ts)) => {
-                    self.current = Some(ts - *EPSILON);
+                    self.current = Some(ts - EPSILON);
                 }
                 (Bound::Included(ts), Bound::Unbounded) => {
                     self.current = Some(ts);
                 }
                 (Bound::Excluded(ts), Bound::Unbounded) => {
-                    self.current = Some(ts + *EPSILON);
+                    self.current = Some(ts + EPSILON);
                 }
                 (Bound::Included(start), Bound::Included(end)) => {
                     if pos < start {
@@ -497,14 +498,14 @@ impl Cursor {
                 }
                 (Bound::Excluded(start), Bound::Excluded(end)) => {
                     if pos <= start {
-                        self.current = Some(start + *EPSILON);
+                        self.current = Some(start + EPSILON);
                     } else {
-                        self.current = Some(end - *EPSILON);
+                        self.current = Some(end - EPSILON);
                     }
                 }
                 (Bound::Excluded(start), Bound::Included(end)) => {
                     if pos <= start {
-                        self.current = Some(start + *EPSILON);
+                        self.current = Some(start + EPSILON);
                     } else {
                         self.current = Some(end);
                     }
@@ -513,7 +514,7 @@ impl Cursor {
                     if pos < start {
                         self.current = Some(start);
                     } else {
-                        self.current = Some(end - *EPSILON);
+                        self.current = Some(end - EPSILON);
                     }
                 }
             }

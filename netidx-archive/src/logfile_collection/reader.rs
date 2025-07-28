@@ -1,7 +1,10 @@
 use crate::{
     config::Config,
     logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek, IMG_POOL},
-    logfile_collection::{index::{ArchiveIndex, File}, to_name},
+    logfile_collection::{
+        index::{ArchiveIndex, File},
+        to_name,
+    },
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -14,7 +17,7 @@ use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     ops::Bound,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::task;
@@ -25,11 +28,9 @@ struct Cached {
     reader: ArchiveReader,
 }
 
-lazy_static! {
-    static ref ARCHIVE_READERS: Mutex<FxHashMap<PathBuf, Cached>> =
-        Mutex::new(HashMap::default());
-    static ref CACHE_FOR: chrono::Duration = chrono::Duration::minutes(10);
-}
+static ARCHIVE_READERS: LazyLock<Mutex<FxHashMap<PathBuf, Cached>>> =
+    LazyLock::new(|| Mutex::new(HashMap::default()));
+static CACHE_FOR: chrono::Duration = chrono::Duration::minutes(10);
 
 pub fn reopen(timestamp: DateTime<Utc>) -> Result<()> {
     let mut readers = ARCHIVE_READERS.lock();
@@ -129,7 +130,7 @@ impl DataSource {
                         debug!("log file was not cached, opening");
                         readers.retain(|_, cached| {
                             cached.reader.strong_count() > 1
-                                || now - cached.last_used < *CACHE_FOR
+                                || now - cached.last_used < CACHE_FOR
                         });
                         drop(readers); // release the lock
                         let rd = task::block_in_place(|| {
@@ -179,7 +180,7 @@ impl Drop for ArchiveCollectionReader {
         self.head = None;
         let now = Utc::now();
         ARCHIVE_READERS.lock().retain(|_, cached| {
-            cached.reader.strong_count() > 1 || now - cached.last_used < *CACHE_FOR
+            cached.reader.strong_count() > 1 || now - cached.last_used < CACHE_FOR
         });
     }
 }

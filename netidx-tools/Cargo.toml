@@ -2,7 +2,7 @@
 name = "netidx-tools"
 version = "0.28.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "netidx command line tools"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -33,34 +33,24 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
-async-stream = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }
-compact_str = { workspace = true }
-crossterm = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }
-flexi_logger = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 hdrhistogram = { workspace = true }
-indexmap = { workspace = true }
 log = { workspace = true }
 netidx-archive = { path = "../netidx-archive", version = "0.28.0", default-features = false }
-netidx-bscript = { path = "../netidx-bscript", version = "0.28.0", default-features = false }
 netidx-container = { path = "../netidx-container", version = "0.28.0", default-features = false }
 netidx = { path = "../netidx", version = "0.28.1", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.28.0", default-features = false }
 netidx-tools-core = { path = "../netidx-tools-core", version = "0.28.0", default-features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.28.0", default-features = false }
 parking_lot = { workspace = true }
-ratatui = { workspace = true }
-reedline = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
-smallvec = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
-triomphe = { workspace = true }

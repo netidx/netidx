@@ -1,16 +1,18 @@
-#[macro_use] extern crate anyhow;
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate combine;
-#[macro_use] extern crate netidx_core;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate anyhow;
+#[macro_use]
+extern crate netidx_core;
+#[macro_use]
+extern crate serde_derive;
 
-pub mod valarray;
-pub mod pbuf;
 pub mod glob;
 pub mod publisher;
-pub mod value_parser;
-pub mod value;
 pub mod resolver;
+
+pub use netidx_value as value;
+pub use value::array as valarray;
+pub use value::parser as value_parser;
+pub use value::pbuf;
 
 #[cfg(test)]
 mod test;

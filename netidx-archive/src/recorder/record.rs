@@ -148,7 +148,7 @@ fn write_pathmap(
     by_subid: &mut FxHashMap<SubId, Id>,
 ) -> Result<()> {
     task::block_in_place(|| {
-        let i = to_add.iter().map(|(ref p, _)| p);
+        let i = to_add.iter().map(|(p, _)| p);
         archive.add_paths(i)
     })
     .context("adding paths to pathindex")?;

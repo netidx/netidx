@@ -2,7 +2,7 @@
 name = "netidx"
 version = "0.28.2"
 authors = ["Eric Stokes <letaris@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Secure, fast, pub/sub messaging"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -10,7 +10,7 @@ repository = "https://github.com/estokes/netidx"
 documentation = "https://docs.rs/netidx"
 readme = "../README.md"
 keywords = ["network", "networking", "distributed", "kerberos"]
-categories = ["text-processing"]
+categories = ["network-programming"]
 
 [features]
 default = []
@@ -34,7 +34,6 @@ if-addrs = { workspace = true }
 immutable-chunkmap = { workspace = true }
 indexmap = { workspace = true }
 keyring = { workspace = true }
-lazy_static = { workspace = true }
 log = { workspace = true }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }

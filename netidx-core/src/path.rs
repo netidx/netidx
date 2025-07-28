@@ -193,7 +193,7 @@ impl<'a> Iterator for DirNames<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            DirNames::Path { ref mut cur, all, ref mut base } => {
+            DirNames::Path { cur, all, base } => {
                 if *base >= all.len() {
                     None
                 } else {
@@ -222,25 +222,23 @@ impl<'a> Iterator for DirNames<'a> {
 impl<'a> DoubleEndedIterator for DirNames<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
-            DirNames::Path { cur: _, ref mut all, base: _ } => {
-                match Path::dirname(*all) {
-                    Some(dn) => {
+            DirNames::Path { cur: _, all, base: _ } => match Path::dirname(*all) {
+                Some(dn) => {
+                    let res = *all;
+                    *all = dn;
+                    Some(res)
+                }
+                None => {
+                    if all == &ROOT {
+                        *self = DirNames::Root(false);
+                        Some("/")
+                    } else {
                         let res = *all;
-                        *all = dn;
+                        *all = &ROOT;
                         Some(res)
                     }
-                    None => {
-                        if all == &ROOT {
-                            *self = DirNames::Root(false);
-                            Some("/")
-                        } else {
-                            let res = *all;
-                            *all = &ROOT;
-                            Some(res)
-                        }
-                    }
                 }
-            }
+            },
             DirNames::Root(true) => {
                 *self = DirNames::Root(false);
                 Some("/")

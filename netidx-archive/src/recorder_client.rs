@@ -3,10 +3,10 @@ use crate::{
     recorder::State,
 };
 use anyhow::Result;
+use arcstr::{literal, ArcStr};
 use chrono::prelude::*;
 use futures::{channel::mpsc, prelude::*};
 use fxhash::FxHashMap;
-use arcstr::{literal, ArcStr};
 use netidx::{
     pack::Pack,
     path::Path,
@@ -17,13 +17,13 @@ use netidx::{
 };
 use netidx_derive::Pack;
 use netidx_protocols::{call_rpc, rpc::client::Proc};
-use std::{collections::VecDeque, time::Duration};
+use std::{collections::VecDeque, sync::LazyLock, time::Duration};
 use tokio::{task, try_join};
 
-lazy_static! {
-    pub(crate) static ref PATHMAPS: Pool<FxHashMap<Id, Path>> = Pool::new(100, 10_000);
-    pub(crate) static ref SHARDS: Pool<Vec<OneshotReplyShard>> = Pool::new(100, 128);
-}
+pub(crate) static PATHMAPS: LazyLock<Pool<FxHashMap<Id, Path>>> =
+    LazyLock::new(|| Pool::new(100, 10_000));
+pub(crate) static SHARDS: LazyLock<Pool<Vec<OneshotReplyShard>>> =
+    LazyLock::new(|| Pool::new(100, 128));
 
 #[derive(Debug, Clone, Pack)]
 pub struct OneshotReplyShard {
@@ -314,7 +314,6 @@ impl SessionBuilder {
         self.speed = Some(speed);
         self
     }
-
 
     /// Start the session. You can call this more than once with the
     /// same builder if you wish to create multiple sessions with the
