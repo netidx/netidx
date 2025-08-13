@@ -269,6 +269,30 @@ where
     }))
 }
 
+/// unescape the specified string using the specified escape character. Place
+/// the result in the specified buffer. Translate escaped characters in the
+/// tr mapping.
+pub fn unescape_tr_to<T>(s: &T, buf: &mut String, esc: char, tr: &[(char, char)])
+where
+    T: AsRef<str> + ?Sized,
+{
+    let mut escaped = false;
+    buf.extend(s.as_ref().chars().filter_map(|c| {
+        if c == esc && !escaped {
+            escaped = true;
+            None
+        } else if escaped {
+            escaped = false;
+            match tr.iter().find_map(|(k, v)| if c == *k { Some(*v) } else { None }) {
+                None => Some(c),
+                Some(c) => Some(c),
+            }
+        } else {
+            Some(c)
+        }
+    }))
+}
+
 /// unescape the specified string using the specified escape character
 pub fn unescape<T>(s: &T, esc: char) -> Cow<str>
 where
@@ -280,6 +304,22 @@ where
     } else {
         let mut res = String::with_capacity(s.len());
         unescape_to(s, &mut res, esc);
+        Cow::Owned(res)
+    }
+}
+
+/// unescape the specified string using the specified escape character,
+/// translate escaped characters using the tr map
+pub fn unescape_tr<'a, T>(s: &'a T, esc: char, tr: &[(char, char)]) -> Cow<'a, str>
+where
+    T: AsRef<str> + ?Sized,
+{
+    let s = s.as_ref();
+    if !s.contains(esc) {
+        Cow::Borrowed(s.as_ref())
+    } else {
+        let mut res = String::with_capacity(s.len());
+        unescape_tr_to(s, &mut res, esc, tr);
         Cow::Owned(res)
     }
 }

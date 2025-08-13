@@ -17,7 +17,7 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    protocol::value_parser::{escaped_string, value, VAL_ESC},
+    protocol::value_parser::{escaped_string, value, VAL_CAN_ESC, VAL_ESC, VAL_TR},
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{splitn_escaped, BatchItem, Batched},
@@ -65,9 +65,9 @@ where
     I::Range: Range,
 {
     (
-        spaces().with(escaped_string(&['\\', '='])),
+        spaces().with(escaped_string(&['\\', '='], &['\\', '='], &[])),
         spaces().with(token('=')),
-        spaces().with(value(&VAL_ESC)),
+        spaces().with(value(&VAL_ESC, &VAL_CAN_ESC, &VAL_TR)),
     )
         .map(|(arg_name, _, arg_val)| (arg_name, arg_val))
 }

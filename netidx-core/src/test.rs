@@ -1,4 +1,7 @@
-use crate::pack::{self, Pack};
+use crate::{
+    pack::{self, Pack},
+    utils::{escape, unescape, unescape_tr},
+};
 use bytes::Buf;
 use chrono::prelude::*;
 use rand::{rng, Rng};
@@ -68,4 +71,28 @@ fn test_array_pack() {
     let a = [42u8; 64];
     Pack::encode(&a, &mut &mut buf[..]).unwrap();
     assert_eq!(<[u8; 64] as Pack>::decode(&mut &buf[..]).unwrap(), a)
+}
+
+#[test]
+fn escape_unescape0() {
+    let s = "[foo]";
+    let esc = escape(s, '\\', &['[', ']']);
+    let un = unescape(&esc, '\\');
+    assert_eq!(s, un)
+}
+
+#[test]
+fn escape_unescape1() {
+    let s = r#"[\foo]"#;
+    let esc = escape(s, '\\', &['[', ']']);
+    let un = unescape(&esc, '\\');
+    assert_eq!(s, un)
+}
+
+#[test]
+fn test_unescape_tr() {
+    let s0 = r#"[foo]\n"#;
+    let un = unescape_tr(s0, '\\', &[('n', '\n')]);
+    let s1 = "[foo]\n";
+    assert_eq!(un, s1)
 }
