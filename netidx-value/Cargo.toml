@@ -20,6 +20,7 @@ chrono = { workspace = true }
 combine = { workspace = true }
 compact_str = { workspace = true }
 enumflags2 = { workspace = true }
+escaping = { workspace = true }
 fish-printf = { workspace = true }
 fxhash = { workspace = true }
 indexmap = { workspace = true }

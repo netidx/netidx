@@ -136,7 +136,7 @@ where
         }
     }
 
-    pub fn range<R, Q>(&self, range: R) -> Range<R, K, V, Q>
+    pub fn range<'a, R, Q>(&'a self, range: R) -> Range<'a, R, K, V, Q>
     where
         R: RangeBounds<Q>,
         Q: Ord,

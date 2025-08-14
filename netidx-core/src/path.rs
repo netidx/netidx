@@ -1,9 +1,7 @@
-use crate::{
-    pack::{Pack, PackError},
-    utils,
-};
+use crate::pack::{Pack, PackError};
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
+use escaping::Escape;
 use std::{
     borrow::{Borrow, Cow},
     cell::RefCell,
@@ -14,11 +12,13 @@ use std::{
     ops::Deref,
     result::Result,
     str::{self, FromStr},
+    sync::LazyLock,
 };
 
-pub const ESC: char = '\\';
 pub const SEP: char = '/';
 pub const ROOT: &str = "/";
+pub const PATH_ESC: LazyLock<Escape> =
+    LazyLock::new(|| Escape::new('\\', &['\\', '/'], &[], None).unwrap());
 
 fn is_canonical(s: &str) -> bool {
     for _ in Path::parts(s).filter(|p| *p == "") {
@@ -154,7 +154,7 @@ impl<C: Borrow<str>> FromIterator<C> for Path {
             buf.clear();
             buf.push(SEP);
             for c in iter {
-                utils::escape_to(c.borrow(), buf, ESC, &[SEP]);
+                PATH_ESC.escape_to(c.borrow(), buf);
                 buf.push(SEP)
             }
             if buf.len() > 1 {
@@ -249,7 +249,6 @@ impl<'a> DoubleEndedIterator for DirNames<'a> {
 }
 
 impl Path {
-    pub const ESC: char = ESC;
     pub const SEP: char = SEP;
     pub const ROOT: &str = ROOT;
 
@@ -367,8 +366,8 @@ impl Path {
     /// assert_eq!("foo\\/bar", &*Path::escape("foo/bar"));
     /// assert_eq!("\\\\hello world", &*Path::escape("\\hello world"));
     /// ```
-    pub fn escape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
-        utils::escape(s, ESC, &[SEP])
+    pub fn escape<'a, T: AsRef<str> + ?Sized>(s: &'a T) -> Cow<'a, str> {
+        PATH_ESC.escape(s)
     }
 
     /// This will unescape the path seperator and the escape character
@@ -380,20 +379,8 @@ impl Path {
     /// assert_eq!("foo/bar", &*Path::unescape("foo\\/bar"));
     /// assert_eq!("\\hello world", &*Path::unescape("\\\\hello world"));
     /// ```
-    pub fn unescape<T: AsRef<str> + ?Sized>(s: &T) -> Cow<str> {
-        let s = s.as_ref();
-        if !(0..s.len()).into_iter().any(|i| utils::is_escaped(s, ESC, i)) {
-            Cow::Borrowed(s)
-        } else {
-            let mut out = String::with_capacity(s.len());
-            for (i, c) in s.chars().enumerate() {
-                if utils::is_escaped(s, ESC, i) {
-                    out.pop();
-                }
-                out.push(c);
-            }
-            Cow::Owned(out)
-        }
+    pub fn unescape<'a, T: AsRef<str> + ?Sized>(s: &'a T) -> Cow<'a, str> {
+        PATH_ESC.unescape(s)
     }
 
     /// return a new path with the specified string appended as a new
@@ -449,7 +436,8 @@ impl Path {
         } else {
             0
         };
-        utils::split_escaped(s, ESC, SEP).skip(skip)
+        let e = PATH_ESC.clone();
+        e.split(s, SEP).skip(skip)
     }
 
     /// Return an iterator over all the dirnames in the path starting
@@ -476,7 +464,7 @@ impl Path {
     /// assert_eq!(bn.next_back(), Some("/"));
     /// assert_eq!(bn.next_back(), None);
     /// ```
-    pub fn dirnames<T: AsRef<str> + ?Sized>(s: &T) -> DirNames {
+    pub fn dirnames<'a, T: AsRef<str> + ?Sized>(s: &'a T) -> DirNames<'a> {
         let s = s.as_ref();
         if s == "/" {
             DirNames::Root(true)
@@ -575,7 +563,7 @@ impl Path {
                 match f(s) {
                     None => return None,
                     Some(i) => {
-                        if !utils::is_escaped(s, ESC, i) {
+                        if !PATH_ESC.is_escaped(s, i) {
                             return Some(i);
                         } else {
                             s = &s[0..i];

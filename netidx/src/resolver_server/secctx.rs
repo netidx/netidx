@@ -181,7 +181,7 @@ impl SecCtx {
         Ok(t)
     }
 
-    pub(super) async fn read(&self) -> SecCtxDataReadGuard {
+    pub(super) async fn read<'a>(&'a self) -> SecCtxDataReadGuard<'a> {
         match self {
             SecCtx::Anonymous => SecCtxDataReadGuard::Anonymous,
             SecCtx::Krb5(a) => SecCtxDataReadGuard::Krb5(a.1.read().await),

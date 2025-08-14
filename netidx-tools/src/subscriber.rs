@@ -7,6 +7,7 @@ use combine::{
     stream::{position, Range},
     token, EasyParser, ParseError, Parser, RangeStream,
 };
+use escaping::Escape;
 use futures::{
     channel::mpsc::{self, Receiver, Sender},
     prelude::*,
@@ -17,10 +18,10 @@ use netidx::{
     config::Config,
     path::Path,
     pool::Pooled,
-    protocol::value_parser::{escaped_string, value, VAL_CAN_ESC, VAL_ESC, VAL_TR},
+    protocol::value_parser::{escaped_string, value, VAL_ESC, VAL_MUST_ESC},
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
-    utils::{splitn_escaped, BatchItem, Batched},
+    utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
 use std::{
@@ -28,6 +29,7 @@ use std::{
     fmt,
     io::Write,
     str::FromStr,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 use structopt::StructOpt;
@@ -58,6 +60,9 @@ pub(super) struct Params {
     paths: Vec<String>,
 }
 
+static RPC_ARG_ESC: LazyLock<Escape> =
+    LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
+
 fn rpc_arg<I>() -> impl Parser<I, Output = (String, Value)>
 where
     I: RangeStream<Token = char>,
@@ -65,9 +70,9 @@ where
     I::Range: Range,
 {
     (
-        spaces().with(escaped_string(&['\\', '='], &['\\', '='], &[])),
+        spaces().with(escaped_string(&['\\', '='], &RPC_ARG_ESC)),
         spaces().with(token('=')),
-        spaces().with(value(&VAL_ESC, &VAL_CAN_ESC, &VAL_TR)),
+        spaces().with(value(&VAL_MUST_ESC, &VAL_ESC)),
     )
         .map(|(arg_name, _, arg_val)| (arg_name, arg_val))
 }
@@ -98,7 +103,7 @@ impl FromStr for In {
         } else if s.starts_with("ADD|") && s.len() > 4 {
             Ok(In::Add(Path::from(ArcStr::from(&s[4..]))))
         } else if s.starts_with("WRITE|") && s.len() > 6 {
-            let mut parts = splitn_escaped(&s[6..], 3, '\\', '|');
+            let mut parts = escaping::splitn(&s[6..], '\\', 3, '|');
             let path = parts.next().ok_or_else(|| anyhow!("expected | before path"))?;
             let path = Path::from(ArcStr::from(path));
             let typ =
@@ -107,7 +112,7 @@ impl FromStr for In {
             let val = typ.parse(val)?;
             Ok(In::Write(path, val))
         } else if s.starts_with("CALL|") && s.len() > 5 {
-            let mut parts = splitn_escaped(&s[5..], 2, '\\', '|');
+            let mut parts = escaping::splitn(&s[5..], '\\', 2, '|');
             let path = parts.next().ok_or_else(|| anyhow!("expected| before path"))?;
             let path = Path::from(ArcStr::from(path));
             let args = match parts.next() {

@@ -6,7 +6,6 @@ use netidx_core::{
     pack::{Pack, PackError},
     path::Path,
     pool::{Pool, Pooled},
-    utils,
 };
 use smallvec::SmallVec;
 use std::{
@@ -83,7 +82,7 @@ impl Glob {
                 match s.find(&['?', '*', '{', '['][..]) {
                     None => break None,
                     Some(i) => {
-                        if utils::is_escaped(s, '\\', i) {
+                        if escaping::is_escaped(s, '\\', i) {
                             s = &s[i + 1..];
                         } else {
                             break Some(i);

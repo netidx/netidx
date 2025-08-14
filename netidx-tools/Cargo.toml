@@ -38,6 +38,7 @@ chrono = { workspace = true }
 combine = { workspace = true }
 dirs = { workspace = true }
 env_logger = { workspace = true }
+escaping = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 hdrhistogram = { workspace = true }

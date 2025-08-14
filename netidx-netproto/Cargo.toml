@@ -15,6 +15,7 @@ categories = ["network-programming"]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
 bytes = { workspace = true }
+escaping = { workspace = true }
 globset = { workspace = true }
 netidx-core = { version = "0.28.0", path = "../netidx-core" }
 netidx-derive = { version = "0.28.3", path = "../netidx-derive" }

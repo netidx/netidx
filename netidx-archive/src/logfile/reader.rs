@@ -268,7 +268,7 @@ impl ArchiveReader {
         Arc::strong_count(&self.index)
     }
 
-    pub fn index(&self) -> RwLockReadGuard<ArchiveIndex> {
+    pub fn index<'a>(&'a self) -> RwLockReadGuard<'a, ArchiveIndex> {
         self.index.read()
     }
 

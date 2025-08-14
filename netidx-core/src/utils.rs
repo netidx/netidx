@@ -17,7 +17,6 @@ use sha3::Sha3_512;
 use std::{
     any::{Any, TypeId},
     borrow::Borrow,
-    borrow::Cow,
     cell::RefCell,
     cmp::{Ord, Ordering, PartialOrd},
     collections::HashMap,
@@ -25,7 +24,6 @@ use std::{
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    str,
 };
 
 #[macro_export]
@@ -203,166 +201,6 @@ pub fn check_addr<A>(ip: IpAddr, resolvers: &[(SocketAddr, A)]) -> Result<()> {
         bail!("addr is a loopback address and the resolver is not");
     }
     Ok(())
-}
-
-pub fn is_sep(esc: &mut bool, c: char, escape: char, sep: char) -> bool {
-    if c == sep {
-        !*esc
-    } else {
-        *esc = c == escape && !*esc;
-        false
-    }
-}
-
-/// escape the specified string using the specified escape character
-/// and a slice of special characters that need escaping. Place the
-/// results into the specified buffer
-pub fn escape_to<T>(s: &T, buf: &mut String, esc: char, spec: &[char])
-where
-    T: AsRef<str> + ?Sized,
-{
-    for c in s.as_ref().chars() {
-        if spec.contains(&c) {
-            buf.push(esc);
-            buf.push(c);
-        } else if c == esc {
-            buf.push(esc);
-            buf.push(c);
-        } else {
-            buf.push(c);
-        }
-    }
-}
-
-/// escape the specified string using the specified escape character
-/// and a slice of special characters that need escaping.
-pub fn escape<'a, 'b, T>(s: &'a T, esc: char, spec: &'b [char]) -> Cow<'a, str>
-where
-    T: AsRef<str> + ?Sized,
-    'a: 'b,
-{
-    let s = s.as_ref();
-    if s.find(|c: char| spec.contains(&c) || c == esc).is_none() {
-        Cow::Borrowed(s.as_ref())
-    } else {
-        let mut out = String::with_capacity(s.len());
-        escape_to(s, &mut out, esc, spec);
-        Cow::Owned(out)
-    }
-}
-
-/// unescape the specified string using the specified escape
-/// character. Place the result in the specified buffer.
-pub fn unescape_to<T>(s: &T, buf: &mut String, esc: char)
-where
-    T: AsRef<str> + ?Sized,
-{
-    let mut escaped = false;
-    buf.extend(s.as_ref().chars().filter_map(|c| {
-        if c == esc && !escaped {
-            escaped = true;
-            None
-        } else {
-            escaped = false;
-            Some(c)
-        }
-    }))
-}
-
-/// unescape the specified string using the specified escape character. Place
-/// the result in the specified buffer. Translate escaped characters in the
-/// tr mapping.
-pub fn unescape_tr_to<T>(s: &T, buf: &mut String, esc: char, tr: &[(char, char)])
-where
-    T: AsRef<str> + ?Sized,
-{
-    let mut escaped = false;
-    buf.extend(s.as_ref().chars().filter_map(|c| {
-        if c == esc && !escaped {
-            escaped = true;
-            None
-        } else if escaped {
-            escaped = false;
-            match tr.iter().find_map(|(k, v)| if c == *k { Some(*v) } else { None }) {
-                None => Some(c),
-                Some(c) => Some(c),
-            }
-        } else {
-            Some(c)
-        }
-    }))
-}
-
-/// unescape the specified string using the specified escape character
-pub fn unescape<T>(s: &T, esc: char) -> Cow<str>
-where
-    T: AsRef<str> + ?Sized,
-{
-    let s = s.as_ref();
-    if !s.contains(esc) {
-        Cow::Borrowed(s.as_ref())
-    } else {
-        let mut res = String::with_capacity(s.len());
-        unescape_to(s, &mut res, esc);
-        Cow::Owned(res)
-    }
-}
-
-/// unescape the specified string using the specified escape character,
-/// translate escaped characters using the tr map
-pub fn unescape_tr<'a, T>(s: &'a T, esc: char, tr: &[(char, char)]) -> Cow<'a, str>
-where
-    T: AsRef<str> + ?Sized,
-{
-    let s = s.as_ref();
-    if !s.contains(esc) {
-        Cow::Borrowed(s.as_ref())
-    } else {
-        let mut res = String::with_capacity(s.len());
-        unescape_tr_to(s, &mut res, esc, tr);
-        Cow::Owned(res)
-    }
-}
-
-pub fn is_escaped(s: &str, esc: char, i: usize) -> bool {
-    let b = s.as_bytes();
-    !s.is_char_boundary(i) || {
-        let mut res = false;
-        for j in (0..i).rev() {
-            if s.is_char_boundary(j) && b[j] == (esc as u8) {
-                res = !res;
-            } else {
-                break;
-            }
-        }
-        res
-    }
-}
-
-pub fn splitn_escaped(
-    s: &str,
-    n: usize,
-    escape: char,
-    sep: char,
-) -> impl Iterator<Item = &str> {
-    s.splitn(n, {
-        let mut esc = false;
-        move |c| is_sep(&mut esc, c, escape, sep)
-    })
-}
-
-pub fn split_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &str> {
-    s.split({
-        let mut esc = false;
-        move |c| is_sep(&mut esc, c, escape, sep)
-    })
-}
-
-pub fn rsplit_escaped(s: &str, escape: char, sep: char) -> impl Iterator<Item = &str> {
-    s.rsplit({
-        let mut esc = false;
-        move |c| is_sep(&mut esc, c, escape, sep)
-    })
 }
 
 thread_local! {

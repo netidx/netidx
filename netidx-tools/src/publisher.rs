@@ -13,7 +13,6 @@ use netidx::{
         BindCfg, DesiredAuth, Id, Publisher, PublisherBuilder, Typ, Val, Value,
         WriteRequest,
     },
-    utils,
 };
 use parking_lot::Mutex;
 use std::{collections::HashMap, convert::From, sync::Arc, time::Duration};
@@ -143,7 +142,7 @@ pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Re
                 }
             }
         } else {
-            let mut m = utils::splitn_escaped(buf.as_str().trim(), 3, '\\', '|');
+            let mut m = escaping::splitn(buf.as_str().trim(), '\\', 3, '|');
             let path =
                 tryc!("missing path", m.next().ok_or_else(|| anyhow!("missing path")));
             let typ = {

@@ -1,7 +1,7 @@
 use crate::{parser, Value};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use netidx_core::utils;
+use escaping::Escape;
 use smallvec::smallvec;
 use std::{
     fmt::{self, Write},
@@ -116,7 +116,7 @@ impl Value {
                     write!(f, "{}s", v)
                 }
             }
-            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::String(s) => write!(f, "\"{}\"", parser::VAL_ESC.escape(s)),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
@@ -133,7 +133,7 @@ impl Value {
     pub fn fmt_ext(
         &self,
         f: &mut fmt::Formatter<'_>,
-        esc: &[char],
+        esc: &Escape,
         types: bool,
     ) -> fmt::Result {
         match self {
@@ -233,7 +233,7 @@ impl Value {
                 }
             }
             Value::String(s) => {
-                write!(f, r#""{}""#, utils::escape(&*s, '\\', esc))
+                write!(f, r#""{}""#, esc.escape(&*s))
             }
             Value::Bytes(b) => {
                 let pfx = if types { "bytes:" } else { "" };
@@ -243,7 +243,7 @@ impl Value {
             Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
             Value::Error(v) => {
-                write!(f, r#"error:"{}""#, utils::escape(&*v, '\\', esc))
+                write!(f, r#"error:"{}""#, esc.escape(&*v))
             }
             Value::Array(elts) => {
                 write!(f, "[")?;
