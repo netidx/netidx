@@ -1,3 +1,8 @@
+* 0.29.0
+
+- remove the escaping functions from utils and publish them as a separate (and
+  enhanced) crate
+
 * 0.28.3
 
 - update deps
@@ -306,7 +311,7 @@
   - add Subscriber::subscribe_updates, subscribe_nondurable_updates,
     subscribe_nondurable_one_updates. These methods allow registering
     for updates as part of the subscription process to avoid any race
-    in receiving values. 
+    in receiving values.
 
 * 0.22.3
 
@@ -635,11 +640,11 @@
     - 1st addresses that are on the local computer
     - 2nd addresses that are on the same subnet as the local computer
     - 3rd all other addresses
-  
+
   - swap out get_if_addrs crate for the maintained if-addrs crate
 
 * 0.18.1-2
-  - add features to BindCfg for NAT traversal. You can now run publishers 
+  - add features to BindCfg for NAT traversal. You can now run publishers
     and resolver servers behind a NAT and DNAT forward the port.
 
   - Fix a bug in TLS, sometimes (rarely) it is required to call flush on
@@ -655,7 +660,7 @@
     the batch buffer size in case the recorder thread is temporarially delayed.
 
 * 0.18.0
-  - Change pre allocated packed data structures to avoid TooBig errors 
+  - Change pre allocated packed data structures to avoid TooBig errors
     and still allocate safe quantities of memory.
 
   - change move the core of the recorder to netidx-archive
@@ -691,16 +696,16 @@
 
   - ignore pings in netidx-wsproxy
 
-  - add serialize/deserialize to netidx-netproto::value::Typ 
+  - add serialize/deserialize to netidx-netproto::value::Typ
 
 * 0.17.3
 
   - add a pack implementation for HashSet
-  
+
   - don't put empty objects back in pools
 
 * 0.17.2
-  
+
   - implement debug on Publisher
 
   - change the websocket proxy protocol a bit to make it possible to
@@ -708,13 +713,13 @@
 
   - Allow rpcs to complete out of order, and don't wait for them to
     move on
-  
+
   - Fix trait requirements for Packing HashMap
-  
+
   - implement a new toplevel Pack directive #[pack(unwrapped)]
     which prevents length wrapping the type it is applied to.
     Also the Pack macro now validates attributes.
-    
+
   - websocket-proxy; expose the warp filter that runs the proxy so
     it can be combined into a bigger warp api if desired.
 
@@ -735,7 +740,7 @@
     interface.
 
 * 0.17.0
-  
+
   - netidx_derive::Pack implement #[pack(other)] attribute for
     enums. Does the same thing as #[serde(other)], if the enum tag
     isn't know will decode as the enum #[pack(other)] is placed on.
@@ -787,9 +792,9 @@
     released, so I don't think it's a huge deal.
 
 * 0.16.1 and 2
- 
+
   - improve the safety of len_wrapped_decode
-  
+
   - add a pack implementation for UUID
 
   - remove krb5_iov as a default feature
@@ -844,7 +849,7 @@
     rpc servers *sorry*. However the protocol did not change significantly,
     so existing rpc clients can call new rpc servers, and new rpc clients can
     call old rpc servers.
-    
+
     The only thing that did change about the rpc protocol is that there is now
     only one way to get a reply to your procedure call, by using write_with_recipt.
     That is what the rpc client always did, so it will continue to work, however if
@@ -1038,7 +1043,7 @@
 
 * 0.10.3 netidx-tools
 
-  - fix building on windows, which has been broken for some time due to 
+  - fix building on windows, which has been broken for some time due to
     new tools that require unix, sorry!
 
 * 0.10.0-0.10.2
