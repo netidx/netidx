@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.28.3"
+version = "0.29.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -17,8 +17,8 @@ default = []
 krb5_iov = ["cross-krb5/iov"]
 
 [dependencies]
-netidx-core = { version = "0.28.0", path = "../netidx-core" }
-netidx-netproto = { version = "0.28.0", path = "../netidx-netproto" }
+netidx-core = { version = "0.29.0", path = "../netidx-core" }
+netidx-netproto = { version = "0.29.0", path = "../netidx-netproto" }
 anyhow = { workspace = true }
 arcstr = { workspace = true }
 bitflags = { workspace = true }

@@ -1,6 +1,6 @@
 [package]
 name = "netidx-container"
-version = "0.28.3"
+version = "0.29.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -17,8 +17,8 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx = { path = "../netidx", version = "0.28.0", default-features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.28.0", default-features = false }
+netidx = { path = "../netidx", version = "0.29.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.29.0", default-features = false }
 triomphe = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

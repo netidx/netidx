@@ -46,7 +46,7 @@ where
 {
     recognize(escaped(
         take_while1(move |c| !must_esc.contains(&c)),
-        '\\',
+        esc.get_escape_char(),
         one_of(
             esc.get_tr()
                 .iter()
@@ -54,7 +54,7 @@ where
                 .chain(must_esc.iter().copied()),
         ),
     ))
-    .map(|s| match VAL_ESC.unescape(&s) {
+    .map(|s| match esc.unescape(&s) {
         Cow::Borrowed(_) => s, // it didn't need unescaping, so just return it
         Cow::Owned(s) => s,
     })
