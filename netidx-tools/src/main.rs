@@ -1,4 +1,5 @@
 #![recursion_limit = "2048"]
+mod browser;
 mod publisher;
 mod record_client;
 mod resolver;
@@ -129,6 +130,13 @@ enum Opt {
         #[structopt(flatten)]
         proxy: netidx_wsproxy::config::Config,
     },
+    #[structopt(name = "browser", about = "tui browser")]
+    Browser {
+        #[structopt(flatten)]
+        common: ClientParams,
+        #[structopt(flatten)]
+        publisher: publisher::Params,
+    },
 }
 
 #[tokio::main]
@@ -181,6 +189,10 @@ async fn tokio_main() -> Result<()> {
         Opt::WsProxy { common, publisher, proxy } => {
             let (cfg, auth) = common.load();
             wsproxy::run(cfg, auth, publisher, proxy).await
+        }
+        Opt::Browser { common, publisher } => {
+            let (cfg, auth) = common.load();
+            browser::run(cfg, auth, publisher).await
         }
     }
 }
