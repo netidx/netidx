@@ -378,23 +378,29 @@ impl Add for Value {
     type Output = Value;
 
     fn add(self, rhs: Self) -> Self {
-        apply_op!(
-            self, rhs, 0., +,
-            (Value::DateTime(dt), Value::Duration(d))
-                | (Value::Duration(d), Value::DateTime(dt)) => {
-                    match chrono::Duration::from_std(d) {
-                        Ok(d) => Value::DateTime(dt + d),
-                        Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            apply_op!(
+                self, rhs, 0., +,
+                (Value::DateTime(dt), Value::Duration(d))
+                    | (Value::Duration(d), Value::DateTime(dt)) => {
+                        match chrono::Duration::from_std(d) {
+                            Ok(d) => Value::DateTime(dt + d),
+                            Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                        }
+                    },
+                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
+                (Value::Duration(_), _)
+                    | (_, Value::Duration(_))
+                    | (_, Value::DateTime(_))
+                    | (Value::DateTime(_), _) => {
+                        Value::Error(literal!("can't add to datetime/duration"))
                     }
-                },
-            (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
-            (Value::Duration(_), _)
-                | (_, Value::Duration(_))
-                | (_, Value::DateTime(_))
-                | (Value::DateTime(_), _) => {
-                    Value::Error(literal!("can't add to datetime/duration"))
-                }
-        )
+            )
+        }));
+        match res {
+            Ok(r) => r,
+            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
+        }
     }
 }
 
@@ -402,23 +408,29 @@ impl Sub for Value {
     type Output = Value;
 
     fn sub(self, rhs: Self) -> Self {
-        apply_op!(
-            self, rhs, 0., -,
-            (Value::DateTime(dt), Value::Duration(d))
-                | (Value::Duration(d), Value::DateTime(dt)) => {
-                    match chrono::Duration::from_std(d) {
-                        Ok(d) => Value::DateTime(dt - d),
-                        Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            apply_op!(
+                self, rhs, 0., -,
+                (Value::DateTime(dt), Value::Duration(d))
+                    | (Value::Duration(d), Value::DateTime(dt)) => {
+                        match chrono::Duration::from_std(d) {
+                            Ok(d) => Value::DateTime(dt - d),
+                            Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                        }
+                    },
+                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
+                (Value::Duration(_), _)
+                    | (_, Value::Duration(_))
+                    | (_, Value::DateTime(_))
+                    | (Value::DateTime(_), _) => {
+                        Value::Error(literal!("can't sub datetime/duration"))
                     }
-                },
-            (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
-            (Value::Duration(_), _)
-                | (_, Value::Duration(_))
-                | (_, Value::DateTime(_))
-                | (Value::DateTime(_), _) => {
-                    Value::Error(literal!("can't sub datetime/duration"))
-                }
-        )
+            )
+        }));
+        match res {
+            Ok(r) => r,
+            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
+        }
     }
 }
 
@@ -426,15 +438,39 @@ impl Mul for Value {
     type Output = Value;
 
     fn mul(self, rhs: Self) -> Self {
-        apply_op!(
-            self, rhs, 1., *,
-            (Value::Duration(_), _)
-                | (_, Value::Duration(_))
-                | (_, Value::DateTime(_))
-                | (Value::DateTime(_), _) => {
-                    Value::Error(literal!("can't mul datetime/duration"))
-                }
-        )
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            apply_op!(
+                self, rhs, 1., *,
+                (Value::Duration(d), Value::U32(n) | Value::V32(n))
+                | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => { Value::Duration(d * n) },
+                (Value::Duration(d), Value::I32(n) | Value::Z32(n))
+                | (Value::I32(n) | Value::Z32(n), Value::Duration(d)) => {
+                    if n < 0 { panic!("can't multiply a duration by a negative number") }
+                    Value::Duration(d * n as u32)
+                },
+                (Value::Duration(d), Value::U64(n) | Value::V64(n))
+                | (Value::U64(n) | Value::V64(n), Value::Duration(d)) => {
+                    Value::Duration(d * n as u32)
+                },
+                (Value::Duration(d), Value::I64(n) | Value::Z64(n))
+                | (Value::I64(n) | Value::Z64(n), Value::Duration(d)) => {
+                    if n < 0 { panic!("can't multiply a duration by a negative number") }
+                    Value::Duration(d * n as u32)
+                },
+                (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => { Value::Duration(d.mul_f32(s)) },
+                (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => { Value::Duration(d.mul_f64(s)) },
+                    | (Value::Duration(_), _)
+                    | (_, Value::Duration(_))
+                    | (_, Value::DateTime(_))
+                    | (Value::DateTime(_), _) => {
+                        Value::Error(literal!("can't mul datetime/duration"))
+                    }
+            )
+        }));
+        match res {
+            Ok(r) => r,
+            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
+        }
     }
 }
 
@@ -445,8 +481,18 @@ impl Div for Value {
         let res = catch_unwind(AssertUnwindSafe(|| {
             apply_op!(
                 self, rhs, 1., /,
-                (Value::Duration(d), Value::U32(s)) => { Value::Duration(d / s) },
-                (Value::Duration(d), Value::V32(s)) => { Value::Duration(d / s) },
+                (Value::Duration(d), Value::U32(s) | Value::V32(s)) => { Value::Duration(d / s) },
+                (Value::Duration(d), Value::I32(s) | Value::Z32(s)) => {
+                    if s < 0 { panic!("can't divide duration by a negative number") }
+                    Value::Duration(d / s as u32)
+                },
+                (Value::Duration(d), Value::U64(s) | Value::V64(s)) => {
+                    Value::Duration(d / s as u32)
+                },
+                (Value::Duration(d), Value::I64(s) | Value::Z64(s)) => {
+                    if s < 0 { panic!("can't divide duration by a negative number") }
+                    Value::Duration(d / s as u32)
+                },
                 (Value::Duration(d), Value::F32(s)) => { Value::Duration(d.div_f32(s)) },
                 (Value::Duration(d), Value::F64(s)) => { Value::Duration(d.div_f64(s)) },
                 (Value::Duration(_), _)
@@ -459,7 +505,7 @@ impl Div for Value {
         }));
         match res {
             Ok(r) => r,
-            Err(_) => Value::Error(literal!("can't divide by zero")),
+            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
         }
     }
 }
