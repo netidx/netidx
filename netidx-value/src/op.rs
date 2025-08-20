@@ -374,6 +374,21 @@ macro_rules! apply_op {
     }
 }
 
+macro_rules! handle_arith_result {
+    ($res:ident, $fallback:literal) => {
+        match $res {
+            Ok(r) => r,
+            Err(e) => match e.downcast_ref::<String>() {
+                Some(s) => Value::Error(s.into()),
+                None => match e.downcast_ref::<&str>() {
+                    Some(s) => Value::Error((*s).into()),
+                    None => Value::Error(literal!($fallback)),
+                },
+            },
+        }
+    };
+}
+
 impl Add for Value {
     type Output = Value;
 
@@ -397,10 +412,7 @@ impl Add for Value {
                     }
             )
         }));
-        match res {
-            Ok(r) => r,
-            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
-        }
+        handle_arith_result!(res, "panic while executing add")
     }
 }
 
@@ -427,10 +439,7 @@ impl Sub for Value {
                     }
             )
         }));
-        match res {
-            Ok(r) => r,
-            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
-        }
+        handle_arith_result!(res, "panic while executing sub")
     }
 }
 
@@ -467,10 +476,7 @@ impl Mul for Value {
                     }
             )
         }));
-        match res {
-            Ok(r) => r,
-            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
-        }
+        handle_arith_result!(res, "panic while executing mul")
     }
 }
 
@@ -503,10 +509,7 @@ impl Div for Value {
                     }
             )
         }));
-        match res {
-            Ok(r) => r,
-            Err(e) => Value::Error(format_compact!("{e:?}").as_str().into()),
-        }
+        handle_arith_result!(res, "panic while executing div")
     }
 }
 
@@ -525,10 +528,7 @@ impl Rem for Value {
                     }
             )
         }));
-        match res {
-            Ok(r) => r,
-            Err(_) => Value::Error(literal!("can't divide by zero")),
-        }
+        handle_arith_result!(res, "panic while executing mod")
     }
 }
 
