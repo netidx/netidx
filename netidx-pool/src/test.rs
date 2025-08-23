@@ -1,4 +1,7 @@
-use super::{pooled::PArc, Pool, RawPool};
+use super::{
+    arc::{Arc, TArc},
+    Pool, RawPool,
+};
 
 /*
 ==829625== LEAK SUMMARY:
@@ -73,18 +76,48 @@ fn normal_pool() {
 ==831358== Reachable blocks (those to which a pointer was found) are not shown.
 */
 #[test]
-fn parc_pool() {
+fn tarc_pool() {
     for _ in 0..100 {
-        let pool: RawPool<PArc<String>> = RawPool::new(1024, 1);
-        let mut v0 = PArc::new(&pool, "0".to_string());
-        let mut v1 = PArc::new(&pool, "0".to_string());
+        let pool: RawPool<TArc<String>> = RawPool::new(1024, 1);
+        let mut v0 = TArc::new(&pool, "0".to_string());
+        let mut v1 = TArc::new(&pool, "0".to_string());
         let v0a = v0.as_ptr().addr();
         let v1a = v1.as_ptr().addr();
         for i in 0..100 {
             drop(v0);
             drop(v1);
-            v0 = PArc::new(&pool, i.to_string());
-            v1 = PArc::new(&pool, i.to_string());
+            v0 = TArc::new(&pool, i.to_string());
+            v1 = TArc::new(&pool, i.to_string());
+            assert_eq!(v0.as_ptr().addr(), v0a);
+            assert_eq!(v1.as_ptr().addr(), v1a);
+            assert_eq!(pool.try_take(), None);
+            let v2 = v0.clone();
+            let v3 = v1.clone();
+            // drops v0 and v1, but they won't go back into the pool
+            // because strong_count > 1.
+            v0 = v2;
+            v1 = v3;
+            assert_eq!(pool.try_take(), None);
+        }
+        drop(v0);
+        drop(v1);
+        drop(pool)
+    }
+}
+
+#[test]
+fn arc_pool() {
+    for _ in 0..100 {
+        let pool: RawPool<Arc<String>> = RawPool::new(1024, 1);
+        let mut v0 = Arc::new(&pool, "0".to_string());
+        let mut v1 = Arc::new(&pool, "0".to_string());
+        let v0a = v0.as_ptr().addr();
+        let v1a = v1.as_ptr().addr();
+        for i in 0..100 {
+            drop(v0);
+            drop(v1);
+            v0 = Arc::new(&pool, i.to_string());
+            v1 = Arc::new(&pool, i.to_string());
             assert_eq!(v0.as_ptr().addr(), v0a);
             assert_eq!(v1.as_ptr().addr(), v1a);
             assert_eq!(pool.try_take(), None);
