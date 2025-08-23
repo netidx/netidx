@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use bytes::{Buf, BufMut};
 use netidx_core::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC},
-    pool::{pooled::PArc, RawPool, RawPoolable, WeakPool},
+    pool::{arc::TArc as PArc, RawPool, RawPoolable, WeakPool},
 };
 use seq_macro::seq;
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};

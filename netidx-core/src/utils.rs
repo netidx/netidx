@@ -1,7 +1,4 @@
-use crate::{
-    pack::{Pack, PackError},
-    pool::{Pool, Poolable, Pooled},
-};
+use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
 use bytes::{Bytes, BytesMut};
 use digest::Digest;
@@ -12,14 +9,12 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use fxhash::FxHashMap;
+pub use netidx_pool::take_t;
 use sha3::Sha3_512;
 use std::{
-    any::{Any, TypeId},
     borrow::Borrow,
     cell::RefCell,
     cmp::{Ord, Ordering, PartialOrd},
-    collections::HashMap,
     hash::Hash,
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
@@ -225,27 +220,6 @@ pub fn pack<T: Pack>(t: &T) -> Result<BytesMut, PackError> {
         let mut b = buf.borrow_mut();
         t.encode(&mut *b)?;
         Ok(b.split())
-    })
-}
-
-thread_local! {
-    static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> =
-        RefCell::new(HashMap::default());
-}
-
-/// Take a poolable type T from the generic thread local pool set.
-/// Note it is much more efficient to construct your own pools.
-/// size and max are the pool parameters used if the pool doesn't
-/// already exist.
-pub fn take_t<T: Any + Poolable + Send + 'static>(size: usize, max: usize) -> Pooled<T> {
-    POOLS.with(|pools| {
-        let mut pools = pools.borrow_mut();
-        let pool: &mut Pool<T> = pools
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(Pool::<T>::new(size, max)))
-            .downcast_mut()
-            .unwrap();
-        pool.take()
     })
 }
 

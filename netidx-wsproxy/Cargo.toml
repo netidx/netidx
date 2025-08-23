@@ -29,4 +29,3 @@ serde_json = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
 warp = { workspace = true }
-once_cell = { workspace = true }

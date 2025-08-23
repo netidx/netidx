@@ -1,13 +1,14 @@
 /// This is shamelessly based on the dynamic-pool crate, with
 /// modifications
-use crate::utils::take_t;
-use crossbeam::queue::ArrayQueue;
+use crossbeam_queue::ArrayQueue;
 use fxhash::FxHashMap;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+#[cfg(feature = "serde")]
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
+    any::{Any, TypeId},
     borrow::Borrow,
+    cell::RefCell,
     cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd},
     collections::HashMap,
     default::Default,
@@ -16,12 +17,32 @@ use std::{
     mem::{self, ManuallyDrop},
     ops::{Deref, DerefMut},
     ptr,
-    sync::{Arc, Weak},
+    sync::{Arc, LazyLock, Weak},
 };
 
+pub mod arc;
 pub mod pooled;
 #[cfg(test)]
 mod test;
+
+/// Take a poolable type T from the generic thread local pool set. It
+/// is much more efficient to construct your own pools.  size and max
+/// are the pool parameters used if the pool doesn't already exist.
+pub fn take_t<T: Any + Poolable + Send + 'static>(size: usize, max: usize) -> Pooled<T> {
+    thread_local! {
+        static POOLS: RefCell<FxHashMap<TypeId, Box<dyn Any>>> =
+            RefCell::new(HashMap::default());
+    }
+    POOLS.with(|pools| {
+        let mut pools = pools.borrow_mut();
+        let pool: &mut Pool<T> = pools
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Box::new(Pool::<T>::new(size, max)))
+            .downcast_mut()
+            .unwrap();
+        pool.take()
+    })
+}
 
 /// Implementing this trait allows full low level control over where
 /// the pool pointer is stored. For example if you are pooling an
@@ -58,19 +79,22 @@ pub unsafe trait RawPoolable: Send + Sized {
     fn really_drop(self);
 }
 
+/// Trait for poolable objects
 pub trait Poolable {
     /// allocate a new empty collection
     fn empty() -> Self;
 
     /// empty the collection and reset it to it's default state so it
-    /// can be put back in the pool
+    /// can be put back in the pool. This will be called when the
+    /// Pooled wrapper has been dropped and the object is being put
+    /// back in the pool.
     fn reset(&mut self);
 
     /// return the capacity of the collection
     fn capacity(&self) -> usize;
 
     /// return true if the object has really been dropped, e.g. if
-    /// you're pooling an Arc, it's strong_count became 1.
+    /// you're pooling an Arc then Arc::get_mut().is_some() == true.
     fn really_dropped(&self) -> bool {
         true
     }
@@ -209,6 +233,7 @@ impl<T: Poolable + Send + 'static> Drop for Pooled<T> {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<T: Poolable + Send + 'static + Serialize> Serialize for Pooled<T> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -218,6 +243,7 @@ impl<T: Poolable + Send + 'static + Serialize> Serialize for Pooled<T> {
     }
 }
 
+#[cfg(feature = "serde")]
 impl<'de, T: Poolable + Send + 'static + DeserializeOwned> Deserialize<'de>
     for Pooled<T>
 {
@@ -258,7 +284,7 @@ struct GlobalState {
     pool_shark_running: bool,
 }
 
-static POOLS: Lazy<Mutex<GlobalState>> = Lazy::new(|| {
+static POOLS: LazyLock<Mutex<GlobalState>> = LazyLock::new(|| {
     Mutex::new(GlobalState { pools: HashMap::default(), pool_shark_running: false })
 });
 
@@ -321,7 +347,9 @@ pub struct RawPool<T: RawPoolable + Send + 'static>(Arc<PoolInner<T>>);
 
 impl<T: RawPoolable + Send + 'static> Drop for RawPool<T> {
     fn drop(&mut self) {
-        // one held by us, and one held by the pool shark
+        // one held by us, and one held by the pool shark. If a weak
+        // ref gets upgraded before we finish the drop the worst that
+        // will happen is that pool won't be pool sharked
         if Arc::strong_count(&self.0) <= 2 {
             let res = POOLS.lock().pools.remove(&self.0.id);
             drop(res)
