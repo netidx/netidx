@@ -13,7 +13,8 @@ use futures::{
     select_biased, stream,
 };
 use log::{info, trace};
-use netidx_core::pool::{Pool, Pooled};
+use poolshark::{Pool, Pooled};
+
 use parking_lot::Mutex;
 use std::{
     clone::Clone,

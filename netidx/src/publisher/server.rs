@@ -6,7 +6,6 @@ use crate::{
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
     pack::BoundedBytes,
     path::Path,
-    pool::Pooled,
     protocol::{
         self,
         publisher::{self, Id, WriteId},
@@ -33,6 +32,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{debug, info};
 use parking_lot::RwLock;
+use poolshark::Pooled;
 use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
 use std::{
     boxed::Box,

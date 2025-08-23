@@ -5,7 +5,6 @@ use super::{
 use crate::{
     pack::Z64,
     path::Path,
-    pool::{Pool, Pooled},
     protocol::{
         glob::{GlobSet, Scope},
         resolver::{Publisher, PublisherId, PublisherRef, Referral},
@@ -16,6 +15,7 @@ use bytes::Bytes;
 use fxhash::FxHashMap;
 use immutable_chunkmap::set::Set as ISet;
 use log::debug;
+use poolshark::{Pool, Pooled};
 use std::{
     clone::Clone,
     collections::{

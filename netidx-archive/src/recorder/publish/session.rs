@@ -11,12 +11,12 @@ use futures::{channel::mpsc, future, prelude::*, select_biased};
 use log::{debug, error, info, warn};
 use netidx::{
     path::Path,
-    pool::Pooled,
     publisher::{Publisher, WriteRequest},
     resolver_client::GlobSet,
     subscriber::Subscriber,
 };
 use netidx_protocols::cluster::Cluster;
+use poolshark::Pooled;
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 use tokio::{sync::broadcast, task::JoinSet};

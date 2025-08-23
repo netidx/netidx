@@ -9,7 +9,6 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-pub use netidx_pool::take_t;
 use sha3::Sha3_512;
 use std::{
     borrow::Borrow,

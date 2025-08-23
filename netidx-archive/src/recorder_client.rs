@@ -10,13 +10,13 @@ use fxhash::FxHashMap;
 use netidx::{
     pack::Pack,
     path::Path,
-    pool::{Pool, Pooled},
     publisher::FromValue,
     resolver_client::GlobSet,
     subscriber::{Dval, Event, Subscriber, UpdatesFlags, Value},
 };
 use netidx_derive::Pack;
 use netidx_protocols::{call_rpc, rpc::client::Proc};
+use poolshark::{Pool, Pooled};
 use std::{collections::VecDeque, sync::LazyLock, time::Duration};
 use tokio::{task, try_join};
 

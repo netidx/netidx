@@ -1,6 +1,6 @@
-use crate::pool::{Pool, Pooled};
 use futures::channel::oneshot;
 use parking_lot::Mutex;
+use poolshark::{Pool, Pooled};
 use std::sync::Arc;
 use std::{clone::Clone, mem, ops::Drop, result};
 

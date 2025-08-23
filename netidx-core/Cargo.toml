@@ -13,7 +13,6 @@ keywords = ["network", "networking", "distributed", "kerberos"]
 categories = ["network-programming"]
 
 [dependencies]
-netidx-pool = { version = "0.29", path = "../netidx-pool" }
 anyhow = { workspace = true }
 arcstr = { workspace = true }
 arrayvec = { workspace = true }
@@ -29,10 +28,11 @@ fxhash = { workspace = true }
 indexmap = { workspace = true }
 parking_lot = { workspace = true }
 pin-utils = { workspace = true }
+poolshark = { workspace = true }
 rand = { workspace = true }
 rust_decimal = { workspace = true }
-serde_derive = { workspace = true }
 serde = { workspace = true }
+serde_derive = { workspace = true }
 sha3 = { workspace = true }
 smallvec = { workspace = true }
 triomphe = { workspace = true }

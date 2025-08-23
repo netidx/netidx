@@ -1,10 +1,10 @@
 use crate::Value;
 use anyhow::{bail, Result};
 use bytes::{Buf, BufMut};
-use netidx_core::{
-    pack::{decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC},
-    pool::{arc::TArc as PArc, RawPool, RawPoolable, WeakPool},
+use netidx_core::pack::{
+    decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC,
 };
+use poolshark::{arc::TArc as PArc, RawPool, RawPoolable, WeakPool};
 use seq_macro::seq;
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};

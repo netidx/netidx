@@ -7,7 +7,6 @@ pub use crate::resolver_client::DesiredAuth;
 use crate::{
     config::Config,
     path::Path,
-    pool::{Pool, Pooled},
     protocol::{publisher, resolver::UserInfo},
     resolver_client::ResolverWrite,
     resolver_server::auth::Permissions,
@@ -27,6 +26,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use if_addrs::get_if_addrs;
 use log::{error, info};
 use parking_lot::Mutex;
+use poolshark::{Pool, Pooled};
 use rand::{self, Rng};
 use std::{
     boxed::Box,

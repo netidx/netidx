@@ -101,10 +101,11 @@ impl Default for PMap {
 /// The on disk format, encoded as JSON
 pub mod file {
     use super::{super::config::check_addrs, resolver, PMap};
-    use crate::{path::Path, pool::Pooled};
+    use crate::path::Path;
     use anyhow::Result;
     use arcstr::ArcStr;
     use derive_builder::Builder;
+    use poolshark::Pooled;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::PathBuf,

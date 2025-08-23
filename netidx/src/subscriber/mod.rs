@@ -6,7 +6,6 @@ use crate::{
     config::Config,
     pack::{Pack, PackError},
     path::Path,
-    pool::{Pool, Pooled},
     protocol::{
         publisher::{From, Id, WriteId},
         resolver::{Publisher, PublisherId, Resolved, TargetAuth},
@@ -32,6 +31,7 @@ use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
 use log::{info, trace, warn};
 use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
+use poolshark::{Pool, Pooled};
 use rand::Rng;
 use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};

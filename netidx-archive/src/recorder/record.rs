@@ -17,12 +17,12 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info, warn};
 use netidx::{
     path::Path,
-    pool::Pooled,
     protocol::glob::{Glob, GlobSet},
     resolver_client::{ChangeTracker, ResolverRead},
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils::{self, Batched},
 };
+use poolshark::Pooled;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,

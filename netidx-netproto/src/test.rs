@@ -5,9 +5,9 @@ use chrono::{DateTime, Utc};
 use netidx_core::{
     pack::{Pack, Z64},
     path::Path,
-    pool::Pooled,
     utils::pack,
 };
+use poolshark::Pooled;
 use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
 use std::{fmt::Debug, net::SocketAddr};

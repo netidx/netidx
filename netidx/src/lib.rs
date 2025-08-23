@@ -110,7 +110,7 @@ extern crate anyhow;
 #[macro_use]
 extern crate netidx_core;
 
-pub use netidx_core::{pack, path, pool, utils};
+pub use netidx_core::{pack, path, utils};
 pub use netidx_netproto as protocol;
 
 mod batch_channel;

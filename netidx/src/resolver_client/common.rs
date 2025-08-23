@@ -1,7 +1,6 @@
 use crate::{
     channel,
     path::Path,
-    pool::{Pool, Pooled},
     protocol::resolver::{
         FromRead, FromWrite, Publisher, PublisherId, Resolved, ToRead, ToWrite,
     },
@@ -12,6 +11,7 @@ use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
+use poolshark::{Pool, Pooled};
 use std::{fmt::Debug, str::FromStr, sync::LazyLock, time::Duration};
 use tokio::{net::TcpStream, task, time};
 

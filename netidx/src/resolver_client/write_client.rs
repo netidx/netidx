@@ -7,7 +7,6 @@ use crate::{
     channel::{self, Channel, K5CtxWrap},
     os::local_auth::AuthClient,
     path::Path,
-    pool::Pooled,
     protocol::resolver::{
         Auth, AuthChallenge, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
         HashMethod, ReadyForOwnershipCheck, Referral, Secret, ServerHelloWrite, ToWrite,
@@ -27,6 +26,7 @@ use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLock};
+use poolshark::Pooled;
 use rand::{rng, Rng};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{

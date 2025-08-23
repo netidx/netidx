@@ -5,8 +5,8 @@ use globset;
 use netidx_core::{
     pack::{Pack, PackError},
     path::Path,
-    pool::{Pool, Pooled},
 };
+use poolshark::{Pool, Pooled};
 use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},

@@ -4,12 +4,12 @@ use log::{info, warn};
 use netidx::{
     pack::Pack,
     path::Path,
-    pool::Pooled,
     publisher::{Publisher, Val, Value, WriteRequest},
     resolver_client::ChangeTracker,
     subscriber::{Dval, Event, Subscriber},
     utils,
 };
+use poolshark::Pooled;
 use std::{
     collections::{HashMap, HashSet},
     iter,

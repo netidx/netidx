@@ -6,9 +6,9 @@ use netidx_core::{
         len_wrapped_decode, len_wrapped_encode, len_wrapped_len, Pack, PackError, Z64,
     },
     path::Path,
-    pool::Pooled,
 };
 use netidx_derive::Pack;
+use poolshark::Pooled;
 use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},

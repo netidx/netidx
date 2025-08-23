@@ -1,10 +1,10 @@
 use netidx::{
     path::Path,
-    pool::Pooled,
     protocol::value::Value,
     publisher::Id as PubId,
     subscriber::{Event, SubId},
 };
+use poolshark::Pooled;
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

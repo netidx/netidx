@@ -7,7 +7,6 @@ use crate::{
     channel::Channel,
     pack::Z64,
     path::Path,
-    pool::{Pool, Pooled},
     protocol::{
         glob::Scope,
         resolver::{
@@ -29,6 +28,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use log::{info, trace};
+use poolshark::{Pool, Pooled};
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},

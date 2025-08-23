@@ -21,11 +21,11 @@ use memmap2::Mmap;
 use netidx::{
     pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
     path::Path,
-    pool::{Pool, Pooled},
     subscriber::{Event, FromValue, Value},
 };
 use netidx_derive::Pack;
 use packed_struct::PackedStruct;
+use poolshark::{Pool, Pooled};
 use std::{
     self,
     cmp::max,

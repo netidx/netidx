@@ -10,7 +10,6 @@ use futures::channel::mpsc;
 use log::{info, warn};
 use netidx::{
     path::Path,
-    pool::Pooled,
     publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
 };
 use netidx_netproto::glob::{Glob, GlobSet};
@@ -18,6 +17,7 @@ use netidx_protocols::{
     rpc::server::{RpcCall, RpcReply},
     rpc_err,
 };
+use poolshark::Pooled;
 use std::{collections::HashMap, ops::Bound, time::Duration};
 use tokio::sync::broadcast;
 use uuid::Uuid;

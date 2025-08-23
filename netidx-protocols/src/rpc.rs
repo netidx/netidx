@@ -10,12 +10,12 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{error, info};
 use netidx::{
     path::Path,
-    pool::{Pool, Pooled},
     publisher::{
         ClId, Id, PublishFlags, Publisher, SendResult, Val, Value, WriteRequest,
     },
     subscriber::{Dval, Subscriber},
 };
+use poolshark::{Pool, Pooled};
 use std::{
     borrow::Borrow,
     collections::HashMap,

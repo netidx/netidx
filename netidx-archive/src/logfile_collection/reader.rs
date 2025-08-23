@@ -11,8 +11,9 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error, info, warn};
-use netidx::{pool::Pooled, subscriber::Event};
+use netidx::subscriber::Event;
 use parking_lot::Mutex;
+use poolshark::Pooled;
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     ops::Bound,

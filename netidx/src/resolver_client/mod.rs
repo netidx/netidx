@@ -10,7 +10,6 @@ use crate::{
     config::Config,
     pack::Z64,
     path::Path,
-    pool::{Pool, Pooled},
     protocol::resolver::{
         FromRead, FromWrite, Publisher, PublisherId, Referral, ToRead, ToWrite,
     },
@@ -27,6 +26,7 @@ use common::{
 use futures::future;
 use fxhash::FxHashMap;
 use parking_lot::{Mutex, RwLock};
+use poolshark::{Pool, Pooled};
 use read_client::ReadClient;
 use std::{
     collections::{

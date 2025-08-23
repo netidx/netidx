@@ -11,13 +11,13 @@ use fxhash::FxHashMap;
 use log::warn;
 use netidx::{
     path::Path,
-    pool::{Pool, Pooled},
     protocol::value::Value,
     publisher::{Id as PubId, Publisher, UpdateBatch, Val as Pub},
     subscriber::{Dval as Sub, Event, SubId, Subscriber, UpdatesFlags},
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
+use poolshark::{Pool, Pooled};
 use std::time::Duration;
 use std::{
     collections::{hash_map::Entry, HashMap},

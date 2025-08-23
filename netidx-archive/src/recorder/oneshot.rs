@@ -18,7 +18,6 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error};
 use netidx::{
     path::Path,
-    pool::Pool,
     publisher::{Publisher, Value},
     resolver_client::GlobSet,
     subscriber::Subscriber,
@@ -31,6 +30,7 @@ use netidx_protocols::{
     rpc::server::{ArgSpec, Proc, RpcCall, RpcReply},
     rpc_err,
 };
+use poolshark::Pool;
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{

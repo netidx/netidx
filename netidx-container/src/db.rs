@@ -13,13 +13,13 @@ use futures::{
 use netidx::{
     pack::{Pack, PackError},
     path::Path,
-    pool::{Pool, Pooled},
     publisher::{Publisher, SendResult, UpdateBatch, Val},
     subscriber::Value,
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::server::RpcReply;
 use parking_lot::Mutex;
+use poolshark::{Pool, Pooled};
 use sled;
 use std::{
     cmp::{max, min},

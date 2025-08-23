@@ -1,12 +1,12 @@
 use crate::{
     path::Path,
-    pool::Pooled,
     protocol::resolver::{Auth, Referral},
     publisher,
     subscriber::DesiredAuth,
     tls, utils,
 };
 use anyhow::Result;
+use poolshark::Pooled;
 use serde_json::from_str;
 use std::{
     cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, fs::read_to_string,
@@ -15,9 +15,9 @@ use std::{
 
 /// The on disk format, encoded as JSON
 pub mod file {
-    use derive_builder::Builder;
     use anyhow::Result;
     use arcstr::ArcStr;
+    use derive_builder::Builder;
     use std::{
         collections::BTreeMap,
         env,
@@ -92,7 +92,7 @@ pub mod file {
         /// The addresses of the local resolver server cluster
         pub addrs: Vec<(SocketAddr, Auth)>,
         #[serde(default)]
-        /// The optional tls config. 
+        /// The optional tls config.
         #[builder(setter(strip_option), default)]
         pub tls: Option<Tls>,
         /// The default authentication mechanism. If this is Tls then
@@ -112,21 +112,21 @@ pub mod file {
     }
 
     impl Config {
-	/// This will return the platform default user config file. It
-	/// will not verify that the file exists, and it will not
-	/// check the system default.
-	pub fn user_platform_default_path() -> Result<PathBuf> {
+        /// This will return the platform default user config file. It
+        /// will not verify that the file exists, and it will not
+        /// check the system default.
+        pub fn user_platform_default_path() -> Result<PathBuf> {
             if let Some(mut cfg) = dirs::config_dir() {
                 cfg.push("netidx");
                 cfg.push("client.json");
                 return Ok(cfg);
             }
-	    bail!("default netidx config path could not be determined")
-	}
+            bail!("default netidx config path could not be determined")
+        }
 
-	/// This will search the user default, and system default
-	/// paths for a netidx config file and return the first one it
-	/// finds. User default paths take priority over system defaults.
+        /// This will search the user default, and system default
+        /// paths for a netidx config file and return the first one it
+        /// finds. User default paths take priority over system defaults.
         pub fn default_path() -> Result<PathBuf> {
             if let Some(cfg) = env::var_os("NETIDX_CFG") {
                 let cfg = PathBuf::from(cfg);

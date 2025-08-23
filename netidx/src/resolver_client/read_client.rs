@@ -5,7 +5,6 @@ use super::common::{
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     os::local_auth::AuthClient,
-    pool::Pooled,
     protocol::resolver::{
         Auth, AuthRead, ClientHello, FromRead, Publisher, Referral, ToRead,
     },
@@ -20,6 +19,7 @@ use futures::{
 };
 use fxhash::FxHashSet;
 use log::{info, warn};
+use poolshark::Pooled;
 use rand::{rng, seq::SliceRandom, Rng};
 use std::{
     cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,

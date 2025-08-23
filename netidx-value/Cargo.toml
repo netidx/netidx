@@ -25,10 +25,11 @@ fish-printf = { workspace = true }
 fxhash = { workspace = true }
 indexmap = { workspace = true }
 netidx-core = { version = "0.29.0", path = "../netidx-core" }
+poolshark = { workspace = true }
 rust_decimal = { workspace = true }
-serde_derive = { workspace = true }
-serde = { workspace = true }
 seq-macro = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
 smallvec = { workspace = true }
 triomphe = { workspace = true }
 uuid = { workspace = true }

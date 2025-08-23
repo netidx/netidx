@@ -2,17 +2,18 @@ use anyhow::Result;
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,
-    pool::Pooled,
     protocol::resolver::UserInfo,
     publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
 };
+use poolshark::Pooled;
 use std::{
     collections::VecDeque,
+    result,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration, result,
+    time::Duration,
 };
 use tokio::{
     sync::{oneshot, Mutex},
@@ -42,7 +43,7 @@ impl Batch {
 
     /// returns the number of values queued in this batch
     pub fn len(&self) -> usize {
-	self.queued.len()
+        self.queued.len()
     }
 }
 
@@ -419,27 +420,29 @@ impl Listener {
     ) -> Result<Listener> {
         let publisher = publisher.clone();
         let (mut tx, rx) = mpsc::channel(3);
-	let (tx_res, rx_res) = oneshot::channel();
+        let (tx_res, rx_res) = oneshot::channel();
         let jh = task::spawn(async move {
             match ListenerInner::new_with_flags(publisher, flags, timeout, path).await {
-                Err(e) => { let _ = tx_res.send(Err(e)); },
+                Err(e) => {
+                    let _ = tx_res.send(Err(e));
+                }
                 Ok(mut inner) => {
-		    let _ = tx_res.send(Ok(()));
+                    let _ = tx_res.send(Ok(()));
                     loop {
                         match inner.accept().await {
                             Ok(mut s) => match s.wait_connected().await {
-				Err(e) => tx.send(Err(e)).await?,
-				Ok(con) => tx.send(Ok(con)).await?,
-			    }
+                                Err(e) => tx.send(Err(e)).await?,
+                                Ok(con) => tx.send(Ok(con)).await?,
+                            },
                             Err(e) => tx.send(Err(e)).await?,
                         }
                     }
                 }
             }
-	    Ok::<_, mpsc::SendError>(())
+            Ok::<_, mpsc::SendError>(())
         });
-	rx_res.await??;
-	Ok(Self { rx, jh })
+        rx_res.await??;
+        Ok(Self { rx, jh })
     }
 
     /// Create a new listener at the specified path. The actual
@@ -458,9 +461,9 @@ impl Listener {
     /// can be safely used in a select! without risk of losing an
     /// incoming connection.
     pub async fn accept(&mut self) -> Result<Connection> {
-	match self.rx.next().await {
-	    Some(r) => r,
-	    None => bail!("accept task died")
-	}
+        match self.rx.next().await {
+            Some(r) => r,
+            None => bail!("accept task died"),
+        }
     }
 }

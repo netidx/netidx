@@ -22,11 +22,11 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, warn};
 use netidx::{
     path::Path,
-    pool::Pooled,
     publisher::{self, Publisher, UpdateBatch, Val, Value},
     resolver_client::GlobSet,
     subscriber::Event,
 };
+use poolshark::Pooled;
 use std::{
     collections::{HashMap, HashSet},
     ops::Bound,

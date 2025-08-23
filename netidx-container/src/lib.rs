@@ -22,7 +22,6 @@ use log::{error, info};
 use netidx::{
     config::Config,
     path::Path,
-    pool::Pooled,
     publisher::{
         BindCfg, DefaultHandle, Event as PEvent, Id, PublishFlags, Publisher,
         PublisherBuilder, UpdateBatch, Val, Value, WriteRequest,
@@ -31,6 +30,7 @@ use netidx::{
     utils::BatchItem,
 };
 use parking_lot::Mutex;
+use poolshark::Pooled;
 use rpcs::{RpcRequest, RpcRequestKind};
 use stats::Stats;
 use std::{

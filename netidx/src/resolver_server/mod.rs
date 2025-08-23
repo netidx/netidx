@@ -1,7 +1,6 @@
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     pack::Pack,
-    pool::{Pool, Pooled},
     protocol::{
         publisher,
         resolver::{
@@ -22,6 +21,7 @@ use fxhash::FxHashMap;
 use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex as SyncMutex;
+use poolshark::{Pool, Pooled};
 use rand::{rng, Rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;

@@ -14,13 +14,13 @@ use memmap2::Mmap;
 use netidx::{
     pack::{decode_varint, varint_len, Pack},
     path::Path,
-    pool::Pooled,
     subscriber::Event,
 };
 use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
 };
+use poolshark::Pooled;
 use std::{
     self,
     cell::RefCell,

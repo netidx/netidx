@@ -1,12 +1,14 @@
 use crate::{
     config::{ArchiveCmds, Config},
-    logfile::{ArchiveReader, ArchiveWriter, BatchItem, Id}, logfile_collection::to_name,
+    logfile::{ArchiveReader, ArchiveWriter, BatchItem, Id},
+    logfile_collection::to_name,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use log::{debug, info, warn};
-use netidx::{path::Path, pool::Pooled};
+use netidx::path::Path;
+use poolshark::Pooled;
 use std::{fs, iter, path::PathBuf, sync::Arc};
 
 /// Run archive PUT cmds on the given archive file

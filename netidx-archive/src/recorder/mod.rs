@@ -9,7 +9,6 @@ use chrono::prelude::*;
 use fxhash::FxHashMap;
 use log::error;
 use netidx::{
-    pool::Pooled,
     protocol::value::FromValue,
     publisher::{Publisher, PublisherBuilder, Value},
     resolver_client::GlobSet,
@@ -18,6 +17,7 @@ use netidx::{
 use netidx_core::atomic_id;
 use netidx_derive::Pack;
 use parking_lot::{Mutex, RwLock};
+use poolshark::Pooled;
 use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::{sync::broadcast, task::JoinSet};

@@ -4,10 +4,8 @@
 /// words, while only paying the cost of a double indirection when
 /// accessing a zero copy Bytes.
 use bytes::{Buf, BufMut, Bytes};
-use netidx_core::{
-    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
-    pool::{arc::TArc as PArc, RawPool},
-};
+use netidx_core::pack::{decode_varint, encode_varint, varint_len, Pack, PackError};
+use poolshark::{arc::TArc as PArc, RawPool};
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
 

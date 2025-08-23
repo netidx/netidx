@@ -8,12 +8,13 @@ use anyhow::Result;
 use bytes::BufMut;
 use chrono::prelude::*;
 use fs3::{allocation_granularity, FileExt};
-use fxhash::{FxBuildHasher, FxHashSet, FxHashMap};
+use fxhash::{FxBuildHasher, FxHashMap, FxHashSet};
 use indexmap::IndexMap;
 use log::warn;
 use memmap2::{Mmap, MmapMut};
-use netidx::{pack::Pack, path::Path, pool::Pooled};
+use netidx::{pack::Pack, path::Path};
 use parking_lot::RwLock;
+use poolshark::Pooled;
 use std::{
     self,
     cmp::max,
@@ -80,7 +81,7 @@ use std::{
 /// encoded item counter, and then a number of items. Path ids are
 /// also LEB128 encoded. So, for example, in an archive containing 1
 /// path, a batch with 1 u64 data item would look like.
-///    
+///
 /// 8 byte header
 /// 1 byte item count
 /// 1 byte path id

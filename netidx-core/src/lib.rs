@@ -8,7 +8,6 @@ extern crate pin_utils;
 pub mod pack;
 pub mod path;
 pub mod utils;
-pub use netidx_pool as pool;
 
 #[cfg(test)]
 mod test;

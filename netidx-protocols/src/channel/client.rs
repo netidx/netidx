@@ -2,9 +2,9 @@ use anyhow::{anyhow, Result};
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,
-    pool::Pooled,
     subscriber::{Event, SubId, Subscriber, UpdatesFlags, Val, Value},
 };
+use poolshark::Pooled;
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, Ordering},

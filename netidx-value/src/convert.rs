@@ -6,10 +6,8 @@ use chrono::prelude::*;
 use compact_str::CompactString;
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
-use netidx_core::{
-    path::Path,
-    pool::{Pool, Pooled},
-};
+use netidx_core::path::Path;
+use poolshark::{Pool, Pooled};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{

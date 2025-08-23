@@ -9,7 +9,6 @@ use crate::{
     batch_channel::BatchReceiver,
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
     path::Path,
-    pool::Pooled,
     protocol::{
         self,
         publisher::{From, Id, To, WriteId},
@@ -33,6 +32,7 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use log::{info, trace};
 use parking_lot::Mutex;
+use poolshark::Pooled;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
 use std::hint::unreachable_unchecked;
