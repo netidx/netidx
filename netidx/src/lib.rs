@@ -112,6 +112,7 @@ extern crate netidx_core;
 
 pub use netidx_core::{pack, path, utils};
 pub use netidx_netproto as protocol;
+pub use poolshark as pool;
 
 mod batch_channel;
 mod channel;
