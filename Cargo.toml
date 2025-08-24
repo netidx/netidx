@@ -51,7 +51,7 @@ packed_struct = "0.10"
 packed_struct_codegen = "0.10"
 parking_lot = "0.12.1"
 pin-utils = "0.1"
-poolshark = "0.1"
+poolshark = "0.1.2"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand = "0.9"
 rayon = "1"

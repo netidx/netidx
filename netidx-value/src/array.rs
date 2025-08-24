@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut};
 use netidx_core::pack::{
     decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC,
 };
-use poolshark::{arc::TArc as PArc, RawPool, RawPoolable, WeakPool};
+use poolshark::{arc::TArc as PArc, Poolable, RawPool, RawPoolable, WeakPool};
 use seq_macro::seq;
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -28,7 +28,7 @@ const POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
     ]
 });
 
-const SPOOL: LazyLock<RawPool<PArc<Option<ValArraySlice>>>> =
+const SPOOL: LazyLock<RawPool<PArc<ValArraySlice>>> =
     LazyLock::new(|| RawPool::new(1024, 64));
 
 fn get_by_size(len: usize) -> ValArrayBase {
@@ -142,10 +142,26 @@ impl Deref for ValArraySlice {
     }
 }
 
+impl Poolable for ValArraySlice {
+    fn empty() -> Self {
+        Self { base: get_by_size(0), start: Bound::Unbounded, end: Bound::Unbounded }
+    }
+
+    fn capacity(&self) -> usize {
+        1
+    }
+
+    fn reset(&mut self) {
+        self.base = get_by_size(0);
+        self.start = Bound::Unbounded;
+        self.end = Bound::Unbounded
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ValArray {
     Base(ValArrayBase),
-    Slice(PArc<Option<ValArraySlice>>),
+    Slice(PArc<ValArraySlice>),
 }
 
 impl Deref for ValArray {
@@ -154,10 +170,7 @@ impl Deref for ValArray {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Base(a) => &*a,
-            Self::Slice(s) => match &**s {
-                Some(s) => &*s,
-                None => &[],
-            },
+            Self::Slice(s) => &**s,
         }
     }
 }
@@ -355,147 +368,140 @@ impl ValArray {
             Self::Base(a) => {
                 let (start, end) =
                     (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
-                let t = Some(ValArraySlice { base: a.clone(), start, end });
+                let t = ValArraySlice { base: a.clone(), start, end };
                 check_bounds(&a, start, end)?;
                 Ok(Self::Slice(PArc::new(&SPOOL, t)))
             }
-            Self::Slice(s) => match &**s {
-                None => bail!("can't subslice an empty subslice"),
-                Some(s) => {
-                    let max_i = match s.end {
-                        Bound::Unbounded => s.base.len(),
-                        Bound::Excluded(i) => i,
-                        Bound::Included(i) => i,
-                    };
-                    let (start, end) =
-                        (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
-                    match (start, end) {
-                        (Bound::Excluded(i), Bound::Excluded(j)) if j <= i => {
-                            bail!("negative size slice ex {i}, ex {j}")
-                        }
-                        (Bound::Included(i), Bound::Included(j)) if j < i => {
-                            bail!("negative size slice {i}, {j}")
-                        }
-                        (_, _) => (),
+            Self::Slice(s) => {
+                let max_i = match s.end {
+                    Bound::Unbounded => s.base.len(),
+                    Bound::Excluded(i) => i,
+                    Bound::Included(i) => i,
+                };
+                let (start, end) =
+                    (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
+                match (start, end) {
+                    (Bound::Excluded(i), Bound::Excluded(j)) if j <= i => {
+                        bail!("negative size slice ex {i}, ex {j}")
                     }
-                    let (start_i, start_off, start) = match (s.start, start) {
-                        (Bound::Unbounded, Bound::Unbounded) => (0, 0, Bound::Unbounded),
-                        (Bound::Unbounded, Bound::Excluded(i)) => {
-                            if i >= max_i {
-                                bail!("slice start {i} is out of bounds {max_i}")
-                            }
-                            (i, i, Bound::Excluded(i))
-                        }
-                        (Bound::Unbounded, Bound::Included(i)) => {
-                            if i > max_i {
-                                bail!("slice start {i} is out of bounds {max_i}")
-                            }
-                            (i, i, Bound::Included(i))
-                        }
-                        (Bound::Excluded(i), Bound::Unbounded) => {
-                            (i, 0, Bound::Excluded(i))
-                        }
-                        (Bound::Excluded(i), Bound::Included(j)) => {
-                            let si = i + j;
-                            if si >= max_i {
-                                bail!("slice start {si} is out of bounds {max_i}")
-                            }
-                            (si, j, Bound::Excluded(si))
-                        }
-                        (Bound::Excluded(i), Bound::Excluded(j)) => {
-                            let si = i + j;
-                            if si >= max_i {
-                                bail!("slice start {si} is out of bounds {max_i}")
-                            }
-                            (si, j, Bound::Excluded(si))
-                        }
-                        (Bound::Included(i), Bound::Unbounded) => {
-                            (i, 0, Bound::Included(i))
-                        }
-                        (Bound::Included(i), Bound::Included(j)) => {
-                            let si = i + j;
-                            if si > max_i {
-                                bail!("slice start {si} is out of bounds {max_i}")
-                            }
-                            (si, j, Bound::Included(si))
-                        }
-                        (Bound::Included(i), Bound::Excluded(j)) => {
-                            let si = i + j;
-                            if si >= max_i {
-                                bail!("slice start {si} is out of bounds {max_i}")
-                            }
-                            (si, j, Bound::Excluded(si))
-                        }
-                    };
-                    let end = match (s.end, end) {
-                        (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
-                        (Bound::Unbounded, Bound::Excluded(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r > max_i {
-                                bail!("slice end {r} is out of bounds {max_i}")
-                            }
-                            Bound::Excluded(r)
-                        }
-                        (Bound::Unbounded, Bound::Included(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r > max_i {
-                                bail!("slice end {r} is out of bounds {max_i}")
-                            }
-                            Bound::Included(r)
-                        }
-                        (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
-                        (Bound::Excluded(i), Bound::Excluded(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r > i {
-                                bail!("slice end {r} is out of bounds {i}")
-                            }
-                            Bound::Excluded(r)
-                        }
-                        (Bound::Excluded(i), Bound::Included(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r >= i {
-                                bail!("slice end {r} is out of bounds {i}")
-                            }
-                            Bound::Included(r)
-                        }
-                        (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
-                        (Bound::Included(i), Bound::Excluded(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r > i + 1 {
-                                bail!("slice end {r} is out of bounds {i}")
-                            }
-                            Bound::Excluded(r)
-                        }
-                        (Bound::Included(i), Bound::Included(j)) => {
-                            if j < start_off {
-                                bail!("array index starts at {start_off} but ends at {j}")
-                            }
-                            let r = start_i + (j - start_off);
-                            if r > i {
-                                bail!("slice end {r} is out of bound {i}")
-                            }
-                            Bound::Included(r)
-                        }
-                    };
-                    let t = Some(ValArraySlice { base: s.base.clone(), start, end });
-                    Ok(Self::Slice(PArc::new(&SPOOL, t)))
+                    (Bound::Included(i), Bound::Included(j)) if j < i => {
+                        bail!("negative size slice {i}, {j}")
+                    }
+                    (_, _) => (),
                 }
-            },
+                let (start_i, start_off, start) = match (s.start, start) {
+                    (Bound::Unbounded, Bound::Unbounded) => (0, 0, Bound::Unbounded),
+                    (Bound::Unbounded, Bound::Excluded(i)) => {
+                        if i >= max_i {
+                            bail!("slice start {i} is out of bounds {max_i}")
+                        }
+                        (i, i, Bound::Excluded(i))
+                    }
+                    (Bound::Unbounded, Bound::Included(i)) => {
+                        if i > max_i {
+                            bail!("slice start {i} is out of bounds {max_i}")
+                        }
+                        (i, i, Bound::Included(i))
+                    }
+                    (Bound::Excluded(i), Bound::Unbounded) => (i, 0, Bound::Excluded(i)),
+                    (Bound::Excluded(i), Bound::Included(j)) => {
+                        let si = i + j;
+                        if si >= max_i {
+                            bail!("slice start {si} is out of bounds {max_i}")
+                        }
+                        (si, j, Bound::Excluded(si))
+                    }
+                    (Bound::Excluded(i), Bound::Excluded(j)) => {
+                        let si = i + j;
+                        if si >= max_i {
+                            bail!("slice start {si} is out of bounds {max_i}")
+                        }
+                        (si, j, Bound::Excluded(si))
+                    }
+                    (Bound::Included(i), Bound::Unbounded) => (i, 0, Bound::Included(i)),
+                    (Bound::Included(i), Bound::Included(j)) => {
+                        let si = i + j;
+                        if si > max_i {
+                            bail!("slice start {si} is out of bounds {max_i}")
+                        }
+                        (si, j, Bound::Included(si))
+                    }
+                    (Bound::Included(i), Bound::Excluded(j)) => {
+                        let si = i + j;
+                        if si >= max_i {
+                            bail!("slice start {si} is out of bounds {max_i}")
+                        }
+                        (si, j, Bound::Excluded(si))
+                    }
+                };
+                let end = match (s.end, end) {
+                    (Bound::Unbounded, Bound::Unbounded) => Bound::Unbounded,
+                    (Bound::Unbounded, Bound::Excluded(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r > max_i {
+                            bail!("slice end {r} is out of bounds {max_i}")
+                        }
+                        Bound::Excluded(r)
+                    }
+                    (Bound::Unbounded, Bound::Included(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r > max_i {
+                            bail!("slice end {r} is out of bounds {max_i}")
+                        }
+                        Bound::Included(r)
+                    }
+                    (Bound::Excluded(i), Bound::Unbounded) => Bound::Excluded(i),
+                    (Bound::Excluded(i), Bound::Excluded(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r > i {
+                            bail!("slice end {r} is out of bounds {i}")
+                        }
+                        Bound::Excluded(r)
+                    }
+                    (Bound::Excluded(i), Bound::Included(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r >= i {
+                            bail!("slice end {r} is out of bounds {i}")
+                        }
+                        Bound::Included(r)
+                    }
+                    (Bound::Included(i), Bound::Unbounded) => Bound::Included(i),
+                    (Bound::Included(i), Bound::Excluded(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r > i + 1 {
+                            bail!("slice end {r} is out of bounds {i}")
+                        }
+                        Bound::Excluded(r)
+                    }
+                    (Bound::Included(i), Bound::Included(j)) => {
+                        if j < start_off {
+                            bail!("array index starts at {start_off} but ends at {j}")
+                        }
+                        let r = start_i + (j - start_off);
+                        if r > i {
+                            bail!("slice end {r} is out of bound {i}")
+                        }
+                        Bound::Included(r)
+                    }
+                };
+                let t = ValArraySlice { base: s.base.clone(), start, end };
+                Ok(Self::Slice(PArc::new(&SPOOL, t)))
+            }
         }
     }
 }

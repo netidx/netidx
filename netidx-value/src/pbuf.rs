@@ -1,24 +1,50 @@
-/// Why? Because Bytes is 5 words. This module export PBytes, which
+/// Why? Because Bytes is 5 words. This module exports PBytes, which
 /// reduces Bytes from 5 words to 1 words by wrapping it in a pooled
 /// arc. This allows us to reduce the size of Value from 5 words to 3
 /// words, while only paying the cost of a double indirection when
-/// accessing a zero copy Bytes.
+/// accessing a Bytes.
 use bytes::{Buf, BufMut, Bytes};
 use netidx_core::pack::{decode_varint, encode_varint, varint_len, Pack, PackError};
-use poolshark::{arc::TArc as PArc, RawPool};
+use poolshark::{arc::TArc as PArc, Poolable, RawPool};
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
 
-static POOL: LazyLock<RawPool<PArc<Bytes>>> = LazyLock::new(|| RawPool::new(8124, 64));
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PooledBytes(Bytes);
+
+impl Poolable for PooledBytes {
+    fn empty() -> Self {
+        Self(Bytes::new())
+    }
+
+    fn capacity(&self) -> usize {
+        1
+    }
+
+    fn reset(&mut self) {
+        *self = Self(Bytes::new())
+    }
+}
+
+impl Deref for PooledBytes {
+    type Target = Bytes;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+static POOL: LazyLock<RawPool<PArc<PooledBytes>>> =
+    LazyLock::new(|| RawPool::new(8124, 64));
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PBytes(PArc<Bytes>);
+pub struct PBytes(PArc<PooledBytes>);
 
 impl Deref for PBytes {
     type Target = Bytes;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &**self.0
     }
 }
 
@@ -42,7 +68,7 @@ impl AsRef<[u8]> for PBytes {
 
 impl PBytes {
     pub fn new(b: Bytes) -> Self {
-        Self(PArc::new(&POOL, b))
+        Self(PArc::new(&POOL, PooledBytes(b)))
     }
 }
 
@@ -55,8 +81,8 @@ impl From<Bytes> for PBytes {
 impl Into<Bytes> for PBytes {
     fn into(mut self) -> Bytes {
         match PArc::get_mut(&mut self.0) {
-            Some(b) => mem::take(b),
-            None => (*self.0).clone(),
+            Some(b) => mem::take(b).0,
+            None => ((*self.0).0).clone(),
         }
     }
 }
