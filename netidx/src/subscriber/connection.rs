@@ -32,7 +32,7 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use log::{info, trace};
 use parking_lot::Mutex;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
 use std::hint::unreachable_unchecked;
@@ -55,14 +55,14 @@ use triomphe::Arc as TArc;
 struct Sub {
     path: Path,
     sub_id: SubId,
-    streams: SmallVec<[(ChanId, ChanWrap<Pooled<Vec<(SubId, Event)>>>); 1]>,
+    streams: SmallVec<[(ChanId, ChanWrap<GPooled<Vec<(SubId, Event)>>>); 1]>,
     last: Option<TArc<Mutex<Event>>>,
     val: ValWeak,
 }
 
 type ByChan = FxHashMap<
     ChanId,
-    (ChanWrap<Pooled<Vec<(SubId, Event)>>>, Pooled<Vec<(SubId, Event)>>),
+    (ChanWrap<GPooled<Vec<(SubId, Event)>>>, GPooled<Vec<(SubId, Event)>>),
 >;
 
 fn unsubscribe(
@@ -209,7 +209,7 @@ const PERIOD: Duration = Duration::from_secs(100);
 fn decode_task(
     mut con: ReadChannel,
     stop: oneshot::Receiver<()>,
-) -> Receiver<Result<(Pooled<Vec<From>>, bool)>> {
+) -> Receiver<Result<(GPooled<Vec<From>>, bool)>> {
     let (mut send, recv) = mpsc::channel(3);
     let mut stop = stop.fuse();
     task::spawn(async move {
@@ -257,7 +257,7 @@ pub(super) struct ConnectionCtx {
     msg_recvd: bool,
     pending_flushes: Vec<oneshot::Sender<()>>,
     pending_writes: FxHashMap<Id, FxHashMap<WriteId, oneshot::Sender<Value>>>,
-    by_receiver: FxHashMap<ChanWrap<Pooled<Vec<(SubId, Event)>>>, ChanId>,
+    by_receiver: FxHashMap<ChanWrap<GPooled<Vec<(SubId, Event)>>>, ChanId>,
     by_chan: ByChan,
     gc_chan: FxHashSet<ChanId>,
     blocked_channels: FuturesUnordered<BlockedChannelFut>,
@@ -363,7 +363,7 @@ impl ConnectionCtx {
     fn handle_from_sub(
         &mut self,
         write_con: &mut WriteChannel,
-        mut batch: Pooled<Vec<ToCon>>,
+        mut batch: GPooled<Vec<ToCon>>,
     ) -> Result<()> {
         let mut stream_batch = DECODE_BATCHES.take();
         for msg in batch.drain(..) {
@@ -410,7 +410,7 @@ impl ConnectionCtx {
 
     fn process_batch(
         &mut self,
-        mut batch: Pooled<Vec<From>>,
+        mut batch: GPooled<Vec<From>>,
         con: &mut WriteChannel,
         subscriber: &Subscriber,
     ) -> Result<()> {
@@ -544,7 +544,7 @@ impl ConnectionCtx {
     // This is the fast path for the common case where the batch contains
     // only updates. As of 2020-04-30, sending to an mpsc channel is
     // pretty slow, about 250ns, so we go to great lengths to avoid it.
-    fn process_updates_batch(&mut self, mut batch: Pooled<Vec<From>>) {
+    fn process_updates_batch(&mut self, mut batch: GPooled<Vec<From>>) {
         for m in batch.drain(..) {
             match m {
                 From::Update(i, m) => {
@@ -624,7 +624,7 @@ impl ConnectionCtx {
     fn handle_updates(
         &mut self,
         write_con: &mut WriteChannel,
-        batch: Pooled<Vec<From>>,
+        batch: GPooled<Vec<From>>,
     ) -> Result<bool> {
         if let Some(subscriber) = self.subscriber.upgrade() {
             self.msg_recvd = true;
@@ -635,13 +635,13 @@ impl ConnectionCtx {
 
     async fn run(
         &mut self,
-        mut batches: Receiver<Result<(Pooled<Vec<From>>, bool)>>,
+        mut batches: Receiver<Result<(GPooled<Vec<From>>, bool)>>,
         write_con: &mut WriteChannel,
     ) -> Result<()> {
         async fn read_batch(
-            batches: &mut Receiver<Result<(Pooled<Vec<From>>, bool)>>,
+            batches: &mut Receiver<Result<(GPooled<Vec<From>>, bool)>>,
             blocked: &mut FuturesUnordered<BlockedChannelFut>,
-        ) -> Option<Result<(Pooled<Vec<From>>, bool)>> {
+        ) -> Option<Result<(GPooled<Vec<From>>, bool)>> {
             loop {
                 if blocked.len() > 0 {
                     let _: Option<_> = blocked.next().await;

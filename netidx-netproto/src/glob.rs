@@ -6,7 +6,7 @@ use netidx_core::{
     pack::{Pack, PackError},
     path::Path,
 };
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},
@@ -177,7 +177,7 @@ impl FromValue for Glob {
 
 #[derive(Debug)]
 struct GlobSetInner {
-    raw: Pooled<Vec<Glob>>,
+    raw: GPooled<Vec<Glob>>,
     published_only: bool,
     glob: globset::GlobSet,
 }
@@ -323,17 +323,17 @@ impl Deref for GlobSet {
 impl Pack for GlobSet {
     fn encoded_len(&self) -> usize {
         <bool as Pack>::encoded_len(&self.0.published_only)
-            + <Pooled<Vec<Glob>> as Pack>::encoded_len(&self.0.raw)
+            + <GPooled<Vec<Glob>> as Pack>::encoded_len(&self.0.raw)
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
         <bool as Pack>::encode(&self.0.published_only, buf)?;
-        <Pooled<Vec<Glob>> as Pack>::encode(&self.0.raw, buf)
+        <GPooled<Vec<Glob>> as Pack>::encode(&self.0.raw, buf)
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
         let published_only = <bool as Pack>::decode(buf)?;
-        let mut raw = <Pooled<Vec<Glob>> as Pack>::decode(buf)?;
+        let mut raw = <GPooled<Vec<Glob>> as Pack>::decode(buf)?;
         let mut builder = globset::GlobSetBuilder::new();
         for glob in raw.iter() {
             builder.add(glob.glob.clone());

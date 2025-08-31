@@ -31,7 +31,7 @@ use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
 use log::{info, trace, warn};
 use netidx_netproto::resolver::{PublisherRef, UserInfo};
 use parking_lot::Mutex;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use rand::Rng;
 use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -109,7 +109,7 @@ bitflags! {
     }
 }
 
-type Updates = Pooled<Vec<(SubId, Event)>>;
+type Updates = GPooled<Vec<(SubId, Event)>>;
 pub type UpdateChan = Sender<Updates>;
 type WUpdateChan = ChanWrap<Updates>;
 type Streams = SmallVec<[(UpdatesFlags, WUpdateChan); 1]>;
@@ -362,7 +362,7 @@ impl Dval {
     pub fn updates(
         &self,
         flags: UpdatesFlags,
-        tx: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
+        tx: mpsc::Sender<GPooled<Vec<(SubId, Event)>>>,
     ) {
         let mut t = self.0.lock();
         let tx = ChanWrap(tx);
@@ -541,7 +541,7 @@ impl SubscriberInner {
 
     fn choose_random_addr(
         &mut self,
-        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        publishers: &GPooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
         flags: PublishFlags,
     ) -> Option<Chosen> {
@@ -583,7 +583,7 @@ impl SubscriberInner {
 
     fn choose_existing_addr(
         &mut self,
-        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        publishers: &GPooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
         mut flags: PublishFlags,
     ) -> Option<Chosen> {
@@ -611,7 +611,7 @@ impl SubscriberInner {
     fn choose_local_addr(
         &mut self,
         tried_existing: bool,
-        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        publishers: &GPooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
         flags: PublishFlags,
     ) -> Option<Chosen> {
@@ -695,7 +695,7 @@ impl SubscriberInner {
 
     fn choose_addr(
         &mut self,
-        publishers: &Pooled<FxHashMap<PublisherId, Publisher>>,
+        publishers: &GPooled<FxHashMap<PublisherId, Publisher>>,
         resolved: &Resolved,
     ) -> Option<Chosen> {
         let mut flags = PublishFlags::from_bits(resolved.flags)?;
@@ -1427,7 +1427,7 @@ impl Subscriber {
 
     fn subscribe_internal<I>(&self, path: Path, updates: I) -> Dval
     where
-        I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+        I: IntoIterator<Item = (UpdatesFlags, Sender<GPooled<Vec<(SubId, Event)>>>)>,
     {
         let mut t = self.0.lock();
         if let Some(s) = t
@@ -1475,7 +1475,7 @@ impl Subscriber {
     /// dval.updates has been called.
     pub fn subscribe_updates<I>(&self, path: Path, updates: I) -> Dval
     where
-        I: IntoIterator<Item = (UpdatesFlags, Sender<Pooled<Vec<(SubId, Event)>>>)>,
+        I: IntoIterator<Item = (UpdatesFlags, Sender<GPooled<Vec<(SubId, Event)>>>)>,
     {
         self.subscribe_internal(path, updates)
     }

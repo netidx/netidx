@@ -8,13 +8,13 @@ use log::{error, warn};
 use netidx::{
     config::Config,
     path::Path,
-    pool::Pooled,
     publisher::{
         BindCfg, DesiredAuth, Id, Publisher, PublisherBuilder, Typ, Val, Value,
         WriteRequest,
     },
 };
 use parking_lot::Mutex;
+use poolshark::global::GPooled;
 use std::{collections::HashMap, convert::From, sync::Arc, time::Duration};
 use structopt::StructOpt;
 use tokio::{
@@ -54,7 +54,7 @@ type ById = Arc<Mutex<HashMap<Id, Arc<Val>, FxBuildHasher>>>;
 async fn handle_writes_loop(
     by_id: ById,
     publisher: Publisher,
-    mut rx: Receiver<Pooled<Vec<WriteRequest>>>,
+    mut rx: Receiver<GPooled<Vec<WriteRequest>>>,
 ) -> Result<()> {
     let mut stdout = stdout();
     let mut buf = Vec::new();

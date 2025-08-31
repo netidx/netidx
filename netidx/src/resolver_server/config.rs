@@ -105,7 +105,7 @@ pub mod file {
     use anyhow::Result;
     use arcstr::ArcStr;
     use derive_builder::Builder;
-    use poolshark::Pooled;
+    use poolshark::global::GPooled;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::PathBuf,
@@ -190,7 +190,7 @@ pub mod file {
             Ok(super::Referral {
                 path,
                 ttl: self.ttl,
-                addrs: Pooled::orphan(
+                addrs: GPooled::orphan(
                     self.addrs.into_iter().map(|(s, a)| (s, a.into())).collect(),
                 ),
             })

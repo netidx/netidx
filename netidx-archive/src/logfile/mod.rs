@@ -25,7 +25,7 @@ use netidx::{
 };
 use netidx_derive::Pack;
 use packed_struct::PackedStruct;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{
     self,
     cmp::max,
@@ -313,7 +313,7 @@ static PM_POOL: LazyLock<Pool<Vec<PathMapping>>> =
 pub static BATCH_POOL: LazyLock<Pool<Vec<BatchItem>>> =
     LazyLock::new(|| Pool::new(10, 100_000));
 pub(crate) static CURSOR_BATCH_POOL: LazyLock<
-    Pool<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+    Pool<VecDeque<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>>,
 > = LazyLock::new(|| Pool::new(100, 10_000));
 pub(crate) static IMG_POOL: LazyLock<Pool<FxHashMap<Id, Event>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
@@ -619,7 +619,7 @@ fn scan_records(
                 buf.advance(rh.record_length as usize); // skip the contents
             }
             RecordTyp::PathMappings => {
-                let mut m = <Pooled<Vec<PathMapping>> as Pack>::decode(buf)
+                let mut m = <GPooled<Vec<PathMapping>> as Pack>::decode(buf)
                     .map_err(Error::from)
                     .context("invalid path mappings record")?;
                 for pm in m.drain(..) {

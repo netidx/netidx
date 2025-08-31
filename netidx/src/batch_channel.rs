@@ -1,6 +1,6 @@
 use futures::channel::oneshot;
 use parking_lot::Mutex;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::sync::Arc;
 use std::{clone::Clone, mem, ops::Drop, result};
 
@@ -9,7 +9,7 @@ struct BatchChannelInner<T: Send + Sync + 'static> {
     send_closed: bool,
     recv_closed: bool,
     notify: Option<oneshot::Sender<()>>,
-    queue: Pooled<Vec<T>>,
+    queue: GPooled<Vec<T>>,
     pool: Pool<Vec<T>>,
 }
 
@@ -69,7 +69,7 @@ impl<T: Send + Sync + 'static> BatchReceiver<T> {
         self.0.lock().queue.len()
     }
 
-    pub(crate) async fn recv(&self) -> Option<Pooled<Vec<T>>> {
+    pub(crate) async fn recv(&self) -> Option<GPooled<Vec<T>>> {
         loop {
             let receiver = {
                 let mut inner = self.0.lock();

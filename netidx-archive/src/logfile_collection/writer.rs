@@ -8,7 +8,7 @@ use arcstr::ArcStr;
 use chrono::prelude::*;
 use log::{debug, info, warn};
 use netidx::path::Path;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{fs, iter, path::PathBuf, sync::Arc};
 
 /// Run archive PUT cmds on the given archive file
@@ -139,7 +139,7 @@ impl ArchiveCollectionWriter {
         &mut self,
         image: bool,
         timestamp: DateTime<Utc>,
-        batch: &Pooled<Vec<BatchItem>>,
+        batch: &GPooled<Vec<BatchItem>>,
     ) -> Result<()> {
         self.current_mut()?.add_batch(image, timestamp, batch)
     }

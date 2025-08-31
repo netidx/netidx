@@ -9,7 +9,7 @@ use netidx::{
     subscriber::{Dval, Event, Subscriber},
     utils,
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::{HashMap, HashSet},
     iter,
@@ -45,7 +45,7 @@ pub struct Cluster<T: Pack> {
     our_path: Path,
     us: Val,
     others: HashMap<Path, Dval>,
-    cmd: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    cmd: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
     primary: bool,
 }
 

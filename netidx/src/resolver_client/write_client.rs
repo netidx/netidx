@@ -26,7 +26,7 @@ use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
 use parking_lot::{Mutex, RwLock};
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use rand::{rng, Rng};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
@@ -38,10 +38,10 @@ use tokio::{
 
 const TTL: u64 = 120;
 
-type Batch = (Pooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
+type Batch = (GPooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
 
 struct ToCon {
-    batch: Pooled<Vec<(usize, ToWrite)>>,
+    batch: GPooled<Vec<(usize, ToWrite)>>,
     replies: Mutex<Vec<oneshot::Sender<Response<FromWrite>>>>,
 }
 
@@ -635,7 +635,7 @@ impl WriteClient {
 
     pub(crate) fn send(
         &mut self,
-        batch: Pooled<Vec<(usize, ToWrite)>>,
+        batch: GPooled<Vec<(usize, ToWrite)>>,
     ) -> ResponseChan<FromWrite> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.unbounded_send((batch, tx));

@@ -13,7 +13,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use log::{debug, error, info, warn};
 use netidx::subscriber::Event;
 use parking_lot::Mutex;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::{hash_map::Entry, HashMap, VecDeque},
     ops::Bound,
@@ -290,11 +290,12 @@ impl ArchiveCollectionReader {
         &mut self,
         filter: Option<&FxHashSet<Id>>,
         read_count: usize,
-    ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
+    ) -> Result<(usize, GPooled<VecDeque<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>>)>
+    {
         self.apply_read(
             |archive, cursor| archive.read_deltas(filter, cursor, read_count),
             |(_, batch)| !batch.is_empty(),
-            (0, Pooled::orphan(VecDeque::new())),
+            (0, GPooled::orphan(VecDeque::new())),
         )
     }
 
@@ -303,7 +304,7 @@ impl ArchiveCollectionReader {
     pub fn read_next(
         &mut self,
         filter: Option<&FxHashSet<Id>>,
-    ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
+    ) -> Result<Option<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>> {
         self.apply_read(
             |archive, cursor| archive.read_next(filter, cursor),
             |batch| batch.is_some(),
@@ -347,7 +348,7 @@ impl ArchiveCollectionReader {
     pub fn reimage(
         &mut self,
         filter: Option<&FxHashSet<Id>>,
-    ) -> Result<Pooled<FxHashMap<Id, Event>>> {
+    ) -> Result<GPooled<FxHashMap<Id, Event>>> {
         if self.source()? {
             task::block_in_place(|| {
                 let ds = self.source.as_mut().unwrap();

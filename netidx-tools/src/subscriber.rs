@@ -17,13 +17,13 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
-    pool::Pooled,
     protocol::value_parser::{escaped_string, value, VAL_ESC, VAL_MUST_ESC},
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
+use poolshark::global::GPooled;
 use std::{
     collections::HashMap,
     fmt,
@@ -187,14 +187,14 @@ impl<'a> Out<'a> {
 }
 
 struct Ctx {
-    sender_updates: Sender<Pooled<Vec<(SubId, Event)>>>,
+    sender_updates: Sender<GPooled<Vec<(SubId, Event)>>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
     rpcs: HashMap<Path, Proc>,
     subscribe_ts: HashMap<Path, Instant>,
     subscriber: Subscriber,
     requests: Box<dyn FusedStream<Item = Result<String>> + Unpin>,
-    updates: Batched<Receiver<Pooled<Vec<(SubId, Event)>>>>,
+    updates: Batched<Receiver<GPooled<Vec<(SubId, Event)>>>>,
     stdout: io::Stdout,
     stderr: io::Stderr,
     to_stdout: BytesMut,
@@ -373,7 +373,7 @@ impl Ctx {
 
     async fn process_update(
         &mut self,
-        u: Option<BatchItem<Pooled<Vec<(SubId, Event)>>>>,
+        u: Option<BatchItem<GPooled<Vec<(SubId, Event)>>>>,
     ) -> Result<()> {
         Ok(match u {
             None => unreachable!(), // channel will never close

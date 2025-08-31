@@ -20,7 +20,7 @@ use parking_lot::{
     lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     self,
     cell::RefCell,
@@ -427,7 +427,7 @@ impl ArchiveReader {
         mmap: &Mmap,
         pos: usize,
         end: usize,
-    ) -> Result<(usize, Pooled<Vec<BatchItem>>)> {
+    ) -> Result<(usize, GPooled<Vec<BatchItem>>)> {
         thread_local! {
             static BUF: RefCell<Vec<u8>> = RefCell::new(vec![]);
         }
@@ -446,7 +446,7 @@ impl ArchiveReader {
                 let index_len =
                     if indexed { decode_varint(&mut &mmap[pos..])? as usize } else { 0 };
                 let pos = pos + index_len;
-                let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
+                let batch = <GPooled<Vec<BatchItem>> as Pack>::decode(&mut &mmap[pos..])
                     .context("decoding batch")?;
                 Ok((rh.record_length as usize, batch))
             }
@@ -472,7 +472,7 @@ impl ArchiveReader {
                             &mut *compression_buf,
                         )
                         .context("decompressing to buffer")?;
-                    let batch = <Pooled<Vec<BatchItem>> as Pack>::decode(
+                    let batch = <GPooled<Vec<BatchItem>> as Pack>::decode(
                         &mut &compression_buf[..len],
                     )?;
                     Ok((rh.record_length as usize, batch))
@@ -493,14 +493,14 @@ impl ArchiveReader {
         &self,
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
-    ) -> Result<Pooled<FxHashMap<Id, Event>>> {
+    ) -> Result<GPooled<FxHashMap<Id, Event>>> {
         self.check_remap_rescan(false)?;
         let pos = match cursor.current {
             None => cursor.start,
             Some(pos) => Bound::Included(pos),
         };
         match pos {
-            Bound::Unbounded => Ok(Pooled::orphan(HashMap::default())),
+            Bound::Unbounded => Ok(GPooled::orphan(HashMap::default())),
             _ => {
                 let mut image = IMG_POOL.take();
                 let index = self.index.read();
@@ -592,7 +592,8 @@ impl ArchiveReader {
         filter: Option<&FxHashSet<Id>>,
         cursor: &mut Cursor,
         n: usize,
-    ) -> Result<(usize, Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>)> {
+    ) -> Result<(usize, GPooled<VecDeque<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>>)>
+    {
         self.check_remap_rescan(false)?;
         let mut res = CURSOR_BATCH_POOL.take();
         let start = match cursor.current {
@@ -635,7 +636,7 @@ impl ArchiveReader {
         &self,
         filter: Option<&FxHashSet<Id>>,
         cursor: &Cursor,
-    ) -> Result<Option<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>> {
+    ) -> Result<Option<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>> {
         self.check_remap_rescan(false)?;
         let start = match cursor.current {
             None => cursor.start,

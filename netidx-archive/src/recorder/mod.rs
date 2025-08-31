@@ -17,7 +17,7 @@ use netidx::{
 use netidx_core::atomic_id;
 use netidx_derive::Pack;
 use parking_lot::{Mutex, RwLock};
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use serde_derive::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tokio::{sync::broadcast, task::JoinSet};
@@ -89,7 +89,7 @@ impl State {
 pub enum BCastMsg {
     LogRotated(DateTime<Utc>),
     NewCurrent(ArchiveReader),
-    Batch(DateTime<Utc>, Arc<Pooled<Vec<BatchItem>>>),
+    Batch(DateTime<Utc>, Arc<GPooled<Vec<BatchItem>>>),
     TailInvalidated,
 }
 

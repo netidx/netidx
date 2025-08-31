@@ -5,7 +5,7 @@ use netidx::{
     protocol::resolver::UserInfo,
     publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::VecDeque,
     result,
@@ -48,7 +48,7 @@ impl Batch {
 }
 
 struct Receiver {
-    writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    writes: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
     queued: VecDeque<Value>,
 }
 
@@ -57,7 +57,7 @@ impl Receiver {
         &mut self,
         dead: &AtomicBool,
         client: ClId,
-        r: Option<Pooled<Vec<WriteRequest>>>,
+        r: Option<GPooled<Vec<WriteRequest>>>,
     ) -> Result<()> {
         match r {
             Some(mut batch) => self.queued.extend(batch.drain(..).filter_map(|req| {
@@ -109,7 +109,7 @@ struct SingletonInner {
     publisher: Publisher,
     anchor: Arc<Val>,
     timeout: Option<Duration>,
-    writes: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    writes: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
 }
 
 impl SingletonInner {
@@ -337,8 +337,8 @@ impl Connection {
 pub struct ListenerInner {
     publisher: Publisher,
     _listener: Val,
-    waiting: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
-    queued: Pooled<Vec<WriteRequest>>,
+    waiting: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
+    queued: GPooled<Vec<WriteRequest>>,
     base: Path,
     timeout: Option<Duration>,
     flags: PublishFlags,
@@ -364,7 +364,7 @@ impl ListenerInner {
             publisher,
             _listener: listener,
             waiting: rx_waiting,
-            queued: Pooled::orphan(Vec::new()),
+            queued: GPooled::orphan(Vec::new()),
             base: path,
             timeout,
             flags,

@@ -15,7 +15,7 @@ use netidx::{
     },
     subscriber::{Dval, Subscriber},
 };
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{
     borrow::Borrow,
     collections::HashMap,
@@ -131,7 +131,7 @@ pub mod server {
     pub struct RpcCall {
         pub client: ClId,
         pub id: ProcId,
-        pub args: Pooled<HashMap<ArcStr, Value>>,
+        pub args: GPooled<HashMap<ArcStr, Value>>,
         pub reply: RpcReply,
     }
 
@@ -142,7 +142,7 @@ pub mod server {
     }
 
     struct PendingCall {
-        args: Pooled<HashMap<ArcStr, Value>>,
+        args: GPooled<HashMap<ArcStr, Value>>,
         initiated: Instant,
     }
 
@@ -155,7 +155,7 @@ pub mod server {
         pending: FxHashMap<ClId, PendingCall>,
         handler: Option<mpsc::Sender<T>>,
         map: M,
-        events: stream::Fuse<mpsc::Receiver<Pooled<Vec<WriteRequest>>>>,
+        events: stream::Fuse<mpsc::Receiver<GPooled<Vec<WriteRequest>>>>,
         stop: future::Fuse<oneshot::Receiver<()>>,
         last_gc: Instant,
     }

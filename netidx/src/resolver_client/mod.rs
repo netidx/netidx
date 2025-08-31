@@ -26,7 +26,7 @@ use common::{
 use futures::future;
 use fxhash::FxHashMap;
 use parking_lot::{Mutex, RwLock};
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use read_client::ReadClient;
 use std::{
     collections::{
@@ -87,8 +87,8 @@ impl Router {
     fn route_batch<T>(
         &mut self,
         pool: &Pool<Vec<(usize, T)>>,
-        batch: &Pooled<Vec<T>>,
-    ) -> impl Iterator<Item = (Option<Arc<Referral>>, Pooled<Vec<(usize, T)>>)> + use<T>
+        batch: &GPooled<Vec<T>>,
+    ) -> impl Iterator<Item = (Option<Arc<Referral>>, GPooled<Vec<(usize, T)>>)> + use<T>
     where
         T: ToPath + Clone + Send + Sync + 'static,
     {
@@ -190,7 +190,7 @@ where
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
     ) -> Self;
-    fn send(&mut self, batch: Pooled<Vec<(usize, T)>>) -> ResponseChan<F>;
+    fn send(&mut self, batch: GPooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
 
 impl Connection<ToRead, FromRead> for ReadClient {
@@ -204,7 +204,7 @@ impl Connection<ToRead, FromRead> for ReadClient {
         ReadClient::new(resolver, desired_auth, tls)
     }
 
-    fn send(&mut self, batch: Pooled<Vec<(usize, ToRead)>>) -> ResponseChan<FromRead> {
+    fn send(&mut self, batch: GPooled<Vec<(usize, ToRead)>>) -> ResponseChan<FromRead> {
         ReadClient::send(self, batch)
     }
 }
@@ -220,7 +220,7 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         WriteClient::new(resolver, desired_auth, writer_addr, secrets, tls)
     }
 
-    fn send(&mut self, batch: Pooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
+    fn send(&mut self, batch: GPooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
         WriteClient::send(self, batch)
     }
 }
@@ -253,7 +253,7 @@ where
     fn send_to_server(
         &mut self,
         server: Option<Arc<Referral>>,
-        batch: Pooled<Vec<(usize, T)>>,
+        batch: GPooled<Vec<(usize, T)>>,
     ) -> ResponseChan<F> {
         let r = server.unwrap_or_else(|| self.default.clone());
         match self.by_server.get_mut(&r) {
@@ -319,8 +319,8 @@ where
 
     async fn send(
         &self,
-        batch: &Pooled<Vec<T>>,
-    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<F>>)> {
+        batch: &GPooled<Vec<T>>,
+    ) -> Result<(GPooled<FxHashMap<PublisherId, Publisher>>, GPooled<Vec<F>>)> {
         let mut referrals = 0;
         loop {
             let mut waiters = Vec::new();
@@ -405,8 +405,9 @@ impl ResolverRead {
     /// send the specified messages to the resolver, and return the answers (in send order)
     pub async fn send(
         &self,
-        batch: &Pooled<Vec<ToRead>>,
-    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<FromRead>>)> {
+        batch: &GPooled<Vec<ToRead>>,
+    ) -> Result<(GPooled<FxHashMap<PublisherId, Publisher>>, GPooled<Vec<FromRead>>)>
+    {
         self.0.send(batch).await
     }
 
@@ -414,7 +415,7 @@ impl ResolverRead {
     pub async fn resolve<I>(
         &self,
         batch: I,
-    ) -> Result<(Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<Resolved>>)>
+    ) -> Result<(GPooled<FxHashMap<PublisherId, Publisher>>, GPooled<Vec<Resolved>>)>
     where
         I: IntoIterator<Item = Path>,
     {
@@ -442,7 +443,7 @@ impl ResolverRead {
     }
 
     /// list children of the specified path. Order is unspecified.
-    pub async fn list(&self, path: Path) -> Result<Pooled<Vec<Path>>> {
+    pub async fn list(&self, path: Path) -> Result<GPooled<Vec<Path>>> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::List(path.clone()));
         let (_, mut result) = self.send(&to).await?;
@@ -465,7 +466,7 @@ impl ResolverRead {
         }
     }
 
-    async fn send_and_aggregate<F: FnMut(FromRead) -> Result<Pooled<Vec<Referral>>>>(
+    async fn send_and_aggregate<F: FnMut(FromRead) -> Result<GPooled<Vec<Referral>>>>(
         &self,
         message: ToRead,
         mut process_reply: F,
@@ -513,7 +514,7 @@ impl ResolverRead {
     pub async fn list_matching(
         &self,
         globset: &GlobSet,
-    ) -> Result<Pooled<Vec<Pooled<Vec<Path>>>>> {
+    ) -> Result<GPooled<Vec<GPooled<Vec<Path>>>>> {
         let mut results = LISTPOOL.take();
         let m = ToRead::ListMatching(globset.clone());
         self.send_and_aggregate(m, |reply| match reply {
@@ -649,8 +650,8 @@ impl ResolverWrite {
 
     pub async fn send(
         &self,
-        batch: &Pooled<Vec<ToWrite>>,
-    ) -> Result<Pooled<Vec<FromWrite>>> {
+        batch: &GPooled<Vec<ToWrite>>,
+    ) -> Result<GPooled<Vec<FromWrite>>> {
         let (_, r) = self.0.send(batch).await?;
         Ok(r)
     }

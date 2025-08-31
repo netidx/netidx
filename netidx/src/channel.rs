@@ -13,7 +13,7 @@ use futures::{
     select_biased, stream,
 };
 use log::{info, trace};
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 
 use parking_lot::Mutex;
 use std::{
@@ -264,7 +264,7 @@ impl WriteChannel {
 }
 
 struct PBuf {
-    data: Pooled<Vec<u8>>,
+    data: GPooled<Vec<u8>>,
     pos: usize,
 }
 

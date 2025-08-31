@@ -21,7 +21,7 @@ use fxhash::FxHashMap;
 use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex as SyncMutex;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use rand::{rng, Rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
@@ -336,7 +336,7 @@ async fn client_loop_write(
                             }
                         }
                         c.flush().await?;
-                        batch = Pooled::orphan(rest);
+                        batch = GPooled::orphan(rest);
                     }
 		    trace!("{:?} handling write batch of size {}", connection_id, batch.len());
                     if let Err(e) = ctx.store.handle_batch_write(

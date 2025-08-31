@@ -30,7 +30,7 @@ use netidx_protocols::{
     rpc::server::{ArgSpec, Proc, RpcCall, RpcReply},
     rpc_err,
 };
-use poolshark::Pool;
+use poolshark::global::Pool;
 use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{

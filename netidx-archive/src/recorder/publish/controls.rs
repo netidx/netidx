@@ -17,7 +17,7 @@ use netidx_protocols::{
     rpc::server::{RpcCall, RpcReply},
     rpc_err,
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{collections::HashMap, ops::Bound, time::Duration};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -150,7 +150,7 @@ impl Controls {
     pub(super) async fn new(
         session_base: &Path,
         publisher: &Publisher,
-        control_tx: &mpsc::Sender<Pooled<Vec<WriteRequest>>>,
+        control_tx: &mpsc::Sender<GPooled<Vec<WriteRequest>>>,
     ) -> Result<Self> {
         let _start_doc = publisher.publish(
             session_base.append("control/start/doc"),
@@ -248,7 +248,7 @@ impl Controls {
         &self,
         session_bcast: &mut broadcast::Sender<SessionBCastMsg>,
         session_id: Uuid,
-        mut batch: Pooled<Vec<WriteRequest>>,
+        mut batch: GPooled<Vec<WriteRequest>>,
     ) {
         let mut inst = HashMap::new();
         for req in batch.drain(..) {

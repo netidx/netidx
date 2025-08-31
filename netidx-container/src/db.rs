@@ -19,7 +19,7 @@ use netidx::{
 };
 use netidx_protocols::rpc::server::RpcReply;
 use parking_lot::Mutex;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use sled;
 use std::{
     cmp::{max, min},
@@ -73,7 +73,7 @@ static PDPAIR: LazyLock<Pool<Vec<(Path, UpdateKind)>>> =
 static PATHS: LazyLock<Pool<Vec<Path>>> = LazyLock::new(|| Pool::new(256, 65534));
 static TXNS: LazyLock<Pool<Txns>> = LazyLock::new(|| Pool::new(16, 65534));
 static STXNS: LazyLock<Pool<Txns>> = LazyLock::new(|| Pool::new(65534, 32));
-static BYPATH: LazyLock<Pool<HashMap<Path, Pooled<Txns>>>> =
+static BYPATH: LazyLock<Pool<HashMap<Path, GPooled<Txns>>>> =
     LazyLock::new(|| Pool::new(16, 65534));
 
 pub(super) enum UpdateKind {
@@ -83,11 +83,11 @@ pub(super) enum UpdateKind {
 }
 
 pub(super) struct Update {
-    pub(super) data: Pooled<Vec<(Path, UpdateKind)>>,
-    pub(super) locked: Pooled<Vec<Path>>,
-    pub(super) unlocked: Pooled<Vec<Path>>,
-    pub(super) added_roots: Pooled<Vec<Path>>,
-    pub(super) removed_roots: Pooled<Vec<Path>>,
+    pub(super) data: GPooled<Vec<(Path, UpdateKind)>>,
+    pub(super) locked: GPooled<Vec<Path>>,
+    pub(super) unlocked: GPooled<Vec<Path>>,
+    pub(super) added_roots: GPooled<Vec<Path>>,
+    pub(super) removed_roots: GPooled<Vec<Path>>,
 }
 
 impl Update {
@@ -276,7 +276,7 @@ impl TxnOp {
     }
 }
 
-pub struct Txn(Pooled<Txns>);
+pub struct Txn(GPooled<Txns>);
 
 impl Txn {
     pub fn new() -> Self {
@@ -474,7 +474,7 @@ fn create_sheet(
 }
 
 struct SheetDescr {
-    rows: Pooled<Vec<Path>>,
+    rows: GPooled<Vec<Path>>,
     max_col: usize,
     max_col_width: usize,
 }
@@ -757,7 +757,7 @@ fn create_table(
     res
 }
 
-fn table_rows(data: &sled::Tree, base: &Path) -> Result<Pooled<Vec<Path>>> {
+fn table_rows(data: &sled::Tree, base: &Path) -> Result<GPooled<Vec<Path>>> {
     let base_levels = Path::levels(&base);
     let mut paths = PATHS.take();
     for r in data.scan_prefix(base.as_bytes()).keys() {

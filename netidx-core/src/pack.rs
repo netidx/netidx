@@ -7,7 +7,10 @@ use chrono::{
 };
 use compact_str::CompactString;
 use indexmap::{IndexMap, IndexSet};
-use poolshark::{take_t, Poolable, Pooled};
+use poolshark::{
+    global::{take_any, GPooled},
+    Poolable,
+};
 use rust_decimal::Decimal;
 use std::{
     any::Any,
@@ -60,7 +63,7 @@ pub trait Pack {
     }
 }
 
-impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
+impl<T: Pack + Any + Send + Sync + Poolable> Pack for GPooled<T> {
     fn encoded_len(&self) -> usize {
         <T as Pack>::encoded_len(&**self)
     }
@@ -70,7 +73,7 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for Pooled<T> {
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        let mut t = take_t::<T>(1000, 1000);
+        let mut t = take_any::<T>(1000, 1000);
         <T as Pack>::decode_into(&mut *t, buf)?;
         Ok(t)
     }

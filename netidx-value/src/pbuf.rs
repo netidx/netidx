@@ -5,7 +5,10 @@
 /// accessing a Bytes.
 use bytes::{Buf, BufMut, Bytes};
 use netidx_core::pack::{decode_varint, encode_varint, varint_len, Pack, PackError};
-use poolshark::{arc::TArc as PArc, Poolable, RawPool};
+use poolshark::{
+    global::{arc::TArc as PArc, RawPool},
+    Poolable,
+};
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
 

@@ -26,7 +26,7 @@ use netidx::{
     resolver_client::GlobSet,
     subscriber::Event,
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::{HashMap, HashSet},
     ops::Bound,
@@ -43,7 +43,7 @@ pub(super) struct SessionShard {
     published_ids: FxHashSet<publisher::Id>,
     session_bcast: broadcast::Sender<SessionBCastMsg>,
     filter: GlobSet,
-    filterset: Pooled<FxHashSet<Id>>,
+    filterset: GPooled<FxHashSet<Id>>,
     speed: Speed,
     state: Arc<AtomicState>,
     data_base: Path,
@@ -126,7 +126,7 @@ impl SessionShard {
         Ok(t)
     }
 
-    async fn next(&mut self) -> Result<(DateTime<Utc>, Pooled<Vec<BatchItem>>)> {
+    async fn next(&mut self) -> Result<(DateTime<Utc>, GPooled<Vec<BatchItem>>)> {
         macro_rules! set_tail {
             () => {
                 let _ = self

@@ -7,7 +7,7 @@ use compact_str::CompactString;
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::path::Path;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{
@@ -699,8 +699,8 @@ impl<T: Into<Value>> From<Vec<T>> for Value {
     }
 }
 
-impl<T: Into<Value> + Clone + Send + Sync> From<Pooled<Vec<T>>> for Value {
-    fn from(mut v: Pooled<Vec<T>>) -> Value {
+impl<T: Into<Value> + Clone + Send + Sync> From<GPooled<Vec<T>>> for Value {
+    fn from(mut v: GPooled<Vec<T>>) -> Value {
         Value::Array(ValArray::from_iter_exact(v.drain(..).map(|e| e.into())))
     }
 }
@@ -1326,7 +1326,7 @@ thread_local! {
         RefCell::new(HashMap::default());
 }
 
-impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
+impl<T: FromValue + Send + Sync + 'static> FromValue for GPooled<Vec<T>> {
     fn from_value(v: Value) -> Result<Self> {
         macro_rules! convert {
             ($a:expr) => {{
@@ -1357,6 +1357,6 @@ impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
     }
 
     fn get(v: Value) -> Option<Self> {
-        <Pooled<Vec<T>> as FromValue>::from_value(v).ok()
+        <GPooled<Vec<T>> as FromValue>::from_value(v).ok()
     }
 }

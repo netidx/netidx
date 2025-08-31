@@ -8,7 +8,7 @@ use netidx_core::{
     path::Path,
 };
 use netidx_derive::Pack;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},
@@ -183,7 +183,7 @@ pub struct PublisherRef {
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Resolved {
     pub resolver: SocketAddr,
-    pub publishers: Pooled<Vec<PublisherRef>>,
+    pub publishers: GPooled<Vec<PublisherRef>>,
     pub timestamp: u64,
     pub flags: u32,
     pub permissions: u32,
@@ -193,7 +193,7 @@ pub struct Resolved {
 pub struct Referral {
     pub path: Path,
     pub ttl: Option<u16>,
-    pub addrs: Pooled<Vec<(SocketAddr, Auth)>>,
+    pub addrs: GPooled<Vec<(SocketAddr, Auth)>>,
 }
 
 impl Hash for Referral {
@@ -214,28 +214,28 @@ impl Eq for Referral {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Table {
-    pub rows: Pooled<Vec<Path>>,
-    pub cols: Pooled<Vec<(Path, Z64)>>,
+    pub rows: GPooled<Vec<Path>>,
+    pub cols: GPooled<Vec<(Path, Z64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct ListMatching {
-    pub matched: Pooled<Vec<Pooled<Vec<Path>>>>,
-    pub referrals: Pooled<Vec<Referral>>,
+    pub matched: GPooled<Vec<GPooled<Vec<Path>>>>,
+    pub referrals: GPooled<Vec<Referral>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct GetChangeNr {
     pub change_number: Z64,
     pub resolver: SocketAddr,
-    pub referrals: Pooled<Vec<Referral>>,
+    pub referrals: GPooled<Vec<Referral>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub enum FromRead {
     Publisher(Publisher),
     Resolved(Resolved),
-    List(Pooled<Vec<Path>>),
+    List(GPooled<Vec<Path>>),
     Table(Table),
     Referral(Referral),
     Denied,

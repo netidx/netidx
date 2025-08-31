@@ -26,7 +26,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use if_addrs::get_if_addrs;
 use log::{error, info};
 use parking_lot::Mutex;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use rand::{self, Rng};
 use std::{
     boxed::Box,
@@ -443,8 +443,8 @@ pub enum Event {
 
 #[derive(Debug)]
 struct Update {
-    updates: Pooled<Vec<publisher::From>>,
-    unsubscribes: Option<Pooled<Vec<Id>>>,
+    updates: GPooled<Vec<publisher::From>>,
+    unsubscribes: Option<GPooled<Vec<Id>>>,
 }
 
 impl Update {
@@ -721,8 +721,8 @@ pub enum BatchMsg {
 #[derive(Debug)]
 pub struct UpdateBatch {
     origin: Publisher,
-    updates: Pooled<Vec<BatchMsg>>,
-    unsubscribes: Option<Pooled<Vec<(ClId, Id)>>>,
+    updates: GPooled<Vec<BatchMsg>>,
+    unsubscribes: Option<GPooled<Vec<(ClId, Id)>>>,
 }
 
 impl UpdateBatch {
@@ -869,18 +869,19 @@ struct PublisherInner {
     by_path: HashMap<Path, Id>,
     by_id: FxHashMap<Id, Published>,
     destroy_on_idle: FxHashSet<Id>,
-    on_write_chans: FxHashMap<ChanWrap<Pooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
+    on_write_chans:
+        FxHashMap<ChanWrap<GPooled<Vec<WriteRequest>>>, (ChanId, HashSet<Id>)>,
     on_event_chans: Vec<UnboundedSender<Event>>,
     on_event_by_id_chans: FxHashMap<Id, Vec<UnboundedSender<Event>>>,
     extended_auth: Option<ExtendedAuthWrap>,
-    on_write: FxHashMap<Id, Vec<(ChanId, Sender<Pooled<Vec<WriteRequest>>>)>>,
+    on_write: FxHashMap<Id, Vec<(ChanId, Sender<GPooled<Vec<WriteRequest>>>)>>,
     resolver: ResolverWrite,
     advertised: HashMap<Path, HashSet<Path>>,
-    to_publish: Pooled<HashMap<Path, Option<u32>>>,
-    to_publish_default: Pooled<HashMap<Path, Option<u32>>>,
-    to_unpublish: Pooled<HashSet<Path>>,
-    to_unpublish_default: Pooled<HashSet<Path>>,
-    to_unsubscribe: Pooled<HashMap<Id, Subscribed>>,
+    to_publish: GPooled<HashMap<Path, Option<u32>>>,
+    to_publish_default: GPooled<HashMap<Path, Option<u32>>>,
+    to_unpublish: GPooled<HashSet<Path>>,
+    to_unpublish_default: GPooled<HashSet<Path>>,
+    to_unsubscribe: GPooled<HashMap<Id, Subscribed>>,
     publish_triggered: bool,
     trigger_publish: UnboundedSender<Option<oneshot::Sender<()>>>,
     wait_clients: FxHashMap<Id, Vec<oneshot::Sender<()>>>,
@@ -990,7 +991,7 @@ impl PublisherInner {
         }
     }
 
-    fn writes(&mut self, id: Id, tx: Sender<Pooled<Vec<WriteRequest>>>) {
+    fn writes(&mut self, id: Id, tx: Sender<GPooled<Vec<WriteRequest>>>) {
         if self.by_id.contains_key(&id) {
             let e = self
                 .on_write_chans
@@ -1275,7 +1276,7 @@ impl Publisher {
         mut flags: PublishFlags,
         path: Path,
         init: T,
-        tx: Option<Sender<Pooled<Vec<WriteRequest>>>>,
+        tx: Option<Sender<GPooled<Vec<WriteRequest>>>>,
     ) -> Result<Val>
     where
         T: TryInto<Value>,
@@ -1639,7 +1640,7 @@ impl Publisher {
     ///
     /// If you no longer wish to accept writes for an id you can drop
     /// all registered channels, or call `stop_writes`.
-    pub fn writes(&self, id: Id, tx: Sender<Pooled<Vec<WriteRequest>>>) {
+    pub fn writes(&self, id: Id, tx: Sender<GPooled<Vec<WriteRequest>>>) {
         self.0.lock().writes(id, tx)
     }
 

@@ -6,7 +6,7 @@ use crate::{
     tls, utils,
 };
 use anyhow::Result;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use serde_json::from_str;
 use std::{
     cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, fs::read_to_string,
@@ -374,7 +374,7 @@ impl Config {
     /// Transform the config into a resolver Referral with a ttl that
     /// will never expire
     pub fn to_referral(self) -> Referral {
-        Referral { path: self.base, ttl: None, addrs: Pooled::orphan(self.addrs) }
+        Referral { path: self.base, ttl: None, addrs: GPooled::orphan(self.addrs) }
     }
 
     /// This will try in order,

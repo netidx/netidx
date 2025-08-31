@@ -11,7 +11,7 @@ use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use fxhash::FxHashMap;
 use netidx_core::pack::BoundedBytes;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{fmt::Debug, str::FromStr, sync::LazyLock, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
@@ -37,7 +37,7 @@ pub(super) static FROMWRITEPOOL: LazyLock<Pool<Vec<(usize, FromWrite)>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
 pub(super) static RESOLVEDPOOL: LazyLock<Pool<Vec<Resolved>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
-pub(super) static LISTPOOL: LazyLock<Pool<Vec<Pooled<Vec<Path>>>>> =
+pub(super) static LISTPOOL: LazyLock<Pool<Vec<GPooled<Vec<Path>>>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
 pub(super) static PATHPOOL: LazyLock<Pool<Vec<Path>>> =
     LazyLock::new(|| Pool::new(100, 100));
@@ -85,7 +85,7 @@ impl FromStr for DesiredAuth {
 }
 
 pub(super) type Response<F> =
-    (Pooled<FxHashMap<PublisherId, Publisher>>, Pooled<Vec<(usize, F)>>);
+    (GPooled<FxHashMap<PublisherId, Publisher>>, GPooled<Vec<(usize, F)>>);
 
 pub(super) type ResponseChan<F> = oneshot::Receiver<Response<F>>;
 

@@ -4,7 +4,7 @@ use netidx::{
     path::Path,
     subscriber::{Event, SubId, Subscriber, UpdatesFlags, Val, Value},
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, Ordering},
@@ -13,7 +13,7 @@ use std::{
 use tokio::{sync::Mutex, time};
 
 struct Receiver {
-    updates: mpsc::Receiver<Pooled<Vec<(SubId, Event)>>>,
+    updates: mpsc::Receiver<GPooled<Vec<(SubId, Event)>>>,
     queued: VecDeque<Value>,
 }
 
@@ -21,7 +21,7 @@ impl Receiver {
     fn fill_from_channel(
         &mut self,
         dead: &AtomicBool,
-        r: Option<Pooled<Vec<(SubId, Event)>>>,
+        r: Option<GPooled<Vec<(SubId, Event)>>>,
     ) -> Result<()> {
         match r {
             None => {

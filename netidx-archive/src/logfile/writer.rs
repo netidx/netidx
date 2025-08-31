@@ -14,7 +14,7 @@ use log::warn;
 use memmap2::{Mmap, MmapMut};
 use netidx::{pack::Pack, path::Path};
 use parking_lot::RwLock;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     self,
     cmp::max,
@@ -323,10 +323,10 @@ impl ArchiveWriter {
 
     pub(super) fn add_raw_pathmappings(
         &mut self,
-        pms: Pooled<Vec<PathMapping>>,
+        pms: GPooled<Vec<PathMapping>>,
     ) -> Result<()> {
         if pms.len() > 0 {
-            let record_length = <Pooled<Vec<PathMapping>> as Pack>::encoded_len(&pms);
+            let record_length = <GPooled<Vec<PathMapping>> as Pack>::encoded_len(&pms);
             let len = self.check_reserve(record_length)?;
             let end = self.end.load(Ordering::Relaxed);
             let mut buf = &mut self.mmap[end..];
@@ -336,7 +336,7 @@ impl ArchiveWriter {
                 timestamp: 0,
             };
             <RecordHeader as Pack>::encode(&rh, &mut buf)?;
-            <Pooled<Vec<PathMapping>> as Pack>::encode(&pms, &mut buf)?;
+            <GPooled<Vec<PathMapping>> as Pack>::encode(&pms, &mut buf)?;
             self.end.fetch_add(len, Ordering::AcqRel);
         }
         Ok(())
@@ -400,7 +400,7 @@ impl ArchiveWriter {
         &mut self,
         image: bool,
         timestamp: DateTime<Utc>,
-        batch: &Pooled<Vec<BatchItem>>,
+        batch: &GPooled<Vec<BatchItem>>,
     ) -> Result<()> {
         if batch.len() > 0 {
             let timestamp = self.time.timestamp(timestamp);
@@ -420,12 +420,12 @@ impl ArchiveWriter {
                 .map(|i| <RecordIndex as Pack>::encoded_len(i))
                 .unwrap_or(0);
             let record_length =
-                index_length + <Pooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
+                index_length + <GPooled<Vec<BatchItem>> as Pack>::encoded_len(&batch);
             self.add_batch_f(image, timestamp, record_length, |buf| {
                 if let Some(index) = &index {
                     <RecordIndex as Pack>::encode(index, buf)?
                 }
-                Ok(<Pooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?)
+                Ok(<GPooled<Vec<BatchItem>> as Pack>::encode(&batch, buf)?)
             })?;
             if let Some(index) = index {
                 self.index_vec = index.index;

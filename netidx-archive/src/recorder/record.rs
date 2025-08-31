@@ -22,7 +22,7 @@ use netidx::{
     subscriber::{Dval, Event, SubId, Subscriber, UpdatesFlags},
     utils::{self, Batched},
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Bound,
@@ -81,7 +81,7 @@ async fn maybe_interval(poll: &mut Option<time::Interval>) {
     }
 }
 
-type Lst = Option<Pooled<Vec<Pooled<Vec<Path>>>>>;
+type Lst = Option<GPooled<Vec<GPooled<Vec<Path>>>>>;
 
 async fn list_task(
     interval: Duration,

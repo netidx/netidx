@@ -32,7 +32,7 @@ use futures::{
 use fxhash::FxHashMap;
 use log::{debug, info};
 use parking_lot::RwLock;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
 use std::{
     boxed::Box,
@@ -171,11 +171,11 @@ fn write(
     t: &mut PublisherInner,
     con: &mut WriteChannel,
     client: ClId,
-    gc_on_write: &mut Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
+    gc_on_write: &mut Vec<ChanWrap<GPooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, WriteId, oneshot::Receiver<Value>)>,
     write_batches: &mut FxHashMap<
         ChanId,
-        (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>),
+        (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>),
     >,
     id: Id,
     v: Value,
@@ -287,15 +287,17 @@ struct ClientCtx {
     publisher: PublisherWeak,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     batch: Vec<publisher::To>,
-    write_batches:
-        FxHashMap<ChanId, (Pooled<Vec<WriteRequest>>, Sender<Pooled<Vec<WriteRequest>>>)>,
+    write_batches: FxHashMap<
+        ChanId,
+        (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>),
+    >,
     blocked_writes: FuturesUnordered<BlockedWriteFut>,
     flushing_updates: Option<Instant>,
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
     deferred_subs_batch: Vec<(Path, Permissions)>,
     wait_write_res: Vec<(Id, WriteId, oneshot::Receiver<Value>)>,
-    gc_on_write: Vec<ChanWrap<Pooled<Vec<WriteRequest>>>>,
+    gc_on_write: Vec<ChanWrap<GPooled<Vec<WriteRequest>>>>,
     msg_sent: bool,
     tls_ctx: Option<tls::CachedAcceptor>,
 }

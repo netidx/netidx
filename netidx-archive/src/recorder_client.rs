@@ -16,7 +16,7 @@ use netidx::{
 };
 use netidx_derive::Pack;
 use netidx_protocols::{call_rpc, rpc::client::Proc};
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{collections::VecDeque, sync::LazyLock, time::Duration};
 use tokio::{task, try_join};
 
@@ -27,13 +27,13 @@ pub(crate) static SHARDS: LazyLock<Pool<Vec<OneshotReplyShard>>> =
 
 #[derive(Debug, Clone, Pack)]
 pub struct OneshotReplyShard {
-    pub pathmap: Pooled<FxHashMap<Id, Path>>,
-    pub image: Pooled<FxHashMap<Id, Event>>,
-    pub deltas: Pooled<VecDeque<(DateTime<Utc>, Pooled<Vec<BatchItem>>)>>,
+    pub pathmap: GPooled<FxHashMap<Id, Path>>,
+    pub image: GPooled<FxHashMap<Id, Event>>,
+    pub deltas: GPooled<VecDeque<(DateTime<Utc>, GPooled<Vec<BatchItem>>)>>,
 }
 
 #[derive(Debug, Clone, Pack)]
-pub struct OneshotReply(pub Pooled<Vec<OneshotReplyShard>>);
+pub struct OneshotReply(pub GPooled<Vec<OneshotReplyShard>>);
 
 fn encode_bound(bound: &Option<DateTime<Utc>>) -> Value {
     match bound {

@@ -28,7 +28,7 @@ use futures::{
 };
 use fxhash::FxHashMap;
 use log::{info, trace};
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
@@ -50,40 +50,40 @@ static PUBLISHERS_POOL: LazyLock<Pool<FxHashMap<PublisherId, Publisher>>> =
 static TO_READ_POOL: LazyLock<Pool<ReadB>> = LazyLock::new(|| Pool::new(100, 10_000));
 static FROM_READ_POOL: LazyLock<Pool<ReadR>> = LazyLock::new(|| Pool::new(100, 10_000));
 static TO_WRITE_POOL: LazyLock<Pool<WriteB>> = LazyLock::new(|| Pool::new(100, 10_000));
-static REPLIES: LazyLock<Pool<Vec<Pooled<ReadR>>>> =
+static REPLIES: LazyLock<Pool<Vec<GPooled<ReadR>>>> =
     LazyLock::new(|| Pool::new(10, 1024));
 static FROM_WRITE_POOL: LazyLock<Pool<WriteR>> = LazyLock::new(|| Pool::new(100, 10_000));
 static COLS_HPOOL: LazyLock<Pool<HashMap<Path, Z64>>> =
     LazyLock::new(|| Pool::new(32, 10_000));
 static PATH_HPOOL: LazyLock<Pool<HashSet<Path>>> =
     LazyLock::new(|| Pool::new(32, 10_000));
-static PATH_BPOOL: LazyLock<Pool<Vec<Pooled<Vec<Path>>>>> =
+static PATH_BPOOL: LazyLock<Pool<Vec<GPooled<Vec<Path>>>>> =
     LazyLock::new(|| Pool::new(32, 1024));
-static READ_SHARD_BATCH: LazyLock<Pool<Vec<Pooled<ReadB>>>> =
+static READ_SHARD_BATCH: LazyLock<Pool<Vec<GPooled<ReadB>>>> =
     LazyLock::new(|| Pool::new(100, 1024));
-static WRITE_SHARD_BATCH: LazyLock<Pool<Vec<Pooled<WriteB>>>> =
+static WRITE_SHARD_BATCH: LazyLock<Pool<Vec<GPooled<WriteB>>>> =
     LazyLock::new(|| Pool::new(100, 1024));
 
 struct ReadRequest {
     uifo: Arc<UserInfo>,
-    batch: Pooled<ReadB>,
+    batch: GPooled<ReadB>,
 }
 
 struct ReadResponse {
-    publishers: Pooled<FxHashMap<PublisherId, Publisher>>,
-    batch: Pooled<ReadR>,
+    publishers: GPooled<FxHashMap<PublisherId, Publisher>>,
+    batch: GPooled<ReadR>,
 }
 
 struct WriteRequest {
     uifo: Arc<UserInfo>,
     publisher: Arc<Publisher>,
-    batch: Pooled<WriteB>,
+    batch: GPooled<WriteB>,
 }
 
 #[derive(Clone)]
 struct Shard {
     read: UnboundedSender<(ReadRequest, oneshot::Sender<ReadResponse>)>,
-    write: UnboundedSender<(WriteRequest, oneshot::Sender<Pooled<WriteR>>)>,
+    write: UnboundedSender<(WriteRequest, oneshot::Sender<GPooled<WriteR>>)>,
     internal: UnboundedSender<(PublisherId, oneshot::Sender<HashSet<Path>>)>,
 }
 
@@ -311,7 +311,7 @@ impl Shard {
         store: &mut store::Store,
         secctx: &SecCtxDataReadGuard<'a>,
         mut req: WriteRequest,
-    ) -> Pooled<WriteR> {
+    ) -> GPooled<WriteR> {
         let uifo = &*req.uifo;
         let publisher = req.publisher;
         let pmap = secctx.pmap();
@@ -438,13 +438,13 @@ impl Store {
         hasher.finish() as usize & self.shard_mask
     }
 
-    fn read_shard_batch(&self) -> Pooled<Vec<Pooled<ReadB>>> {
+    fn read_shard_batch(&self) -> GPooled<Vec<GPooled<ReadB>>> {
         let mut b = READ_SHARD_BATCH.take();
         b.extend((0..self.shards.len()).into_iter().map(|_| TO_READ_POOL.take()));
         b
     }
 
-    fn write_shard_batch(&self) -> Pooled<Vec<Pooled<WriteB>>> {
+    fn write_shard_batch(&self) -> GPooled<Vec<GPooled<WriteB>>> {
         let mut b = WRITE_SHARD_BATCH.take();
         b.extend((0..self.shards.len()).into_iter().map(|_| TO_WRITE_POOL.take()));
         b
@@ -719,7 +719,7 @@ impl Store {
                 }))
                 .await
                 .into_iter()
-                .collect::<result::Result<Vec<Pooled<WriteR>>, Canceled>>()?;
+                .collect::<result::Result<Vec<GPooled<WriteR>>, Canceled>>()?;
             trace!("handle_write_batch {} shards replied", replies.len());
             if let Some(ref mut c) = con {
                 for i in 0..n {

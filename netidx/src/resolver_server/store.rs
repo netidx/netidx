@@ -15,7 +15,7 @@ use bytes::Bytes;
 use fxhash::FxHashMap;
 use immutable_chunkmap::set::Set as ISet;
 use log::debug;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::{
     clone::Clone,
     collections::{
@@ -555,7 +555,7 @@ impl Store {
         sec: Option<(&SecCtxDataReadGuard, &UserInfo)>,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         path: &Path,
-    ) -> (u32, Pooled<Vec<PublisherRef>>) {
+    ) -> (u32, GPooled<Vec<PublisherRef>>) {
         let default = self
             .defaults
             .range::<str, (Bound<&str>, Bound<&str>)>((
@@ -582,7 +582,7 @@ impl Store {
         &self,
         publishers: &mut FxHashMap<PublisherId, Publisher>,
         path: &Path,
-    ) -> (u32, Pooled<Vec<PublisherRef>>) {
+    ) -> (u32, GPooled<Vec<PublisherRef>>) {
         let (flags, mut pubs) = self.resolve_default(None, publishers, path);
         let flags = match self.published_by_path.get(path.as_ref()) {
             None => flags,
@@ -616,7 +616,7 @@ impl Store {
         now: u64,
         perm: Permissions,
         path: &Path,
-    ) -> (u32, Pooled<Vec<PublisherRef>>) {
+    ) -> (u32, GPooled<Vec<PublisherRef>>) {
         let sign = |id: PublisherId| {
             let secret = match sec {
                 SecCtxDataReadGuard::Anonymous => None,
@@ -665,7 +665,7 @@ impl Store {
         (flags, pubs)
     }
 
-    pub(super) fn list(&self, parent: &Path) -> Pooled<Vec<Path>> {
+    pub(super) fn list(&self, parent: &Path) -> GPooled<Vec<Path>> {
         with_trailing(&*parent, |tmp| {
             let n = Path::levels(parent);
             let mut paths = PATH_POOL.take();
@@ -684,7 +684,7 @@ impl Store {
         })
     }
 
-    pub(super) fn list_matching(&self, pat: &GlobSet) -> Pooled<Vec<Path>> {
+    pub(super) fn list_matching(&self, pat: &GlobSet) -> GPooled<Vec<Path>> {
         let mut paths = PATH_POOL.take();
         let mut cur: Option<&str> = None;
         for glob in pat.iter() {
@@ -731,7 +731,7 @@ impl Store {
             .unwrap_or(Z64(0))
     }
 
-    pub(super) fn columns(&self, root: &Path) -> Pooled<Vec<(Path, Z64)>> {
+    pub(super) fn columns(&self, root: &Path) -> GPooled<Vec<(Path, Z64)>> {
         let mut cols = COLS_POOL.take();
         if let Some(c) = self.columns.get(root) {
             cols.extend(c.iter().map(|(name, cnt)| (name.clone(), *cnt)));

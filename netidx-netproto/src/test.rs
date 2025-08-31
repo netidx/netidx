@@ -7,7 +7,7 @@ use netidx_core::{
     path::Path,
     utils::pack,
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use proptest::{collection, prelude::*, string::string_regex};
 use rust_decimal::Decimal;
 use std::{fmt::Debug, net::SocketAddr};
@@ -207,7 +207,7 @@ mod resolver {
     fn resolved() -> impl Strategy<Value = Resolved> {
         let resolver = any::<SocketAddr>();
         let publishers =
-            collection::vec(publisher_ref(), (0, 10)).prop_map(Pooled::orphan);
+            collection::vec(publisher_ref(), (0, 10)).prop_map(GPooled::orphan);
         let timestamp = any::<u64>();
         let flags = any::<u32>();
         let permissions = any::<u32>();
@@ -239,7 +239,7 @@ mod resolver {
             .prop_map(|(path, ttl, addrs)| Referral {
                 path,
                 ttl,
-                addrs: Pooled::orphan(addrs),
+                addrs: GPooled::orphan(addrs),
             })
     }
 
@@ -249,18 +249,18 @@ mod resolver {
             collection::vec((path(), any::<u64>().prop_map(Z64)), (0, 1000)),
         )
             .prop_map(|(rows, cols)| Table {
-                rows: Pooled::orphan(rows),
-                cols: Pooled::orphan(cols),
+                rows: GPooled::orphan(rows),
+                cols: GPooled::orphan(cols),
             })
     }
 
     fn list_matching() -> impl Strategy<Value = ListMatching> {
         let matched = collection::vec(
-            collection::vec(path(), (0, 10)).prop_map(Pooled::orphan),
+            collection::vec(path(), (0, 10)).prop_map(GPooled::orphan),
             (0, 100),
         )
-        .prop_map(Pooled::orphan);
-        let referrals = collection::vec(referral(), (0, 100)).prop_map(Pooled::orphan);
+        .prop_map(GPooled::orphan);
+        let referrals = collection::vec(referral(), (0, 100)).prop_map(GPooled::orphan);
         (matched, referrals)
             .prop_map(|(matched, referrals)| ListMatching { matched, referrals })
     }
@@ -273,7 +273,7 @@ mod resolver {
             |(change_number, resolver, referrals)| GetChangeNr {
                 change_number,
                 resolver,
-                referrals: Pooled::orphan(referrals),
+                referrals: GPooled::orphan(referrals),
             },
         )
     }
@@ -283,7 +283,7 @@ mod resolver {
             publisher().prop_map(FromRead::Publisher),
             resolved().prop_map(FromRead::Resolved),
             collection::vec(path(), (0, 1000))
-                .prop_map(|v| FromRead::List(Pooled::orphan(v))),
+                .prop_map(|v| FromRead::List(GPooled::orphan(v))),
             list_matching().prop_map(FromRead::ListMatching),
             get_change_nr().prop_map(FromRead::GetChangeNr),
             table().prop_map(FromRead::Table),

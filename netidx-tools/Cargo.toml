@@ -41,6 +41,7 @@ env_logger = { workspace = true }
 escaping = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
+poolshark = { workspace = true }
 graphix-shell = { workspace = true }
 graphix-rt = { workspace = true }
 graphix-compiler = { workspace = true }

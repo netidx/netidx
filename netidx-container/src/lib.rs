@@ -30,7 +30,7 @@ use netidx::{
     utils::BatchItem,
 };
 use parking_lot::Mutex;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use rpcs::{RpcRequest, RpcRequestKind};
 use stats::Stats;
 use std::{
@@ -157,8 +157,8 @@ struct ContainerInner {
     api_path: Option<Path>,
     stats: Option<Stats>,
     locked: BTreeMap<Path, bool>,
-    write_updates_tx: mpsc::Sender<Pooled<Vec<WriteRequest>>>,
-    write_updates_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    write_updates_tx: mpsc::Sender<GPooled<Vec<WriteRequest>>>,
+    write_updates_rx: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
     by_id: FxHashMap<Id, Arc<Published>>,
     by_path: FxHashMap<Path, Arc<Published>>,
     publish_events: mpsc::UnboundedReceiver<PEvent>,
@@ -287,7 +287,7 @@ impl ContainerInner {
         Ok(batch.commit(self.params.timeout.map(Duration::from_secs)).await)
     }
 
-    fn process_writes(&mut self, txn: &mut Txn, mut writes: Pooled<Vec<WriteRequest>>) {
+    fn process_writes(&mut self, txn: &mut Txn, mut writes: GPooled<Vec<WriteRequest>>) {
         // CR estokes: log this
         for req in writes.drain(..) {
             let reply = req.send_result.map(Sendable::Write);

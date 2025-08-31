@@ -4,7 +4,10 @@ use bytes::{Buf, BufMut};
 use netidx_core::pack::{
     decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC,
 };
-use poolshark::{arc::TArc as PArc, Poolable, RawPool, RawPoolable, WeakPool};
+use poolshark::{
+    global::{arc::TArc as PArc, RawPool, WeakPool},
+    Poolable, RawPoolable,
+};
 use seq_macro::seq;
 use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -22,13 +25,13 @@ use triomphe::{Arc, ThinArc};
 
 const MAX_LEN: usize = 128;
 
-const POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
+static POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
     [
         #(LazyLock::new(|| RawPool::new(32 * (MAX_LEN + 1 - N), 1)),)*
     ]
 });
 
-const SPOOL: LazyLock<RawPool<PArc<ValArraySlice>>> =
+static SPOOL: LazyLock<RawPool<PArc<ValArraySlice>>> =
     LazyLock::new(|| RawPool::new(1024, 64));
 
 fn get_by_size(len: usize) -> ValArrayBase {

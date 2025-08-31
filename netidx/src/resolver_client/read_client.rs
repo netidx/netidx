@@ -19,7 +19,7 @@ use futures::{
 };
 use fxhash::FxHashSet;
 use log::{info, warn};
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use rand::{rng, seq::SliceRandom, Rng};
 use std::{
     cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,
@@ -171,7 +171,7 @@ async fn connect(
     }
 }
 
-type Batch = (Pooled<Vec<(usize, ToRead)>>, oneshot::Sender<Response<FromRead>>);
+type Batch = (GPooled<Vec<(usize, ToRead)>>, oneshot::Sender<Response<FromRead>>);
 
 fn partition_publishers(m: FromRead) -> Either<FromRead, Publisher> {
     match m {
@@ -317,7 +317,7 @@ impl ReadClient {
 
     pub(crate) fn send(
         &mut self,
-        batch: Pooled<Vec<(usize, ToRead)>>,
+        batch: GPooled<Vec<(usize, ToRead)>>,
     ) -> ResponseChan<FromRead> {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.unbounded_send((batch, tx));

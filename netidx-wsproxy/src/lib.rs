@@ -17,7 +17,7 @@ use netidx::{
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
-use poolshark::{Pool, Pooled};
+use poolshark::global::{GPooled, Pool};
 use std::time::Duration;
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -82,14 +82,14 @@ struct ClientCtx {
     subs_by_path: HashMap<Path, SubId>,
     pubs_by_path: HashMap<Path, PubId>,
     rpcs: HashMap<Path, Proc>,
-    tx_up: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
+    tx_up: mpsc::Sender<GPooled<Vec<(SubId, Event)>>>,
 }
 
 impl ClientCtx {
     fn new(
         publisher: Publisher,
         subscriber: Subscriber,
-        tx_up: mpsc::Sender<Pooled<Vec<(SubId, Event)>>>,
+        tx_up: mpsc::Sender<GPooled<Vec<(SubId, Event)>>>,
     ) -> Self {
         Self {
             publisher,
@@ -174,7 +174,7 @@ impl ClientCtx {
     fn update(
         &mut self,
         batch: &mut UpdateBatch,
-        mut updates: Pooled<Vec<protocol::BatchItem>>,
+        mut updates: GPooled<Vec<protocol::BatchItem>>,
     ) -> Result<()> {
         for up in updates.drain(..) {
             match self.pubs.get(&up.id) {
@@ -189,7 +189,7 @@ impl ClientCtx {
         &mut self,
         id: u64,
         path: Path,
-        mut args: Pooled<Vec<(Pooled<String>, Value)>>,
+        mut args: GPooled<Vec<(GPooled<String>, Value)>>,
     ) -> Result<PendingCall> {
         let proc = match self.rpcs.entry(path) {
             Entry::Occupied(e) => e.into_mut(),
@@ -281,7 +281,7 @@ async fn handle_client(
     timeout: Option<Duration>,
 ) -> Result<()> {
     static UPDATES: LazyLock<Pool<Vec<Update>>> = LazyLock::new(|| Pool::new(50, 10000));
-    let (tx_up, mut rx_up) = mpsc::channel::<Pooled<Vec<(SubId, Event)>>>(3);
+    let (tx_up, mut rx_up) = mpsc::channel::<GPooled<Vec<(SubId, Event)>>>(3);
     let mut ctx = ClientCtx::new(publisher, subscriber, tx_up);
     let (mut tx_ws, rx_ws) = ws.split();
     let mut queued: Vec<result::Result<Message, warp::Error>> = Vec::new();

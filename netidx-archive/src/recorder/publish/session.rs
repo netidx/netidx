@@ -16,7 +16,7 @@ use netidx::{
     subscriber::Subscriber,
 };
 use netidx_protocols::cluster::Cluster;
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use smallvec::{smallvec, SmallVec};
 use std::sync::Arc;
 use tokio::{sync::broadcast, task::JoinSet};
@@ -32,7 +32,7 @@ pub(super) struct Session {
     cluster: Cluster<ClusterCmd>,
     controls: Controls,
     shard_tasks: JoinSet<Result<()>>,
-    control_rx: mpsc::Receiver<Pooled<Vec<WriteRequest>>>,
+    control_rx: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
     session_bcast: broadcast::Sender<SessionBCastMsg>,
     session_bcast_rx: broadcast::Receiver<SessionBCastMsg>,
     session_id: Uuid,

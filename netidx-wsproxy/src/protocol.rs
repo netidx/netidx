@@ -4,7 +4,7 @@ use netidx::{
     publisher::Id as PubId,
     subscriber::{Event, SubId},
 };
-use poolshark::Pooled;
+use poolshark::global::GPooled;
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum Request {
         init: Value,
     },
     Update {
-        updates: Pooled<Vec<BatchItem>>,
+        updates: GPooled<Vec<BatchItem>>,
     },
     Unpublish {
         id: PubId,
@@ -39,7 +39,7 @@ pub enum Request {
     Call {
         id: u64,
         path: Path,
-        args: Pooled<Vec<(Pooled<String>, Value)>>,
+        args: GPooled<Vec<(GPooled<String>, Value)>>,
     },
     #[serde(other)]
     Unknown,
@@ -55,7 +55,7 @@ pub struct Update {
 #[serde(tag = "type")]
 pub enum Response {
     Subscribed { id: SubId },
-    Update { updates: Pooled<Vec<Update>> },
+    Update { updates: GPooled<Vec<Update>> },
     Unsubscribed,
     Wrote,
     Published { id: PubId },
