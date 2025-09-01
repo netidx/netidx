@@ -368,10 +368,10 @@ impl ClientCtx {
         static NO: &str = "authentication mechanism not supported";
         debug!("hello_client");
         channel::write_raw(&mut con, &3u64).await?;
-        if channel::read_raw::<u64, _>(&mut con).await? != 3 {
+        if channel::read_raw::<u64, _, 1024>(&mut con).await? != 3 {
             bail!("incompatible protocol version")
         }
-        let hello: Hello = channel::read_raw(&mut con).await?;
+        let hello: Hello = channel::read_raw::<_, _, 8124>(&mut con).await?;
         debug!("hello_client received {:?}", hello);
         match hello {
             Hello::Anonymous => {
