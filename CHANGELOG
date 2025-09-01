@@ -1,3 +1,7 @@
+* 0.29.2
+
+- use const generics for read_raw so that we can support larger kerberos tokens (up to 64K)
+
 * 0.29.1
 
 - Work in progress version of the tui browser added to netidx-tools
