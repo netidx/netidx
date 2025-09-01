@@ -82,7 +82,7 @@ async fn connect(
         };
         try_cf!("no delay", con.set_nodelay(true));
         cwt!("send version", channel::write_raw(&mut con, &3u64));
-        if cwt!("recv version", channel::read_raw::<u64, _>(&mut con)) != 3 {
+        if cwt!("recv version", channel::read_raw::<u64, _, 1024>(&mut con)) != 3 {
             continue;
         }
         let con = match (desired_auth, auth) {
@@ -130,7 +130,7 @@ async fn connect(
                 let hello = ClientHello::ReadOnly(AuthRead::Krb5);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
                 let ctx = cwt!("k5auth", krb5_authentication(upn, &*spn, &mut con));
-                match cwt!("reply", channel::read_raw::<AuthRead, _>(&mut con)) {
+                match cwt!("reply", channel::read_raw::<AuthRead, _, 1024>(&mut con)) {
                     AuthRead::Krb5 => Channel::new(Some(K5CtxWrap::new(ctx)), con),
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Tls => {
                         bail!("protocol error")

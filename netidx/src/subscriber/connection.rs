@@ -126,13 +126,13 @@ async fn hello_publisher(
 ) -> Result<Channel> {
     use protocol::publisher::Hello;
     channel::write_raw(&mut con, &3u64).await?;
-    if channel::read_raw::<u64, _>(&mut con).await? != 3 {
+    if channel::read_raw::<u64, _, 1024>(&mut con).await? != 3 {
         bail!("incompatible protocol version")
     }
     match (desired_auth, target_auth) {
         (DesiredAuth::Anonymous, TargetAuth::Anonymous) => {
             channel::write_raw(&mut con, &Hello::Anonymous).await?;
-            match channel::read_raw(&mut con).await? {
+            match channel::read_raw::<_, _, 8124>(&mut con).await? {
                 Hello::Anonymous => (),
                 _ => bail!("unexpected response from publisher"),
             }
@@ -155,7 +155,7 @@ async fn hello_publisher(
             TargetAuth::Local,
         ) => {
             channel::write_raw(&mut con, &Hello::Local(uifo)).await?;
-            match channel::read_raw(&mut con).await? {
+            match channel::read_raw::<_, _, 8124>(&mut con).await? {
                 Hello::Local(_) => (),
                 _ => bail!("unexpected response from publisher"),
             }

@@ -356,10 +356,10 @@ async fn client_loop_write(
     }
 }
 
-const TOKEN_MAX: usize = 4096;
+const TOKEN_MAX: usize = 64 * 1024;
 
 async fn recv<T: Pack + Debug>(timeout: Duration, con: &mut TcpStream) -> Result<T> {
-    Ok(time::timeout(timeout, channel::read_raw(con)).await??)
+    Ok(time::timeout(timeout, channel::read_raw::<_, _, TOKEN_MAX>(con)).await??)
 }
 async fn send(timeout: Duration, con: &mut TcpStream, msg: &impl Pack) -> Result<()> {
     Ok(time::timeout(timeout, channel::write_raw(con, msg)).await??)
@@ -370,24 +370,22 @@ pub(crate) async fn krb5_authentication(
     spn: Option<&str>,
     con: &mut TcpStream,
 ) -> Result<ServerCtx> {
-    // the GSS token shouldn't ever be bigger than 1 MB
-    const L: usize = 1 * 1024 * 1024;
     let spn = spn.map(ArcStr::from);
     let mut ctx = task::spawn_blocking(move || {
         ServerCtx::new(AcceptFlags::empty(), spn.as_ref().map(|s| s.as_str()))
     })
     .await??;
     loop {
-        let token: BoundedBytes<L> = recv(timeout, con).await?;
+        let token: BoundedBytes<TOKEN_MAX> = recv(timeout, con).await?;
         match task::spawn_blocking(move || ctx.step(&*token)).await?? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;
-                let token = BoundedBytes::<L>(utils::bytes(&*token));
+                let token = BoundedBytes::<TOKEN_MAX>(utils::bytes(&*token));
                 send(timeout, con, &token).await?;
             }
             Step::Finished((ctx, token)) => {
                 if let Some(token) = token {
-                    let token = BoundedBytes::<L>(utils::bytes(&*token));
+                    let token = BoundedBytes::<TOKEN_MAX>(utils::bytes(&*token));
                     send(timeout, con, &token).await?;
                 }
                 break Ok(ctx);

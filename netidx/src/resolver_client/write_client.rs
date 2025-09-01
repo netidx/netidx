@@ -191,7 +191,7 @@ impl Connection {
         debug!("writing protocol version 3");
         wt!("write version", channel::write_raw(&mut con, &3u64))??;
         debug!("reading protocol version");
-        if wt!("read version", channel::read_raw::<u64, _>(&mut con))?? != 3 {
+        if wt!("read version", channel::read_raw::<u64, _, 1024>(&mut con))?? != 3 {
             bail!("incompatible protocol version")
         }
         let sec = Duration::from_secs(1);
@@ -213,7 +213,7 @@ impl Connection {
                     )??;
                     let r = wt!(
                         "read anonymous",
-                        channel::read_raw::<ServerHelloWrite, _>(&mut con)
+                        channel::read_raw::<ServerHelloWrite, _, 1024>(&mut con)
                     )??;
                     (Channel::new::<ClientCtx, TcpStream>(None, con), r, false)
                 }

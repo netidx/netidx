@@ -115,7 +115,7 @@ pub(crate) async fn krb5_authentication(
     send(con, &*token).await?;
     loop {
         let token: BoundedBytes<L> =
-            time::timeout(HELLO_TO, channel::read_raw(con)).await??;
+            time::timeout(HELLO_TO, channel::read_raw::<_, _, 1024>(con)).await??;
         match task::spawn_blocking(move || ctx.step(&*token)).await?? {
             Step::Continue((nctx, token)) => {
                 ctx = nctx;

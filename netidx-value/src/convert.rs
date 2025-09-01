@@ -1326,7 +1326,7 @@ thread_local! {
         RefCell::new(HashMap::default());
 }
 
-impl<T: FromValue + Send + Sync> FromValue for Pooled<Vec<T>> {
+impl<T: FromValue + Send + Sync + 'static> FromValue for Pooled<Vec<T>> {
     fn from_value(v: Value) -> Result<Self> {
         macro_rules! convert {
             ($a:expr) => {{

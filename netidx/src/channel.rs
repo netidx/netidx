@@ -82,8 +82,9 @@ pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
 /// Read a single, small, unencrypted message from the specified
 /// socket. This is intended to be used to do some initialization
 /// before the proper channel can be created.
-pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin>(socket: &mut S) -> Result<T> {
-    const MAX: usize = 1024;
+pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin, const MAX: usize>(
+    socket: &mut S,
+) -> Result<T> {
     let mut buf = [0u8; MAX];
     socket.read_exact(&mut buf[0..4]).await?;
     let len = BigEndian::read_u32(&buf[0..4]);
