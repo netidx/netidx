@@ -26,6 +26,7 @@ escaping = { workspace = true }
 futures = { workspace = true }
 fxhash = { workspace = true }
 indexmap = { workspace = true }
+immutable-chunkmap = { workspace = true }
 parking_lot = { workspace = true }
 pin-utils = { workspace = true }
 poolshark = { workspace = true }

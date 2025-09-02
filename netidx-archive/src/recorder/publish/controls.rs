@@ -68,7 +68,7 @@ fn get_bound(r: WriteRequest) -> Option<Bound<DateTime<Utc>>> {
         Ok(b) => Some(b),
         Err(e) => {
             if let Some(reply) = r.send_result {
-                reply.send(Value::Error(format!("{}", e).into()))
+                reply.send(Value::error(format!("{}", e)))
             }
             None
         }
@@ -277,7 +277,7 @@ impl Controls {
                     Err(e) => {
                         warn!("tried to set invalid speed {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(format!("{}", e).into()));
+                            reply.send(Value::error(format!("{}", e)));
                         }
                     }
                 }
@@ -291,7 +291,7 @@ impl Controls {
                     Err(e) => {
                         warn!("tried to set invalid state {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(format!("{}", e).into()))
+                            reply.send(Value::error(format!("{}", e)))
                         }
                     }
                 }
@@ -305,7 +305,7 @@ impl Controls {
                     Err(e) => {
                         warn!("invalid set pos {}", e);
                         if let Some(reply) = req.send_result {
-                            reply.send(Value::Error(format!("{}", e).into()))
+                            reply.send(Value::error(format!("{}", e)))
                         }
                     }
                 }

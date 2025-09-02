@@ -1,4 +1,4 @@
-use crate::{array::ValArray, Typ, Value};
+use crate::{array::ValArray, Map, Typ, Value};
 use anyhow::{anyhow, Result};
 use arcstr::literal;
 use bytes::Bytes;
@@ -47,9 +47,10 @@ fn value_typ_discriminants() {
                 assert_eq!(t as u32, Value::Bytes(Bytes::new().into()).discriminant())
             }
             Typ::Error => {
-                assert_eq!(t as u32, Value::Error(literal!("42")).discriminant())
+                assert_eq!(t as u32, Value::error(literal!("42")).discriminant())
             }
             Typ::Array => assert_eq!(t as u32, Value::Array([].into()).discriminant()),
+            Typ::Map => assert_eq!(t as u32, Value::Map(Map::new()).discriminant()),
         }
     }
     // did you add a new value type, make sure you add a corresponding
@@ -74,6 +75,7 @@ fn value_typ_discriminants() {
         Value::Bytes(_) => (),
         Value::Error(_) => (),
         Value::Array(_) => (),
+        Value::Map(_) => (),
     }
 }
 

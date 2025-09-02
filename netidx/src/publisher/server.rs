@@ -51,6 +51,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+use triomphe::Arc as TArc;
 
 const MAX_DEFERRED: usize = 1000000;
 type DeferredSubs =
@@ -188,7 +189,7 @@ fn write(
                 Some(v) => v,
                 None => {
                     if r {
-                        let m = Value::Error(literal!($m));
+                        let m = Value::Error(TArc::new(Value::String(literal!($m))));
                         con.queue_send(&From::WriteResult(id, m, wid))?
                     }
                     return Ok(());

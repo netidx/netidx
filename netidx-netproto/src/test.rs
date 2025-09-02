@@ -389,6 +389,7 @@ mod publisher {
     use netidx_core::pack::PackError;
     use proptest::collection;
     use std::{net::SocketAddr, time::Duration};
+    use triomphe::Arc;
 
     fn fuzz(b: Bytes) {
         type Result<T> = std::result::Result<T, PackError>;
@@ -458,11 +459,15 @@ mod publisher {
             Just(Value::Bool(true)),
             Just(Value::Bool(false)),
             Just(Value::Null),
-            arcstr().prop_map(Value::Error),
         ];
         leaf.prop_recursive(10, 1000, 100, |inner| {
-            prop_oneof![collection::vec(inner.clone(), 0..100)
-                .prop_map(|e| Value::Array(ValArray::from(e)))]
+            prop_oneof![
+                collection::vec(inner.clone(), 0..100)
+                    .prop_map(|e| Value::Array(ValArray::from(e))),
+                inner.clone().prop_map(|v| Value::Error(Arc::new(v))),
+                collection::vec((inner.clone(), inner.clone()), 0..100)
+                    .prop_map(|v| Value::Map(immutable_chunkmap::map::Map::from_iter(v)))
+            ]
         })
     }
 

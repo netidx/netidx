@@ -41,7 +41,7 @@ pub mod server {
     #[macro_export]
     macro_rules! rpc_err {
         ($reply:expr, $msg:expr) => {{
-            $reply.send(Value::Error($msg.into()));
+            $reply.send(Value::error($msg));
             return None;
         }};
     }
@@ -107,7 +107,7 @@ pub mod server {
     impl Drop for RpcReply {
         fn drop(&mut self) {
             if let Some(reply) = self.0.take() {
-                let _ = reply.send(Value::Error(literal!("rpc call failed")));
+                let _ = reply.send(Value::error(literal!("rpc call failed")));
             }
         }
     }

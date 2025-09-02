@@ -185,7 +185,7 @@ impl PendingOneshot {
         } else {
             let replies = self.replies.drain(..).collect::<Result<SmallVec<[_; 64]>>>();
             match replies {
-                Err(e) => self.reply.send(Value::Error(e.to_string().into())),
+                Err(e) => self.reply.send(Value::error(e.to_string())),
                 Ok(mut replies) => {
                     let mut reply = replies.pop().unwrap();
                     for mut r in replies.drain(..) {
@@ -331,7 +331,7 @@ pub(super) async fn run(
                     // your call is important to us. please stay on
                     // the line until the next available representive
                     // is ready to assist you. Goodbye.
-                    reply.send(Value::Error(literal!("busy")));
+                    reply.send(Value::error(literal!("busy")));
                 } else {
                     let id = Oid::new();
                     let path = our_path.clone();

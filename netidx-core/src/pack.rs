@@ -9,6 +9,7 @@ use compact_str::CompactString;
 use indexmap::{IndexMap, IndexSet};
 use poolshark::{
     global::{take_any, GPooled},
+    local::LPooled,
     Poolable,
 };
 use rust_decimal::Decimal;
@@ -1115,6 +1116,56 @@ impl<K: Ord + Pack, V: Pack> Pack for BTreeMap<K, V> {
     }
 }
 
+impl<K: Ord + Pack + Clone, V: Pack + Clone, const SIZE: usize> Pack
+    for immutable_chunkmap::map::Map<K, V, SIZE>
+{
+    fn encoded_len(&self) -> usize {
+        self.into_iter().fold(varint_len(self.len() as u64), |len, (k, v)| {
+            len + <K as Pack>::encoded_len(k) + <V as Pack>::encoded_len(v)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        for (k, v) in self {
+            <K as Pack>::encode(k, buf)?;
+            <V as Pack>::encode(v, buf)?;
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        let mut data: LPooled<Vec<(K, V)>> = LPooled::take_sz(1024, 64 * 1024);
+        let cap = data.capacity();
+        if cap < elts {
+            data.reserve(elts - cap);
+        }
+        for _ in 0..elts {
+            let k = <K as Pack>::decode(buf)?;
+            let v = <V as Pack>::decode(buf)?;
+            data.push((k, v))
+        }
+        Ok(immutable_chunkmap::map::Map::from_iter(data.drain(..)))
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        for _ in 0..elts {
+            let k = <K as Pack>::decode(buf)?;
+            let v = <V as Pack>::decode(buf)?;
+            self.insert_cow(k, v);
+        }
+        Ok(())
+    }
+}
+
 macro_rules! impl_hashset {
     ($ty:ident) => {
         impl<K, R> Pack for $ty<K, R>
@@ -1212,6 +1263,51 @@ impl<K: Ord + Pack> Pack for BTreeSet<K> {
         }
         for _ in 0..elts {
             self.insert(<K as Pack>::decode(buf)?);
+        }
+        Ok(())
+    }
+}
+
+impl<K: Ord + Pack + Clone, const SIZE: usize> Pack
+    for immutable_chunkmap::set::Set<K, SIZE>
+{
+    fn encoded_len(&self) -> usize {
+        self.into_iter().fold(varint_len(self.len() as u64), |len, k| {
+            len + <K as Pack>::encoded_len(k)
+        })
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        encode_varint(self.len() as u64, buf);
+        for k in self {
+            <K as Pack>::encode(k, buf)?;
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        let mut data: LPooled<Vec<K>> = LPooled::take_sz(1024, 64 * 1024);
+        let cap = data.capacity();
+        if cap < elts {
+            data.reserve(elts - cap);
+        }
+        for _ in 0..elts {
+            data.push(<K as Pack>::decode(buf)?);
+        }
+        Ok(immutable_chunkmap::set::Set::from_iter(data.drain(..)))
+    }
+
+    fn decode_into(&mut self, buf: &mut impl Buf) -> Result<(), PackError> {
+        let elts = decode_varint(buf)? as usize;
+        if elts > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        for _ in 0..elts {
+            self.insert_cow(<K as Pack>::decode(buf)?);
         }
         Ok(())
     }

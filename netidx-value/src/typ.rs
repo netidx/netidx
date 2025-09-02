@@ -36,6 +36,7 @@ pub enum Typ {
     Bytes = 0x4000_0000,
     Error = 0x2000_0000,
     Array = 0x1000_0000,
+    Map = 0x0800_0000,
 }
 
 impl Typ {
@@ -67,6 +68,7 @@ impl Typ {
             }
             Typ::Error => Ok(s.parse::<Value>()?),
             Typ::Array => Ok(s.parse::<Value>()?),
+            Typ::Map => Ok(s.parse::<Value>()?),
             Typ::Null => {
                 if s.trim() == "null" {
                     Ok(Value::Null)
@@ -97,6 +99,7 @@ impl Typ {
             Typ::Bytes => "bytes",
             Typ::Error => "error",
             Typ::Array => "array",
+            Typ::Map => "map",
             Typ::Null => "null",
         }
     }
@@ -196,9 +199,10 @@ impl FromStr for Typ {
             "Bytes" | "bytes" => Ok(Typ::Bytes),
             "Error" | "error" => Ok(Typ::Error),
             "Array" | "array" => Ok(Typ::Array),
+            "Map" | "map" => Ok(Typ::Map),
             "Null" | "null" => Ok(Typ::Null),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, null", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, map, null", s))
         }
     }
 }

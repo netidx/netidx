@@ -40,7 +40,7 @@ graphix-rt = { path = "../graphix/graphix-rt", version = "0.1" }
 graphix-compiler = { path = "../graphix/graphix-compiler", version = "0.1" }
 hdrhistogram = "7"
 if-addrs = "0.14"
-immutable-chunkmap = "2"
+immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
 indexmap = "2"
 keyring = "3"
 log = "0.4"
@@ -51,7 +51,7 @@ packed_struct = "0.10"
 packed_struct_codegen = "0.10"
 parking_lot = "0.12.1"
 pin-utils = "0.1"
-poolshark = "0.2.0"
+poolshark = "0.2.3"
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand = "0.9"
 rayon = "1"

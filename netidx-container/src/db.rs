@@ -1065,7 +1065,7 @@ fn send_reply(reply: Reply, r: Result<()>) {
             reply.send(Value::Null);
         }
         (Err(e), Some(reply)) => {
-            let e = Value::Error(format!("{}", e).into());
+            let e = Value::error(format!("{}", e));
             reply.send(e);
         }
         (_, None) => (),

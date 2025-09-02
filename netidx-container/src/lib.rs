@@ -95,7 +95,7 @@ macro_rules! or_reply {
             Ok(r) => r,
             Err(e) => {
                 if let Some(reply) = $reply {
-                    let e = Value::Error(format!("{}", e).into());
+                    let e = Value::error(format!("{}", e));
                     reply.send(e);
                 }
                 return;
@@ -405,7 +405,7 @@ impl ContainerInner {
         if rows > max_rows || columns > max_columns {
             let m = literal!("rows <= max_rows && columns <= max_columns");
             if let Some(reply) = reply {
-                reply.send(Value::Error(m));
+                reply.send(Value::error(m));
             }
         } else {
             txn.create_sheet(path, rows, columns, max_rows, max_columns, lock, reply);

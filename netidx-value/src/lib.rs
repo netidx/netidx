@@ -3,6 +3,7 @@ use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
 use compact_str::{format_compact, CompactString};
+use immutable_chunkmap::map;
 use netidx_core::{
     pack::{self, Pack, PackError},
     utils,
@@ -11,6 +12,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{hint::unreachable_unchecked, iter, ptr, result, str::FromStr, time::Duration};
+use triomphe::Arc;
 
 pub mod array;
 mod convert;
@@ -43,6 +45,8 @@ fn _test_valarray() {
     let v: Value = valarray![1, 2, 5.3, 10];
     let _: Value = valarray![valarray!["elts", v], valarray!["foo", ["bar"]]];
 }
+
+pub type Map = map::Map<Value, Value, 32>;
 
 const COPY_MAX: u32 = 0x0000_4000;
 
@@ -95,9 +99,11 @@ pub enum Value {
     /// byte array
     Bytes(PBytes) = 0x4000_0000,
     /// An explicit error
-    Error(ArcStr) = 0x2000_0000,
+    Error(Arc<Value>) = 0x2000_0000,
     /// An array of values
     Array(ValArray) = 0x1000_0000,
+    /// A Map of values
+    Map(Map) = 0x0800_0000,
 }
 
 // This will fail to compile if any variant that is supposed to be
@@ -123,6 +129,7 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::Bytes(i) => Value::Bytes(i.clone()),
         Value::Error(i) => Value::Error(i.clone()),
         Value::Array(i) => Value::Array(i.clone()),
+        Value::Map(i) => Value::Map(i.clone()),
     };
     panic!("{i}")
 }
@@ -137,6 +144,7 @@ impl Clone for Value {
                 Self::Bytes(b) => Self::Bytes(b.clone()),
                 Self::Error(e) => Self::Error(e.clone()),
                 Self::Array(a) => Self::Array(a.clone()),
+                Self::Map(m) => Self::Map(m.clone()),
                 Value::U32(_)
                 | Value::V32(_)
                 | Value::I32(_)
@@ -172,6 +180,9 @@ impl Clone for Value {
                 }
                 Self::Array(a) => {
                     *self = Self::Array(a.clone());
+                }
+                Self::Map(m) => {
+                    *self = Self::Map(m.clone());
                 }
                 Value::U32(_)
                 | Value::V32(_)
@@ -222,6 +233,7 @@ impl Pack for Value {
             Value::Error(c) => Pack::encoded_len(c),
             Value::Array(elts) => Pack::encoded_len(elts),
             Value::Decimal(d) => Pack::encoded_len(d),
+            Value::Map(m) => Pack::encoded_len(m),
         }
     }
 
@@ -290,10 +302,7 @@ impl Pack for Value {
             Value::Null => Ok(buf.put_u8(16)),
             //          OK is deprecated, but we reserve 17 for backwards compatibility
             //          Value::Ok => Ok(buf.put_u8(17))
-            Value::Error(e) => {
-                buf.put_u8(18);
-                Pack::encode(e, buf)
-            }
+            // string error is encoded as 18 for backwards compatibility
             Value::Array(elts) => {
                 buf.put_u8(19);
                 Pack::encode(elts, buf)
@@ -302,6 +311,20 @@ impl Pack for Value {
                 buf.put_u8(20);
                 Pack::encode(d, buf)
             }
+            Value::Map(m) => {
+                buf.put_u8(21);
+                Pack::encode(m, buf)
+            }
+            Value::Error(e) => match &**e {
+                Value::String(s) => {
+                    buf.put_u8(18);
+                    Pack::encode(s, buf)
+                }
+                v => {
+                    buf.put_u8(22);
+                    Pack::encode(v, buf)
+                }
+            },
         }
     }
 
@@ -324,10 +347,15 @@ impl Pack for Value {
             14 => Ok(Value::Bool(true)),
             15 => Ok(Value::Bool(false)),
             16 => Ok(Value::Null),
-            17 => Ok(Value::Null), // 17 used to be Ok
-            18 => Ok(Value::Error(Pack::decode(buf)?)),
+            17 => Ok(Value::Null), // 17 used to be Ok now translated to Null
+            18 => {
+                // backwards compatible with previous encodings of error when it
+                // was only a string
+                Ok(Value::Error(Arc::new(Value::String(<ArcStr as Pack>::decode(buf)?))))
+            }
             19 => Ok(Value::Array(Pack::decode(buf)?)),
             20 => Ok(Value::Decimal(Pack::decode(buf)?)),
+            21 => Ok(Value::Error(Arc::new(Pack::decode(buf)?))),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -360,10 +388,16 @@ impl Value {
             (Value::Bytes(l), Value::Bytes(r)) => l == r,
             (Value::Bool(l), Value::Bool(r)) => l == r,
             (Value::Null, Value::Null) => true,
-            (Value::Error(l), Value::Error(r)) => l == r,
+            (Value::Error(l), Value::Error(r)) => l.approx_eq(r),
             (Value::Array(l), Value::Array(r)) => {
                 l.len() == r.len()
                     && l.iter().zip(r.iter()).all(|(v0, v1)| v0.approx_eq(v1))
+            }
+            (Value::Map(l), Value::Map(r)) => {
+                l.len() == r.len()
+                    && l.into_iter()
+                        .zip(r.into_iter())
+                        .all(|((k0, v0), (k1, v1))| k0.approx_eq(k1) && v0.approx_eq(v1))
             }
             (Value::Array(_), _) | (_, Value::Array(_)) => false,
             (l, r) if l.number() || r.number() => {
@@ -421,27 +455,43 @@ impl Value {
                     Typ::String => {
                         Some(Value::String(format_compact!("{}", self).as_str().into()))
                     }
-                    Typ::Bytes => None,
-                    Typ::Error => None,
                     Typ::Array => Some(Value::Array([self.clone()].into())),
                     Typ::Null => Some(Value::Null),
+                    Typ::Bytes | Typ::Error | Typ::Map => None,
                 }
             };
         }
         match self {
             Value::String(s) => match typ {
                 Typ::String => Some(Value::String(s)),
-                Typ::Error => Some(Value::Error(s)),
+                Typ::Error => Some(Value::Error(Arc::new(Value::String(s)))),
                 Typ::Array => Some(Value::Array([Value::String(s)].into())),
                 _ => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
             },
             v if typ == Typ::String => {
                 Some(Value::String(format_compact!("{}", v).as_str().into()))
             }
-            Value::Array(elts) if typ != Typ::Array => {
-                elts.first().and_then(|v| v.clone().cast(typ))
-            }
-            v @ Value::Array(_) => Some(v),
+            Value::Map(m) => match typ {
+                Typ::Map => Some(Value::Map(m)),
+                Typ::Array => Some(Value::Array(ValArray::from_iter(m.into_iter().map(
+                    |(k, v)| {
+                        Value::Array(ValArray::from_iter_exact(
+                            [k.clone(), v.clone()].into_iter(),
+                        ))
+                    },
+                )))),
+                _ => None,
+            },
+            Value::Array(elts) => match typ {
+                Typ::Array => Some(Value::Array(elts)),
+                Typ::Map => {
+                    match Value::Array(elts).cast_to::<SmallVec<[(Value, Value); 8]>>() {
+                        Err(_) => None,
+                        Ok(vals) => Some(Value::Map(Map::from_iter(vals))),
+                    }
+                }
+                typ => elts.first().and_then(|v| v.clone().cast(typ)),
+            },
             Value::U32(v) | Value::V32(v) => cast_number!(v, typ),
             Value::I32(v) | Value::Z32(v) => cast_number!(v, typ),
             Value::U64(v) | Value::V64(v) => cast_number!(v, typ),
@@ -465,6 +515,7 @@ impl Value {
                 }
                 Typ::Bool
                 | Typ::Array
+                | Typ::Map
                 | Typ::Bytes
                 | Typ::DateTime
                 | Typ::Duration
@@ -523,14 +574,15 @@ impl Value {
                     }
                 }
                 Typ::DateTime => Some(Value::DateTime(v)),
-                Typ::Decimal => None,
-                Typ::Duration => None,
-                Typ::Bool => None,
-                Typ::Bytes => None,
-                Typ::Error => None,
                 Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
+                Typ::Decimal
+                | Typ::Duration
+                | Typ::Bool
+                | Typ::Bytes
+                | Typ::Error
+                | Typ::Map => None,
             },
             Value::Duration(d) => match typ {
                 Typ::U32 => Some(Value::U32(d.as_secs() as u32)),
@@ -543,15 +595,16 @@ impl Value {
                 Typ::Z64 => Some(Value::Z64(d.as_secs() as i64)),
                 Typ::F32 => Some(Value::F32(d.as_secs_f32())),
                 Typ::F64 => Some(Value::F64(d.as_secs_f64())),
-                Typ::Decimal => None,
-                Typ::DateTime => None,
-                Typ::Duration => Some(Value::Duration(d)),
-                Typ::Bool => None,
-                Typ::Bytes => None,
-                Typ::Error => None,
                 Typ::Array => Some(Value::Array([self].into())),
+                Typ::Duration => Some(Value::Duration(d)),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
+                Typ::Decimal
+                | Typ::DateTime
+                | Typ::Bool
+                | Typ::Bytes
+                | Typ::Error
+                | Typ::Map => None,
             },
             Value::Bool(b) => match typ {
                 Typ::U32 => Some(Value::U32(b as u32)),
@@ -564,15 +617,16 @@ impl Value {
                 Typ::Z64 => Some(Value::Z64(b as i64)),
                 Typ::F32 => Some(Value::F32(b as u32 as f32)),
                 Typ::F64 => Some(Value::F64(b as u64 as f64)),
-                Typ::Decimal => None,
-                Typ::DateTime => None,
-                Typ::Duration => None,
                 Typ::Bool => Some(self),
-                Typ::Bytes => None,
-                Typ::Error => None,
                 Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
+                Typ::Decimal
+                | Typ::DateTime
+                | Typ::Duration
+                | Typ::Bytes
+                | Typ::Error
+                | Typ::Map => None,
             },
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
             Value::Bytes(_) => None,
@@ -595,7 +649,11 @@ impl Value {
         use std::fmt::Write;
         let mut tmp = CompactString::new("");
         write!(tmp, "{e}").unwrap();
-        Value::Error(tmp.as_str().into())
+        Value::Error(Arc::new(Value::String(tmp.as_str().into())))
+    }
+
+    pub fn error<S: Into<ArcStr>>(e: S) -> Value {
+        Value::Error(Arc::new(Value::String(e.into())))
     }
 
     /// return true if the value is some kind of number, otherwise
@@ -620,7 +678,8 @@ impl Value {
             | Value::Bool(_)
             | Value::Null
             | Value::Error(_)
-            | Value::Array(_) => false,
+            | Value::Array(_)
+            | Value::Map(_) => false,
         }
     }
 

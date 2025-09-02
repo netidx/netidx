@@ -214,7 +214,7 @@ fn start_session(
             Err(e) => {
                 error!("session {} initialization failed {e:?}", session_id);
                 if let Some(mut reply) = reply {
-                    let m = Value::Error(format!("initialization failed {e:?}").into());
+                    let m = Value::error(format!("initialization failed {e:?}"));
                     reply.send(m)
                 }
             }
@@ -301,7 +301,7 @@ pub(super) async fn run(
     let mut ecm_rx = ecm_rx.fuse();
     let ecm_reply = |res: Result<()>, mut reply: RpcReply| match res {
         Ok(()) => reply.send(Value::Null),
-        Err(e) => reply.send(Value::Error(e.to_string().into())),
+        Err(e) => reply.send(Value::error(e.to_string())),
     };
     publisher.flushed().await;
     let _ = init.send(());
@@ -361,7 +361,7 @@ pub(super) async fn run(
                     match sessions.add_session(cfg.client) {
                         None => {
                             let m = format!("too many sessions, client {:?}", cfg.client);
-                            reply.send(Value::Error(m.into()));
+                            reply.send(Value::error(m));
                         },
                         Some(session_token) => {
                             let filter_txt = cfg.filter.clone();

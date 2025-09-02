@@ -30,3 +30,5 @@ smallvec = { workspace = true }
 proptest = "1"
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
+triomphe = { workspace = true }
+immutable-chunkmap = { workspace = true }

@@ -17,6 +17,7 @@ use combine::{
 };
 use compact_str::CompactString;
 use escaping::Escape;
+use poolshark::local::LPooled;
 use rust_decimal::Decimal;
 use std::{borrow::Cow, result::Result, str::FromStr, sync::LazyLock, time::Duration};
 
@@ -193,9 +194,27 @@ where
 {
     spaces().with(choice((
         attempt(
-            between(token('['), token(']'), sep_by(value(must_escape, esc), token(',')))
-                .map(|vals: Vec<Value>| Value::Array(vals.into())),
+            between(
+                token('['),
+                token(']'),
+                sep_by(value(must_escape, esc), attempt(spaces().with(token(',')))),
+            )
+            .map(|vals: Vec<Value>| Value::Array(vals.into())),
         ),
+        attempt(between(
+            token('{'),
+            token('}'),
+            sep_by(
+                (
+                    value(must_escape, esc),
+                    spaces().with(string("=>")).with(value(must_escape, esc)),
+                ),
+                attempt(spaces().with(token(','))),
+            )
+            .map(|mut vals: LPooled<Vec<(Value, Value)>>| {
+                Value::Map(immutable_chunkmap::map::Map::from_iter(vals.drain(..)))
+            }),
+        )),
         attempt(quoted(must_escape, esc)).map(|s| Value::String(ArcStr::from(s))),
         attempt(flt::<_, f64>()).map(Value::F64),
         attempt(int::<_, i64>()).map(Value::I64),
@@ -227,7 +246,7 @@ where
         attempt(
             constant("error")
                 .with(quoted(must_escape, esc))
-                .map(|s| Value::Error(ArcStr::from(s))),
+                .map(|s| Value::error(ArcStr::from(s))),
         ),
         attempt(
             constant("datetime")
@@ -276,6 +295,8 @@ pub fn parse_value(s: &str) -> anyhow::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use arcstr::literal;
+
     use super::*;
 
     #[test]
@@ -320,7 +341,7 @@ mod tests {
         assert_eq!(Value::Bool(false), parse_value("false").unwrap());
         assert_eq!(Value::Null, parse_value("null").unwrap());
         assert_eq!(
-            Value::Error(ArcStr::from("error")),
+            Value::error(literal!("error")),
             parse_value(r#"error:"error""#).unwrap()
         );
     }

@@ -81,6 +81,10 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
                 strings.push(format_compact!("{v}"));
                 T::Index(strings.len() - 1)
             }
+            v @ Value::Map(_) => {
+                strings.push(format_compact!("{v}"));
+                T::Index(strings.len() - 1)
+            }
         })
     }
     let mut fish_args: SmallVec<[Arg; 8]> = fish_args
@@ -123,6 +127,7 @@ impl Value {
             Value::Null => write!(f, "null"),
             v @ Value::Error(_) => write!(f, "{}", v),
             v @ Value::Array(_) => write!(f, "{}", v),
+            v @ Value::Map(_) => write!(f, "{}", v),
         }
     }
 
@@ -242,9 +247,14 @@ impl Value {
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            Value::Error(v) => {
-                write!(f, r#"error:"{}""#, esc.escape(&*v))
-            }
+            Value::Error(v) => match &**v {
+                Value::String(s) => {
+                    write!(f, r#"error:"{}""#, esc.escape(&*s))
+                }
+                v => {
+                    write!(f, r#"error:"{v}""#)
+                }
+            },
             Value::Array(elts) => {
                 write!(f, "[")?;
                 for (i, v) in elts.iter().enumerate() {
@@ -256,6 +266,18 @@ impl Value {
                     }
                 }
                 write!(f, "]")
+            }
+            Value::Map(m) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in m.into_iter().enumerate() {
+                    k.fmt_ext(f, esc, types)?;
+                    write!(f, " => ")?;
+                    v.fmt_ext(f, esc, types)?;
+                    if i < m.len() - 1 {
+                        write!(f, ", ")?
+                    }
+                }
+                write!(f, "}}")
             }
         }
     }

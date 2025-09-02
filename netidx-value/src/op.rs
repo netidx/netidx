@@ -82,10 +82,16 @@ impl Hash for Value {
             Value::Bool(true) => 14u8.hash(state),
             Value::Bool(false) => 15u8.hash(state),
             Value::Null => 16u8.hash(state),
-            Value::Error(c) => {
-                18u8.hash(state);
-                c.hash(state)
-            }
+            Value::Error(c) => match &**c {
+                Value::String(e) => {
+                    18u8.hash(state);
+                    e.hash(state)
+                }
+                v => {
+                    21u8.hash(state);
+                    v.hash(state)
+                }
+            },
             Value::Array(a) => {
                 19u8.hash(state);
                 for v in a.iter() {
@@ -95,6 +101,10 @@ impl Hash for Value {
             Value::Decimal(d) => {
                 20u8.hash(state);
                 d.hash(state);
+            }
+            Value::Map(m) => {
+                21u8.hash(state);
+                m.hash(state);
             }
         }
     }
@@ -128,6 +138,8 @@ impl PartialEq for Value {
             (Value::Error(l), Value::Error(r)) => l == r,
             (Value::Array(l), Value::Array(r)) => l == r,
             (Value::Array(_), _) | (_, Value::Array(_)) => false,
+            (Value::Map(l), Value::Map(r)) => l == r,
+            (Value::Map(_), _) | (_, Value::Map(_)) => false,
             (l, r) if l.number() || r.number() => {
                 match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
                     (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
@@ -188,6 +200,9 @@ impl PartialOrd for Value {
             (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
             (Value::Array(_), _) => Some(Ordering::Less),
             (_, Value::Array(_)) => Some(Ordering::Greater),
+            (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
+            (Value::Map(_), _) => Some(Ordering::Less),
+            (_, Value::Map(_)) => Some(Ordering::Greater),
             (l, r) if l.number() || r.number() => {
                 match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
                     (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
@@ -304,36 +319,36 @@ macro_rules! apply_op {
                 Ok(r) => Value::Decimal(l $op r),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", r);
-                    Value::Error(e.as_str().into())
+                    Value::error(e.as_str())
                 },
             },
             (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
                 Ok(l) => Value::Decimal(l $op r),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", l);
-                    Value::Error(e.as_str().into())
+                    Value::error(e.as_str())
                 },
             },
             (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
                 Ok(r) => Value::Decimal(l $op r),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", r);
-                    Value::Error(e.as_str().into())
+                    Value::error(e.as_str())
                 },
             },
             (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
                 Ok(l) => Value::Decimal(l $op r),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", l);
-                    Value::Error(e.as_str().into())
+                    Value::error(e.as_str())
                 },
             },
             (Value::String(s), n) => match s.parse::<Value>() {
-                Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                Err(e) => Value::error(format_compact!("{}", e).as_str()),
                 Ok(s) => s $op n,
             }
             (n, Value::String(s)) => match s.parse::<Value>() {
-                Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                Err(e) => Value::error(format_compact!("{}", e).as_str()),
                 Ok(s) => n $op s,
             },
             (Value::Array(e0), Value::Array(e1)) => {
@@ -347,24 +362,25 @@ macro_rules! apply_op {
             }
             (l @ Value::Array(_), n) => {
                 match n.cast(Typ::Array) {
-                    None => Value::Error(literal!("can't add to array")),
+                    None => Value::error(literal!("can't add to array")),
                     Some(r) => l $op r,
                 }
             }
             (n, r @ Value::Array(_)) => {
                 match n.cast(Typ::Array) {
-                    None => Value::Error(literal!("can't add to array")),
+                    None => Value::error(literal!("can't add to array")),
                     Some(l) => l $op r,
                 }
             }
+            (Value::Map(_), _) | (_, Value::Map(_)) => Value::error(literal!("can't apply to Map")),
             (Value::Bytes(_), _) | (_, Value::Bytes(_)) => {
-                Value::Error(literal!("can't add bytes"))
+                Value::error(literal!("can't add bytes"))
             }
             (Value::Null, _) | (_, Value::Null) => {
-                Value::Error(literal!("can't add null"))
+                Value::error(literal!("can't add null"))
             }
             | (Value::Error(_), _)
-            | (_, Value::Error(_)) => Value::Error(literal!("can't add error types")),
+            | (_, Value::Error(_)) => Value::error(literal!("can't add error types")),
             (Value::Bool(true), n) => Value::U32(1) $op n,
             (n, Value::Bool(true)) => n $op Value::U32(1),
             (Value::Bool(false), n) => Value::U32(0) $op n,
@@ -379,10 +395,10 @@ macro_rules! handle_arith_result {
         match $res {
             Ok(r) => r,
             Err(e) => match e.downcast_ref::<String>() {
-                Some(s) => Value::Error(s.into()),
+                Some(s) => Value::error(s),
                 None => match e.downcast_ref::<&str>() {
-                    Some(s) => Value::Error((*s).into()),
-                    None => Value::Error(literal!($fallback)),
+                    Some(s) => Value::error(*s),
+                    None => Value::error(literal!($fallback)),
                 },
             },
         }
@@ -400,7 +416,7 @@ impl Add for Value {
                     | (Value::Duration(d), Value::DateTime(dt)) => {
                         match chrono::Duration::from_std(d) {
                             Ok(d) => Value::DateTime(dt + d),
-                            Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                            Err(e) => Value::error(format_compact!("{}", e).as_str()),
                         }
                     },
                 (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
@@ -408,7 +424,7 @@ impl Add for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't add to datetime/duration"))
+                        Value::error(literal!("can't add to datetime/duration"))
                     }
             )
         }));
@@ -427,7 +443,7 @@ impl Sub for Value {
                     | (Value::Duration(d), Value::DateTime(dt)) => {
                         match chrono::Duration::from_std(d) {
                             Ok(d) => Value::DateTime(dt - d),
-                            Err(e) => Value::Error(format_compact!("{}", e).as_str().into()),
+                            Err(e) => Value::error(format_compact!("{}", e).as_str()),
                         }
                     },
                 (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
@@ -435,7 +451,7 @@ impl Sub for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't sub datetime/duration"))
+                        Value::error(literal!("can't sub datetime/duration"))
                     }
             )
         }));
@@ -472,7 +488,7 @@ impl Mul for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't mul datetime/duration"))
+                        Value::error(literal!("can't mul datetime/duration"))
                     }
             )
         }));
@@ -505,7 +521,7 @@ impl Div for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't div datetime/duration"))
+                        Value::error(literal!("can't div datetime/duration"))
                     }
             )
         }));
@@ -524,7 +540,7 @@ impl Rem for Value {
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
                     | (Value::DateTime(_), _) => {
-                        Value::Error(literal!("can't mod datetime/duration"))
+                        Value::error(literal!("can't mod datetime/duration"))
                     }
             )
         }));
@@ -547,14 +563,15 @@ impl Not for Value {
             Value::V64(v) => Value::V64(!v),
             Value::I64(v) => Value::I64(!v),
             Value::Z64(v) => Value::Z64(!v),
-            Value::F32(_) => Value::Error(literal!("can't apply not to F32")),
-            Value::F64(_) => Value::Error(literal!("can't apply not to F64")),
-            Value::Decimal(_) => Value::Error(literal!("can't apply not to Decimal")),
-            Value::DateTime(_) => Value::Error(literal!("can't apply not to DateTime")),
-            Value::Duration(_) => Value::Error(literal!("can't apply not to Duration")),
-            Value::String(_) => Value::Error(literal!("can't apply not to String")),
-            Value::Bytes(_) => Value::Error(literal!("can't apply not to Bytes")),
-            Value::Error(_) => Value::Error(literal!("can't apply not to Error")),
+            Value::F32(_) => Value::error(literal!("can't apply not to F32")),
+            Value::F64(_) => Value::error(literal!("can't apply not to F64")),
+            Value::Decimal(_) => Value::error(literal!("can't apply not to Decimal")),
+            Value::DateTime(_) => Value::error(literal!("can't apply not to DateTime")),
+            Value::Duration(_) => Value::error(literal!("can't apply not to Duration")),
+            Value::String(_) => Value::error(literal!("can't apply not to String")),
+            Value::Bytes(_) => Value::error(literal!("can't apply not to Bytes")),
+            Value::Error(_) => Value::error(literal!("can't apply not to Error")),
+            Value::Map(_) => Value::error(literal!("can't apply not to Map")),
             Value::Array(elts) => {
                 Value::Array(ValArray::from_iter_exact(elts.iter().cloned().map(|v| !v)))
             }
