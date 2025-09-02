@@ -1,4 +1,4 @@
-use crate::{pbuf::PBytes, Value};
+use crate::{pbuf::PBytes, ValArray, Value};
 use arcstr::ArcStr;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
@@ -200,7 +200,9 @@ where
                 token(']'),
                 sep_by(value(must_escape, esc), attempt(spaces().with(token(',')))),
             )
-            .map(|vals: Vec<Value>| Value::Array(vals.into())),
+            .map(|mut vals: LPooled<Vec<Value>>| {
+                Value::Array(ValArray::from_iter_exact(vals.drain(..)))
+            }),
         ),
         attempt(between(
             token('{'),
