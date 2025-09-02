@@ -439,8 +439,8 @@ mod publisher {
         (any::<u64>(), 0..1_000_000_000u32).prop_map(|(s, ns)| Duration::new(s, ns))
     }
 
-    fn value() -> impl Strategy<Value = Value> {
-        let leaf = prop_oneof![
+    fn value_leaf() -> impl Strategy<Value = Value> {
+        prop_oneof![
             any::<u32>().prop_map(Value::U32),
             any::<u32>().prop_map(Value::V32),
             any::<i32>().prop_map(Value::I32),
@@ -459,16 +459,28 @@ mod publisher {
             Just(Value::Bool(true)),
             Just(Value::Bool(false)),
             Just(Value::Null),
-        ];
-        leaf.prop_recursive(10, 1000, 100, |inner| {
+        ]
+    }
+
+    fn value() -> impl Strategy<Value = Value> {
+        value_leaf().prop_recursive(10, 1000, 100, |inner| {
             prop_oneof![
                 collection::vec(inner.clone(), 0..100)
                     .prop_map(|e| Value::Array(ValArray::from(e))),
                 inner.clone().prop_map(|v| Value::Error(Arc::new(v))),
-                collection::vec((inner.clone(), inner.clone()), 0..100)
-                    .prop_map(|v| Value::Map(immutable_chunkmap::map::Map::from_iter(v)))
+                collection::vec((inner.clone(), inner.clone()), 0..100).prop_map(|v| {
+                    Value::Map(immutable_chunkmap::map::Map::from_iter(dbg!(v)))
+                })
             ]
         })
+    }
+
+    fn value_leaf_array() -> impl Strategy<Value = Vec<Value>> {
+        collection::vec(value_leaf(), 0..100)
+    }
+
+    fn value_array() -> impl Strategy<Value = Vec<Value>> {
+        collection::vec(value(), 0..12)
     }
 
     fn from() -> impl Strategy<Value = From> {
@@ -501,17 +513,37 @@ mod publisher {
                 e0.len() == e1.len()
                     && e0.iter().zip(e1.iter()).all(|(v0, v1)| vequiv(v0, v1))
             }
+            (Value::Map(m0), Value::Map(m1)) => {
+                m0.len() == m1.len()
+                    && m0
+                        .into_iter()
+                        .zip(m1.into_iter())
+                        .all(|((k0, v0), (k1, v1))| vequiv(k0, k1) && vequiv(v0, v1))
+            }
+            (Value::Error(v0), Value::Error(v1)) => vequiv(v0, v1),
             (v0, v1) => v0 == v1,
         }
     }
 
     fn round_trip(v: Value) {
-        let s = format!("{}", v);
+        let s = dbg!(format!("{}", v));
         let v_ = s.parse::<Value>().unwrap();
         assert!(vequiv(&v, &v_))
     }
 
     proptest! {
+        #[test]
+        fn test_value_ord0(mut v in value_leaf_array()) {
+            eprintln!("{}", Value::Array(ValArray::from_iter_exact(v.iter().cloned())));
+            v.sort()
+        }
+
+        #[test]
+        fn test_value_ord1(mut v in value_array()) {
+            eprintln!("{}", Value::Array(ValArray::from_iter_exact(v.iter().cloned())));
+            v.sort()
+        }
+
         #[test]
         fn test_fuzz(b in bytes()) {
             fuzz(b)

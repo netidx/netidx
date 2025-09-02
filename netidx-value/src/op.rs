@@ -160,63 +160,42 @@ impl Eq for Value {}
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use std::num::FpCategory::*;
-        match (self, other) {
-            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
-                l.partial_cmp(r)
-            }
-            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
-                l.partial_cmp(r)
-            }
-            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
-                l.partial_cmp(r)
-            }
-            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
-                l.partial_cmp(r)
-            }
-            (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
-                (Nan, Nan) => Some(Ordering::Equal),
-                (Nan, _) => Some(Ordering::Less),
-                (_, Nan) => Some(Ordering::Greater),
-                (_, _) => l.partial_cmp(r),
+        match Typ::get(self).cmp(&Typ::get(other)) {
+            Ordering::Greater => Some(Ordering::Greater),
+            Ordering::Less => Some(Ordering::Less),
+            Ordering::Equal => match (self, other) {
+                (Value::U32(l), Value::U32(r)) => l.partial_cmp(r),
+                (Value::V32(l), Value::V32(r)) => l.partial_cmp(r),
+                (Value::I32(l), Value::I32(r)) => l.partial_cmp(r),
+                (Value::Z32(l), Value::Z32(r)) => l.partial_cmp(r),
+                (Value::U64(l), Value::U64(r)) => l.partial_cmp(r),
+                (Value::V64(l), Value::V64(r)) => l.partial_cmp(r),
+                (Value::I64(l), Value::I64(r)) => l.partial_cmp(r),
+                (Value::Z64(l), Value::Z64(r)) => l.partial_cmp(r),
+                (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
+                    (Nan, Nan) => Some(Ordering::Equal),
+                    (Nan, _) => Some(Ordering::Less),
+                    (_, Nan) => Some(Ordering::Greater),
+                    (_, _) => l.partial_cmp(r),
+                },
+                (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
+                    (Nan, Nan) => Some(Ordering::Equal),
+                    (Nan, _) => Some(Ordering::Less),
+                    (_, Nan) => Some(Ordering::Greater),
+                    (_, _) => l.partial_cmp(r),
+                },
+                (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
+                (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
+                (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
+                (Value::String(l), Value::String(r)) => l.partial_cmp(r),
+                (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
+                (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
+                (Value::Null, Value::Null) => Some(Ordering::Equal),
+                (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
+                (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
+                (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
+                (_, _) => unreachable!(),
             },
-            (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
-                (Nan, Nan) => Some(Ordering::Equal),
-                (Nan, _) => Some(Ordering::Less),
-                (_, Nan) => Some(Ordering::Greater),
-                (_, _) => l.partial_cmp(r),
-            },
-            (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
-            (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
-            (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
-            (Value::String(l), Value::String(r)) => l.partial_cmp(r),
-            (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
-            (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
-            (Value::Null, Value::Null) => Some(Ordering::Equal),
-            (Value::Null, _) => Some(Ordering::Less),
-            (_, Value::Null) => Some(Ordering::Greater),
-            (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
-            (Value::Error(_), _) => Some(Ordering::Less),
-            (_, Value::Error(_)) => Some(Ordering::Greater),
-            (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
-            (Value::Array(_), _) => Some(Ordering::Less),
-            (_, Value::Array(_)) => Some(Ordering::Greater),
-            (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
-            (Value::Map(_), _) => Some(Ordering::Less),
-            (_, Value::Map(_)) => Some(Ordering::Greater),
-            (l, r) if l.number() || r.number() => {
-                match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                    (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
-                        (Nan, Nan) => Some(Ordering::Equal),
-                        (Nan, _) => Some(Ordering::Less),
-                        (_, Nan) => Some(Ordering::Greater),
-                        (_, _) => l.partial_cmp(&r),
-                    },
-                    (_, _) => {
-                        format_compact!("{}", l).partial_cmp(&format_compact!("{}", r))
-                    }
-                }
-            }
-            (l, r) => format_compact!("{}", l).partial_cmp(&format_compact!("{}", r)),
         }
     }
 }

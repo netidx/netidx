@@ -563,10 +563,7 @@ impl Value {
                 Typ::Z64 => Some(Value::Z64(v.timestamp())),
                 Typ::F32 | Typ::F64 => {
                     let dur = v.timestamp() as f64;
-                    let dur = dur
-                        + (v.timestamp_nanos_opt()
-                            .expect("cannot represent as timestamp with ns precision")
-                            / 1_000_000_000) as f64;
+                    let dur = dur + (v.timestamp_nanos_opt()? / 1_000_000_000) as f64;
                     if typ == Typ::F32 {
                         Some(Value::F32(dur as f32))
                     } else {

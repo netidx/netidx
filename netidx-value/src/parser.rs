@@ -20,6 +20,7 @@ use escaping::Escape;
 use poolshark::local::LPooled;
 use rust_decimal::Decimal;
 use std::{borrow::Cow, result::Result, str::FromStr, sync::LazyLock, time::Duration};
+use triomphe::Arc;
 
 fn should_escape_generic(c: char) -> bool {
     c.is_control()
@@ -245,8 +246,8 @@ where
         ),
         attempt(
             constant("error")
-                .with(quoted(must_escape, esc))
-                .map(|s| Value::error(ArcStr::from(s))),
+                .with(value(must_escape, esc))
+                .map(|v| Value::Error(Arc::new(v))),
         ),
         attempt(
             constant("datetime")

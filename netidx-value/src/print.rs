@@ -252,7 +252,7 @@ impl Value {
                     write!(f, r#"error:"{}""#, esc.escape(&*s))
                 }
                 v => {
-                    write!(f, r#"error:"{v}""#)
+                    write!(f, r#"error:{v}"#)
                 }
             },
             Value::Array(elts) => {
