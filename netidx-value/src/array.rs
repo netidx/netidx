@@ -15,7 +15,7 @@ use std::{
     borrow::Borrow,
     fmt::Debug,
     hash::{Hash, Hasher},
-    mem::ManuallyDrop,
+    mem::{self, ManuallyDrop},
     ops::{Bound, Deref, RangeBounds},
     ptr,
     slice::Iter,
@@ -559,7 +559,11 @@ impl Pack for ValArray {
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        encode_varint(self.len() as u64, buf);
+        let len = self.len();
+        if len * mem::size_of::<Value>() > MAX_VEC {
+            return Err(PackError::TooBig);
+        }
+        encode_varint(len as u64, buf);
         for t in &**self {
             Pack::encode(t, buf)?
         }
@@ -568,7 +572,8 @@ impl Pack for ValArray {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let elts = decode_varint(buf)? as usize;
-        if elts > MAX_VEC {
+        let sz = elts.saturating_mul(mem::size_of::<Value>());
+        if sz > MAX_VEC || sz > buf.remaining() << 8 {
             return Err(PackError::TooBig);
         }
         let mut data = get_by_size(elts);

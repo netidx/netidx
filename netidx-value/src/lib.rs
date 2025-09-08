@@ -230,7 +230,10 @@ impl Pack for Value {
             Value::String(c) => Pack::encoded_len(c),
             Value::Bytes(b) => Pack::encoded_len(b),
             Value::Bool(_) | Value::Null => 0,
-            Value::Error(c) => Pack::encoded_len(c),
+            Value::Error(c) => match &**c {
+                Value::String(s) => Pack::encoded_len(s),
+                v => Pack::encoded_len(v),
+            },
             Value::Array(elts) => Pack::encoded_len(elts),
             Value::Decimal(d) => Pack::encoded_len(d),
             Value::Map(m) => Pack::encoded_len(m),
@@ -355,7 +358,8 @@ impl Pack for Value {
             }
             19 => Ok(Value::Array(Pack::decode(buf)?)),
             20 => Ok(Value::Decimal(Pack::decode(buf)?)),
-            21 => Ok(Value::Error(Arc::new(Pack::decode(buf)?))),
+            21 => Ok(Value::Map(Pack::decode(buf)?)),
+            22 => Ok(Value::Error(Arc::new(Pack::decode(buf)?))),
             _ => Err(PackError::UnknownTag),
         }
     }

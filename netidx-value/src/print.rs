@@ -1,12 +1,37 @@
 use crate::{parser, Value};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use compact_str::CompactString;
 use escaping::Escape;
+use rust_decimal::Decimal;
 use smallvec::smallvec;
 use std::{
+    cell::RefCell,
     fmt::{self, Write},
     ops::Deref,
 };
+
+struct DecimalFmt(Decimal);
+
+impl fmt::Display for DecimalFmt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // decimal, like float, must always end in '.', but the default
+        // decimal printer does not do that, so we have to fix it
+        thread_local! {
+            static BUF: RefCell<CompactString> = RefCell::new(CompactString::new(""));
+        }
+        BUF.with_borrow_mut(|buf| {
+            use std::fmt::Write;
+            buf.clear();
+            write!(buf, "{}", self.0)?;
+            if buf.contains('.') {
+                write!(f, "{buf}")
+            } else {
+                write!(f, "{buf}.")
+            }
+        })
+    }
+}
 
 /// A value reference that formats without type tags
 pub struct NakedValue<'a>(pub &'a Value);
@@ -110,7 +135,7 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
-            Value::Decimal(v) => write!(f, "{}", v),
+            Value::Decimal(v) => write!(f, "{}", DecimalFmt(*v)),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let v = v.as_secs_f64();
@@ -216,9 +241,9 @@ impl Value {
             }
             Value::Decimal(v) => {
                 if types {
-                    write!(f, "decimal:{}", v)
+                    write!(f, "decimal:{}", DecimalFmt(*v))
                 } else {
-                    write!(f, "{}", v)
+                    write!(f, "{}", DecimalFmt(*v))
                 }
             }
             Value::DateTime(v) => {

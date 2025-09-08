@@ -129,24 +129,6 @@ where
     })
 }
 
-fn dcml<I>() -> impl Parser<I, Output = Decimal>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    recognize((
-        optional(token('-')),
-        take_while1(|c: char| c.is_digit(10)),
-        optional(token('.')),
-        take_while(|c: char| c.is_digit(10)),
-    ))
-    .then(|s: CompactString| match s.parse::<Decimal>() {
-        Ok(i) => combine::value(i).right(),
-        Err(_) => unexpected_any("invalid decimal").left(),
-    })
-}
-
 struct Base64Encoded(Vec<u8>);
 
 impl FromStr for Base64Encoded {
@@ -230,7 +212,7 @@ where
                 .map(|_| Value::Bool(false)),
         ),
         attempt(string("null").skip(not_followed_by(alpha_num())).map(|_| Value::Null)),
-        attempt(constant("decimal").with(dcml()).map(Value::Decimal)),
+        attempt(constant("decimal").with(flt::<_, Decimal>()).map(Value::Decimal)),
         attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
         attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
         attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
