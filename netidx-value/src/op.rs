@@ -113,45 +113,36 @@ impl Hash for Value {
 impl PartialEq for Value {
     fn eq(&self, rhs: &Value) -> bool {
         use std::num::FpCategory::*;
-        match (self, rhs) {
-            (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => l == r,
-            (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => l == r,
-            (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => l == r,
-            (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => l == r,
-            (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
-                (Nan, Nan) => true,
-                (Zero, Zero) => true,
-                (_, _) => l == r,
-            },
-            (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
-                (Nan, Nan) => true,
-                (Zero, Zero) => true,
-                (_, _) => l == r,
-            },
-            (Value::Decimal(l), Value::Decimal(r)) => l == r,
-            (Value::DateTime(l), Value::DateTime(r)) => l == r,
-            (Value::Duration(l), Value::Duration(r)) => l == r,
-            (Value::String(l), Value::String(r)) => l == r,
-            (Value::Bytes(l), Value::Bytes(r)) => l == r,
-            (Value::Bool(l), Value::Bool(r)) => l == r,
-            (Value::Null, Value::Null) => true,
-            (Value::Error(l), Value::Error(r)) => l == r,
-            (Value::Array(l), Value::Array(r)) => l == r,
-            (Value::Array(_), _) | (_, Value::Array(_)) => false,
-            (Value::Map(l), Value::Map(r)) => l == r,
-            (Value::Map(_), _) | (_, Value::Map(_)) => false,
-            (l, r) if l.number() || r.number() => {
-                match (l.clone().cast_to::<f64>(), r.clone().cast_to::<f64>()) {
-                    (Ok(l), Ok(r)) => match (l.classify(), r.classify()) {
-                        (Nan, Nan) => true,
-                        (Zero, Zero) => true,
-                        (_, _) => l == r,
-                    },
-                    (_, _) => false,
-                }
+        Typ::get(self) == Typ::get(rhs)
+            && match (self, rhs) {
+                (Value::U32(l), Value::U32(r)) => l == r,
+                (Value::V32(l), Value::V32(r)) => l == r,
+                (Value::I32(l), Value::I32(r)) => l == r,
+                (Value::Z32(l), Value::Z32(r)) => l == r,
+                (Value::U64(l), Value::U64(r)) => l == r,
+                (Value::V64(l), Value::V64(r)) => l == r,
+                (Value::I64(l), Value::I64(r)) => l == r,
+                (Value::Z64(l), Value::Z64(r)) => l == r,
+                (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
+                    (Nan, Nan) => true,
+                    (_, _) => l == r,
+                },
+                (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
+                    (Nan, Nan) => true,
+                    (_, _) => l == r,
+                },
+                (Value::Decimal(l), Value::Decimal(r)) => l == r,
+                (Value::DateTime(l), Value::DateTime(r)) => l == r,
+                (Value::Duration(l), Value::Duration(r)) => l == r,
+                (Value::Bool(l), Value::Bool(r)) => l == r,
+                (Value::Null, Value::Null) => true,
+                (Value::String(l), Value::String(r)) => l == r,
+                (Value::Bytes(l), Value::Bytes(r)) => l == r,
+                (Value::Error(l), Value::Error(r)) => l == r,
+                (Value::Array(l), Value::Array(r)) => l == r,
+                (Value::Map(l), Value::Map(r)) => l == r,
+                (_, _) => false,
             }
-            (_, _) => false,
-        }
     }
 }
 
@@ -187,10 +178,10 @@ impl PartialOrd for Value {
                 (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
                 (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
                 (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
-                (Value::String(l), Value::String(r)) => l.partial_cmp(r),
-                (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
                 (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
                 (Value::Null, Value::Null) => Some(Ordering::Equal),
+                (Value::String(l), Value::String(r)) => l.partial_cmp(r),
+                (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
                 (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
                 (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
                 (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
