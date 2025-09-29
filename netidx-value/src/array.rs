@@ -91,7 +91,7 @@ unsafe impl RawPoolable for ValArrayBase {
             // reset can only be called if the arc is unique
             for v in Arc::get_mut(t).unwrap().slice.iter_mut() {
                 // ensure we drop any allocated values
-                *v = Value::Bool(false);
+                *v = Value::Null;
             }
         })
     }
@@ -104,7 +104,7 @@ unsafe impl RawPoolable for ValArrayBase {
 
 impl ValArrayBase {
     fn new_with_len(pool: WeakPool<Self>, len: usize) -> Self {
-        let iter = (0..len).map(|_| Value::Bool(false));
+        let iter = (0..len).map(|_| Value::Null);
         let t = ThinArc::from_header_and_iter(pool, iter);
         Self(ManuallyDrop::new(t))
     }
