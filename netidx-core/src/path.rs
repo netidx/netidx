@@ -1,5 +1,5 @@
 use crate::pack::{Pack, PackError};
-use arcstr::ArcStr;
+use arcstr::{literal, ArcStr};
 use bytes::{Buf, BufMut};
 use escaping::Escape;
 use std::{
@@ -264,7 +264,7 @@ impl Path {
     /// returns /
     pub fn root() -> Path {
         // CR estokes: need a good solution for using SEP here
-        Path::from("/")
+        Path(literal!("/"))
     }
 
     /// returns true if the path starts with /, false otherwise

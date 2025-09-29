@@ -49,6 +49,12 @@ fn get_by_size(len: usize) -> ValArrayBase {
 #[derive(Debug, Clone)]
 pub struct ValArrayBase(ManuallyDrop<ThinArc<WeakPool<Self>, Value>>);
 
+impl Default for ValArrayBase {
+    fn default() -> Self {
+        get_by_size(0)
+    }
+}
+
 impl Drop for ValArrayBase {
     fn drop(&mut self) {
         if ThinArc::strong_count(&self.0) > 1 {
@@ -165,6 +171,12 @@ impl Poolable for ValArraySlice {
 pub enum ValArray {
     Base(ValArrayBase),
     Slice(PArc<ValArraySlice>),
+}
+
+impl Default for ValArray {
+    fn default() -> Self {
+        Self::Base(Default::default())
+    }
 }
 
 impl Deref for ValArray {
