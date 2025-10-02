@@ -54,7 +54,8 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
             | GeneralName::RFC822Name(_)
             | GeneralName::RegisteredID(_)
             | GeneralName::URI(_)
-            | GeneralName::X400Address(_) => None,
+            | GeneralName::X400Address(_)
+            | GeneralName::Invalid(_, _) => None,
         })
         .collect();
     let alt_name = if alt_names.len() == 0 {
