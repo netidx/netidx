@@ -451,9 +451,10 @@ mod publisher {
             any::<i64>().prop_map(Value::Z64),
             any::<f32>().prop_map(Value::F32),
             any::<f64>().prop_map(Value::F64),
-            any::<[u8; 16]>().prop_map(|a| Value::Decimal(Decimal::deserialize(a))),
-            datetime().prop_map(Value::DateTime),
-            duration().prop_map(Value::Duration),
+            any::<[u8; 16]>()
+                .prop_map(|a| Value::Decimal(Arc::new(Decimal::deserialize(a)))),
+            datetime().prop_map(|d| Value::DateTime(Arc::new(d))),
+            duration().prop_map(|d| Value::Duration(Arc::new(d))),
             arcstr().prop_map(Value::String),
             bytes().prop_map(|b| Value::Bytes(b.into())),
             Just(Value::Bool(true)),

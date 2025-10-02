@@ -10,6 +10,7 @@ use std::{
     ops::{Add, Div, Mul, Not, Rem, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
 };
+use triomphe::Arc;
 
 impl Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -214,7 +215,7 @@ macro_rules! apply_op {
             }
             (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
-            (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(l $op r),
+            (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(Arc::new((*l) $op (*r))),
             (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
                 Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
             }
@@ -270,44 +271,44 @@ macro_rules! apply_op {
             (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
             (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
             (Value::Decimal(l), Value::U32(r) | Value::V32(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
+                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
             (Value::U32(l) | Value::V32(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
+                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
             (Value::Decimal(l), Value::U64(r) | Value::V64(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
+                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
             (Value::U64(l) | Value::V64(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
+                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
             (Value::Decimal(l), Value::I32(r) | Value::Z32(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
+                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
             (Value::I32(l) | Value::Z32(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
+                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
             (Value::Decimal(l), Value::I64(r) | Value::Z64(r)) =>
-                Value::Decimal(l $op Decimal::from(r)),
+                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
             (Value::I64(l) | Value::Z64(l), Value::Decimal(r)) =>
-                Value::Decimal(Decimal::from(l) $op r),
+                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
             (Value::Decimal(l), Value::F32(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(l $op r),
+                Ok(r) => Value::Decimal(Arc::new((*l) $op r)),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", r);
                     Value::error(e.as_str())
                 },
             },
             (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(l $op r),
+                Ok(l) => Value::Decimal(Arc::new(l $op (*r))),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", l);
                     Value::error(e.as_str())
                 },
             },
             (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(l $op r),
+                Ok(r) => Value::Decimal(Arc::new((*l) $op r)),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", r);
                     Value::error(e.as_str())
                 },
             },
             (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(l $op r),
+                Ok(l) => Value::Decimal(Arc::new(l $op (*r))),
                 Err(_) => {
                     let e = format_compact!("can't parse {} as a decimal", l);
                     Value::error(e.as_str())
@@ -384,12 +385,12 @@ impl Add for Value {
                 self, rhs, 0., +,
                 (Value::DateTime(dt), Value::Duration(d))
                     | (Value::Duration(d), Value::DateTime(dt)) => {
-                        match chrono::Duration::from_std(d) {
-                            Ok(d) => Value::DateTime(dt + d),
+                        match chrono::Duration::from_std(*d) {
+                            Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
                             Err(e) => Value::error(format_compact!("{}", e).as_str()),
                         }
                     },
-                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 + d1) },
+                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(Arc::new((*d0) + (*d1))) },
                 (Value::Duration(_), _)
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
@@ -411,12 +412,12 @@ impl Sub for Value {
                 self, rhs, 0., -,
                 (Value::DateTime(dt), Value::Duration(d))
                     | (Value::Duration(d), Value::DateTime(dt)) => {
-                        match chrono::Duration::from_std(d) {
-                            Ok(d) => Value::DateTime(dt - d),
+                        match chrono::Duration::from_std(*d) {
+                            Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
                             Err(e) => Value::error(format_compact!("{}", e).as_str()),
                         }
                     },
-                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(d0 - d1) },
+                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(Arc::new((*d0) - (*d1))) },
                 (Value::Duration(_), _)
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
@@ -437,23 +438,27 @@ impl Mul for Value {
             apply_op!(
                 self, rhs, 1., *,
                 (Value::Duration(d), Value::U32(n) | Value::V32(n))
-                | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => { Value::Duration(d * n) },
+                | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => { Value::Duration(Arc::new((*d) * n)) },
                 (Value::Duration(d), Value::I32(n) | Value::Z32(n))
                 | (Value::I32(n) | Value::Z32(n), Value::Duration(d)) => {
                     if n < 0 { panic!("can't multiply a duration by a negative number") }
-                    Value::Duration(d * n as u32)
+                    Value::Duration(Arc::new((*d) * n as u32))
                 },
                 (Value::Duration(d), Value::U64(n) | Value::V64(n))
                 | (Value::U64(n) | Value::V64(n), Value::Duration(d)) => {
-                    Value::Duration(d * n as u32)
+                    Value::Duration(Arc::new((*d) * n as u32))
                 },
                 (Value::Duration(d), Value::I64(n) | Value::Z64(n))
                 | (Value::I64(n) | Value::Z64(n), Value::Duration(d)) => {
                     if n < 0 { panic!("can't multiply a duration by a negative number") }
-                    Value::Duration(d * n as u32)
+                    Value::Duration(Arc::new((*d) * n as u32))
                 },
-                (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => { Value::Duration(d.mul_f32(s)) },
-                (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => { Value::Duration(d.mul_f64(s)) },
+                (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => {
+                    Value::Duration(Arc::new(d.mul_f32(s)))
+                },
+                (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => {
+                    Value::Duration(Arc::new(d.mul_f64(s)))
+                },
                     | (Value::Duration(_), _)
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))
@@ -473,20 +478,20 @@ impl Div for Value {
         let res = catch_unwind(AssertUnwindSafe(|| {
             apply_op!(
                 self, rhs, 1., /,
-                (Value::Duration(d), Value::U32(s) | Value::V32(s)) => { Value::Duration(d / s) },
+                (Value::Duration(d), Value::U32(s) | Value::V32(s)) => { Value::Duration(Arc::new((*d) / s)) },
                 (Value::Duration(d), Value::I32(s) | Value::Z32(s)) => {
                     if s < 0 { panic!("can't divide duration by a negative number") }
-                    Value::Duration(d / s as u32)
+                    Value::Duration(Arc::new((*d) / s as u32))
                 },
                 (Value::Duration(d), Value::U64(s) | Value::V64(s)) => {
-                    Value::Duration(d / s as u32)
+                    Value::Duration(Arc::new((*d) / s as u32))
                 },
                 (Value::Duration(d), Value::I64(s) | Value::Z64(s)) => {
                     if s < 0 { panic!("can't divide duration by a negative number") }
-                    Value::Duration(d / s as u32)
+                    Value::Duration(Arc::new((*d) / s as u32))
                 },
-                (Value::Duration(d), Value::F32(s)) => { Value::Duration(d.div_f32(s)) },
-                (Value::Duration(d), Value::F64(s)) => { Value::Duration(d.div_f64(s)) },
+                (Value::Duration(d), Value::F32(s)) => { Value::Duration(Arc::new(d.div_f32(s))) },
+                (Value::Duration(d), Value::F64(s)) => { Value::Duration(Arc::new(d.div_f64(s))) },
                 (Value::Duration(_), _)
                     | (_, Value::Duration(_))
                     | (_, Value::DateTime(_))

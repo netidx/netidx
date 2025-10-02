@@ -297,7 +297,7 @@ impl Into<Value> for Seek {
 impl FromValue for Seek {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::DateTime(ts) => Ok(Seek::Absolute(ts)),
+            Value::DateTime(ts) => Ok(Seek::Absolute(*ts)),
             v if v.number() => Ok(Seek::BatchRelative(v.cast_to::<i8>()?)),
             v => v.cast_to::<ArcStr>()?.parse::<Seek>(),
         }

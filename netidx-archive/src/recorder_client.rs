@@ -19,6 +19,7 @@ use netidx_protocols::{call_rpc, rpc::client::Proc};
 use poolshark::global::{GPooled, Pool};
 use std::{collections::VecDeque, sync::LazyLock, time::Duration};
 use tokio::{task, try_join};
+use triomphe::Arc;
 
 pub(crate) static PATHMAPS: LazyLock<Pool<FxHashMap<Id, Path>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
@@ -38,7 +39,7 @@ pub struct OneshotReply(pub GPooled<Vec<OneshotReplyShard>>);
 fn encode_bound(bound: &Option<DateTime<Utc>>) -> Value {
     match bound {
         None => Value::String(literal!("unbounded")),
-        Some(dt) => Value::DateTime(*dt),
+        Some(dt) => Value::DateTime(Arc::new(*dt)),
     }
 }
 

@@ -32,11 +32,16 @@ static POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
     ]
 });
 
-static SPOOL: LazyLock<RawPool<PArc<ValArraySlice>>> =
+static APOOL: LazyLock<RawPool<PArc<ValArrayInner>>> =
     LazyLock::new(|| RawPool::new(1024, 64));
 
+static EMPTY: LazyLock<ValArrayBase> =
+    LazyLock::new(|| ValArrayBase::new_with_len(POOLS[0].downgrade(), 0));
+
 fn get_by_size(len: usize) -> ValArrayBase {
-    if len <= MAX_LEN {
+    if len == 0 {
+        EMPTY.clone()
+    } else if len <= MAX_LEN {
         let pool = &POOLS[len];
         match pool.try_take() {
             Some(t) => t,
@@ -52,7 +57,7 @@ pub struct ValArrayBase(ManuallyDrop<ThinArc<WeakPool<Self>, Value>>);
 
 impl Default for ValArrayBase {
     fn default() -> Self {
-        get_by_size(0)
+        EMPTY.clone()
     }
 }
 
@@ -152,31 +157,32 @@ impl Deref for ValArraySlice {
     }
 }
 
-impl Poolable for ValArraySlice {
-    fn empty() -> Self {
-        Self { base: get_by_size(0), start: Bound::Unbounded, end: Bound::Unbounded }
-    }
+#[derive(Debug, Clone)]
+pub enum ValArrayInner {
+    Base(ValArrayBase),
+    Slice(ValArraySlice),
+}
 
+impl Poolable for ValArrayInner {
     fn capacity(&self) -> usize {
         1
     }
 
+    fn empty() -> Self {
+        Self::Base(EMPTY.clone())
+    }
+
     fn reset(&mut self) {
-        self.base = get_by_size(0);
-        self.start = Bound::Unbounded;
-        self.end = Bound::Unbounded
+        *self = Self::Base(EMPTY.clone())
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum ValArray {
-    Base(ValArrayBase),
-    Slice(PArc<ValArraySlice>),
-}
+pub struct ValArray(PArc<ValArrayInner>);
 
 impl Default for ValArray {
     fn default() -> Self {
-        Self::Base(Default::default())
+        Self(APOOL.take())
     }
 }
 
@@ -184,9 +190,9 @@ impl Deref for ValArray {
     type Target = [Value];
 
     fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Base(a) => &*a,
-            Self::Slice(s) => &**s,
+        match &*self.0 {
+            ValArrayInner::Base(a) => &*a,
+            ValArrayInner::Slice(s) => &**s,
         }
     }
 }
@@ -314,14 +320,17 @@ impl ValArray {
     pub fn from_iter_exact<I: Iterator<Item = Value> + ExactSizeIterator>(
         iter: I,
     ) -> Self {
+        let len = iter.len();
         let mut res = get_by_size(iter.len());
-        res.0.with_arc_mut(|res| {
-            let res = Arc::get_mut(res).unwrap();
-            for (i, v) in iter.enumerate() {
-                res.slice[i] = v;
-            }
-        });
-        Self::Base(res)
+        if len > 0 {
+            res.0.with_arc_mut(|res| {
+                let res = Arc::get_mut(res).unwrap();
+                for (i, v) in iter.enumerate() {
+                    res.slice[i] = v;
+                }
+            })
+        }
+        Self(PArc::new(&APOOL, ValArrayInner::Base(res)))
     }
 
     /// create a zero copy owned subslice of the array. Returns an
@@ -380,15 +389,15 @@ impl ValArray {
             }
             Ok(())
         }
-        match self {
-            Self::Base(a) => {
+        match &*self.0 {
+            ValArrayInner::Base(a) => {
                 let (start, end) =
                     (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
                 let t = ValArraySlice { base: a.clone(), start, end };
                 check_bounds(&a, start, end)?;
-                Ok(Self::Slice(PArc::new(&SPOOL, t)))
+                Ok(Self(PArc::new(&APOOL, ValArrayInner::Slice(t))))
             }
-            Self::Slice(s) => {
+            ValArrayInner::Slice(s) => {
                 let max_i = match s.end {
                     Bound::Unbounded => s.base.len(),
                     Bound::Excluded(i) => i,
@@ -516,7 +525,7 @@ impl ValArray {
                     }
                 };
                 let t = ValArraySlice { base: s.base.clone(), start, end };
-                Ok(Self::Slice(PArc::new(&SPOOL, t)))
+                Ok(Self(PArc::new(&APOOL, ValArrayInner::Slice(t))))
             }
         }
     }
@@ -590,13 +599,15 @@ impl Pack for ValArray {
             return Err(PackError::TooBig);
         }
         let mut data = get_by_size(elts);
-        data.0.with_arc_mut(|data| {
-            let data = Arc::get_mut(data).unwrap();
-            for i in 0..elts {
-                data.slice[i] = Pack::decode(buf)?;
-            }
-            Ok(())
-        })?;
-        Ok(Self::Base(data))
+        if elts > 0 {
+            data.0.with_arc_mut(|data| {
+                let data = Arc::get_mut(data).unwrap();
+                for i in 0..elts {
+                    data.slice[i] = Pack::decode(buf)?;
+                }
+                Ok(())
+            })?
+        }
+        Ok(Self(PArc::new(&APOOL, ValArrayInner::Base(data))))
     }
 }

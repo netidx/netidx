@@ -20,6 +20,7 @@ use netidx_protocols::{
 use poolshark::global::GPooled;
 use std::{collections::HashMap, ops::Bound, time::Duration};
 use tokio::sync::broadcast;
+use triomphe::Arc;
 use uuid::Uuid;
 
 pub(crate) static START_DOC: &'static str = "The timestamp you want to replay to start at, or Unbounded for the beginning of the archive. This can also be an offset from now in terms of [+-][0-9]+[.]?[0-9]*[yMdhms], e.g. -1.5d. Default Unbounded.";
@@ -49,7 +50,7 @@ fn parse_speed(v: Value) -> Result<Option<f64>> {
 
 pub(crate) fn parse_bound(v: Value) -> Result<Bound<DateTime<Utc>>> {
     match v {
-        Value::DateTime(ts) => Ok(Bound::Included(ts)),
+        Value::DateTime(ts) => Ok(Bound::Included(*ts)),
         Value::String(c) if c.trim().to_lowercase().as_str() == "unbounded" => {
             Ok(Bound::Unbounded)
         }
@@ -221,7 +222,9 @@ impl Controls {
         fn bound_to_val(b: Bound<DateTime<Utc>>) -> Value {
             match b {
                 Bound::Unbounded => Value::String(literal!("Unbounded")),
-                Bound::Included(ts) | Bound::Excluded(ts) => Value::DateTime(ts),
+                Bound::Included(ts) | Bound::Excluded(ts) => {
+                    Value::DateTime(Arc::new(ts))
+                }
             }
         }
         match m {

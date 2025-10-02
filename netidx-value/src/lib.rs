@@ -48,7 +48,7 @@ fn _test_valarray() {
 
 pub type Map = map::Map<Value, Value, 32>;
 
-const COPY_MAX: u32 = 0x0000_4000;
+const COPY_MAX: u32 = 0x0000_0800;
 
 // this type is divided into two subtypes, the copy part and the clone
 // part. If the tag word is <= COPY_MAX then the type is copy,
@@ -84,16 +84,10 @@ pub enum Value {
     F32(f32) = 0x0000_0100,
     /// 8 byte ieee754 double precision float
     F64(f64) = 0x0000_0200,
-    /// fixed point decimal type
-    Decimal(Decimal) = 0x0000_0400,
-    /// UTC timestamp
-    DateTime(DateTime<Utc>) = 0x0000_0800,
-    /// Duration
-    Duration(Duration) = 0x0000_1000,
     /// boolean true
-    Bool(bool) = 0x0000_2000,
+    Bool(bool) = 0x0000_0400,
     /// Empty value
-    Null = 0x0000_4000,
+    Null = 0x0000_0800,
     /// unicode string
     String(ArcStr) = 0x8000_0000,
     /// byte array
@@ -104,6 +98,12 @@ pub enum Value {
     Array(ValArray) = 0x1000_0000,
     /// A Map of values
     Map(Map) = 0x0800_0000,
+    /// fixed point decimal type
+    Decimal(Arc<Decimal>) = 0x0400_0000,
+    /// UTC timestamp
+    DateTime(Arc<DateTime<Utc>>) = 0x0200_0000,
+    /// Duration
+    Duration(Arc<Duration>) = 0x0100_0000,
 }
 
 // This will fail to compile if any variant that is supposed to be
@@ -118,9 +118,6 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::I64(i) | Value::Z64(i) => Value::I64(*i),
         Value::F32(i) => Value::F32(*i),
         Value::F64(i) => Value::F64(*i),
-        Value::Decimal(i) => Value::Decimal(*i),
-        Value::DateTime(i) => Value::DateTime(*i),
-        Value::Duration(i) => Value::Duration(*i),
         Value::Bool(b) => Value::Bool(*b),
         Value::Null => Value::Null,
 
@@ -130,6 +127,9 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::Error(i) => Value::Error(i.clone()),
         Value::Array(i) => Value::Array(i.clone()),
         Value::Map(i) => Value::Map(i.clone()),
+        Value::Decimal(i) => Value::Decimal(i.clone()),
+        Value::DateTime(i) => Value::DateTime(i.clone()),
+        Value::Duration(i) => Value::Duration(i.clone()),
     };
     panic!("{i}")
 }
@@ -145,21 +145,21 @@ impl Clone for Value {
                 Self::Error(e) => Self::Error(e.clone()),
                 Self::Array(a) => Self::Array(a.clone()),
                 Self::Map(m) => Self::Map(m.clone()),
-                Value::U32(_)
-                | Value::V32(_)
-                | Value::I32(_)
-                | Value::Z32(_)
-                | Value::U64(_)
-                | Value::V64(_)
-                | Value::I64(_)
-                | Value::Z64(_)
-                | Value::F32(_)
-                | Value::F64(_)
-                | Value::Decimal(_)
-                | Value::DateTime(_)
-                | Value::Duration(_)
-                | Value::Bool(_)
-                | Value::Null => unsafe { unreachable_unchecked() },
+                Self::Decimal(d) => Self::Decimal(d.clone()),
+                Self::DateTime(d) => Self::DateTime(d.clone()),
+                Self::Duration(d) => Self::Duration(d.clone()),
+                Self::U32(_)
+                | Self::V32(_)
+                | Self::I32(_)
+                | Self::Z32(_)
+                | Self::U64(_)
+                | Self::V64(_)
+                | Self::I64(_)
+                | Self::Z64(_)
+                | Self::F32(_)
+                | Self::F64(_)
+                | Self::Bool(_)
+                | Self::Null => unsafe { unreachable_unchecked() },
             }
         }
     }
@@ -184,6 +184,15 @@ impl Clone for Value {
                 Self::Map(m) => {
                     *self = Self::Map(m.clone());
                 }
+                Value::Decimal(d) => {
+                    *self = Self::Decimal(d.clone());
+                }
+                Value::DateTime(d) => {
+                    *self = Self::DateTime(d.clone());
+                }
+                Value::Duration(d) => {
+                    *self = Self::Duration(d.clone());
+                }
                 Value::U32(_)
                 | Value::V32(_)
                 | Value::I32(_)
@@ -194,9 +203,6 @@ impl Clone for Value {
                 | Value::Z64(_)
                 | Value::F32(_)
                 | Value::F64(_)
-                | Value::Decimal(_)
-                | Value::DateTime(_)
-                | Value::Duration(_)
                 | Value::Bool(_)
                 | Value::Null => unsafe { unreachable_unchecked() },
             }
@@ -442,14 +448,14 @@ impl Value {
                     Typ::F32 => Some(Value::F32($v as f32)),
                     Typ::F64 => Some(Value::F64($v as f64)),
                     Typ::Decimal => match Decimal::try_from($v) {
-                        Ok(d) => Some(Value::Decimal(d)),
+                        Ok(d) => Some(Value::Decimal(Arc::new(d))),
                         Err(_) => None,
                     },
-                    Typ::DateTime => {
-                        Some(Value::DateTime(DateTime::from_timestamp($v as i64, 0)?))
-                    }
+                    Typ::DateTime => Some(Value::DateTime(Arc::new(
+                        DateTime::from_timestamp($v as i64, 0)?,
+                    ))),
                     Typ::Duration => {
-                        Some(Value::Duration(Duration::from_secs($v as u64)))
+                        Some(Value::Duration(Arc::new(Duration::from_secs($v as u64))))
                     }
                     Typ::Bool => Some(if $v as i64 > 0 {
                         Value::Bool(true)
@@ -504,16 +510,16 @@ impl Value {
             Value::F64(v) => cast_number!(v, typ),
             Value::Decimal(v) => match typ {
                 Typ::Decimal => Some(Value::Decimal(v)),
-                Typ::U32 => v.try_into().ok().map(Value::U32),
-                Typ::V32 => v.try_into().ok().map(Value::V32),
-                Typ::I32 => v.try_into().ok().map(Value::I32),
-                Typ::Z32 => v.try_into().ok().map(Value::Z32),
-                Typ::U64 => v.try_into().ok().map(Value::U64),
-                Typ::V64 => v.try_into().ok().map(Value::V64),
-                Typ::I64 => v.try_into().ok().map(Value::I64),
-                Typ::Z64 => v.try_into().ok().map(Value::Z64),
-                Typ::F32 => v.try_into().ok().map(Value::F32),
-                Typ::F64 => v.try_into().ok().map(Value::F64),
+                Typ::U32 => (*v).try_into().ok().map(Value::U32),
+                Typ::V32 => (*v).try_into().ok().map(Value::V32),
+                Typ::I32 => (*v).try_into().ok().map(Value::I32),
+                Typ::Z32 => (*v).try_into().ok().map(Value::Z32),
+                Typ::U64 => (*v).try_into().ok().map(Value::U64),
+                Typ::V64 => (*v).try_into().ok().map(Value::V64),
+                Typ::I64 => (*v).try_into().ok().map(Value::I64),
+                Typ::Z64 => (*v).try_into().ok().map(Value::Z64),
+                Typ::F32 => (*v).try_into().ok().map(Value::F32),
+                Typ::F64 => (*v).try_into().ok().map(Value::F64),
                 Typ::String => {
                     Some(Value::String(format_compact!("{}", v).as_str().into()))
                 }
@@ -526,7 +532,7 @@ impl Value {
                 | Typ::Null
                 | Typ::Error => None,
             },
-            Value::DateTime(v) => match typ {
+            Value::DateTime(ref v) => match typ {
                 Typ::U32 | Typ::V32 => {
                     let ts = v.timestamp();
                     if ts < 0 && ts > u32::MAX as i64 {
@@ -574,7 +580,7 @@ impl Value {
                         Some(Value::F64(dur))
                     }
                 }
-                Typ::DateTime => Some(Value::DateTime(v)),
+                Typ::DateTime => Some(Value::DateTime(v.clone())),
                 Typ::Array => Some(Value::Array([self].into())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
@@ -585,7 +591,7 @@ impl Value {
                 | Typ::Error
                 | Typ::Map => None,
             },
-            Value::Duration(d) => match typ {
+            Value::Duration(ref d) => match typ {
                 Typ::U32 => Some(Value::U32(d.as_secs() as u32)),
                 Typ::V32 => Some(Value::V32(d.as_secs() as u32)),
                 Typ::I32 => Some(Value::I32(d.as_secs() as i32)),
@@ -597,7 +603,7 @@ impl Value {
                 Typ::F32 => Some(Value::F32(d.as_secs_f32())),
                 Typ::F64 => Some(Value::F64(d.as_secs_f64())),
                 Typ::Array => Some(Value::Array([self].into())),
-                Typ::Duration => Some(Value::Duration(d)),
+                Typ::Duration => Some(Value::Duration(d.clone())),
                 Typ::Null => Some(Value::Null),
                 Typ::String => unreachable!(),
                 Typ::Decimal

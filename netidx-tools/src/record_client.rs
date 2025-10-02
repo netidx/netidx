@@ -1,3 +1,4 @@
+use crate::subscriber::Out;
 use anyhow::{Context, Result};
 use arcstr::literal;
 use bytes::BytesMut;
@@ -15,8 +16,7 @@ use netidx_tools_core::ClientParams;
 use std::{collections::HashSet, future, path::PathBuf};
 use structopt::StructOpt;
 use tokio::io::{stdout, AsyncWriteExt};
-
-use crate::subscriber::Out;
+use triomphe::Arc;
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct OneshotParams {
@@ -160,7 +160,7 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
                             Out {
                                 raw: false,
                                 path: "timestamp",
-                                value: Event::Update(Value::DateTime(ts)),
+                                value: Event::Update(Value::DateTime(Arc::new(ts))),
                             }
                             .write(&mut buf)?;
                             for BatchItem(id, value) in batch.drain(..) {

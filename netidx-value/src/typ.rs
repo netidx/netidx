@@ -10,6 +10,7 @@ use std::{
     fmt, mem, result,
     str::FromStr,
 };
+use triomphe::Arc;
 
 // Each Typ corresponds directly to the tag of a Value, the bits are
 // the same, and they can be used interchangeably.
@@ -27,16 +28,16 @@ pub enum Typ {
     Z64 = 0x0000_0080,
     F32 = 0x0000_0100,
     F64 = 0x0000_0200,
-    Decimal = 0x0000_0400,
-    DateTime = 0x0000_0800,
-    Duration = 0x0000_1000,
-    Bool = 0x0000_2000,
-    Null = 0x0000_4000,
+    Bool = 0x0000_0400,
+    Null = 0x0000_0800,
     String = 0x8000_0000,
     Bytes = 0x4000_0000,
     Error = 0x2000_0000,
     Array = 0x1000_0000,
     Map = 0x0800_0000,
+    Decimal = 0x0400_0000,
+    DateTime = 0x0200_0000,
+    Duration = 0x0100_0000,
 }
 
 impl Typ {
@@ -52,8 +53,8 @@ impl Typ {
             Typ::Z64 => Ok(Value::Z64(s.parse::<i64>()?)),
             Typ::F32 => Ok(Value::F32(s.parse::<f32>()?)),
             Typ::F64 => Ok(Value::F64(s.parse::<f64>()?)),
-            Typ::Decimal => Ok(Value::Decimal(s.parse::<Decimal>()?)),
-            Typ::DateTime => Ok(Value::DateTime(DateTime::from_str(s)?)),
+            Typ::Decimal => Ok(Value::Decimal(Arc::new(s.parse::<Decimal>()?))),
+            Typ::DateTime => Ok(Value::DateTime(Arc::new(DateTime::from_str(s)?))),
             Typ::Duration => {
                 let mut tmp = String::from("duration:");
                 tmp.push_str(s);

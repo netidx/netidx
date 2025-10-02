@@ -118,7 +118,7 @@ impl ExternalControl {
     fn remap_rescan(mut req: RpcCall, ts: Value) -> Option<(ExternalControl, RpcReply)> {
         match ts {
             Value::DateTime(ts) => {
-                Some((ExternalControl::RemapRescan(Some(ts)), req.reply))
+                Some((ExternalControl::RemapRescan(Some(*ts)), req.reply))
             }
             Value::Null => Some((ExternalControl::RemapRescan(None), req.reply)),
             _ => rpc_err!(req.reply, "invalid timestamp"),
@@ -127,7 +127,7 @@ impl ExternalControl {
 
     fn reopen(mut req: RpcCall, ts: Value) -> Option<(ExternalControl, RpcReply)> {
         match ts {
-            Value::DateTime(ts) => Some((ExternalControl::Reopen(Some(ts)), req.reply)),
+            Value::DateTime(ts) => Some((ExternalControl::Reopen(Some(*ts)), req.reply)),
             Value::Null => Some((ExternalControl::Reopen(None), req.reply)),
             _ => rpc_err!(req.reply, "invalid timestamp"),
         }

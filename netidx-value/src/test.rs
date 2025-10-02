@@ -10,6 +10,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     time::Duration,
 };
+use triomphe::Arc;
 
 #[test]
 fn value_typ_discriminants() {
@@ -26,17 +27,20 @@ fn value_typ_discriminants() {
             Typ::F32 => assert_eq!(t as u32, Value::F32(42.).discriminant()),
             Typ::F64 => assert_eq!(t as u32, Value::F64(42.).discriminant()),
             Typ::Decimal => {
-                assert_eq!(t as u32, Value::Decimal(Decimal::MIN).discriminant())
+                assert_eq!(
+                    t as u32,
+                    Value::Decimal(Arc::new(Decimal::MIN)).discriminant()
+                )
             }
             Typ::DateTime => {
                 assert_eq!(
                     t as u32,
-                    Value::DateTime(DateTime::<Utc>::MIN_UTC).discriminant()
+                    Value::DateTime(Arc::new(DateTime::<Utc>::MIN_UTC)).discriminant()
                 )
             }
             Typ::Duration => assert_eq!(
                 t as u32,
-                Value::Duration(Duration::from_secs(42)).discriminant()
+                Value::Duration(Arc::new(Duration::from_secs(42))).discriminant()
             ),
             Typ::Bool => assert_eq!(t as u32, Value::Bool(true).discriminant()),
             Typ::Null => assert_eq!(t as u32, Value::Null.discriminant()),

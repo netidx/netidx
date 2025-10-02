@@ -212,7 +212,11 @@ where
                 .map(|_| Value::Bool(false)),
         ),
         attempt(string("null").skip(not_followed_by(alpha_num())).map(|_| Value::Null)),
-        attempt(constant("decimal").with(flt::<_, Decimal>()).map(Value::Decimal)),
+        attempt(
+            constant("decimal")
+                .with(flt::<_, Decimal>())
+                .map(|d| Value::Decimal(Arc::new(d))),
+        ),
         attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
         attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
         attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
@@ -236,7 +240,7 @@ where
         attempt(
             constant("datetime")
                 .with(from_str(quoted(must_escape, esc)))
-                .map(|d| Value::DateTime(d)),
+                .map(|d| Value::DateTime(Arc::new(d))),
         ),
         attempt(
             constant("duration")
@@ -254,7 +258,7 @@ where
                         "s" => Duration::from_secs_f64(n),
                         _ => unreachable!(),
                     };
-                    Value::Duration(d)
+                    Value::Duration(Arc::new(d))
                 }),
         ),
     )))

@@ -18,6 +18,7 @@ use std::{
     hash::{BuildHasher, Hash},
     time::Duration,
 };
+use triomphe::Arc;
 
 pub trait FromValue {
     /// attempt to cast v to the type of self using any reasonable means
@@ -399,11 +400,11 @@ impl From<f64> for Value {
 impl FromValue for Decimal {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::Decimal(v) => Ok(v),
+            Value::Decimal(v) => Ok(*v),
             v => {
                 v.cast(Typ::Decimal).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
                     match v {
-                        Value::Decimal(v) => Ok(v),
+                        Value::Decimal(v) => Ok(*v),
                         _ => bail!("can't cast"),
                     }
                 })
@@ -413,7 +414,7 @@ impl FromValue for Decimal {
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::Decimal(v) => Some(v),
+            Value::Decimal(v) => Some(*v),
             _ => None,
         }
     }
@@ -421,7 +422,7 @@ impl FromValue for Decimal {
 
 impl From<Decimal> for Value {
     fn from(value: Decimal) -> Self {
-        Value::Decimal(value)
+        Value::Decimal(Arc::new(value))
     }
 }
 
@@ -553,11 +554,11 @@ impl From<CompactString> for Value {
 impl FromValue for DateTime<Utc> {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::DateTime(d) => Ok(d),
+            Value::DateTime(d) => Ok(*d),
             v => {
                 v.cast(Typ::DateTime).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
                     match v {
-                        Value::DateTime(d) => Ok(d),
+                        Value::DateTime(d) => Ok(*d),
                         _ => bail!("can't cast"),
                     }
                 })
@@ -567,7 +568,7 @@ impl FromValue for DateTime<Utc> {
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::DateTime(d) => Some(d),
+            Value::DateTime(d) => Some(*d),
             _ => None,
         }
     }
@@ -575,18 +576,18 @@ impl FromValue for DateTime<Utc> {
 
 impl From<DateTime<Utc>> for Value {
     fn from(v: DateTime<Utc>) -> Value {
-        Value::DateTime(v)
+        Value::DateTime(Arc::new(v))
     }
 }
 
 impl FromValue for Duration {
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::Duration(d) => Ok(d),
+            Value::Duration(d) => Ok(*d),
             v => {
                 v.cast(Typ::Duration).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
                     match v {
-                        Value::Duration(d) => Ok(d),
+                        Value::Duration(d) => Ok(*d),
                         _ => bail!("can't cast"),
                     }
                 })
@@ -596,7 +597,7 @@ impl FromValue for Duration {
 
     fn get(v: Value) -> Option<Self> {
         match v {
-            Value::Duration(d) => Some(d),
+            Value::Duration(d) => Some(*d),
             _ => None,
         }
     }
@@ -604,7 +605,7 @@ impl FromValue for Duration {
 
 impl From<Duration> for Value {
     fn from(v: Duration) -> Value {
-        Value::Duration(v)
+        Value::Duration(Arc::new(v))
     }
 }
 

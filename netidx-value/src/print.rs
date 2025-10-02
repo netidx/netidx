@@ -135,7 +135,7 @@ impl Value {
             Value::I64(v) | Value::Z64(v) => write!(f, "{}", v),
             Value::F32(v) => write!(f, "{}", v),
             Value::F64(v) => write!(f, "{}", v),
-            Value::Decimal(v) => write!(f, "{}", DecimalFmt(*v)),
+            Value::Decimal(v) => write!(f, "{}", DecimalFmt(**v)),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let v = v.as_secs_f64();
@@ -241,9 +241,9 @@ impl Value {
             }
             Value::Decimal(v) => {
                 if types {
-                    write!(f, "decimal:{}", DecimalFmt(*v))
+                    write!(f, "decimal:{}", DecimalFmt(**v))
                 } else {
-                    write!(f, "{}", DecimalFmt(*v))
+                    write!(f, "{}", DecimalFmt(**v))
                 }
             }
             Value::DateTime(v) => {
