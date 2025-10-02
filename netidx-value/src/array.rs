@@ -6,6 +6,7 @@ use netidx_core::pack::{
 };
 use poolshark::{
     global::{arc::TArc as PArc, RawPool, WeakPool},
+    local::LPooled,
     Poolable, RawPoolable,
 };
 use seq_macro::seq;
@@ -248,11 +249,11 @@ impl From<&[Value]> for ValArray {
 
 impl FromIterator<Value> for ValArray {
     fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
-        let mut tmp: SmallVec<[Value; 64]> = smallvec![];
+        let mut tmp: LPooled<Vec<Value>> = LPooled::take();
         for v in iter {
             tmp.push(v);
         }
-        Self::from_iter_exact(tmp.into_iter())
+        Self::from_iter_exact(tmp.drain(..))
     }
 }
 
