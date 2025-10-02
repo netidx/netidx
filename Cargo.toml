@@ -88,7 +88,7 @@ tokio = { version = "1", features = [
 triomphe = { version = "0.1" }
 uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
-x509-parser = "0.17"
+x509-parser = "0.18"
 zstd = { version = "0.13", features = ["zstdmt"] }
 
 [workspace]
