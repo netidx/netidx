@@ -25,6 +25,7 @@ use futures::{
 use fxhash::{FxHashMap, FxHashSet};
 use if_addrs::get_if_addrs;
 use log::{error, info};
+use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
 use rand::{self, Rng};
@@ -1047,6 +1048,7 @@ pub struct PublisherBuilder {
     config: Option<Config>,
     desired_auth: Option<DesiredAuth>,
     bind_cfg: Option<BindCfg>,
+    priority: PublisherPriority,
     max_clients: usize,
     slack: usize,
 }
@@ -1057,6 +1059,7 @@ impl PublisherBuilder {
             config: Some(config),
             desired_auth: None,
             bind_cfg: None,
+            priority: PublisherPriority::Normal,
             max_clients: 768,
             slack: 3,
         }
@@ -1067,7 +1070,15 @@ impl PublisherBuilder {
         let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
         let bind_cfg =
             self.bind_cfg.take().unwrap_or_else(|| cfg.default_bind_config.clone());
-        Publisher::new(cfg, desired_auth, bind_cfg, self.max_clients, self.slack).await
+        Publisher::new(
+            cfg,
+            desired_auth,
+            bind_cfg,
+            self.priority,
+            self.max_clients,
+            self.slack,
+        )
+        .await
     }
 
     /// The desired authentication mechanism you want to use. If not
@@ -1098,6 +1109,35 @@ impl PublisherBuilder {
         self.slack = slack;
         self
     }
+
+    /// Set the priority of this publisher.
+    ///
+    /// There are three priority levels,
+    ///
+    /// - High
+    /// - Normal
+    /// - Low
+    ///
+    /// The default priority is Normal. Subscribers will not attempt to connect
+    /// to a Normal priority publisher unless all High priority publishers that
+    /// publish the same path have been tried first. Subscribers will not
+    /// attempt to connect to a Low priority publisher unless all High and all
+    /// Normal priority publishers have been tried first.
+    ///
+    /// If multiple publishers exist at a given priority level then subscribers
+    /// will pick a random one to try first.
+    ///
+    /// If a subscriber is already connected to the publisher that is publishing
+    /// a path it wishes to subscribe to then it will reuse the existing
+    /// connection regardless of priority.
+    ///
+    /// This can be used for many things, for example, primary and backup
+    /// network segmentation, high performance vs backup cluster segmentation,
+    /// and probably a lot more.
+    pub fn priority(&mut self, priority: PublisherPriority) -> &mut Self {
+        self.priority = priority;
+        self
+    }
 }
 
 /// Publish values. Publisher is internally wrapped in an Arc, so
@@ -1112,12 +1152,13 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    /// Create a new publisher using the specified resolver, desired
-    /// auth, and bind config.
+    /// Create a new publisher using the specified resolver, desired auth, bind
+    /// config, and priority. `PublisherBuilder` may be easier to use.
     pub async fn new(
         resolver: Config,
         desired_auth: DesiredAuth,
         bind_cfg: BindCfg,
+        priority: PublisherPriority,
         max_clients: usize,
         slack: usize,
     ) -> Result<Publisher> {
@@ -1158,7 +1199,8 @@ impl Publisher {
             }
         };
         let tls_ctx = resolver.tls.clone().map(tls::CachedAcceptor::new);
-        let resolver = ResolverWrite::new(resolver, desired_auth.clone(), addr)?;
+        let resolver =
+            ResolverWrite::new(resolver, desired_auth.clone(), addr, priority)?;
         let (stop, receive_stop) = oneshot::channel();
         let (tx_trigger, rx_trigger) = unbounded();
         let pb = Publisher(Arc::new(Mutex::new(PublisherInner {

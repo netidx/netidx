@@ -2,6 +2,7 @@ use super::*;
 use netidx::{
     config::Config as ClientConfig,
     path::Path,
+    protocol::resolver::PublisherPriority,
     publisher::Publisher,
     resolver_client::DesiredAuth,
     resolver_server::{config::Config as ServerConfig, Server},
@@ -31,6 +32,7 @@ impl Ctx {
             cfg.clone(),
             DesiredAuth::Anonymous,
             "127.0.0.1/32".parse().unwrap(),
+            PublisherPriority::Normal,
             768,
             3,
         )
@@ -108,7 +110,7 @@ async fn accept_cancel_safe() {
         }
     });
     for _ in 0..100 {
-	#[rustfmt::skip]
+        #[rustfmt::skip]
         select! {
             () = futures::future::ready(()) => println!("cancel!"), // ensure a lot of cancels happen
             r = listener.accept() => {

@@ -25,6 +25,7 @@ use common::{
 };
 use futures::future;
 use fxhash::FxHashMap;
+use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
 use poolshark::global::{GPooled, Pool};
 use read_client::ReadClient;
@@ -187,6 +188,7 @@ where
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
+        priority: PublisherPriority,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
     ) -> Self;
@@ -198,6 +200,7 @@ impl Connection<ToRead, FromRead> for ReadClient {
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
+        _priority: PublisherPriority,
         _secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
     ) -> Self {
@@ -214,10 +217,11 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
+        priority: PublisherPriority,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
     ) -> Self {
-        WriteClient::new(resolver, desired_auth, writer_addr, secrets, tls)
+        WriteClient::new(resolver, desired_auth, writer_addr, priority, secrets, tls)
     }
 
     fn send(&mut self, batch: GPooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
@@ -236,6 +240,7 @@ where
     default: Arc<Referral>,
     by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
+    priority: PublisherPriority,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     tls: Option<tls::CachedConnector>,
     phantom: PhantomData<(T, F)>,
@@ -263,6 +268,7 @@ where
                     r.clone(),
                     self.desired_auth.clone(),
                     self.writer_addr,
+                    self.priority,
                     self.secrets.clone(),
                     self.tls.clone(),
                 );
@@ -289,6 +295,7 @@ where
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
+        priority: PublisherPriority,
         f_pool: Pool<Vec<F>>,
         fi_pool: Pool<Vec<(usize, F)>>,
         ti_pool: Pool<Vec<(usize, T)>>,
@@ -304,6 +311,7 @@ where
             default,
             by_server: HashMap::new(),
             writer_addr,
+            priority,
             secrets,
             tls,
             f_pool,
@@ -396,6 +404,7 @@ impl ResolverRead {
             default,
             desired_auth,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+            PublisherPriority::Normal,
             RAWFROMREADPOOL.clone(),
             FROMREADPOOL.clone(),
             TOREADPOOL.clone(),
@@ -623,6 +632,7 @@ impl ResolverWrite {
         default: Config,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
+        priority: PublisherPriority,
     ) -> Result<Self> {
         match &desired_auth {
             DesiredAuth::Local
@@ -642,6 +652,7 @@ impl ResolverWrite {
             default,
             desired_auth,
             writer_addr,
+            priority,
             RAWFROMWRITEPOOL.clone(),
             FROMWRITEPOOL.clone(),
             TOWRITEPOOL.clone(),

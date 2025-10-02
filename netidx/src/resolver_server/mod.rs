@@ -160,6 +160,7 @@ impl ClinfosInner {
                                 hash_method: HashMethod::Sha3_512,
                                 target_auth: hello.auth.clone().try_into()?,
                                 user_info: None,
+                                priority: hello.priority,
                             });
                             let (tx, rx) = oneshot::channel();
                             e.insert(ClientInfo::Running {

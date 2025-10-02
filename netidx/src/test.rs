@@ -8,7 +8,7 @@ mod resolver {
         resolver_server::{config::Config as ServerConfig, Server},
     };
     use arcstr::literal;
-    use netidx_netproto::resolver::TargetAuth;
+    use netidx_netproto::resolver::{PublisherPriority, TargetAuth};
     use rand::{rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::{runtime::Runtime, time};
@@ -27,8 +27,13 @@ mod resolver {
             let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr)
-                .unwrap();
+            let w = ResolverWrite::new(
+                client_cfg.clone(),
+                DesiredAuth::Anonymous,
+                paddr,
+                PublisherPriority::Normal,
+            )
+            .unwrap();
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
             let flags = Some(PublishFlags::USE_EXISTING.bits());
@@ -63,8 +68,13 @@ mod resolver {
             let server = Server::new(server_cfg, false, 0).await.expect("start server");
             client_cfg.addrs[0].0 = *server.local_addr();
             let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(client_cfg.clone(), DesiredAuth::Anonymous, paddr)
-                .unwrap();
+            let w = ResolverWrite::new(
+                client_cfg.clone(),
+                DesiredAuth::Anonymous,
+                paddr,
+                PublisherPriority::Normal,
+            )
+            .unwrap();
             let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
             w.publish_default(iter::once(p("/default"))).await.unwrap();
             let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
@@ -303,16 +313,28 @@ mod resolver {
         let r_root = ResolverRead::new(ctx.cfg_root.clone(), DesiredAuth::Anonymous);
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
         assert!(r_root.check_changed(&mut ct_app).await.unwrap());
-        let w0 =
-            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[0])
-                .unwrap();
-        let w1 =
-            ResolverWrite::new(ctx.random_server(), DesiredAuth::Anonymous, waddrs[1])
-                .unwrap();
+        let w0 = ResolverWrite::new(
+            ctx.random_server(),
+            DesiredAuth::Anonymous,
+            waddrs[0],
+            PublisherPriority::Normal,
+        )
+        .unwrap();
+        let w1 = ResolverWrite::new(
+            ctx.random_server(),
+            DesiredAuth::Anonymous,
+            waddrs[1],
+            PublisherPriority::Normal,
+        )
+        .unwrap();
         w0.publish(paths.iter().cloned()).await.unwrap();
-        let wl =
-            ResolverWrite::new(ctx.cfg_local.clone(), DesiredAuth::Anonymous, waddrs[0])
-                .unwrap();
+        let wl = ResolverWrite::new(
+            ctx.cfg_local.clone(),
+            DesiredAuth::Anonymous,
+            waddrs[0],
+            PublisherPriority::Normal,
+        )
+        .unwrap();
         wl.publish(local_paths.iter().cloned()).await.unwrap();
         time::sleep(Duration::from_millis(1000)).await;
         assert!(r_root.check_changed(&mut ct_root).await.unwrap());
@@ -384,6 +406,7 @@ mod publisher {
     use anyhow::Result;
     use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
     use netidx_core::path::Path;
+    use netidx_netproto::resolver::PublisherPriority;
     use parking_lot::Mutex;
     use std::{
         iter,
@@ -427,10 +450,16 @@ mod publisher {
             DesiredAuth::Tls { .. } => true,
             _ => false,
         };
-        let publisher =
-            Publisher::new(cfg, auth, "127.0.0.1/32".parse().unwrap(), 768, 3)
-                .await
-                .unwrap();
+        let publisher = Publisher::new(
+            cfg,
+            auth,
+            "127.0.0.1/32".parse().unwrap(),
+            PublisherPriority::Normal,
+            768,
+            3,
+        )
+        .await
+        .unwrap();
         let vp = publisher.publish("/app/v0".into(), Value::U64(0)).unwrap();
         publisher.alias(vp.id(), "/app/v1".into()).unwrap();
         let mut dfp: Option<Val> = None;

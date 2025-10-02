@@ -60,8 +60,9 @@ mod resolver {
         resolver::{
             Auth, AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite,
             FromRead, FromWrite, GetChangeNr, HashMethod, ListMatching, Publisher,
-            PublisherId, PublisherRef, ReadyForOwnershipCheck, Referral, Resolved,
-            Secret, ServerHelloWrite, Table, TargetAuth, ToRead, ToWrite,
+            PublisherId, PublisherPriority, PublisherRef, ReadyForOwnershipCheck,
+            Referral, Resolved, Secret, ServerHelloWrite, Table, TargetAuth, ToRead,
+            ToWrite,
         },
     };
     use netidx_core::pack::PackError;
@@ -129,8 +130,13 @@ mod resolver {
     }
 
     fn client_hello_write() -> impl Strategy<Value = ClientHelloWrite> {
-        (any::<SocketAddr>(), auth_write())
-            .prop_map(|(write_addr, auth)| ClientHelloWrite { write_addr, auth })
+        (any::<SocketAddr>(), auth_write(), publisher_priority()).prop_map(
+            |(write_addr, auth, priority)| ClientHelloWrite {
+                write_addr,
+                auth,
+                priority,
+            },
+        )
     }
 
     fn client_hello() -> impl Strategy<Value = ClientHello> {
@@ -181,6 +187,14 @@ mod resolver {
         prop_oneof![Just(HashMethod::Sha3_512)]
     }
 
+    fn publisher_priority() -> impl Strategy<Value = PublisherPriority> {
+        prop_oneof![
+            Just(PublisherPriority::High),
+            Just(PublisherPriority::Normal),
+            Just(PublisherPriority::Low)
+        ]
+    }
+
     fn publisher() -> impl Strategy<Value = Publisher> {
         let resolver = any::<SocketAddr>();
         let id = publisher_id();
@@ -188,14 +202,18 @@ mod resolver {
         let hash_method = hash_method();
         let target_auth = target_auth();
         let user_info = option(user_info());
-        (resolver, id, addr, hash_method, target_auth, user_info).prop_map(
-            |(resolver, id, addr, hash_method, target_auth, user_info)| Publisher {
-                resolver,
-                id,
-                addr,
-                hash_method,
-                target_auth,
-                user_info,
+        let priority = publisher_priority();
+        (resolver, id, addr, hash_method, target_auth, user_info, priority).prop_map(
+            |(resolver, id, addr, hash_method, target_auth, user_info, priority)| {
+                Publisher {
+                    resolver,
+                    id,
+                    addr,
+                    hash_method,
+                    target_auth,
+                    user_info,
+                    priority,
+                }
             },
         )
     }

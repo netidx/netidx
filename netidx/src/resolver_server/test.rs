@@ -6,6 +6,7 @@ use crate::{
 };
 use bytes::Bytes;
 use fxhash::FxHashMap;
+use netidx_netproto::resolver::PublisherPriority;
 use rand::{self, rng, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -39,6 +40,7 @@ fn test_resolver_store() {
             resolver: addr,
             target_auth: TargetAuth::Anonymous,
             user_info: None,
+            priority: PublisherPriority::Normal,
         });
         if rng().random() {
             let path = Path::from(String::from(Path::dirname(&parsed[0]).unwrap()));

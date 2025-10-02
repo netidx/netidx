@@ -25,6 +25,7 @@ use futures::{
 use fxhash::{FxBuildHasher, FxHashMap};
 use indexmap::IndexMap;
 use log::{debug, info, warn};
+use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
 use poolshark::global::GPooled;
 use rand::{rng, Rng};
@@ -75,6 +76,7 @@ struct Connection {
     active: bool,
     heartbeat: Interval,
     disconnect: Interval,
+    priority: PublisherPriority,
 }
 
 impl Connection {
@@ -197,8 +199,9 @@ impl Connection {
         let sec = Duration::from_secs(1);
         let hello = |auth| {
             let h = ClientHello::WriteOnly(ClientHelloWrite {
-                write_addr: self.write_addr,
                 auth,
+                write_addr: self.write_addr,
+                priority: self.priority,
             });
             debug!("write_con connection established hello {:?}", h);
             h
@@ -490,6 +493,7 @@ impl Connection {
         resolver_addr: SocketAddr,
         resolver_auth: Auth,
         write_addr: SocketAddr,
+        priority: PublisherPriority,
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
@@ -499,6 +503,7 @@ impl Connection {
             resolver_addr,
             resolver_auth,
             write_addr,
+            priority,
             published: IndexMap::default(),
             secrets,
             desired_auth,
@@ -569,6 +574,7 @@ async fn write_mgr(
     desired_auth: DesiredAuth,
     secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
     write_addr: SocketAddr,
+    priority: PublisherPriority,
     tls: Option<tls::CachedConnector>,
 ) -> Result<()> {
     let (sender, _) = broadcast::channel(100);
@@ -585,6 +591,7 @@ async fn write_mgr(
                 addr,
                 auth,
                 write_addr,
+                priority,
                 desired_auth,
                 secrets,
                 tls,
@@ -621,13 +628,22 @@ impl WriteClient {
         resolver: Arc<Referral>,
         desired_auth: DesiredAuth,
         write_addr: SocketAddr,
+        priority: PublisherPriority,
         secrets: Arc<RwLock<FxHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
     ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
-            let r =
-                write_mgr(to_rx, resolver, desired_auth, secrets, write_addr, tls).await;
+            let r = write_mgr(
+                to_rx,
+                resolver,
+                desired_auth,
+                secrets,
+                write_addr,
+                priority,
+                tls,
+            )
+            .await;
             info!("write manager exited {:?}", r);
         });
         Self(to_tx)

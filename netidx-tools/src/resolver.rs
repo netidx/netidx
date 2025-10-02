@@ -3,7 +3,10 @@ use arcstr::ArcStr;
 use netidx::{
     config::Config,
     path::Path,
-    protocol::glob::{Glob, GlobSet},
+    protocol::{
+        glob::{Glob, GlobSet},
+        resolver::PublisherPriority,
+    },
     resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
 };
 use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
@@ -126,13 +129,15 @@ pub(super) async fn run(
             }
         }
         ResolverCmd::Add { path, socketaddr } => {
-            let resolver = ResolverWrite::new(config, auth, socketaddr)
-                .context("create resolver write")?;
+            let resolver =
+                ResolverWrite::new(config, auth, socketaddr, PublisherPriority::Normal)
+                    .context("create resolver write")?;
             resolver.publish(vec![path]).await.context("add publisher")?;
         }
         ResolverCmd::Remove { path, socketaddr } => {
-            let resolver = ResolverWrite::new(config, auth, socketaddr)
-                .context("create resolver write")?;
+            let resolver =
+                ResolverWrite::new(config, auth, socketaddr, PublisherPriority::Normal)
+                    .context("create resolver write")?;
             resolver.unpublish(vec![path]).await.context("remove publisher")?;
         }
     }

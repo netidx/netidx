@@ -29,7 +29,7 @@ use futures::{
 use fxhash::FxHashMap;
 use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
 use log::{info, trace, warn};
-use netidx_netproto::resolver::{PublisherRef, UserInfo};
+use netidx_netproto::resolver::{PublisherPriority, PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
 use rand::Rng;
@@ -546,39 +546,50 @@ impl SubscriberInner {
         flags: PublishFlags,
     ) -> Option<Chosen> {
         use rand::seq::IteratorRandom;
-        let res = resolved
+        let mk = |(pref, pb): (&PublisherRef, &Publisher)| Chosen {
+            addr: pb.addr,
+            target_auth: pb.target_auth.clone(),
+            token: pref.token.clone(),
+            uifo: pb.user_info.clone(),
+            flags,
+        };
+        macro_rules! with_pred {
+            ($f:expr) => {
+                resolved
+                    .publishers
+                    .iter()
+                    .filter_map(|pref| {
+                        publishers.get(&pref.id).filter($f).map(|pb| (pref, pb))
+                    })
+                    .choose(&mut rand::rng())
+                    .map(mk)
+            };
+        }
+        let high = with_pred!(|pb| {
+            pb.priority == PublisherPriority::High
+                && !self.recently_failed.contains_key(&pb.addr)
+        });
+        if let Some(chosen) = high {
+            return Some(chosen);
+        }
+        let normal = with_pred!(|pb| {
+            (pb.priority == PublisherPriority::High
+                || pb.priority == PublisherPriority::Normal)
+                && !self.recently_failed.contains_key(&pb.addr)
+        });
+        if let Some(chosen) = normal {
+            return Some(chosen);
+        }
+        let low = with_pred!(|pb| !self.recently_failed.contains_key(&pb.addr));
+        if let Some(chosen) = low {
+            return Some(chosen);
+        }
+        resolved
             .publishers
             .iter()
-            .filter_map(|pref| {
-                publishers
-                    .get(&pref.id)
-                    .filter(|pb| !self.recently_failed.contains_key(&pb.addr))
-                    .map(|pb| (pref, pb))
-            })
+            .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
             .choose(&mut rand::rng())
-            .map(|(pref, pb)| Chosen {
-                addr: pb.addr,
-                target_auth: pb.target_auth.clone(),
-                token: pref.token.clone(),
-                uifo: pb.user_info.clone(),
-                flags,
-            });
-        if let Some(chosen) = res {
-            Some(chosen)
-        } else {
-            resolved
-                .publishers
-                .iter()
-                .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
-                .choose(&mut rand::rng())
-                .map(|(pref, pb)| Chosen {
-                    addr: pb.addr,
-                    target_auth: pb.target_auth.clone(),
-                    token: pref.token.clone(),
-                    uifo: pb.user_info.clone(),
-                    flags,
-                })
-        }
+            .map(mk)
     }
 
     fn choose_existing_addr(

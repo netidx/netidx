@@ -52,6 +52,8 @@ pub enum AuthWrite {
 pub struct ClientHelloWrite {
     pub write_addr: SocketAddr,
     pub auth: AuthWrite,
+    #[pack(default)]
+    pub priority: PublisherPriority,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
@@ -163,6 +165,19 @@ pub struct UserInfo {
     pub token: Bytes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pack)]
+pub enum PublisherPriority {
+    High,
+    Normal,
+    Low,
+}
+
+impl Default for PublisherPriority {
+    fn default() -> Self {
+        PublisherPriority::Normal
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Publisher {
     pub resolver: SocketAddr,
@@ -172,6 +187,8 @@ pub struct Publisher {
     pub target_auth: TargetAuth,
     #[pack(default)]
     pub user_info: Option<UserInfo>,
+    #[pack(default)]
+    pub priority: PublisherPriority,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
