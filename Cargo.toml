@@ -4,6 +4,7 @@ opt-level = 3
 lto = true
 debug = false
 
+
 [profile.dev]
 opt-level = "s"
 lto = "thin"

@@ -505,6 +505,7 @@ impl Connection {
     }
 }
 
+#[derive(Debug)]
 struct Chosen {
     addr: SocketAddr,
     target_auth: TargetAuth,
@@ -937,24 +938,34 @@ impl Subscriber {
                     if let Some(ds) =
                         subscriber.durable_pending.remove(&p).and_then(|ds| ds.upgrade())
                     {
+                        trace!("processing pending subscrition to {p}");
                         let dsw = ds.downgrade();
                         let mut dv = ds.0.lock();
-                        match r {
-                            Err(e) => match &mut dv.sub {
-                                DvState::Subscribed(_) => unreachable!(),
-                                DvState::Dead(d) => {
-                                    d.tries += 1;
-                                    let wait =
-                                        Duration::from_millis(pick(d.tries) as u64 * 50);
-                                    d.next_try = now + wait;
-                                    let s = wait.as_secs_f32();
-                                    warn!(
-                                        "resubscription error {}: {}, next try: {}s",
-                                        p, e, s
-                                    );
-                                    subscriber.durable_dead.insert(p.clone(), dsw);
+                        macro_rules! failed {
+                            ($e:expr) => {
+                                match &mut dv.sub {
+                                    DvState::Subscribed(_) => unreachable!(),
+                                    DvState::Dead(d) => {
+                                        d.tries += 1;
+                                        let wait = Duration::from_millis(
+                                            pick(d.tries) as u64 * 50,
+                                        );
+                                        d.next_try = now + wait;
+                                        let s = wait.as_secs_f32();
+                                        warn!(
+                                            "resubscription error {}: {}, next try: {}s",
+                                            p, $e, s
+                                        );
+                                        subscriber.durable_dead.insert(p.clone(), dsw);
+                                    }
                                 }
-                            },
+                            };
+                        }
+                        match r {
+                            Err(e) => failed!(e),
+                            Ok(sub) if *sub.0.last.lock() == Event::Unsubscribed => {
+                                failed!(anyhow!("unsubscribed"))
+                            }
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
                                 for (f, tx) in &dv.streams {
@@ -1025,16 +1036,24 @@ impl Subscriber {
                 select_biased! {
                     m = incoming.next() => match m {
                         None => break,
-                        Some(BatchItem::InBatch(())) => (),
+                        Some(BatchItem::InBatch(())) => {
+                            trace!("incoming");
+                            ()
+                        },
                         Some(BatchItem::EndBatch) => {
+                            trace!("incoming end batch");
                             if let Some(set) = do_resub(&subscriber, &mut retry).await {
                                 subscriptions.push_back(Batched::new(set, 100_000));
                             }
                         }
                     },
                     m = next_subscription_result(&mut subscriptions).fuse() => match m {
-                        BatchItem::InBatch((p, r)) => subscription_batch.push((p, r)),
+                        BatchItem::InBatch((p, r)) => {
+                            trace!("subscription result for {p} {r:?}");
+                            subscription_batch.push((p, r))
+                        },
                         BatchItem::EndBatch => {
+                            trace!("end subscription batch {}", subscription_batch.len());
                             finish_resubscription_batch(
                                 &subscriber,
                                 &mut subscription_batch,
@@ -1050,12 +1069,14 @@ impl Subscriber {
                         }
                     },
                     _ = wait_retry(retry).fuse() => {
+                        trace!("time to retry");
                         if let Some(set) = do_resub(&subscriber, &mut retry).await {
                             subscriptions.push_back(Batched::new(set, 100_000));
                         }
                     },
                 }
             }
+            trace!("resub loop ended");
         });
     }
 

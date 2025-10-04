@@ -171,21 +171,32 @@ impl ClinfosInner {
                         }
                         Entry::Occupied(mut e) => {
                             let ifo = e.get_mut();
+                            macro_rules! kill_it {
+                                ($publisher:expr) => {{
+                                    let publisher = $publisher.clone();
+                                    *ifo = ClientInfo::CleaningUp(Vec::new());
+                                    ctx.secctx.remove(&publisher.id).await;
+                                    return Ok(R::ClearClient(publisher));
+                                }};
+                            }
                             match ifo {
                                 ClientInfo::Running { publisher, stop } => {
                                     let anon = publisher.target_auth.is_anonymous();
                                     match &hello.auth {
-                                        AuthWrite::Anonymous if anon => (),
+                                        AuthWrite::Anonymous if anon => {
+                                            if publisher.priority != hello.priority {
+                                                kill_it!(publisher)
+                                            }
+                                        }
                                         AuthWrite::Anonymous => bail!("not permitted"),
-                                        AuthWrite::Reuse => (),
+                                        AuthWrite::Reuse => {
+                                            if publisher.priority != hello.priority {
+                                                bail!("illegal priority change")
+                                            }
+                                        }
                                         AuthWrite::Krb5 { .. }
                                         | AuthWrite::Local
-                                        | AuthWrite::Tls { .. } => {
-                                            let publisher = publisher.clone();
-                                            *ifo = ClientInfo::CleaningUp(Vec::new());
-                                            ctx.secctx.remove(&publisher.id).await;
-                                            return Ok(R::ClearClient(publisher));
-                                        }
+                                        | AuthWrite::Tls { .. } => kill_it!(publisher),
                                     }
                                     let (tx, rx) = oneshot::channel();
                                     *stop = tx;
@@ -274,16 +285,15 @@ async fn client_loop_write(
         }
     }
     'main: loop {
-        #[rustfmt::skip]
         select_biased! {
             _ = server_stop => break Ok(()),
             _ = rx_stop => break Ok(()),
             _ = timeout.tick().fuse() => {
                 if act {
-		    trace!("checking timeout, {:?} was active", connection_id);
+                    trace!("checking timeout, {:?} was active", connection_id);
                     act = false;
                 } else {
-		    trace!("dropping inactive connection {:?} ", connection_id);
+                    trace!("dropping inactive connection {:?} ", connection_id);
                     drop(con);
                     ctx.ctracker.close(connection_id);
                     ctx.clinfos.lock().await.remove(&ctx, &publisher, &uifo).await?;
@@ -298,17 +308,17 @@ async fn client_loop_write(
                     info!("write client loop error reading message: {}", e)
                 },
                 Ok(()) => {
-		    trace!("{:?} received a batch", connection_id);
+                    trace!("{:?} received a batch", connection_id);
                     act = true;
                     if batch.len() == 1 && batch[0] == ToWrite::Heartbeat {
-			trace!("{:?} batch is just a heartbeat", connection_id);
+                        trace!("{:?} batch is just a heartbeat", connection_id);
                         continue 'main
                     }
                     let c = match con.as_mut() {
-			Some(c) => c,
-			None => unreachable!("bug, con is none and we received a batch"),
-		    };
-		    trace!("{:?} checking batch of len {} for clear", connection_id, batch.len());
+                        Some(c) => c,
+                        None => unreachable!("bug, con is none and we received a batch"),
+                    };
+                    trace!("{:?} checking batch of len {} for clear", connection_id, batch.len());
                     while let Some((i, _)) =
                         batch.iter().enumerate().find(|(_, m)| *m == &ToWrite::Clear)
                     {
@@ -327,7 +337,7 @@ async fn client_loop_write(
                                 ToWrite::UnpublishDefault(_) =>
                                     c.queue_send(&FromWrite::Unpublished)?,
                                 ToWrite::Clear => {
-				    trace!("{:?} handling clear", connection_id);
+                                    trace!("{:?} handling clear", connection_id);
                                     ctx.store.handle_clear(
                                         uifo.clone(),
                                         publisher.clone()
@@ -339,7 +349,7 @@ async fn client_loop_write(
                         c.flush().await?;
                         batch = GPooled::orphan(rest);
                     }
-		    trace!("{:?} handling write batch of size {}", connection_id, batch.len());
+                    trace!("{:?} handling write batch of size {}", connection_id, batch.len());
                     if let Err(e) = ctx.store.handle_batch_write(
                         Some(c),
                         uifo.clone(),
@@ -888,7 +898,7 @@ async fn server_loop(
     loop {
         select_biased! {
             _ = stop => {
-        debug!("server loop stop requested");
+                debug!("server loop stop requested");
                 for cl in client_stops.drain(..) {
                     let _ = cl.send(());
                 }

@@ -24,7 +24,7 @@ use futures::{
 };
 use fxhash::{FxHashMap, FxHashSet};
 use if_addrs::get_if_addrs;
-use log::{error, info};
+use log::{info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
@@ -1736,26 +1736,26 @@ async fn publish_loop(
             };
             if to_publish.len() > 0 {
                 if let Err(e) = resolver.publish_with_flags(to_publish.drain()).await {
-                    error!("failed to publish some paths {} will retry", e);
+                    warn!("failed to publish some paths {} will retry", e);
                 }
             }
             if to_publish_default.len() > 0 {
                 if let Err(e) =
                     resolver.publish_default_with_flags(to_publish_default.drain()).await
                 {
-                    error!("failed to publish_default some paths {} will retry", e)
+                    warn!("failed to publish_default some paths {} will retry", e)
                 }
             }
             if to_unpublish.len() > 0 {
                 if let Err(e) = resolver.unpublish(to_unpublish.drain()).await {
-                    error!("failed to unpublish some paths {} will retry", e)
+                    warn!("failed to unpublish some paths {} will retry", e)
                 }
             }
             if to_unpublish_default.len() > 0 {
                 if let Err(e) =
                     resolver.unpublish_default(to_unpublish_default.drain()).await
                 {
-                    error!("failed to unpublish default some paths {} will retry", e)
+                    warn!("failed to unpublish default some paths {} will retry", e)
                 }
             }
             if to_unsubscribe.len() > 0 {

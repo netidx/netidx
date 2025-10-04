@@ -87,6 +87,7 @@ fn unsubscribe(
         .remove(&sub.path)
         .or_else(|| subscriber.durable_pending.remove(&sub.path))
     {
+        trace!("unsubscribing {}", sub.path);
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
             inner.sub = DvState::Dead(Box::new(DvDead {
@@ -375,13 +376,10 @@ impl ConnectionCtx {
                     let permissions = req.permissions;
                     let timestamp = req.timestamp;
                     self.pending.insert(path.clone(), req);
-                    write_con.queue_send(&To::Subscribe {
-                        path,
-                        resolver,
-                        timestamp,
-                        permissions,
-                        token,
-                    })?
+                    let m =
+                        To::Subscribe { path, resolver, timestamp, permissions, token };
+                    trace!("subscribe {m:?}");
+                    write_con.queue_send(&m)?
                 }
                 ToCon::Unsubscribe(id) => {
                     info!("unsubscribe {:?}", id);
@@ -416,6 +414,7 @@ impl ConnectionCtx {
     ) -> Result<()> {
         let mut stream_batch = DECODE_BATCHES.take();
         for m in batch.drain(..) {
+            trace!("processing from publisher {m:?}");
             match m {
                 From::Update(i, m) => match self.subscriptions.get(&i) {
                     Some(sub) => {
@@ -730,6 +729,7 @@ impl ConnectionCtx {
                 let _ = req.finished.send(Err(anyhow!("connection died")));
             }
         }
+        // info!("connection shutting down {res:?}");
         res
     }
 }

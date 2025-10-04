@@ -401,13 +401,15 @@ mod publisher {
             PublisherBuilder, Val,
         },
         resolver_server::{config::Config as ServerConfig, Server},
-        subscriber::{Event, Subscriber, SubscriberBuilder, UpdatesFlags, Value},
+        subscriber::{Event, SubId, Subscriber, SubscriberBuilder, UpdatesFlags, Value},
     };
     use anyhow::Result;
     use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
+    use log::debug;
     use netidx_core::path::Path;
     use netidx_netproto::resolver::PublisherPriority;
     use parking_lot::Mutex;
+    use poolshark::global::GPooled;
     use std::{
         iter,
         net::{IpAddr, SocketAddr},
@@ -703,6 +705,122 @@ mod publisher {
         }
         slow_sub.abort();
         pb.abort();
+        Ok(())
+    }
+
+    struct PTestPub(mpsc::UnboundedSender<(bool, oneshot::Sender<()>)>);
+
+    impl PTestPub {
+        fn new(
+            priority: PublisherPriority,
+            cfg: crate::config::Config,
+            v: Value,
+        ) -> Self {
+            let (tx, mut rx) = mpsc::unbounded();
+            let t = Self(tx);
+            task::spawn(async move {
+                let mut publisher: Option<Publisher> = None;
+                let mut _val: Option<Val> = None;
+                let mut status = false;
+                while let Some((up, reply)) = rx.next().await {
+                    if up && !status {
+                        let p = PublisherBuilder::new(cfg.clone())
+                            .priority(priority)
+                            .build()
+                            .await?;
+                        _val = Some(p.publish(Path::from("/local/foo"), v.clone())?);
+                        p.flushed().await;
+                        publisher = Some(p);
+                        status = true
+                    } else if status {
+                        _val = None;
+                        if let Some(p) = publisher.take() {
+                            p.shutdown().await
+                        }
+                        status = false;
+                    }
+                    let _ = reply.send(());
+                }
+                Ok::<(), anyhow::Error>(())
+            });
+            t
+        }
+
+        async fn set_status(&mut self, up: bool) -> Result<()> {
+            let (tx, rx) = oneshot::channel();
+            self.0.unbounded_send((up, tx))?;
+            Ok(rx.await?)
+        }
+    }
+
+    async fn wait_val(rx: &mut mpsc::Receiver<GPooled<Vec<(SubId, Event)>>>) -> Value {
+        while let Some(mut events) = rx.next().await {
+            for (_, ev) in events.drain(..) {
+                match ev {
+                    Event::Unsubscribed => (),
+                    Event::Update(v) => return v,
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn priority() -> Result<()> {
+        let _ = env_logger::try_init();
+        let resolver = {
+            use crate::resolver_server::config::{self, file};
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![file::MemberServerBuilder::default()
+                    .auth(file::Auth::Anonymous)
+                    .addr("127.0.0.1:0".parse()?)
+                    .bind_addr("127.0.0.1".parse()?)
+                    .build()?])
+                .build()?;
+            let cfg = config::Config::from_file(cfg)?;
+            crate::resolver_server::Server::new(cfg, false, 0).await?
+        };
+        let addr = *resolver.local_addr();
+        let cfg = {
+            use crate::config::{self, file, DefaultAuthMech};
+            let cfg = file::ConfigBuilder::default()
+                .addrs(vec![(addr, file::Auth::Anonymous)])
+                .default_auth(DefaultAuthMech::Anonymous)
+                .default_bind_config("local")
+                .build()?;
+            config::Config::from_file(cfg)?
+        };
+        let mut high =
+            PTestPub::new(PublisherPriority::High, cfg.clone(), Value::I64(42));
+        let mut normal =
+            PTestPub::new(PublisherPriority::Normal, cfg.clone(), Value::I64(21));
+        let mut low = PTestPub::new(PublisherPriority::Low, cfg.clone(), Value::I64(10));
+        low.set_status(true).await?;
+        for i in 0..1000 {
+            debug!("loop iter {i}");
+            debug!("turning on high");
+            high.set_status(true).await?;
+            debug!("turning on normal");
+            normal.set_status(true).await?;
+            let subscriber = SubscriberBuilder::new(cfg.clone()).build()?;
+            let (tx, mut rx) = mpsc::channel(10);
+            debug!("subscribing");
+            let s = subscriber.subscribe_updates(
+                Path::from("/local/foo"),
+                [(UpdatesFlags::empty(), tx)],
+            );
+            assert_eq!(wait_val(&mut rx).await, Value::I64(42));
+            debug!("turning off high");
+            high.set_status(false).await?;
+            debug!("waiting resub to normal");
+            assert_eq!(wait_val(&mut rx).await, Value::I64(21)); // tweeeeenywon
+            debug!("turning off normal");
+            normal.set_status(false).await?;
+            debug!("waiting resub to low");
+            assert_eq!(wait_val(&mut rx).await, Value::I64(10));
+            debug!("loop finished, dropping subscriber");
+            drop(s)
+        }
         Ok(())
     }
 }
