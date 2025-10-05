@@ -36,13 +36,13 @@ use std::{
     default::Default,
     fmt, iter, mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    pin::Pin,
+    pin::{pin, Pin},
     result,
     str::FromStr,
     sync::{Arc, LazyLock, Weak},
     time::Duration,
 };
-use tokio::{net::TcpListener, task};
+use tokio::{net::TcpListener, runtime, task, time};
 
 /// Control how the publisher picks a bind address. The address we
 /// give to the resolver server must be uniquely routable back to us,
@@ -864,7 +864,7 @@ impl Published {
 #[derive(Debug)]
 struct PublisherInner {
     addr: SocketAddr,
-    stop: Option<oneshot::Sender<()>>,
+    stop: Option<oneshot::Sender<oneshot::Sender<()>>>,
     clients: FxHashMap<ClId, Client>,
     hc_subscribed: FxHashMap<BTreeSet<ClId>, Subscribed>,
     by_path: HashMap<Path, Id>,
@@ -891,18 +891,6 @@ struct PublisherInner {
 }
 
 impl PublisherInner {
-    fn cleanup(&mut self) -> bool {
-        match mem::replace(&mut self.stop, None) {
-            None => false,
-            Some(stop) => {
-                let _ = stop.send(());
-                self.clients.clear();
-                self.by_id.clear();
-                true
-            }
-        }
-    }
-
     fn is_advertised(&self, path: &Path) -> bool {
         self.advertised
             .iter()
@@ -1020,9 +1008,26 @@ impl PublisherInner {
 
 impl Drop for PublisherInner {
     fn drop(&mut self) {
-        if self.cleanup() {
+        let stopped = mem::replace(&mut self.stop, None).map(|stop| {
+            let (tx, rx) = oneshot::channel();
+            let _ = stop.send(tx);
+            rx
+        });
+        if let Some(stopped) = stopped {
+            let stopped = stopped.shared();
+            let hd = runtime::Handle::current();
+            let timeout = pin!(time::timeout(Duration::from_millis(50), stopped.clone()));
+            let stopped = match hd.block_on(timeout) {
+                Err(_) => Some(stopped),
+                Ok(_) => None,
+            };
+            self.clients.clear();
+            self.by_id.clear();
             let resolver = self.resolver.clone();
             tokio::spawn(async move {
+                if let Some(stopped) = stopped {
+                    let _ = stopped.await;
+                }
                 let _ = resolver.clear().await;
             });
         }
@@ -1278,23 +1283,32 @@ impl Publisher {
 
     /// Perform a clean shutdown of the publisher, remove all
     /// published paths from the resolver server, shutdown the
-    /// listener, and close the connection to all clients. Dropping
-    /// all references to the publisher also calls this function,
-    /// however because async Drop is not yet implemented it is not
-    /// guaranteed that a clean shutdown will be achieved before the
-    /// Runtime itself is Dropped, as such it is necessary to call
-    /// this function directly in the case you are tearing down the
-    /// whole program. In the case where you have multiple publishers
-    /// in your process, or you are for some reason tearing down the
-    /// publisher but will continue to run async jobs on the same
-    /// Runtime, then there is no need to call this function, you can
-    /// just Drop all references to the Publisher.
+    /// listener, and close the connection to all clients.
+    ///
+    /// When this future is finished it is guaranteed that
+    /// - The listener is no longer listening
+    /// - Every client is shut down or in the process of shutting down
+    /// - All metadata related to this publisher has been cleared from the resolver server
+    ///
+    /// Drop does the same thing, but doesn't wait for every operation to finish.
     pub async fn shutdown(self) {
+        let stopped = mem::replace(&mut self.0.lock().stop, None).map(|stop| {
+            let (tx, rx) = oneshot::channel();
+            let _ = stop.send(tx);
+            rx
+        });
+        // wait for the listener to stop
+        if let Some(stopped) = stopped {
+            let _ = stopped.await;
+        }
+        // clear out the clients
         let resolver = {
             let mut inner = self.0.lock();
-            inner.cleanup();
+            inner.clients.clear();
+            inner.by_id.clear();
             inner.resolver.clone()
         };
+        // clear out the resolver
         let _: Result<_> = resolver.clear().await;
     }
 

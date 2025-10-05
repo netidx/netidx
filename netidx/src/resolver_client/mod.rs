@@ -738,8 +738,7 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Unpublished, ToWrite::UnpublishDefault).await
     }
 
-    // CR estokes: this is broken on complex clusters, but it's also
-    // redundant, consider removing it.
+    // CR estokes: this is broken on complex clusters
     pub async fn clear(&self) -> Result<()> {
         let mut batch = RAWTOWRITEPOOL.take();
         batch.push(ToWrite::Clear);

@@ -718,16 +718,16 @@ impl ClientCtx {
 pub(super) async fn start(
     t: PublisherWeak,
     serv: TcpListener,
-    stop: oneshot::Receiver<()>,
+    stop: oneshot::Receiver<oneshot::Sender<()>>,
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedAcceptor>,
     max_clients: usize,
     slack: usize,
 ) {
     let mut stop = stop.fuse();
-    loop {
+    let stopped = loop {
         select_biased! {
-            _ = stop => break,
+            stopped = stop => break stopped.ok(),
             cl = serv.accept().fuse() => match cl {
                 Err(e) => info!("accept error {}", e), // CR estokes: Handle this
                 Ok((s, addr)) => {
@@ -776,5 +776,9 @@ pub(super) async fn start(
                 }
             },
         }
+    };
+    drop(serv);
+    if let Some(stopped) = stopped {
+        let _ = stopped.send(());
     }
 }
