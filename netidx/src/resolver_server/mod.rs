@@ -274,10 +274,7 @@ async fn client_loop_write(
         batch: &mut Vec<ToWrite>,
     ) -> Result<()> {
         match con {
-            Some(con) => {
-                trace!("receiving batch");
-                con.receive_batch(batch).await
-            }
+            Some(con) => con.receive_batch(batch).await,
             None => {
                 trace!("isn't connected, not receiving");
                 future::pending().await
@@ -308,7 +305,7 @@ async fn client_loop_write(
                     info!("write client loop error reading message: {}", e)
                 },
                 Ok(()) => {
-                    trace!("{:?} received a batch", connection_id);
+                    trace!("{:?} received a batch {batch:?}", connection_id);
                     act = true;
                     if batch.len() == 1 && batch[0] == ToWrite::Heartbeat {
                         trace!("{:?} batch is just a heartbeat", connection_id);
@@ -354,13 +351,14 @@ async fn client_loop_write(
                         Some(c),
                         uifo.clone(),
                         publisher.clone(),
-                        batch.drain(..)
+                        mem::replace(&mut batch, WRITE_BATCHES.take())
                     ).await {
                         warn!("handle_write_batch failed {}", e);
                         con = None;
                         ctx.ctracker.close(connection_id);
                         continue 'main;
                     }
+                    trace!("{:?} write success", connection_id);
                 }
             },
         }

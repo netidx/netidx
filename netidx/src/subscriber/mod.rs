@@ -547,6 +547,8 @@ impl SubscriberInner {
         flags: PublishFlags,
     ) -> Option<Chosen> {
         use rand::seq::IteratorRandom;
+        trace!("publishers {:?}", publishers);
+        trace!("resolved {:?}", resolved);
         let mk = |(pref, pb): (&PublisherRef, &Publisher)| Chosen {
             addr: pb.addr,
             target_auth: pb.target_auth.clone(),
@@ -571,6 +573,7 @@ impl SubscriberInner {
                 && !self.recently_failed.contains_key(&pb.addr)
         });
         if let Some(chosen) = high {
+            trace!("chosen {chosen:?}");
             return Some(chosen);
         }
         let normal = with_pred!(|pb| {
@@ -579,18 +582,21 @@ impl SubscriberInner {
                 && !self.recently_failed.contains_key(&pb.addr)
         });
         if let Some(chosen) = normal {
+            trace!("chosen {chosen:?}");
             return Some(chosen);
         }
         let low = with_pred!(|pb| !self.recently_failed.contains_key(&pb.addr));
         if let Some(chosen) = low {
             return Some(chosen);
         }
-        resolved
+        let chosen = resolved
             .publishers
             .iter()
             .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
             .choose(&mut rand::rng())
-            .map(mk)
+            .map(mk);
+        trace!("chosen {chosen:?}");
+        chosen
     }
 
     fn choose_existing_addr(

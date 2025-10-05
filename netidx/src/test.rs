@@ -11,90 +11,87 @@ mod resolver {
     use netidx_netproto::resolver::{PublisherPriority, TargetAuth};
     use rand::{rng, Rng};
     use std::{iter, net::SocketAddr, time::Duration};
-    use tokio::{runtime::Runtime, time};
+    use tokio::time;
 
     fn p(p: &'static str) -> Path {
         Path::from(p)
     }
 
-    #[test]
-    fn publish_resolve_simple() {
-        Runtime::new().unwrap().block_on(async {
-            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
-                .expect("load simple server config");
-            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
-                .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            client_cfg.addrs[0].0 = *server.local_addr();
-            let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(
-                client_cfg.clone(),
-                DesiredAuth::Anonymous,
-                paddr,
-                PublisherPriority::Normal,
-            )
-            .unwrap();
-            let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
-            let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
-            let flags = Some(PublishFlags::USE_EXISTING.bits());
-            w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags))).await.unwrap();
-            let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
-            for r in resolved.drain(..) {
-                assert_eq!(r.publishers.len(), 1);
-                let pb = publishers.get(&r.publishers[0].id).unwrap();
-                assert_eq!(pb.addr, paddr);
-            }
-            let mut l = r.list(p("/")).await.unwrap();
-            l.sort();
-            assert_eq!(&**l, &[p("/app"), p("/foo")]);
-            let mut l = r.list(p("/foo")).await.unwrap();
-            l.sort();
-            assert_eq!(&**l, &[p("/foo/bar"), p("/foo/baz")]);
-            let mut l = r.list(p("/app")).await.unwrap();
-            l.sort();
-            assert_eq!(&**l, &[p("/app/v0"), p("/app/v1")]);
-            drop(server)
-        });
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_resolve_simple() {
+        let _ = env_logger::try_init();
+        let server_cfg = ServerConfig::load("../cfg/simple-server.json")
+            .expect("load simple server config");
+        let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+            .expect("load simple client config");
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        client_cfg.addrs[0].0 = *server.local_addr();
+        let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let w = ResolverWrite::new(
+            client_cfg.clone(),
+            DesiredAuth::Anonymous,
+            paddr,
+            PublisherPriority::Normal,
+        )
+        .unwrap();
+        let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
+        let paths = vec![p("/foo/bar"), p("/foo/baz"), p("/app/v0"), p("/app/v1")];
+        let flags = Some(PublishFlags::USE_EXISTING.bits());
+        w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags))).await.unwrap();
+        let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+        for r in resolved.drain(..) {
+            assert_eq!(r.publishers.len(), 1);
+            let pb = publishers.get(&r.publishers[0].id).unwrap();
+            assert_eq!(pb.addr, paddr);
+        }
+        let mut l = r.list(p("/")).await.unwrap();
+        l.sort();
+        assert_eq!(&**l, &[p("/app"), p("/foo")]);
+        let mut l = r.list(p("/foo")).await.unwrap();
+        l.sort();
+        assert_eq!(&**l, &[p("/foo/bar"), p("/foo/baz")]);
+        let mut l = r.list(p("/app")).await.unwrap();
+        l.sort();
+        assert_eq!(&**l, &[p("/app/v0"), p("/app/v1")]);
+        drop(server)
     }
 
-    #[test]
-    fn publish_default() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_default() {
         let _ = env_logger::try_init();
-        Runtime::new().unwrap().block_on(async {
-            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
-                .expect("load simple server config");
-            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
-                .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            client_cfg.addrs[0].0 = *server.local_addr();
-            let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-            let w = ResolverWrite::new(
-                client_cfg.clone(),
-                DesiredAuth::Anonymous,
-                paddr,
-                PublisherPriority::Normal,
-            )
-            .unwrap();
-            let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
-            w.publish_default(iter::once(p("/default"))).await.unwrap();
-            let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
-            let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
-            for r in resolved.drain(..) {
-                assert_eq!(r.publishers.len(), 1);
-                let pb = publishers.get(&r.publishers[0].id).unwrap();
-                assert_eq!(pb.addr, paddr);
-            }
-            let l = r.list(p("/")).await.unwrap();
-            assert_eq!(&**l, &[p("/default")]);
-            w.clear().await.unwrap();
-            let (_, mut resolved) = r.resolve(paths.clone()).await.unwrap();
-            for r in resolved.drain(..) {
-                assert_eq!(r.publishers.len(), 0);
-            }
-            let l = r.list(p("/")).await.unwrap();
-            assert_eq!(&**l, &[]);
-            drop(server)
-        });
+        let server_cfg = ServerConfig::load("../cfg/simple-server.json")
+            .expect("load simple server config");
+        let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+            .expect("load simple client config");
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        client_cfg.addrs[0].0 = *server.local_addr();
+        let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let w = ResolverWrite::new(
+            client_cfg.clone(),
+            DesiredAuth::Anonymous,
+            paddr,
+            PublisherPriority::Normal,
+        )
+        .unwrap();
+        let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
+        w.publish_default(iter::once(p("/default"))).await.unwrap();
+        let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
+        let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+        for r in resolved.drain(..) {
+            assert_eq!(r.publishers.len(), 1);
+            let pb = publishers.get(&r.publishers[0].id).unwrap();
+            assert_eq!(pb.addr, paddr);
+        }
+        let l = r.list(p("/")).await.unwrap();
+        assert_eq!(&**l, &[p("/default")]);
+        w.clear().await.unwrap();
+        let (_, mut resolved) = r.resolve(paths.clone()).await.unwrap();
+        for r in resolved.drain(..) {
+            assert_eq!(r.publishers.len(), 0);
+        }
+        let l = r.list(p("/")).await.unwrap();
+        assert_eq!(&**l, &[]);
+        drop(server)
     }
 
     struct Ctx {
@@ -283,7 +280,9 @@ mod resolver {
         assert_eq!(i, paths.len());
     }
 
-    async fn run_publish_resolve_complex() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_resolve_complex() {
+        let _ = env_logger::try_init();
         let ctx = Ctx::new().await;
         let waddrs =
             vec!["127.0.0.1:5543".parse().unwrap(), "127.0.0.1:5544".parse().unwrap()];
@@ -385,12 +384,6 @@ mod resolver {
         check_list(false, &r_huge0).await;
         check_resolve(&ctx, &r_huge0, &paths, &[waddrs[1]][..]).await;
     }
-
-    #[test]
-    fn publish_resolve_complex() {
-        let _ = env_logger::try_init();
-        Runtime::new().unwrap().block_on(run_publish_resolve_complex())
-    }
 }
 
 mod publisher {
@@ -400,10 +393,12 @@ mod publisher {
             BindCfg, DesiredAuth, Event as PEvent, PublishFlags, Publisher,
             PublisherBuilder, Val,
         },
+        resolver_client::ResolverRead,
         resolver_server::{config::Config as ServerConfig, Server},
         subscriber::{Event, SubId, Subscriber, SubscriberBuilder, UpdatesFlags, Value},
     };
     use anyhow::Result;
+    use arcstr::literal;
     use futures::{channel::mpsc, channel::oneshot, prelude::*, select_biased};
     use log::debug;
     use netidx_core::path::Path;
@@ -417,7 +412,6 @@ mod publisher {
         time::Duration,
     };
     use tokio::{
-        runtime::Runtime,
         task::{self, JoinHandle},
         time::{self, Instant},
     };
@@ -567,66 +561,56 @@ mod publisher {
         }
     }
 
-    #[test]
-    fn publish_subscribe() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_subscribe() {
         let _ = env_logger::try_init();
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let server_cfg = ServerConfig::load("../cfg/simple-server.json")
-                .expect("load simple server config");
-            let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
-                .expect("load simple client config");
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            client_cfg.addrs[0].0 = *server.local_addr();
-            let default_destroyed = Arc::new(Mutex::new(false));
-            let (tx, ready) = oneshot::channel();
-            task::spawn(run_publisher(
-                client_cfg.clone(),
-                default_destroyed.clone(),
-                tx,
-                DesiredAuth::Anonymous,
-            ));
-            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            run_subscriber(client_cfg, default_destroyed, DesiredAuth::Anonymous).await;
-            drop(server);
-        });
+        let server_cfg = ServerConfig::load("../cfg/simple-server.json")
+            .expect("load simple server config");
+        let mut client_cfg = ClientConfig::load("../cfg/simple-client.json")
+            .expect("load simple client config");
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        client_cfg.addrs[0].0 = *server.local_addr();
+        let default_destroyed = Arc::new(Mutex::new(false));
+        let (tx, ready) = oneshot::channel();
+        task::spawn(run_publisher(
+            client_cfg.clone(),
+            default_destroyed.clone(),
+            tx,
+            DesiredAuth::Anonymous,
+        ));
+        time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+        run_subscriber(client_cfg, default_destroyed, DesiredAuth::Anonymous).await;
+        drop(server);
     }
 
-    #[test]
-    fn tls_publish_subscribe() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tls_publish_subscribe() {
         let _ = env_logger::try_init();
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            #[cfg(unix)]
-            let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")
-                .expect("load tls server config");
-            #[cfg(windows)]
-            let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver-win.json")
-                .expect("load tls server config");
-            let mut pub_cfg = ClientConfig::load("../cfg/tls/publisher/client.json")
-                .expect("failed to load tls publisher config");
-            let mut sub_cfg = ClientConfig::load("../cfg/tls/client/client.json")
-                .expect("failed to load subscriber cfg");
-            let default_destroyed = Arc::new(Mutex::new(false));
-            let (tx, ready) = oneshot::channel();
-            let server = Server::new(server_cfg, false, 0).await.expect("start server");
-            pub_cfg.addrs[0].0 = *server.local_addr();
-            sub_cfg.addrs[0].0 = *server.local_addr();
-            task::spawn(run_publisher(
-                pub_cfg.clone(),
-                default_destroyed.clone(),
-                tx,
-                DesiredAuth::Tls { identity: None },
-            ));
-            time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
-            run_subscriber(
-                pub_cfg,
-                default_destroyed,
-                DesiredAuth::Tls { identity: None },
-            )
+        #[cfg(unix)]
+        let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")
+            .expect("load tls server config");
+        #[cfg(windows)]
+        let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver-win.json")
+            .expect("load tls server config");
+        let mut pub_cfg = ClientConfig::load("../cfg/tls/publisher/client.json")
+            .expect("failed to load tls publisher config");
+        let mut sub_cfg = ClientConfig::load("../cfg/tls/client/client.json")
+            .expect("failed to load subscriber cfg");
+        let default_destroyed = Arc::new(Mutex::new(false));
+        let (tx, ready) = oneshot::channel();
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        pub_cfg.addrs[0].0 = *server.local_addr();
+        sub_cfg.addrs[0].0 = *server.local_addr();
+        task::spawn(run_publisher(
+            pub_cfg.clone(),
+            default_destroyed.clone(),
+            tx,
+            DesiredAuth::Tls { identity: None },
+        ));
+        time::timeout(Duration::from_secs(1), ready).await.unwrap().unwrap();
+        run_subscriber(pub_cfg, default_destroyed, DesiredAuth::Tls { identity: None })
             .await;
-            drop(server)
-        })
+        drop(server)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -765,6 +749,28 @@ mod publisher {
         unreachable!()
     }
 
+    async fn check_resolver(rclient: &ResolverRead) -> Result<()> {
+        let (pubs, res) = rclient.resolve([Path::from(literal!("/local/foo"))]).await?;
+        debug!("published {pubs:?}, resolved: {res:?}");
+        assert_eq!(pubs.len(), 3);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].publishers.len(), 3);
+        let mut saw_high = false;
+        let mut saw_normal = false;
+        let mut saw_low = false;
+        for (_, pb) in pubs.iter() {
+            match pb.priority {
+                PublisherPriority::High => saw_high = true,
+                PublisherPriority::Normal => saw_normal = true,
+                PublisherPriority::Low => saw_low = true,
+            }
+        }
+        assert!(saw_high);
+        assert!(saw_normal);
+        assert!(saw_low);
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn priority() -> Result<()> {
         let _ = env_logger::try_init();
@@ -790,6 +796,7 @@ mod publisher {
                 .build()?;
             config::Config::from_file(cfg)?
         };
+        let rclient = ResolverRead::new(cfg.clone(), DesiredAuth::Anonymous);
         let mut high =
             PTestPub::new(PublisherPriority::High, cfg.clone(), Value::I64(42));
         let mut normal =
@@ -802,6 +809,7 @@ mod publisher {
             high.set_status(true).await?;
             debug!("turning on normal");
             normal.set_status(true).await?;
+            check_resolver(&rclient).await?;
             let subscriber = SubscriberBuilder::new(cfg.clone()).build()?;
             let (tx, mut rx) = mpsc::channel(10);
             debug!("subscribing");

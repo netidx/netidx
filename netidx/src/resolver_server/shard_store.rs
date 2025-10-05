@@ -19,7 +19,7 @@ use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
     channel::{
-        mpsc::{unbounded, UnboundedSender},
+        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
         oneshot::{self, Canceled},
     },
     future::join_all,
@@ -32,8 +32,9 @@ use poolshark::global::{GPooled, Pool};
 use std::{
     collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
-    iter,
+    mem,
     net::SocketAddr,
+    ops::Deref,
     result,
     sync::{Arc, LazyLock},
     time::SystemTime,
@@ -43,7 +44,7 @@ use tokio::task;
 type ReadB = Vec<(u64, ToRead)>;
 type ReadR = VecDeque<(u64, FromRead)>;
 type WriteB = Vec<(u64, ToWrite)>;
-type WriteR = VecDeque<(u64, FromWrite)>;
+type WriteR = Vec<(u64, FromWrite)>;
 
 static PUBLISHERS_POOL: LazyLock<Pool<FxHashMap<PublisherId, Publisher>>> =
     LazyLock::new(|| Pool::new(100, 1000));
@@ -345,7 +346,7 @@ impl Shard {
                 n = 0;
                 task::yield_now().await;
             }
-            resp.push_back(match m {
+            resp.push(match m {
                 ToWrite::Heartbeat => unreachable!(),
                 ToWrite::Clear => {
                     n += 1000;
@@ -408,10 +409,28 @@ macro_rules! same {
     };
 }
 
-#[derive(Clone)]
-pub(super) struct Store {
+struct QueuedWrite {
+    uifo: Arc<UserInfo>,
+    publisher: Arc<Publisher>,
+    msgs: GPooled<Vec<ToWrite>>,
+    result: oneshot::Sender<Result<GPooled<Vec<(u64, FromWrite)>>>>,
+}
+
+pub(super) struct StoreInner {
     shards: Vec<Shard>,
     shard_mask: usize,
+    tx_write: UnboundedSender<QueuedWrite>,
+}
+
+#[derive(Clone)]
+pub(super) struct Store(Arc<StoreInner>);
+
+impl Deref for Store {
+    type Target = StoreInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Store {
@@ -429,7 +448,101 @@ impl Store {
                 Shard::new(i, parent.clone(), children.clone(), secctx.clone(), resolver)
             })
             .collect();
-        Store { shards, shard_mask }
+        let (tx_write, rx_write) = unbounded();
+        let t = Store(Arc::new(StoreInner { shards, shard_mask, tx_write }));
+        task::spawn({
+            let t = t.clone();
+            async { t.write_task(rx_write).await }
+        });
+        t
+    }
+
+    async fn handle_queued_write(
+        &self,
+        uifo: Arc<UserInfo>,
+        publisher: Arc<Publisher>,
+        mut msgs: impl Iterator<Item = ToWrite>,
+    ) -> Result<GPooled<Vec<(u64, FromWrite)>>> {
+        trace!("handling write from {:?}", &publisher);
+        let mut finished = false;
+        let mut n = 0;
+        let mut replies = FROM_WRITE_POOL.take();
+        loop {
+            let mut by_shard = self.write_shard_batch();
+            for _ in 0..MAX_WRITE_BATCH {
+                match msgs.next() {
+                    None => {
+                        finished = true;
+                        break;
+                    }
+                    Some(ToWrite::Heartbeat) => continue,
+                    Some(ToWrite::Clear) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::Clear));
+                        }
+                    }
+                    Some(ToWrite::Publish(path)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push((n, ToWrite::Publish(path)));
+                    }
+                    Some(ToWrite::Unpublish(path)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push((n, ToWrite::Unpublish(path)));
+                    }
+                    Some(ToWrite::UnpublishDefault(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::UnpublishDefault(path.clone())));
+                        }
+                    }
+                    Some(ToWrite::PublishDefault(path)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((n, ToWrite::PublishDefault(path.clone())));
+                        }
+                    }
+                    Some(ToWrite::PublishWithFlags(path, flags)) => {
+                        let s = self.shard(&path);
+                        by_shard[s].push((n, ToWrite::PublishWithFlags(path, flags)));
+                    }
+                    Some(ToWrite::PublishDefaultWithFlags(path, flags)) => {
+                        for b in by_shard.iter_mut() {
+                            b.push((
+                                n,
+                                ToWrite::PublishDefaultWithFlags(path.clone(), flags),
+                            ));
+                        }
+                    }
+                }
+                n += 1;
+            }
+            trace!("handle_write_batch dispatching {} messages to shards", n);
+            if by_shard.iter().all(|v| v.is_empty()) {
+                assert!(finished);
+                break;
+            }
+            let mut r = join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
+                let (tx, rx) = oneshot::channel();
+                let publisher = publisher.clone();
+                let req = WriteRequest { uifo: uifo.clone(), publisher, batch };
+                let _ = self.shards[i].write.unbounded_send((req, tx));
+                rx
+            }))
+            .await
+            .into_iter()
+            .collect::<result::Result<Vec<GPooled<WriteR>>, Canceled>>()?;
+            for mut r in r.drain(..) {
+                replies.extend(r.drain(..))
+            }
+        }
+        Ok(replies)
+    }
+
+    async fn write_task(self, mut rx: UnboundedReceiver<QueuedWrite>) {
+        while let Some(mut w) = rx.next().await {
+            let msgs = w.msgs.drain(..);
+            let res = self.handle_queued_write(w.uifo, w.publisher, msgs).await;
+            let _ = w.result.send(res);
+        }
+        info!("write task shutting down")
     }
 
     fn shard(&self, path: &Path) -> usize {
@@ -652,121 +765,37 @@ impl Store {
         mut con: Option<&mut Channel>,
         uifo: Arc<UserInfo>,
         publisher: Arc<Publisher>,
-        mut msgs: impl Iterator<Item = ToWrite>,
+        msgs: GPooled<Vec<ToWrite>>,
     ) -> Result<()> {
-        trace!("handling write from {:?}", &publisher);
-        let mut finished = false;
-        loop {
-            let mut n = 0;
-            let mut by_shard = self.write_shard_batch();
-            for _ in 0..MAX_WRITE_BATCH {
-                match msgs.next() {
-                    None => {
-                        finished = true;
-                        break;
+        let (tx, rx) = oneshot::channel();
+        self.tx_write.unbounded_send(QueuedWrite {
+            uifo: uifo.clone(),
+            publisher: publisher.clone(),
+            msgs,
+            result: tx,
+        })?;
+        let mut replies = rx.await??;
+        replies.sort_unstable_by_key(|(n, _)| *n);
+        trace!("handle_write_batch {} replies", replies.len());
+        if let Some(c) = con.as_mut()
+            && let Some((mut n, mut cur)) = replies.pop()
+        {
+            for (i, m) in replies.drain(..) {
+                if i == n {
+                    if mem::discriminant(&cur) != mem::discriminant(&m) {
+                        panic!("desynced message {cur:?} vs {m:?}")
                     }
-                    Some(ToWrite::Heartbeat) => continue,
-                    Some(ToWrite::Clear) => {
-                        for b in by_shard.iter_mut() {
-                            b.push((n, ToWrite::Clear));
-                        }
-                    }
-                    Some(ToWrite::Publish(path)) => {
-                        let s = self.shard(&path);
-                        by_shard[s].push((n, ToWrite::Publish(path)));
-                    }
-                    Some(ToWrite::Unpublish(path)) => {
-                        let s = self.shard(&path);
-                        by_shard[s].push((n, ToWrite::Unpublish(path)));
-                    }
-                    Some(ToWrite::UnpublishDefault(path)) => {
-                        for b in by_shard.iter_mut() {
-                            b.push((n, ToWrite::UnpublishDefault(path.clone())));
-                        }
-                    }
-                    Some(ToWrite::PublishDefault(path)) => {
-                        for b in by_shard.iter_mut() {
-                            b.push((n, ToWrite::PublishDefault(path.clone())));
-                        }
-                    }
-                    Some(ToWrite::PublishWithFlags(path, flags)) => {
-                        let s = self.shard(&path);
-                        by_shard[s].push((n, ToWrite::PublishWithFlags(path, flags)));
-                    }
-                    Some(ToWrite::PublishDefaultWithFlags(path, flags)) => {
-                        for b in by_shard.iter_mut() {
-                            b.push((
-                                n,
-                                ToWrite::PublishDefaultWithFlags(path.clone(), flags),
-                            ));
-                        }
-                    }
+                } else {
+                    n = i;
+                    c.queue_send(&cur)?;
+                    cur = m;
                 }
-                n += 1;
             }
-            trace!("handle_write_batch dispatching {} messages to shards", n);
-            if by_shard.iter().all(|v| v.is_empty()) {
-                assert!(finished);
-                break Ok(());
-            }
-            let mut replies =
-                join_all(by_shard.drain(..).enumerate().map(|(i, batch)| {
-                    let (tx, rx) = oneshot::channel();
-                    let publisher = publisher.clone();
-                    let req = WriteRequest { uifo: uifo.clone(), publisher, batch };
-                    let _ = self.shards[i].write.unbounded_send((req, tx));
-                    rx
-                }))
-                .await
-                .into_iter()
-                .collect::<result::Result<Vec<GPooled<WriteR>>, Canceled>>()?;
-            trace!("handle_write_batch {} shards replied", replies.len());
-            if let Some(ref mut c) = con {
-                for i in 0..n {
-                    if replies.len() == 1
-                        || !replies
-                            .iter()
-                            .all(|v| v.front().map(|v| i == v.0).unwrap_or(false))
-                    {
-                        let r = replies
-                            .iter_mut()
-                            .find(|v| v.front().map(|v| v.0 == i).unwrap_or(false))
-                            .unwrap()
-                            .pop_front()
-                            .unwrap()
-                            .1;
-                        c.queue_send(&r)?;
-                    } else {
-                        match replies[0].pop_front().unwrap() {
-                            (_, m @ FromWrite::Denied) => {
-                                same!(c, replies, &m, "desynced permissions");
-                            }
-                            (_, FromWrite::Error(e)) => {
-                                for i in 1..replies.len() {
-                                    replies[i].pop_front().unwrap();
-                                }
-                                c.queue_send(&FromWrite::Error(e))?;
-                            }
-                            (_, m @ FromWrite::Published) => {
-                                same!(c, replies, &m, "desynced publish");
-                            }
-                            (_, m @ FromWrite::Referral(_)) => {
-                                same!(c, replies, &m, "desynced referrals");
-                            }
-                            (_, m @ FromWrite::Unpublished) => {
-                                same!(c, replies, &m, "desynced unpublish");
-                            }
-                        }
-                    }
-                }
-                c.flush().await?;
-            }
-            trace!("handle_write_batch processed replies");
-            if finished {
-                trace!("handle_write_batch finished");
-                break Ok(());
-            }
+            c.queue_send(&cur)?;
+            c.flush().await?;
         }
+        trace!("handle_write_batch processed replies");
+        Ok(())
     }
 
     pub(super) async fn handle_clear(
@@ -786,13 +815,23 @@ impl Store {
         .flat_map(|s| s.unwrap().into_iter().map(ToWrite::Unpublish))
         .collect::<Vec<_>>();
         published_paths.shuffle(&mut rng());
-        let iter = published_paths.into_iter();
         // clear the vast majority of published paths using resources fairly
-        self.handle_batch_write(None, uifo.clone(), publisher.clone(), iter).await?;
+        self.handle_batch_write(
+            None,
+            uifo.clone(),
+            publisher.clone(),
+            GPooled::orphan(published_paths),
+        )
+        .await?;
         // clear out anything left over that was sent to all shards,
         // e.g. default publishers.
-        self.handle_batch_write(None, uifo, publisher, iter::once(ToWrite::Clear))
-            .await?;
+        self.handle_batch_write(
+            None,
+            uifo,
+            publisher,
+            GPooled::orphan(vec![ToWrite::Clear]),
+        )
+        .await?;
         Ok(())
     }
 }

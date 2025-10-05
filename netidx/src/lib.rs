@@ -2,7 +2,7 @@
 //! one program and consuming it in another program, either on the
 //! same machine or across the network.
 //!
-//! For more details see the [netidx book](https://estokes.github.io/netidx-book/)
+//! For more details see the [netidx book](https://netidx.github.io/netidx-book/)
 //!
 //! Here is an example service that publishes a cpu temperature, along
 //! with the corresponding subscriber that consumes the data.
