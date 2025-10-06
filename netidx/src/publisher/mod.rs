@@ -36,13 +36,13 @@ use std::{
     default::Default,
     fmt, iter, mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    pin::{pin, Pin},
+    pin::Pin,
     result,
     str::FromStr,
     sync::{Arc, LazyLock, Weak},
     time::Duration,
 };
-use tokio::{net::TcpListener, runtime, task, time};
+use tokio::{net::TcpListener, task};
 
 /// Control how the publisher picks a bind address. The address we
 /// give to the resolver server must be uniquely routable back to us,
