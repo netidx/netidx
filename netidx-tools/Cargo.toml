@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools"
-version = "0.29.2"
+version = "0.30.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -47,12 +47,12 @@ graphix-rt = { workspace = true }
 graphix-compiler = { workspace = true }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
-netidx-archive = { path = "../netidx-archive", version = "0.29.0", default-features = false }
-netidx-container = { path = "../netidx-container", version = "0.29.0", default-features = false }
-netidx = { path = "../netidx", version = "0.29.1", default-features = false }
-netidx-protocols = { path = "../netidx-protocols", version = "0.29.0", default-features = false }
-netidx-tools-core = { path = "../netidx-tools-core", version = "0.29.0", default-features = false }
-netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.29.0", default-features = false }
+netidx-archive = { path = "../netidx-archive", version = "0.30.0", default-features = false }
+netidx-container = { path = "../netidx-container", version = "0.30.0", default-features = false }
+netidx = { path = "../netidx", version = "0.30.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.30.0", default-features = false }
+netidx-tools-core = { path = "../netidx-tools-core", version = "0.30.0", default-features = false }
+netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.30.0", default-features = false }
 parking_lot = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
