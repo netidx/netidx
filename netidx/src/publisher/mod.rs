@@ -1014,20 +1014,9 @@ impl Drop for PublisherInner {
             rx
         });
         if let Some(stopped) = stopped {
-            let stopped = stopped.shared();
-            let hd = runtime::Handle::current();
-            let timeout = pin!(time::timeout(Duration::from_millis(50), stopped.clone()));
-            let stopped = match hd.block_on(timeout) {
-                Err(_) => Some(stopped),
-                Ok(_) => None,
-            };
-            self.clients.clear();
-            self.by_id.clear();
             let resolver = self.resolver.clone();
             tokio::spawn(async move {
-                if let Some(stopped) = stopped {
-                    let _ = stopped.await;
-                }
+                let _ = stopped.await;
                 let _ = resolver.clear().await;
             });
         }

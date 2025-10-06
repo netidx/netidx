@@ -1,5 +1,15 @@
 * 0.30.0
 
+- Add publisher priority. This new flag to publisher creation (use the Builder
+for a nicer interface) is stored by the resolver and communicated to the
+subscriber. Subscribers will attempt to subscribe to publishers in priority
+order. There are three priorities, HIGH, NORMAL, and LOW. Subscribers will first
+try to subscribe to HIGH, then NORMAL, then LOW.
+
+As an added benefit the test for this feature is absolutely brutal, and
+uncovered multiple minor race conditions in the resolver server, the subscriber,
+and the publisher all of which were fixed.
+
 - Value::Error now carries an inner Value instead of an inner ArcStr, allowing
 structured error types to be published (mostly for Graphix).
 Value::Error(Value::String(..)) is special cased to encoded exactly the same as
