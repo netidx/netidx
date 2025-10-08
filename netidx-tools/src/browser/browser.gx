@@ -11,18 +11,17 @@ let cursor: MoveCursor = never();
 let command_mode = false;
 let command = "";
 
-let run_command = |c: string, path: string| {
-    let errors = never();
-    select str::sub(#start:0, #len:2, c) {
-        "w " => {
-            let v = str::sub(#start:2, #len:str::len(c) - 2, c)?;
-            let v = str::parse(v)?;
-            net::write(path, v)?
-        },
-        s => error("invalid command [s]")?
-    };
-    command_error <- errors
-};
+let run_command = |c: string, path: string|
+    try
+        select str::sub(#start:0, #len:2, c)? {
+            "w " => {
+                let v = str::sub(#start:2, #len:str::len(c) - 2, c)?;
+                let v = str::parse(v)?;
+                net::write(path, v)?
+            },
+            s => error("invalid command [s]")?
+        }
+    catch(e) => command_error <- e;
 
 let title_style = style(#fg:`Indexed(202));
 let title_bottom = select command_mode {
