@@ -1,40 +1,48 @@
 * 0.30.0
 
-- Add publisher priority. This new flag to publisher creation (use the Builder
-for a nicer interface) is stored by the resolver and communicated to the
-subscriber. Subscribers will attempt to subscribe to publishers in priority
-order. There are three priorities, HIGH, NORMAL, and LOW. Subscribers will first
-try to subscribe to HIGH, then NORMAL, then LOW.
+- Add publisher priority. This new flag to publisher creation (use the
+Builder for a nicer interface) is stored by the resolver and
+communicated to the subscriber. Subscribers will attempt to subscribe
+to publishers in priority order. There are three priorities, HIGH,
+NORMAL, and LOW. Subscribers will first try to subscribe to HIGH, then
+NORMAL, then LOW.
 
-As an added benefit the test for this feature is absolutely brutal, and
-uncovered multiple minor race conditions in the resolver server, the subscriber,
-and the publisher all of which were fixed.
+As an added benefit the test for this feature is absolutely brutal,
+and uncovered multiple minor race conditions in the resolver server,
+the subscriber, and the publisher all of which were fixed.
 
-- Value::Error now carries an inner Value instead of an inner ArcStr, allowing
-structured error types to be published (mostly for Graphix).
-Value::Error(Value::String(..)) is special cased to encoded exactly the same as
-it used to in previous versions, so this change is both backwards and forwards
-compatible with old code as long as you stick to string errors.
+This protocol change is backwards and forwards compatible with all
+components. However, if you do not update the resolver server then all
+priorities will be NORMAL, regardless of what they are set to. And of
+course, pre 0.30 subscribers will always ignore priority.
 
-- add Value::Map using a pooled immutable chunkmap. This is mostly for Graphix,
-but it's generally useful to have a Value => Value map type that can be
-published. Value is forward compatible with previous versions, any value
-published by old code will be understood by new code. Value::Map can't be
-published to old code, if it is the old Subscriber will fail to read the
-Value::Map and gracefully disconnect from the publisher.
+- Value::Error now carries an inner Value instead of an inner ArcStr,
+allowing structured error types to be published (mostly for Graphix).
+Value::Error(Value::String(..)) is special cased to encoded exactly
+the same as it used to in previous versions, so this change is both
+backwards and forwards compatible with old code as long as you stick
+to string errors.
 
-- shrink Value to 2 machine words. This is accomplished by boxing DateTime,
-Duration, and Decimal, which aren't used often. For the common case of
-publishing normal numbers this is worth 5% additional throughput, and for
-Graphix it will likely be even more important. This didn't change the wire
-encoding of Value at all.
+- add Value::Map using a pooled immutable chunkmap. This is mostly for
+Graphix, but it's generally useful to have a Value => Value map type
+that can be published. Value is forward compatible with previous
+versions, any value published by old code will be understood by new
+code. Value::Map can't be published to old code, if it is the old
+Subscriber will fail to read the Value::Map and gracefully disconnect
+from the publisher.
 
-- move memory pooling code (pool module) to a separate (and enhanced) crate
-called poolshark
+- shrink Value to 2 machine words. This is accomplished by boxing
+DateTime, Duration, and Decimal, which aren't used often. For the
+common case of publishing normal numbers this is worth 5% additional
+throughput, and for Graphix it will likely be even more
+important. This didn't change the wire encoding of Value at all.
 
-- additional hardening of collection pack implementations to prevent a remote
-attacker from being able to trigger fairly large memory allocations in some
-cases
+- move memory pooling code (pool module) to a separate (and enhanced)
+crate called poolshark
+
+- additional hardening of collection pack implementations to prevent a
+remote attacker from being able to trigger fairly large memory
+allocations in some cases
 
 * 0.29.2
 
