@@ -1,6 +1,6 @@
 [package]
 name = "netidx-tools-core"
-version = "0.30.0"
+version = "0.30.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -17,5 +17,5 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx = { path = "../netidx", version = "0.30.0", default-features = false }
+netidx = { path = "../netidx", version = "0.30.1", default-features = false }
 structopt = { workspace = true }

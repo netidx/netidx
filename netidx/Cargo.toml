@@ -1,6 +1,6 @@
 [package]
 name = "netidx"
-version = "0.30.0"
+version = "0.30.1"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
@@ -34,7 +34,7 @@ indexmap = { workspace = true }
 keyring = { workspace = true }
 log = { workspace = true }
 netidx-core = { version = "0.30.0", path = "../netidx-core" }
-netidx-netproto = { version = "0.30.0", path = "../netidx-netproto" }
+netidx-netproto = { version = "0.30.1", path = "../netidx-netproto" }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }
 pkcs8 = { workspace = true }

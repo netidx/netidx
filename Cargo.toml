@@ -86,7 +86,7 @@ tokio = { version = "1", features = [
     "signal",
     "io-std",
 ] }
-triomphe = { version = "0.1" }
+triomphe = { version = "0.1.15" }
 uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
 x509-parser = "0.18"
