@@ -95,7 +95,7 @@ unsafe impl RawPoolable for ValArrayBase {
     fn reset(&mut self) {
         self.0.with_arc_mut(|t| {
             // reset can only be called if the arc is unique
-            for v in Arc::get_mut(t).unwrap().slice.iter_mut() {
+            for v in Arc::get_mut(t).unwrap().slice_mut().iter_mut() {
                 // ensure we drop any allocated values
                 *v = Value::Null;
             }
@@ -326,7 +326,7 @@ impl ValArray {
             res.0.with_arc_mut(|res| {
                 let res = Arc::get_mut(res).unwrap();
                 for (i, v) in iter.enumerate() {
-                    res.slice[i] = v;
+                    res.slice_mut()[i] = v;
                 }
             })
         }
@@ -603,7 +603,7 @@ impl Pack for ValArray {
             data.0.with_arc_mut(|data| {
                 let data = Arc::get_mut(data).unwrap();
                 for i in 0..elts {
-                    data.slice[i] = Pack::decode(buf)?;
+                    data.slice_mut()[i] = Pack::decode(buf)?;
                 }
                 Ok(())
             })?
