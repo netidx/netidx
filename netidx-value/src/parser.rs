@@ -151,13 +151,13 @@ where
     ))
 }
 
-fn constant<I>(typ: &'static str) -> impl Parser<I, Output = char>
+fn constant<I>(typ: &'static str) -> impl Parser<I, Output = ()>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    string(typ).with(token(':'))
+    string(typ).with(spaces()).with(token(':')).with(spaces()).map(|_| ())
 }
 
 pub fn close_expr<I>() -> impl Parser<I, Output = ()>
