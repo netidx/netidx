@@ -145,9 +145,12 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize((
-        take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
-        take_while(|c: char| c == '='),
+    choice((
+        attempt(string("null")).map(|_| String::new()),
+        recognize((
+            take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
+            take_while(|c: char| c == '='),
+        )),
     ))
 }
 

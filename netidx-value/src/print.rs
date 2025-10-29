@@ -267,7 +267,11 @@ impl Value {
             }
             Value::Bytes(b) => {
                 let pfx = if types { "bytes:" } else { "" };
-                write!(f, "{}{}", pfx, BASE64.encode(&*b))
+                if b.is_empty() {
+                    write!(f, "{}null", pfx)
+                } else {
+                    write!(f, "{}{}", pfx, BASE64.encode(&*b))
+                }
             }
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
