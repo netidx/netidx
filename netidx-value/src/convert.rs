@@ -7,7 +7,10 @@ use compact_str::CompactString;
 use fxhash::FxHashMap;
 use indexmap::{IndexMap, IndexSet};
 use netidx_core::path::Path;
-use poolshark::global::{GPooled, Pool};
+use poolshark::{
+    global::{GPooled, Pool},
+    local::LPooled,
+};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::{
@@ -1359,5 +1362,32 @@ impl<T: FromValue + Send + Sync + 'static> FromValue for GPooled<Vec<T>> {
 
     fn get(v: Value) -> Option<Self> {
         <GPooled<Vec<T>> as FromValue>::from_value(v).ok()
+    }
+}
+
+impl<T: FromValue + Send + Sync + 'static> FromValue for LPooled<Vec<T>> {
+    fn from_value(v: Value) -> Result<Self> {
+        macro_rules! convert {
+            ($a:expr) => {{
+                let mut t: LPooled<Vec<T>> = LPooled::take();
+                for elt in $a.iter() {
+                    t.push(elt.clone().cast_to::<T>()?)
+                }
+                Ok(t)
+            }};
+        }
+        match v {
+            Value::Array(a) => convert!(a),
+            v => v.cast(Typ::Array).ok_or_else(|| anyhow!("can't cast")).and_then(|v| {
+                match v {
+                    Value::Array(a) => convert!(a),
+                    _ => bail!("can't cast"),
+                }
+            }),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        <LPooled<Vec<T>> as FromValue>::from_value(v).ok()
     }
 }
