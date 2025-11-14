@@ -14,6 +14,7 @@ use smallvec::SmallVec;
 use std::{hint::unreachable_unchecked, iter, ptr, result, str::FromStr, time::Duration};
 use triomphe::Arc;
 
+pub mod abstract_type;
 pub mod array;
 mod convert;
 mod op;

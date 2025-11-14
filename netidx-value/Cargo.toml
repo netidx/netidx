@@ -26,6 +26,8 @@ fxhash = { workspace = true }
 indexmap = { workspace = true }
 immutable-chunkmap = { workspace = true }
 netidx-core = { version = "0.30.0", path = "../netidx-core" }
+netidx-derive = { version = "0.28.3", path = "../netidx-derive" }
+parking_lot = { workspace = true }
 poolshark = { workspace = true }
 rust_decimal = { workspace = true }
 seq-macro = { workspace = true }
