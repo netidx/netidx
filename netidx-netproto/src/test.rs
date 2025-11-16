@@ -591,11 +591,7 @@ mod publisher {
                         .all(|((k0, v0), (k1, v1))| vequiv(k0, k1) && vequiv(v0, v1))
             }
             (Value::Error(v0), Value::Error(v1)) => vequiv(v0, v1),
-            (Value::Abstract(a0), Value::Abstract(a1)) => {
-                // For Abstract types, we can only compare if they're the same registered type
-                // The Abstract type implements Eq, so we can use that
-                a0 == a1
-            }
+            (Value::Abstract(a0), Value::Abstract(a1)) => a0 == a1,
             (v0, v1) => v0 == v1,
         }
     }
