@@ -187,7 +187,7 @@ impl Clone for Value {
     }
 
     fn clone_from(&mut self, source: &Self) {
-        if self.is_copy() {
+        if source.is_copy() {
             unsafe { ptr::copy_nonoverlapping(source, self, 1) };
         } else {
             match source {
@@ -740,6 +740,9 @@ impl Value {
     /// If you are wrong about what kind of value you have then this
     /// could cause undefined behavior.
     pub unsafe fn get_as_unchecked<T>(&self) -> &T {
+        // You must run the test suite on a new platform to validate that this still works.
+        // on 64 bit platforms tag is always size 8 align 8,
+        // on 32 bit platforms tag can be align 4 or 8, but is always size 8
         unsafe {
             let ptr = (self as *const _ as *const u64).add(1);
             &*(ptr as *const T)

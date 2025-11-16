@@ -95,22 +95,30 @@ impl AbstractVtable {
     }
 }
 
-/// This is the type that will be decoded if we unpack an abstract type that
-/// hasn't been registered.
+/// This is the type that will be decoded if we unpack an abstract
+/// type that hasn't been registered. It preserves the original
+/// payload of the type so if we end up forwarding this to another
+/// program that does know this type, it will work.
 #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct UnknownAbstractType;
+pub struct UnknownAbstractType(Bytes);
 
 impl Pack for UnknownAbstractType {
     fn encoded_len(&self) -> usize {
-        0
+        self.0.encoded_len()
     }
 
-    fn encode(&self, _buf: &mut impl BufMut) -> Result<(), PackError> {
-        Ok(())
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        self.0.encode(buf)
     }
 
-    fn decode(_buf: &mut impl Buf) -> Result<Self, PackError> {
-        Ok(UnknownAbstractType)
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        // len_wrapped_encode passes us a limited view of the buffer,
+        // since we are always the last thing in it we can just take
+        // the whole thing.
+        let chunk = buf.chunk();
+        let t = UnknownAbstractType(Bytes::copy_from_slice(chunk));
+        buf.advance(chunk.len());
+        Ok(t)
     }
 }
 
@@ -282,9 +290,9 @@ impl Pack for Abstract {
                     })))
                 }
                 None => Ok(Abstract(Arc::new(AbstractInner {
-                    id: UNKNOWN_ID,
+                    id,
                     vtable: reg.by_uuid[&UNKNOWN_ID].clone(),
-                    t: Box::new(UnknownAbstractType),
+                    t: Box::new(UnknownAbstractType::decode(buf)?),
                 }))),
             }
         })
