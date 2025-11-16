@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     hash::Hash,
-    iter,
+    iter, mem,
     num::Wrapping,
     ops::{Add, Div, Mul, Not, Rem, Sub},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -136,6 +136,10 @@ impl PartialEq for Value {
         use std::num::FpCategory::*;
         Typ::get(self) == Typ::get(rhs)
             && match (self, rhs) {
+                (Value::U8(l), Value::U8(r)) => l == r,
+                (Value::I8(l), Value::I8(r)) => l == r,
+                (Value::U16(l), Value::U16(r)) => l == r,
+                (Value::I16(l), Value::I16(r)) => l == r,
                 (Value::U32(l), Value::U32(r)) => l == r,
                 (Value::V32(l), Value::V32(r)) => l == r,
                 (Value::I32(l), Value::I32(r)) => l == r,
@@ -162,6 +166,7 @@ impl PartialEq for Value {
                 (Value::Error(l), Value::Error(r)) => l == r,
                 (Value::Array(l), Value::Array(r)) => l == r,
                 (Value::Map(l), Value::Map(r)) => l == r,
+                (Value::Abstract(l), Value::Abstract(r)) => l == r,
                 (_, _) => false,
             }
     }
@@ -176,6 +181,9 @@ impl PartialOrd for Value {
             Ordering::Greater => Some(Ordering::Greater),
             Ordering::Less => Some(Ordering::Less),
             Ordering::Equal => match (self, other) {
+                (Value::U8(l), Value::U8(r)) => l.partial_cmp(r),
+                (Value::I8(l), Value::I8(r)) => l.partial_cmp(r),
+                (Value::U16(l), Value::U16(r)) => l.partial_cmp(r),
                 (Value::U32(l), Value::U32(r)) => l.partial_cmp(r),
                 (Value::V32(l), Value::V32(r)) => l.partial_cmp(r),
                 (Value::I32(l), Value::I32(r)) => l.partial_cmp(r),
@@ -206,6 +214,7 @@ impl PartialOrd for Value {
                 (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
                 (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
                 (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
+                (Value::Abstract(l), Value::Abstract(r)) => l.partial_cmp(r),
                 (_, _) => unreachable!(),
             },
         }
@@ -218,9 +227,114 @@ impl Ord for Value {
     }
 }
 
+macro_rules! apply_op_mixed_int {
+    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt) => {
+        match $rhs {
+            Value::U8(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::I8(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::U16(r) if mem::size_of::<u16>() > mem::size_of::<$lht>() => Value::U16((Wrapping($lhs as u16) $op Wrapping(r)).0),
+            Value::U16(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::I16(r) if mem::size_of::<i16>() > mem::size_of::<$lht>() => Value::I16((Wrapping($lhs as i16) $op Wrapping(r)).0),
+            Value::I16(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::U32(r) | Value::V32(r) if mem::size_of::<u32>() > mem::size_of::<$lht>() => Value::U32((Wrapping($lhs as u32) $op Wrapping(r)).0),
+            Value::U32(r) | Value::V32(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::I32(r) | Value::Z32(r) if mem::size_of::<i32>() > mem::size_of::<$lht>() => Value::I32((Wrapping($lhs as i32) $op Wrapping(r)).0),
+            Value::I32(r) | Value::Z32(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::U64(r) | Value::V64(r) if mem::size_of::<u64>() > mem::size_of::<$lht>() => Value::U64((Wrapping($lhs as u64) $op Wrapping(r)).0),
+            Value::U64(r) | Value::V64(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::I64(r) | Value::Z64(r) if mem::size_of::<i64>() > mem::size_of::<$lht>() => Value::I64((Wrapping($lhs as i64) $op Wrapping(r)).0),
+            Value::I64(r) | Value::Z64(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::F32(r) => Value::F32(($lhs as f32) $op r),
+            Value::F64(r) => Value::F64(($lhs as f64) $op r),
+            Value::Decimal(r) => Value::Decimal(Arc::new(Decimal::from($lhs) $op *r)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+macro_rules! apply_op_mixed_float {
+    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt) => {
+        match $rhs {
+            Value::U8(r) => Value::$lhc($lhs $op r as $lht),
+            Value::I8(r) => Value::$lhc($lhs $op r as $lht),
+            Value::U16(r) => Value::$lhc($lhs $op r as $lht),
+            Value::I16(r) => Value::$lhc($lhs $op r as $lht),
+            Value::U32(r) | Value::V32(r) => Value::$lhc($lhs $op r as $lht),
+            Value::I32(r) | Value::Z32(r) => Value::$lhc($lhs $op r as $lht),
+            Value::U64(r) | Value::V64(r) => Value::$lhc($lhs $op r as $lht),
+            Value::I64(r) | Value::Z64(r) => Value::$lhc($lhs $op r as $lht),
+            Value::F32(r) => Value::$lhc($lhs $op r as $lht),
+            Value::F64(r) => Value::$lhc($lhs $op r as $lht),
+            Value::Decimal(r) => {
+                let d = match Decimal::try_from($lhs) {
+                    Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
+                    Ok(d) => d
+                };
+                Value::Decimal(Arc::new(d $op *r))
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+macro_rules! apply_op_mixed_decimal {
+    ($lhs:expr, $rhs:expr, $op:tt) => {
+        match $rhs {
+            Value::U8(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::I8(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::U16(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::I16(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::U32(r) | Value::V32(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::I32(r) | Value::Z32(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::U64(r) | Value::V64(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::I64(r) | Value::Z64(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::F32(r) => {
+                let d = match Decimal::try_from(r) {
+                    Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
+                    Ok(d) => d
+                };
+                Value::Decimal(Arc::new($lhs $op d))
+            },
+            Value::F64(r) => {
+                let d = match Decimal::try_from(r) {
+                    Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
+                    Ok(d) => d
+                };
+                Value::Decimal(Arc::new($lhs $op d))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+macro_rules! number {
+    () => {
+        Value::U8(_)
+            | Value::I8(_)
+            | Value::U16(_)
+            | Value::I16(_)
+            | Value::U32(_)
+            | Value::V32(_)
+            | Value::I32(_)
+            | Value::Z32(_)
+            | Value::U64(_)
+            | Value::V64(_)
+            | Value::I64(_)
+            | Value::Z64(_)
+            | Value::F32(_)
+            | Value::F64(_)
+            | Value::Decimal(_)
+    };
+}
+
 macro_rules! apply_op {
     ($self:expr, $rhs:expr, $id:expr, $op:tt, $($pat:pat => $blk:block),+) => {
+        #[allow(unreachable_patterns)]
         match ($self, $rhs) {
+            (Value::U8(l), Value::U8(r)) => Value::U8((Wrapping(l) $op Wrapping(r)).0),
+            (Value::I8(l), Value::I8(r)) => Value::I8((Wrapping(l) $op Wrapping(r)).0),
+            (Value::U16(l), Value::U16(r)) => Value::U16((Wrapping(l) $op Wrapping(r)).0),
+            (Value::I16(l), Value::I16(r)) => Value::I16((Wrapping(l) $op Wrapping(r)).0),
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
                 Value::U32((Wrapping(l) $op Wrapping(r)).0)
             }
@@ -236,104 +350,17 @@ macro_rules! apply_op {
             (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
             (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(Arc::new((*l) $op (*r))),
-            (Value::U32(l) | Value::V32(l), Value::U64(r) | Value::V64(r)) => {
-                Value::U64((Wrapping(l as u64) $op Wrapping(r)).0)
-            }
-            (Value::U64(l) | Value::V64(l), Value::U32(r) | Value::V32(r)) => {
-                Value::U64((Wrapping(l) $op Wrapping(r as u64)).0)
-            }
-            (Value::I32(l) | Value::Z32(l), Value::I64(r) | Value::Z64(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
-            }
-            (Value::I32(l) | Value::Z32(l), Value::U32(r) | Value::V32(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
-            }
-            (Value::U32(l) | Value::V32(l), Value::I32(r) | Value::Z32(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
-            }
-            (Value::I64(l) | Value::Z64(l), Value::I32(r) | Value::Z32(r)) => {
-                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
-            }
-            (Value::I64(l) | Value::Z64(l), Value::U32(r) | Value::V32(r)) => {
-                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
-            }
-            (Value::U32(l) | Value::V32(l), Value::I64(r) | Value::Z64(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
-            }
-            (Value::I64(l) | Value::Z64(l), Value::U64(r) | Value::V64(r)) => {
-                Value::I64((Wrapping(l) $op Wrapping(r as i64)).0)
-            }
-            (Value::U64(l) | Value::V64(l), Value::I64(r) | Value::Z64(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r)).0)
-            }
-            (Value::U64(l) | Value::V64(l), Value::I32(r) | Value::Z32(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
-            }
-            (Value::I32(l) | Value::Z32(l), Value::U64(r) | Value::V64(r)) => {
-                Value::I64((Wrapping(l as i64) $op Wrapping(r as i64)).0)
-            }
-            (Value::F32(l), Value::U32(r) | Value::V32(r)) => Value::F32(l $op r as f32),
-            (Value::U32(l) | Value::V32(l), Value::F32(r)) => Value::F32(l as f32 $op r),
-            (Value::F32(l), Value::U64(r) | Value::V64(r)) => Value::F32(l $op r as f32),
-            (Value::U64(l) | Value::V64(l), Value::F32(r)) => Value::F32(l as f32 $op r),
-            (Value::F32(l), Value::I32(r) | Value::Z32(r)) => Value::F32(l $op r  as f32),
-            (Value::I32(l) | Value::Z32(l), Value::F32(r)) => Value::F32(l as f32 $op r),
-            (Value::F32(l), Value::I64(r) | Value::Z64(r)) => Value::F32(l $op r as f32),
-            (Value::I64(l) | Value::Z64(l), Value::F32(r)) => Value::F32(l as f32 $op r),
-            (Value::F32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
-            (Value::F64(l), Value::U32(r) | Value::V32(r)) => Value::F64(l $op r as f64),
-            (Value::U32(l) | Value::V32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
-            (Value::F64(l), Value::U64(r) | Value::V64(r)) => Value::F64(l $op r as f64),
-            (Value::U64(l) | Value::V64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
-            (Value::F64(l), Value::I32(r) | Value::Z32(r)) => Value::F64(l $op r as f64),
-            (Value::I32(l) | Value::Z32(l), Value::F64(r)) => Value::F64(l as f64 $op r),
-            (Value::F64(l), Value::I64(r) | Value::Z64(r)) => Value::F64(l $op r as f64),
-            (Value::I64(l) | Value::Z64(l), Value::F64(r)) => Value::F64(l as f64 $op r),
-            (Value::F64(l), Value::F32(r)) => Value::F64(l $op r as f64),
-            (Value::Decimal(l), Value::U32(r) | Value::V32(r)) =>
-                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
-            (Value::U32(l) | Value::V32(l), Value::Decimal(r)) =>
-                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
-            (Value::Decimal(l), Value::U64(r) | Value::V64(r)) =>
-                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
-            (Value::U64(l) | Value::V64(l), Value::Decimal(r)) =>
-                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
-            (Value::Decimal(l), Value::I32(r) | Value::Z32(r)) =>
-                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
-            (Value::I32(l) | Value::Z32(l), Value::Decimal(r)) =>
-                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
-            (Value::Decimal(l), Value::I64(r) | Value::Z64(r)) =>
-                Value::Decimal(Arc::new((*l) $op Decimal::from(r))),
-            (Value::I64(l) | Value::Z64(l), Value::Decimal(r)) =>
-                Value::Decimal(Arc::new(Decimal::from(l) $op (*r))),
-            (Value::Decimal(l), Value::F32(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(Arc::new((*l) $op r)),
-                Err(_) => {
-                    let e = format_compact!("can't parse {} as a decimal", r);
-                    Value::error(e.as_str())
-                },
-            },
-            (Value::F32(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(Arc::new(l $op (*r))),
-                Err(_) => {
-                    let e = format_compact!("can't parse {} as a decimal", l);
-                    Value::error(e.as_str())
-                },
-            },
-            (Value::Decimal(l), Value::F64(r)) => match Decimal::try_from(r) {
-                Ok(r) => Value::Decimal(Arc::new((*l) $op r)),
-                Err(_) => {
-                    let e = format_compact!("can't parse {} as a decimal", r);
-                    Value::error(e.as_str())
-                },
-            },
-            (Value::F64(l), Value::Decimal(r)) => match Decimal::try_from(l) {
-                Ok(l) => Value::Decimal(Arc::new(l $op (*r))),
-                Err(_) => {
-                    let e = format_compact!("can't parse {} as a decimal", l);
-                    Value::error(e.as_str())
-                },
-            },
+            (Value::U8(l), v@ number!()) => apply_op_mixed_int!(l, v, U8, u8, $op),
+            (Value::I8(l), v@ number!()) => apply_op_mixed_int!(l, v, I8, i8, $op),
+            (Value::U16(l), v@ number!()) => apply_op_mixed_int!(l, v, U16, u16, $op),
+            (Value::I16(l), v@ number!()) => apply_op_mixed_int!(l, v, I16, i16, $op),
+            (Value::U32(l) | Value::V32(l), v@ number!()) => apply_op_mixed_int!(l, v, U32, u32, $op),
+            (Value::I32(l) | Value::Z32(l), v@ number!()) => apply_op_mixed_int!(l, v, I32, i32, $op),
+            (Value::U64(l) | Value::V64(l), v@ number!()) => apply_op_mixed_int!(l, v, U64, u64, $op),
+            (Value::I64(l) | Value::Z64(l), v@ number!()) => apply_op_mixed_int!(l, v, I64, i64, $op),
+            (Value::F32(l), v@ number!()) => apply_op_mixed_float!(l, v, F32, f32, $op),
+            (Value::F64(l), v@ number!()) => apply_op_mixed_float!(l, v, F64, f64, $op),
+            (Value::Decimal(l), v@ number!()) => apply_op_mixed_decimal!(*l, v, $op),
             (Value::String(s), n) => match s.parse::<Value>() {
                 Err(e) => Value::error(format_compact!("{}", e).as_str()),
                 Ok(s) => s $op n,
@@ -371,7 +398,8 @@ macro_rules! apply_op {
                 Value::error(literal!("can't add null"))
             }
             | (Value::Error(_), _)
-            | (_, Value::Error(_)) => Value::error(literal!("can't add error types")),
+                | (_, Value::Error(_)) => Value::error(literal!("can't add error types")),
+            (Value::Abstract(_), _) | (_, Value::Abstract(_)) => Value::error(literal!("can't add abstract types")),
             (Value::Bool(true), n) => Value::U32(1) $op n,
             (n, Value::Bool(true)) => n $op Value::U32(1),
             (Value::Bool(false), n) => Value::U32(0) $op n,
@@ -550,6 +578,10 @@ impl Not for Value {
         match self {
             Value::Bool(v) => Value::Bool(!v),
             Value::Null => Value::Null,
+            Value::U8(v) => Value::U8(!v),
+            Value::I8(v) => Value::I8(!v),
+            Value::U16(v) => Value::U16(!v),
+            Value::I16(v) => Value::I16(!v),
             Value::U32(v) => Value::U32(!v),
             Value::V32(v) => Value::V32(!v),
             Value::I32(v) => Value::I32(!v),
@@ -567,6 +599,7 @@ impl Not for Value {
             Value::Bytes(_) => Value::error(literal!("can't apply not to Bytes")),
             Value::Error(_) => Value::error(literal!("can't apply not to Error")),
             Value::Map(_) => Value::error(literal!("can't apply not to Map")),
+            Value::Abstract(_) => Value::error(literal!("can't apply not to Abstract")),
             Value::Array(elts) => {
                 Value::Array(ValArray::from_iter_exact(elts.iter().cloned().map(|v| !v)))
             }

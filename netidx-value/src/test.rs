@@ -1,6 +1,8 @@
-use crate::{array::ValArray, Map, Typ, Value};
+use crate::{
+    abstract_type::Abstract, array::ValArray, Map, PBytes, Typ, Value, ValueLayout,
+};
 use anyhow::{anyhow, Result};
-use arcstr::literal;
+use arcstr::{literal, ArcStr};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use enumflags2::BitFlags;
@@ -152,4 +154,44 @@ fn array_subslicing() -> Result<()> {
         assert_eq!(v, &Value::U64((115 + i) as u64));
     }
     Ok(())
+}
+
+fn check_layout<T>() {
+    use std::mem;
+    assert_eq!(
+        mem::size_of::<ValueLayout<T>>(),
+        mem::size_of::<Value>(),
+        "Layout assumption violated for type {}",
+        std::any::type_name::<T>()
+    );
+    assert_eq!(
+        mem::offset_of!(ValueLayout<T>, payload),
+        8,
+        "Offset assumption violated for type {}",
+        std::any::type_name::<T>()
+    );
+}
+
+#[test]
+fn layout() {
+    check_layout::<u8>();
+    check_layout::<i8>();
+    check_layout::<u16>();
+    check_layout::<i16>();
+    check_layout::<u32>();
+    check_layout::<i32>();
+    check_layout::<u64>();
+    check_layout::<i64>();
+    check_layout::<f32>();
+    check_layout::<f64>();
+    check_layout::<bool>();
+    check_layout::<ArcStr>();
+    check_layout::<PBytes>();
+    check_layout::<Arc<Value>>();
+    check_layout::<ValArray>();
+    check_layout::<Map>();
+    check_layout::<Arc<Decimal>>();
+    check_layout::<Arc<DateTime<Utc>>>();
+    check_layout::<Arc<Duration>>();
+    check_layout::<Abstract>();
 }

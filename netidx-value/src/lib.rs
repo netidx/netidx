@@ -25,13 +25,12 @@ mod print;
 mod test;
 mod typ;
 
+pub use abstract_type::Abstract;
 pub use array::ValArray;
 pub use convert::FromValue;
 pub use pbuf::PBytes;
 pub use print::{printf, NakedValue};
 pub use typ::Typ;
-
-use crate::abstract_type::Abstract;
 
 #[macro_export]
 macro_rules! valarray {
@@ -52,6 +51,21 @@ fn _test_valarray() {
 pub type Map = map::Map<Value, Value, 32>;
 
 const COPY_MAX: u32 = 0x0000_8000;
+
+#[cfg(all(target_pointer_width = "32", target_arch = "x86"))]
+#[repr(C)]
+pub(crate) struct ValueLayout<T> {
+    discriminant: u32,
+    payload: T,
+}
+
+#[cfg(not(all(target_pointer_width = "32", target_arch = "x86")))]
+#[repr(C)]
+pub(crate) struct ValueLayout<T> {
+    discriminant: u32,
+    _padding: u32, // for 8-byte alignment
+    payload: T,
+}
 
 // this type is divided into two subtypes, the copy part and the clone
 // part. If the tag word is <= COPY_MAX then the type is copy,
@@ -736,6 +750,15 @@ impl Value {
         <T as FromValue>::get(self)
     }
 
+    /// get a reference to the payload of the value without checking the tag
+    ///
+    /// If you are wrong about what kind of value you have then this
+    /// could cause undefined behavior.
+    pub unsafe fn get_as_unchecked<T>(&self) -> &T {
+        let layout_ptr = self as *const Self as *const ValueLayout<T>;
+        unsafe { &(*layout_ptr).payload }
+    }
+
     pub fn err<T: std::error::Error>(e: T) -> Value {
         use std::fmt::Write;
         let mut tmp = CompactString::new("");
@@ -767,6 +790,38 @@ impl Value {
             | Value::F64(_)
             | Value::Decimal(_) => true,
             Value::DateTime(_)
+            | Value::Duration(_)
+            | Value::String(_)
+            | Value::Bytes(_)
+            | Value::Bool(_)
+            | Value::Null
+            | Value::Error(_)
+            | Value::Array(_)
+            | Value::Map(_)
+            | Value::Abstract(_) => false,
+        }
+    }
+
+    /// return true if the value is some kind of integer, otherwise
+    /// false.
+    pub fn integer(&self) -> bool {
+        match self {
+            Value::U8(_)
+            | Value::I8(_)
+            | Value::U16(_)
+            | Value::I16(_)
+            | Value::U32(_)
+            | Value::V32(_)
+            | Value::I32(_)
+            | Value::Z32(_)
+            | Value::U64(_)
+            | Value::V64(_)
+            | Value::I64(_)
+            | Value::Z64(_) => true,
+            Value::F32(_)
+            | Value::F64(_)
+            | Value::Decimal(_)
+            | Value::DateTime(_)
             | Value::Duration(_)
             | Value::String(_)
             | Value::Bytes(_)

@@ -1,4 +1,4 @@
-use crate::{pbuf::PBytes, ValArray, Value};
+use crate::{pbuf::PBytes, Abstract, ValArray, Value};
 use arcstr::ArcStr;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
@@ -17,6 +17,7 @@ use combine::{
 };
 use compact_str::CompactString;
 use escaping::Escape;
+use netidx_core::pack::Pack;
 use poolshark::local::LPooled;
 use rust_decimal::Decimal;
 use std::{borrow::Cow, result::Result, str::FromStr, sync::LazyLock, time::Duration};
@@ -235,6 +236,12 @@ where
                 .with(from_str(base64str()))
                 .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
         ),
+        attempt(constant("abstract").with(from_str(base64str())).then(
+            |Base64Encoded(v)| match Abstract::decode(&mut &v[..]) {
+                Ok(a) => combine::value(Value::Abstract(a)).right(),
+                Err(_) => unexpected_any("failed to unpack abstract").left(),
+            },
+        )),
         attempt(
             constant("error")
                 .with(value(must_escape, esc))

@@ -1,8 +1,10 @@
 use crate::{parser, Value};
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use bytes::BytesMut;
 use compact_str::CompactString;
 use escaping::Escape;
+use netidx_core::utils::pack;
 use rust_decimal::Decimal;
 use smallvec::smallvec;
 use std::{
@@ -69,6 +71,10 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
     let mut fish_args: SmallVec<[T; 8]> = smallvec![];
     for v in args {
         fish_args.push(match v {
+            Value::U8(v) => T::Arg(v.to_arg()),
+            Value::I8(v) => T::Arg(v.to_arg()),
+            Value::U16(v) => T::Arg(v.to_arg()),
+            Value::I16(v) => T::Arg(v.to_arg()),
             Value::U32(v) | Value::V32(v) => T::Arg(v.to_arg()),
             Value::I32(v) | Value::Z32(v) => T::Arg(v.to_arg()),
             Value::U64(v) | Value::V64(v) => T::Arg(v.to_arg()),
@@ -98,15 +104,10 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
             Value::Bool(true) => T::Arg("true".to_arg()),
             Value::Bool(false) => T::Arg("false".to_arg()),
             Value::Null => T::Arg("null".to_arg()),
-            v @ Value::Error(_) => {
-                strings.push(format_compact!("{v}"));
-                T::Index(strings.len() - 1)
-            }
-            v @ Value::Array(_) => {
-                strings.push(format_compact!("{v}"));
-                T::Index(strings.len() - 1)
-            }
-            v @ Value::Map(_) => {
+            v @ (Value::Error(_)
+            | Value::Array(_)
+            | Value::Map(_)
+            | Value::Abstract(_)) => {
                 strings.push(format_compact!("{v}"));
                 T::Index(strings.len() - 1)
             }
@@ -129,6 +130,10 @@ impl Value {
 
     pub fn fmt_naked(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::U8(v) => write!(f, "{}", v),
+            Value::I8(v) => write!(f, "{}", v),
+            Value::U16(v) => write!(f, "{}", v),
+            Value::I16(v) => write!(f, "{}", v),
             Value::U32(v) | Value::V32(v) => write!(f, "{}", v),
             Value::I32(v) | Value::Z32(v) => write!(f, "{}", v),
             Value::U64(v) | Value::V64(v) => write!(f, "{}", v),
@@ -150,9 +155,10 @@ impl Value {
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            v @ Value::Error(_) => write!(f, "{}", v),
-            v @ Value::Array(_) => write!(f, "{}", v),
-            v @ Value::Map(_) => write!(f, "{}", v),
+            v @ (Value::Error(_)
+            | Value::Array(_)
+            | Value::Map(_)
+            | Value::Abstract(_)) => write!(f, "{}", v),
         }
     }
 
@@ -167,6 +173,34 @@ impl Value {
         types: bool,
     ) -> fmt::Result {
         match self {
+            Value::U8(v) => {
+                if types {
+                    write!(f, "u8:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::I8(v) => {
+                if types {
+                    write!(f, "i8:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::U16(v) => {
+                if types {
+                    write!(f, "u16:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
+            Value::I16(v) => {
+                if types {
+                    write!(f, "i16:{}", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
             Value::U32(v) => {
                 if types {
                     write!(f, "u32:{}", v)
@@ -307,6 +341,10 @@ impl Value {
                     }
                 }
                 write!(f, "}}")
+            }
+            Value::Abstract(a) => {
+                let bytes = pack(a).unwrap_or_else(|_| BytesMut::new());
+                write!(f, "abstract:{}", BASE64.encode(&bytes))
             }
         }
     }
