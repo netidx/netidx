@@ -32,3 +32,4 @@ chrono = { workspace = true }
 rust_decimal = { workspace = true }
 triomphe = { workspace = true }
 immutable-chunkmap = { workspace = true }
+uuid = { workspace = true }

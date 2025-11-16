@@ -221,16 +221,23 @@ where
                 .with(flt::<_, Decimal>())
                 .map(|d| Value::Decimal(Arc::new(d))),
         ),
-        attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
-        attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
-        attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
-        attempt(constant("z32").with(int::<_, i32>()).map(Value::Z32)),
-        attempt(constant("u64").with(uint::<_, u64>()).map(Value::U64)),
-        attempt(constant("v64").with(uint::<_, u64>()).map(Value::V64)),
-        attempt(constant("i64").with(int::<_, i64>()).map(Value::I64)),
-        attempt(constant("z64").with(int::<_, i64>()).map(Value::Z64)),
-        attempt(constant("f32").with(flt::<_, f32>()).map(Value::F32)),
-        attempt(constant("f64").with(flt::<_, f64>()).map(Value::F64)),
+        // Integer and float types grouped to stay under choice! limit
+        attempt(choice((
+            attempt(constant("u8").with(uint::<_, u8>()).map(Value::U8)),
+            attempt(constant("i8").with(int::<_, i8>()).map(Value::I8)),
+            attempt(constant("u16").with(uint::<_, u16>()).map(Value::U16)),
+            attempt(constant("i16").with(int::<_, i16>()).map(Value::I16)),
+            attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
+            attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
+            attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
+            attempt(constant("z32").with(int::<_, i32>()).map(Value::Z32)),
+            attempt(constant("u64").with(uint::<_, u64>()).map(Value::U64)),
+            attempt(constant("v64").with(uint::<_, u64>()).map(Value::V64)),
+            attempt(constant("i64").with(int::<_, i64>()).map(Value::I64)),
+            attempt(constant("z64").with(int::<_, i64>()).map(Value::Z64)),
+            attempt(constant("f32").with(flt::<_, f32>()).map(Value::F32)),
+            attempt(constant("f64").with(flt::<_, f64>()).map(Value::F64)),
+        ))),
         attempt(
             constant("bytes")
                 .with(from_str(base64str()))

@@ -184,6 +184,7 @@ impl PartialOrd for Value {
                 (Value::U8(l), Value::U8(r)) => l.partial_cmp(r),
                 (Value::I8(l), Value::I8(r)) => l.partial_cmp(r),
                 (Value::U16(l), Value::U16(r)) => l.partial_cmp(r),
+                (Value::I16(l), Value::I16(r)) => l.partial_cmp(r),
                 (Value::U32(l), Value::U32(r)) => l.partial_cmp(r),
                 (Value::V32(l), Value::V32(r)) => l.partial_cmp(r),
                 (Value::I32(l), Value::I32(r)) => l.partial_cmp(r),

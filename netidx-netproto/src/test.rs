@@ -401,13 +401,15 @@ mod publisher {
     use super::*;
     use crate::{
         publisher::{From, Hello, Id, To, WriteId},
-        value::Value,
+        value::{Abstract, Value},
     };
     use chrono::prelude::*;
-    use netidx_core::pack::PackError;
+    use netidx_core::pack::{Pack, PackError};
+    use netidx_value::abstract_type::AbstractWrapper;
     use proptest::collection;
-    use std::{net::SocketAddr, time::Duration};
+    use std::{net::SocketAddr, sync::LazyLock, time::Duration};
     use triomphe::Arc;
+    use uuid::Uuid;
 
     fn fuzz(b: Bytes) {
         type Result<T> = std::result::Result<T, PackError>;
@@ -457,8 +459,56 @@ mod publisher {
         (any::<u64>(), 0..1_000_000_000u32).prop_map(|(s, ns)| Duration::new(s, ns))
     }
 
+    // Test abstract type for testing the Abstract machinery
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct TestAbstract {
+        id: u64,
+        name: ArcStr,
+        data: Vec<u8>,
+    }
+
+    impl Pack for TestAbstract {
+        fn encoded_len(&self) -> usize {
+            self.id.encoded_len() + self.name.encoded_len() + self.data.encoded_len()
+        }
+
+        fn encode(&self, buf: &mut impl bytes::BufMut) -> Result<(), PackError> {
+            self.id.encode(buf)?;
+            self.name.encode(buf)?;
+            self.data.encode(buf)
+        }
+
+        fn decode(buf: &mut impl bytes::Buf) -> Result<Self, PackError> {
+            Ok(TestAbstract {
+                id: Pack::decode(buf)?,
+                name: Pack::decode(buf)?,
+                data: Pack::decode(buf)?,
+            })
+        }
+    }
+
+    static TEST_ABSTRACT_WRAPPER: LazyLock<AbstractWrapper<TestAbstract>> =
+        LazyLock::new(|| {
+            // UUID for TestAbstract type - randomly generated for this test
+            const TEST_ABSTRACT_UUID: Uuid =
+                Uuid::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+            Abstract::register::<TestAbstract>(TEST_ABSTRACT_UUID)
+                .expect("failed to register TestAbstract")
+        });
+
+    fn abstract_value() -> impl Strategy<Value = Value> {
+        (any::<u64>(), arcstr(), bytes()).prop_map(|(id, name, data)| {
+            let test_val = TestAbstract { id, name, data: data.to_vec() };
+            Value::Abstract(TEST_ABSTRACT_WRAPPER.wrap(test_val))
+        })
+    }
+
     fn value_leaf() -> impl Strategy<Value = Value> {
         prop_oneof![
+            any::<u8>().prop_map(Value::U8),
+            any::<i8>().prop_map(Value::I8),
+            any::<u16>().prop_map(Value::U16),
+            any::<i16>().prop_map(Value::I16),
             any::<u32>().prop_map(Value::U32),
             any::<u32>().prop_map(Value::V32),
             any::<i32>().prop_map(Value::I32),
@@ -478,6 +528,7 @@ mod publisher {
             Just(Value::Bool(true)),
             Just(Value::Bool(false)),
             Just(Value::Null),
+            abstract_value(),
         ]
     }
 
@@ -540,6 +591,11 @@ mod publisher {
                         .all(|((k0, v0), (k1, v1))| vequiv(k0, k1) && vequiv(v0, v1))
             }
             (Value::Error(v0), Value::Error(v1)) => vequiv(v0, v1),
+            (Value::Abstract(a0), Value::Abstract(a1)) => {
+                // For Abstract types, we can only compare if they're the same registered type
+                // The Abstract type implements Eq, so we can use that
+                a0 == a1
+            }
             (v0, v1) => v0 == v1,
         }
     }
