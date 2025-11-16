@@ -107,6 +107,26 @@ impl Hash for Value {
                 21u8.hash(state);
                 m.hash(state);
             }
+            Value::U8(v) => {
+                22u8.hash(state);
+                v.hash(state)
+            }
+            Value::I8(v) => {
+                23u8.hash(state);
+                v.hash(state)
+            }
+            Value::U16(v) => {
+                24u8.hash(state);
+                v.hash(state)
+            }
+            Value::I16(v) => {
+                25u8.hash(state);
+                v.hash(state)
+            }
+            Value::Abstract(v) => {
+                26u8.hash(state);
+                v.hash(state)
+            }
         }
     }
 }

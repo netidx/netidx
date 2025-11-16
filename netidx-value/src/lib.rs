@@ -31,6 +31,8 @@ pub use pbuf::PBytes;
 pub use print::{printf, NakedValue};
 pub use typ::Typ;
 
+use crate::abstract_type::Abstract;
+
 #[macro_export]
 macro_rules! valarray {
     ($proto:expr; $size:literal) => {{
@@ -49,7 +51,7 @@ fn _test_valarray() {
 
 pub type Map = map::Map<Value, Value, 32>;
 
-const COPY_MAX: u32 = 0x0000_0800;
+const COPY_MAX: u32 = 0x0000_8000;
 
 // this type is divided into two subtypes, the copy part and the clone
 // part. If the tag word is <= COPY_MAX then the type is copy,
@@ -65,30 +67,38 @@ const COPY_MAX: u32 = 0x0000_0800;
 #[serde(tag = "type", content = "value")]
 #[repr(u32)]
 pub enum Value {
+    /// unsigned byte
+    U8(u8) = 0x0000_0001,
+    /// signed byte
+    I8(i8) = 0x0000_0002,
+    /// u16
+    U16(u16) = 0x0000_0004,
+    /// i16
+    I16(i16) = 0x0000_0008,
     /// full 4 byte u32
-    U32(u32) = 0x0000_0001,
+    U32(u32) = 0x0000_0010,
     /// LEB128 varint, 1 - 5 bytes depending on value
-    V32(u32) = 0x0000_0002,
+    V32(u32) = 0x0000_0020,
     /// full 4 byte i32
-    I32(i32) = 0x0000_0004,
+    I32(i32) = 0x0000_0040,
     /// LEB128 varint zigzag encoded, 1 - 5 bytes depending on abs(value)
-    Z32(i32) = 0x0000_0008,
+    Z32(i32) = 0x0000_0080,
     /// full 8 byte u64
-    U64(u64) = 0x0000_0010,
+    U64(u64) = 0x0000_0100,
     /// LEB128 varint, 1 - 10 bytes depending on value
-    V64(u64) = 0x0000_0020,
+    V64(u64) = 0x0000_0200,
     /// full 8 byte i64
-    I64(i64) = 0x0000_0040,
+    I64(i64) = 0x0000_0400,
     /// LEB128 varint zigzag encoded, 1 - 10 bytes depending on abs(value)
-    Z64(i64) = 0x0000_0080,
+    Z64(i64) = 0x0000_0800,
     /// 4 byte ieee754 single precision float
-    F32(f32) = 0x0000_0100,
+    F32(f32) = 0x0000_1000,
     /// 8 byte ieee754 double precision float
-    F64(f64) = 0x0000_0200,
+    F64(f64) = 0x0000_2000,
     /// boolean true
-    Bool(bool) = 0x0000_0400,
+    Bool(bool) = 0x0000_4000,
     /// Empty value
-    Null = 0x0000_0800,
+    Null = 0x0000_8000,
     /// unicode string
     String(ArcStr) = 0x8000_0000,
     /// byte array
@@ -105,6 +115,8 @@ pub enum Value {
     DateTime(Arc<DateTime<Utc>>) = 0x0200_0000,
     /// Duration
     Duration(Arc<Duration>) = 0x0100_0000,
+    /// Abstract
+    Abstract(Abstract) = 0x0080_0000,
 }
 
 // This will fail to compile if any variant that is supposed to be
@@ -113,6 +125,10 @@ pub enum Value {
 fn _assert_variants_are_copy(v: &Value) -> Value {
     let i = match v {
         // copy types
+        Value::U8(i) => Value::U8(*i),
+        Value::I8(i) => Value::I8(*i),
+        Value::U16(i) => Value::U16(*i),
+        Value::I16(i) => Value::I16(*i),
         Value::U32(i) | Value::V32(i) => Value::U32(*i),
         Value::I32(i) | Value::Z32(i) => Value::I32(*i),
         Value::U64(i) | Value::V64(i) => Value::U64(*i),
@@ -131,6 +147,7 @@ fn _assert_variants_are_copy(v: &Value) -> Value {
         Value::Decimal(i) => Value::Decimal(i.clone()),
         Value::DateTime(i) => Value::DateTime(i.clone()),
         Value::Duration(i) => Value::Duration(i.clone()),
+        Value::Abstract(i) => Value::Abstract(i.clone()),
     };
     panic!("{i}")
 }
@@ -149,7 +166,12 @@ impl Clone for Value {
                 Self::Decimal(d) => Self::Decimal(d.clone()),
                 Self::DateTime(d) => Self::DateTime(d.clone()),
                 Self::Duration(d) => Self::Duration(d.clone()),
-                Self::U32(_)
+                Self::Abstract(v) => Self::Abstract(v.clone()),
+                Self::U8(_)
+                | Self::I8(_)
+                | Self::U16(_)
+                | Self::I16(_)
+                | Self::U32(_)
                 | Self::V32(_)
                 | Self::I32(_)
                 | Self::Z32(_)
@@ -194,7 +216,14 @@ impl Clone for Value {
                 Value::Duration(d) => {
                     *self = Self::Duration(d.clone());
                 }
-                Value::U32(_)
+                Value::Abstract(v) => {
+                    *self = Self::Abstract(v.clone());
+                }
+                Value::I8(_)
+                | Value::U8(_)
+                | Value::U16(_)
+                | Value::I16(_)
+                | Value::U32(_)
                 | Value::V32(_)
                 | Value::I32(_)
                 | Value::Z32(_)
@@ -222,6 +251,10 @@ impl FromStr for Value {
 impl Pack for Value {
     fn encoded_len(&self) -> usize {
         1 + match self {
+            Value::U8(v) => Pack::encoded_len(v),
+            Value::I8(v) => Pack::encoded_len(v),
+            Value::U16(v) => Pack::encoded_len(v),
+            Value::I16(v) => Pack::encoded_len(v),
             Value::U32(v) => Pack::encoded_len(v),
             Value::V32(v) => pack::varint_len(*v as u64),
             Value::I32(v) => Pack::encoded_len(v),
@@ -244,6 +277,7 @@ impl Pack for Value {
             Value::Array(elts) => Pack::encoded_len(elts),
             Value::Decimal(d) => Pack::encoded_len(d),
             Value::Map(m) => Pack::encoded_len(m),
+            Value::Abstract(v) => Pack::encoded_len(v),
         }
     }
 
@@ -335,6 +369,26 @@ impl Pack for Value {
                     Pack::encode(v, buf)
                 }
             },
+            Value::U8(i) => {
+                buf.put_u8(23);
+                Pack::encode(i, buf)
+            }
+            Value::I8(i) => {
+                buf.put_u8(24);
+                Pack::encode(i, buf)
+            }
+            Value::U16(i) => {
+                buf.put_u8(25);
+                Pack::encode(i, buf)
+            }
+            Value::I16(i) => {
+                buf.put_u8(26);
+                Pack::encode(i, buf)
+            }
+            Value::Abstract(v) => {
+                buf.put_u8(27);
+                Pack::encode(v, buf)
+            }
         }
     }
 
@@ -367,6 +421,11 @@ impl Pack for Value {
             20 => Ok(Value::Decimal(Pack::decode(buf)?)),
             21 => Ok(Value::Map(Pack::decode(buf)?)),
             22 => Ok(Value::Error(Arc::new(Pack::decode(buf)?))),
+            23 => Ok(Value::U8(Pack::decode(buf)?)),
+            24 => Ok(Value::I8(Pack::decode(buf)?)),
+            25 => Ok(Value::U16(Pack::decode(buf)?)),
+            26 => Ok(Value::I16(Pack::decode(buf)?)),
+            27 => Ok(Value::Abstract(Pack::decode(buf)?)),
             _ => Err(PackError::UnknownTag),
         }
     }
@@ -438,6 +497,10 @@ impl Value {
         macro_rules! cast_number {
             ($v:expr, $typ:expr) => {
                 match typ {
+                    Typ::U8 => Some(Value::U8($v as u8)),
+                    Typ::I8 => Some(Value::I8($v as i8)),
+                    Typ::U16 => Some(Value::U16($v as u16)),
+                    Typ::I16 => Some(Value::I16($v as i16)),
                     Typ::U32 => Some(Value::U32($v as u32)),
                     Typ::V32 => Some(Value::V32($v as u32)),
                     Typ::I32 => Some(Value::I32($v as i32)),
@@ -468,7 +531,7 @@ impl Value {
                     }
                     Typ::Array => Some(Value::Array([self.clone()].into())),
                     Typ::Null => Some(Value::Null),
-                    Typ::Bytes | Typ::Error | Typ::Map => None,
+                    Typ::Bytes | Typ::Error | Typ::Map | Typ::Abstract => None,
                 }
             };
         }
@@ -503,6 +566,10 @@ impl Value {
                 }
                 typ => elts.first().and_then(|v| v.clone().cast(typ)),
             },
+            Value::U8(v) => cast_number!(v, typ),
+            Value::I8(v) => cast_number!(v, typ),
+            Value::U16(v) => cast_number!(v, typ),
+            Value::I16(v) => cast_number!(v, typ),
             Value::U32(v) | Value::V32(v) => cast_number!(v, typ),
             Value::I32(v) | Value::Z32(v) => cast_number!(v, typ),
             Value::U64(v) | Value::V64(v) => cast_number!(v, typ),
@@ -511,6 +578,10 @@ impl Value {
             Value::F64(v) => cast_number!(v, typ),
             Value::Decimal(v) => match typ {
                 Typ::Decimal => Some(Value::Decimal(v)),
+                Typ::U8 => (*v).try_into().ok().map(Value::U8),
+                Typ::I8 => (*v).try_into().ok().map(Value::I8),
+                Typ::U16 => (*v).try_into().ok().map(Value::U16),
+                Typ::I16 => (*v).try_into().ok().map(Value::I16),
                 Typ::U32 => (*v).try_into().ok().map(Value::U32),
                 Typ::V32 => (*v).try_into().ok().map(Value::V32),
                 Typ::I32 => (*v).try_into().ok().map(Value::I32),
@@ -527,6 +598,7 @@ impl Value {
                 Typ::Bool
                 | Typ::Array
                 | Typ::Map
+                | Typ::Abstract
                 | Typ::Bytes
                 | Typ::DateTime
                 | Typ::Duration
@@ -534,6 +606,7 @@ impl Value {
                 | Typ::Error => None,
             },
             Value::DateTime(ref v) => match typ {
+                Typ::U8 | Typ::I8 | Typ::U16 | Typ::I16 => None,
                 Typ::U32 | Typ::V32 => {
                     let ts = v.timestamp();
                     if ts < 0 && ts > u32::MAX as i64 {
@@ -590,9 +663,11 @@ impl Value {
                 | Typ::Bool
                 | Typ::Bytes
                 | Typ::Error
-                | Typ::Map => None,
+                | Typ::Map
+                | Typ::Abstract => None,
             },
             Value::Duration(ref d) => match typ {
+                Typ::U8 | Typ::I8 | Typ::U16 | Typ::I16 => None,
                 Typ::U32 => Some(Value::U32(d.as_secs() as u32)),
                 Typ::V32 => Some(Value::V32(d.as_secs() as u32)),
                 Typ::I32 => Some(Value::I32(d.as_secs() as i32)),
@@ -612,9 +687,14 @@ impl Value {
                 | Typ::Bool
                 | Typ::Bytes
                 | Typ::Error
-                | Typ::Map => None,
+                | Typ::Map
+                | Typ::Abstract => None,
             },
             Value::Bool(b) => match typ {
+                Typ::U8 => Some(Value::U8(b as u8)),
+                Typ::I8 => Some(Value::I8(b as i8)),
+                Typ::U16 => Some(Value::U16(b as u16)),
+                Typ::I16 => Some(Value::I16(b as i16)),
                 Typ::U32 => Some(Value::U32(b as u32)),
                 Typ::V32 => Some(Value::V32(b as u32)),
                 Typ::I32 => Some(Value::I32(b as i32)),
@@ -634,13 +714,16 @@ impl Value {
                 | Typ::Duration
                 | Typ::Bytes
                 | Typ::Error
-                | Typ::Map => None,
+                | Typ::Map
+                | Typ::Abstract => None,
             },
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
             Value::Bytes(_) => None,
             Value::Error(_) => Value::Bool(false).cast(typ),
             Value::Null if typ == Typ::Null => Some(self),
             Value::Null => None,
+            Value::Abstract(_) if typ == Typ::Abstract => Some(self),
+            Value::Abstract(_) => None,
         }
     }
 
@@ -668,7 +751,11 @@ impl Value {
     /// false.
     pub fn number(&self) -> bool {
         match self {
-            Value::U32(_)
+            Value::U8(_)
+            | Value::I8(_)
+            | Value::U16(_)
+            | Value::I16(_)
+            | Value::U32(_)
             | Value::V32(_)
             | Value::I32(_)
             | Value::Z32(_)
@@ -687,7 +774,8 @@ impl Value {
             | Value::Null
             | Value::Error(_)
             | Value::Array(_)
-            | Value::Map(_) => false,
+            | Value::Map(_)
+            | Value::Abstract(_) => false,
         }
     }
 

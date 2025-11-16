@@ -18,18 +18,22 @@ use triomphe::Arc;
 #[repr(u32)]
 #[bitflags]
 pub enum Typ {
-    U32 = 0x0000_0001,
-    V32 = 0x0000_0002,
-    I32 = 0x0000_0004,
-    Z32 = 0x0000_0008,
-    U64 = 0x0000_0010,
-    V64 = 0x0000_0020,
-    I64 = 0x0000_0040,
-    Z64 = 0x0000_0080,
-    F32 = 0x0000_0100,
-    F64 = 0x0000_0200,
-    Bool = 0x0000_0400,
-    Null = 0x0000_0800,
+    U8 = 0x0000_0001,
+    I8 = 0x0000_0002,
+    U16 = 0x0000_0004,
+    I16 = 0x0000_0008,
+    U32 = 0x0000_0010,
+    V32 = 0x0000_0020,
+    I32 = 0x0000_0040,
+    Z32 = 0x0000_0080,
+    U64 = 0x0000_0100,
+    V64 = 0x0000_0200,
+    I64 = 0x0000_0400,
+    Z64 = 0x0000_0800,
+    F32 = 0x0000_1000,
+    F64 = 0x0000_2000,
+    Bool = 0x0000_4000,
+    Null = 0x0000_8000,
     String = 0x8000_0000,
     Bytes = 0x4000_0000,
     Error = 0x2000_0000,
@@ -38,11 +42,16 @@ pub enum Typ {
     Decimal = 0x0400_0000,
     DateTime = 0x0200_0000,
     Duration = 0x0100_0000,
+    Abstract = 0x0080_0000,
 }
 
 impl Typ {
     pub fn parse(&self, s: &str) -> anyhow::Result<Value> {
         match self {
+            Typ::U8 => Ok(Value::U8(s.parse::<u8>()?)),
+            Typ::I8 => Ok(Value::I8(s.parse::<i8>()?)),
+            Typ::U16 => Ok(Value::U16(s.parse::<u16>()?)),
+            Typ::I16 => Ok(Value::I16(s.parse::<i16>()?)),
             Typ::U32 => Ok(Value::U32(s.parse::<u32>()?)),
             Typ::V32 => Ok(Value::V32(s.parse::<u32>()?)),
             Typ::I32 => Ok(Value::I32(s.parse::<i32>()?)),
@@ -77,11 +86,20 @@ impl Typ {
                     bail!("expected null")
                 }
             }
+            Typ::Abstract => {
+                let mut tmp = String::from("abstract:");
+                tmp.push_str(s);
+                Ok(tmp.parse::<Value>()?)
+            }
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
+            Typ::U8 => "u8",
+            Typ::I8 => "i8",
+            Typ::U16 => "u16",
+            Typ::I16 => "i16",
             Typ::U32 => "u32",
             Typ::V32 => "v32",
             Typ::I32 => "i32",
@@ -102,6 +120,7 @@ impl Typ {
             Typ::Array => "array",
             Typ::Map => "map",
             Typ::Null => "null",
+            Typ::Abstract => "abstract",
         }
     }
 
@@ -116,7 +135,11 @@ impl Typ {
     }
 
     pub fn number() -> BitFlags<Typ> {
-        Typ::U32
+        Typ::U8
+            | Typ::I8
+            | Typ::U16
+            | Typ::I16
+            | Typ::U32
             | Typ::V32
             | Typ::I32
             | Typ::Z32
@@ -134,7 +157,11 @@ impl Typ {
     }
 
     pub fn integer() -> BitFlags<Typ> {
-        Typ::U32
+        Typ::U8
+            | Typ::I8
+            | Typ::U16
+            | Typ::I16
+            | Typ::U32
             | Typ::V32
             | Typ::I32
             | Typ::Z32
@@ -149,7 +176,7 @@ impl Typ {
     }
 
     pub fn signed_integer() -> BitFlags<Typ> {
-        Typ::I32 | Typ::Z32 | Typ::I64 | Typ::Z64
+        Typ::I8 | Typ::I16 | Typ::I32 | Typ::Z32 | Typ::I64 | Typ::Z64
     }
 
     pub fn is_signed_integer(&self) -> bool {
@@ -157,7 +184,7 @@ impl Typ {
     }
 
     pub fn unsigned_integer() -> BitFlags<Typ> {
-        Typ::U32 | Typ::V32 | Typ::U64 | Typ::V64
+        Typ::U8 | Typ::U16 | Typ::U32 | Typ::V32 | Typ::U64 | Typ::V64
     }
 
     pub fn is_unsigned_integer(&self) -> bool {
@@ -182,6 +209,10 @@ impl FromStr for Typ {
 
     fn from_str(s: &str) -> result::Result<Self, Self::Err> {
         match s {
+            "U8" | "u8" => Ok(Typ::U8),
+            "I8" | "i8" => Ok(Typ::I8),
+            "U16" | "u16" => Ok(Typ::U16),
+            "I16" | "i16" => Ok(Typ::I16),
             "U32" | "u32" => Ok(Typ::U32),
             "V32" | "v32" => Ok(Typ::V32),
             "I32" | "i32" => Ok(Typ::I32),
@@ -202,6 +233,7 @@ impl FromStr for Typ {
             "Array" | "array" => Ok(Typ::Array),
             "Map" | "map" => Ok(Typ::Map),
             "Null" | "null" => Ok(Typ::Null),
+            "Abstract" | "abstract" => Ok(Typ::Abstract),
             s => Err(anyhow!(
                 "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, map, null", s))
         }
