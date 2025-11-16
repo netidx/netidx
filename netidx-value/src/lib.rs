@@ -50,22 +50,7 @@ fn _test_valarray() {
 
 pub type Map = map::Map<Value, Value, 32>;
 
-const COPY_MAX: u32 = 0x0000_8000;
-
-#[cfg(all(target_pointer_width = "32", target_arch = "x86"))]
-#[repr(C)]
-pub(crate) struct ValueLayout<T> {
-    discriminant: u32,
-    payload: T,
-}
-
-#[cfg(not(all(target_pointer_width = "32", target_arch = "x86")))]
-#[repr(C)]
-pub(crate) struct ValueLayout<T> {
-    discriminant: u32,
-    _padding: u32, // for 8-byte alignment
-    payload: T,
-}
+const COPY_MAX: u64 = 0x0000_8000;
 
 // this type is divided into two subtypes, the copy part and the clone
 // part. If the tag word is <= COPY_MAX then the type is copy,
@@ -79,7 +64,7 @@ pub(crate) struct ValueLayout<T> {
 // operation
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
-#[repr(u32)]
+#[repr(u64)]
 pub enum Value {
     /// unsigned byte
     U8(u8) = 0x0000_0001,
@@ -498,8 +483,8 @@ impl Value {
         }
     }
 
-    pub fn discriminant(&self) -> u32 {
-        unsafe { *<*const _>::from(self).cast::<u32>() }
+    pub fn discriminant(&self) -> u64 {
+        unsafe { *<*const _>::from(self).cast::<u64>() }
     }
 
     pub fn is_copy(&self) -> bool {
@@ -755,8 +740,10 @@ impl Value {
     /// If you are wrong about what kind of value you have then this
     /// could cause undefined behavior.
     pub unsafe fn get_as_unchecked<T>(&self) -> &T {
-        let layout_ptr = self as *const Self as *const ValueLayout<T>;
-        unsafe { &(*layout_ptr).payload }
+        unsafe {
+            let ptr = (self as *const _ as *const u64).add(1);
+            &*(ptr as *const T)
+        }
     }
 
     pub fn err<T: std::error::Error>(e: T) -> Value {

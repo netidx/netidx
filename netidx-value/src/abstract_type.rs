@@ -235,6 +235,17 @@ impl Abstract {
     }
 }
 
+impl Default for Abstract {
+    fn default() -> Self {
+        let reg = REGISTRY.read();
+        Abstract(Arc::new(AbstractInner {
+            id: UNKNOWN_ID,
+            vtable: reg.by_uuid[&UNKNOWN_ID].clone(),
+            t: Box::new(UnknownAbstractType),
+        }))
+    }
+}
+
 impl fmt::Debug for Abstract {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Abstract(")?;

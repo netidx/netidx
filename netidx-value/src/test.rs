@@ -1,6 +1,4 @@
-use crate::{
-    abstract_type::Abstract, array::ValArray, Map, PBytes, Typ, Value, ValueLayout,
-};
+use crate::{abstract_type::Abstract, array::ValArray, Map, PBytes, Typ, Value};
 use anyhow::{anyhow, Result};
 use arcstr::{literal, ArcStr};
 use bytes::Bytes;
@@ -8,6 +6,7 @@ use chrono::{DateTime, Utc};
 use enumflags2::BitFlags;
 use rust_decimal::Decimal;
 use std::{
+    fmt::Debug,
     ops::Bound,
     panic::{catch_unwind, AssertUnwindSafe},
     time::Duration,
@@ -18,50 +17,61 @@ use triomphe::Arc;
 fn value_typ_discriminants() {
     for t in BitFlags::<Typ>::all().iter() {
         match t {
-            Typ::U32 => assert_eq!(t as u32, Value::U32(42).discriminant()),
-            Typ::V32 => assert_eq!(t as u32, Value::V32(42).discriminant()),
-            Typ::I32 => assert_eq!(t as u32, Value::I32(42).discriminant()),
-            Typ::Z32 => assert_eq!(t as u32, Value::Z32(42).discriminant()),
-            Typ::U64 => assert_eq!(t as u32, Value::U64(42).discriminant()),
-            Typ::V64 => assert_eq!(t as u32, Value::V64(42).discriminant()),
-            Typ::I64 => assert_eq!(t as u32, Value::I64(42).discriminant()),
-            Typ::Z64 => assert_eq!(t as u32, Value::Z64(42).discriminant()),
-            Typ::F32 => assert_eq!(t as u32, Value::F32(42.).discriminant()),
-            Typ::F64 => assert_eq!(t as u32, Value::F64(42.).discriminant()),
+            Typ::U8 => assert_eq!(t as u64, Value::U8(42).discriminant()),
+            Typ::I8 => assert_eq!(t as u64, Value::I8(42).discriminant()),
+            Typ::U16 => assert_eq!(t as u64, Value::U16(42).discriminant()),
+            Typ::I16 => assert_eq!(t as u64, Value::I16(42).discriminant()),
+            Typ::U32 => assert_eq!(t as u64, Value::U32(42).discriminant()),
+            Typ::V32 => assert_eq!(t as u64, Value::V32(42).discriminant()),
+            Typ::I32 => assert_eq!(t as u64, Value::I32(42).discriminant()),
+            Typ::Z32 => assert_eq!(t as u64, Value::Z32(42).discriminant()),
+            Typ::U64 => assert_eq!(t as u64, Value::U64(42).discriminant()),
+            Typ::V64 => assert_eq!(t as u64, Value::V64(42).discriminant()),
+            Typ::I64 => assert_eq!(t as u64, Value::I64(42).discriminant()),
+            Typ::Z64 => assert_eq!(t as u64, Value::Z64(42).discriminant()),
+            Typ::F32 => assert_eq!(t as u64, Value::F32(42.).discriminant()),
+            Typ::F64 => assert_eq!(t as u64, Value::F64(42.).discriminant()),
             Typ::Decimal => {
                 assert_eq!(
-                    t as u32,
+                    t as u64,
                     Value::Decimal(Arc::new(Decimal::MIN)).discriminant()
                 )
             }
             Typ::DateTime => {
                 assert_eq!(
-                    t as u32,
+                    t as u64,
                     Value::DateTime(Arc::new(DateTime::<Utc>::MIN_UTC)).discriminant()
                 )
             }
             Typ::Duration => assert_eq!(
-                t as u32,
+                t as u64,
                 Value::Duration(Arc::new(Duration::from_secs(42))).discriminant()
             ),
-            Typ::Bool => assert_eq!(t as u32, Value::Bool(true).discriminant()),
-            Typ::Null => assert_eq!(t as u32, Value::Null.discriminant()),
+            Typ::Bool => assert_eq!(t as u64, Value::Bool(true).discriminant()),
+            Typ::Null => assert_eq!(t as u64, Value::Null.discriminant()),
             Typ::String => {
-                assert_eq!(t as u32, Value::String(literal!("42")).discriminant())
+                assert_eq!(t as u64, Value::String(literal!("42")).discriminant())
             }
             Typ::Bytes => {
-                assert_eq!(t as u32, Value::Bytes(Bytes::new().into()).discriminant())
+                assert_eq!(t as u64, Value::Bytes(Bytes::new().into()).discriminant())
             }
             Typ::Error => {
-                assert_eq!(t as u32, Value::error(literal!("42")).discriminant())
+                assert_eq!(t as u64, Value::error(literal!("42")).discriminant())
             }
-            Typ::Array => assert_eq!(t as u32, Value::Array([].into()).discriminant()),
-            Typ::Map => assert_eq!(t as u32, Value::Map(Map::new()).discriminant()),
+            Typ::Array => assert_eq!(t as u64, Value::Array([].into()).discriminant()),
+            Typ::Map => assert_eq!(t as u64, Value::Map(Map::new()).discriminant()),
+            Typ::Abstract => {
+                assert_eq!(t as u64, Value::Abstract(Abstract::default()).discriminant())
+            }
         }
     }
     // did you add a new value type, make sure you add a corresponding
     // Typ, this is here to trip when you do
     match Value::Bool(true) {
+        Value::U8(_) => (),
+        Value::I8(_) => (),
+        Value::U16(_) => (),
+        Value::I16(_) => (),
         Value::U32(_) => (),
         Value::V32(_) => (),
         Value::I32(_) => (),
@@ -82,6 +92,7 @@ fn value_typ_discriminants() {
         Value::Error(_) => (),
         Value::Array(_) => (),
         Value::Map(_) => (),
+        Value::Abstract(_) => (),
     }
 }
 
@@ -156,42 +167,57 @@ fn array_subslicing() -> Result<()> {
     Ok(())
 }
 
-fn check_layout<T>() {
-    use std::mem;
-    assert_eq!(
-        mem::size_of::<ValueLayout<T>>(),
-        mem::size_of::<Value>(),
-        "Layout assumption violated for type {}",
-        std::any::type_name::<T>()
-    );
-    assert_eq!(
-        mem::offset_of!(ValueLayout<T>, payload),
-        8,
-        "Offset assumption violated for type {}",
-        std::any::type_name::<T>()
-    );
+fn get_as_unchecked<T: Debug + PartialEq>(v: Value, expected: &T) {
+    assert_eq!(unsafe { v.get_as_unchecked::<T>() }, expected)
 }
 
 #[test]
-fn layout() {
-    check_layout::<u8>();
-    check_layout::<i8>();
-    check_layout::<u16>();
-    check_layout::<i16>();
-    check_layout::<u32>();
-    check_layout::<i32>();
-    check_layout::<u64>();
-    check_layout::<i64>();
-    check_layout::<f32>();
-    check_layout::<f64>();
-    check_layout::<bool>();
-    check_layout::<ArcStr>();
-    check_layout::<PBytes>();
-    check_layout::<Arc<Value>>();
-    check_layout::<ValArray>();
-    check_layout::<Map>();
-    check_layout::<Arc<Decimal>>();
-    check_layout::<Arc<DateTime<Utc>>>();
-    check_layout::<Arc<Duration>>();
-    check_layout::<Abstract>();
+fn get_unchecked() {
+    get_as_unchecked::<u8>(Value::U8(42), &42);
+    get_as_unchecked::<i8>(Value::I8(42), &42);
+    get_as_unchecked::<u16>(Value::U16(42), &42);
+    get_as_unchecked::<i16>(Value::I16(42), &42);
+    get_as_unchecked::<u32>(Value::U32(42), &42);
+    get_as_unchecked::<i32>(Value::I32(42), &42);
+    get_as_unchecked::<u64>(Value::U64(42), &42);
+    get_as_unchecked::<i64>(Value::I64(42), &42);
+    get_as_unchecked::<f32>(Value::F32(42.), &42.);
+    get_as_unchecked::<f64>(Value::F64(42.), &42.);
+    get_as_unchecked::<bool>(Value::Bool(true), &true);
+    {
+        let s = literal!("hello world");
+        get_as_unchecked::<ArcStr>(Value::String(s.clone()), &s);
+    }
+    {
+        let pb = PBytes::new(Bytes::from("12345"));
+        get_as_unchecked::<PBytes>(Value::Bytes(pb.clone()), &pb);
+    }
+    {
+        let v = Arc::new(Value::I64(42));
+        get_as_unchecked::<Arc<Value>>(Value::Error(v.clone()), &v)
+    }
+    {
+        let a = ValArray::from_iter_exact([Value::I16(42)].into_iter());
+        get_as_unchecked::<ValArray>(Value::Array(a.clone()), &a);
+    }
+    {
+        let m = Map::new();
+        get_as_unchecked::<Map>(Value::Map(m.clone()), &m)
+    }
+    {
+        let d = Arc::new(Decimal::from(42));
+        get_as_unchecked::<Arc<Decimal>>(Value::Decimal(d.clone()), &d)
+    }
+    {
+        let now = Arc::new(Utc::now());
+        get_as_unchecked::<Arc<DateTime<Utc>>>(Value::DateTime(now.clone()), &now);
+    }
+    {
+        let dur = Arc::new(Duration::MAX);
+        get_as_unchecked::<Arc<Duration>>(Value::Duration(dur.clone()), &dur)
+    }
+    {
+        let a = Abstract::default();
+        get_as_unchecked::<Abstract>(Value::Abstract(a.clone()), &a)
+    }
 }

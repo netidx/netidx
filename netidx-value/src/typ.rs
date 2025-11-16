@@ -15,7 +15,7 @@ use triomphe::Arc;
 // Each Typ corresponds directly to the tag of a Value, the bits are
 // the same, and they can be used interchangeably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[repr(u32)]
+#[repr(u64)]
 #[bitflags]
 pub enum Typ {
     U8 = 0x0000_0001,
@@ -125,9 +125,9 @@ impl Typ {
     }
 
     pub fn get(v: &Value) -> Self {
-        // safe because we are repr(u32) and because the tags are the
+        // safe because we are repr(u64) and because the tags are the
         // same between Typ and Value
-        unsafe { mem::transmute::<u32, Typ>(v.discriminant()) }
+        unsafe { mem::transmute::<u64, Typ>(v.discriminant()) }
     }
 
     pub fn any() -> BitFlags<Typ> {
