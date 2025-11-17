@@ -608,7 +608,7 @@ impl Value {
                 Typ::U8 | Typ::I8 | Typ::U16 | Typ::I16 => None,
                 Typ::U32 | Typ::V32 => {
                     let ts = v.timestamp();
-                    if ts < 0 && ts > u32::MAX as i64 {
+                    if ts < 0 || ts > u32::MAX as i64 {
                         None
                     } else {
                         if typ == Typ::U32 {

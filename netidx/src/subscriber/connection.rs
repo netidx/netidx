@@ -560,7 +560,7 @@ impl ConnectionCtx {
                         }
                     }
                 }
-                _ => unsafe { unreachable_unchecked() },
+                _ => unreachable!(),
             }
         }
         self.send_updates()

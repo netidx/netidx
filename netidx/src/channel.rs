@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use std::{
     clone::Clone,
     fmt::Debug,
-    mem::{self, MaybeUninit},
+    mem,
     ops::{Deref, DerefMut},
     sync::{Arc, LazyLock},
     time::Duration,
@@ -424,21 +424,15 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
             if buf.remaining_mut() < BUF {
                 buf.reserve_mut(std::cmp::max(buf.capacity(), BUF));
             }
-            let cap = unsafe {
-                mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(
-                    buf.chunk_mut().as_uninit_slice_mut(),
-                )
-            };
             trace!("reading more from socket");
             #[rustfmt::skip]
             select_biased! {
                 _ = stop => break Ok(()),
-                i = soc.read(cap).fuse() => {
+                i = soc.read_buf(&mut buf).fuse() => {
 		    trace!("read {:?} from the socket", i);
                     if try_cf!(i) == 0 {
                         break Err(anyhow!("EOF"));
                     }
-		    unsafe { buf.advance_mut(i.unwrap()); }
                 }
             }
         };
