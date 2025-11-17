@@ -550,10 +550,12 @@ impl Value {
         }
     }
 
+    /// return the discriminant tag of this value
     pub fn discriminant(&self) -> u64 {
         unsafe { *<*const _>::from(self).cast::<u64>() }
     }
 
+    /// return true if this value will be cloned by a direct bitwise copy
     pub fn is_copy(&self) -> bool {
         self.discriminant() <= COPY_MAX
     }
@@ -798,6 +800,9 @@ impl Value {
         <T as FromValue>::from_value(self)
     }
 
+    /// get the value as `T`, return None if the value isn't a `T`.
+    ///
+    /// don't attempt to cast.
     pub fn get_as<T: FromValue + Sized>(self) -> Option<T> {
         <T as FromValue>::get(self)
     }
@@ -816,6 +821,7 @@ impl Value {
         }
     }
 
+    /// construct a Value::Error from `e`
     pub fn err<T: std::error::Error>(e: T) -> Value {
         use std::fmt::Write;
         let mut tmp = CompactString::new("");
@@ -823,6 +829,7 @@ impl Value {
         Value::Error(Arc::new(Value::String(tmp.as_str().into())))
     }
 
+    /// construct a Value::Error from `e`
     pub fn error<S: Into<ArcStr>>(e: S) -> Value {
         Value::Error(Arc::new(Value::String(e.into())))
     }
