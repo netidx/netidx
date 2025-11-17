@@ -44,6 +44,7 @@ read and write.
 - Automatic reconnection and state recovery
 - Integration with corporate auth systems (AD, Kerberos v5, etc)
 - Tools for debugging and administration
+- Add-In for real time data in Excel
 
 ## Quick Example
 
