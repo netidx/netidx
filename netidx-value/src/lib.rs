@@ -1,3 +1,68 @@
+//! Universal value type for netidx pub/sub.
+//!
+//! This crate provides [`Value`], a dynamically-typed enum that can represent
+//! any data type publishable in netidx. Values support 25+ built-in types
+//! including integers, floats, strings, bytes, arrays, maps, decimals,
+//! timestamps, and durations.
+//!
+//! ## Key Features
+//!
+//! - **Rich type system**: Integers (with LEB128 varint encoding), floats,
+//!   strings, bytes, arrays, maps, decimals, timestamps, durations
+//! - **Efficient cloning**: Small values (≤64 bits) are bitwise copied;
+//!   larger values use reference counting
+//! - **User-defined types**: Register custom types with the [`Abstract`] wrapper
+//! - **Wire-efficient**: Compact binary encoding via [`Pack`]
+//! - **Parsing & printing**: Parse from strings, format for display
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use netidx_value::Value;
+//!
+//! let v = Value::I64(42);
+//! assert_eq!(v.cast_to::<f64>(), Some(42.0));
+//!
+//! let s = Value::String("hello".into());
+//! let arr = Value::Array(vec![v, s].into());
+//! ```
+//!
+//! ## User-Defined Types
+//!
+//! You can register your own types using the abstract type system. Each type
+//! needs a unique UUID and must implement `Pack`, `Debug`, `Hash`, `Eq`, and `Ord`:
+//!
+//! ```
+//! use netidx_value::{Value, Abstract};
+//! use netidx_core::pack::Pack;
+//! use uuid::uuid;
+//!
+//! #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Pack)]
+//! struct Custom {
+//!     field1: u32,
+//!     field2: String,
+//! }
+//!
+//! // Register with a unique UUID (generate once, hardcode in your program)
+//! const CUSTOM_TYPE_ID: uuid::Uuid = uuid!("550e8400-e29b-41d4-a716-446655440000");
+//!
+//! let wrapper = Abstract::register::<Custom>(CUSTOM_TYPE_ID)?;
+//! let t = Custom { field1: 42, field2: "test".into() };
+//! let abstract_value: Value = wrapper.create(my_value).into();
+//!
+//! // Later, downcast back to your type
+//! if let Value::Abstract(abs) = abstract_value {
+//!     if let Some(t) = abs.downcast_ref::<Custom>() {
+//!         println!("field1: {}", my_type.field1);
+//!     }
+//! }
+//! ```
+//!
+//! ## Type Casting
+//!
+//! Values support casting between compatible types using [`Value::cast_to()`].
+//! For example, integers can be cast to floats, and vice versa (with range checking).
+
 use anyhow::Result;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
