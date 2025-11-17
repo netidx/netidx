@@ -42,8 +42,9 @@ pub(super) static LISTPOOL: LazyLock<Pool<Vec<GPooled<Vec<Path>>>>> =
 pub(super) static PATHPOOL: LazyLock<Pool<Vec<Path>>> =
     LazyLock::new(|| Pool::new(100, 100));
 
-/// `DesiredAuth` instructs publishers and subscribers what authentication mechanism
-/// they should try to use. To use the default specified in the configuration you
+/// Tell publishers and subscribers what auth mechanism to try.
+///
+/// To use the default specified in the configuration you
 /// can call `Config::default_auth`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DesiredAuth {

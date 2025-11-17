@@ -1,3 +1,4 @@
+//! Configuration file loading and management.
 use crate::{
     path::Path,
     protocol::resolver::{Auth, Referral},
@@ -25,6 +26,7 @@ pub mod file {
         path::{Path, PathBuf},
     };
 
+    /// The type of authentication to use
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub enum Auth {
@@ -46,6 +48,7 @@ pub mod file {
         }
     }
 
+    /// A TLS identity definition
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct TlsIdentity {
@@ -59,6 +62,7 @@ pub mod file {
         pub private_key: String,
     }
 
+    /// The config for TLS authentication
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Tls {
@@ -83,6 +87,10 @@ pub mod file {
 
     const DEFAULT_BASE: &str = "/";
 
+    /// The toplevel config object
+    ///
+    /// The config file should contain exactly one of these encoded as
+    /// JSON.
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
@@ -160,16 +168,30 @@ pub mod file {
             bail!("no default config file was found")
         }
 
+        /// Load from `file`
         pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
             Ok(serde_json::from_reader(std::fs::File::open(file)?)?)
         }
 
+        /// Load from the default platform specific location
+        ///
+        /// This will try in order,
+        ///
+        /// * $NETIDX_CFG
+        /// * ${dirs::config_dir}/netidx/client.json
+        /// * ${dirs::home_dir}/.config/netidx/client.json
+        /// * C:\netidx\client.json on windows
+        /// * /etc/netidx/client.json on unix
+        ///
+        /// It will load the first file that exists, if that file fails to
+        /// load then Err will be returned.
         pub fn load_default() -> Result<Config> {
             Self::load(Self::default_path()?)
         }
     }
 }
 
+/// A TLS identity with certificate and private key.
 #[derive(Debug, Clone)]
 pub struct TlsIdentity {
     pub trusted: String,
@@ -178,6 +200,7 @@ pub struct TlsIdentity {
     pub private_key: String,
 }
 
+/// TLS configuration with identities and optional askpass.
 #[derive(Debug, Clone)]
 pub struct Tls {
     pub default_identity: String,
@@ -265,6 +288,7 @@ impl Tls {
     }
 }
 
+/// The default authentication mechanism to use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DefaultAuthMech {
     Anonymous,
@@ -279,6 +303,7 @@ impl Default for DefaultAuthMech {
     }
 }
 
+/// Configuration for connecting to a netidx resolver server.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub base: Path,
@@ -289,8 +314,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Transform a file::Config into a validated netidx config. Use
-    /// this if you built a file::Config with the file::ConfigBuilder.
+    /// Transform a file::Config into a validated netidx config.
+    ///
+    /// Use this if you built a file::Config with the file::ConfigBuilder.
     pub fn from_file(cfg: file::Config) -> Result<Config> {
         if cfg.addrs.is_empty() {
             bail!("you must specify at least one address");
@@ -377,6 +403,8 @@ impl Config {
         Referral { path: self.base, ttl: None, addrs: GPooled::orphan(self.addrs) }
     }
 
+    /// Load from the default platform specific location.
+    ///
     /// This will try in order,
     ///
     /// * $NETIDX_CFG

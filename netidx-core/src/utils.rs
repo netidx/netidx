@@ -1,3 +1,4 @@
+//! Utility types and functions.
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
 use bytes::{Bytes, BytesMut};

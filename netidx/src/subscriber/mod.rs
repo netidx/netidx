@@ -1,3 +1,4 @@
+//! Subscribe to published values.
 mod connection;
 pub use crate::protocol::value::{FromValue, Typ, Value};
 pub use crate::resolver_client::DesiredAuth;
@@ -57,6 +58,7 @@ static BATCHES: LazyLock<Pool<Vec<(SubId, Event)>>> =
     LazyLock::new(|| Pool::new(64, 16384));
 static DECODE_BATCHES: LazyLock<Pool<Vec<From>>> = LazyLock::new(|| Pool::new(64, 16384));
 
+/// Subscription was denied due to insufficient permissions.
 #[derive(Debug)]
 pub struct PermissionDenied;
 
@@ -68,6 +70,7 @@ impl fmt::Display for PermissionDenied {
 
 impl error::Error for PermissionDenied {}
 
+/// The requested path does not exist.
 #[derive(Debug)]
 pub struct NoSuchValue;
 
@@ -84,6 +87,7 @@ atomic_id!(SubscriberId);
 atomic_id!(ConId);
 
 bitflags! {
+    /// Flags controlling update delivery behavior.
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct UpdatesFlags: u32 {
         /// if set, then an immediate update will be sent consisting
@@ -137,10 +141,13 @@ enum ToCon {
     Flush(oneshot::Sender<()>),
 }
 
+/// A subscription event
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum Event {
+    /// The subscription has been unsubsubscribed
     Unsubscribed,
+    /// The subscription's value has updated
     Update(Value),
 }
 
@@ -193,8 +200,9 @@ impl ValWeak {
     }
 }
 
-/// A non durable subscription to a value. If all user held references
-/// to `Val` are dropped then it will be unsubscribed.
+/// A non-durable subscription to a value.
+///
+/// If all user held references to `Val` are dropped then it will be unsubscribed.
 #[derive(Debug, Clone)]
 pub struct Val(Arc<ValInner>);
 
@@ -208,7 +216,7 @@ impl Val {
         self.0.last.lock().clone()
     }
 
-    /// Register `tx` to receive updates to this `Val`.
+    /// Register a channel to receive updates to this subscription.
     ///
     /// You may register multiple different channels to receive
     /// updates from a `Val`, and you may register one channel to
@@ -238,6 +246,8 @@ impl Val {
         self.0.connection.send(ToCon::Write(self.0.id, v, WriteId::new(), None));
     }
 
+    /// Write a value and wait for a reply from the publisher.
+    ///
     /// This does the same thing as `write` except that it requires
     /// the publisher send a reply indicating the outcome of the
     /// request. The reply can be read from the returned oneshot
@@ -298,8 +308,9 @@ impl DvalWeak {
     }
 }
 
-/// `Dval` is a durable value subscription. it behaves just like
-/// `Val`, except that if it dies a task within subscriber will
+/// A durable value subscription with automatic reconnection.
+///
+/// `Dval` behaves just like `Val`, except that if it dies a task within subscriber will
 /// attempt to resubscribe. The resubscription process goes through
 /// the entire resolution and connection process again, so `Dval` is
 /// robust to many failures. For example,
@@ -354,7 +365,7 @@ impl Dval {
         }
     }
 
-    /// Register `tx` to receive updates to this `Dval`.
+    /// Register a channel to receive updates to this durable subscription.
     ///
     /// You may register multiple different channels to receive
     /// updates from a `Dval`, and you may register one channel to
@@ -375,8 +386,9 @@ impl Dval {
         }
     }
 
-    /// Wait until the `Dval` is subscribed and then return. This is
-    /// not a guarantee that the `Dval` will stay subscribed for any
+    /// Wait until the `Dval` is subscribed.
+    ///
+    /// This is not a guarantee that the `Dval` will stay subscribed for any
     /// length of time, just that at the moment this method returns
     /// the `Dval` is subscribed. If the `Dval` is subscribed when
     /// this method is called, it will return immediatly without
@@ -391,7 +403,9 @@ impl Dval {
         Ok(())
     }
 
-    /// Write a value back to the publisher, see `Val::write`. If we
+    /// Write a value back to the publisher.
+    ///
+    /// See `Val::write` for details. If we
     /// aren't currently subscribed the write will be queued and sent
     /// when we are. The return value will be `true` if the write was
     /// sent immediatly, and false if it was queued. It is still
@@ -411,6 +425,8 @@ impl Dval {
         }
     }
 
+    /// Write a value and wait for a reply from the publisher.
+    ///
     /// This does the same thing as `write` except that it requires
     /// the publisher send a reply indicating the outcome of the
     /// request. The reply can be read from the returned oneshot
@@ -442,7 +458,7 @@ impl Dval {
         rx
     }
 
-    /// Clear the write queue
+    /// Clear the write queue.
     pub fn clear_queued_writes(&self) {
         let mut t = self.0.lock();
         if let DvState::Dead(dead) = &mut t.sub {
@@ -450,7 +466,7 @@ impl Dval {
         }
     }
 
-    /// Return the number of queued writes
+    /// Return the number of queued writes.
     pub fn queued_writes(&self) -> usize {
         match &mut self.0.lock().sub {
             DvState::Subscribed(_) => 0,
@@ -458,7 +474,7 @@ impl Dval {
         }
     }
 
-    /// return the unique id of this `Dval`
+    /// Return the unique id of this `Dval`.
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
@@ -748,6 +764,7 @@ impl SubscriberWeak {
     }
 }
 
+/// Statistics about durable subscriptions.
 #[derive(Debug, Clone, Copy)]
 pub struct DurableStats {
     pub alive: usize,
@@ -755,6 +772,7 @@ pub struct DurableStats {
     pub dead: usize,
 }
 
+/// Builder for configuring and creating a Subscriber.
 pub struct SubscriberBuilder {
     cfg: Option<Config>,
     desired_auth: Option<DesiredAuth>,
@@ -780,12 +798,12 @@ impl SubscriberBuilder {
     }
 }
 
-/// create subscriptions
+/// Subscribe to published values.
 #[derive(Clone, Debug)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
 
 impl Subscriber {
-    /// create a new subscriber with the specified config and desired auth
+    /// Create a new subscriber with the specified config and desired auth.
     pub fn new(resolver: Config, desired_auth: DesiredAuth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
         let tls_ctx = resolver.tls.clone().map(tls::CachedConnector::new);
@@ -808,14 +826,15 @@ impl Subscriber {
         Ok(t)
     }
 
-    /// Return a unique identifier for this subscriber instance. The
-    /// identifier will be unique across all subscribers created in
+    /// Return a unique identifier for this subscriber instance.
+    ///
+    /// The identifier will be unique across all subscribers created in
     /// this process, but not across processes or machines.
     pub fn id(&self) -> SubscriberId {
         self.0.lock().id
     }
 
-    /// return stats about durable subscriptions
+    /// Return stats about durable subscriptions.
     pub fn durable_stats(&self) -> DurableStats {
         let t = self.0.lock();
         DurableStats {
@@ -1136,7 +1155,7 @@ impl Subscriber {
         (conid, tx)
     }
 
-    /// Subscribe to the specified set of values.
+    /// Subscribe to a batch of values.
     ///
     /// To minimize round trips and amortize locking path resolution
     /// and subscription are done in batches. Best performance will be
@@ -1168,8 +1187,7 @@ impl Subscriber {
         self.subscribe_nondurable_internal(batch.map(|p| (p, [])), timeout).await
     }
 
-    /// Subscribe to values with updates channel registered from the
-    /// beginning.
+    /// Subscribe to a batch of values with updates channels.
     ///
     /// This is the same as subscribe_nondurable except that updates
     /// channels may be registered for each path from the very
@@ -1427,7 +1445,7 @@ impl Subscriber {
         pending.drain().map(|(path, st)| wait_result(self.clone(), path, st)).collect()
     }
 
-    /// Subscribe to just one value.
+    /// Subscribe to a single value.
     ///
     /// This is sufficient for a small number of paths, but if you
     /// need to subscribe to a lot of values it is more efficent to
@@ -1441,8 +1459,7 @@ impl Subscriber {
         self.subscribe_nondurable(iter::once(path), timeout).await.next().await.unwrap().1
     }
 
-    /// Subscribe to just one value with updates channels registered
-    /// from the start.
+    /// Subscribe to a single value with updates channels.
     ///
     /// This is sufficient for a small number of paths, but if you
     /// need to subscribe to a lot of values it is more efficent to
@@ -1498,8 +1515,7 @@ impl Subscriber {
         s
     }
 
-    /// Create a durable value subscription to `path` with updates
-    /// already attached.
+    /// Create a durable subscription with updates channels.
     ///
     /// Batching of durable subscriptions is automatic, if you create
     /// a lot of durable subscriptions all at once they will batch.
@@ -1518,7 +1534,7 @@ impl Subscriber {
         self.subscribe_internal(path, updates)
     }
 
-    /// Create a durable value subscription to `path`.
+    /// Create a durable subscription.
     ///
     /// Batching of durable subscriptions is automatic, if you create
     /// a lot of durable subscriptions all at once they will batch.
@@ -1530,8 +1546,9 @@ impl Subscriber {
         self.subscribe_internal(path, [])
     }
 
-    /// This will return when all pending operations are flushed out
-    /// to the publishers. This is primarially used to provide
+    /// Wait for all pending operations to flush to publishers.
+    ///
+    /// This is primarially used to provide
     /// pushback in the case you want to do a lot of writes, and you
     /// need pushback in case a publisher is slow to process them,
     /// however it applies to durable_subscribe and unsubscribe as well.

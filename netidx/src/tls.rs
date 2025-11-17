@@ -1,3 +1,4 @@
+//! TLS configuration and utilities.
 use crate::config::{Tls, TlsIdentity};
 use anyhow::{Context, Result};
 use fxhash::FxHashMap;
@@ -71,6 +72,8 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
 static CACHED: LazyLock<Mutex<FxHashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::default()));
 
+/// pre cache the password for a private key.
+///
 /// If you obtained a certificate private key password via another
 /// method as part of startup, you can provide it here and the system
 /// keychain won't be consulted.
@@ -88,8 +91,9 @@ pub fn clear_cached_passwords() {
     }
 }
 
-/// load the password for the key at the specified path, or else call
-/// askpass to ask the user, or else fail.
+/// load the password for the key at path
+///
+/// or else call askpass to ask the user, or else fail.
 pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
@@ -132,13 +136,16 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     }
 }
 
-/// Save the password for the specified key in the user's keychain.
+/// Save the password in the user's keychain.
 pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
     use keyring::Entry;
     let entry = Entry::new("netidx", path)?;
     Ok(entry.set_password(password)?)
 }
 
+/// load a private key
+///
+/// if askpass is Some then call `load_key_password` if the private key is encrypted
 pub fn load_private_key(
     askpass: Option<&str>,
     path: &str,

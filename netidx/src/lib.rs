@@ -1,29 +1,36 @@
-//! Netidx is middleware that enables publishing a value, like 42, in
-//! one program and consuming it in another program, either on the
-//! same machine or across the network.
+//! # Netidx - Real-time data sharing for distributed systems
 //!
-//! For more details see the [netidx book](https://netidx.github.io/netidx-book/)
+//! **High-performance pub/sub middleware without the message broker.**
 //!
-//! Here is an example service that publishes a cpu temperature, along
-//! with the corresponding subscriber that consumes the data.
+//! Netidx lets you publish and subscribe to live data across your network using a
+//! simple, hierarchical namespace. Data flows directly between publishers and
+//! subscribers over TCP—no central broker bottleneck.
 //!
-//! # Publisher
+//! ## Why Netidx?
+//!
+//! - **Fast**: Direct connections, zero-copy where possible, handles tens of millions
+//!   of updates/sec
+//! - **Discoverable**: Hierarchical namespace like a filesystem, browse and query
+//!   what exists
+//! - **Flexible**: Optional persistence (netidx-container), event logging (netidx-archive)
+//! - **Secure**: Built-in Kerberos v5 and TLS with centralized authorization
+//! - **Production-tested**: Years in production in financial trading systems
+//!
+//! ## Quick Start
+//!
+//! Publishing data:
+//!
 //! ```no_run
 //! # fn get_cpu_temp() -> f32 { 42. }
 //! use netidx::{
 //!     publisher::{PublisherBuilder, Value, BindCfg, DesiredAuth},
-//!     config::Config,
-//!     path::Path,
+//!     config::Config, path::Path,
 //! };
 //! use tokio::time;
 //! use std::time::Duration;
-//!
 //! # use anyhow::Result;
 //! # async fn run() -> Result<()> {
-//! // load the site cluster config. You can also just use a file.
 //! let cfg = Config::load_default()?;
-//!
-//! // listen on any unique address matching 192.168.0.0/16
 //! let publisher = PublisherBuilder::new(cfg)
 //!     .desired_auth(DesiredAuth::Anonymous)
 //!     .bind_cfg(Some("192.168.0.0/16".parse()?))
@@ -31,75 +38,94 @@
 //!     .await?;
 //!
 //! let temp = publisher.publish(
-//!     Path::from("/hw/washu-chan/cpu-temp"),
-//!     Value::F32(get_cpu_temp())
+//!     Path::from("/hw/cpu-temp"),
+//!     get_cpu_temp()
 //! )?;
 //!
 //! loop {
 //!     time::sleep(Duration::from_millis(500)).await;
 //!     let mut batch = publisher.start_batch();
-//!     temp.update(&mut batch, Value::F32(get_cpu_temp()));
+//!     temp.update(&mut batch, get_cpu_temp());
 //!     batch.commit(None).await;
 //! }
-//! # Ok(())
-//! # };
+//! # Ok(()) }
 //! ```
 //!
-//! # Subscriber
+//! Subscribing to data:
+//!
 //! ```no_run
 //! use netidx::{
 //!     subscriber::{Subscriber, UpdatesFlags, DesiredAuth},
-//!     config::Config,
-//!     path::Path,
+//!     config::Config, path::Path,
 //! };
 //! use futures::{prelude::*, channel::mpsc};
 //! # use anyhow::Result;
-//!
 //! # async fn run() -> Result<()> {
 //! let cfg = Config::load_default()?;
 //! let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
-//! let path = Path::from("/hw/washu-chan/cpu-temp");
-//! let temp = subscriber.subscribe(path);
+//! let temp = subscriber.subscribe(Path::from("/hw/cpu-temp"));
 //! temp.wait_subscribed().await;
-//! println!("washu-chan cpu temp is: {:?}", temp.last());
+//!
+//! println!("Current: {:?}", temp.last());
 //!
 //! let (tx, mut rx) = mpsc::channel(10);
 //! temp.updates(UpdatesFlags::empty(), tx);
-//! while let Some(mut batch) = rx.next().await {
-//!     for (_, v) in batch.drain(..) {
-//!         println!("washu-chan cpu temp is: {:?}", v);
+//! while let Some(batch) = rx.next().await {
+//!     for (_, value) in batch {
+//!         println!("Updated: {:?}", value);
 //!     }
 //! }
-//! # Ok(())
-//! # };
+//! # Ok(()) }
 //! ```
 //!
-//! Published things always have a value, which new subscribers receive
-//! initially. Thereafter a subscription is a lossless ordered stream,
-//! just like a tcp connection, except that instead of bytes
-//! `publisher::Value` is the unit of transmission. Since the subscriber
-//! can write values back to the publisher, the connection is
-//! bidirectional, also like a Tcp stream.
+//! ## How It Works
 //!
-//! Values include many useful primitives, including zero copy bytes
-//! buffers (using the awesome bytes crate), so you can easily use
-//! netidx to efficiently send any kind of message you like. However
-//! it's advised to stick to primitives and express structure with
-//! multiple published values in a hierarchy, since this makes your
-//! system more discoverable, and is also quite efficient.
+//! Netidx has three components:
 //!
-//! netidx includes optional support for kerberos v5 (including Active
-//! Directory). If enabled, all components will do mutual
-//! authentication between the resolver, subscriber, and publisher as
-//! well as encryption of all data on the wire.
+//! - **Resolver Server**: Directory service mapping paths to publisher addresses
+//! - **Publishers**: Create values and serve subscribers directly
+//! - **Subscribers**: Connect directly to publishers for live data
 //!
-//! In krb5 mode the resolver server maintains and enforces a set of
-//! authorization permissions for the entire namespace. The system
-//! administrator can centrally enforce who can publish where, and who
-//! can subscribe to what.
+//! Unlike traditional message brokers, the resolver only stores *addresses*, not data.
+//! This eliminates the broker as a bottleneck and single point of failure.
 //!
-//! * Publish with a [`Publisher`](publisher/struct.Publisher.html)
-//! * Subscribe with a [`Subscriber`](subscriber/struct.Subscriber.html)
+//! ## Key Features
+//!
+//! - **Direct TCP connections** - No broker bottleneck, connection pooling
+//! - **Type-safe values** - Rich types including primitives, strings, bytes, arrays, maps
+//! - **User-defined types** - Publish your own custom types by implementing a few traits
+//! - **Bi-directional** - Subscribers can write values back to publishers
+//! - **Durable subscriptions** - Automatic reconnection and state recovery
+//! - **Authorization** - Centralized permissions with Kerberos v5 or TLS
+//! - **Discovery** - Browse namespace, glob patterns, structural queries
+//!
+//! ## Optional Components
+//!
+//! - **[netidx-container](https://docs.rs/netidx-container)** - Redis-like NoSQL storage
+//!   for persistence and guaranteed delivery
+//! - **[netidx-archive](https://docs.rs/netidx-archive)** - Event logging, replay, and
+//!   tiered storage for historical data
+//! - **[netidx-protocols](https://docs.rs/netidx-protocols)** - RPC framework and
+//!   clustering primitives
+//!
+//! ## Documentation
+//!
+//! - [Netidx Book](https://netidx.github.io/netidx-book/) - Complete guide and tutorials
+//! - [`Publisher`] - Publish data and accept subscriptions
+//! - [`Subscriber`] - Subscribe to live data
+//! - [`config::Config`] - Configuration management
+//! - [`path::Path`] - Hierarchical path handling
+//!
+//! ## Architecture
+//!
+//! Values are transmitted as a reliable, ordered stream over TCP (like the connection
+//! itself, but with [`publisher::Value`] as the unit instead of bytes). Published
+//! values always have a current value that new subscribers receive immediately, followed
+//! by live updates.
+//!
+//! For best discoverability, structure your data hierarchically with multiple published
+//! values rather than complex nested structures. This is both efficient and makes your
+//! system browsable.
 #![recursion_limit = "1024"]
 #[macro_use]
 extern crate serde_derive;
@@ -110,7 +136,9 @@ extern crate anyhow;
 #[macro_use]
 extern crate netidx_core;
 
-pub use netidx_core::{pack, path, utils};
+pub use netidx_core::pack;
+pub use netidx_core::path;
+pub use netidx_core::utils;
 pub use netidx_netproto as protocol;
 pub use poolshark as pool;
 
@@ -130,9 +158,10 @@ use anyhow::Result;
 use publisher::{Publisher, PublisherBuilder};
 use subscriber::{Subscriber, SubscriberBuilder};
 
-/// A complete internal only netidx setup. This will allow the current
-/// program to talk to itself (and child processes) over netidx. This
-/// is useful for tests, as well as a fallback of last resort when
+/// A self-contained netidx setup for testing or standalone use.
+///
+/// This will allow the current program to talk to itself (and child processes) over netidx.
+/// This is useful for tests, as well as a fallback of last resort when
 /// there is no usable netidx config, but a program could still be
 /// useful without netidx.
 ///

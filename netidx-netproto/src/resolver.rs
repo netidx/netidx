@@ -197,6 +197,7 @@ pub struct PublisherRef {
     pub token: Bytes,
 }
 
+/// The result of resolving a path
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Resolved {
     pub resolver: SocketAddr,
@@ -229,6 +230,7 @@ impl PartialEq for Referral {
 
 impl Eq for Referral {}
 
+/// An inferred table
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct Table {
     pub rows: GPooled<Vec<Path>>,

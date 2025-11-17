@@ -254,10 +254,10 @@ impl ArchiveWriter {
     /// program can write to an archive while [netidx record] reads and
     /// publishes them at the same time.
     ///
-    /// THIS IS POTENTIALLY DANGEROUS!  The protection against more than
-    /// one writer, and therefore data corruption, is weaker than with
-    /// [open], since writers have to agree on the same external lock
-    /// filename.
+    /// THIS IS POTENTIALLY DANGEROUS!  The protection against more
+    /// than one writer, and therefore data corruption, is weaker than
+    /// with [open](ArchiveWriter::open), since writers have to agree
+    /// on the same external lock filename.
     pub fn open_external(
         path: impl AsRef<FilePath>,
         external_lock: impl AsRef<FilePath>,

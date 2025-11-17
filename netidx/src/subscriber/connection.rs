@@ -35,7 +35,6 @@ use parking_lot::Mutex;
 use poolshark::global::GPooled;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
-use std::hint::unreachable_unchecked;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     mem,

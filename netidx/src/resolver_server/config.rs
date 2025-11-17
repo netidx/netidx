@@ -1,3 +1,7 @@
+//! Resolver server configuration
+//!
+//! See the file module for documentation of the on disk format.
+
 use self::file::IdMapType;
 use crate::{
     path::Path,
@@ -25,6 +29,7 @@ use std::{
 type Permissions = ArcStr;
 type Entity = ArcStr;
 
+/// The type of authentication to use
 #[derive(Debug, Clone)]
 pub enum Auth {
     Anonymous,
@@ -111,6 +116,7 @@ pub mod file {
         path::PathBuf,
     };
 
+    /// Type of authentication to use
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub enum Auth {
@@ -131,6 +137,7 @@ pub mod file {
         }
     }
 
+    /// Type of authentication used by this `Referral`
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub enum RefAuth {
@@ -151,6 +158,7 @@ pub mod file {
         }
     }
 
+    /// A referral to another resolver server
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Referral {
@@ -201,11 +209,15 @@ pub mod file {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     }
 
+    /// The type of user id mapping to perform
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub enum IdMapType {
+        /// Don't map user ids at all
         DoNotMap,
+        /// Run an external command to map ids (such as /bin/id in unix)
         Command,
+        /// Send a message to a local socket to map ids
         Socket,
     }
 
@@ -237,6 +249,7 @@ pub mod file {
         120
     }
 
+    /// Describes a member of the local resolver cluster
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct MemberServer {
@@ -303,6 +316,10 @@ pub mod file {
         pub id_map_timeout: u64,
     }
 
+    /// The toplevel config object
+    ///
+    /// The config file is expected to contain exactly one of these
+    /// encoded as json.
     #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
@@ -327,6 +344,7 @@ pub mod file {
     }
 }
 
+/// The type of user id mapping to perform
 #[derive(Debug, Clone)]
 pub enum IdMap {
     DoNotMap,
@@ -335,6 +353,7 @@ pub enum IdMap {
     Socket(ArcStr),
 }
 
+/// Describes a member of the local resolver cluster
 #[derive(Debug, Clone)]
 pub struct MemberServer {
     pub(super) addr: SocketAddr,
@@ -349,6 +368,7 @@ pub struct MemberServer {
     pub(crate) id_map_timeout: chrono::Duration,
 }
 
+/// The toplevel config object
 #[derive(Debug, Clone)]
 pub struct Config {
     pub(super) parent: Option<Referral>,

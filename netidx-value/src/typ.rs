@@ -12,8 +12,10 @@ use std::{
 };
 use triomphe::Arc;
 
-// Each Typ corresponds directly to the tag of a Value, the bits are
-// the same, and they can be used interchangeably.
+/// The type of a Value.
+///
+/// Each Typ corresponds directly to the tag of a Value; the bits are
+/// the same, and they can be used interchangeably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u64)]
 #[bitflags]

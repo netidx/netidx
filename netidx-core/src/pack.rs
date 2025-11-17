@@ -1,3 +1,58 @@
+//! Efficient binary serialization with forward compatibility.
+//!
+//! Pack provides a compact binary encoding for netidx's wire protocol. Unlike
+//! `serde` with `bincode` or similar serializers, Pack is designed for protocol
+//! evolution and forward compatibility.
+//!
+//! ## Key Features
+//!
+//! - **Efficient encoding**: LEB128 varints, length-prefixed strings, zero-copy where possible
+//! - **Forward compatible**: Length-wrapped encoding allows old decoders to skip unknown fields
+//! - **Extensible protocols**: Add new fields to structs and enum variants without breaking compatibility
+//! - **Derivable**: Use `#[derive(Pack)]` from the `netidx-derive` crate
+//!
+//! ## Why Pack Instead of Serde?
+//!
+//! While `serde` with `bincode` or other binary formats provides fast
+//! serialization, Pack is specifically designed to be fast and
+//! **extensible**:
+//!
+//! - **Length-wrapped encoding**: By default each encoded value is
+//! prefixed with its length, allowing decoders to skip unknown fields
+//! in structs and variants.
+//! - **Protocol evolution**: New fields can be added to the end of
+//! structs, and to the end of struct variants without breaking old
+//! decoders. New enum cases can be added to the end of enums and are
+//! safe as long as they are never sent to old decoders.
+//!
+//! ## Example
+//!
+//! ```ignore
+//! use netidx_core::pack::Pack;
+//! use bytes::{Bytes, BytesMut};
+//!
+//! #[derive(Pack)]
+//! struct Message {
+//!     id: u32,
+//!     data: String,
+//! }
+//!
+//! let msg = Message { id: 42, data: "hello".into() };
+//! let buf = utils::pack(&msg)?;
+//!
+//! let decoded = Message::decode(&mut buf.freeze())?;
+//! ```
+//!
+//! ## The Pack Trait
+//!
+//! The core trait provides three methods:
+//!
+//! - `encoded_len()`: Calculate the encoded size
+//! - `encode()`: Encode to a buffer
+//! - `decode()`: Decode from a buffer
+//!
+//! Most types should use `#[derive(Pack)]` rather than implementing manually.
+
 use arcstr::ArcStr;
 use arrayvec::{ArrayString, ArrayVec};
 use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
@@ -29,6 +84,7 @@ use std::{
     time::Duration,
 };
 
+/// Error type for Pack encoding and decoding operations.
 #[derive(Debug, Clone, Copy)]
 pub enum PackError {
     UnknownTag,
@@ -46,6 +102,50 @@ impl fmt::Display for PackError {
 
 impl error::Error for PackError {}
 
+/// Binary serialization trait with forward compatibility.
+///
+/// Pack provides efficient binary encoding designed for protocol evolution.
+/// Most types should use `#[derive(Pack)]` from `netidx-derive` rather than
+/// implementing this trait manually.
+///
+/// # Encoding Format
+///
+/// By default derive(Pack) uses length-wrapped encoding: each value
+/// is prefixed with its encoded length, allowing decoders to skip
+/// unknown data. This enables:
+///
+/// - Adding new fields to the end of structs
+/// - Adding new variants to enums (so long as you don't send them to old decoders)
+/// - Adding new fields to the end of struct variants
+///
+/// Old decoders will skip over extra data when they are done
+/// decoding, allowing protocol extensibility with the performance of
+/// a fixed field decoder.
+///
+/// # Order Matters
+///
+/// Pack is a fixed field decoder, so the order of fields in struct
+/// types, enum types, and enum structs matters. The encoder packs
+/// each struct field in the order it is declared in the type, and the
+/// decoder expects fields to appear in that order. This avoids the
+/// overhead of tagged fields, but means that new fields can only be
+/// added at the end, and fields can never be reordered.
+///
+/// Enum tags are similarly allocated in type declaration order, so
+/// when adding new fields to enums, you must add them at the end of
+/// the type (unless you write a custom Pack implementation).
+///
+/// # Example
+///
+/// ```ignore
+/// use netidx_core::pack::Pack;
+///
+/// #[derive(Pack)]
+/// struct Point {
+///     x: i32,
+///     y: i32,
+/// }
+/// ```
 pub trait Pack {
     fn const_encoded_len() -> Option<usize> {
         None

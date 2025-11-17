@@ -52,16 +52,18 @@ pub type Map = map::Map<Value, Value, 32>;
 
 const COPY_MAX: u64 = 0x0000_8000;
 
-// this type is divided into two subtypes, the copy part and the clone
-// part. If the tag word is <= COPY_MAX then the type is copy,
-// otherwise it must be cloned. Additionally, the tag word values are
-// THE SAME as the values of the cases of Typ. Getting the Typ of a
-// value is therefore a simply copy of the discriminant of Value.
-//
-// It is essential that when adding variants you update COPY_MAX and
-// Typ correctly. If adding a non copy type, you will also need to
-// update the implementation of clone to match and delegate the clone
-// operation
+/// A dynamically-typed value that can be published and subscribed.
+///
+/// This type is divided into two subtypes: copy and clone.
+/// If the tag word is <= COPY_MAX then the type is copy,
+/// otherwise it must be cloned. Additionally, the tag word values are
+/// THE SAME as the values of the cases of Typ. Getting the Typ of a
+/// value is therefore a simply copy of the discriminant of Value.
+///
+/// It is essential that when adding variants you update COPY_MAX and
+/// Typ correctly. If adding a non copy type, you will also need to
+/// update the implementation of clone to match and delegate the clone
+/// operation.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 #[repr(u64)]

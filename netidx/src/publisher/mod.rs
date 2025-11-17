@@ -1,3 +1,4 @@
+//! Publish values to subscribers.
 mod server;
 pub use crate::protocol::{
     publisher::Id,
@@ -44,11 +45,12 @@ use std::{
 };
 use tokio::{net::TcpListener, task};
 
-/// Control how the publisher picks a bind address. The address we
-/// give to the resolver server must be uniquely routable back to us,
-/// otherwise clients will not be able to subscribe. In the
-/// furtherance of this goal there are a number of address rules to
-/// follow,
+/// Control how the publisher picks a bind address.
+///
+/// The address we give to the resolver server must be uniquely
+/// routable back to us, otherwise clients will not be able to
+/// subscribe. In the furtherance of this goal there are a number of
+/// address rules to follow,
 ///
 /// - no unspecified (0.0.0.0)
 /// - no broadcast (255.255.255.255)
@@ -326,6 +328,7 @@ static PUBLISHERS: LazyLock<Mutex<Vec<PublisherWeak>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
 bitflags! {
+    /// Flags to control how a value is published
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct PublishFlags: u32 {
         /// if set, then subscribers will be forced to use an existing
@@ -405,7 +408,7 @@ bitflags! {
     }
 }
 
-/// Used to signal a write result
+/// Send a result value back to a write client.
 #[derive(Clone, Debug)]
 pub struct SendResult(Arc<Mutex<Option<oneshot::Sender<Value>>>>);
 
@@ -422,6 +425,7 @@ impl SendResult {
     }
 }
 
+/// A write request from a subscriber to a published value.
 #[derive(Debug)]
 pub struct WriteRequest {
     /// the Id of the value being written
@@ -435,6 +439,7 @@ pub struct WriteRequest {
     pub send_result: Option<SendResult>,
 }
 
+/// Events emitted by the publisher about subscription lifecycle.
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
     Destroyed(Id),
@@ -465,7 +470,7 @@ type MsgQ = Sender<(Option<Duration>, Update)>;
 // keys/values, replaced by 1 word.
 type Subscribed = Arc<FxHashSet<ClId>>;
 
-/// Extended authorization hook
+/// User-defined authorization function for fine-grained access control.
 pub type ExtendedAuth =
     Box<dyn Fn(ClId, Id, Option<&UserInfo>) -> bool + Send + Sync + 'static>;
 
@@ -478,8 +483,9 @@ impl fmt::Debug for ExtendedAuthWrap {
     }
 }
 
-/// This represents a published value. When it is dropped the value
-/// will be unpublished.
+/// A published value.
+///
+/// When dropped, the value will be unpublished.
 #[derive(Debug)]
 pub struct Val(Id);
 
@@ -512,8 +518,8 @@ impl Val {
         batch.updates.push(BatchMsg::Update(None, self.0, v.into()))
     }
 
-    /// Same as update, except the argument can be TryInto<Value>
-    /// instead of Into<Value>
+    /// Same as update, except the argument can be `TryInto<Value>`
+    /// instead of `Into<Value>`
     pub fn try_update<T: TryInto<Value>>(
         &self,
         batch: &mut UpdateBatch,
@@ -529,7 +535,7 @@ impl Val {
     }
 
     /// Same as update_changed except the argument can be
-    /// TryInto<Value> instead of Into<Value>.
+    /// `TryInto<Value>` instead of `Into<Value>`.
     pub fn try_update_changed<T: TryInto<Value>>(
         &self,
         batch: &mut UpdateBatch,
@@ -549,7 +555,7 @@ impl Val {
         batch.updates.push(BatchMsg::Update(Some(dst), self.0, v.into()));
     }
 
-    /// Same as update_subscriber except the argument can be TryInto<Value>.
+    /// Same as update_subscriber except the argument can be `TryInto<Value>`.
     pub fn try_update_subscriber<T: TryInto<Value>>(
         &self,
         batch: &mut UpdateBatch,
@@ -578,8 +584,10 @@ impl Val {
     }
 }
 
-/// A handle to the channel that will receive notifications about
-/// subscriptions to paths in a subtree with a default publisher.
+/// Receive subscription requests under a default publisher path.
+///
+/// This handle receives notifications about subscriptions to paths
+/// in a subtree with a default publisher.
 pub struct DefaultHandle {
     chan: UnboundedReceiver<(Path, oneshot::Sender<()>)>,
     path: Path,
@@ -604,6 +612,8 @@ impl FusedStream for DefaultHandle {
 }
 
 impl DefaultHandle {
+    /// Advertise a path without fully publishing it.
+    ///
     /// Advertising is a middle way between fully publishing and a
     /// completely sparse namespace.
     ///
@@ -658,14 +668,16 @@ impl DefaultHandle {
         Ok(())
     }
 
-    /// Advertise the specified path with an empty set of flags. see
-    /// `advertise_with_flags`.
+    /// Advertise the specified path with no flags.
+    ///
+    /// See `advertise_with_flags` for details.
     pub fn advertise(&self, path: Path) -> Result<()> {
         self.advertise_with_flags(PublishFlags::empty(), path)
     }
 
-    /// Stop advertising the specified path. If the path is currently
-    /// published, this will merely record that it is no longer
+    /// Stop advertising the specified path.
+    ///
+    /// If the path is currently published, this will merely record that it is no longer
     /// advertised. However if the path is not currently published
     /// then it will also be removed from the resolver server.
     ///
@@ -711,6 +723,7 @@ impl Drop for DefaultHandle {
     }
 }
 
+/// A message in an `UpdateBatch`
 #[derive(Debug, Clone)]
 pub enum BatchMsg {
     UpdateChanged(Id, Value),
@@ -839,6 +852,7 @@ struct Client {
     user: Option<UserInfo>,
 }
 
+/// Information about a published value including its current value and subscribers.
 #[derive(Debug)]
 pub struct Published {
     current: Value,
@@ -1037,6 +1051,7 @@ fn rand_port(current: u16) -> u16 {
     current + rng.random_range(0u16..10u16)
 }
 
+/// Builder for configuring and creating a Publisher.
 #[derive(Debug)]
 pub struct PublisherBuilder {
     config: Option<Config>,
@@ -1134,7 +1149,9 @@ impl PublisherBuilder {
     }
 }
 
-/// Publish values. Publisher is internally wrapped in an Arc, so
+/// Publish values to subscribers.
+///
+/// Publisher is internally wrapped in an Arc, so
 /// cloning it is virtually free. When all references to to the
 /// publisher have been dropped the publisher will shutdown the
 /// listener, and remove all published paths from the resolver server.
@@ -1146,8 +1163,9 @@ impl Publisher {
         PublisherWeak(Arc::downgrade(&self.0))
     }
 
-    /// Create a new publisher using the specified resolver, desired auth, bind
-    /// config, and priority. `PublisherBuilder` may be easier to use.
+    /// Create a new publisher.
+    ///
+    /// `PublisherBuilder` may be easier to use.
     pub async fn new(
         resolver: Config,
         desired_auth: DesiredAuth,
@@ -1250,8 +1268,9 @@ impl Publisher {
         Ok(pb)
     }
 
-    /// Set an extended authorization function for the publisher. `f`
-    /// will be called on every subscription with the client, id, and
+    /// Set an extended authorization function for the publisher.
+    ///
+    /// `f` will be called on every subscription with the client, id, and
     /// user info. If it returns false then the subscription will be
     /// denied, otherwise it will be allowed.
     ///
@@ -1265,13 +1284,14 @@ impl Publisher {
         self.0.lock().extended_auth = Some(ExtendedAuthWrap(f));
     }
 
-    /// Remove the extended authorization function
+    /// Remove the extended authorization function.
     pub fn clear_extended_authorization(&self) {
         self.0.lock().extended_auth = None;
     }
 
-    /// Perform a clean shutdown of the publisher, remove all
-    /// published paths from the resolver server, shutdown the
+    /// Perform a clean shutdown of the publisher.
+    ///
+    /// This will remove all published paths from the resolver server, shutdown the
     /// listener, and close the connection to all clients.
     ///
     /// When this future is finished it is guaranteed that
@@ -1301,13 +1321,14 @@ impl Publisher {
         let _: Result<_> = resolver.clear().await;
     }
 
-    /// get the `SocketAddr` that publisher is bound to
+    /// Get the `SocketAddr` that publisher is bound to.
     pub fn addr(&self) -> SocketAddr {
         self.0.lock().addr
     }
 
-    /// Publish `Path` with initial value `init` and flags `flags`. It
-    /// is an error for the same publisher to publish the same path
+    /// Publish a path with initial value, flags, and write channel.
+    ///
+    /// It is an error for the same publisher to publish the same path
     /// twice, however different publishers may publish a given path
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
@@ -1352,8 +1373,9 @@ impl Publisher {
         Ok(Val(id))
     }
 
-    /// Publish `Path` with initial value `init` and flags `flags`. It
-    /// is an error for the same publisher to publish the same path
+    /// Publish a path with initial value and flags.
+    ///
+    /// It is an error for the same publisher to publish the same path
     /// twice, however different publishers may publish a given path
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
@@ -1371,8 +1393,9 @@ impl Publisher {
         self.publish_with_flags_and_writes(flags, path, init, None)
     }
 
-    /// Create an alias to an already published value at `path`. This
-    /// takes much less memory than publishing the same value twice at
+    /// Create an alias to an already published value.
+    ///
+    /// This takes much less memory than publishing the same value twice at
     /// different paths. Just as with publishing `path` cannot already
     /// be published by this publisher, and you must still have
     /// permission to publish at `path` in the resolver. When the val
@@ -1407,8 +1430,9 @@ impl Publisher {
         Ok(())
     }
 
-    /// Publish `Path` with initial value `init` and no flags. It is
-    /// an error for the same publisher to publish the same path
+    /// Publish a path with initial value and no flags.
+    ///
+    /// It is an error for the same publisher to publish the same path
     /// twice, however different publishers may publish a given path
     /// as many times as they like. Subscribers will then pick
     /// randomly among the advertised publishers when subscribing. See
@@ -1421,12 +1445,12 @@ impl Publisher {
         self.publish_with_flags(PublishFlags::empty(), path, init)
     }
 
-    /// Create an alias for an already published path
+    /// Create an alias for an already published path.
     pub fn alias(&self, id: Id, path: Path) -> Result<()> {
         self.alias_with_flags(id, PublishFlags::empty(), path)
     }
 
-    /// remove the specified alias for `val` if it exists
+    /// Remove the specified alias for `val` if it exists.
     pub fn remove_alias(&self, id: Id, path: &Path) {
         let mut pb = self.0.lock();
         if let Some(pbv) = pb.by_id.get_mut(&id) {
@@ -1438,7 +1462,7 @@ impl Publisher {
         }
     }
 
-    /// remove all aliases (if any) for the specified value
+    /// Remove all aliases (if any) for the specified value.
     pub fn remove_all_aliases(&self, id: Id) {
         let mut pb = self.0.lock();
         if let Some(pbv) = pb.by_id.get_mut(&id) {
@@ -1450,8 +1474,9 @@ impl Publisher {
         }
     }
 
-    /// Install a default publisher rooted at `base` with flags
-    /// `flags`. Once installed, any subscription request for a child
+    /// Install a default publisher rooted at `base` with flags.
+    ///
+    /// Once installed, any subscription request for a child
     /// of `base`, regardless if it doesn't exist in the resolver,
     /// will be routed to this publisher or one of it's peers in the
     /// case of multiple default publishers.
@@ -1501,8 +1526,9 @@ impl Publisher {
         Ok(DefaultHandle { chan: rx, path: base, publisher: self.downgrade() })
     }
 
-    /// Install a default publisher rooted at `base` with no
-    /// flags. Once installed, any subscription request for a child of
+    /// Install a default publisher rooted at `base` with no flags.
+    ///
+    /// Once installed, any subscription request for a child of
     /// `base`, regardless if it doesn't exist in the resolver, will
     /// be routed to this publisher or one of it's peers in the case
     /// of multiple default publishers.
@@ -1525,7 +1551,9 @@ impl Publisher {
         self.publish_default_with_flags(PublishFlags::empty(), base)
     }
 
-    /// Start a new update batch. Updates are queued in the batch (see
+    /// Start a new update batch.
+    ///
+    /// Updates are queued in the batch (see
     /// `Val::update`), and then the batch can be either discarded, or
     /// committed. If discarded then none of the updates will have any
     /// effect, otherwise once committed the queued updates will be
@@ -1537,9 +1565,10 @@ impl Publisher {
         UpdateBatch { origin: self.clone(), updates: RAWBATCH.take(), unsubscribes: None }
     }
 
-    /// Wait until all previous publish or unpublish commands have
-    /// been processed by the resolver server. e.g. if you just
-    /// published 100 values, and you want to know when they have been
+    /// Wait until all previous publish or unpublish commands complete.
+    ///
+    /// This waits for the resolver server to process all previous commands.
+    /// e.g. if you just published 100 values, and you want to know when they have been
     /// uploaded to the resolver, you can call `flushed`.
     pub async fn flushed(&self) {
         let (tx, rx) = oneshot::channel();
@@ -1552,8 +1581,9 @@ impl Publisher {
         self.0.lock().clients.len()
     }
 
-    /// Wait for at least one client to subscribe to at least one
-    /// value. Returns immediately if there is already a client.
+    /// Wait for at least one client to subscribe to any value.
+    ///
+    /// Returns immediately if there is already a client.
     pub async fn wait_any_client(&self) {
         let wait = {
             let mut inner = self.0.lock();
@@ -1568,16 +1598,18 @@ impl Publisher {
         let _ = wait.await;
     }
 
-    /// Wait for any new client to connect. This will always wait for
-    /// a new client, even if there are clients connected.
+    /// Wait for any new client to connect.
+    ///
+    /// This will always wait for a new client, even if there are clients connected.
     pub async fn wait_any_new_client(&self) {
         let (tx, rx) = oneshot::channel();
         self.0.lock().wait_any_client.push(tx);
         let _ = rx.await;
     }
 
-    /// Wait for at least one client to subscribe to the specified
-    /// published value. Returns immediatly if there is a client, or
+    /// Wait for at least one client to subscribe to the specified value.
+    ///
+    /// Returns immediatly if there is a client, or
     /// if the published value has been dropped.
     pub async fn wait_client(&self, id: Id) {
         let wait = {
@@ -1597,7 +1629,7 @@ impl Publisher {
         let _ = wait.await;
     }
 
-    /// Retreive the Id of path if it is published
+    /// Retrieve the Id of path if it is published.
     pub fn id<S: AsRef<str>>(&self, path: S) -> Option<Id> {
         self.0.lock().by_path.get(path.as_ref()).map(|id| *id)
     }
@@ -1607,7 +1639,7 @@ impl Publisher {
         self.0.lock().by_id.get(&id).map(|pbl| pbl.path.clone())
     }
 
-    /// Return all the aliases for the specified `id`
+    /// Return all the aliases for the specified `id`.
     pub fn aliases(&self, id: Id) -> Vec<Path> {
         let pb = self.0.lock();
         match pb.by_id.get(&id) {
@@ -1619,12 +1651,12 @@ impl Publisher {
         }
     }
 
-    /// Get a copy of the current value of a published `Val`
+    /// Get a copy of the current value of a published `Val`.
     pub fn current(&self, id: &Id) -> Option<Value> {
         self.0.lock().by_id.get(&id).map(|p| p.current.clone())
     }
 
-    /// Get a list of clients subscribed to a published `Val`
+    /// Get a list of clients subscribed to a published `Val`.
     pub fn subscribed(&self, id: &Id) -> Vec<ClId> {
         self.0
             .lock()
@@ -1642,8 +1674,7 @@ impl Publisher {
         }
     }
 
-    /// Return true if the specified client is subscribed to the
-    /// specifed Id.
+    /// Return true if the specified client is subscribed to the specified Id.
     pub fn is_subscribed(&self, id: &Id, client: &ClId) -> bool {
         match self.0.lock().by_id.get(&id) {
             Some(p) => p.subscribed.contains(client),
@@ -1651,8 +1682,9 @@ impl Publisher {
         }
     }
 
-    /// Return the user information associated with the specified
-    /// client id. If the authentication mechanism is Krb5 then this
+    /// Return the user information associated with the specified client id.
+    ///
+    /// If the authentication mechanism is Krb5 then this
     /// will be the remote user's user principal name,
     /// e.g. eric@RYU-OH.ORG on posix systems. If the auth mechanism
     /// is tls, then this will be the common name of the user's
@@ -1664,13 +1696,14 @@ impl Publisher {
         self.0.lock().clients.get(client).and_then(|c| c.user.clone())
     }
 
-    /// Get the number of clients subscribed to a published `Val`
+    /// Get the number of clients subscribed to a published `Val`.
     pub fn subscribed_len(&self, id: &Id) -> usize {
         self.0.lock().by_id.get(&id).map(|p| p.subscribed.len()).unwrap_or(0)
     }
 
-    /// Register `tx` to receive writes to the specified published
-    /// value. You can register multiple channels, and you can
+    /// Register `tx` to receive writes to the specified published value.
+    ///
+    /// You can register multiple channels, and you can
     /// register the same channel on multiple ids. If no channels are
     /// registered to receive writes for an id, then an attempt to
     /// write to that id will return an error to the subscriber.
@@ -1689,13 +1722,13 @@ impl Publisher {
         self.0.lock().writes(id, tx)
     }
 
-    /// Stop accepting writes to the specified id
+    /// Stop accepting writes to the specified id.
     pub fn stop_writes(&self, id: Id) {
         let mut pb = self.0.lock();
         pb.on_write.remove(&id);
     }
 
-    /// Register `tx` to receive a message about publisher events
+    /// Register `tx` to receive a message about publisher events.
     ///
     /// if you don't want to receive events on a given channel anymore
     /// you can just drop it.
@@ -1703,7 +1736,7 @@ impl Publisher {
         self.0.lock().on_event_chans.push(tx)
     }
 
-    /// Register `tx` to receive a message about publisher events
+    /// Register `tx` to receive publisher events for the specified id.
     ///
     /// This does exactly the same thing as events, however only
     /// events for the specifed id will be delivered to the

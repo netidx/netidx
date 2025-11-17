@@ -1,3 +1,4 @@
+//! Resolver server for mapping paths to publishers.
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     pack::Pack,
@@ -931,6 +932,7 @@ async fn server_loop(
     }
 }
 
+/// Run a resolver server
 #[derive(Debug)]
 pub struct Server {
     stop: Option<oneshot::Sender<()>>,
@@ -946,6 +948,17 @@ impl Drop for Server {
 }
 
 impl Server {
+    /// Create a new resolver server
+    ///
+    /// # Parameters
+    /// - cfg: the config
+    /// - delay_reads: don't allow reads until 2x the writer timeout, this allows
+    ///   publisher to republish to this resolver server before subscribers are allowed
+    ///   to use it.
+    /// - id: the index of this resolver server in the config's members array
+    ///
+    /// When this future is resolved the server will be running. If
+    /// the returned `Server` is dropped the server will stop.
     pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
@@ -964,6 +977,7 @@ impl Server {
         Ok(Server { stop: Some(send_stop), local_addr })
     }
 
+    /// Get the local address this resolver server is bound to
     pub fn local_addr(&self) -> &SocketAddr {
         &self.local_addr
     }

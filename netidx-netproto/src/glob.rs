@@ -32,8 +32,9 @@ impl Scope {
     }
 }
 
-/// Unix style globs for matching paths in the resolver. All common
-/// unix globing features are supported.
+/// Unix style globs for matching paths in the resolver.
+///
+/// All common unix globing features are supported.
 /// * ? matches any character except the path separator
 /// * \* matches zero or more characters, but not the path separator
 /// * \** recursively matches containers. It's only legal uses are
@@ -41,7 +42,7 @@ impl Scope {
 /// any path ending in foo, any path starting with /foo and ending in
 /// bar, and any path starting with /foo/bar.
 /// * {a, b}, matches a or b where a and b are glob patterns, {} can't be nested however.
-/// * [ab], [!ab], matches respectively the char a or b, and any char but a or b.
+/// * \[ab\], \[!ab\], matches respectively the char a or b, and any char but a or b.
 /// * any of the above metacharacters can be escaped with a \, a
 /// literal \ may be produced with \\.
 ///
@@ -182,6 +183,7 @@ struct GlobSetInner {
     glob: globset::GlobSet,
 }
 
+/// A set of globs that are evaluated at the same time
 #[derive(Debug, Clone)]
 pub struct GlobSet(Arc<GlobSetInner>);
 
@@ -253,8 +255,9 @@ impl TryFrom<Vec<ArcStr>> for GlobSet {
 }
 
 impl GlobSet {
-    /// create a new globset from the specified globs. if
-    /// published_only is true, then the globset will only match
+    /// create a new globset from the specified globs
+    ///
+    /// if published_only is true, then the globset will only match
     /// published paths, otherwise it will match both structural and
     /// published paths.
     pub fn new(
@@ -289,7 +292,9 @@ impl GlobSet {
         self.0.raw.iter().map(|g| g.raw.clone()).collect()
     }
 
-    /// disjoint globsets will never both match a given path. However
+    /// Return true if the two globsets are disjoint.
+    ///
+    /// Disjoint globsets will never both match a given path. However
     /// non disjoint globsets might not match the same paths. So in
     /// other words this will only return turn if the two globsets
     /// definitely will not match any of the same paths. It is

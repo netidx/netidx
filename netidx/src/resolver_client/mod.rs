@@ -1,3 +1,4 @@
+//! Client for querying the resolver server.
 pub(crate) mod common;
 mod read_client;
 mod write_client;
@@ -379,6 +380,10 @@ where
     }
 }
 
+/// Track changes in the resolver cluster.
+///
+/// Used with `ResolverRead::check_changed()` to efficiently detect when
+/// publishers register or unregister under a path without repeatedly listing.
 #[derive(Debug, Clone)]
 pub struct ChangeTracker {
     path: Path,
@@ -395,6 +400,11 @@ impl ChangeTracker {
     }
 }
 
+/// Client for querying the resolver server (read operations).
+///
+/// Used by subscribers to resolve paths to publisher addresses, list published
+/// paths, and query the namespace structure. Handles referrals and cluster
+/// topology automatically.
 #[derive(Debug, Clone)]
 pub struct ResolverRead(ResolverWrap<ReadClient, ToRead, FromRead>);
 
@@ -411,7 +421,7 @@ impl ResolverRead {
         ))
     }
 
-    /// send the specified messages to the resolver, and return the answers (in send order)
+    /// Send the specified messages to the resolver and return answers in send order.
     pub async fn send(
         &self,
         batch: &GPooled<Vec<ToRead>>,
@@ -420,7 +430,9 @@ impl ResolverRead {
         self.0.send(batch).await
     }
 
-    /// resolve the specified paths, results are in send order
+    /// Resolve the specified paths to publisher addresses.
+    ///
+    /// Results are in send order.
     pub async fn resolve<I>(
         &self,
         batch: I,
@@ -451,7 +463,9 @@ impl ResolverRead {
         }
     }
 
-    /// list children of the specified path. Order is unspecified.
+    /// List immediate children of the specified path.
+    ///
+    /// Order is unspecified.
     pub async fn list(&self, path: Path) -> Result<GPooled<Vec<Path>>> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::List(path.clone()));
@@ -515,8 +529,9 @@ impl ResolverRead {
         Ok(())
     }
 
-    /// list all paths in the cluster matching the specified
-    /// globset. You will get a list of batches of paths. If your
+    /// List all paths in the cluster matching the specified globset.
+    ///
+    /// Returns a list of batches of paths. If your
     /// globset is configured to match only published paths, then the
     /// batches should be disjoint, otherwise there may be some
     /// duplicate structural elements.
@@ -548,9 +563,9 @@ impl ResolverRead {
         Ok(results)
     }
 
-    /// Check whether that have been any changes to the specified path
-    /// or any of it's children on any server in the resolver
-    /// cluster. A change in this context consists of,
+    /// Check whether there have been any changes under the specified path.
+    ///
+    /// This checks all servers in the resolver cluster. A change in this context consists of:
     ///
     /// * A new publisher publishing an existing path
     /// * A publisher publishing a new path
@@ -595,6 +610,24 @@ impl ResolverRead {
         Ok(res)
     }
 
+    /// Interpret `path` as a table and return it's description.
+    ///
+    /// The contents of the resolver server is a tree, however a
+    /// tree's structure can describe a table if at a single level
+    /// multiple paths are published that share common children. Then
+    /// each level 1 path is a row, and the common children are the
+    /// columns.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// /table/a/1
+    /// /table/a/2
+    /// /table/b/1
+    /// /table/b/2
+    /// ```
+    ///
+    /// is a table with two rows, a and b, and two columns 1 and 2.
     pub async fn table(&self, path: Path) -> Result<Table> {
         let mut to = RAWTOREADPOOL.take();
         to.push(ToRead::Table(path.clone()));
@@ -624,6 +657,10 @@ impl ResolverRead {
     }
 }
 
+/// Client for updating the resolver server (write operations).
+///
+/// Used by publishers to register and unregister published paths, including
+/// default publishers. Handles authentication and referrals automatically.
 #[derive(Debug, Clone)]
 pub struct ResolverWrite(ResolverWrap<WriteClient, ToWrite, FromWrite>);
 
@@ -659,6 +696,7 @@ impl ResolverWrite {
         )))
     }
 
+    /// Send the specified messages to the resolver and return responses.
     pub async fn send(
         &self,
         batch: &GPooled<Vec<ToWrite>>,
@@ -692,10 +730,12 @@ impl ResolverWrite {
         Ok(())
     }
 
+    /// Publish a batch of paths to the resolver.
     pub async fn publish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
         self.send_expect(batch, FromWrite::Published, ToWrite::Publish).await
     }
 
+    /// Publish a batch of paths with optional flags.
     pub async fn publish_with_flags<I: IntoIterator<Item = (Path, Option<u32>)>>(
         &self,
         batch: I,
@@ -707,6 +747,7 @@ impl ResolverWrite {
         .await
     }
 
+    /// Publish a batch of default publisher paths to the resolver.
     pub async fn publish_default<I: IntoIterator<Item = Path>>(
         &self,
         batch: I,
@@ -714,6 +755,7 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Published, ToWrite::PublishDefault).await
     }
 
+    /// Publish a batch of default publisher paths with optional flags.
     pub async fn publish_default_with_flags<
         I: IntoIterator<Item = (Path, Option<u32>)>,
     >(
@@ -727,10 +769,12 @@ impl ResolverWrite {
         .await
     }
 
+    /// Unpublish a batch of paths from the resolver.
     pub async fn unpublish<I: IntoIterator<Item = Path>>(&self, batch: I) -> Result<()> {
         self.send_expect(batch, FromWrite::Unpublished, ToWrite::Unpublish).await
     }
 
+    /// Unpublish a batch of default publisher paths from the resolver.
     pub async fn unpublish_default<I: IntoIterator<Item = Path>>(
         &self,
         batch: I,
@@ -738,6 +782,8 @@ impl ResolverWrite {
         self.send_expect(batch, FromWrite::Unpublished, ToWrite::UnpublishDefault).await
     }
 
+    /// Clear all published paths from this publisher.
+    ///
     // CR estokes: this is broken on complex clusters
     pub async fn clear(&self) -> Result<()> {
         let mut batch = RAWTOWRITEPOOL.take();

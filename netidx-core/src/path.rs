@@ -1,3 +1,4 @@
+//! Hierarchical path handling and manipulation.
 use crate::pack::{Pack, PackError};
 use arcstr::{literal, ArcStr};
 use bytes::{Buf, BufMut};
@@ -46,8 +47,10 @@ fn canonize(s: &str) -> String {
     res
 }
 
-/// A path in the namespace. Paths are immutable and reference
-/// counted.  Path components are seperated by /, which may be escaped
+/// A path in the netidx namespace.
+///
+/// Paths are immutable and reference counted.
+/// Path components are seperated by /, which may be escaped
 /// with \. / and \ are the only special characters in path, any other
 /// unicode character may be used. Path lengths are not limited on the
 /// local machine, but may be restricted by maximum message size on
