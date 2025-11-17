@@ -238,7 +238,7 @@ request historical data.
 
 | Feature | Netidx | MQTT | Redis Pub/Sub | gRPC |
 |---------|--------|------|---------------|------|
-| Broker required | No* | Yes | Yes | No |
+| Broker required | No | Yes | Yes | No |
 | Hierarchical namespace | Yes | Yes (topics) | Limited | No |
 | Discovery/browsing | Yes | No | No | Via reflection |
 | Bi-directional | Yes | No | No | Yes (streaming) |
