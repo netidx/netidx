@@ -76,7 +76,10 @@ use netidx_core::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::{hint::unreachable_unchecked, iter, ptr, result, str::FromStr, time::Duration};
+use std::{
+    any::Any, hint::unreachable_unchecked, iter, ptr, result, str::FromStr,
+    time::Duration,
+};
 use triomphe::Arc;
 
 pub mod abstract_type;
@@ -805,6 +808,17 @@ impl Value {
     /// don't attempt to cast.
     pub fn get_as<T: FromValue + Sized>(self) -> Option<T> {
         <T as FromValue>::get(self)
+    }
+
+    /// downcast an abstract value to it's concrete type
+    ///
+    /// return None if the value isn't abstract, or if `T` is not it's
+    /// concrete type.
+    pub fn downcast_ref<T: Any + Send + Sync>(&self) -> Option<&T> {
+        match self {
+            Value::Abstract(a) => a.downcast_ref::<T>(),
+            _ => None,
+        }
     }
 
     /// get a reference to the payload of the value without checking the tag
