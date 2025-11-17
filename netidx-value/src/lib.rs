@@ -51,10 +51,8 @@
 //! let abstract_value: Value = wrapper.create(my_value).into();
 //!
 //! // Later, downcast back to your type
-//! if let Value::Abstract(abs) = abstract_value {
-//!     if let Some(t) = abs.downcast_ref::<Custom>() {
-//!         println!("field1: {}", my_type.field1);
-//!     }
+//! if let Some(t) = abstract_value.downcast_ref::<Custom>() {
+//!     println!("field1: {}", my_type.field1);
 //! }
 //! ```
 //!
