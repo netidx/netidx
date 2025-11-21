@@ -30,6 +30,7 @@ byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 cross-krb5 = { workspace = true }
+ctrlc = { workspace = true }
 derive_builder = { workspace = true }
 dirs = { workspace = true }
 futures = { workspace = true }
@@ -53,6 +54,7 @@ serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
+tempdir = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 triomphe = { workspace = true }

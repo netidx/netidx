@@ -22,7 +22,7 @@ use anyhow::Result;
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{DesiredAuth, Publisher, PublisherBuilder, UpdateBatch, Val, Value},
+    publisher::{Publisher, PublisherBuilder, UpdateBatch, Val, Value},
 };
 use rand::random_range;
 use tokio::time::{self, Duration};
@@ -78,15 +78,14 @@ impl Sensor {
         self.avg.update(batch, self.sum / (self.count as f64));
         self.min.update(batch, f64::min(self.min.cur, temp));
         self.max.update(batch, f64::max(self.max.cur, temp));
-        println!("{}: {:.1}°C", self.base, temp);
+        println!("{}: {:.1}°C", Path::basename(&self.base).unwrap_or(""), temp);
     }
 }
 
 #[tokio::main]
 async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
     let base = Path::from("/local/sensors/temperature");
-    let publisher =
-        PublisherBuilder::new(cfg).desired_auth(DesiredAuth::Anonymous).build().await?;
+    let publisher = PublisherBuilder::new(cfg).build().await?;
     println!("Temperature monitoring system started");
     println!("Publishing sensor data under {base}");
     // Create sensors for different rooms
@@ -117,6 +116,10 @@ async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
 }
 
 fn main() -> Result<()> {
+    // start logging
+    env_logger::init();
+    // maybe start the local machine resolver
     Config::maybe_run_machine_local_resolver()?;
+    // load the config and go
     tokio_main(Config::load_default_or_local_only()?)
 }

@@ -14,18 +14,13 @@
 
 use anyhow::Result;
 use chrono::prelude::*;
-use netidx::{
-    config::Config,
-    path::Path,
-    publisher::{DesiredAuth, PublisherBuilder},
-};
+use netidx::{config::Config, path::Path, publisher::PublisherBuilder};
 use tokio::time::{self, Duration};
 
 #[tokio::main]
 async fn tokio_main(cfg: Config) -> Result<()> {
     // Create a publisher with anonymous auth (no security)
-    let publisher =
-        PublisherBuilder::new(cfg).desired_auth(DesiredAuth::Anonymous).build().await?;
+    let publisher = PublisherBuilder::new(cfg).build().await?;
     println!("Publisher started. Publishing to /local/example/counter");
     let base = Path::from("/local/example");
     // by convention /local is always mapped to the local machine
@@ -52,6 +47,8 @@ async fn tokio_main(cfg: Config) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // init logging
+    env_logger::init();
     // maybe start the machine local resolver
     Config::maybe_run_machine_local_resolver()?;
     // Load the netidx config from the default location, or use the zero config

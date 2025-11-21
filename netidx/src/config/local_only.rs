@@ -19,6 +19,7 @@ const TIMEOUT: Duration = Duration::from_millis(250);
 const VAR_RESOLVER_BASE: &str = "NETIDX_LOCAL_ONLY_RESOLVER_BASE";
 const VAR_RESOLVER_RANGE: &str = "NETIDX_LOCAL_ONLY_RESOLVER_RANGE";
 const VAR_WE_ARE_RESOLVER: &str = "NETIDX_LOCAL_ONLY_WE_ARE_THE_RESOLVER";
+const VAR_RESOLVER_TMPDIR: &str = "NETIDX_LOCAL_ONLY_RESOLVER_TEMP";
 
 fn get_env_as<T: FromStr>(name: &str, default: T) -> T {
     match env::var(name) {
@@ -40,6 +41,7 @@ fn client_cfg_for_addr(addr: SocketAddr) -> Result<Config> {
     config::Config::from_file(cfg)
 }
 
+#[derive(Debug)]
 enum PortStatus {
     ResolverFound(Config),
     PortAvailable(TcpListener),
@@ -69,26 +71,34 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
     if !get_env_as::<bool>(VAR_WE_ARE_RESOLVER, false) {
         return Ok(());
     }
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
-        let fd = stdin().as_raw_fd();
-        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-        use crate::resolver_server::{
-            self,
-            config::{self, file},
-        };
-        let listener = TcpListener::from_std(listener)?;
-        let addr = listener.local_addr()?;
-        let cfg = file::ConfigBuilder::default()
-            .member_servers(vec![file::MemberServerBuilder::default()
-                .auth(file::Auth::Anonymous)
-                .addr(addr)
-                .bind_addr("127.0.0.1".parse()?)
-                .build()?])
-            .build()?;
-        let cfg = config::Config::from_file(cfg)?;
-        resolver_server::Server::new_local_only(cfg, listener).await?;
-        future::pending::<Result<()>>().await
-    })
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(
+        async move {
+            let _ = ctrlc::set_handler(|| {
+                if let Ok(tempdir) = env::var(VAR_RESOLVER_TMPDIR) {
+                    let _ = std::fs::remove_dir_all(tempdir);
+                }
+                std::process::exit(0)
+            });
+            let fd = stdin().as_raw_fd();
+            let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+            use crate::resolver_server::{
+                self,
+                config::{self, file},
+            };
+            let listener = TcpListener::from_std(listener)?;
+            let addr = listener.local_addr()?;
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![file::MemberServerBuilder::default()
+                    .auth(file::Auth::Anonymous)
+                    .addr(addr)
+                    .bind_addr("127.0.0.1".parse()?)
+                    .build()?])
+                .build()?;
+            let cfg = config::Config::from_file(cfg)?;
+            let _server = resolver_server::Server::new_local_only(cfg, listener).await?;
+            future::pending::<Result<()>>().await
+        },
+    )
 }
 
 #[cfg(windows)]
@@ -115,20 +125,50 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
 
 #[cfg(unix)]
 fn start_local_resolver(l: TcpListener) -> Result<()> {
-    use daemonize::{Daemonize, Outcome};
-    use std::{os::unix::process::CommandExt, process::Stdio};
+    use daemonize::{Daemonize, Outcome, Stdio};
+    use std::{
+        fs::{File, OpenOptions},
+        os::unix::process::CommandExt,
+        path::PathBuf,
+    };
+    use tempdir::TempDir;
+    fn open_out(tmp: &PathBuf, name: &str) -> Option<File> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(tmp.join(name))
+            .ok()
+    }
     let raw_fd = l.as_raw_fd();
     let current_exe = env::current_exe()?;
-    match Daemonize::new().execute() {
+    let td = TempDir::new("netidx_resolver").map(|td| td.into_path()).ok();
+    let stdout = td
+        .as_ref()
+        .and_then(|td| open_out(td, "stdout"))
+        .map(Stdio::from)
+        .unwrap_or_else(|| Stdio::devnull());
+    let stderr = td
+        .as_ref()
+        .and_then(|td| open_out(td, "stderr"))
+        .map(Stdio::from)
+        .unwrap_or_else(|| Stdio::devnull());
+    match Daemonize::new().stdout(stdout).stderr(stderr).execute() {
         Outcome::Parent(r) => {
             r?;
             Ok(())
         }
         Outcome::Child(_) => {
-            let err = Command::new(current_exe)
-                .env(VAR_WE_ARE_RESOLVER, "true")
-                .stdin(unsafe { Stdio::from_raw_fd(raw_fd) })
-                .exec();
+            let mut cmd = Command::new(current_exe);
+            cmd.env(VAR_WE_ARE_RESOLVER, "true");
+            if let Some(td) = &td {
+                cmd.env(VAR_RESOLVER_TMPDIR, td);
+            }
+            let err =
+                cmd.stdin(unsafe { std::process::Stdio::from_raw_fd(raw_fd) }).exec();
+            if let Some(td) = &td {
+                let _ = std::fs::remove_dir_all(td);
+            }
             panic!("exec failed {err}")
         }
     }

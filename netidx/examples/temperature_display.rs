@@ -18,14 +18,15 @@ use futures::{channel::mpsc, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
-    subscriber::{DesiredAuth, Event, Subscriber, UpdatesFlags},
+    publisher::Value,
+    subscriber::{Event, SubscriberBuilder, UpdatesFlags},
 };
 use std::collections::HashMap;
 
 #[tokio::main]
 async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
     let base = Path::from("/local/sensors/temperature");
-    let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
+    let subscriber = SubscriberBuilder::new(cfg).build()?;
     let (tx, mut rx) = mpsc::channel(10);
     println!("Temperature Display");
     println!("==================\n");
@@ -52,8 +53,10 @@ async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
                 // Check what kind of update it is
                 if sub_id == status.id() {
                     println!("{:15} {}", "status:", value);
-                } else if let Some((name, _)) = subscriptions.get(&sub_id) {
-                    println!("{:15} {}", format!("{}:", name), value);
+                } else if let Some((name, _)) = subscriptions.get(&sub_id)
+                    && let Value::F64(v) = value
+                {
+                    println!("{:15} {:.1}°C", format!("{}:", name), v);
                 }
             } else {
                 // report loss of connection
@@ -67,6 +70,10 @@ async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
 }
 
 fn main() -> Result<()> {
+    // init logging
+    env_logger::init();
+    // maybe start the local machine resolver
     Config::maybe_run_machine_local_resolver()?;
+    // load the config and go
     tokio_main(Config::load_default_or_local_only()?)
 }

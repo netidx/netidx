@@ -24,6 +24,7 @@ compact_str = { version = "0.9", features = ["serde"] }
 crossbeam = "0.8"
 crossbeam-queue = "0.3"
 cross-krb5 = { version = "0.4", default-features = false }
+ctrlc = { version = "3", features = ["termination"] }
 derive_builder = "0.20"
 digest = "0.10"
 diligent-date-parser = "0.1.4"
@@ -73,6 +74,7 @@ sha3 = "0.10"
 sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
 structopt = "0.3"
+tempdir = "0.3.7"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = [
     "rt-multi-thread",

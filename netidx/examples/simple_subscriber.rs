@@ -17,14 +17,14 @@ use futures::{channel::mpsc, future::try_join_all, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
-    subscriber::{DesiredAuth, Subscriber, UpdatesFlags},
+    subscriber::{SubscriberBuilder, UpdatesFlags},
 };
 
 #[tokio::main]
 async fn tokio_main(cfg: Config) -> Result<()> {
     let base = Path::from("/local/example");
-    // Create a subscriber with anonymous auth
-    let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
+    // Create a subscriber
+    let subscriber = SubscriberBuilder::new(cfg).build()?;
     println!("Subscribing to /local/example/counter and /local/example/timestamp");
     // Subscribe to the counter
     let counter = subscriber.subscribe(base.join("counter"));
@@ -56,6 +56,10 @@ async fn tokio_main(cfg: Config) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // init logging
+    env_logger::init();
+    // maybe start the local machine resolver
     Config::maybe_run_machine_local_resolver()?;
+    // load the config and go
     tokio_main(Config::load_default_or_local_only()?)
 }

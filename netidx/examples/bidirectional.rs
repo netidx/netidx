@@ -13,15 +13,14 @@ use futures::{channel::mpsc, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
-    publisher::{DesiredAuth, PublishFlags, PublisherBuilder, Value, WriteRequest},
-    subscriber::{Event, Subscriber, UpdatesFlags},
+    publisher::{PublishFlags, PublisherBuilder, Value, WriteRequest},
+    subscriber::{Event, SubscriberBuilder, UpdatesFlags},
 };
 use poolshark::global::GPooled;
 use tokio::{task, time};
 
 async fn run_publisher(cfg: Config, base: Path) -> Result<()> {
-    let publisher =
-        PublisherBuilder::new(cfg).desired_auth(DesiredAuth::Anonymous).build().await?;
+    let publisher = PublisherBuilder::new(cfg).build().await?;
     // Set up a channel to receive write requests
     let (tx, mut rx) = mpsc::channel::<GPooled<Vec<WriteRequest>>>(10);
     println!("[Publisher] Started");
@@ -65,7 +64,7 @@ async fn run_publisher(cfg: Config, base: Path) -> Result<()> {
 }
 
 async fn run_subscriber(cfg: Config, base: Path) -> anyhow::Result<()> {
-    let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
+    let subscriber = SubscriberBuilder::new(cfg).build()?;
     let (tx, mut rx) = mpsc::channel(10);
     println!("[Subscriber] Connecting...");
     // Subscribe to the values
@@ -92,8 +91,7 @@ async fn run_subscriber(cfg: Config, base: Path) -> anyhow::Result<()> {
             }
         })
     };
-    brightness.wait_subscribed().await?;
-    power.wait_subscribed().await?;
+    tokio::try_join!(brightness.wait_subscribed(), power.wait_subscribed())?;
     println!("[Subscriber] Connected");
     // Simulate controlling the device
     time::sleep(time::Duration::from_secs(2)).await;
@@ -126,6 +124,10 @@ async fn tokio_main(cfg: Config) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // init logging
+    env_logger::init();
+    // maybe start the local machine resolver
     Config::maybe_run_machine_local_resolver()?;
+    // load the config and go
     tokio_main(Config::load_default_or_local_only()?)
 }
