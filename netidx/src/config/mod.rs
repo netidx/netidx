@@ -420,4 +420,53 @@ impl Config {
     pub fn load_default() -> Result<Config> {
         Self::load(file::Config::default_path()?)
     }
+
+    /// Load the default config or fall back to a machine local config
+    ///
+    /// This is the same as `local_only`, but it tries to load the default
+    /// config before falling back to the zero configuration local only
+    /// resolver.
+    ///
+    /// You must call `maybe_start_child_resolver` before argument parsing if
+    /// you use this function.
+    pub fn load_default_or_local_only() -> Result<Config> {
+        match Self::load_default() {
+            Ok(cfg) => Ok(cfg),
+            Err(_) => Config::local_only(),
+        }
+    }
+
+    /// Return a machine local config
+    ///
+    /// This is the same as `load_default_or_local_only` but it does not attempt
+    /// to load the default config.
+    ///
+    /// You must call `maybe_start_child_resolver` before argument parsing if
+    /// you use this function.
+    ///
+    /// The local only resolver server will run on port 59200 by default,
+    /// however if that port is in use it will try ports up to 59215 before
+    /// failing. You can configure the base port by setting the environment
+    /// variable NETIDX_LOCAL_ONLY_RESOLVER_BASE, and you can configure how many
+    /// additional ports to try by setting the environment variable
+    /// NETIDX_LOCAL_ONLY_RESOLVER_RANGE. The election algorithm should ensure
+    /// that no matter which port is picked by the resolver, only one resolver
+    /// will be started per machine, and therefore all processes on that machine
+    /// are able to share data using netidx without any additional
+    /// configuration.
+    pub fn local_only() -> Result<Config> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(local_only::find_or_start_resolver())
+    }
+
+    /// If we won the leader election start the local resolver
+    ///
+    /// This function should only be called in conjunction with `local_only` or
+    /// `load_default_or_local_only`. It must be called before command line
+    /// argument parsing.
+    pub fn maybe_start_child_resolver() -> Result<()> {
+        local_only::child_run_local_resolver()
+    }
 }

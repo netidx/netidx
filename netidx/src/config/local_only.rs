@@ -65,28 +65,30 @@ async fn check_port(port: u16) -> Result<PortStatus> {
     }
 }
 
-pub(super) async fn child_run_local_resolver() -> Result<()> {
+pub(super) fn child_run_local_resolver() -> Result<()> {
     if !get_env_as::<bool>(VAR_WE_ARE_RESOLVER, false) {
         return Ok(());
     }
-    let fd = stdin().as_raw_fd();
-    let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-    use crate::resolver_server::{
-        self,
-        config::{self, file},
-    };
-    let listener = TcpListener::from_std(listener)?;
-    let addr = listener.local_addr()?;
-    let cfg = file::ConfigBuilder::default()
-        .member_servers(vec![file::MemberServerBuilder::default()
-            .auth(file::Auth::Anonymous)
-            .addr(addr)
-            .bind_addr("127.0.0.1".parse()?)
-            .build()?])
-        .build()?;
-    let cfg = config::Config::from_file(cfg)?;
-    resolver_server::Server::new_local_only(cfg, listener).await?;
-    future::pending::<Result<()>>().await
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
+        let fd = stdin().as_raw_fd();
+        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        use crate::resolver_server::{
+            self,
+            config::{self, file},
+        };
+        let listener = TcpListener::from_std(listener)?;
+        let addr = listener.local_addr()?;
+        let cfg = file::ConfigBuilder::default()
+            .member_servers(vec![file::MemberServerBuilder::default()
+                .auth(file::Auth::Anonymous)
+                .addr(addr)
+                .bind_addr("127.0.0.1".parse()?)
+                .build()?])
+            .build()?;
+        let cfg = config::Config::from_file(cfg)?;
+        resolver_server::Server::new_local_only(cfg, listener).await?;
+        future::pending::<Result<()>>().await
+    })
 }
 
 #[cfg(windows)]
