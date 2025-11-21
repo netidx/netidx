@@ -171,15 +171,23 @@ pub struct InternalOnly {
     _resolver: resolver_server::Server,
     subscriber: Subscriber,
     publisher: Publisher,
+    cfg: config::Config,
 }
 
 impl InternalOnly {
+    /// pre built subscriber
     pub fn subscriber(&self) -> &Subscriber {
         &self.subscriber
     }
 
+    /// pre built publisher
     pub fn publisher(&self) -> &Publisher {
         &self.publisher
+    }
+
+    /// the client configuration
+    pub fn cfg(&self) -> config::Config {
+        self.cfg.clone()
     }
 
     pub async fn new() -> Result<Self> {
@@ -206,7 +214,7 @@ impl InternalOnly {
             config::Config::from_file(cfg)?
         };
         let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
-        let subscriber = SubscriberBuilder::new(cfg).build()?;
-        Ok(Self { _resolver: resolver, publisher, subscriber })
+        let subscriber = SubscriberBuilder::new(cfg.clone()).build()?;
+        Ok(Self { _resolver: resolver, publisher, subscriber, cfg })
     }
 }

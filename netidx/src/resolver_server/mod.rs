@@ -859,6 +859,7 @@ async fn server_loop(
     stop: oneshot::Receiver<()>,
     ready: oneshot::Sender<SocketAddr>,
     id: usize,
+    listener: Option<TcpListener>,
 ) -> Result<()> {
     debug!("server task start I am id: {}", id);
     let member = cfg.member_servers[id].clone();
@@ -877,7 +878,10 @@ async fn server_loop(
     );
     let listen_addr = SocketAddr::new(member.bind_addr, id.port());
     debug!("creating tcp listener on {:?}", listen_addr);
-    let listener = TcpListener::bind(listen_addr).await?;
+    let listener = match listener {
+        None => TcpListener::bind(listen_addr).await?,
+        Some(listener) => listener,
+    };
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
@@ -963,7 +967,46 @@ impl Server {
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(async move {
-            let res = server_loop(cfg, delay_reads, recv_stop, send_ready, id).await;
+            let res =
+                server_loop(cfg, delay_reads, recv_stop, send_ready, id, None).await;
+            match &res {
+                Ok(_) => info!("resolver server shutdown"),
+                Err(e) => error!("resolver server failed {}", e),
+            }
+            res
+        });
+        let local_addr = match recv_ready.await {
+            Err(_) => bail!("resolver server shutdown"),
+            Ok(addr) => addr,
+        };
+        Ok(Server { stop: Some(send_stop), local_addr })
+    }
+
+    /// Start a new local only resolver server
+    ///
+    /// # Parameters
+    /// - cfg: the config
+    /// - listener: the already listening socket
+    ///
+    /// This function requires the following conditions,
+    /// - Config must contain exactly one member server, and it's address must
+    /// match the address of the listener.
+    /// - The ip address of the listener must be localhost
+    pub(crate) async fn new_local_only(
+        cfg: Config,
+        listener: TcpListener,
+    ) -> Result<Server> {
+        if cfg.member_servers.len() != 1 {
+            bail!("expected exactly one member server")
+        }
+        if cfg.member_servers[0].addr != listener.local_addr()? {
+            bail!("cfg addr does not match actual listen addr")
+        }
+        let (send_stop, recv_stop) = oneshot::channel();
+        let (send_ready, recv_ready) = oneshot::channel();
+        task::spawn(async move {
+            let res =
+                server_loop(cfg, false, recv_stop, send_ready, 0, Some(listener)).await;
             match &res {
                 Ok(_) => info!("resolver server shutdown"),
                 Err(e) => error!("resolver server failed {}", e),

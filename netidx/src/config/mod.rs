@@ -14,6 +14,8 @@ use std::{
     net::SocketAddr, path::Path as FsPath, str,
 };
 
+mod local_only;
+
 /// The on disk format, encoded as JSON
 pub mod file {
     use anyhow::Result;

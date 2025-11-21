@@ -16,6 +16,12 @@ categories = ["network-programming"]
 default = []
 krb5_iov = ["cross-krb5/iov"]
 
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = "0.62.2"
+
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
