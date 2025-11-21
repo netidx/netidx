@@ -2,55 +2,9 @@
 
 This directory contains examples demonstrating key netidx functionality.
 
-## Getting Started
-
-Before running most examples, you'll need a resolver server running. The easiest way is:
-
-```bash
-# Install netidx tools
-cargo install netidx-tools
-
-# Create a simple resolver config
-mkdir -p ~/.config/netidx
-cat > ~/.config/netidx/resolver.json << 'EOF'
-{
-  "parent": null,
-  "children": [],
-  "member_servers": [
-    {
-      "id": "0",
-      "addr": "127.0.0.1:4564",
-      "bind_addr": "127.0.0.1",
-      "auth": "Anonymous"
-    }
-  ]
-}
-EOF
-
-# Create a client config
-cat > ~/.config/netidx/client.json << 'EOF'
-{
-  "base": "/",
-  "addrs": [["127.0.0.1:4564", "Anonymous"]],
-  "default_auth": "Anonymous"
-}
-EOF
-
-# Start the resolver
-netidx resolver-server --config ~/.config/netidx/resolver.json
-```
-
 ## Examples
 
 ### Basic Examples
-
-**[standalone.rs](standalone.rs)** - Self-contained example with no external resolver
-
-The simplest example to start with. Runs publisher and subscriber in one process.
-
-```bash
-cargo run --example standalone
-```
 
 **[simple_publisher.rs](simple_publisher.rs)** - Basic publisher
 

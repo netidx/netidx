@@ -65,7 +65,7 @@ async fn check_port(port: u16) -> Result<PortStatus> {
     }
 }
 
-pub(super) fn child_run_local_resolver() -> Result<()> {
+pub(super) fn maybe_run_local_resolver() -> Result<()> {
     if !get_env_as::<bool>(VAR_WE_ARE_RESOLVER, false) {
         return Ok(());
     }

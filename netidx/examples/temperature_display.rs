@@ -13,6 +13,7 @@
 //! cargo run --example temperature_display
 //! ```
 
+use anyhow::Result;
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     config::Config,
@@ -22,71 +23,50 @@ use netidx::{
 use std::collections::HashMap;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cfg = Config::load_default()?;
+async fn tokio_main(cfg: Config) -> anyhow::Result<()> {
+    let base = Path::from("/local/sensors/temperature");
     let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
-
+    let (tx, mut rx) = mpsc::channel(10);
     println!("Temperature Display");
     println!("==================\n");
-
     // Subscribe to all the temperature sensors
     let sensors = vec!["living_room", "bedroom", "kitchen", "outside"];
-
     let mut subscriptions = HashMap::new();
-
     for sensor in &sensors {
-        let path = format!("/sensors/temperature/{}/current", sensor);
-        let sub = subscriber.subscribe(Path::from(path));
-        sub.wait_subscribed().await?;
-        subscriptions.insert(sensor.to_string(), sub);
+        let path = base.join("zones").join(sensor).join("current");
+        let up = [(UpdatesFlags::empty(), tx.clone())];
+        // subscribe and set up the updates channel atomically
+        let sub = subscriber.subscribe_updates(path, up);
+        subscriptions.insert(sub.id(), (sensor.to_string(), sub));
     }
-
     // Subscribe to system status
-    let status = subscriber.subscribe(Path::from("/sensors/temperature/system/status"));
-    status.wait_subscribed().await?;
-
+    let status = subscriber.subscribe_updates(
+        base.join("system/status"),
+        [(UpdatesFlags::empty(), tx.clone())],
+    );
     println!("Subscribed to {} sensors\n", sensors.len());
-
-    // Display initial values
-    println!("Initial readings:");
-    for (name, sub) in &subscriptions {
-        if let Event::Update(value) = sub.last() {
-            println!("  {}: {:?}", name, value);
-        }
-    }
-    println!();
-
-    // Set up updates channel
-    let (tx, mut rx) = mpsc::channel(10);
-
-    for sub in subscriptions.values() {
-        sub.updates(UpdatesFlags::empty(), tx.clone());
-    }
-    status.updates(UpdatesFlags::empty(), tx.clone());
-
-    println!("Live updates:");
-
     // Process updates
-    while let Some(batch) = rx.next().await {
-        for (sub_id, event) in batch {
-            // Find which sensor this update is for
-            for (name, sub) in &subscriptions {
-                if sub.id() == sub_id {
-                    if let Event::Update(value) = event {
-                        println!("{:15} {:?}", format!("{}:", name), value);
-                    }
-                    break;
+    while let Some(mut batch) = rx.next().await {
+        for (sub_id, event) in batch.drain(..) {
+            if let Event::Update(value) = event {
+                // Check what kind of update it is
+                if sub_id == status.id() {
+                    println!("{:15} {}", "status:", value);
+                } else if let Some((name, _)) = subscriptions.get(&sub_id) {
+                    println!("{:15} {}", format!("{}:", name), value);
                 }
-            }
-
-            // Check if it's the status update
-            if sub_id == status.id() {
-                if let Event::Update(value) = event {
-                    println!("{:15} {:?}", "status:", value);
+            } else {
+                // report loss of connection
+                if let Some((name, _)) = subscriptions.get(&sub_id) {
+                    println!("{:15} lost", format!("{}:", name))
                 }
             }
         }
     }
-
     Ok(())
+}
+
+fn main() -> Result<()> {
+    Config::maybe_run_machine_local_resolver()?;
+    tokio_main(Config::load_default_or_local_only()?)
 }

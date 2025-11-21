@@ -12,7 +12,8 @@
 //! cargo run --example simple_subscriber
 //! ```
 
-use futures::{channel::mpsc, prelude::*};
+use anyhow::Result;
+use futures::{channel::mpsc, future::try_join_all, prelude::*};
 use netidx::{
     config::Config,
     path::Path,
@@ -20,38 +21,26 @@ use netidx::{
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Load the netidx config
-    let cfg = Config::load_default()?;
-
+async fn tokio_main(cfg: Config) -> Result<()> {
+    let base = Path::from("/local/example");
     // Create a subscriber with anonymous auth
     let subscriber = Subscriber::new(cfg, DesiredAuth::Anonymous)?;
-
-    println!("Subscribing to /example/counter and /example/timestamp");
-
+    println!("Subscribing to /local/example/counter and /local/example/timestamp");
     // Subscribe to the counter
-    let counter = subscriber.subscribe(Path::from("/example/counter"));
-
+    let counter = subscriber.subscribe(base.join("counter"));
     // Subscribe to the timestamp
-    let timestamp = subscriber.subscribe(Path::from("/example/timestamp"));
-
+    let timestamp = subscriber.subscribe(base.join("timestamp"));
     // Wait for the subscriptions to be established
-    counter.wait_subscribed().await?;
-    timestamp.wait_subscribed().await?;
-
+    try_join_all([counter.wait_subscribed(), timestamp.wait_subscribed()]).await?;
     println!("Subscribed! Initial values:");
     println!("  Counter: {:?}", counter.last());
     println!("  Timestamp: {:?}", timestamp.last());
-
     // Set up a channel to receive updates
     let (tx, mut rx) = mpsc::channel(10);
-
     // Register for updates from both subscriptions
     counter.updates(UpdatesFlags::empty(), tx.clone());
     timestamp.updates(UpdatesFlags::empty(), tx);
-
     println!("\nWaiting for updates...");
-
     // Process updates as they arrive
     while let Some(mut batch) = rx.next().await {
         for (sub_id, event) in batch.drain(..) {
@@ -63,6 +52,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
     Ok(())
+}
+
+fn main() -> Result<()> {
+    Config::maybe_run_machine_local_resolver()?;
+    tokio_main(Config::load_default_or_local_only()?)
 }

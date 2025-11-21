@@ -427,7 +427,7 @@ impl Config {
     /// config before falling back to the zero configuration local only
     /// resolver.
     ///
-    /// You must call `maybe_start_child_resolver` before argument parsing if
+    /// You must call `maybe_run_machine_local_resolver` before argument parsing if
     /// you use this function.
     pub fn load_default_or_local_only() -> Result<Config> {
         match Self::load_default() {
@@ -441,7 +441,7 @@ impl Config {
     /// This is the same as `load_default_or_local_only` but it does not attempt
     /// to load the default config.
     ///
-    /// You must call `maybe_start_child_resolver` before argument parsing if
+    /// You must call `maybe_run_machine_local_resolver` before argument parsing if
     /// you use this function.
     ///
     /// The local only resolver server will run on port 59200 by default,
@@ -461,12 +461,39 @@ impl Config {
             .block_on(local_only::find_or_start_resolver())
     }
 
-    /// If we won the leader election start the local resolver
+    /// If we won the leader election run the local resolver
     ///
     /// This function should only be called in conjunction with `local_only` or
-    /// `load_default_or_local_only`. It must be called before command line
-    /// argument parsing.
-    pub fn maybe_start_child_resolver() -> Result<()> {
-        local_only::child_run_local_resolver()
+    /// `load_default_or_local_only` (although it is harmless in other cases).
+    /// It must be called as early as possible in main, and absolutely before
+    /// command line argument parsing.
+    ///
+    /// # Details
+    ///
+    /// When using the machine local configuration netidx performs a leader
+    /// election among all the netidx processes on the machine that wish to also
+    /// use the machine local configuration. One of them is elected to start the
+    /// resolver server, and will fork a child process and daemonize (on unix)
+    /// or detach from it's parent (on windows). The daemonized process will
+    /// then exec the program binary with the
+    /// NETIDX_LOCAL_ONLY_WE_ARE_THE_RESOLVER environment variable set to true.
+    /// This function checks that environment variable, and if it is set to
+    /// true, it will run the resolver server and never return. If it isn't set,
+    /// or it isn't set to true then it will just return `Ok(())`.
+    ///
+    /// Several things are important from the user in order to successfully make
+    /// use of the zero configuration machine local config.
+    ///
+    /// - You must call this function as early as possible in your program.
+    /// Ideally it is the first call in your main function.
+    /// - It absolutely must be called before argument parsing happens, because
+    /// your binary will be run with no arguments when we want to run the
+    /// resolver server
+    /// - If this function returns an error, then you must exit. It can only
+    /// return an error in the child process if starting the resolver fails for
+    /// some reason, in the non child process it will always return `Ok(())`
+    /// immediately.
+    pub fn maybe_run_machine_local_resolver() -> Result<()> {
+        local_only::maybe_run_local_resolver()
     }
 }

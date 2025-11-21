@@ -201,7 +201,7 @@ async fn tokio_main() -> Result<()> {
 // as early as possible, before the async runtime is initialized. This means we can't
 // use the tokio_main macro on main, so we short-circuit ResolverServer handling here.
 fn main() -> Result<()> {
-    netidx::config::Config::maybe_start_child_resolver()?;
+    netidx::config::Config::maybe_run_machine_local_resolver()?;
     let opt = Opt::from_args();
     match opt {
         Opt::ResolverServer(p) => resolver_server::run(p),

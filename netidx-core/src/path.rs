@@ -410,6 +410,11 @@ impl Path {
         }
     }
 
+    /// alias for append
+    pub fn join<T: AsRef<str> + ?Sized>(&self, other: &T) -> Self {
+        self.append(other)
+    }
+
     /// return an iterator over the parts of the path. The path
     /// separator may be escaped with \. and a literal \ may be
     /// represented as \\.
