@@ -454,7 +454,7 @@ impl Config {
             .block_on(local_only::find_or_start_resolver())
     }
 
-    /// If we won the leader election run the local resolver
+    /// If no resolver is running become the resolver
     ///
     /// This function should only be called in conjunction with `local_only` or
     /// `load_default_or_local_only` (although it is harmless in other cases).
