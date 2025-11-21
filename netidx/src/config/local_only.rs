@@ -1,7 +1,7 @@
-use crate::{config::Config, publisher::DesiredAuth, resolver_client::ResolverRead};
+use crate::config::Config;
 use anyhow::Result;
-use poolshark::local::LPooled;
-use rand::random_range;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::{
     env, future,
     io::{stdin, ErrorKind},
@@ -9,15 +9,11 @@ use std::{
     os::fd::{AsRawFd, FromRawFd},
     process::Command,
     str::FromStr,
-    time::Duration,
 };
-use tokio::{net::TcpListener, time};
+use tokio::net::TcpListener;
 
-const DEFAULT_BASE_PORT: u16 = 59200;
-const DEFAULT_PORT_RANGE: u16 = 16;
-const TIMEOUT: Duration = Duration::from_millis(250);
-const VAR_RESOLVER_BASE: &str = "NETIDX_LOCAL_ONLY_RESOLVER_BASE";
-const VAR_RESOLVER_RANGE: &str = "NETIDX_LOCAL_ONLY_RESOLVER_RANGE";
+const DEFAULT_PORT: u16 = 59200;
+const VAR_RESOLVER_PORT: &str = "NETIDX_LOCAL_ONLY_RESOLVER_PORT";
 const VAR_WE_ARE_RESOLVER: &str = "NETIDX_LOCAL_ONLY_WE_ARE_THE_RESOLVER";
 const VAR_RESOLVER_TMPDIR: &str = "NETIDX_LOCAL_ONLY_RESOLVER_TEMP";
 
@@ -39,32 +35,6 @@ fn client_cfg_for_addr(addr: SocketAddr) -> Result<Config> {
         .default_bind_config("local")
         .build()?;
     config::Config::from_file(cfg)
-}
-
-#[derive(Debug)]
-enum PortStatus {
-    ResolverFound(Config),
-    PortAvailable(TcpListener),
-    PortSquatted,
-}
-
-async fn check_port(port: u16) -> Result<PortStatus> {
-    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
-    match TcpListener::bind(addr).await {
-        Ok(l) => Ok(PortStatus::PortAvailable(l)),
-        Err(e) => match e.kind() {
-            ErrorKind::AddrInUse => {
-                let cfg = client_cfg_for_addr(addr)?;
-                let res = ResolverRead::new(cfg.clone(), DesiredAuth::Anonymous);
-                // test if it's really a resolver server by listing /
-                match time::timeout(TIMEOUT, res.list("/".into())).await {
-                    Ok(Ok(_)) => Ok(PortStatus::ResolverFound(cfg)),
-                    Ok(Err(_)) | Err(_) => Ok(PortStatus::PortSquatted),
-                }
-            }
-            _ => bail!(e),
-        },
-    }
 }
 
 pub(super) fn maybe_run_local_resolver() -> Result<()> {
@@ -124,7 +94,7 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn start_local_resolver(l: TcpListener) -> Result<()> {
+fn start_local_resolver(l: TcpListener) -> Result<PathBuf> {
     use daemonize::{Daemonize, Outcome, Stdio};
     use std::{
         fs::{File, OpenOptions},
@@ -132,91 +102,51 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
         path::PathBuf,
     };
     use tempdir::TempDir;
-    fn open_out(tmp: &PathBuf, name: &str) -> Option<File> {
-        OpenOptions::new()
+    fn open_out(tmp: &PathBuf, name: &str) -> Result<File> {
+        Ok(OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(tmp.join(name))
-            .ok()
+            .open(tmp.join(name))?)
     }
     let raw_fd = l.as_raw_fd();
     let current_exe = env::current_exe()?;
-    let td = TempDir::new("netidx_resolver").map(|td| td.into_path()).ok();
-    let stdout = td
-        .as_ref()
-        .and_then(|td| open_out(td, "stdout"))
-        .map(Stdio::from)
-        .unwrap_or_else(|| Stdio::devnull());
-    let stderr = td
-        .as_ref()
-        .and_then(|td| open_out(td, "stderr"))
-        .map(Stdio::from)
-        .unwrap_or_else(|| Stdio::devnull());
-    match Daemonize::new().stdout(stdout).stderr(stderr).execute() {
+    let td = TempDir::new("netidx_resolver")?.into_path();
+    let stdout = Stdio::from(open_out(&td, "stdout")?);
+    let stderr = Stdio::from(open_out(&td, "stderr")?);
+    match Daemonize::new()
+        .stdout(stdout)
+        .stderr(stderr)
+        .pid_file(td.join("pid"))
+        .execute()
+    {
         Outcome::Parent(r) => {
             r?;
-            Ok(())
+            Ok(td)
         }
         Outcome::Child(_) => {
-            let mut cmd = Command::new(current_exe);
-            cmd.env(VAR_WE_ARE_RESOLVER, "true");
-            if let Some(td) = &td {
-                cmd.env(VAR_RESOLVER_TMPDIR, td);
-            }
-            let err =
-                cmd.stdin(unsafe { std::process::Stdio::from_raw_fd(raw_fd) }).exec();
-            if let Some(td) = &td {
-                let _ = std::fs::remove_dir_all(td);
-            }
+            let err = Command::new(current_exe)
+                .env(VAR_WE_ARE_RESOLVER, "true")
+                .env(VAR_RESOLVER_TMPDIR, &td)
+                .stdin(unsafe { std::process::Stdio::from_raw_fd(raw_fd) })
+                .exec();
+            let _ = std::fs::remove_dir_all(td);
             panic!("exec failed {err}")
         }
     }
 }
 
 pub(super) async fn find_or_start_resolver() -> Result<Config> {
-    let base = get_env_as::<u16>(VAR_RESOLVER_BASE, DEFAULT_BASE_PORT);
-    let range = get_env_as::<u16>(VAR_RESOLVER_RANGE, DEFAULT_PORT_RANGE);
-    let mut backoff = true;
-    let mut we_are_leader = false;
-    let mut second_pass = false;
-    loop {
-        let mut candidates: LPooled<Vec<TcpListener>> = LPooled::take();
-        let mut errors: LPooled<Vec<anyhow::Error>> = LPooled::take();
-        for port in base..base + range {
-            match check_port(port).await {
-                Ok(PortStatus::ResolverFound(cfg)) => return Ok(cfg), // we found an existing resolver
-                Ok(PortStatus::PortAvailable(l)) => candidates.push(l), // we might be the leader
-                Ok(PortStatus::PortSquatted) => {
-                    // spread out potential simultaneous starts
-                    time::sleep(Duration::from_millis(random_range(1..100))).await
-                }
-                Err(e) => errors.push(e),
-            }
+    let port = get_env_as::<u16>(VAR_RESOLVER_PORT, DEFAULT_PORT);
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
+    match TcpListener::bind(addr).await {
+        Ok(l) => {
+            start_local_resolver(l)?;
+            client_cfg_for_addr(addr)
         }
-        // if we are the leader, then we started a server, which means we should
-        // not have arrived here. This means the server failed to start.
-        if we_are_leader {
-            // we have already been here, and the resolver failed to start
-            bail!("starting the resolver failed")
-        }
-        if !candidates.is_empty() {
-            if backoff {
-                drop(candidates);
-                time::sleep(Duration::from_millis(random_range(1..200))).await;
-                backoff = false;
-                continue;
-            }
-            start_local_resolver(candidates.remove(0))?;
-            we_are_leader = true;
-            continue;
-        }
-        // If we find all the ports squatted try one more time before failing
-        if !second_pass {
-            second_pass = true;
-            time::sleep(Duration::from_millis(200)).await;
-            continue;
-        }
-        bail!("couldn't find or start a local resolver {errors:?}")
+        Err(e) => match e.kind() {
+            ErrorKind::AddrInUse => client_cfg_for_addr(addr),
+            _ => bail!(e),
+        },
     }
 }
