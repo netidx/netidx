@@ -276,81 +276,80 @@ fn encode(no_wrap: bool, input: &Data) -> TokenStream {
         Data::Enum(en) => {
             let mut tagged = HashSet::default();
             let cases = en.variants.iter().enumerate().map(|(i, v)| {
-		let tag = &v.ident;
+          		let tag = &v.ident;
                 let i = v
                     .attrs
                     .iter()
                     .find_map(|a| get_tag(a, i, &mut tagged, &ENUM_ATTRS))
-                    .unwrap_or_else(|| if tagged.is_empty() {
-			Index::from(i).to_token_stream()
-		    } else {
-			panic!("all cases must be tagged or none must be")
-		    });
-		match &v.fields {
+                    .unwrap_or_else(|| {
+                        if tagged.is_empty() {
+                            Index::from(i).to_token_stream()
+              		    } else {
+             			    panic!("all cases must be tagged or none must be")
+              		    }
+                    });
+                match &v.fields {
                     Fields::Named(f) => {
-			let match_fields = f
+             			let match_fields = f
                             .named
                             .iter()
-                            .filter(|f| {
-				!f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
-                            })
+                            .filter(|f| !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")))
                             .map(|f| &f.ident);
-			let pack_fields = f
+             			let pack_fields = f
                             .named
                             .iter()
-                            .filter(|f| {
-				!f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
-                            })
+                            .filter(|f| !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")))
                             .map(|f| {
-				let name = &f.ident;
-				quote! {
+                				let name = &f.ident;
+                				quote! {
                                     netidx_core::pack::Pack::encode(#name, buf)?
-				}
+                				}
                             });
-			quote! {
+             			quote! {
                             Self::#tag { #(#match_fields),*, .. } => {
-				<u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
-				#(#pack_fields);*;
-				Ok(())
+                				<u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
+                				#(#pack_fields);*;
+                				Ok(())
                             }
-			}
+             			}
                     }
                     Fields::Unnamed(f) => {
-			let match_fields = f.unnamed.iter().enumerate().map(|(i, f)| {
-                            if f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")) {
-				format_ident!("_")
-                            } else {
-				format_ident!("field{}", i)
-                            }
-			});
-			let pack_fields = f
+                        let match_fields = f.unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| {
+                                if f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")) {
+                                    format_ident!("_")
+                                } else {
+                    				format_ident!("field{}", i)
+                                }
+                            });
+                        let pack_fields = f
                             .unnamed
                             .iter()
                             .enumerate()
-                            .filter(|(_, f)| {
-				!f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip"))
-                            })
+                            .filter(|(_, f)| !f.attrs.iter().any(|a| is_attr(a, &FIELD_ATTRS, "skip")))
                             .map(|(i, _)| {
-				let name = format_ident!("field{}", i);
-				quote! {
+                				let name = format_ident!("field{}", i);
+                				quote! {
                                     netidx_core::pack::Pack::encode(#name, buf)?
-				}
+                				}
                             });
-			quote! {
+                        quote! {
                             Self::#tag(#(#match_fields),*) => {
-				<u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
-				#(#pack_fields);*;
-				Ok(())
+                				<u8 as netidx_core::pack::Pack>::encode(&#i, buf)?;
+                				#(#pack_fields);*;
+                				Ok(())
                             }
-			}
+                        }
                     }
                     Fields::Unit => {
-			quote! {
+                        quote! {
                             Self::#tag => <u8 as netidx_core::pack::Pack>::encode(&#i, buf),
-			}
+                        }
                     }
-		}
-	    });
+                }
+       	    });
             if no_wrap {
                 quote! {
                     match self {
@@ -498,10 +497,10 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                             let decode_fields = f.named.iter().map(decode_named_field);
                             #[rustfmt::skip]
                             quote! {
-				#i => {
+                                #i => {
                                     #(#decode_fields);*;
                                     Ok(Self::#tag { #(#name_fields),* })
-				}
+                                }
                             }
                         }
                         Fields::Unnamed(f) => {
@@ -522,10 +521,10 @@ fn decode(no_wrap: bool, input: &Data) -> TokenStream {
                                 .map(|(i, f)| decode_unnamed_field(f, i));
                             #[rustfmt::skip]
                             quote! {
-				#i => {
+                                #i => {
                                     #(#decode_fields);*;
                                     Ok(Self::#tag(#(#name_fields),*))
-				}
+                                }
                             }
                         }
                         Fields::Unit => {
