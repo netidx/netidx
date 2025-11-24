@@ -9,6 +9,7 @@ use crate::rpcs::RpcApi;
 use anyhow::{bail, Result};
 use arcstr::{literal, ArcStr};
 pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
+use derive_builder::Builder;
 use futures::{
     self,
     channel::{mpsc, oneshot},
@@ -48,33 +49,41 @@ use structopt::StructOpt;
 use tokio::task;
 use triomphe::Arc;
 
-#[derive(StructOpt, Debug)]
+#[derive(StructOpt, Builder, Debug)]
 pub struct Params {
     #[structopt(
         short = "b",
         long = "bind",
         help = "configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000"
     )]
+    #[builder(setter(strip_option), default)]
     pub bind: Option<BindCfg>,
     #[structopt(
         long = "timeout",
         help = "require subscribers to consume values before timeout (seconds)"
     )]
+    #[builder(setter(strip_option), default)]
     pub timeout: Option<u64>,
     #[structopt(long = "slack", help = "set the publisher slack (default 3 batches)")]
+    #[builder(setter(strip_option), default)]
     pub slack: Option<usize>,
     #[structopt(
         long = "max_clients",
         help = "set the maximum number of clients (default 768)"
     )]
+    #[builder(setter(strip_option), default)]
     pub max_clients: Option<usize>,
     #[structopt(long = "api-path", help = "the netidx path of the container api")]
+    #[builder(setter(strip_option), default)]
     pub api_path: Option<Path>,
     #[structopt(long = "db", help = "the db file")]
+    #[builder(setter(strip_option), default)]
     pub db: Option<String>,
     #[structopt(long = "cache-size", help = "db page cache size in bytes")]
+    #[builder(setter(strip_option), default)]
     pub cache_size: Option<u64>,
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
+    #[builder(default = "false")]
     pub sparse: bool,
 }
 
@@ -552,15 +561,13 @@ impl ContainerInner {
             match value {
                 UpdateKind::Updated(v) => {
                     if let Some(p) = self.by_path.get(&path) {
-                        p.val.update(batch, v.clone())
+                        p.val.update(batch, v)
                     }
                 }
-                UpdateKind::Inserted => {
-                    if self.by_path.contains_key(&path) {
-                        self.remove_deleted_published(&path);
-                    }
-                    self.advertise_path(path);
-                }
+                UpdateKind::Inserted(v) => match self.by_path.get(&path) {
+                    Some(p) => p.val.update(batch, v),
+                    None => self.advertise_path(path),
+                },
                 UpdateKind::Deleted => self.remove_deleted_published(&path),
             }
         }

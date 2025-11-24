@@ -78,7 +78,7 @@ static BYPATH: LazyLock<Pool<HashMap<Path, GPooled<Txns>>>> =
 
 pub(super) enum UpdateKind {
     Deleted,
-    Inserted,
+    Inserted(Value),
     Updated(Value),
 }
 
@@ -402,11 +402,11 @@ fn set_data(
     let datum = Datum::Data(value.clone());
     datum.encode(&mut *val)?;
     let up = match data.insert(key, &**val)? {
-        None => UpdateKind::Inserted,
+        None => UpdateKind::Inserted(value),
         Some(data) => match DatumKind::decode(&mut &*data) {
             DatumKind::Data => UpdateKind::Updated(value),
             DatumKind::Formula | DatumKind::Deleted | DatumKind::Invalid => {
-                UpdateKind::Inserted
+                UpdateKind::Inserted(value)
             }
         },
     };

@@ -34,3 +34,4 @@ sled = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
 triomphe = { workspace = true }
+derive_builder = { workspace = true }

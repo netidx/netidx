@@ -375,6 +375,7 @@ impl ConnectionCtx {
                     let permissions = req.permissions;
                     let timestamp = req.timestamp;
                     self.pending.insert(path.clone(), req);
+                    info!("subscribe {path}");
                     let m =
                         To::Subscribe { path, resolver, timestamp, permissions, token };
                     trace!("subscribe {m:?}");

@@ -499,7 +499,7 @@ mod publisher {
     fn abstract_value() -> impl Strategy<Value = Value> {
         (any::<u64>(), arcstr(), bytes()).prop_map(|(id, name, data)| {
             let test_val = TestAbstract { id, name, data: data.to_vec() };
-            Value::Abstract(TEST_ABSTRACT_WRAPPER.wrap(test_val))
+            TEST_ABSTRACT_WRAPPER.wrap(test_val)
         })
     }
 

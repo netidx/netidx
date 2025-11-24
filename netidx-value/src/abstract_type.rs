@@ -19,6 +19,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::Value;
+
 type EncodedLenFn = Box<dyn Fn(&Abstract) -> usize + Send + Sync + 'static>;
 type EncodeFn = Box<
     dyn Fn(&Abstract, &mut dyn BufMut) -> result::Result<(), PackError>
@@ -104,21 +106,18 @@ pub struct UnknownAbstractType(Bytes);
 
 impl Pack for UnknownAbstractType {
     fn encoded_len(&self) -> usize {
-        self.0.encoded_len()
+        self.0.len()
     }
 
     fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        self.0.encode(buf)
+        Ok(buf.put_slice(&self.0[..]))
     }
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         // len_wrapped_encode passes us a limited view of the buffer,
         // since we are always the last thing in it we can just take
         // the whole thing.
-        let chunk = buf.chunk();
-        let t = UnknownAbstractType(Bytes::copy_from_slice(chunk));
-        buf.advance(chunk.len());
-        Ok(t)
+        Ok(UnknownAbstractType(buf.copy_to_bytes(buf.remaining())))
     }
 }
 
@@ -178,13 +177,13 @@ impl<T: Any + Debug + Pack + Hash + Eq + Ord + Send + Sync> AbstractWrapper<T> {
         self.id
     }
 
-    /// Wrap T as an Abstract
-    pub fn wrap(&self, t: T) -> Abstract {
-        Abstract(Arc::new(AbstractInner {
+    /// Wrap T as an Abstract Value
+    pub fn wrap(&self, t: T) -> Value {
+        Value::Abstract(Abstract(Arc::new(AbstractInner {
             id: self.id,
             vtable: self.vtable.clone(),
             t: Box::new(t),
-        }))
+        })))
     }
 }
 
