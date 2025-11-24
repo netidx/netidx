@@ -1,6 +1,6 @@
 [package]
 name = "netidx-netproto"
-version = "0.30.2"
+version = "0.31.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -17,9 +17,9 @@ arcstr = { workspace = true }
 bytes = { workspace = true }
 escaping = { workspace = true }
 globset = { workspace = true }
-netidx-core = { version = "0.30.0", path = "../netidx-core" }
-netidx-derive = { version = "0.28.3", path = "../netidx-derive" }
-netidx-value = { version = "0.30.1", path = "../netidx-value" }
+netidx-core = { version = "0.31.0", path = "../netidx-core" }
+netidx-derive = { version = "0.31.0", path = "../netidx-derive" }
+netidx-value = { version = "0.31.0", path = "../netidx-value" }
 poolshark = { workspace = true }
 seq-macro = { workspace = true }
 serde = { workspace = true }

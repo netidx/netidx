@@ -1,6 +1,6 @@
 [package]
 name = "netidx-archive"
-version = "0.30.2"
+version = "0.31.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 homepage = "https://netidx.github.io/netidx-book/"
@@ -16,11 +16,11 @@ default = []
 krb5_iov = ["netidx/krb5_iov"]
 
 [dependencies]
-netidx = { path = "../netidx", version = "0.30.1", default-features = false }
-netidx-netproto = { version = "0.30.1", path = "../netidx-netproto" }
-netidx-protocols = { path = "../netidx-protocols", version = "0.30.1", default-features = false }
-netidx-derive = { path = "../netidx-derive", version = "0.28.3" }
-netidx-core = { path = "../netidx-core", version = "0.30.0" }
+netidx = { path = "../netidx", version = "0.31.0", default-features = false }
+netidx-netproto = { version = "0.31.0", path = "../netidx-netproto" }
+netidx-protocols = { path = "../netidx-protocols", version = "0.31.0", default-features = false }
+netidx-derive = { path = "../netidx-derive", version = "0.31.0" }
+netidx-core = { path = "../netidx-core", version = "0.31.0" }
 anyhow = { workspace = true }
 arcstr = { workspace = true }
 bytes = { workspace = true }
