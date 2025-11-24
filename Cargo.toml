@@ -108,6 +108,6 @@ members = [
     "netidx-container",
     "netidx-derive",
     "netidx-wsproxy",
-    "netidx-examples",
+    "examples",
 ]
 exclude = ["cfg/tls/id-win"]

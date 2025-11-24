@@ -620,7 +620,7 @@ impl ResolverRead {
     ///
     /// # Example
     ///
-    /// ```
+    /// ```ignore
     /// /table/a/1
     /// /table/a/2
     /// /table/b/1

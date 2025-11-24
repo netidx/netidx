@@ -70,8 +70,8 @@
 //!
 //! let (tx, mut rx) = mpsc::channel(10);
 //! temp.updates(UpdatesFlags::empty(), tx);
-//! while let Some(batch) = rx.next().await {
-//!     for (_, value) in batch {
+//! while let Some(mut batch) = rx.next().await {
+//!     for (_, value) in batch.drain(..) {
 //!         println!("Updated: {:?}", value);
 //!     }
 //! }

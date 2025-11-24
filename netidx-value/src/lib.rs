@@ -18,13 +18,15 @@
 //! ## Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use netidx_value::Value;
 //!
 //! let v = Value::I64(42);
-//! assert_eq!(v.cast_to::<f64>(), Some(42.0));
+//! assert_eq!(v.clone().cast_to::<f64>()?, 42.0);
 //!
 //! let s = Value::String("hello".into());
 //! let arr = Value::Array(vec![v, s].into());
+//! # Ok(()) }
 //! ```
 //!
 //! ## User-Defined Types
@@ -35,8 +37,9 @@
 //! ```
 //! use netidx_value::{Value, Abstract};
 //! use netidx_core::pack::Pack;
+//! use netidx_derive::Pack;
 //! use uuid::uuid;
-//!
+//! # fn main() -> anyhow::Result<()> {
 //! #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Pack)]
 //! struct Custom {
 //!     field1: u32,
@@ -48,12 +51,13 @@
 //!
 //! let wrapper = Abstract::register::<Custom>(CUSTOM_TYPE_ID)?;
 //! let t = Custom { field1: 42, field2: "test".into() };
-//! let abstract_value: Value = wrapper.create(my_value).into();
+//! let abstract_value: Value = wrapper.wrap(t).into();
 //!
 //! // Later, downcast back to your type
 //! if let Some(t) = abstract_value.downcast_ref::<Custom>() {
-//!     println!("field1: {}", my_type.field1);
+//!     println!("field1: {}", t.field1);
 //! }
+//! # Ok(()) }
 //! ```
 //!
 //! ## Type Casting
