@@ -5,6 +5,7 @@
 - Add examples
 - Improve documentation
 - fix spurious unsubscribe on initial publish in the container
+- configuration free local machine resolver
 
 * 0.30.2 (netidx-value)
 
