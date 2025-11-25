@@ -33,3 +33,4 @@ tempdir = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 ctrlc = { workspace = true }
+arcstr = { workspace = true }
