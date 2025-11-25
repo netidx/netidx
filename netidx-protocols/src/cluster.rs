@@ -134,20 +134,28 @@ impl<T: Pack> Cluster<T> {
 
     /// Wait for some commands from other members of the cluster.
     pub async fn wait_cmds(&mut self) -> Result<Vec<T>> {
+        let mut buf = Vec::new();
+        self.wait_cmds_buf(&mut buf).await?;
+        Ok(buf)
+    }
+
+    /// Wait for some commands from other members of the cluster.
+    ///
+    /// Place the commands in the provided buffer.
+    pub async fn wait_cmds_buf(&mut self, buf: &mut Vec<T>) -> Result<()> {
         match self.cmd.next().await {
             None => bail!("cluster publish write stream ended"),
             Some(mut reqs) => {
-                let mut cmds = Vec::new();
                 for req in reqs.drain(..) {
                     if let Value::Bytes(b) = &req.value {
                         if let Ok(cmd) = Pack::decode(&mut &***b) {
-                            cmds.push(cmd);
+                            buf.push(cmd);
                             continue;
                         }
                     }
                     warn!("ignoring invalid cmd: {:?}", &req.value);
                 }
-                Ok(cmds)
+                Ok(())
             }
         }
     }
