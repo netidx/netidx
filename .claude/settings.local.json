@@ -5,7 +5,8 @@
       "Bash(cargo test:*)",
       "Bash(cargo build:*)",
       "Bash(cargo clippy:*)",
-      "Bash(rustc:*)"
+      "Bash(rustc:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
