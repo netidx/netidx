@@ -45,7 +45,8 @@ async fn tokio_main(cfg: Config) -> Result<()> {
     let base = Path::from("/local/example/typed_channel");
 
     // Create a listener at the base path
-    let mut listener = Listener::new(&publisher, Some(Duration::from_secs(30)), base.clone()).await?;
+    let mut listener =
+        Listener::new(&publisher, Some(Duration::from_secs(30)), base.clone()).await?;
 
     println!("Typed channel listener available at: {}", base);
     println!("Waiting for connections...\n");
@@ -83,8 +84,13 @@ async fn tokio_main(cfg: Config) -> Result<()> {
 
                                     // Check for quit message
                                     if msg.content == "quit" {
-                                        println!("Client {} requested disconnect", client_id);
-                                        let _ = connection.send_one(&ServerResponse::Goodbye).await;
+                                        println!(
+                                            "Client {} requested disconnect",
+                                            client_id
+                                        );
+                                        let _ = connection
+                                            .send_one(&ServerResponse::Goodbye)
+                                            .await;
                                         break;
                                     }
 
@@ -93,7 +99,8 @@ async fn tokio_main(cfg: Config) -> Result<()> {
                                         let stats = ServerResponse::Stats {
                                             messages_received: message_count,
                                         };
-                                        if let Err(e) = connection.send_one(&stats).await {
+                                        if let Err(e) = connection.send_one(&stats).await
+                                        {
                                             eprintln!("Error sending stats: {}", e);
                                             break;
                                         }
