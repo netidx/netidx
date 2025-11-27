@@ -31,6 +31,8 @@
 #[macro_use]
 extern crate netidx_protocols;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use futures::{channel::mpsc, StreamExt};
 use netidx::{
@@ -40,7 +42,7 @@ use netidx::{
 };
 use netidx_protocols::rpc::client::Proc;
 use netidx_value::{NakedValue, Value};
-use tokio::task;
+use tokio::{task, time};
 
 #[tokio::main]
 async fn tokio_main(cfg: Config) -> Result<()> {
@@ -66,9 +68,6 @@ async fn tokio_main(cfg: Config) -> Result<()> {
         [(UpdatesFlags::empty(), tx.clone())],
     );
 
-    // Wait for the server to start
-    tokio::try_join![emp001_name.wait_subscribed(), emp001_salary.wait_subscribed()]?;
-
     // print changes to subscribed values
     task::spawn({
         let emp001_name = emp001_name.id();
@@ -90,6 +89,9 @@ async fn tokio_main(cfg: Config) -> Result<()> {
             }
         }
     });
+
+    // Wait for the server to start
+    tokio::try_join![emp001_name.wait_subscribed(), emp001_salary.wait_subscribed()]?;
 
     println!("\n=== 2. CREATE Operations ===\n");
 
@@ -148,6 +150,7 @@ async fn tokio_main(cfg: Config) -> Result<()> {
     println!("Writing directly to the subscription (no RPC needed)...");
     emp001_salary.write(Value::V64(80000));
     println!("✓ Write sent\n");
+    time::sleep(Duration::from_millis(100)).await;
 
     println!("\n=== 4. DELETE Operations ===\n");
 

@@ -185,9 +185,9 @@ async fn tokio_main(cfg: Config) -> Result<()> {
     let _set_employee_rpc = start_set_employee_rpc(&publisher, &base, container.clone())?;
 
     println!("\n=== Container Ready ===");
-    println!("RPC endpoints available at: {}/rpc", base);
-    println!("  - Built-in: set_data, remove, etc.");
-    println!("  - Custom: set_employee (atomic employee creation and update)");
+    println!("RPC endpoints available at: {}/rpcs", base);
+    println!("  - Built-in: set-data, delete, delete-subtree, etc.");
+    println!("  - Custom: set-employee (atomic employee creation and update)");
     println!("Data published at: {}", base);
     println!("\nRun the client in another terminal:");
     println!("  cargo run --example container_client\n");
