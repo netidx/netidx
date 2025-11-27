@@ -670,6 +670,7 @@ enum ToInner {
     Commit(Txn, oneshot::Sender<()>),
 }
 
+#[derive(Clone)]
 pub struct Container(mpsc::UnboundedSender<ToInner>);
 
 impl Container {

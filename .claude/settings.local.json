@@ -6,7 +6,11 @@
       "Bash(cargo build:*)",
       "Bash(cargo clippy:*)",
       "Bash(rustc:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(cargo run:*)",
+      "Bash(timeout 30 cargo run:*)",
+      "Bash(timeout 5 cargo run:*)"
     ],
     "deny": [],
     "ask": []

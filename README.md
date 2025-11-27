@@ -137,22 +137,35 @@ Netidx shines in scenarios where you need:
 
 ## Getting Started
 
-1. **Install the tools:**
+1. **Try the examples** (zero configuration required):
+   ```bash
+   # Clone the repo
+   git clone https://github.com/estokes/netidx.git
+   cd netidx
+
+   # Run the basic pub/sub example
+   cargo run --example simple_publisher    # Terminal 1
+   cargo run --example simple_subscriber   # Terminal 2
+   ```
+
+   See [`examples/README.md`](examples/README.md) for 12+ examples covering everything from basic pub/sub to distributed clustering and time-series archiving.
+
+2. **Install the tools:**
    ```bash
    cargo install netidx-tools
    ```
 
-2. **Start a resolver server** (like DNS for netidx):
+3. **Start a resolver server** (like DNS for netidx):
    ```bash
    netidx resolver-server --config /path/to/resolver.json
    ```
 
-3. **Explore with the browser:**
+4. **Explore with the browser:**
    ```bash
    netidx browser
    ```
 
-4. **Add to your project:**
+5. **Add to your project:**
    ```bash
    cargo add netidx
    ```
