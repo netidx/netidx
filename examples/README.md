@@ -301,69 +301,6 @@ We recommend following this learning path:
 10. **Time-Series**: `embedded_archive` for recording and replay
 11. **Data Storage**: `container_*` for persistent CRUD operations
 
-## Common Patterns
-
-### Publishing Pattern
-```rust
-let publisher = PublisherBuilder::new(cfg).build().await?;
-let val = publisher.publish(path, initial_value)?;
-
-loop {
-    let mut batch = publisher.start_batch();
-    val.update(&mut batch, new_value);
-    batch.commit(None).await;
-}
-```
-
-### Subscribing Pattern
-```rust
-let subscriber = SubscriberBuilder::new(cfg).build()?;
-let dval = subscriber.subscribe(path);
-
-let (tx, mut rx) = mpsc::channel(10);
-dval.updates(UpdatesFlags::empty(), tx);
-
-while let Some(batch) = rx.next().await {
-    for (_, event) in batch {
-        // Handle updates
-    }
-}
-```
-
-### RPC Pattern
-```rust
-// Server
-let _proc = define_rpc!(
-    &publisher,
-    path,
-    "documentation",
-    |mut call: RpcCall, arg: Type| {
-        call.reply.send(result);
-        None
-    },
-    None,
-    arg: Type = default; "arg documentation"
-)?;
-
-// Client
-let proc = Proc::new(&subscriber, path)?;
-let result = call_rpc!(proc, arg: value).await?;
-```
-
-### Channel Pattern
-```rust
-// Server
-let mut listener = Listener::new(&publisher, timeout, path).await?;
-let connection = listener.accept().await?;
-connection.send_one(value).await?;
-let received = connection.recv_one().await?;
-
-// Client
-let connection = Connection::connect(&subscriber, path).await?;
-connection.send(value)?;
-let received = connection.recv_one().await?;
-```
-
 ## Tips
 
 - **Logging**: Set `RUST_LOG=debug` to see detailed netidx internals
@@ -374,7 +311,7 @@ let received = connection.recv_one().await?;
 ## Architecture Notes
 
 ### Resolver
-All examples use `Config::maybe_run_machine_local_resolver()` which starts a lightweight resolver on `127.0.0.1:4564` if one isn't already running. This is perfect for local development.
+All examples use `Config::maybe_run_machine_local_resolver()` which starts a lightweight resolver on `127.0.0.1:59200` if one isn't already running. This is perfect for local development.
 
 For production, you'd run a standalone resolver server.
 
@@ -391,18 +328,8 @@ Examples use temporary directories and handle Ctrl+C gracefully. Resources are c
 
 **"failed to connect to resolver"**
 - The machine-local resolver might not have started
-- Check if port 4564 is already in use
+- Check if port 59200 is already in use
 - Try `netidx resolver-server` manually with a config file
-
-**"subscription timeout"**
-- Publisher may not have started yet
-- Check the path matches exactly (case-sensitive)
-- Verify both examples are using the same resolver
-
-**"address already in use"**
-- Another instance is already running
-- This is expected for examples that create multiple instances
-- For server examples, kill the old instance first
 
 ## Further Reading
 
