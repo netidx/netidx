@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     // Publish temperature and status
     let temperature = publisher.publish(base.join("temperature"), 20.0)?;
     let status = publisher.publish(base.join("status"), "online")?;
-    let _publisher_id =
+    let publisher_id =
         publisher.publish(base.join("publisher_id"), priority_name.clone())?;
 
     println!("Publishing sensor data at:");
@@ -96,6 +96,7 @@ async fn main() -> Result<()> {
                 let mut batch = publisher.start_batch();
                 temperature.update(&mut batch, temp);
                 status.update(&mut batch, "online");
+                publisher_id.update(&mut batch, priority_name.clone());
                 batch.commit(None).await;
 
                 println!(

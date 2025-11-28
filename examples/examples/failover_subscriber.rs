@@ -25,6 +25,14 @@
 //! # Kill primary publisher (Ctrl+C) and watch automatic failover
 //! # Restart primary and create new subscription to see priority preference
 //! ```
+//!
+//! ## Important Note
+//!
+//! Netidx keeps track of recently failed publishers and will not try
+//! them again for 60 seconds (unless all publishers recently
+//! failed). This means if you fail high, and then start it back up
+//! before the 60 second window, and then fail normal, subscriber will
+//! fail to LOW not HIGH.
 
 use anyhow::Result;
 use futures::{channel::mpsc, StreamExt};
@@ -34,8 +42,7 @@ use netidx::{
     subscriber::{Event, SubscriberBuilder, UpdatesFlags},
 };
 use netidx_value::Value;
-use std::time::Duration;
-use tokio::{signal, time};
+use tokio::signal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,28 +89,31 @@ async fn main() -> Result<()> {
     // Track which publisher we're connected to
     let mut current_publisher = Value::Null;
 
-    // Periodic reconnection test
-    let mut resubscribe_interval = time::interval(Duration::from_secs(10));
-    let mut resubscribe_count = 0;
-
     loop {
         tokio::select! {
+            biased;
+            _ = signal::ctrl_c() => {
+                println!("\n\nShutting down subscriber...\n");
+                break;
+            }
             Some(mut batch) = rx.next() => {
                 for (id, event) in batch.drain(..) {
                     match event {
                         Event::Update(value) => {
                             if id == temp_sub.id() {
-                                println!("  Temperature: {}", value);
+                                println!("  Temperature: {value}");
                             } else if id == status_sub.id() {
-                                println!("  Status: {}", value);
+                                println!("  Status: {value}");
                             } else if id == id_sub.id() {
-                                if value != current_publisher {
+                                if value == current_publisher {
+                                    println!("  Publisher: {value}")
+                                } else {
                                     if current_publisher == Value::Null {
-                                        println!("🔌 Connected to: {}", value);
+                                        println!("🔌 Connected to: {value}");
                                     } else {
                                         println!("\n🔄 FAILOVER DETECTED!");
-                                        println!("  Previous: {}", current_publisher);
-                                        println!("  Current:  {}\n", value);
+                                        println!("  Previous: {current_publisher}");
+                                        println!("  Current:  {value}\n");
                                     }
                                     current_publisher = value;
                                 }
@@ -114,26 +124,6 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-            }
-            _ = resubscribe_interval.tick() => {
-                resubscribe_count += 1;
-                if resubscribe_count % 3 == 0 {
-                    println!("\n--- Periodic Reconnection Test ---");
-                    println!("Creating fresh subscription to test priority preference...");
-
-                    // Create a new subscription to see which publisher we get
-                    let test_sub = subscriber.subscribe(base.join("publisher_id"));
-                    test_sub.wait_subscribed().await?;
-
-                    if let Event::Update(value) = test_sub.last() {
-                        println!("New subscription connected to: {}", value);
-                        println!("(Higher priority publishers are preferred for new connections)\n");
-                    }
-                }
-            }
-            _ = signal::ctrl_c() => {
-                println!("\n\nShutting down subscriber...\n");
-                break;
             }
         }
     }
