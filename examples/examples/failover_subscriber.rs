@@ -45,15 +45,10 @@ use netidx_value::Value;
 use tokio::signal;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::init();
-
+async fn tokio_main(cfg: Config) -> Result<()> {
     println!("╔════════════════════════════════════════════════╗");
     println!("║  Failover Subscriber - Automatic Failover      ║");
     println!("╚════════════════════════════════════════════════╝\n");
-
-    Config::maybe_run_machine_local_resolver()?;
-    let cfg = Config::load_default_or_local_only()?;
 
     let subscriber = SubscriberBuilder::new(cfg).build()?;
     let base = Path::from("/local/failover/sensor");
@@ -129,4 +124,13 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    // start logging
+    env_logger::init();
+    // maybe run the local machine resolver
+    Config::maybe_run_machine_local_resolver()?;
+    // load config, start async, and go!
+    tokio_main(Config::load_default_or_local_only()?)
 }

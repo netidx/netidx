@@ -10,7 +10,8 @@
       "Bash(wc:*)",
       "Bash(cargo run:*)",
       "Bash(timeout 30 cargo run:*)",
-      "Bash(timeout 5 cargo run:*)"
+      "Bash(timeout 5 cargo run:*)",
+      "Bash(1)"
     ],
     "deny": [],
     "ask": []

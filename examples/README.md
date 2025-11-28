@@ -226,6 +226,84 @@ cargo run --example resilient_subscriptions
 
 **Learn**: Val vs Dval, auto-reconnection, linear backoff, durable subscriptions, `wait_subscribed()`, production resilience patterns
 
+### 🔀 High Availability & Failover
+
+Examples demonstrating multi-publisher redundancy and automatic failover.
+
+#### `failover_publisher` & `failover_subscriber`
+Basic multi-publisher failover with priority-based selection.
+
+- **Multiple publishers** can publish to the same paths (not an error!)
+- **Priority levels** (0-2): Clients prefer higher priority publishers
+- **Automatic failover**: Subscribers transparently switch when publisher dies
+- **Random selection**: Among same-priority publishers, clients pick randomly
+- **No code changes**: Failover is completely transparent to subscribers
+
+```bash
+# Terminal 1 - Primary (high priority)
+PRIORITY=2 cargo run --example failover_publisher
+
+# Terminal 2 - Backup (low priority, only used if primary fails)
+PRIORITY=0 cargo run --example failover_publisher
+
+# Terminal 3 - Subscriber (automatically uses primary)
+cargo run --example failover_subscriber
+
+# Kill primary → subscriber automatically fails over to backup
+# Restart primary → new subscriptions prefer it again
+```
+
+**Use cases**:
+- Load balancing across multiple publishers
+- Backup publishers on slow/expensive networks (use priority 0)
+- Geographic redundancy (backup in different datacenter)
+- Zero-downtime deployments
+
+**Learn**: Multi-publisher redundancy, priority levels, transparent failover, publisher selection algorithm
+
+### ⚖️ Load Balancing
+
+Examples demonstrating automatic load distribution across multiple publishers.
+
+#### `load_balancing_publisher` & `load_balancing_subscriber`
+Automatic load balancing using random publisher selection and USE_EXISTING flag.
+
+- **Automatic distribution**: Each subscriber randomly picks publishers
+- **Even load spread**: Load automatically balanced across all publishers
+- **USE_EXISTING flag**: Keeps related data together on same publisher
+- **Atomic batches**: All fields of a stock quote from same publisher
+- **No coordination needed**: Publishers don't need to know about each other
+
+```bash
+# Start 3+ publishers (each gets unique ID)
+# Terminal 1
+cargo run --example load_balancing_publisher
+
+# Terminal 2
+cargo run --example load_balancing_publisher
+
+# Terminal 3
+cargo run --example load_balancing_publisher
+
+# Start multiple subscribers to see load distribution
+# Terminal 4+
+cargo run --example load_balancing_subscriber  # Run multiple times
+```
+
+**How it works**:
+- **Random selection**: Each subscriber randomly picks one publisher on first subscription
+- **USE_EXISTING flag**: Once connected, all subsequent subscriptions reuse that same publisher
+- **Single publisher per subscriber**: All stocks for a subscriber come from the same publisher
+- **Statistical distribution**: With many subscribers picking randomly, load is evenly distributed
+
+**Use cases**:
+- Stock quote feeds with atomic updates per symbol
+- Sensor networks with multiple data sources
+- Horizontally scaled publishers
+- Geographic distribution with data consistency requirements
+
+**Learn**: Random load balancing, USE_EXISTING flag, atomic batch guarantees, horizontal scaling, stock quote pattern
+
 ### 🗄️ Data Storage
 
 Examples using netidx-container for persistent storage.
@@ -297,9 +375,11 @@ We recommend following this learning path:
 6. **Type Safety**: `typed_channel_*` for efficient, type-safe communication
 7. **Discovery**: `building_sensors_*` for glob patterns and change tracking
 8. **Visualization**: `table_dashboard` for browser-friendly data
-9. **Distributed Systems**: `clustering` for multi-node coordination
-10. **Time-Series**: `embedded_archive` for recording and replay
-11. **Data Storage**: `container_*` for persistent CRUD operations
+9. **High Availability**: `failover_*` for multi-publisher redundancy
+10. **Load Balancing**: `load_balancing_*` for automatic load distribution
+11. **Distributed Systems**: `clustering` for multi-node coordination
+12. **Time-Series**: `embedded_archive` for recording and replay
+13. **Data Storage**: `container_*` for persistent CRUD operations
 
 ## Tips
 

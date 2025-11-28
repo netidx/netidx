@@ -44,9 +44,7 @@ fn name(pri: &str) -> ArcStr {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::init();
-
+async fn tokio_main(cfg: Config) -> Result<()> {
     // Get priority from environment (default to Normal)
     let priority_str = env::var("PRIORITY").unwrap_or_else(|_| "normal".to_string());
     let (priority, priority_name) = match priority_str.to_lowercase().as_str() {
@@ -59,11 +57,6 @@ async fn main() -> Result<()> {
     println!("╔════════════════════════════════════════════════╗");
     println!("║  Failover Publisher - Priority: {}  ║", priority_name);
     println!("╚════════════════════════════════════════════════╝\n");
-
-    // Start resolver
-    Config::maybe_run_machine_local_resolver()?;
-    let cfg = Config::load_default_or_local_only()?;
-
     // Build publisher with specified priority
     let publisher = PublisherBuilder::new(cfg).priority(priority).build().await?;
 
@@ -113,4 +106,13 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    // start logging
+    env_logger::init();
+    // maybe run the local machine resolver
+    Config::maybe_run_machine_local_resolver()?;
+    // load config, start async, and go!
+    tokio_main(Config::load_default_or_local_only()?)
 }

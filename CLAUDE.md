@@ -206,3 +206,4 @@ The reviewer will change CR to XCR when addressed and may add explanation. On fo
 - Hash-cons shared data structures to reduce memory
 - Length-prefix wire protocol messages
 - Token-based auth for subscriptions
+- When using subscribe_updates you don't need BEGIN_WITH_LAST, you will get every update from the first one automatically
