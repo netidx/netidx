@@ -6,15 +6,16 @@
 //! - UPDATE: Modifying existing data
 //! - DELETE: Removing data
 //!
-//! ## Important: Container Atomicity Model
+//! ## Important: Container Transaction Model ("Weak ACID")
 //!
-//! The container provides per-operation atomicity via sled:
-//! - ✅ Each individual operation (set_data, remove, etc.) is atomic
-//! - ❌ NO multi-operation atomicity
-//! - ❌ NO rollback if operations fail
-//! - ✅ Durable storage via sled
+//! Transactions provide atomicity during normal operation but not crash recovery:
+//! - ✅ **Runtime atomicity**: All operations in a Txn commit together, no observer sees partial state
+//! - ❌ **Crash atomicity**: Process kill mid-commit may leave partial state on restart
+//! - ✅ **Consistent**: Sequential execution ensures consistency
+//! - ✅ **Isolated**: One Txn commits at a time, no concurrent commits
+//! - ✅ **Durable**: Backed by sled's durable storage
 //!
-//! This is NOT like traditional ACID transactions!
+//! Custom RPCs (like `set-employee`) ARE atomic during normal operation!
 //!
 //! ## Running
 //!
@@ -139,10 +140,10 @@ async fn tokio_main(cfg: Config) -> Result<()> {
     .await?;
     println!("✓ Added phone column\n");
 
-    // NOTE: set-employee RPC is fully atomic, all fields succeed or
-    // fail together, and there can be server side validation and
-    // business logic. Individual writes or set_data calls are atomic
-    // per-operation (no rollback between calls)
+    // NOTE: set-employee RPC provides runtime atomicity - all fields commit
+    // together in a single transaction, and there can be server-side validation
+    // and business logic. This is more efficient than individual set_data calls
+    // (1 RPC vs N operations) and ensures consistency during normal operation.
 
     println!("\n=== 3. UPDATE Operations ===\n");
 

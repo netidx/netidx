@@ -309,15 +309,15 @@ cargo run --example load_balancing_subscriber  # Run multiple times
 Examples using netidx-container for persistent storage.
 
 #### `container_server` & `container_client`
-Demonstrates container CRUD operations with custom atomic RPCs.
+Demonstrates container CRUD operations with custom RPCs (weak ACID model).
 
 - **Server**: Starts embedded container with employee directory
-- **Custom RPC**: `set-employee` for atomic employee create/update with business logic
+- **Custom RPC**: `set-employee` for runtime atomic employee create/update with business logic
 - **Client**: Performs CREATE, READ, UPDATE, DELETE operations
 - Shows custom RPC vs built-in operations (delete, delete-subtree)
 - Demonstrates subscription-based reads with background task
 - Direct writes to subscriptions (no RPC needed for updates)
-- Partial updates: add fields to existing records atomically
+- Partial updates: add fields to existing records with runtime atomicity
 
 ```bash
 # Terminal 1
@@ -328,13 +328,13 @@ cargo run --example container_client
 ```
 
 **Key Features**:
-- **Atomic operations**: `set-employee` RPC commits all fields in single transaction
+- **Runtime atomic operations**: `set-employee` RPC commits all fields together (weak ACID - see code for details)
 - **Partial updates**: Can set just `phone` field on existing employee
 - **Server-side logic**: Validation and business rules in one place
 - **Efficiency**: 1 RPC instead of N field updates (reduces network calls by 75%+)
 - **Direct writes**: Write to subscriptions without RPC for simple updates
 
-**Learn**: Custom RPC implementation, atomic transactions, partial updates, subscription writes vs RPC calls, embedded container, practical CRUD patterns
+**Learn**: Custom RPC implementation, runtime atomic transactions, partial updates, subscription writes vs RPC calls, embedded container, practical CRUD patterns
 
 ### 📊 Visualization
 
