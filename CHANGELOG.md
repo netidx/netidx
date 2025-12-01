@@ -1,4 +1,9 @@
-* 0.31.0
+# 0.31.1 tools, protocols
+
+- fix some warnings in the tui browser
+- small api addition in netidx_protocols::cluster
+
+# 0.31.0
 
 - Add i8, u8, i16, u16 to Value
 - Add abstract types to Value
@@ -18,7 +23,7 @@
 - allow whitespace in literal values, e.g. decimal : 1.0 is now
   allowed
 
-* 0.30.0
+# 0.30.0
 
 - Add publisher priority. This new flag to publisher creation (use the
 Builder for a nicer interface) is stored by the resolver and
@@ -64,21 +69,21 @@ crate called poolshark
 remote attacker from being able to trigger fairly large memory
 allocations in some cases
 
-* 0.29.2
+# 0.29.2
 
 - use const generics for read_raw so that we can support larger
   kerberos tokens (up to 64K)
 
-* 0.29.1
+# 0.29.1
 
 - Work in progress version of the tui browser added to netidx-tools
 
-* 0.29.0
+# 0.29.0
 
 - remove the escaping functions from utils and publish them as a
   separate (and enhanced) crate
 
-* 0.28.3
+# 0.28.3
 
 - update deps
 
@@ -94,7 +99,7 @@ allocations in some cases
   general purpose, and as such it deserves it's own project that just
   depends on netidx instead of being part of it.
 
-* 0.28.2
+# 0.28.2
 
 - Update all dependencies
 
@@ -108,12 +113,12 @@ allocations in some cases
 
 - Various bscript performance optimizations
 
-* 0.28.1
+# 0.28.1
 
 - Fix #20, slow consumers cause publisher to stop for longer than the
   configured timeout
 
-* 0.28.0
+# 0.28.0
 
 - The value type's in memory layout has been reworked
   - Value is now repr C and tag is a u32
@@ -155,7 +160,7 @@ allocations in some cases
 - the gtk browser is deprecated and will be replaced in a future
   release
 
-* 0.27.3
+# 0.27.3
 
 - Fix a bug in the recorder that prevented it being used
   embedded. That is, with an embedded data source writing directly to
@@ -184,7 +189,7 @@ allocations in some cases
   the same time. Proving once again that premature optimization is the
   root of most (all?) evil.
 
-* 0.27.2
+# 0.27.2
 
 - Fix a bug in subscriber that caused spurious empty batches to be
   delivered to an updates channel for subscriptions that aren't
@@ -212,7 +217,7 @@ allocations in some cases
 - Begin testing on aarch64 MacOS again. Pre release we now test on
   x86_64 windows, x86_64 linux, aarch64 linux, and aarch64 Mac OS.
 
-* 0.27.0-0.27.1
+# 0.27.0-0.27.1
 
 - merge #14 refactor netidx-archive so that the origin can directly
   write to an archive collection(s) while exposing the recorder
@@ -220,7 +225,7 @@ allocations in some cases
 
 - update dependencies to more recent versions
 
-* 0.26.0
+# 0.26.0
 
 - Fix a bug in write_with_recipt that could cause concurrent write
   results to be delivered to the wrong request
@@ -231,43 +236,43 @@ allocations in some cases
 
 - Merge #10, allow symlinks to archive files
 
-* 0.25.3
+# 0.25.3
 
 - change logfile to use a sorted array instead of a BTreeMap as an index
 
-* 0.25.2
+# 0.25.2
 
 - catch additional cases where the recorder reads more than it should
 
-* 0.25.1
+# 0.25.1
 
 - fix a recorder bug that would case read_deltas to read a lot more
   data than is necessary to fill a request
 
-* 0.25.0
+# 0.25.0
 
 - add recorder rpcs to facilitate an external process writing logs
   while the recorder is used to service readers concurrently
 
 - fix use of deprecated tls function
 
-* 0.24.2
+# 0.24.2
 
 - switch to workspace dependencies and update dependencies
 
 - trim pools in the entire tree
 
-* 0.24.1
+# 0.24.1
 
 - prune over large recorder pools after experiance in production
 
-* 0.24.0
+# 0.24.0
 
 - rpc client constructor is no longer async
 
 - implement a configurable subscription timeout in the rpc client
 
-* 0.22.24
+# 0.22.24
 
 - don't spam the keychain with requests for cert passwords we've
   already asked for
@@ -275,52 +280,52 @@ allocations in some cases
 - add a mechanism to populate passwords for certs without consulting
   the keychain or calling askpass
 
-* 0.23.4
+# 0.23.4
 
 - add extensive anyhow context information to the recorder
 
-* 0.23.3
+# 0.23.3
 
 - fix a bug in the way netidx-archive was interpreting index
   lengths. It could cause suprious log errors, as well as false
   positive index hits that would later need to be filtered at
   additional expense.
 
-* 0.22.23
+# 0.22.23
 
 - implement pack for arbitrary sized arrays
 
-* 0.22.22
+# 0.22.22
 
 - fix a bug in pack that would cause decoding an empty length wrapped struct to fail
 
-* 0.22.21
+# 0.22.21
 
 - fix multiple bugs unpacking ArrayString
 
-* 0.23.2
+# 0.23.2
 
 - add *channel::*::Batch::len method
 
-* 0.23.1
+# 0.23.1
 
 - simplify the accept api. Sorry semantic versioning.
 
-* 0.23.0
+# 0.23.0
 
 - channel::Listener::accept and channel::Singleton::wait_connected
   were not cancel safe. This is now fixed but it required a small api
   change, hence 0.23.
 
-* 0.22.20
+# 0.22.20
 
  - implement convert Chars from CompactString
 
-* 0.22.19
+# 0.22.19
 
  - implement pack for ArrayString and ArrayVec
 
-* 0.22.18
+# 0.22.18
 
  - eliminate block_in_place from the netidx crate so that netidx can
    be used on the current_thread tokio runtime. This also applies to
@@ -330,77 +335,77 @@ allocations in some cases
    lot of different clients. The hashconsing of connected clients was
    not removing unused sets
 
-* 0.22.17
+# 0.22.17
 
  - implement pack for NaiveDateTime and NaiveDate
 
-* 0.22.16
+# 0.22.16
 
  - remove unecessary Sync requirement from pool
 
-* 0.22.15
+# 0.22.15
 
  - implement pack for CompactString
 
-* 0.22.14
+# 0.22.14
 
  - implement pack for btreemap and btreeset
 
-* 0.22.13
+# 0.22.13
 
  - add extended auth hook to publisher, allowing the registration of a
    function that can make a final decision on authorization after the
    traditional netidx authentication and authorization steps have been
    completed
 
-* 0.22.12
+# 0.22.12
 
  - improve error message when a recorder timestamp fails to parse (include the failing timestamp)
 
-* 0.22.11
+# 0.22.11
 
  - reduce lock contention on large recorders
 
-* 0.22.10
+# 0.22.10
 
   - add Dval::strong_count
 
-* 0.22.9
+# 0.22.9
 
   - add Subscriber::is_subscribed_or_pending
 
-* 0.22.8
+# 0.22.8
 
   - more flexible substitution in recorder script args
 
-* 0.22.7
+# 0.22.7
 
   - subscribe_interal shouldn't have been public. Sorry!
 
-* 0.22.6
+# 0.22.6
 
   - fix a race condition in channel registration in subscriber
 
-* 0.22.4
+# 0.22.4
 
   - add Subscriber::subscribe_updates, subscribe_nondurable_updates,
     subscribe_nondurable_one_updates. These methods allow registering
     for updates as part of the subscription process to avoid any race
     in receiving values.
 
-* 0.22.3
+# 0.22.3
 
   - add Publisher::events_for_id, that does the same thing as events,
     but only for a specific id.
 
-* 0.22.1
+# 0.22.1
 
   - fix a memory leak in subscriber that was triggered by lots of
     resubscriptions.
 
   - implement pack and poolable for indexmap and indexset
 
-* 0.22.0 netidx
+# 0.22.0 netidx
 
   - start using cargo workspaces to manage versions hence the big bump
     to harmonize everything
@@ -423,46 +428,46 @@ allocations in some cases
   - handle additional rare republish cases in
     resolver_client::write_client
 
-* 0.20.3 netidx-tools
+# 0.20.3 netidx-tools
 
   - port the container server to windows
 
-* 0.18.1 netidx-archive
+# 0.18.1 netidx-archive
 
   - fix a date overflow when seeking backwards with an empty current file
 
-* 0.18.2 netidx-derive
+# 0.18.2 netidx-derive
 
   - Check in the proc macro that no tag is used more than once
 
-* 0.18.1 netidx-derive
+# 0.18.1 netidx-derive
 
   - add an attribute #[pack(tag(n))] that allows explicitly specifying
     the on the wire tag of an enum variant. If tag is specified on one
     variant case then it must be specified on all of them.
 
-* 0.19.18 netidx
+# 0.19.18 netidx
 
   - reduce the wait time between resubscription attempts
 
-* 0.20.1 browser, protocols
+# 0.20.1 browser, protocols
 
   - fix borrow error in the browser
 
   - reduce log verbosity in rpc
 
-* 0.19.17 netidx
+# 0.19.17 netidx
 
   - fix a bug where a dead resolver server could cause publishing to
     take a long time (even if at least 1 resolver in the cluster is
     still alive)
 
-* 0.20.1 protocols and deps
+# 0.20.1 protocols and deps
 
   - remove the lock around rpc procedure calls, it is no longer
     necessary with the new calling convention
 
-* 0.20.0 protocols and deps
+# 0.20.0 protocols and deps
 
   - change the rpc calling convention to fix a race condition where
     the publisher is still publishing arguments when the subscriber is
@@ -474,30 +479,30 @@ allocations in some cases
   - RPC CLIENTS >0.20 CAN'T CALL RPC SERVERS <0.20. Older clients can
     still call newer servers.
 
-* 0.19.22 tools archive
+# 0.19.22 tools archive
 
   - the resolver server now runs on windows in a limited capacity, basically
   tls or kerberos mod only
 
   - fix building netidx-archive on windows
 
-* 0.19.21 tools
+# 0.19.21 tools
 
   - pull in new archive
 
-* 0.19.15 archive
+# 0.19.15 archive
 
   - make channel slack configurable
 
-* 0.19.20 tools
+# 0.19.20 tools
 
   - fix daemonizeing the resolver server (again)
 
-* 0.19.16 netidx
+# 0.19.16 netidx
 
   - resolver server config fixes for tools
 
-* 0.19.15 netidx
+# 0.19.15 netidx
 
   - change the way we use certificates in tls mode
 
@@ -533,39 +538,39 @@ allocations in some cases
     seconds to cache id map entries before they must be done
     again. The default is 1 hour.
 
-* 0.19.14 netidx
+# 0.19.14 netidx
 
   - public tls function to precache key passwords in the keychain
 
   - trim cr and lf from passwords read from askpass
 
-* 0.19.13 netidx
+# 0.19.13 netidx
 
   - more config file path exposure
 
-* 0.19.12 netidx
+# 0.19.12 netidx
 
   - make some more functions public
 
-* 0.19.11 netidx
+# 0.19.11 netidx
 
   - make the tls module public
 
-* 0.19.10 netidx
+# 0.19.10 netidx
 
   - move a bunch of path related functions into file::Config from
     Config.
 
-* 0.19.9 netidx
+# 0.19.9 netidx
 
   - make the client config file types public
 
-* 0.19.19 tools
+# 0.19.19 tools
 
   - fix bug that caused daemonized resolver server and activation
     server to fail.
 
-* 0.19.5 protocols 0.19.8 netidx
+# 0.19.5 protocols 0.19.8 netidx
 
   - add more context to channel errors
 
@@ -574,19 +579,19 @@ allocations in some cases
   - add publish_with_flags_and_writes to eliminate a race between
     publishing and registering a write channel.
 
-* 0.19.14 archive
+# 0.19.14 archive
 
   - don't call get if the file exists
 
   - don't hold the lock while opening the archive file in LogfileCollection
 
-* 0.19.13 archive
+# 0.19.13 archive
 
   - further minor optimizations
 
   - reimage should also take a filter
 
-* 0.19.12 archive
+# 0.19.12 archive
 
   - cache open archive files for some time
 
@@ -594,11 +599,11 @@ allocations in some cases
 
   - faster index reading and writing
 
-* 0.19.11 archive
+# 0.19.11 archive
 
   - derive debug and clone on the recorder_client::Client struct.
 
-* 0.19.10 archive
+# 0.19.10 archive
 
   - fix a bug in the oneshot rpc. It now returns results by shard with
     a pathmap to interpret the results by shard.
@@ -606,12 +611,12 @@ allocations in some cases
   - implement disjointness checking for globset. Use it to not start
     oneshot or publisher tasks that can never match the user's filter
 
-* 0.19.9 archive
+# 0.19.9 archive
 
   - don't compress the index for an additional 2x and a reduction in
     complexity.
 
-* 0.19.8 archive
+# 0.19.8 archive
 
   - introduce index headers to batches. the index header contains a
     list of all the ids in the batch. now you can read_deltas with a
@@ -623,7 +628,7 @@ allocations in some cases
   - fix an O(n^2) length check in oneshot for an 80x improvement on
     reading a 150 MB compressed archive. oops.
 
-* 0.19.7 archive
+# 0.19.7 archive
 
   - big netidx-archive refactor. now shards can be represented
     internally as well as across processes. There are a lot more
@@ -633,7 +638,7 @@ allocations in some cases
     mechanism is still available, but is meant to be used when you are
     sharding across multiple machines.
 
-* 0.19.6 archive protocols
+# 0.19.6 archive protocols
 
   - lots of fixes for timing and clustering
 
@@ -642,15 +647,15 @@ allocations in some cases
 
   - add a pack implementation for Bound
 
-* 0.19.5 archive
+# 0.19.5 archive
 
   - fix bug in load_file_header
 
-* 0.19.4 archive
+# 0.19.4 archive
 
   - allow tuning of the parallel window size
 
-* 0.19.3 archive
+# 0.19.3 archive
 
   - The container server lost the ability to compress it's
     database. This is because sled hasn't been updated in ages and
@@ -669,7 +674,7 @@ allocations in some cases
 
   - Fix a number of bugs in the recorders
 
-* 0.19.6
+# 0.19.6
   - don't spam info messages when republish fails
 
   - pool the republish Vec
@@ -678,7 +683,7 @@ allocations in some cases
 
   - properly check the exit status of commands in the recorder
 
-* 0.19.5
+# 0.19.5
   - fix a bug in subscriber that could cause the last messages from
     a disconnected publisher to be lost
 
@@ -686,30 +691,30 @@ allocations in some cases
 
   - add a command line tool to query the recorder's oneshot facility
 
-* 0.19.4
+# 0.19.4
   - fix a bug in subscriber that caused voluntary shutdowns
     to add the ip to the recently failed list.
 
-* 0.19.3
+# 0.19.3
   - fix a bug in PREFER_LOCAL that could prevent subscribing
 
-* 0.19.2
+# 0.19.2
   - implement new publish flag FORCE_LOCAL, which overrides USE_EXISTING
     but is otherwise the same as PREFER_LOCAL.
 
-* 0.19.1
+# 0.19.1
   - fix a bug in PREFER_LOCAL
 
   - introduce a new replay mode in the recorder "oneshot" that lets
     you just call an rpc with a time range and get data.
 
-* 0.19.0
+# 0.19.0
   - fix PublisherBuilder to be more ergonomic, sorry for the churn
 
   - add a parameter `slack` that together with the flush timeout can
     be used to properly manage the slow client problem.
 
-* 0.18.3
+# 0.18.3
   - add new publish flag PREFER_LOCAL, which will cause subscribers to
     try addresses in the following order.
     - 1st addresses that are on the local computer
@@ -718,7 +723,7 @@ allocations in some cases
 
   - swap out get_if_addrs crate for the maintained if-addrs crate
 
-* 0.18.1-2
+# 0.18.1-2
   - add features to BindCfg for NAT traversal. You can now run publishers
     and resolver servers behind a NAT and DNAT forward the port.
 
@@ -734,7 +739,7 @@ allocations in some cases
   - recorder, stop polling dead subscriptions after trying for a while, increase
     the batch buffer size in case the recorder thread is temporarially delayed.
 
-* 0.18.0
+# 0.18.0
   - Change pre allocated packed data structures to avoid TooBig errors
     and still allocate safe quantities of memory.
 
@@ -767,19 +772,19 @@ allocations in some cases
 
   - fix overflow in pack decoding found in fuzz testing
 
-* 0.17.4
+# 0.17.4
 
   - ignore pings in netidx-wsproxy
 
   - add serialize/deserialize to netidx-netproto::value::Typ
 
-* 0.17.3
+# 0.17.3
 
   - add a pack implementation for HashSet
 
   - don't put empty objects back in pools
 
-* 0.17.2
+# 0.17.2
 
   - implement debug on Publisher
 
@@ -801,7 +806,7 @@ allocations in some cases
   - change netidx-archive to use the better maintained memmap2 crate
     instead of mapr
 
-* 0.17.1
+# 0.17.1
 
   - permissions now allow dynamic params. e.g.  { "/foo/bar/$[user]":
     { "$[user]": swlpd } } would give user 'eric' swlpd in
@@ -814,7 +819,7 @@ allocations in some cases
     publisher, subscriber and rpcs. Including an example javascript
     interface.
 
-* 0.17.0
+# 0.17.0
 
   - netidx_derive::Pack implement #[pack(other)] attribute for
     enums. Does the same thing as #[serde(other)], if the enum tag
@@ -832,7 +837,7 @@ allocations in some cases
   - update the browser to the latest version of gtk-rs, and make use
     of the finally upstreamed gktsourceview4 subclassing
 
-* 0.16.0-9
+# 0.16.0-9
   - Fix a bug in subscriber that could cause pushback not to work at
     very high message rates
 
@@ -866,7 +871,7 @@ allocations in some cases
   - I may have slighly broken semantic versioning here, but 0.16 just
     released, so I don't think it's a huge deal.
 
-* 0.16.1 and 2
+# 0.16.1 and 2
 
   - improve the safety of len_wrapped_decode
 
@@ -877,7 +882,7 @@ allocations in some cases
   - make clientparams cloneable, and make load take a reference
     instead of an owned value.
 
-* 0.16 all
+# 0.16 all
   - rename Subscriber::durable_subscribe -> Subscriber::subscribe
 
   - rename Subscriber::subscribe -> Subscriber::subscribe_nondurable
@@ -895,16 +900,16 @@ allocations in some cases
   - Major refactor of publisher and subscriber to completely eliminate
     blocking awaits from their respective message handling loops.
 
-* 0.15.1 core netidx
+# 0.15.1 core netidx
 
   - expose the inner u64 in atomic_id for ffi bindings
   - make DesiredAuth Serializable/Deserializable for ffi bindings
 
-* 0.15.1 browser
+# 0.15.1 browser
 
   - fix a crash when creating progress bars. sorry ...
 
-* 0.15 all
+# 0.15 all
 
   - skipping ahead to 0.15 because tls is a big step forward.
   - add a new authentication mechanism TLS, for using transport layer
@@ -931,7 +936,7 @@ allocations in some cases
     you were manually calling rpcs and depending on the procedure value to update it
     won't do that anymore.
 
-* 0.12.7 browser
+# 0.12.7 browser
 
   - Use the new bscript functionality to greatly improve tracing. Load
     existing traces when opening the expression inspector. Use the
@@ -942,7 +947,7 @@ allocations in some cases
     debugged view that you want to run a little bit faster you can
     turn it off.
 
-* 0.14.0 bscript
+# 0.14.0 bscript
 
   - record initialization events
 
@@ -952,40 +957,40 @@ allocations in some cases
 
   - timestamp events when they happen
 
-* 0.12.5 tools
+# 0.12.5 tools
 
   - Fix a bug in the archiver that would cause it to hang on to idle
     sessions if any client was using any session. Now it will drop
     sessions that no client is using after 1 minute, as was the
     original intention.
 
-* 0.12.6 browser
+# 0.12.6 browser
 
   - Fix paned widget is jumpy when moving the mouse until manually
     moving the boundry under some gtk themes
 
-* 0.12.4 netidx
+# 0.12.4 netidx
 
   - Fix an issue with the resolver server that could result in
     leftover paths from a dead publisher being associated with a new
     publisher when using local authentication.
 
-* 0.12.5 browser
+# 0.12.5 browser
 
   - Fix crash that could occurr due to trying to get the adjustment of
     a destroyed scrolled window.
 
-* 0.12.4 browser
+# 0.12.4 browser
 
   - put the breadcrumbs in a scrolled window so that they don't force
     the browser window size to increase when viewing a deeply nested
     path.
 
-* 0.12.3 netidx
+# 0.12.3 netidx
 
   - add a helper to publisher required by netidx-dbus
 
-* 0.12.3 browser
+# 0.12.3 browser
 
   - Greatly increase the utility of the event log window in the
     expression inspector. It now shows only actual events. It shows
@@ -998,7 +1003,7 @@ allocations in some cases
   - Improve the performance of normal bscript execution by only
     recording debug events when the editor window is open.
 
-* 0.12.2 browser netidx
+# 0.12.2 browser netidx
 
   - Fix some borrow error crashes that could occurr when a publisher
     is hung while accepting a write generated by a view save and the
@@ -1024,13 +1029,13 @@ allocations in some cases
     when it fails to subscribe because the connection to the publisher
     died.
 
-* 0.12.2 tools
+# 0.12.2 tools
 
   - separate the tools lib from tools so external users don't need to
     pull in all of tools deps in order to use the common command line
     arguments
 
-* 0.12.1 netidx
+# 0.12.1 netidx
 
   - add support for aliases in publisher and subscriber. Aliases allow
     publisher to publish the same data under multiple names without
@@ -1043,7 +1048,7 @@ allocations in some cases
     functionally the same as subscribing to the same path twice, you
     just get a clone of the existing subscription.
 
-* 0.12.0 all components
+# 0.12.0 all components
 
   - fix a resolver client bug that prevented local publishers from
     republishing after the local resolver was restarted.
@@ -1060,11 +1065,11 @@ allocations in some cases
     twice through an alias, therefore if you plan to deploy aliases
     you should upgrade all subscribers to 0.12 or later first.
 
-* 0.11.1 tools
+# 0.11.1 tools
 
   - fix building the tools on windows
 
-* 0.11.0 all components now go to 11
+# 0.11.0 all components now go to 11
 
   - introduce protocol version 2, not backwards compatible with
     version 1. Sorry
@@ -1102,7 +1107,7 @@ allocations in some cases
 
     - reorganized examples
 
-* 0.10.5 browser, netidx, netidx-tools, bscript, protocols
+# 0.10.5 browser, netidx, netidx-tools, bscript, protocols
 
   - bump dependencies for all modules
 
@@ -1111,17 +1116,17 @@ allocations in some cases
     functions as well as variables that are in scope. Use CRTL+Space
     to trigger it.
 
-* 0.10.4 netidx, netidx-tools, bscript, protocols
+# 0.10.4 netidx, netidx-tools, bscript, protocols
 
   - use cross-krb5 instead of gssapi and winapi directly
   - fix build on mac os
 
-* 0.10.3 netidx-tools
+# 0.10.3 netidx-tools
 
   - fix building on windows, which has been broken for some time due to
     new tools that require unix, sorry!
 
-* 0.10.0-0.10.2
+# 0.10.0-0.10.2
 
   - Add arrays to the value datatype. This has some pretty big
     implications,
@@ -1146,7 +1151,7 @@ allocations in some cases
       case they do, the old subscriber should not crash, however it
       won't be able to read the array data.
 
-* 0.9.1 bscript, tools, browser
+# 0.9.1 bscript, tools, browser
 
   - fix the "do" bscript function which was broken, and fix it's
     semantics to match documentation (return the value of the last
@@ -1157,7 +1162,7 @@ allocations in some cases
     container might not have recognized that the subtree had a parent
     root, and would then have deleted it. This has been corrected.
 
-* 0.9.0 netidx, netidx-tools, netidx-browser:
+# 0.9.0 netidx, netidx-tools, netidx-browser:
 
   - Subscriber uses much less memory, a durable subscription now costs
     about 2x a publish of the same value, which is a lot better than
@@ -1246,7 +1251,7 @@ allocations in some cases
     if they use default publishers it is recommended to recompile
     against 0.9.
 
-* 0.8.1 netidx, netidx-tools:
+# 0.8.1 netidx, netidx-tools:
   - fix a bug in the resolver server which would cause it to hang on
     to default publishers until the process is restarted even if the
     publisher itself timed out or explicitly sent clear. This bug was
@@ -1260,7 +1265,7 @@ allocations in some cases
   - added a test to check default publisher functionality, including
     that it goes away!
 
-* 0.8.0 netidx, protocols, netproto, tools, browser:
+# 0.8.0 netidx, protocols, netproto, tools, browser:
   - The command line publisher can now accept writes, simply say
     WRITE|PATH to enable writes for PATH. Written values will be sent
     to stdout in the same format as the command line subscriber. PATH
@@ -1320,14 +1325,14 @@ allocations in some cases
     now if a publisher hangs, it won't become a poisioned chalice that
     slows down subscriptions to unrelated publishers.
 
-* 0.7.3 netidx-tools:
+# 0.7.3 netidx-tools:
   - Additional error handling fixes in the recorder.
 
-* 0.7.2 netidx-tools:
+# 0.7.2 netidx-tools:
   - Make the recorder more robust to transient resolver server
     failures.
 
-* 0.7.1 netidx-tools:
+# 0.7.1 netidx-tools:
   - Add the DROP command to the command line publisher to stop
     publishing a path
   - Add oneshot mode to the subscriber
@@ -1338,7 +1343,7 @@ allocations in some cases
     a write is queued it will tell you how many writes are in the
     queue for a given path
 
-* 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
+# 0.7 netidx, netidx-tools, netidx-browser, netidx-protocols:
   - major update to the filter language syntax and semantics
   - add netidx rpc to protocols, use it in the recorder, implement it
     in the browser formula language
@@ -1350,7 +1355,7 @@ allocations in some cases
     recorder. This protocol change requires the resolver server to be
     updated, but is backwards compatible with older clients.
 
-* 0.6.1 netidx netidx-tools netidx-core:
+# 0.6.1 netidx netidx-tools netidx-core:
   - small semantic change in subscriber, writes to a dval now queue
     when the subscription is not connected and are sent on
     reconnect. Previously they would be dropped.
@@ -1359,7 +1364,7 @@ allocations in some cases
     and pick reasonable defaults.
   - add a few support methods to netidx core
 
-* 0.6.1 browser:
+# 0.6.1 browser:
   - Fix several really dumb bugs in the formula parser
   - Fix the browser's formula inspector closing whenever you change
     something
@@ -1367,7 +1372,7 @@ allocations in some cases
   - Fix the evaluation of the any() formula so it also works with
     constant sources
 
-* 0.6.0:
+# 0.6.0:
   - New tool, netidx recorder, records subscriptions to compact
     archive files and publishes archive files.
   - Add list_matching and check_changed methods to ResolverRead. Both
@@ -1382,7 +1387,7 @@ allocations in some cases
     and const_encoded_len to avoid confusion.
   - Implement From on Value for most primitive types.
   - Add a trait, FromValue, that behaves like FromStr, and implement
-    it for many primitive types. Refactor cast_* methods into
+    it for many primitive types. Refactor cast_# methods into
     cast_to::<T> where T: FromValue.
   - Tune the resolver server to give much higher priority to Resolve
     over List, Table and especially ListMatching calls.
@@ -1396,7 +1401,7 @@ allocations in some cases
   - Implement a write dialog in the browser table view.
   - Move to Tokio 1.0 and Bytes 1.0
 
-* 0.5.1:
+# 0.5.1:
   - Resolver server: improve the performance of sharding (eliminate
     integer division) for a noticable speedup processing large
     batches.
@@ -1408,7 +1413,7 @@ allocations in some cases
     publishing.
   - Fix unit tests.
 
-* 0.5.0:
+# 0.5.0:
   - Update to tokio 0.3 aka 1.0
   - Implement timeout logic in the resolver client to deal with the
     case where a resolver server is hung. The rule is, minimum timeout
@@ -1464,7 +1469,7 @@ allocations in some cases
     component. The major version bump is due to tokio 0.3 being a
     potentially large change.
 
-* 0.4.2:
+# 0.4.2:
   - Fix browser design mode widget highlights are wrong when there are
     nested grids.
   - Maybe fix an intermittant issue with design mode where invisible
@@ -1472,7 +1477,7 @@ allocations in some cases
     visible widgets are not.
   - Make the WIP book the homepage
 
-* 0.4.1:
+# 0.4.1:
   - Fix browser can't get out of raw mode.
   - Subscriber: Tweak the semantics when registering a duplicate
     channel for updates on a subscription. Now, if begin_with_last is
@@ -1496,7 +1501,7 @@ allocations in some cases
     subscription is unsubscribed and there are no queued
     subscriptions.
 
-* 0.4.0:
+# 0.4.0:
   - protocol breaking changes (additions). 0.4 will be the last non
     backwards compatible protocol, from here on protocol breaking
     changes will introduce a new protocol version, and new library
@@ -1530,19 +1535,19 @@ allocations in some cases
     breaking changes. e.g. publisher and subscriber write now take a
     triple of path, type, value, instead of path, value.
 
-* 0.3.2:
+# 0.3.2:
   - minor api enhancement. add update_changed, and current to
     publisher::Val
 
-* 0.3.1:
+# 0.3.1:
   - make publisher::Id public again, sorry!
 
-* 0.3.0:
+# 0.3.0:
   - basic netidx browser added to tools, more is planned for it
   - protocol not compatible with previous versions
   - subscriber Val::last and Dval::last are no longer async
 
-* 0.2.0:
+# 0.2.0:
   - trim tokio features to the required set
   - config in dns is removed due to limitations, which is really sad
     because it was damn cool
@@ -1552,11 +1557,11 @@ allocations in some cases
   - test extensively on windows
   - protocol not compatible with previous versions
 
-* 0.1.2:
+# 0.1.2:
   - Experimental support for publisher/subscriber on windows
 
-* 0.1.1:
+# 0.1.1:
   - Fix some bugs
 
-* 0.1.0:
+# 0.1.0:
   -Initial release
