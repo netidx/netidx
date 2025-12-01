@@ -69,7 +69,7 @@ let handle_command_mode_key = |e: KeyCode| -> [`Stop, `Continue] select e {
     },
     e@ `Backspace if command != "" => {
         let len = str::len(command) - 1;
-        command <- e ~ str::sub(#start:0, #len, command)?;
+        command <- e ~ str::sub(#start:0, #len, command)$;
         `Stop
     },
     `Esc => {
