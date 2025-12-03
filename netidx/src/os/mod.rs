@@ -47,14 +47,14 @@ pub(crate) mod local_auth {
     }
 
     #[cfg(windows)]
-    pub(crate) use windows::local_auth::*;
+    pub(crate) use crate::os::windows::local_auth::*;
 
     #[cfg(unix)]
-    pub(crate) use unix::local_auth::*;
+    pub(crate) use crate::os::unix::local_auth::*;
 }
 
 #[cfg(unix)]
-pub(crate) use unix::Mapper;
+pub(crate) use crate::os::unix::Mapper;
 
 #[cfg(windows)]
-pub(crate) use windows::Mapper;
+pub(crate) use crate::os::windows::Mapper;
