@@ -190,6 +190,12 @@ impl InternalOnly {
         self.cfg.clone()
     }
 
+    /// gracefully stop the system
+    pub async fn shutdown(self) {
+        self.publisher.shutdown().await;
+        drop(self.subscriber);
+    }
+
     pub async fn new() -> Result<Self> {
         let resolver = {
             use resolver_server::config::{self, file};
