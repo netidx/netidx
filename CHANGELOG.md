@@ -1,3 +1,7 @@
+# 0.31.2
+
+- fix windows build
+
 # 0.31.1 tools, protocols
 
 - fix some warnings in the tui browser
