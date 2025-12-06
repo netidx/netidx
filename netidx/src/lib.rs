@@ -196,7 +196,7 @@ impl InternalOnly {
         drop(self.subscriber);
     }
 
-    pub async fn new() -> Result<Self> {
+    async fn new_inner() -> Result<Self> {
         let resolver = {
             use resolver_server::config::{self, file};
             let cfg = file::ConfigBuilder::default()
@@ -207,27 +207,7 @@ impl InternalOnly {
                     .build()?])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
-            #[cfg(unix)]
-            {
-                resolver_server::Server::new(cfg.clone(), false, 0).await?
-            }
-            #[cfg(windows)]
-            {
-                // work around tokio::net::TcpListener not setting SO_REUSEADDR on windows
-                use std::time::Duration;
-                use tokio::time;
-                let mut tries = 0;
-                loop {
-                    match resolver_server::Server::new(cfg.clone(), false, 0).await {
-                        Ok(resolver) => break resolver,
-                        Err(e) if tries >= 3 => bail!(e),
-                        Err(_) => {
-                            time::sleep(Duration::from_millis(500)).await;
-                            tries += 1
-                        }
-                    }
-                }
-            }
+            resolver_server::Server::new(cfg.clone(), false, 0).await?
         };
         let addr = *resolver.local_addr();
         let cfg = {
@@ -242,5 +222,28 @@ impl InternalOnly {
         let publisher = PublisherBuilder::new(cfg.clone()).build().await?;
         let subscriber = SubscriberBuilder::new(cfg.clone()).build()?;
         Ok(Self { _resolver: resolver, publisher, subscriber, cfg })
+    }
+
+    #[cfg(unix)]
+    pub async fn new() -> Result<Self> {
+        Self::new_inner().await
+    }
+
+    // work around tokio not setting SO_REUSEADDR on windows
+    #[cfg(windows)]
+    pub async fn new() -> Result<Self> {
+        use std::time::Duration;
+        use tokio::time;
+        let mut tries = 0;
+        loop {
+            match Self::new_inner().await {
+                Ok(r) => break Ok(r),
+                Err(e) if tries >= 3 => bail!(e),
+                Err(_) => {
+                    time::sleep(Duration::from_millis(500)).await;
+                    tries += 1
+                }
+            }
+        }
     }
 }
