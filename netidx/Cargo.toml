@@ -20,7 +20,13 @@ krb5_iov = ["cross-krb5/iov"]
 daemonize = "0.5"
 
 [target.'cfg(windows)'.dependencies]
-windows = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32", 
+    "Win32_Storage", 
+    "Win32_Storage_FileSystem", 
+    "Win32_System",
+    "Win32_System_Threading"
+] }
 
 [dependencies]
 anyhow = { workspace = true }

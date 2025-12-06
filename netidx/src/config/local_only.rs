@@ -1,12 +1,13 @@
 use crate::config::Config;
 use anyhow::Result;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::{
     env, future,
     io::{stdin, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    os::fd::{AsRawFd, FromRawFd},
     process::Command,
     str::FromStr,
 };
@@ -49,8 +50,18 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
                 }
                 std::process::exit(0)
             });
-            let fd = stdin().as_raw_fd();
-            let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+            #[cfg(unix)]
+            let listener = {
+                use std::os::fd::{AsRawFd, FromRawFd};
+                let fd = stdin().as_raw_fd();
+                unsafe { std::net::TcpListener::from_raw_fd(fd) }
+            };
+            #[cfg(windows)]
+            let listener = {
+                use std::os::windows::io::FromRawSocket;
+                let fd = stdin().as_raw_handle() as u64;
+                unsafe { std::net::TcpListener::from_raw_socket(fd) }
+            };
             use crate::resolver_server::{
                 self,
                 config::{self, file},
@@ -73,22 +84,27 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
 
 #[cfg(windows)]
 fn start_local_resolver(l: TcpListener) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Stdio;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::SetHandleInformation;
-    use windows::Win32::System::Threading::{
-        CREATE_NO_WINDOW, DETACHED_PROCESS, HANDLE_FLAG_INHERIT,
+    use std::{
+        os::{
+            raw::c_void,
+            windows::{
+                io::{AsRawSocket, FromRawHandle},
+                process::CommandExt,
+            },
+        },
+        process::Stdio,
     };
-    let raw_handle = l.as_raw_socket().as_raw_handle();
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
+    let raw_handle = l.as_raw_socket() as *mut c_void;
     // Make the handle inheritable
     unsafe {
         let handle = HANDLE(raw_handle);
-        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)?;
     }
     Command::new(env::current_exe()?)
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-        .stdin(Stdio::from_raw_handle(raw_handle))
+        .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
+        .stdin(unsafe { Stdio::from_raw_handle(raw_handle) })
         .spawn()?;
     Ok(())
 }
