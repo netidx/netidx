@@ -207,7 +207,27 @@ impl InternalOnly {
                     .build()?])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
-            resolver_server::Server::new(cfg, false, 0).await?
+            #[cfg(unix)]
+            {
+                resolver_server::Server::new(cfg.clone(), false, 0).await?
+            }
+            #[cfg(windows)]
+            {
+                // work around tokio::net::TcpListener not setting SO_REUSEADDR on windows
+                use std::time::Duration;
+                use tokio::time;
+                let mut tries = 0;
+                loop {
+                    match resolver_server::Server::new(cfg.clone(), false, 0).await {
+                        Ok(resolver) => break resolver,
+                        Err(e) if tries >= 3 => bail!(e),
+                        Err(_) => {
+                            time::sleep(Duration::from_millis(500)).await;
+                            tries += 1
+                        }
+                    }
+                }
+            }
         };
         let addr = *resolver.local_addr();
         let cfg = {

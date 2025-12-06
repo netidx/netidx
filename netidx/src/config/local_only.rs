@@ -114,7 +114,10 @@ fn start_local_resolver(l: TcpListener) -> Result<PathBuf> {
     use daemonize::{Daemonize, Outcome, Stdio};
     use std::{
         fs::{File, OpenOptions},
-        os::unix::process::CommandExt,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::process::CommandExt,
+        },
         path::PathBuf,
     };
     use tempdir::TempDir;
