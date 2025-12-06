@@ -1,5 +1,5 @@
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{bail, Result};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::{
@@ -43,6 +43,20 @@ fn client_cfg_for_addr(addr: SocketAddr) -> Result<Config> {
 pub(super) fn maybe_run_local_resolver() -> Result<()> {
     if !get_env_as::<bool>(VAR_WE_ARE_RESOLVER, false) {
         return Ok(());
+    }
+    // On Windows, explicitly initialize Winsock before any socket operations.
+    // This is necessary when running as a DETACHED_PROCESS where the normal
+    // lazy initialization may not work correctly.
+    #[cfg(windows)]
+    {
+        use windows::Win32::Networking::WinSock::{WSAStartup, WSADATA};
+        unsafe {
+            let mut wsa_data: WSADATA = std::mem::zeroed();
+            let result = WSAStartup(0x0202, &mut wsa_data); // Request Winsock 2.2
+            if result != 0 {
+                bail!("WSAStartup failed with error: {}", result);
+            }
+        }
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(
         async move {
