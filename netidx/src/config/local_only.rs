@@ -2,15 +2,17 @@ use crate::config::Config;
 use anyhow::Result;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
-#[cfg(unix)]
-use std::path::PathBuf;
 use std::{
-    env, future,
+    env,
+    fs::{File, OpenOptions},
+    future,
     io::{stdin, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    path::PathBuf,
     process::Command,
     str::FromStr,
 };
+use tempdir::TempDir;
 use tokio::net::TcpListener;
 
 const DEFAULT_PORT: u16 = 59200;
@@ -82,6 +84,10 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
     )
 }
 
+fn open_out(tmp: &PathBuf, name: &str) -> Result<File> {
+    Ok(OpenOptions::new().write(true).create(true).truncate(true).open(tmp.join(name))?)
+}
+
 #[cfg(windows)]
 fn start_local_resolver(l: TcpListener) -> Result<()> {
     use std::{
@@ -102,9 +108,17 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
         let handle = HANDLE(raw_handle);
         SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)?;
     }
-    Command::new(env::current_exe()?)
+    let exe = env::current_exe()?;
+    let td = TempDir::new("netidx_resolver")?.into_path();
+    let stdout = Stdio::from(open_out(&td, "stdout")?);
+    let stderr = Stdio::from(open_out(&td, "stderr")?);
+    Command::new(exe)
         .creation_flags(CREATE_NO_WINDOW.0 | DETACHED_PROCESS.0)
         .stdin(unsafe { Stdio::from_raw_handle(raw_handle) })
+        .env(VAR_WE_ARE_RESOLVER, "true")
+        .env(VAR_RESOLVER_TMPDIR, &td)
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()?;
     Ok(())
 }
@@ -112,22 +126,10 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
 #[cfg(unix)]
 fn start_local_resolver(l: TcpListener) -> Result<PathBuf> {
     use daemonize::{Daemonize, Outcome, Stdio};
-    use std::{
-        fs::{File, OpenOptions},
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::process::CommandExt,
-        },
-        path::PathBuf,
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::process::CommandExt,
     };
-    use tempdir::TempDir;
-    fn open_out(tmp: &PathBuf, name: &str) -> Result<File> {
-        Ok(OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(tmp.join(name))?)
-    }
     let raw_fd = l.as_raw_fd();
     let current_exe = env::current_exe()?;
     let td = TempDir::new("netidx_resolver")?.into_path();
