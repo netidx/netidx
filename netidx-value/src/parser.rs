@@ -3,15 +3,15 @@ use arcstr::ArcStr;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice, from_str, many1, none_of, not_followed_by, one_of,
-    optional, parser,
+    attempt, between, choice, eof, from_str, look_ahead, many1, none_of, not_followed_by,
+    one_of, optional, parser,
     parser::{
-        char::{alpha_num, digit, spaces, string},
+        char::{digit, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
         repeat::escaped,
     },
-    sep_by,
+    sep_by, sep_by1,
     stream::{position, Range},
     token, unexpected_any, EasyParser, ParseError, Parser, RangeStream,
 };
@@ -22,6 +22,81 @@ use poolshark::local::LPooled;
 use rust_decimal::Decimal;
 use std::{borrow::Cow, result::Result, str::FromStr, sync::LazyLock, time::Duration};
 use triomphe::Arc;
+
+// sep_by1, but a separator terminator is allowed, and ignored
+pub fn sep_by1_tok<I, O, OC, EP, SP, TP>(
+    p: EP,
+    sep: SP,
+    term: TP,
+) -> impl Parser<I, Output = OC>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+    OC: Extend<O> + Default,
+    SP: Parser<I>,
+    EP: Parser<I, Output = O>,
+    TP: Parser<I>,
+{
+    sep_by1(choice((look_ahead(term).map(|_| None::<O>), p.map(Some))), sep).map(
+        |mut e: LPooled<Vec<Option<O>>>| {
+            let mut res = OC::default();
+            res.extend(e.drain(..).filter_map(|e| e));
+            res
+        },
+    )
+}
+
+// sep_by, but a separator terminator is allowed, and ignored
+pub fn sep_by_tok<I, O, OC, EP, SP, TP>(
+    p: EP,
+    sep: SP,
+    term: TP,
+) -> impl Parser<I, Output = OC>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+    OC: Extend<O> + Default,
+    SP: Parser<I>,
+    EP: Parser<I, Output = O>,
+    TP: Parser<I>,
+{
+    sep_by(choice((look_ahead(term).map(|_| None::<O>), p.map(Some))), sep).map(
+        |mut e: LPooled<Vec<Option<O>>>| {
+            let mut res = OC::default();
+            res.extend(e.drain(..).filter_map(|e| e));
+            res
+        },
+    )
+}
+
+fn sptoken<I>(t: char) -> impl Parser<I, Output = char>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(token(t))
+}
+
+fn spstring<I>(t: &'static str) -> impl Parser<I, Output = &'static str>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    spaces().with(string(t))
+}
+
+fn csep<I>() -> impl Parser<I, Output = char>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    attempt(spaces().with(token(','))).skip(spaces())
+}
 
 fn should_escape_generic(c: char) -> bool {
     c.is_control()
@@ -72,7 +147,7 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    spaces().with(between(token('"'), token('"'), escaped_string(must_escape, esc)))
+    between(token('"'), token('"'), escaped_string(must_escape, esc))
 }
 
 fn uint<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
@@ -180,104 +255,83 @@ where
     I::Range: Range,
 {
     spaces().with(choice((
-        attempt(
-            between(
-                token('['),
-                token(']'),
-                sep_by(value(must_escape, esc), attempt(spaces().with(token(',')))),
-            )
-            .map(|mut vals: LPooled<Vec<Value>>| {
-                Value::Array(ValArray::from_iter_exact(vals.drain(..)))
-            }),
-        ),
-        attempt(between(
+        choice((
+            attempt(constant("u8")).with(uint::<_, u8>().map(Value::U8)),
+            attempt(constant("u16")).with(uint::<_, u16>().map(Value::U16)),
+            attempt(constant("u32")).with(uint::<_, u32>().map(Value::U32)),
+            constant("u64").with(uint::<_, u64>().map(Value::U64)),
+            attempt(constant("i8")).with(int::<_, i8>().map(Value::I8)),
+            attempt(constant("i16")).with(int::<_, i16>().map(Value::I16)),
+            attempt(constant("i32")).with(int::<_, i32>().map(Value::I32)),
+            constant("i64").with(int::<_, i64>().map(Value::I64)),
+            attempt(constant("v32")).with(uint::<_, u32>().map(Value::V32)),
+            constant("v64").with(uint::<_, u64>().map(Value::V64)),
+            attempt(constant("z32")).with(int::<_, i32>().map(Value::Z32)),
+            constant("z64").with(int::<_, i64>().map(Value::Z64)),
+            attempt(constant("f32")).with(flt::<_, f32>().map(Value::F32)),
+            attempt(constant("f64")).with(flt::<_, f64>().map(Value::F64)),
+        )),
+        between(
+            token('['),
+            sptoken(']'),
+            sep_by_tok(value(must_escape, esc), csep(), token(']')),
+        )
+        .map(|mut vals: LPooled<Vec<Value>>| {
+            Value::Array(ValArray::from_iter_exact(vals.drain(..)))
+        }),
+        between(
             token('{'),
-            token('}'),
-            sep_by(
-                (
-                    value(must_escape, esc),
-                    spaces().with(string("=>")).with(value(must_escape, esc)),
-                ),
-                attempt(spaces().with(token(','))),
+            sptoken('}'),
+            sep_by_tok(
+                (value(must_escape, esc), spstring("=>").with(value(must_escape, esc))),
+                csep(),
+                token('}'),
             )
             .map(|mut vals: LPooled<Vec<(Value, Value)>>| {
                 Value::Map(immutable_chunkmap::map::Map::from_iter(vals.drain(..)))
             }),
-        )),
-        attempt(quoted(must_escape, esc)).map(|s| Value::String(ArcStr::from(s))),
-        attempt(flt::<_, f64>()).map(Value::F64),
-        attempt(int::<_, i64>()).map(Value::I64),
-        attempt(
-            string("true").skip(not_followed_by(alpha_num())).map(|_| Value::Bool(true)),
         ),
-        attempt(
-            string("false")
-                .skip(not_followed_by(alpha_num()))
-                .map(|_| Value::Bool(false)),
-        ),
-        attempt(string("null").skip(not_followed_by(alpha_num())).map(|_| Value::Null)),
-        attempt(
-            constant("decimal")
-                .with(flt::<_, Decimal>())
-                .map(|d| Value::Decimal(Arc::new(d))),
-        ),
-        // Integer and float types grouped to stay under choice! limit
-        attempt(choice((
-            attempt(constant("u8").with(uint::<_, u8>()).map(Value::U8)),
-            attempt(constant("i8").with(int::<_, i8>()).map(Value::I8)),
-            attempt(constant("u16").with(uint::<_, u16>()).map(Value::U16)),
-            attempt(constant("i16").with(int::<_, i16>()).map(Value::I16)),
-            attempt(constant("u32").with(uint::<_, u32>()).map(Value::U32)),
-            attempt(constant("v32").with(uint::<_, u32>()).map(Value::V32)),
-            attempt(constant("i32").with(int::<_, i32>()).map(Value::I32)),
-            attempt(constant("z32").with(int::<_, i32>()).map(Value::Z32)),
-            attempt(constant("u64").with(uint::<_, u64>()).map(Value::U64)),
-            attempt(constant("v64").with(uint::<_, u64>()).map(Value::V64)),
-            attempt(constant("i64").with(int::<_, i64>()).map(Value::I64)),
-            attempt(constant("z64").with(int::<_, i64>()).map(Value::Z64)),
-            attempt(constant("f32").with(flt::<_, f32>()).map(Value::F32)),
-            attempt(constant("f64").with(flt::<_, f64>()).map(Value::F64)),
-        ))),
-        attempt(
-            constant("bytes")
-                .with(from_str(base64str()))
-                .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
-        ),
-        attempt(constant("abstract").with(from_str(base64str())).then(
-            |Base64Encoded(v)| match Abstract::decode(&mut &v[..]) {
+        quoted(must_escape, esc).map(|s| Value::String(ArcStr::from(s))),
+        flt::<_, f64>().map(Value::F64),
+        int::<_, i64>().map(Value::I64),
+        string("true").map(|_| Value::Bool(true)),
+        string("false").map(|_| Value::Bool(false)),
+        string("null").map(|_| Value::Null),
+        constant("bytes")
+            .with(from_str(base64str()))
+            .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
+        constant("abstract").with(from_str(base64str())).then(|Base64Encoded(v)| {
+            match Abstract::decode(&mut &v[..]) {
                 Ok(a) => combine::value(Value::Abstract(a)).right(),
                 Err(_) => unexpected_any("failed to unpack abstract").left(),
-            },
-        )),
-        attempt(
-            constant("error")
-                .with(value(must_escape, esc))
-                .map(|v| Value::Error(Arc::new(v))),
-        ),
-        attempt(
-            constant("datetime")
-                .with(from_str(quoted(must_escape, esc)))
-                .map(|d| Value::DateTime(Arc::new(d))),
-        ),
-        attempt(
-            constant("duration")
-                .with(flt::<_, f64>().and(choice((
-                    string("ns"),
-                    string("us"),
-                    string("ms"),
-                    string("s"),
-                ))))
-                .map(|(n, suffix)| {
-                    let d = match suffix {
-                        "ns" => Duration::from_secs_f64(n / 1e9),
-                        "us" => Duration::from_secs_f64(n / 1e6),
-                        "ms" => Duration::from_secs_f64(n / 1e3),
-                        "s" => Duration::from_secs_f64(n),
-                        _ => unreachable!(),
-                    };
-                    Value::Duration(Arc::new(d))
-                }),
-        ),
+            }
+        }),
+        constant("error")
+            .with(value(must_escape, esc))
+            .map(|v| Value::Error(Arc::new(v))),
+        attempt(constant("decimal"))
+            .with(flt::<_, Decimal>())
+            .map(|d| Value::Decimal(Arc::new(d))),
+        attempt(constant("datetime"))
+            .with(from_str(quoted(must_escape, esc)))
+            .map(|d| Value::DateTime(Arc::new(d))),
+        constant("duration")
+            .with(flt::<_, f64>().and(choice((
+                string("ns"),
+                string("us"),
+                string("ms"),
+                string("s"),
+            ))))
+            .map(|(n, suffix)| {
+                let d = match suffix {
+                    "ns" => Duration::from_secs_f64(n / 1e9),
+                    "us" => Duration::from_secs_f64(n / 1e6),
+                    "ms" => Duration::from_secs_f64(n / 1e3),
+                    "s" => Duration::from_secs_f64(n),
+                    _ => unreachable!(),
+                };
+                Value::Duration(Arc::new(d))
+            }),
     )))
 }
 
@@ -294,6 +348,8 @@ parser! {
 
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
     value(&VAL_MUST_ESC, &VAL_ESC)
+        .skip(spaces())
+        .skip(eof())
         .easy_parse(position::Stream::new(s))
         .map(|(r, _)| r)
         .map_err(|e| anyhow::anyhow!(format!("{}", e)))
@@ -302,6 +358,8 @@ pub fn parse_value(s: &str) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use arcstr::literal;
+
+    use crate::Map;
 
     use super::*;
 
@@ -350,5 +408,25 @@ mod tests {
             Value::error(literal!("error")),
             parse_value(r#"error:"error""#).unwrap()
         );
+        let a = ValArray::from_iter_exact(
+            [Value::I64(42), Value::String(literal!("hello world"))].into_iter(),
+        );
+        assert_eq!(
+            Value::Array(a.clone()),
+            parse_value(r#"[42, "hello world", ]"#).unwrap()
+        );
+        assert_eq!(Value::Array(a), parse_value(r#"[42, "hello world"]"#).unwrap());
+        let m = Map::from_iter([
+            (Value::I64(42), Value::String(literal!("hello world"))),
+            (Value::String(literal!("hello world")), Value::I64(42)),
+        ]);
+        assert_eq!(
+            Value::Map(m.clone()),
+            parse_value(r#"{ 42 => "hello world", "hello world" => 42, }"#).unwrap()
+        );
+        assert_eq!(
+            Value::Map(m.clone()),
+            parse_value(r#"{ 42 => "hello world", "hello world" => 42}"#).unwrap()
+        )
     }
 }
