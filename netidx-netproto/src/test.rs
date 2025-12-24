@@ -346,7 +346,42 @@ mod resolver {
 
     proptest! {
         #[test]
-        fn test_fuzz(b in bytes()) {
+        fn test_fuzz0(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz1(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz2(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz3(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz4(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz5(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz6(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz7(b in bytes()) {
             fuzz(b)
         }
 
@@ -616,7 +651,42 @@ mod publisher {
         }
 
         #[test]
-        fn test_fuzz(b in bytes()) {
+        fn test_fuzz0(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz1(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz2(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz3(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz4(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz5(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz6(b in bytes()) {
+            fuzz(b)
+        }
+
+        #[test]
+        fn test_fuzz7(b in bytes()) {
             fuzz(b)
         }
 
@@ -636,7 +706,42 @@ mod publisher {
         }
 
         #[test]
-        fn test_value_roundtrip(v in value()) {
+        fn test_value_roundtrip0(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip1(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip2(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip3(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip4(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip5(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip6(v in value()) {
+            round_trip(v)
+        }
+
+        #[test]
+        fn test_value_roundtrip7(v in value()) {
             round_trip(v)
         }
     }

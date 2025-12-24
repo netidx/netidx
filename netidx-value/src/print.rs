@@ -310,7 +310,7 @@ impl Value {
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            Value::Error(v) => match dbg!(&**v) {
+            Value::Error(v) => match &**v {
                 Value::String(s) => {
                     write!(f, r#"error:"{}""#, esc.escape(&*s))
                 }
