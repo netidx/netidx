@@ -300,9 +300,9 @@ impl Value {
                 write!(f, r#""{}""#, esc.escape(&*s))
             }
             Value::Bytes(b) => {
-                let pfx = if types { "bytes:" } else { "" };
+                let pfx = if types || b.is_empty() { "bytes:" } else { "" };
                 if b.is_empty() {
-                    write!(f, "{}null", pfx)
+                    write!(f, "{}==", pfx)
                 } else {
                     write!(f, "{}{}", pfx, BASE64.encode(&*b))
                 }
@@ -310,7 +310,7 @@ impl Value {
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
             Value::Null => write!(f, "null"),
-            Value::Error(v) => match &**v {
+            Value::Error(v) => match dbg!(&**v) {
                 Value::String(s) => {
                     write!(f, r#"error:"{}""#, esc.escape(&*s))
                 }

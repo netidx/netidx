@@ -20,7 +20,7 @@ use escaping::Escape;
 use netidx_core::pack::Pack;
 use poolshark::local::LPooled;
 use rust_decimal::Decimal;
-use std::{borrow::Cow, result::Result, str::FromStr, sync::LazyLock, time::Duration};
+use std::{borrow::Cow, str::FromStr, sync::LazyLock, time::Duration};
 use triomphe::Arc;
 
 // sep_by1, but a separator terminator is allowed, and ignored
@@ -205,29 +205,24 @@ where
     })
 }
 
-struct Base64Encoded(Vec<u8>);
-
-impl FromStr for Base64Encoded {
-    type Err = base64::DecodeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        BASE64.decode(s).map(Base64Encoded)
-    }
-}
-
-fn base64str<I>() -> impl Parser<I, Output = String>
+fn base64<I>() -> impl Parser<I, Output = LPooled<Vec<u8>>>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    choice((
-        attempt(string("null")).map(|_| String::new()),
-        recognize((
-            take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
-            take_while(|c: char| c == '='),
-        )),
+    recognize((
+        take_while(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/'),
+        take_while(|c: char| c == '='),
     ))
+    .then(|s: LPooled<String>| {
+        let s = if &*s == "==" { LPooled::take() } else { s };
+        let mut buf: LPooled<Vec<u8>> = LPooled::take();
+        match BASE64.decode_vec(&*s, &mut buf) {
+            Ok(()) => combine::value(buf).right(),
+            Err(_) => unexpected_any("base64 decode failed").left(),
+        }
+    })
 }
 
 fn constant<I>(typ: &'static str) -> impl Parser<I, Output = ()>
@@ -298,9 +293,9 @@ where
         string("false").map(|_| Value::Bool(false)),
         string("null").map(|_| Value::Null),
         constant("bytes")
-            .with(from_str(base64str()))
-            .map(|Base64Encoded(v)| Value::Bytes(PBytes::new(Bytes::from(v)))),
-        constant("abstract").with(from_str(base64str())).then(|Base64Encoded(v)| {
+            .with(base64())
+            .map(|v| Value::Bytes(PBytes::new(Bytes::from(LPooled::detach(v))))),
+        constant("abstract").with(base64()).then(|v| {
             match Abstract::decode(&mut &v[..]) {
                 Ok(a) => combine::value(Value::Abstract(a)).right(),
                 Err(_) => unexpected_any("failed to unpack abstract").left(),
