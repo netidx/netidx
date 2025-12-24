@@ -6,7 +6,7 @@ use combine::{
     attempt, between, choice, eof, from_str, look_ahead, many1, none_of, not_followed_by,
     one_of, optional, parser,
     parser::{
-        char::{digit, spaces, string},
+        char::{alpha_num, digit, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
         repeat::escaped,
@@ -69,6 +69,15 @@ where
             res
         },
     )
+}
+
+pub fn not_prefix<I>() -> impl Parser<I, Output = ()>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    not_followed_by(choice((token('_'), alpha_num())))
 }
 
 fn sptoken<I>(t: char) -> impl Parser<I, Output = char>
@@ -289,9 +298,9 @@ where
         quoted(must_escape, esc).map(|s| Value::String(ArcStr::from(s))),
         flt::<_, f64>().map(Value::F64),
         int::<_, i64>().map(Value::I64),
-        string("true").map(|_| Value::Bool(true)),
-        string("false").map(|_| Value::Bool(false)),
-        string("null").map(|_| Value::Null),
+        attempt(string("true").skip(not_prefix())).map(|_| Value::Bool(true)),
+        attempt(string("false").skip(not_prefix())).map(|_| Value::Bool(false)),
+        attempt(string("null").skip(not_prefix())).map(|_| Value::Null),
         constant("bytes")
             .with(base64())
             .map(|v| Value::Bytes(PBytes::new(Bytes::from(LPooled::detach(v))))),
