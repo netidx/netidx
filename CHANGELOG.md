@@ -1,6 +1,8 @@
 # 0.31.2
 
 - fix windows build
+- optimize the value parser in netidx-value
+- change the pretty print of empty bytes to bytes:== so base64 will always round trip
 
 # 0.31.1 tools, protocols
 
