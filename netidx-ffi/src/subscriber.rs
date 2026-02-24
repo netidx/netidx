@@ -82,7 +82,8 @@ pub extern "C" fn netidx_subscriber_subscribe_updates(
     update_rx: *mut *mut NetidxUpdateReceiver,
 ) -> *mut NetidxDval {
     let path = unsafe { &*path }.inner.clone();
-    let buf = if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
+    let buf =
+        if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
     let (tx, rx) = mpsc::channel(buf);
     let flags = UpdatesFlags::empty();
     let dval = unsafe { &*sub }.inner.subscribe_updates(path, [(flags, tx)]);
@@ -97,9 +98,7 @@ pub extern "C" fn netidx_subscriber_subscribe_updates(
 pub extern "C" fn netidx_subscriber_clone(
     sub: *const NetidxSubscriber,
 ) -> *mut NetidxSubscriber {
-    Box::into_raw(Box::new(NetidxSubscriber {
-        inner: unsafe { &*sub }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxSubscriber { inner: unsafe { &*sub }.inner.clone() }))
 }
 
 /// Destroy a subscriber.
@@ -130,7 +129,9 @@ pub extern "C" fn netidx_dval_wait_subscribed(
     let rt = unsafe { &*rt };
     let dval = unsafe { &*dval };
     let result = crate::block_on_timeout(
-        &rt.rt, timeout_ms, "timeout waiting for subscription",
+        &rt.rt,
+        timeout_ms,
+        "timeout waiting for subscription",
         dval.inner.wait_subscribed(),
     );
     match result {
@@ -167,9 +168,7 @@ pub extern "C" fn netidx_dval_write(
 /// Clone a Dval.
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_dval_clone(dval: *const NetidxDval) -> *mut NetidxDval {
-    Box::into_raw(Box::new(NetidxDval {
-        inner: unsafe { &*dval }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxDval { inner: unsafe { &*dval }.inner.clone() }))
 }
 
 /// Destroy a Dval (unsubscribes).
@@ -208,9 +207,7 @@ pub extern "C" fn netidx_event_type(ev: *const NetidxEvent) -> EventType {
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_event_value_clone(ev: *const NetidxEvent) -> *mut NetidxValue {
     match &unsafe { &*ev }.inner {
-        Event::Update(v) => {
-            Box::into_raw(Box::new(NetidxValue { inner: v.clone() }))
-        }
+        Event::Update(v) => Box::into_raw(Box::new(NetidxValue { inner: v.clone() })),
         Event::Unsubscribed => std::ptr::null_mut(),
     }
 }
@@ -295,11 +292,15 @@ pub extern "C" fn netidx_update_receiver_try_recv(
     out_len: *mut usize,
 ) -> *mut *mut NetidxSubscriberUpdate {
     let rx = unsafe { &mut *rx };
-    match rx.inner.try_next() {
-        Ok(Some(mut batch)) => {
-            let mut results: Vec<*mut NetidxSubscriberUpdate> = Vec::with_capacity(batch.len());
+    match rx.inner.try_recv() {
+        Ok(mut batch) => {
+            let mut results: Vec<*mut NetidxSubscriberUpdate> =
+                Vec::with_capacity(batch.len());
             for (sub_id, event) in batch.drain(..) {
-                results.push(Box::into_raw(Box::new(NetidxSubscriberUpdate { sub_id, event })));
+                results.push(Box::into_raw(Box::new(NetidxSubscriberUpdate {
+                    sub_id,
+                    event,
+                })));
             }
             unsafe { *out_len = results.len() };
             let raw = Box::into_raw(results.into_boxed_slice());
@@ -327,9 +328,13 @@ pub extern "C" fn netidx_update_receiver_recv(
     let result = crate::block_on_timeout_opt(&rt.rt, timeout_ms, rx.inner.next());
     match result {
         Some(mut batch) => {
-            let mut results: Vec<*mut NetidxSubscriberUpdate> = Vec::with_capacity(batch.len());
+            let mut results: Vec<*mut NetidxSubscriberUpdate> =
+                Vec::with_capacity(batch.len());
             for (sub_id, event) in batch.drain(..) {
-                results.push(Box::into_raw(Box::new(NetidxSubscriberUpdate { sub_id, event })));
+                results.push(Box::into_raw(Box::new(NetidxSubscriberUpdate {
+                    sub_id,
+                    event,
+                })));
             }
             unsafe { *out_len = results.len() };
             let raw = Box::into_raw(results.into_boxed_slice());

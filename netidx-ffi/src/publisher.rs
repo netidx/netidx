@@ -1,10 +1,10 @@
 use crate::{
+    config::NetidxConfig,
     error::{clear_error, set_error, NetidxError},
     path::NetidxPath,
     runtime::NetidxRuntime,
-    value::NetidxValue,
-    config::NetidxConfig,
     timeout_from_millis,
+    value::NetidxValue,
 };
 use futures::channel::mpsc;
 use futures::prelude::*;
@@ -26,9 +26,7 @@ pub extern "C" fn netidx_publisher_builder_new(
     cfg: *const NetidxConfig,
 ) -> *mut NetidxPublisherBuilder {
     let cfg = unsafe { &*cfg }.inner.clone();
-    Box::into_raw(Box::new(NetidxPublisherBuilder {
-        inner: PublisherBuilder::new(cfg),
-    }))
+    Box::into_raw(Box::new(NetidxPublisherBuilder { inner: PublisherBuilder::new(cfg) }))
 }
 
 /// Set the bind config from a string (e.g. "local", "192.168.0.0/24").
@@ -42,7 +40,10 @@ pub unsafe extern "C" fn netidx_publisher_builder_bind_cfg(
 ) -> bool {
     unsafe { clear_error(err) };
     let s = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(bind as *const u8, bind_len))
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            bind as *const u8,
+            bind_len,
+        ))
     };
     match s.parse::<BindCfg>() {
         Ok(cfg) => {
@@ -141,12 +142,15 @@ pub extern "C" fn netidx_publisher_publish_with_writes(
     unsafe { clear_error(err) };
     let path = unsafe { Box::from_raw(path) }.inner;
     let init = unsafe { Box::from_raw(init) }.inner;
-    let buf = if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
+    let buf =
+        if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
     let (tx, rx) = mpsc::channel(buf);
-    match unsafe { &*pub_ }
-        .inner
-        .publish_with_flags_and_writes(netidx::publisher::PublishFlags::empty(), path, init, Some(tx))
-    {
+    match unsafe { &*pub_ }.inner.publish_with_flags_and_writes(
+        netidx::publisher::PublishFlags::empty(),
+        path,
+        init,
+        Some(tx),
+    ) {
         Ok(val) => {
             unsafe {
                 *write_rx = Box::into_raw(Box::new(NetidxWriteReceiver { inner: rx }));
@@ -169,7 +173,8 @@ pub extern "C" fn netidx_publisher_writes(
     val: *const NetidxPublisherVal,
     channel_buffer: usize,
 ) -> *mut NetidxWriteReceiver {
-    let buf = if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
+    let buf =
+        if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
     let (tx, rx) = mpsc::channel(buf);
     unsafe { &*pub_ }.inner.writes(unsafe { &*val }.inner.id(), tx);
     Box::into_raw(Box::new(NetidxWriteReceiver { inner: rx }))
@@ -199,9 +204,7 @@ pub extern "C" fn netidx_publisher_flushed(
 pub extern "C" fn netidx_publisher_clone(
     pub_: *const NetidxPublisher,
 ) -> *mut NetidxPublisher {
-    Box::into_raw(Box::new(NetidxPublisher {
-        inner: unsafe { &*pub_ }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxPublisher { inner: unsafe { &*pub_ }.inner.clone() }))
 }
 
 /// Destroy a publisher.
@@ -226,9 +229,7 @@ pub extern "C" fn netidx_publisher_val_update(
     value: *mut NetidxValue,
 ) {
     let v = unsafe { Box::from_raw(value) }.inner;
-    unsafe { &*val }
-        .inner
-        .update(&mut unsafe { &mut *batch }.inner, v);
+    unsafe { &*val }.inner.update(&mut unsafe { &mut *batch }.inner, v);
 }
 
 /// Update a published value only if it changed. Consumes `value`.
@@ -239,9 +240,7 @@ pub extern "C" fn netidx_publisher_val_update_changed(
     value: *mut NetidxValue,
 ) {
     let v = unsafe { Box::from_raw(value) }.inner;
-    unsafe { &*val }
-        .inner
-        .update_changed(&mut unsafe { &mut *batch }.inner, v);
+    unsafe { &*val }.inner.update_changed(&mut unsafe { &mut *batch }.inner, v);
 }
 
 /// Destroy a published value handle. This will unpublish the value.
@@ -301,9 +300,10 @@ pub extern "C" fn netidx_write_receiver_try_recv(
     out_len: *mut usize,
 ) -> *mut *mut NetidxWriteRequest {
     let rx = unsafe { &mut *rx };
-    match rx.inner.try_next() {
-        Ok(Some(mut batch)) => {
-            let mut results: Vec<*mut NetidxWriteRequest> = Vec::with_capacity(batch.len());
+    match rx.inner.try_recv() {
+        Ok(mut batch) => {
+            let mut results: Vec<*mut NetidxWriteRequest> =
+                Vec::with_capacity(batch.len());
             for req in batch.drain(..) {
                 results.push(Box::into_raw(Box::new(NetidxWriteRequest {
                     path: req.path,
@@ -373,9 +373,7 @@ pub extern "C" fn netidx_write_request_path(
 pub extern "C" fn netidx_write_request_value(
     req: *const NetidxWriteRequest,
 ) -> *mut NetidxValue {
-    Box::into_raw(Box::new(NetidxValue {
-        inner: unsafe { &*req }.value.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxValue { inner: unsafe { &*req }.value.clone() }))
 }
 
 /// Destroy a write request.

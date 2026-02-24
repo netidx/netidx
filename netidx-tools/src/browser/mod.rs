@@ -15,12 +15,12 @@ pub async fn run(
     auth: DesiredAuth,
     params: publisher::Params,
 ) -> Result<()> {
-    /*
-    let resolver = ModuleResolver::VFS(FxHashMap::from_iter([(
-        Path::from("/browser"),
-        literal!(include_str!("browser.gx")),
-    )]));
-    */
+    let (mt, rx) = graphix_package::MainThreadHandle::new();
+    std::thread::spawn(move || {
+        while let Ok(_) = rx.recv() {
+            panic!("The main thread is not available")
+        }
+    });
     let publisher = PublisherBuilder::new(cfg.clone())
         .desired_auth(auth.clone())
         .bind_cfg(params.bind)
@@ -34,6 +34,6 @@ pub async fn run(
         .subscriber(subscriber)
         .no_init(true)
         .build()?
-        .run()
+        .run(mt)
         .await
 }

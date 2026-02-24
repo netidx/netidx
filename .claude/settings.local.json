@@ -15,7 +15,9 @@
       "Bash(ls:*)",
       "Bash(head:*)",
       "Bash(cbindgen:*)",
-      "Bash(~/.cargo/bin/cbindgen:*)"
+      "Bash(~/.cargo/bin/cbindgen:*)",
+      "Bash(file:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

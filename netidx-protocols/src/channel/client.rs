@@ -54,10 +54,10 @@ impl Receiver {
 
     fn try_fill_queue(&mut self, dead: &AtomicBool) -> Result<()> {
         for _ in 0..10 {
-            match self.updates.try_next() {
+            match self.updates.try_recv() {
                 Err(_) => break,
                 Ok(r) => {
-                    if let Err(e) = self.fill_from_channel(dead, r) {
+                    if let Err(e) = self.fill_from_channel(dead, Some(r)) {
                         if self.queued.len() == 0 {
                             return Err(e);
                         } else {

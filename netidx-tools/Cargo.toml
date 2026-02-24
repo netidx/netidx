@@ -45,6 +45,7 @@ poolshark = { workspace = true }
 graphix-shell = { workspace = true }
 graphix-rt = { workspace = true }
 graphix-compiler = { workspace = true }
+graphix-package = { workspace = true }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
 netidx-archive = { path = "../netidx-archive", version = "0.31.0", default-features = false }
