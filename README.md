@@ -265,6 +265,7 @@ cargo build -p netidx-ffi
 # Examples with a Makefile are in netidx-ffi/examples/
 ```
 
+There is also a CMakeLists.txt for CMake integration.
 See [`netidx-ffi/`](netidx-ffi/) for details.
 
 ## Comparison to Alternatives
