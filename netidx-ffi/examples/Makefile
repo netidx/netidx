@@ -8,9 +8,9 @@ CFLAGS      := -Wall -Wextra $(INCLUDE)
 CXXFLAGS    := -std=c++20 -Wall -Wextra $(INCLUDE)
 LDFLAGS     := -L$(TARGET_DIR) -lnetidx_ffi -Wl,-rpath,$(abspath $(TARGET_DIR))
 
-C_SRCS   := publisher.c subscriber.c stress.c rpc_server.c rpc_client.c \
+C_SRCS   := publisher.c subscriber.c subscriber_simple.c stress.c rpc_server.c rpc_client.c \
             channel_server.c channel_client.c
-CXX_SRCS := publisher.cpp subscriber.cpp stress.cpp rpc_server.cpp rpc_client.cpp \
+CXX_SRCS := publisher.cpp subscriber.cpp subscriber_simple.cpp stress.cpp rpc_server.cpp rpc_client.cpp \
             channel_server.cpp channel_client.cpp
 
 C_BINS   := $(C_SRCS:.c=_c)
