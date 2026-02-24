@@ -1,0 +1,34 @@
+[package]
+name = "netidx-ffi"
+version = "0.31.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "C/C++ FFI bindings for netidx"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+netidx = { path = "../netidx", version = "0.31.0", default-features = false }
+netidx-core = { path = "../netidx-core", version = "0.31.0", default-features = false }
+netidx-protocols = { path = "../netidx-protocols", version = "0.31.0", default-features = false }
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+immutable-chunkmap = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true }
+parking_lot = { workspace = true }
+poolshark = { workspace = true }
+rust_decimal = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.28"

@@ -1,0 +1,13 @@
+CompileFlags:
+  Add:
+    - -I../include
+    - -Wall
+    - -Wextra
+
+---
+
+If:
+  PathMatch: .*\.cpp
+CompileFlags:
+  Add:
+    - -std=c++20

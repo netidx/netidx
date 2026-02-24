@@ -11,7 +11,21 @@
       "Bash(cargo run:*)",
       "Bash(timeout 30 cargo run:*)",
       "Bash(timeout 5 cargo run:*)",
-      "Bash(1)"
+      "Bash(1)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(cbindgen:*)",
+      "Bash(~/.cargo/bin/cbindgen:*)",
+      "Bash(file:*)",
+      "Bash(grep:*)",
+      "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make 2>&1)",
+      "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make clean && make 2>&1)",
+      "Bash(make clean && make 2>&1)",
+      "Bash(make subscriber_c:*)",
+      "Bash(make subscriber_cpp:*)",
+      "Bash(tail:*)",
+      "Bash(rm -rf /tmp/netidx-cmake-release && cmake -S /home/eric/proj/netidx/netidx-ffi -B /tmp/netidx-cmake-release -DCMAKE_BUILD_TYPE=Release 2>&1)",
+      "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make subscriber_simple_c subscriber_simple_cpp 2>&1)"
     ],
     "deny": [],
     "ask": []
