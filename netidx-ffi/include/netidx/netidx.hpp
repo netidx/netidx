@@ -54,6 +54,8 @@ class SubscriberBuilder;
 class Dval;
 class Event;
 class SubscriberUpdate;
+class UpdateChannel;
+class UpdateReceiver;
 
 namespace rpc { class Call; class Client; }
 namespace channel { class ServerConnection; class ClientConnection; }
@@ -250,6 +252,11 @@ public:
         return std::nullopt;
     }
 
+    // Error value factory
+    static Value error(Value inner) {
+        return Value(netidx_value_error(inner.release()));
+    }
+
     // Error inner value
     Value error_clone() const {
         auto* p = netidx_value_get_error_clone(ptr_);
@@ -350,7 +357,7 @@ public:
     // Abstract
     std::optional<std::array<uint8_t, 16>> abstract_id() const {
         std::array<uint8_t, 16> id;
-        if (!netidx_value_abstract_id(ptr_, &id))
+        if (!netidx_value_abstract_id(ptr_, reinterpret_cast<uint8_t(*)[16]>(id.data())))
             return std::nullopt;
         return id;
     }
@@ -703,6 +710,42 @@ public:
     }
 };
 
+// --- UpdatesFlags ---
+
+namespace updates_flags {
+    inline constexpr uint32_t BEGIN_WITH_LAST      = 0x01;
+    inline constexpr uint32_t STOP_COLLECTING_LAST = 0x02;
+    inline constexpr uint32_t NO_SPURIOUS          = 0x04;
+}
+
+// --- UpdateChannel ---
+
+class UpdateChannel {
+    NetidxUpdateChannel* ptr_;
+public:
+    static std::pair<UpdateChannel, UpdateReceiver> create(size_t channel_buffer = 0);
+
+    ~UpdateChannel() { if (ptr_) netidx_update_channel_destroy(ptr_); }
+
+    UpdateChannel(const UpdateChannel& o) : ptr_(netidx_update_channel_clone(o.ptr_)) {}
+    UpdateChannel& operator=(const UpdateChannel& o) {
+        if (this != &o) { if (ptr_) netidx_update_channel_destroy(ptr_); ptr_ = netidx_update_channel_clone(o.ptr_); }
+        return *this;
+    }
+    UpdateChannel(UpdateChannel&& o) noexcept : ptr_(o.ptr_) { o.ptr_ = nullptr; }
+    UpdateChannel& operator=(UpdateChannel&& o) noexcept {
+        if (this != &o) { if (ptr_) netidx_update_channel_destroy(ptr_); ptr_ = o.ptr_; o.ptr_ = nullptr; }
+        return *this;
+    }
+
+    const NetidxUpdateChannel* raw() const { return ptr_; }
+
+private:
+    explicit UpdateChannel(NetidxUpdateChannel* p) : ptr_(p) {}
+    friend class Dval;
+    friend class Subscriber;
+};
+
 // --- UpdateReceiver ---
 
 class UpdateReceiver {
@@ -747,7 +790,15 @@ public:
 private:
     explicit UpdateReceiver(NetidxUpdateReceiver* p) : ptr_(p) {}
     friend class Subscriber;
+    friend class UpdateChannel;
 };
+
+// UpdateChannel::create defined here because it needs UpdateReceiver to be complete
+inline std::pair<UpdateChannel, UpdateReceiver> UpdateChannel::create(size_t channel_buffer) {
+    NetidxUpdateReceiver* rx_ptr = nullptr;
+    auto* ch = netidx_update_channel_new(channel_buffer, &rx_ptr);
+    return {UpdateChannel(ch), UpdateReceiver(rx_ptr)};
+}
 
 // --- Dval ---
 
@@ -770,6 +821,10 @@ public:
 
     bool write(Value value) {
         return netidx_dval_write(ptr_, value.release());
+    }
+
+    void updates(const UpdateChannel& channel, uint32_t flags = 0) {
+        netidx_dval_updates(ptr_, channel.raw(), flags);
     }
 
     ~Dval() { if (ptr_) netidx_dval_destroy(ptr_); }
@@ -801,15 +856,8 @@ public:
         return Dval(netidx_subscriber_subscribe(ptr_, path.raw()));
     }
 
-    struct SubscribeUpdatesResult {
-        Dval dval;
-        UpdateReceiver rx;
-    };
-
-    SubscribeUpdatesResult subscribe_updates(const Path& path, size_t channel_buffer = 0) {
-        NetidxUpdateReceiver* rx_ptr = nullptr;
-        auto* dval = netidx_subscriber_subscribe_updates(ptr_, path.raw(), channel_buffer, &rx_ptr);
-        return {Dval(dval), UpdateReceiver(rx_ptr)};
+    Dval subscribe_updates(const Path& path, const UpdateChannel& channel, uint32_t flags = 0) {
+        return Dval(netidx_subscriber_subscribe_updates(ptr_, path.raw(), channel.raw(), flags));
     }
 
     ~Subscriber() { if (ptr_) netidx_subscriber_destroy(ptr_); }
@@ -840,9 +888,9 @@ public:
     explicit SubscriberBuilder(const Config& cfg)
         : ptr_(netidx_subscriber_builder_new(cfg.raw())) {}
 
-    Subscriber build() {
+    Subscriber build(const Runtime& rt) {
         NetidxError err = netidx_error_init();
-        auto* p = netidx_subscriber_builder_build(ptr_, &err);
+        auto* p = netidx_subscriber_builder_build(rt.raw(), ptr_, &err);
         ptr_ = nullptr; // consumed
         detail::check_error(err);
         return Subscriber(p);
@@ -862,6 +910,9 @@ public:
 // --- RPC ---
 
 namespace rpc {
+
+// Forward-declare the C callback so Call can befriend it
+extern "C" void rpc_proc_c_handler(void*, NetidxRpcCall*);
 
 // --- RPC Call (server side) ---
 
@@ -892,7 +943,7 @@ public:
 private:
     explicit Call(NetidxRpcCall* p) : ptr_(p) {}
     friend class Proc;
-    friend extern "C" void rpc_proc_c_handler(void*, NetidxRpcCall*);
+    friend void rpc_proc_c_handler(void*, NetidxRpcCall*);
 };
 
 // Type-erased C callback context for RPC proc handlers

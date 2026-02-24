@@ -12,6 +12,90 @@ use netidx::subscriber::{
 };
 use poolshark::global::GPooled;
 
+// --- UpdatesFlags ---
+
+/// Bitmask flags controlling update delivery behavior.
+/// Combine with bitwise OR (e.g. `BEGIN_WITH_LAST | NO_SPURIOUS`).
+#[repr(u32)]
+pub enum NetidxUpdatesFlag {
+    /// Send the last known value immediately upon registration.
+    BeginWithLast = 0x01,
+    /// Stop storing the last value (improves performance).
+    StopCollectingLast = 0x02,
+    /// When re-registering the same channel with BEGIN_WITH_LAST,
+    /// do not re-send the last value.
+    NoSpurious = 0x04,
+}
+
+// --- UpdateChannel ---
+
+/// A shared sender for aggregating updates from multiple Dvals into one receiver.
+pub struct NetidxUpdateChannel {
+    inner: mpsc::Sender<GPooled<Vec<(SubId, Event)>>>,
+}
+
+/// Create a shared update channel. Returns the sender; writes the receiver to `rx_out`.
+/// `channel_buffer`: channel capacity; 0 uses the default.
+#[unsafe(no_mangle)]
+pub extern "C" fn netidx_update_channel_new(
+    channel_buffer: usize,
+    rx_out: *mut *mut NetidxUpdateReceiver,
+) -> *mut NetidxUpdateChannel {
+    let buf = if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
+    let (tx, rx) = mpsc::channel(buf);
+    unsafe {
+        *rx_out = Box::into_raw(Box::new(NetidxUpdateReceiver { inner: rx }));
+    }
+    Box::into_raw(Box::new(NetidxUpdateChannel { inner: tx }))
+}
+
+/// Clone an update channel sender (cheap, shares the same underlying channel).
+#[unsafe(no_mangle)]
+pub extern "C" fn netidx_update_channel_clone(
+    ch: *const NetidxUpdateChannel,
+) -> *mut NetidxUpdateChannel {
+    Box::into_raw(Box::new(NetidxUpdateChannel {
+        inner: unsafe { &*ch }.inner.clone(),
+    }))
+}
+
+/// Destroy an update channel sender. The receiver remains valid until dropped separately.
+#[unsafe(no_mangle)]
+pub extern "C" fn netidx_update_channel_destroy(ch: *mut NetidxUpdateChannel) {
+    if !ch.is_null() {
+        drop(unsafe { Box::from_raw(ch) });
+    }
+}
+
+/// Subscribe using an existing shared update channel.
+/// Does not consume `path` or `channel`. `flags` is a bitmask of `NetidxUpdatesFlag`.
+#[unsafe(no_mangle)]
+pub extern "C" fn netidx_subscriber_subscribe_updates(
+    sub: *const NetidxSubscriber,
+    path: *const NetidxPath,
+    channel: *const NetidxUpdateChannel,
+    flags: u32,
+) -> *mut NetidxDval {
+    let path = unsafe { &*path }.inner.clone();
+    let tx = unsafe { &*channel }.inner.clone();
+    let flags = UpdatesFlags::from_bits_truncate(flags);
+    let dval = unsafe { &*sub }.inner.subscribe_updates(path, [(flags, tx)]);
+    Box::into_raw(Box::new(NetidxDval { inner: dval }))
+}
+
+/// Register a shared update channel on an existing Dval.
+/// Does not consume `dval` or `channel`. `flags` is a bitmask of `NetidxUpdatesFlag`.
+#[unsafe(no_mangle)]
+pub extern "C" fn netidx_dval_updates(
+    dval: *const NetidxDval,
+    channel: *const NetidxUpdateChannel,
+    flags: u32,
+) {
+    let tx = unsafe { &*channel }.inner.clone();
+    let flags = UpdatesFlags::from_bits_truncate(flags);
+    unsafe { &*dval }.inner.updates(flags, tx);
+}
+
 // --- SubscriberBuilder ---
 
 pub struct NetidxSubscriberBuilder {
@@ -32,11 +116,14 @@ pub extern "C" fn netidx_subscriber_builder_new(
 /// Build the subscriber. Consumes the builder. Returns NULL on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_subscriber_builder_build(
+    rt: *const NetidxRuntime,
     sb: *mut NetidxSubscriberBuilder,
     err: *mut NetidxError,
 ) -> *mut NetidxSubscriber {
     unsafe { clear_error(err) };
     let mut builder = unsafe { Box::from_raw(sb) };
+    let rt = unsafe { &*rt };
+    let _guard = rt.rt.enter();
     match builder.inner.build() {
         Ok(sub) => Box::into_raw(Box::new(NetidxSubscriber { inner: sub })),
         Err(e) => {
@@ -71,27 +158,6 @@ pub extern "C" fn netidx_subscriber_subscribe(
     Box::into_raw(Box::new(NetidxDval { inner: dval }))
 }
 
-/// Subscribe with an update channel, so you can receive all updates.
-/// Returns a Dval and an update receiver via out-parameter.
-/// `channel_buffer`: channel capacity; 0 uses the default.
-#[unsafe(no_mangle)]
-pub extern "C" fn netidx_subscriber_subscribe_updates(
-    sub: *const NetidxSubscriber,
-    path: *const NetidxPath,
-    channel_buffer: usize,
-    update_rx: *mut *mut NetidxUpdateReceiver,
-) -> *mut NetidxDval {
-    let path = unsafe { &*path }.inner.clone();
-    let buf =
-        if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
-    let (tx, rx) = mpsc::channel(buf);
-    let flags = UpdatesFlags::empty();
-    let dval = unsafe { &*sub }.inner.subscribe_updates(path, [(flags, tx)]);
-    unsafe {
-        *update_rx = Box::into_raw(Box::new(NetidxUpdateReceiver { inner: rx }));
-    }
-    Box::into_raw(Box::new(NetidxDval { inner: dval }))
-}
 
 /// Clone a subscriber handle (cheap Arc clone).
 #[unsafe(no_mangle)]

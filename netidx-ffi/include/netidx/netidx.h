@@ -24,6 +24,33 @@ typedef uint8_t NetidxEventType;
 #endif // __cplusplus
 
 /**
+ * Bitmask flags controlling update delivery behavior.
+ * Combine with bitwise OR (e.g. `BEGIN_WITH_LAST | NO_SPURIOUS`).
+ */
+enum NetidxUpdatesFlag
+#ifdef __cplusplus
+  : uint32_t
+#endif // __cplusplus
+ {
+    /**
+     * Send the last known value immediately upon registration.
+     */
+    NETIDX_UPDATES_FLAG_BEGIN_WITH_LAST = 1,
+    /**
+     * Stop storing the last value (improves performance).
+     */
+    NETIDX_UPDATES_FLAG_STOP_COLLECTING_LAST = 2,
+    /**
+     * When re-registering the same channel with BEGIN_WITH_LAST,
+     * do not re-send the last value.
+     */
+    NETIDX_UPDATES_FLAG_NO_SPURIOUS = 4,
+};
+#ifndef __cplusplus
+typedef uint32_t NetidxUpdatesFlag;
+#endif // __cplusplus
+
+/**
  * Discriminant tag for Value, matching the Rust enum's discriminants.
  */
 enum NetidxValueType
@@ -108,6 +135,11 @@ typedef struct NetidxSubscriberBuilder NetidxSubscriberBuilder;
 typedef struct NetidxSubscriberUpdate NetidxSubscriberUpdate;
 
 typedef struct NetidxUpdateBatch NetidxUpdateBatch;
+
+/**
+ * A shared sender for aggregating updates from multiple Dvals into one receiver.
+ */
+typedef struct NetidxUpdateChannel NetidxUpdateChannel;
 
 typedef struct NetidxUpdateReceiver NetidxUpdateReceiver;
 
@@ -613,6 +645,40 @@ struct NetidxRuntime *netidx_runtime_new(uintptr_t worker_threads, struct Netidx
 void netidx_runtime_destroy(struct NetidxRuntime *rt);
 
 /**
+ * Create a shared update channel. Returns the sender; writes the receiver to `rx_out`.
+ * `channel_buffer`: channel capacity; 0 uses the default.
+ */
+struct NetidxUpdateChannel *netidx_update_channel_new(uintptr_t channel_buffer,
+                                                      struct NetidxUpdateReceiver **rx_out);
+
+/**
+ * Clone an update channel sender (cheap, shares the same underlying channel).
+ */
+struct NetidxUpdateChannel *netidx_update_channel_clone(const struct NetidxUpdateChannel *ch);
+
+/**
+ * Destroy an update channel sender. The receiver remains valid until dropped separately.
+ */
+void netidx_update_channel_destroy(struct NetidxUpdateChannel *ch);
+
+/**
+ * Subscribe using an existing shared update channel.
+ * Does not consume `path` or `channel`. `flags` is a bitmask of `NetidxUpdatesFlag`.
+ */
+struct NetidxDval *netidx_subscriber_subscribe_updates(const struct NetidxSubscriber *sub,
+                                                       const struct NetidxPath *path,
+                                                       const struct NetidxUpdateChannel *channel,
+                                                       uint32_t flags);
+
+/**
+ * Register a shared update channel on an existing Dval.
+ * Does not consume `dval` or `channel`. `flags` is a bitmask of `NetidxUpdatesFlag`.
+ */
+void netidx_dval_updates(const struct NetidxDval *dval,
+                         const struct NetidxUpdateChannel *channel,
+                         uint32_t flags);
+
+/**
  * Create a new SubscriberBuilder. Does not consume `cfg`.
  */
 struct NetidxSubscriberBuilder *netidx_subscriber_builder_new(const struct NetidxConfig *cfg);
@@ -620,7 +686,8 @@ struct NetidxSubscriberBuilder *netidx_subscriber_builder_new(const struct Netid
 /**
  * Build the subscriber. Consumes the builder. Returns NULL on failure.
  */
-struct NetidxSubscriber *netidx_subscriber_builder_build(struct NetidxSubscriberBuilder *sb,
+struct NetidxSubscriber *netidx_subscriber_builder_build(const struct NetidxRuntime *rt,
+                                                         struct NetidxSubscriberBuilder *sb,
                                                          struct NetidxError *err);
 
 /**
@@ -633,16 +700,6 @@ void netidx_subscriber_builder_destroy(struct NetidxSubscriberBuilder *sb);
  */
 struct NetidxDval *netidx_subscriber_subscribe(const struct NetidxSubscriber *sub,
                                                const struct NetidxPath *path);
-
-/**
- * Subscribe with an update channel, so you can receive all updates.
- * Returns a Dval and an update receiver via out-parameter.
- * `channel_buffer`: channel capacity; 0 uses the default.
- */
-struct NetidxDval *netidx_subscriber_subscribe_updates(const struct NetidxSubscriber *sub,
-                                                       const struct NetidxPath *path,
-                                                       uintptr_t channel_buffer,
-                                                       struct NetidxUpdateReceiver **update_rx);
 
 /**
  * Clone a subscriber handle (cheap Arc clone).

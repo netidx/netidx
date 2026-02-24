@@ -6,6 +6,7 @@ style = "both"
 cpp_compat = true
 
 [export]
+include = ["NetidxUpdatesFlag"]
 
 [export.rename]
 "ValueType" = "NetidxValueType"

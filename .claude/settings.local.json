@@ -17,7 +17,12 @@
       "Bash(cbindgen:*)",
       "Bash(~/.cargo/bin/cbindgen:*)",
       "Bash(file:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make 2>&1)",
+      "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make clean && make 2>&1)",
+      "Bash(make clean && make 2>&1)",
+      "Bash(make subscriber_c:*)",
+      "Bash(make subscriber_cpp:*)"
     ],
     "deny": [],
     "ask": []
