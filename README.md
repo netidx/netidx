@@ -247,6 +247,26 @@ Real-world example: Market data logging with 2TB of local flash for
 frequently accessed periods, automatically going out to S3 when users
 request historical data.
 
+## C and C++ Bindings
+
+**netidx-ffi** provides full C and C++ bindings for netidx, so you
+can use it from languages other than Rust. It includes:
+
+- **Auto-generated C header** (`netidx.h`) via cbindgen
+- **Hand-written C++ RAII wrapper** (`netidx.hpp`) with idiomatic resource management
+- Publisher, subscriber, RPC, and bi-directional channel support
+- Complete examples in both C and C++ (publisher, subscriber, RPC, channels, stress test)
+
+```bash
+# Build the shared/static library
+cargo build -p netidx-ffi
+
+# Headers are in netidx-ffi/include/netidx/
+# Examples with a Makefile are in netidx-ffi/examples/
+```
+
+See [`netidx-ffi/`](netidx-ffi/) for details.
+
 ## Comparison to Alternatives
 
 | Feature | Netidx | MQTT | Redis Pub/Sub | gRPC |
