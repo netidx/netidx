@@ -37,9 +37,9 @@ fs3 = "0.5"
 futures = "0.3"
 fxhash = "0.2"
 globset = "0.4"
-graphix-shell = { path = "../graphix/graphix-shell", version = "0.2.2" }
-graphix-rt = { path = "../graphix/graphix-rt", version = "0.2.2" }
-graphix-compiler = { path = "../graphix/graphix-compiler", version = "0.2.2" }
+graphix-shell = "0.2.2"
+graphix-rt = "0.2.2"
+graphix-compiler = "0.2.2"
 hdrhistogram = "7"
 if-addrs = "0.14"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
@@ -108,6 +108,7 @@ members = [
     "netidx-container",
     "netidx-derive",
     "netidx-wsproxy",
+    "netidx-ffi",
     "examples",
 ]
 exclude = ["cfg/tls/id-win"]

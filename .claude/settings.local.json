@@ -11,7 +11,11 @@
       "Bash(cargo run:*)",
       "Bash(timeout 30 cargo run:*)",
       "Bash(timeout 5 cargo run:*)",
-      "Bash(1)"
+      "Bash(1)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(cbindgen:*)",
+      "Bash(~/.cargo/bin/cbindgen:*)"
     ],
     "deny": [],
     "ask": []
