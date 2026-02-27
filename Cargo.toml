@@ -41,6 +41,7 @@ graphix-shell = { version = "0.4.0", path = "../graphix/graphix-shell" }
 graphix-rt = { version = "0.4.0", path = "../graphix/graphix-rt" }
 graphix-compiler = { version = "0.4.0", path = "../graphix/graphix-compiler" }
 graphix-package = { version = "0.4.0", path = "../graphix/graphix-package" }
+graphix-package-core = { version = "0.4.0", path = "../graphix/stdlib/graphix-package-core" }
 hdrhistogram = "7"
 if-addrs = "0.14"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }

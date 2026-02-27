@@ -65,6 +65,10 @@
 //! Values support casting between compatible types using [`Value::cast_to()`].
 //! For example, integers can be cast to floats, and vice versa (with range checking).
 
+pub use arcstr;
+#[doc(hidden)]
+pub extern crate self as netidx_value;
+
 use anyhow::Result;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
