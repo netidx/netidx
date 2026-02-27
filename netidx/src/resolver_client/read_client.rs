@@ -20,7 +20,7 @@ use futures::{
 use fxhash::FxHashSet;
 use log::{info, warn};
 use poolshark::global::GPooled;
-use rand::{rng, seq::SliceRandom, Rng};
+use rand::{rng, seq::SliceRandom, RngExt};
 use std::{
     cmp::max, collections::HashSet, fmt::Debug, net::SocketAddr, sync::Arc,
     time::Duration,

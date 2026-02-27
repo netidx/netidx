@@ -9,7 +9,7 @@ mod resolver {
     };
     use arcstr::literal;
     use netidx_netproto::resolver::{PublisherPriority, TargetAuth};
-    use rand::{rng, Rng};
+    use rand::{rng, RngExt};
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::time;
 

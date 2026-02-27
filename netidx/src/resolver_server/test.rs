@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 use fxhash::FxHashMap;
 use netidx_netproto::resolver::PublisherPriority;
-use rand::{self, rng, Rng};
+use rand::{self, rng, RngExt};
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,

@@ -28,7 +28,7 @@ use log::{debug, info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
 use poolshark::global::GPooled;
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,

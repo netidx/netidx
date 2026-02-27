@@ -128,7 +128,7 @@ pub(crate) mod local_auth {
     use netidx_core::utils::{make_sha3_token, pack};
     use netidx_netproto::resolver::HashMethod;
     use parking_lot::Mutex;
-    use rand::{rng, Rng};
+    use rand::{rng, RngExt};
     use std::{
         collections::{hash_map::Entry, HashMap},
         fs::Permissions,

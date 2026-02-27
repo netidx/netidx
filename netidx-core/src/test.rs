@@ -1,7 +1,7 @@
 use crate::pack::{self, Pack};
 use bytes::Buf;
 use chrono::prelude::*;
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 
 #[test]
 fn test_naive_date_pack() {

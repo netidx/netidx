@@ -89,7 +89,7 @@ async fn list_task(
     resolver: ResolverRead,
     spec: GlobSet,
 ) -> Result<()> {
-    use rand::{rng, Rng};
+    use rand::{rng, RngExt};
     let mut cts = CTS::new(&spec);
     let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {

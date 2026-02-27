@@ -29,7 +29,7 @@ use log::{info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
-use rand::{self, Rng};
+use rand::{self, RngExt};
 use std::{
     boxed::Box,
     collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},

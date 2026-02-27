@@ -33,7 +33,7 @@ use log::{info, trace, warn};
 use netidx_netproto::resolver::{PublisherPriority, PublisherRef, UserInfo};
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
-use rand::Rng;
+use rand::RngExt;
 use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;

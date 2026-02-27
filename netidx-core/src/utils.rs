@@ -2,7 +2,6 @@
 use crate::pack::{Pack, PackError};
 use anyhow::{self, Result};
 use bytes::{Bytes, BytesMut};
-use digest::Digest;
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -10,7 +9,7 @@ use futures::{
     stream::FusedStream,
     task::{Context, Poll},
 };
-use sha3::Sha3_512;
+use sha3::{Digest, Sha3_512};
 use std::{
     borrow::Borrow,
     cell::RefCell,

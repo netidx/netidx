@@ -227,7 +227,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand::{rng, seq::SliceRandom, Rng};
+    use rand::{rng, seq::SliceRandom, RngExt};
     use std::collections::BTreeMap;
 
     #[test]

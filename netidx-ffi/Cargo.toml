@@ -31,4 +31,4 @@ triomphe = { workspace = true }
 uuid = { workspace = true }
 
 [build-dependencies]
-cbindgen = "0.28"
+cbindgen = "0.29"

@@ -24,33 +24,6 @@ typedef uint8_t NetidxEventType;
 #endif // __cplusplus
 
 /**
- * Bitmask flags controlling update delivery behavior.
- * Combine with bitwise OR (e.g. `BEGIN_WITH_LAST | NO_SPURIOUS`).
- */
-enum NetidxUpdatesFlag
-#ifdef __cplusplus
-  : uint32_t
-#endif // __cplusplus
- {
-    /**
-     * Send the last known value immediately upon registration.
-     */
-    NETIDX_UPDATES_FLAG_BEGIN_WITH_LAST = 1,
-    /**
-     * Stop storing the last value (improves performance).
-     */
-    NETIDX_UPDATES_FLAG_STOP_COLLECTING_LAST = 2,
-    /**
-     * When re-registering the same channel with BEGIN_WITH_LAST,
-     * do not re-send the last value.
-     */
-    NETIDX_UPDATES_FLAG_NO_SPURIOUS = 4,
-};
-#ifndef __cplusplus
-typedef uint32_t NetidxUpdatesFlag;
-#endif // __cplusplus
-
-/**
  * Discriminant tag for Value, matching the Rust enum's discriminants.
  */
 enum NetidxValueType
@@ -86,6 +59,33 @@ enum NetidxValueType
 };
 #ifndef __cplusplus
 typedef uint32_t NetidxValueType;
+#endif // __cplusplus
+
+/**
+ * Bitmask flags controlling update delivery behavior.
+ * Combine with bitwise OR (e.g. `BEGIN_WITH_LAST | NO_SPURIOUS`).
+ */
+enum NetidxUpdatesFlag
+#ifdef __cplusplus
+  : uint32_t
+#endif // __cplusplus
+ {
+    /**
+     * Send the last known value immediately upon registration.
+     */
+    NETIDX_UPDATES_FLAG_BEGIN_WITH_LAST = 1,
+    /**
+     * Stop storing the last value (improves performance).
+     */
+    NETIDX_UPDATES_FLAG_STOP_COLLECTING_LAST = 2,
+    /**
+     * When re-registering the same channel with BEGIN_WITH_LAST,
+     * do not re-send the last value.
+     */
+    NETIDX_UPDATES_FLAG_NO_SPURIOUS = 4,
+};
+#ifndef __cplusplus
+typedef uint32_t NetidxUpdatesFlag;
 #endif // __cplusplus
 
 typedef struct NetidxChannelClientConn NetidxChannelClientConn;

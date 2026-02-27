@@ -23,7 +23,7 @@ use log::{debug, error, info, trace, warn};
 use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use parking_lot::Mutex as SyncMutex;
 use poolshark::global::{GPooled, Pool};
-use rand::{rng, Rng};
+use rand::{rng, RngExt};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{

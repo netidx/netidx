@@ -26,7 +26,7 @@ crossbeam-queue = "0.3"
 cross-krb5 = { version = "0.4", default-features = false }
 ctrlc = { version = "3", features = ["termination"] }
 derive_builder = "0.20"
-digest = "0.10"
+digest = "0.11"
 diligent-date-parser = "0.1.4"
 dirs = "6"
 enumflags2 = "0.7"
@@ -37,13 +37,13 @@ fs3 = "0.5"
 futures = "0.3"
 fxhash = "0.2"
 globset = "0.4"
-graphix-shell = { version = "0.4.0", path = "../graphix/graphix-shell" }
+graphix-shell = { version = "0.4.0", path = "../graphix/graphix-shell", default-features = false }
 graphix-rt = { version = "0.4.0", path = "../graphix/graphix-rt" }
 graphix-compiler = { version = "0.4.0", path = "../graphix/graphix-compiler" }
 graphix-package = { version = "0.4.0", path = "../graphix/graphix-package" }
 graphix-package-core = { version = "0.4.0", path = "../graphix/stdlib/graphix-package-core" }
 hdrhistogram = "7"
-if-addrs = "0.14"
+if-addrs = "0.15"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
 indexmap = "2"
 keyring = "3"
@@ -57,7 +57,7 @@ parking_lot = "0.12.1"
 pin-utils = "0.1"
 poolshark = { version = "0.2.5" }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
-rand = "0.9"
+rand = "0.10"
 rayon = "1"
 regex = "1"
 rust_decimal = { version = "1", features = [
