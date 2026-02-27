@@ -61,3 +61,8 @@ serde = { workspace = true }
 triomphe = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+graphix-package-core = { workspace = true }
+netidx-derive = { path = "../netidx-derive", version = "0.31.0" }
+netidx-value = { path = "../netidx-value", version = "0.31.0" }
