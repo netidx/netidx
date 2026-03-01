@@ -1,48 +1,15 @@
 // Integration tests verifying that IntoValue/FromValue derive macros produce
 // wire-compatible Values with the graphix runtime, and round-trip correctly.
 
-use anyhow::{bail, Result};
-use arcstr::{literal, ArcStr};
+use anyhow::Result;
+use arcstr::ArcStr;
 use graphix_package_core::testing;
-use graphix_rt::{GXEvent, NoExt};
+use graphix_rt::NoExt;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, Value};
-use tokio::sync::mpsc;
 
 const TEST_REGISTER: &[testing::RegisterFn] =
     &[<graphix_package_core::P as graphix_package::Package<NoExt>>::register];
-
-async fn eval_graphix(code: &str) -> Result<(Value, testing::TestCtx)> {
-    let (tx, mut rx) = mpsc::channel(10);
-    let gx_code = format!("let result = {code}");
-    let tbl = fxhash::FxHashMap::from_iter([(
-        netidx::path::Path::from("/test.gx"),
-        ArcStr::from(gx_code),
-    )]);
-    let resolver = graphix_compiler::expr::ModuleResolver::VFS(tbl);
-    let ctx = testing::init_with_resolvers(tx, TEST_REGISTER, vec![resolver]).await?;
-    let compiled = ctx.rt.compile(literal!("{ mod test; test::result }")).await?;
-    let eid = compiled.exprs[0].id;
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
-    tokio::pin!(timeout);
-    loop {
-        tokio::select! {
-            _ = &mut timeout => bail!("timeout waiting for graphix result"),
-            batch = rx.recv() => match batch {
-                None => bail!("graphix runtime died"),
-                Some(mut batch) => {
-                    for e in batch.drain(..) {
-                        if let GXEvent::Updated(id, v) = e {
-                            if id == eid {
-                                return Ok((v, ctx));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Check that a Rust value's IntoValue representation matches the graphix
 /// evaluation of `graphix_expr`, and that FromValue round-trips back to the
@@ -52,7 +19,7 @@ where
     T: Clone + PartialEq + std::fmt::Debug + Into<Value> + FromValue,
 {
     let derive_val: Value = original.clone().into();
-    let (gx_val, ctx) = eval_graphix(graphix_expr).await?;
+    let (gx_val, ctx) = testing::eval(graphix_expr, &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     let roundtrip = T::from_value(gx_val)?;
     assert_eq!(roundtrip, original);
@@ -175,7 +142,8 @@ async fn rename_attr() -> Result<()> {
     let orig = WithAttrs { a: 1, b: "hello".into(), c: 99 };
     let derive_val: Value = orig.into();
     // c is skipped; b is renamed to "bravo"
-    let (gx_val, ctx) = eval_graphix("{ a: 1, bravo: \"hello\" }").await?;
+    let (gx_val, ctx) =
+        testing::eval("{ a: 1, bravo: \"hello\" }", &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     let back = WithAttrs::from_value(gx_val)?;
     assert_eq!(back.a, 1);
@@ -215,14 +183,11 @@ async fn nested_struct() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 async fn value_default_attr() -> Result<()> {
     // Full roundtrip with all fields
-    check(
-        WithDefault { a: 1, b: 2, c: "hi".into() },
-        "{ a: 1, b: 2, c: \"hi\" }",
-    )
-    .await?;
+    check(WithDefault { a: 1, b: 2, c: "hi".into() }, "{ a: 1, b: 2, c: \"hi\" }")
+        .await?;
 
     // Wire data missing the #[value(default)] field 'b'
-    let (gx_val, ctx) = eval_graphix("{ a: 10, c: \"world\" }").await?;
+    let (gx_val, ctx) = testing::eval("{ a: 10, c: \"world\" }", &TEST_REGISTER).await?;
     let back = WithDefault::from_value(gx_val)?;
     assert_eq!(back.a, 10);
     assert_eq!(back.b, 0); // Default::default() for i64
@@ -242,7 +207,7 @@ async fn enum_variant_skip() -> Result<()> {
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].0.as_str(), "x");
 
-    let (gx_val, ctx) = eval_graphix("`Named({x: 42})").await?;
+    let (gx_val, ctx) = testing::eval("`Named({x: 42})", &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     // roundtrip: y gets Default
     let back = EnumWithSkip::from_value(gx_val)?;

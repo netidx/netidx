@@ -595,9 +595,9 @@ impl Value {
                     Typ::DateTime => Some(Value::DateTime(Arc::new(
                         DateTime::from_timestamp($v as i64, 0)?,
                     ))),
-                    Typ::Duration => {
-                        Some(Value::Duration(Arc::new(Duration::from_secs($v as u64))))
-                    }
+                    Typ::Duration => Some(Value::Duration(Arc::new(
+                        Duration::from_secs_f64($v as f64),
+                    ))),
                     Typ::Bool => Some(if $v as i64 > 0 {
                         Value::Bool(true)
                     } else {
