@@ -1,3 +1,8 @@
+# 0.31.5
+
+- add derive macros for FromValue and Into<Value> to netidx-derive
+- fix a bug in float -> duration conversion in netidx-value
+
 # 0.31.2
 
 - fix windows build
