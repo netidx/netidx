@@ -5,12 +5,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use enumflags2::BitFlags;
 use rust_decimal::Decimal;
-use std::{
-    fmt::Debug,
-    ops::Bound,
-    panic::{catch_unwind, AssertUnwindSafe},
-    time::Duration,
-};
+use std::{fmt::Debug, ops::Bound, panic::{catch_unwind, AssertUnwindSafe}, time::Duration};
 use triomphe::Arc;
 
 #[test]
@@ -220,4 +215,79 @@ fn get_unchecked() {
         let a = Abstract::default();
         get_as_unchecked::<Abstract>(Value::Abstract(a.clone()), &a)
     }
+}
+
+#[test]
+fn arith_no_panics() {
+    // operator impls: wrapping for +/-/*, checked for //%
+    // div by zero returns Error, not panic
+    assert!(matches!(Value::I64(1) / Value::I64(0), Value::Error(_)));
+    assert!(matches!(Value::U32(1) / Value::U32(0), Value::Error(_)));
+    assert!(matches!(Value::I64(1) % Value::I64(0), Value::Error(_)));
+    assert!(matches!(Value::U8(1) % Value::U8(0), Value::Error(_)));
+
+    // wrapping: overflow wraps around
+    assert_eq!(Value::I64(i64::MAX) + Value::I64(1), Value::I64(i64::MIN));
+    assert_eq!(Value::U32(0) - Value::U32(1), Value::U32(u32::MAX));
+    assert_eq!(Value::I8(i8::MAX) * Value::I8(2), Value::I8(-2));
+
+    // normal operations
+    assert_eq!(Value::I64(10) + Value::I64(20), Value::I64(30));
+    assert_eq!(Value::I64(10) - Value::I64(3), Value::I64(7));
+    assert_eq!(Value::I64(10) * Value::I64(3), Value::I64(30));
+    assert_eq!(Value::I64(10) / Value::I64(3), Value::I64(3));
+    assert_eq!(Value::I64(10) % Value::I64(3), Value::I64(1));
+    assert_eq!(Value::F64(1.0) / Value::F64(0.0), Value::F64(f64::INFINITY));
+
+    // decimal div by zero
+    let d0 = Value::Decimal(Arc::new(Decimal::from(1)));
+    let d1 = Value::Decimal(Arc::new(Decimal::from(0)));
+    assert!(matches!(d0 / d1, Value::Error(_)));
+
+    // string "0" as divisor (transitive via parse)
+    assert!(matches!(Value::I64(1) / Value::String("0".into()), Value::Error(_)));
+
+    // bool false as divisor (coerced to U32(0))
+    assert!(matches!(Value::I64(1) / Value::Bool(false), Value::Error(_)));
+
+    // duration edge cases
+    let d = Value::Duration(Arc::new(Duration::from_secs(10)));
+    assert!(matches!(d.clone() / Value::U32(0), Value::Error(_)));
+    assert!(matches!(d.clone() * Value::I64(-1), Value::Error(_)));
+    assert!(matches!(
+        d.clone() - d.clone() - d.clone(),
+        Value::Error(_)
+    ));
+    let big = Value::Duration(Arc::new(Duration::MAX));
+    assert!(matches!(big.clone() + big.clone(), Value::Error(_)));
+}
+
+#[test]
+fn checked_methods() {
+    // checked: overflow returns Error
+    assert!(matches!(Value::I64(i64::MAX).checked_add(Value::I64(1)), Value::Error(_)));
+    assert!(matches!(Value::U32(0).checked_sub(Value::U32(1)), Value::Error(_)));
+    assert!(matches!(Value::I8(i8::MAX).checked_mul(Value::I8(2)), Value::Error(_)));
+
+    // checked div by zero
+    assert!(matches!(Value::I64(1).checked_div(Value::I64(0)), Value::Error(_)));
+    assert!(matches!(Value::U8(1).checked_rem(Value::U8(0)), Value::Error(_)));
+
+    // checked: normal operations succeed
+    assert_eq!(Value::I64(10).checked_add(Value::I64(20)), Value::I64(30));
+    assert_eq!(Value::I64(10).checked_sub(Value::I64(3)), Value::I64(7));
+    assert_eq!(Value::I64(10).checked_mul(Value::I64(3)), Value::I64(30));
+    assert_eq!(Value::I64(10).checked_div(Value::I64(3)), Value::I64(3));
+    assert_eq!(Value::I64(10).checked_rem(Value::I64(3)), Value::I64(1));
+
+    // float: same behavior (no overflow concept)
+    assert_eq!(Value::F64(1.0).checked_div(Value::F64(0.0)), Value::F64(f64::INFINITY));
+
+    // decimal checked
+    let d0 = Value::Decimal(Arc::new(Decimal::from(1)));
+    let d1 = Value::Decimal(Arc::new(Decimal::from(0)));
+    assert!(matches!(d0.checked_div(d1), Value::Error(_)));
+
+    // cross-type checked
+    assert!(matches!(Value::I64(i64::MAX).checked_add(Value::I32(1)), Value::Error(_)));
 }

@@ -6,9 +6,8 @@ use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     hash::Hash,
     iter, mem,
-    num::Wrapping,
     ops::{Add, Div, Mul, Not, Rem, Sub},
-    panic::{catch_unwind, AssertUnwindSafe},
+    time::Duration,
 };
 use triomphe::Arc;
 
@@ -228,33 +227,72 @@ impl Ord for Value {
     }
 }
 
+macro_rules! int_op {
+    ($lhs:expr, wrapping, $method:ident, $rhs:expr, $Ctor:ident) => {
+        Value::$Ctor(($lhs).$method($rhs))
+    };
+    ($lhs:expr, checked, $method:ident, $rhs:expr, $Ctor:ident) => {
+        match ($lhs).$method($rhs) {
+            Some(v) => Value::$Ctor(v),
+            None => return Value::error(literal!("arithmetic error")),
+        }
+    };
+}
+
+macro_rules! checked_decimal {
+    ($lhs:expr, $dec_method:ident, $rhs:expr) => {
+        match ($lhs).$dec_method($rhs) {
+            Some(v) => Value::Decimal(Arc::new(v)),
+            None => return Value::error(literal!("decimal arithmetic error")),
+        }
+    };
+}
+
+macro_rules! checked_dur {
+    ($expr:expr) => {
+        match $expr {
+            Some(v) => Value::Duration(Arc::new(v)),
+            None => return Value::error(literal!("duration arithmetic error")),
+        }
+    };
+}
+
+macro_rules! dur_from_f64 {
+    ($expr:expr) => {
+        match Duration::try_from_secs_f64($expr) {
+            Ok(v) => Value::Duration(Arc::new(v)),
+            Err(_) => return Value::error(literal!("duration arithmetic error")),
+        }
+    };
+}
+
 macro_rules! apply_op_mixed_int {
-    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt) => {
+    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt, $mode:ident, $int_method:ident, $dec_method:ident) => {
         match $rhs {
-            Value::U8(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::I8(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::U16(r) if mem::size_of::<u16>() > mem::size_of::<$lht>() => Value::U16((Wrapping($lhs as u16) $op Wrapping(r)).0),
-            Value::U16(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::I16(r) if mem::size_of::<i16>() > mem::size_of::<$lht>() => Value::I16((Wrapping($lhs as i16) $op Wrapping(r)).0),
-            Value::I16(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::U32(r) | Value::V32(r) if mem::size_of::<u32>() > mem::size_of::<$lht>() => Value::U32((Wrapping($lhs as u32) $op Wrapping(r)).0),
-            Value::U32(r) | Value::V32(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::I32(r) | Value::Z32(r) if mem::size_of::<i32>() > mem::size_of::<$lht>() => Value::I32((Wrapping($lhs as i32) $op Wrapping(r)).0),
-            Value::I32(r) | Value::Z32(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::U64(r) | Value::V64(r) if mem::size_of::<u64>() > mem::size_of::<$lht>() => Value::U64((Wrapping($lhs as u64) $op Wrapping(r)).0),
-            Value::U64(r) | Value::V64(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
-            Value::I64(r) | Value::Z64(r) if mem::size_of::<i64>() > mem::size_of::<$lht>() => Value::I64((Wrapping($lhs as i64) $op Wrapping(r)).0),
-            Value::I64(r) | Value::Z64(r) => Value::$lhc((Wrapping($lhs) $op Wrapping(r as $lht)).0),
+            Value::U8(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::I8(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::U16(r) if mem::size_of::<u16>() > mem::size_of::<$lht>() => int_op!(($lhs as u16), $mode, $int_method, r, U16),
+            Value::U16(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::I16(r) if mem::size_of::<i16>() > mem::size_of::<$lht>() => int_op!(($lhs as i16), $mode, $int_method, r, I16),
+            Value::I16(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::U32(r) | Value::V32(r) if mem::size_of::<u32>() > mem::size_of::<$lht>() => int_op!(($lhs as u32), $mode, $int_method, r, U32),
+            Value::U32(r) | Value::V32(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::I32(r) | Value::Z32(r) if mem::size_of::<i32>() > mem::size_of::<$lht>() => int_op!(($lhs as i32), $mode, $int_method, r, I32),
+            Value::I32(r) | Value::Z32(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::U64(r) | Value::V64(r) if mem::size_of::<u64>() > mem::size_of::<$lht>() => int_op!(($lhs as u64), $mode, $int_method, r, U64),
+            Value::U64(r) | Value::V64(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
+            Value::I64(r) | Value::Z64(r) if mem::size_of::<i64>() > mem::size_of::<$lht>() => int_op!(($lhs as i64), $mode, $int_method, r, I64),
+            Value::I64(r) | Value::Z64(r) => int_op!($lhs, $mode, $int_method, r as $lht, $lhc),
             Value::F32(r) => Value::F32(($lhs as f32) $op r),
             Value::F64(r) => Value::F64(($lhs as f64) $op r),
-            Value::Decimal(r) => Value::Decimal(Arc::new(Decimal::from($lhs) $op *r)),
+            Value::Decimal(r) => checked_decimal!(Decimal::from($lhs), $dec_method, *r),
             _ => unreachable!(),
         }
     }
 }
 
 macro_rules! apply_op_mixed_float {
-    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt) => {
+    ($lhs:expr, $rhs:expr, $lhc:ident, $lht:ty, $op:tt, $dec_method:ident) => {
         match $rhs {
             Value::U8(r) => Value::$lhc($lhs $op r as $lht),
             Value::I8(r) => Value::$lhc($lhs $op r as $lht),
@@ -271,7 +309,7 @@ macro_rules! apply_op_mixed_float {
                     Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
                     Ok(d) => d
                 };
-                Value::Decimal(Arc::new(d $op *r))
+                checked_decimal!(d, $dec_method, *r)
             },
             _ => unreachable!(),
         }
@@ -279,29 +317,29 @@ macro_rules! apply_op_mixed_float {
 }
 
 macro_rules! apply_op_mixed_decimal {
-    ($lhs:expr, $rhs:expr, $op:tt) => {
+    ($lhs:expr, $rhs:expr, $dec_method:ident) => {
         match $rhs {
-            Value::U8(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::I8(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::U16(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::I16(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::U32(r) | Value::V32(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::I32(r) | Value::Z32(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::U64(r) | Value::V64(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
-            Value::I64(r) | Value::Z64(r) => Value::Decimal(Arc::new($lhs $op Decimal::from(r))),
+            Value::U8(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::I8(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::U16(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::I16(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::U32(r) | Value::V32(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::I32(r) | Value::Z32(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::U64(r) | Value::V64(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::I64(r) | Value::Z64(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
             Value::F32(r) => {
                 let d = match Decimal::try_from(r) {
                     Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
                     Ok(d) => d
                 };
-                Value::Decimal(Arc::new($lhs $op d))
+                checked_decimal!($lhs, $dec_method, d)
             },
             Value::F64(r) => {
                 let d = match Decimal::try_from(r) {
                     Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
                     Ok(d) => d
                 };
-                Value::Decimal(Arc::new($lhs $op d))
+                checked_decimal!($lhs, $dec_method, d)
             }
             _ => unreachable!(),
         }
@@ -329,39 +367,39 @@ macro_rules! number {
 }
 
 macro_rules! apply_op {
-    ($self:expr, $rhs:expr, $id:expr, $op:tt, $($pat:pat => $blk:block),+) => {
+    ($self:expr, $rhs:expr, $id:expr, $op:tt, $mode:ident, $int_method:ident, $dec_method:ident, $($pat:pat => $blk:block),+) => {
         #[allow(unreachable_patterns)]
         match ($self, $rhs) {
-            (Value::U8(l), Value::U8(r)) => Value::U8((Wrapping(l) $op Wrapping(r)).0),
-            (Value::I8(l), Value::I8(r)) => Value::I8((Wrapping(l) $op Wrapping(r)).0),
-            (Value::U16(l), Value::U16(r)) => Value::U16((Wrapping(l) $op Wrapping(r)).0),
-            (Value::I16(l), Value::I16(r)) => Value::I16((Wrapping(l) $op Wrapping(r)).0),
+            (Value::U8(l), Value::U8(r)) => int_op!(l, $mode, $int_method, r, U8),
+            (Value::I8(l), Value::I8(r)) => int_op!(l, $mode, $int_method, r, I8),
+            (Value::U16(l), Value::U16(r)) => int_op!(l, $mode, $int_method, r, U16),
+            (Value::I16(l), Value::I16(r)) => int_op!(l, $mode, $int_method, r, I16),
             (Value::U32(l) | Value::V32(l), Value::U32(r) | Value::V32(r)) => {
-                Value::U32((Wrapping(l) $op Wrapping(r)).0)
+                int_op!(l, $mode, $int_method, r, U32)
             }
             (Value::I32(l) | Value::Z32(l), Value::I32(r) | Value::Z32(r)) => {
-                Value::I32((Wrapping(l) $op Wrapping(r)).0)
+                int_op!(l, $mode, $int_method, r, I32)
             }
             (Value::U64(l) | Value::V64(l), Value::U64(r) | Value::V64(r)) => {
-                Value::U64((Wrapping(l) $op Wrapping(r)).0)
+                int_op!(l, $mode, $int_method, r, U64)
             }
             (Value::I64(l) | Value::Z64(l), Value::I64(r) | Value::Z64(r)) => {
-                Value::I64((Wrapping(l) $op Wrapping(r)).0)
+                int_op!(l, $mode, $int_method, r, I64)
             }
             (Value::F32(l), Value::F32(r)) => Value::F32(l $op r),
             (Value::F64(l), Value::F64(r)) => Value::F64(l $op r),
-            (Value::Decimal(l), Value::Decimal(r)) => Value::Decimal(Arc::new((*l) $op (*r))),
-            (Value::U8(l), v@ number!()) => apply_op_mixed_int!(l, v, U8, u8, $op),
-            (Value::I8(l), v@ number!()) => apply_op_mixed_int!(l, v, I8, i8, $op),
-            (Value::U16(l), v@ number!()) => apply_op_mixed_int!(l, v, U16, u16, $op),
-            (Value::I16(l), v@ number!()) => apply_op_mixed_int!(l, v, I16, i16, $op),
-            (Value::U32(l) | Value::V32(l), v@ number!()) => apply_op_mixed_int!(l, v, U32, u32, $op),
-            (Value::I32(l) | Value::Z32(l), v@ number!()) => apply_op_mixed_int!(l, v, I32, i32, $op),
-            (Value::U64(l) | Value::V64(l), v@ number!()) => apply_op_mixed_int!(l, v, U64, u64, $op),
-            (Value::I64(l) | Value::Z64(l), v@ number!()) => apply_op_mixed_int!(l, v, I64, i64, $op),
-            (Value::F32(l), v@ number!()) => apply_op_mixed_float!(l, v, F32, f32, $op),
-            (Value::F64(l), v@ number!()) => apply_op_mixed_float!(l, v, F64, f64, $op),
-            (Value::Decimal(l), v@ number!()) => apply_op_mixed_decimal!(*l, v, $op),
+            (Value::Decimal(l), Value::Decimal(r)) => checked_decimal!(*l, $dec_method, *r),
+            (Value::U8(l), v@ number!()) => apply_op_mixed_int!(l, v, U8, u8, $op, $mode, $int_method, $dec_method),
+            (Value::I8(l), v@ number!()) => apply_op_mixed_int!(l, v, I8, i8, $op, $mode, $int_method, $dec_method),
+            (Value::U16(l), v@ number!()) => apply_op_mixed_int!(l, v, U16, u16, $op, $mode, $int_method, $dec_method),
+            (Value::I16(l), v@ number!()) => apply_op_mixed_int!(l, v, I16, i16, $op, $mode, $int_method, $dec_method),
+            (Value::U32(l) | Value::V32(l), v@ number!()) => apply_op_mixed_int!(l, v, U32, u32, $op, $mode, $int_method, $dec_method),
+            (Value::I32(l) | Value::Z32(l), v@ number!()) => apply_op_mixed_int!(l, v, I32, i32, $op, $mode, $int_method, $dec_method),
+            (Value::U64(l) | Value::V64(l), v@ number!()) => apply_op_mixed_int!(l, v, U64, u64, $op, $mode, $int_method, $dec_method),
+            (Value::I64(l) | Value::Z64(l), v@ number!()) => apply_op_mixed_int!(l, v, I64, i64, $op, $mode, $int_method, $dec_method),
+            (Value::F32(l), v@ number!()) => apply_op_mixed_float!(l, v, F32, f32, $op, $dec_method),
+            (Value::F64(l), v@ number!()) => apply_op_mixed_float!(l, v, F64, f64, $op, $dec_method),
+            (Value::Decimal(l), v@ number!()) => apply_op_mixed_decimal!(*l, v, $dec_method),
             (Value::String(s), n) => match s.parse::<Value>() {
                 Err(e) => Value::error(format_compact!("{}", e).as_str()),
                 Ok(s) => s $op n,
@@ -410,45 +448,29 @@ macro_rules! apply_op {
     }
 }
 
-macro_rules! handle_arith_result {
-    ($res:ident, $fallback:literal) => {
-        match $res {
-            Ok(r) => r,
-            Err(e) => match e.downcast_ref::<String>() {
-                Some(s) => Value::error(s),
-                None => match e.downcast_ref::<&str>() {
-                    Some(s) => Value::error(*s),
-                    None => Value::error(literal!($fallback)),
-                },
-            },
-        }
-    };
-}
-
 impl Add for Value {
     type Output = Value;
 
     fn add(self, rhs: Self) -> Self {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            apply_op!(
-                self, rhs, 0., +,
-                (Value::DateTime(dt), Value::Duration(d))
-                    | (Value::Duration(d), Value::DateTime(dt)) => {
-                        match chrono::Duration::from_std(*d) {
-                            Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
-                            Err(e) => Value::error(format_compact!("{}", e).as_str()),
-                        }
-                    },
-                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(Arc::new((*d0) + (*d1))) },
-                (Value::Duration(_), _)
-                    | (_, Value::Duration(_))
-                    | (_, Value::DateTime(_))
-                    | (Value::DateTime(_), _) => {
-                        Value::error(literal!("can't add to datetime/duration"))
+        apply_op!(
+            self, rhs, 0., +, wrapping, wrapping_add, checked_add,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(*d) {
+                        Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
+                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
-            )
-        }));
-        handle_arith_result!(res, "panic while executing add")
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => {
+                checked_dur!(d0.checked_add(*d1))
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't add to datetime/duration"))
+                }
+        )
     }
 }
 
@@ -456,26 +478,25 @@ impl Sub for Value {
     type Output = Value;
 
     fn sub(self, rhs: Self) -> Self {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            apply_op!(
-                self, rhs, 0., -,
-                (Value::DateTime(dt), Value::Duration(d))
-                    | (Value::Duration(d), Value::DateTime(dt)) => {
-                        match chrono::Duration::from_std(*d) {
-                            Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
-                            Err(e) => Value::error(format_compact!("{}", e).as_str()),
-                        }
-                    },
-                (Value::Duration(d0), Value::Duration(d1)) => { Value::Duration(Arc::new((*d0) - (*d1))) },
-                (Value::Duration(_), _)
-                    | (_, Value::Duration(_))
-                    | (_, Value::DateTime(_))
-                    | (Value::DateTime(_), _) => {
-                        Value::error(literal!("can't sub datetime/duration"))
+        apply_op!(
+            self, rhs, 0., -, wrapping, wrapping_sub, checked_sub,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(*d) {
+                        Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
+                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
-            )
-        }));
-        handle_arith_result!(res, "panic while executing sub")
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => {
+                checked_dur!(d0.checked_sub(*d1))
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't sub datetime/duration"))
+                }
+        )
     }
 }
 
@@ -483,40 +504,39 @@ impl Mul for Value {
     type Output = Value;
 
     fn mul(self, rhs: Self) -> Self {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            apply_op!(
-                self, rhs, 1., *,
-                (Value::Duration(d), Value::U32(n) | Value::V32(n))
-                | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => { Value::Duration(Arc::new((*d) * n)) },
-                (Value::Duration(d), Value::I32(n) | Value::Z32(n))
-                | (Value::I32(n) | Value::Z32(n), Value::Duration(d)) => {
-                    if n < 0 { panic!("can't multiply a duration by a negative number") }
-                    Value::Duration(Arc::new((*d) * n as u32))
-                },
-                (Value::Duration(d), Value::U64(n) | Value::V64(n))
-                | (Value::U64(n) | Value::V64(n), Value::Duration(d)) => {
-                    Value::Duration(Arc::new((*d) * n as u32))
-                },
-                (Value::Duration(d), Value::I64(n) | Value::Z64(n))
-                | (Value::I64(n) | Value::Z64(n), Value::Duration(d)) => {
-                    if n < 0 { panic!("can't multiply a duration by a negative number") }
-                    Value::Duration(Arc::new((*d) * n as u32))
-                },
-                (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => {
-                    Value::Duration(Arc::new(d.mul_f32(s)))
-                },
-                (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => {
-                    Value::Duration(Arc::new(d.mul_f64(s)))
-                },
-                    | (Value::Duration(_), _)
-                    | (_, Value::Duration(_))
-                    | (_, Value::DateTime(_))
-                    | (Value::DateTime(_), _) => {
-                        Value::error(literal!("can't mul datetime/duration"))
-                    }
-            )
-        }));
-        handle_arith_result!(res, "panic while executing mul")
+        apply_op!(
+            self, rhs, 1., *, wrapping, wrapping_mul, checked_mul,
+            (Value::Duration(d), Value::U32(n) | Value::V32(n))
+            | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => {
+                checked_dur!(d.checked_mul(n))
+            },
+            (Value::Duration(d), Value::I32(n) | Value::Z32(n))
+            | (Value::I32(n) | Value::Z32(n), Value::Duration(d)) => {
+                if n < 0 { return Value::error(literal!("can't multiply duration by negative")); }
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::U64(n) | Value::V64(n))
+            | (Value::U64(n) | Value::V64(n), Value::Duration(d)) => {
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::I64(n) | Value::Z64(n))
+            | (Value::I64(n) | Value::Z64(n), Value::Duration(d)) => {
+                if n < 0 { return Value::error(literal!("can't multiply duration by negative")); }
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => {
+                dur_from_f64!(d.as_secs_f64() * s as f64)
+            },
+            (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => {
+                dur_from_f64!(d.as_secs_f64() * s)
+            },
+                | (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't mul datetime/duration"))
+                }
+        )
     }
 }
 
@@ -524,32 +544,35 @@ impl Div for Value {
     type Output = Value;
 
     fn div(self, rhs: Self) -> Self {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            apply_op!(
-                self, rhs, 1., /,
-                (Value::Duration(d), Value::U32(s) | Value::V32(s)) => { Value::Duration(Arc::new((*d) / s)) },
-                (Value::Duration(d), Value::I32(s) | Value::Z32(s)) => {
-                    if s < 0 { panic!("can't divide duration by a negative number") }
-                    Value::Duration(Arc::new((*d) / s as u32))
-                },
-                (Value::Duration(d), Value::U64(s) | Value::V64(s)) => {
-                    Value::Duration(Arc::new((*d) / s as u32))
-                },
-                (Value::Duration(d), Value::I64(s) | Value::Z64(s)) => {
-                    if s < 0 { panic!("can't divide duration by a negative number") }
-                    Value::Duration(Arc::new((*d) / s as u32))
-                },
-                (Value::Duration(d), Value::F32(s)) => { Value::Duration(Arc::new(d.div_f32(s))) },
-                (Value::Duration(d), Value::F64(s)) => { Value::Duration(Arc::new(d.div_f64(s))) },
-                (Value::Duration(_), _)
-                    | (_, Value::Duration(_))
-                    | (_, Value::DateTime(_))
-                    | (Value::DateTime(_), _) => {
-                        Value::error(literal!("can't div datetime/duration"))
-                    }
-            )
-        }));
-        handle_arith_result!(res, "panic while executing div")
+        apply_op!(
+            self, rhs, 1., /, checked, checked_div, checked_div,
+            (Value::Duration(d), Value::U32(s) | Value::V32(s)) => {
+                checked_dur!(d.checked_div(s))
+            },
+            (Value::Duration(d), Value::I32(s) | Value::Z32(s)) => {
+                if s < 0 { return Value::error(literal!("can't divide duration by negative")); }
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::U64(s) | Value::V64(s)) => {
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::I64(s) | Value::Z64(s)) => {
+                if s < 0 { return Value::error(literal!("can't divide duration by negative")); }
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::F32(s)) => {
+                dur_from_f64!(d.as_secs_f64() / s as f64)
+            },
+            (Value::Duration(d), Value::F64(s)) => {
+                dur_from_f64!(d.as_secs_f64() / s)
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't div datetime/duration"))
+                }
+        )
     }
 }
 
@@ -557,18 +580,141 @@ impl Rem for Value {
     type Output = Value;
 
     fn rem(self, rhs: Self) -> Self::Output {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            apply_op!(
-                self, rhs, 1., %,
-                (Value::Duration(_), _)
-                    | (_, Value::Duration(_))
-                    | (_, Value::DateTime(_))
-                    | (Value::DateTime(_), _) => {
-                        Value::error(literal!("can't mod datetime/duration"))
+        apply_op!(
+            self, rhs, 1., %, checked, checked_rem, checked_rem,
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't mod datetime/duration"))
+                }
+        )
+    }
+}
+
+impl Value {
+    pub fn checked_add(self, rhs: Self) -> Self {
+        apply_op!(
+            self, rhs, 0., +, checked, checked_add, checked_add,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(*d) {
+                        Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
+                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
-            )
-        }));
-        handle_arith_result!(res, "panic while executing mod")
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => {
+                checked_dur!(d0.checked_add(*d1))
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't add to datetime/duration"))
+                }
+        )
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Self {
+        apply_op!(
+            self, rhs, 0., -, checked, checked_sub, checked_sub,
+            (Value::DateTime(dt), Value::Duration(d))
+                | (Value::Duration(d), Value::DateTime(dt)) => {
+                    match chrono::Duration::from_std(*d) {
+                        Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
+                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
+                    }
+                },
+            (Value::Duration(d0), Value::Duration(d1)) => {
+                checked_dur!(d0.checked_sub(*d1))
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't sub datetime/duration"))
+                }
+        )
+    }
+
+    pub fn checked_mul(self, rhs: Self) -> Self {
+        apply_op!(
+            self, rhs, 1., *, checked, checked_mul, checked_mul,
+            (Value::Duration(d), Value::U32(n) | Value::V32(n))
+            | (Value::U32(n) | Value::V32(n), Value::Duration(d)) => {
+                checked_dur!(d.checked_mul(n))
+            },
+            (Value::Duration(d), Value::I32(n) | Value::Z32(n))
+            | (Value::I32(n) | Value::Z32(n), Value::Duration(d)) => {
+                if n < 0 { return Value::error(literal!("can't multiply duration by negative")); }
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::U64(n) | Value::V64(n))
+            | (Value::U64(n) | Value::V64(n), Value::Duration(d)) => {
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::I64(n) | Value::Z64(n))
+            | (Value::I64(n) | Value::Z64(n), Value::Duration(d)) => {
+                if n < 0 { return Value::error(literal!("can't multiply duration by negative")); }
+                checked_dur!(d.checked_mul(n as u32))
+            },
+            (Value::Duration(d), Value::F32(s)) | (Value::F32(s), Value::Duration(d)) => {
+                dur_from_f64!(d.as_secs_f64() * s as f64)
+            },
+            (Value::Duration(d), Value::F64(s)) | (Value::F64(s), Value::Duration(d)) => {
+                dur_from_f64!(d.as_secs_f64() * s)
+            },
+                | (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't mul datetime/duration"))
+                }
+        )
+    }
+
+    pub fn checked_div(self, rhs: Self) -> Self {
+        apply_op!(
+            self, rhs, 1., /, checked, checked_div, checked_div,
+            (Value::Duration(d), Value::U32(s) | Value::V32(s)) => {
+                checked_dur!(d.checked_div(s))
+            },
+            (Value::Duration(d), Value::I32(s) | Value::Z32(s)) => {
+                if s < 0 { return Value::error(literal!("can't divide duration by negative")); }
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::U64(s) | Value::V64(s)) => {
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::I64(s) | Value::Z64(s)) => {
+                if s < 0 { return Value::error(literal!("can't divide duration by negative")); }
+                checked_dur!(d.checked_div(s as u32))
+            },
+            (Value::Duration(d), Value::F32(s)) => {
+                dur_from_f64!(d.as_secs_f64() / s as f64)
+            },
+            (Value::Duration(d), Value::F64(s)) => {
+                dur_from_f64!(d.as_secs_f64() / s)
+            },
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't div datetime/duration"))
+                }
+        )
+    }
+
+    pub fn checked_rem(self, rhs: Self) -> Self {
+        apply_op!(
+            self, rhs, 1., %, checked, checked_rem, checked_rem,
+            (Value::Duration(_), _)
+                | (_, Value::Duration(_))
+                | (_, Value::DateTime(_))
+                | (Value::DateTime(_), _) => {
+                    Value::error(literal!("can't mod datetime/duration"))
+                }
+        )
     }
 }
 
