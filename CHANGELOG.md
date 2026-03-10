@@ -1,3 +1,7 @@
+# 0.31.6
+
+- Improve arithmetic operators in netidx-value
+
 # 0.31.5
 
 - add derive macros for FromValue and Into<Value> to netidx-derive
