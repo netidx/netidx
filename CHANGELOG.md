@@ -1,6 +1,7 @@
 # 0.31.6
 
 - Improve arithmetic operators in netidx-value
+- Upgrade graphix to 0.6
 
 # 0.31.5
 
