@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
 use combine::{
     attempt, between, choice, eof, from_str, look_ahead, many1, none_of, not_followed_by,
-    one_of, optional, parser,
+    one_of, optional, parser, satisfy,
     parser::{
         char::{alpha_num, digit, spaces, string},
         combinator::recognize,
@@ -159,30 +159,97 @@ where
     between(token('"'), token('"'), escaped_string(must_escape, esc))
 }
 
-fn uint<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
+pub trait FromStrRadix: Sized {
+    fn from_str_radix(s: &str, radix: u32) -> Result<Self, std::num::ParseIntError>;
+}
+
+macro_rules! impl_from_str_radix {
+    ($($t:ty),*) => { $(
+        impl FromStrRadix for $t {
+            fn from_str_radix(s: &str, radix: u32) -> Result<Self, std::num::ParseIntError> {
+                <$t>::from_str_radix(s, radix)
+            }
+        }
+    )* };
+}
+
+impl_from_str_radix!(u8, i8, u16, i16, u32, i32, u64, i64, usize, isize);
+
+fn radix_prefix<I>() -> impl Parser<I, Output = (u32, CompactString)>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    many1(digit()).then(|s: CompactString| match s.parse::<T>() {
-        Ok(i) => combine::value(i).right(),
-        Err(_) => unexpected_any("invalid unsigned integer").left(),
+    choice((
+        attempt(
+            token('0')
+                .with(one_of(['x', 'X']))
+                .with(many1(satisfy(|c: char| c.is_ascii_hexdigit())))
+                .map(|s: CompactString| (16u32, s)),
+        ),
+        attempt(
+            token('0')
+                .with(one_of(['b', 'B']))
+                .with(many1(satisfy(|c: char| c == '0' || c == '1')))
+                .map(|s: CompactString| (2u32, s)),
+        ),
+        attempt(
+            token('0')
+                .with(one_of(['o', 'O']))
+                .with(many1(satisfy(|c: char| c.is_digit(8))))
+                .map(|s: CompactString| (8u32, s)),
+        ),
+    ))
+}
+
+fn uint<I, T: FromStrRadix + Clone + Copy>() -> impl Parser<I, Output = T>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    choice((
+        radix_prefix(),
+        many1(digit()).map(|s: CompactString| (10u32, s)),
+    ))
+    .then(|(radix, digits): (u32, CompactString)| {
+        match T::from_str_radix(&digits, radix) {
+            Ok(i) => combine::value(i).right(),
+            Err(_) => unexpected_any("invalid unsigned integer").left(),
+        }
     })
 }
 
-pub fn int<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
+pub fn int<I, T: FromStrRadix + Clone + Copy>() -> impl Parser<I, Output = T>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    recognize((optional(token('-')), take_while1(|c: char| c.is_digit(10)))).then(
-        |s: CompactString| match s.parse::<T>() {
-            Ok(i) => combine::value(i).right(),
-            Err(_) => unexpected_any("invalid signed integer").left(),
-        },
-    )
+    choice((
+        attempt(optional(token('-')).and(radix_prefix())).then(
+            |(sign, (radix, digits)): (Option<char>, (u32, CompactString))| {
+                let s = if sign.is_some() {
+                    let mut s = CompactString::new("-");
+                    s.push_str(&digits);
+                    s
+                } else {
+                    digits
+                };
+                match T::from_str_radix(&s, radix) {
+                    Ok(i) => combine::value(i).right(),
+                    Err(_) => unexpected_any("invalid signed integer").left(),
+                }
+            },
+        ),
+        recognize((optional(token('-')), take_while1(|c: char| c.is_digit(10)))).then(
+            |s: CompactString| match T::from_str_radix(&s, 10) {
+                Ok(i) => combine::value(i).right(),
+                Err(_) => unexpected_any("invalid signed integer").left(),
+            },
+        ),
+    ))
 }
 
 fn flt<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
@@ -431,6 +498,25 @@ mod tests {
         assert_eq!(
             Value::Map(m.clone()),
             parse_value(r#"{ 42 => "hello world", "hello world" => 42}"#).unwrap()
-        )
+        );
+        // hex literals
+        assert_eq!(Value::U8(255), parse_value("u8:0xFF").unwrap());
+        assert_eq!(Value::U8(255), parse_value("u8:0XFF").unwrap());
+        assert_eq!(Value::I32(-31), parse_value("i32:-0x1F").unwrap());
+        assert_eq!(Value::U64(0xDEAD), parse_value("u64:0xDEAD").unwrap());
+        assert_eq!(Value::I64(255), parse_value("i64:0xFF").unwrap());
+        // binary literals
+        assert_eq!(Value::U16(10), parse_value("u16:0b1010").unwrap());
+        assert_eq!(Value::U16(10), parse_value("u16:0B1010").unwrap());
+        assert_eq!(Value::I8(-1), parse_value("i8:-0b1").unwrap());
+        // octal literals
+        assert_eq!(Value::U32(63), parse_value("u32:0o77").unwrap());
+        assert_eq!(Value::U32(63), parse_value("u32:0O77").unwrap());
+        assert_eq!(Value::I64(-8), parse_value("i64:-0o10").unwrap());
+        // bare hex/bin/oct as i64
+        assert_eq!(Value::I64(255), parse_value("0xFF").unwrap());
+        assert_eq!(Value::I64(10), parse_value("0b1010").unwrap());
+        assert_eq!(Value::I64(63), parse_value("0o77").unwrap());
+        assert_eq!(Value::I64(-255), parse_value("-0xFF").unwrap());
     }
 }
