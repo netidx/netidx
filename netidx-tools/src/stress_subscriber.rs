@@ -17,6 +17,7 @@ pub(super) struct Params {
     base: String,
 }
 
+#[tokio::main]
 pub(super) async fn run(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     env_logger::init();
     let r = ResolverRead::new(config.clone(), auth.clone());

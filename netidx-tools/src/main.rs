@@ -139,77 +139,59 @@ enum Opt {
     },
 }
 
-#[tokio::main]
-async fn tokio_main() -> Result<()> {
-    match Opt::from_args() {
-        #[cfg(unix)]
-        Opt::Activation { .. } => {
-            panic!("activation server cannot be initialized from async");
-        }
-        Opt::ResolverServer(_) => {
-            panic!("resolver server cannot be initialized from async")
-        }
-        Opt::Resolver { common, cmd } => {
-            let (cfg, auth) = common.load();
-            resolver::run(cfg, auth, cmd).await
-        }
-        Opt::Publisher { common, params } => {
-            let (cfg, auth) = common.load();
-            publisher::run(cfg, auth, params).await
-        }
-        Opt::Subscriber { common, params } => {
-            let (cfg, auth) = common.load();
-            subscriber::run(cfg, auth, params).await
-        }
-        Opt::Container { common, params } => {
-            let (cfg, auth) = common.load();
-            container::run(cfg, auth, params).await
-        }
-        Opt::RecordClient { cmd } => record_client::run(cmd).await,
-        #[cfg(unix)]
-        Opt::Record { config, example } => recorder::run(config, example).await,
-        Opt::Stress { cmd } => match cmd {
-            Stress::Subscriber { common, params } => {
-                let (cfg, auth) = common.load();
-                stress_subscriber::run(cfg, auth, params).await
-            }
-            Stress::Publisher { common, params } => {
-                let (cfg, auth) = common.load();
-                stress_publisher::run(cfg, auth, params).await
-            }
-            Stress::ChannelPublisher { common, params } => {
-                let (cfg, auth) = common.load();
-                stress_channel_publisher::run(cfg, auth, params).await
-            }
-            Stress::ChannelSubscriber { common, params } => {
-                let (cfg, auth) = common.load();
-                stress_channel_subscriber::run(cfg, auth, params).await
-            }
-        },
-        Opt::WsProxy { common, publisher, proxy } => {
-            let (cfg, auth) = common.load();
-            wsproxy::run(cfg, auth, publisher, proxy).await
-        }
-        Opt::Browser { common, publisher } => {
-            let (cfg, auth) = common.load();
-            browser::run(cfg, auth, publisher).await
-        }
-    }
-}
-
-// Daemonization and tokio don't play well together. The best practice is to daemonize
-// as early as possible, before the async runtime is initialized. This means we can't
-// use the tokio_main macro on main, so we short-circuit ResolverServer handling here.
 fn main() -> Result<()> {
     netidx::config::Config::maybe_run_machine_local_resolver()?;
-    let opt = Opt::from_args();
-    match opt {
+    match Opt::from_args() {
         Opt::ResolverServer(p) => resolver_server::run(p),
         #[cfg(unix)]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)
         }
-        _ => tokio_main(),
+        Opt::Resolver { common, cmd } => {
+            let (cfg, auth) = common.load();
+            resolver::run(cfg, auth, cmd)
+        }
+        Opt::Publisher { common, params } => {
+            let (cfg, auth) = common.load();
+            publisher::run(cfg, auth, params)
+        }
+        Opt::Subscriber { common, params } => {
+            let (cfg, auth) = common.load();
+            subscriber::run(cfg, auth, params)
+        }
+        Opt::Container { common, params } => {
+            let (cfg, auth) = common.load();
+            container::run(cfg, auth, params)
+        }
+        Opt::RecordClient { cmd } => record_client::run(cmd),
+        #[cfg(unix)]
+        Opt::Record { config, example } => recorder::run(config, example),
+        Opt::Stress { cmd } => match cmd {
+            Stress::Subscriber { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_subscriber::run(cfg, auth, params)
+            }
+            Stress::Publisher { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_publisher::run(cfg, auth, params)
+            }
+            Stress::ChannelPublisher { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_channel_publisher::run(cfg, auth, params)
+            }
+            Stress::ChannelSubscriber { common, params } => {
+                let (cfg, auth) = common.load();
+                stress_channel_subscriber::run(cfg, auth, params)
+            }
+        },
+        Opt::WsProxy { common, publisher, proxy } => {
+            let (cfg, auth) = common.load();
+            wsproxy::run(cfg, auth, publisher, proxy)
+        }
+        Opt::Browser { common, publisher } => {
+            let (cfg, auth) = common.load();
+            browser::run(cfg, auth, publisher)
+        }
     }
 }

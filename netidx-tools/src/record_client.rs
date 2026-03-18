@@ -296,6 +296,7 @@ fn compressed(file: PathBuf) -> Result<()> {
     }
 }
 
+#[tokio::main]
 pub(super) async fn run(cmd: Cmd) -> Result<()> {
     env_logger::init();
     match cmd {

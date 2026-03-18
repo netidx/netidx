@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::publisher;
 
+#[tokio::main]
 pub(super) async fn run(
     cfg: netidx::config::Config,
     auth: DesiredAuth,

@@ -4,6 +4,7 @@ use netidx_container::Container;
 pub(super) use netidx_container::Params;
 use tokio::signal::ctrl_c;
 
+#[tokio::main]
 pub(crate) async fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     env_logger::init();
     let _c =

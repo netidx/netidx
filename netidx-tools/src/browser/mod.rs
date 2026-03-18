@@ -10,6 +10,7 @@ use netidx::{
     subscriber::Subscriber,
 };
 
+#[tokio::main]
 pub async fn run(
     cfg: Config,
     auth: DesiredAuth,

@@ -77,6 +77,7 @@ async fn handle_writes_loop(
     Ok(())
 }
 
+#[tokio::main]
 pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     env_logger::init();
     let timeout = params.timeout.map(Duration::from_secs);

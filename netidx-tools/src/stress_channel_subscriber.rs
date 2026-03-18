@@ -135,6 +135,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
     }
 }
 
+#[tokio::main]
 pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     env_logger::init();
     run_client(config, auth, params).await

@@ -55,6 +55,7 @@ pub(super) enum ResolverCmd {
     },
 }
 
+#[tokio::main]
 pub(super) async fn run(
     config: Config,
     auth: DesiredAuth,

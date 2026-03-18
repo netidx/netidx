@@ -87,6 +87,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
     Ok(())
 }
 
+#[tokio::main]
 pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Result<()> {
     env_logger::init();
     run_publisher(config, auth, params).await

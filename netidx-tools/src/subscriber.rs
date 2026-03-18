@@ -402,6 +402,7 @@ impl Ctx {
     }
 }
 
+#[tokio::main]
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     env_logger::init();
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
