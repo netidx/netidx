@@ -1,3 +1,8 @@
+# 0.31.7
+
+- Fix crash on systems with no config by delaying tokio runtime creation until
+  after config loading
+
 # 0.31.6
 
 - Improve arithmetic operators in netidx-value
