@@ -26,7 +26,8 @@
       "Bash(tail:*)",
       "Bash(rm -rf /tmp/netidx-cmake-release && cmake -S /home/eric/proj/netidx/netidx-ffi -B /tmp/netidx-cmake-release -DCMAKE_BUILD_TYPE=Release 2>&1)",
       "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make subscriber_simple_c subscriber_simple_cpp 2>&1)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(git stash:*)"
     ],
     "deny": [],
     "ask": []

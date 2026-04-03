@@ -28,6 +28,8 @@ graphix-rt = { workspace = true }
 graphix-compiler = { workspace = true }
 graphix-package = { workspace = true }
 graphix-package-core = { workspace = true }
+graphix-package-gui = { workspace = true }
+poolshark = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

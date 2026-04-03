@@ -1,4 +1,4 @@
-use crate::{view, ToGui, ViewLoc};
+use crate::{ToGui, ViewLoc};
 use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
 use futures::{
@@ -46,9 +46,8 @@ type RawBatch = GPooled<Vec<(netidx::subscriber::SubId, Event)>>;
 #[derive(Debug)]
 pub(crate) enum FromGui {
     Navigate(ViewLoc),
-    Save(ViewLoc, view::Widget, oneshot::Sender<Result<()>>),
-    Render(view::Widget),
-    ResolveTable(Path),
+    Save(ViewLoc, ArcStr, oneshot::Sender<Result<()>>),
+    Render(ArcStr),
     Terminate,
 }
 
@@ -61,9 +60,20 @@ pub(crate) struct Ctx {
     pub(crate) from_gui: mpsc::UnboundedSender<FromGui>,
     pub(crate) rt_handle: tokio::runtime::Handle,
     pub(crate) subscriber: Subscriber,
+    current_path_bid: graphix_compiler::BindId,
+    pub(crate) confirm_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<crate::builtins::ConfirmRequest>>>,
 }
 
 impl Ctx {
+    /// Update the current_path graphix variable on navigation
+    pub(crate) fn set_current_path(&self, loc: &ViewLoc) {
+        let path_str = match loc {
+            ViewLoc::Netidx(p) => ArcStr::from(&**p),
+            ViewLoc::File(f) => ArcStr::from(format!("file:{}", f.display()).as_str()),
+        };
+        let _ = self.gx.set(self.current_path_bid, Value::String(path_str));
+    }
+
     pub(crate) fn navigate(&self, loc: ViewLoc) {
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Navigate(loc));
@@ -72,11 +82,11 @@ impl Ctx {
     pub(crate) async fn save(
         &self,
         loc: ViewLoc,
-        spec: view::Widget,
+        source: ArcStr,
     ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let _: result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::Save(loc, spec, tx));
+            self.from_gui.unbounded_send(FromGui::Save(loc, source, tx));
         Ok(rx.await??)
     }
 
@@ -85,16 +95,10 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::Terminate);
     }
 
-    pub(crate) fn render(&self, spec: view::Widget) {
+    pub(crate) fn render(&self, source: ArcStr) {
         let _: result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::Render(spec));
+            self.from_gui.unbounded_send(FromGui::Render(source));
     }
-
-    pub(crate) fn resolve_table(&self, path: Path) {
-        let _: result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::ResolveTable(path));
-    }
-
 
     /// Compile a graphix expression synchronously from the GTK thread.
     /// This blocks the GTK main loop briefly for compilation only.
@@ -138,7 +142,7 @@ impl BackendInner {
         self.dv_view = None;
         let m = ToGui::View {
             loc: Some(ViewLoc::Netidx(base_path.clone())),
-            spec: crate::default_view(base_path.clone()),
+            source: crate::default_view_source(base_path.clone()),
             generated: true,
         };
         self.to_gui.send(m)?;
@@ -161,20 +165,14 @@ impl BackendInner {
                 let m = format!("can't load view from file {:?}, {}", file, e);
                 self.to_gui.send(ToGui::ShowError(m))?;
             }
-            Ok(s) => match serde_json::from_str::<view::Widget>(&s) {
-                Err(e) => {
-                    let m = format!("invalid view: {:?}, {}", file, e);
-                    self.to_gui.send(ToGui::ShowError(m))?;
-                }
-                Ok(v) => {
-                    let m = ToGui::View {
-                        loc: Some(ViewLoc::File(file)),
-                        spec: v,
-                        generated: false,
-                    };
-                    self.to_gui.send(m)?;
-                }
-            },
+            Ok(s) => {
+                let m = ToGui::View {
+                    loc: Some(ViewLoc::File(file)),
+                    source: ArcStr::from(s.as_str()),
+                    generated: false,
+                };
+                self.to_gui.send(m)?;
+            }
         }
         Ok(())
     }
@@ -182,7 +180,7 @@ impl BackendInner {
     fn save_view_netidx(
         &self,
         path: Path,
-        spec: view::Widget,
+        source: ArcStr,
         fin: oneshot::Sender<Result<()>>,
     ) {
         let subscriber = self.subscriber.clone();
@@ -192,49 +190,39 @@ impl BackendInner {
                 Err(e) => {
                     let _ = fin.send(Err(e));
                 }
-                Ok(val) => match serde_json::to_string(&spec) {
-                    Err(e) => {
-                        let _ = fin.send(Err(Error::from(e)));
-                    }
-                    Ok(s) => {
-                        let v = Value::String(ArcStr::from(s.as_str()));
-                        match val.write_with_recipt(v).await {
-                            Err(e) => {
-                                let _ = fin.send(Err(Error::from(e)));
-                            }
-                            Ok(v) => {
-                                let _ = fin.send(match v {
-                                    Value::Error(s) => {
-                                        Err(anyhow!("{}", s))
-                                    }
-                                    _ => Ok(()),
-                                });
-                            }
+                Ok(val) => {
+                    let v = Value::String(source);
+                    match val.write_with_recipt(v).await {
+                        Err(e) => {
+                            let _ = fin.send(Err(Error::from(e)));
+                        }
+                        Ok(v) => {
+                            let _ = fin.send(match v {
+                                Value::Error(s) => {
+                                    Err(anyhow!("{}", s))
+                                }
+                                _ => Ok(()),
+                            });
                         }
                     }
-                },
+                }
             }
         });
     }
 
     fn save_view_file(
         file: PathBuf,
-        spec: view::Widget,
+        source: ArcStr,
         fin: oneshot::Sender<Result<()>>,
     ) {
         task::spawn(async move {
-            match serde_json::to_string(&spec) {
+            match task::block_in_place(|| fs::write(file, source.as_str())) {
                 Err(e) => {
                     let _ = fin.send(Err(Error::from(e)));
                 }
-                Ok(s) => match task::block_in_place(|| fs::write(file, s)) {
-                    Err(e) => {
-                        let _ = fin.send(Err(Error::from(e)));
-                    }
-                    Ok(()) => {
-                        let _ = fin.send(Ok(()));
-                    }
-                },
+                Ok(()) => {
+                    let _ = fin.send(Ok(()));
+                }
             }
         });
     }
@@ -250,23 +238,16 @@ impl BackendInner {
                 for (_, view) in batch.drain(..) {
                     match view {
                         Event::Update(Value::String(s)) => {
-                            match serde_json::from_str::<view::Widget>(&*s) {
-                                Err(e) => warn!(
-                                    "error parsing view definition {}", e
-                                ),
-                                Ok(spec) => {
-                                    if let Some(path) = &self.view_path {
-                                        let m = ToGui::View {
-                                            loc: Some(ViewLoc::Netidx(
-                                                path.clone(),
-                                            )),
-                                            spec,
-                                            generated: false,
-                                        };
-                                        self.to_gui.send(m)?;
-                                        info!("updated gui view")
-                                    }
-                                }
+                            if let Some(path) = &self.view_path {
+                                let m = ToGui::View {
+                                    loc: Some(ViewLoc::Netidx(
+                                        path.clone(),
+                                    )),
+                                    source: s,
+                                    generated: false,
+                                };
+                                self.to_gui.send(m)?;
+                                info!("updated gui view")
                             }
                         }
                         v => warn!("unexpected type of view definition {:?}", v),
@@ -277,33 +258,14 @@ impl BackendInner {
         Ok(())
     }
 
-    fn render_view(&mut self, spec: view::Widget) -> Result<()> {
+    fn render_view(&mut self, source: ArcStr) -> Result<()> {
         self.view_path = None;
         self.rx_view = None;
         self.dv_view = None;
-        let m = ToGui::View { loc: None, spec, generated: false };
+        let m = ToGui::View { loc: None, source, generated: false };
         self.to_gui.send(m)?;
         info!("updated gui view (render)");
         Ok(())
-    }
-
-    fn resolve_table(&self, path: Path) {
-        let resolver = self.subscriber.resolver();
-        let to_gui = self.to_gui.clone();
-        task::spawn(async move {
-            let table = match resolver.table(path.clone()).await {
-                Ok(table) => table,
-                Err(e) => {
-                    warn!("failed to resolve table {}, {}", path, e);
-                    netidx_netproto::resolver::Table {
-                        rows: netidx::pool::global::GPooled::orphan(vec![]),
-                        cols: netidx::pool::global::GPooled::orphan(vec![]),
-                    }
-                }
-            };
-            let _: result::Result<_, _> =
-                to_gui.send(ToGui::TableResolved(path, table));
-        });
     }
 
     async fn run(mut self) {
@@ -320,17 +282,17 @@ impl BackendInner {
                 m = self.from_gui.next() => match m {
                     None => break,
                     Some(FromGui::Terminate) => break,
-                    Some(FromGui::Render(spec)) => {
-                        if let Err(e) = self.render_view(spec) {
+                    Some(FromGui::Render(source)) => {
+                        if let Err(e) = self.render_view(source) {
                             warn!("render_view error: {e}");
                             break;
                         }
                     }
-                    Some(FromGui::Save(ViewLoc::Netidx(path), spec, fin)) => {
-                        self.save_view_netidx(path, spec, fin)
+                    Some(FromGui::Save(ViewLoc::Netidx(path), source, fin)) => {
+                        self.save_view_netidx(path, source, fin)
                     }
-                    Some(FromGui::Save(ViewLoc::File(file), spec, fin)) => {
-                        Self::save_view_file(file, spec, fin)
+                    Some(FromGui::Save(ViewLoc::File(file), source, fin)) => {
+                        Self::save_view_file(file, source, fin)
                     }
                     Some(FromGui::Navigate(ViewLoc::Netidx(path))) => {
                         if let Err(e) = self.navigate_path(path).await {
@@ -343,9 +305,6 @@ impl BackendInner {
                             warn!("navigate error: {e}");
                             break;
                         }
-                    }
-                    Some(FromGui::ResolveTable(path)) => {
-                        self.resolve_table(path);
                     }
                 },
                 m = read_view(&mut self.rx_view).fuse() => {
@@ -426,21 +385,44 @@ impl Backend {
         let mut ctx = ExecCtx::new(gxrt)?;
         // Register browser-specific builtins
         crate::builtins::register_builtins(&mut ctx)?;
+        // Set up confirm dialog channel
+        let (confirm_tx, confirm_rx) = std::sync::mpsc::sync_channel(16);
         // Set up shared state for builtins
         ctx.libstate.set(crate::builtins::BrowserLibState {
             to_gui: to_gui.clone(),
+            confirm_tx,
         });
 
         // Channel for graphix output events
         let (gx_tx, mut gx_rx) = tmpsc::channel(100);
 
-        // Start the graphix runtime with browser prelude types
-        let prelude = arcstr::literal!(include_str!("browser_prelude.gx"));
+        // Set up the browser package as a VFS module so views can `use browser;`
+        let mut vfs = fxhash::FxHashMap::default();
+        vfs.insert(
+            Path::from("/browser/mod"),
+            arcstr::literal!(include_str!("graphix/mod.gx")),
+        );
+        let resolvers = vec![
+            graphix_compiler::expr::ModuleResolver::VFS(vfs),
+        ];
+
+        // Start the graphix runtime with root module defining current_path
+        let root = arcstr::literal!(r#"let current_path: &string = "/";"#);
         let gx = GXConfig::builder(ctx, gx_tx)
-            .root(prelude)
+            .root(root)
+            .resolvers(resolvers)
             .build()?
             .start()
             .await?;
+
+        // Compile a ref to current_path so we can set it from Rust on navigation
+        let env = gx.get_env().await?;
+        let scope = graphix_compiler::Scope::root();
+        let name = graphix_compiler::expr::ModPath::from(["current_path"]);
+        let current_path_ref = gx.compile_ref_by_name(&env, &scope, &name).await?;
+        let current_path_bid = current_path_ref.bid;
+        // Leak the ref so its expression node stays alive for the window lifetime
+        std::mem::forget(current_path_ref);
 
         // Bridge: forward graphix events to the GTK main loop
         let to_gui_bridge = to_gui.clone();
@@ -484,6 +466,8 @@ impl Backend {
             from_gui: tx_from_gui,
             rt_handle,
             subscriber,
+            current_path_bid,
+            confirm_rx: std::sync::Arc::new(std::sync::Mutex::new(confirm_rx)),
         })
     }
 

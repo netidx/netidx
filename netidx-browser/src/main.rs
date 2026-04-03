@@ -3,28 +3,22 @@
 mod backend;
 mod builtins;
 mod cairo_backend;
-mod containers;
 mod editor;
-mod lineplot;
-mod table;
+mod gtk_widgets;
 mod util;
-mod view;
-mod widgets;
 
 use anyhow::{anyhow, bail, Result};
 use arcstr::ArcStr;
 use bytes::Bytes;
 use editor::Editor;
-use fxhash::{FxBuildHasher, FxHashMap};
 use gdk::{self, prelude::*};
 use glib::{
     clone, idle_add_local, idle_add_local_once, source::Priority, ControlFlow,
     Propagation,
 };
 use graphix_compiler::expr::ExprId;
-use graphix_rt::{CompExp, NoExt};
+use graphix_rt::NoExt;
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
-use indexmap::IndexSet;
 use netidx::{
     config::Config,
     path::Path,
@@ -32,7 +26,6 @@ use netidx::{
     publisher::Value,
     subscriber::DesiredAuth,
 };
-use netidx_netproto::resolver;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -65,131 +58,6 @@ pub(crate) struct BrowserCtx {
     pub(crate) new_window_loc: Rc<RefCell<ViewLoc>>,
     pub(crate) current_loc: Rc<RefCell<ViewLoc>>,
     pub(crate) view_saved: Cell<bool>,
-    pub(crate) radio_groups:
-        FxHashMap<String, (Rc<Cell<bool>>, IndexSet<gtk::RadioButton, FxBuildHasher>)>,
-}
-
-/// A compiled graphix expression bound to a widget property.
-/// When dropped, the graphix runtime cleans up the expression.
-pub(crate) struct GxProp {
-    pub(crate) exp: CompExp<NoExt>,
-    pub(crate) last: Option<Value>,
-}
-
-impl GxProp {
-    pub(crate) fn id(&self) -> ExprId {
-        self.exp.id
-    }
-
-    /// Compile a GxExpr string into a live graphix expression.
-    /// Returns None if the expression is null/empty.
-    pub(crate) fn compile(
-        ctx: &BCtx,
-        expr: &view::GxExpr,
-    ) -> Option<Self> {
-        if expr.0.is_empty() {
-            return None;
-        }
-        match ctx.borrow().backend.compile(&expr.0) {
-            Ok(mut res) => {
-                if res.exprs.is_empty() {
-                    None
-                } else {
-                    Some(GxProp {
-                        exp: res.exprs.remove(0),
-                        last: None,
-                    })
-                }
-            }
-            Err(e) => {
-                log::warn!("failed to compile expression '{}': {}", expr.0, e);
-                None
-            }
-        }
-    }
-
-    /// Check if this update is for us and update the cached value
-    pub(crate) fn update(&mut self, id: ExprId, value: &Value) -> bool {
-        if self.exp.id == id {
-            self.last = Some(value.clone());
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// A compiled graphix callback - an expression that evaluates to a function.
-/// When a GTK event fires, the callback is invoked with typed arguments
-/// via the graphix Callable interface.
-pub(crate) struct GxCallback {
-    /// The compiled expression. When it evaluates to a function value,
-    /// we compile a Callable from it.
-    prop: GxProp,
-    /// The compiled callable, ready to invoke. None if the expression
-    /// hasn't evaluated to a function yet (late binding).
-    callable: Option<graphix_rt::Callable<NoExt>>,
-    /// Tokio runtime handle for spawning async calls from GTK thread
-    rt_handle: tokio::runtime::Handle,
-    /// GXHandle for compiling callables when the expression resolves
-    gx: graphix_rt::GXHandle<NoExt>,
-}
-
-impl GxCallback {
-    /// Compile a callback expression. Returns None if the expression
-    /// is empty/null.
-    pub(crate) fn compile(ctx: &BCtx, expr: &view::GxExpr) -> Option<Self> {
-        let prop = GxProp::compile(ctx, expr)?;
-        let ctx_ref = ctx.borrow();
-        let rt_handle = ctx_ref.backend.rt_handle.clone();
-        let gx = ctx_ref.backend.gx.clone();
-        // Try to compile callable immediately if we already have a value
-        let callable = prop.last.as_ref().and_then(|v| {
-            rt_handle.block_on(gx.compile_callable(v.clone())).ok()
-        });
-        Some(GxCallback { prop, callable, rt_handle, gx })
-    }
-
-    /// Handle an update from the graphix runtime. If the expression
-    /// value changed and is a function, recompile the Callable.
-    pub(crate) fn update(&mut self, id: ExprId, value: &Value) -> bool {
-        if self.prop.update(id, value) {
-            // The expression value changed - it should be a function.
-            // Recompile the callable.
-            match self.rt_handle.block_on(self.gx.compile_callable(value.clone())) {
-                Ok(c) => { self.callable = Some(c); }
-                Err(e) => {
-                    log::warn!("callback expression didn't produce a callable: {}", e);
-                    self.callable = None;
-                }
-            }
-            true
-        } else if let Some(ref c) = self.callable {
-            // Check if this is a return value from our callable
-            c.update(id, value).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Fire the callback with the given arguments.
-    /// This spawns the async call on the tokio runtime.
-    pub(crate) fn fire(&self, args: netidx::protocol::valarray::ValArray) {
-        if let Some(ref callable) = self.callable {
-            let callable_id = callable.id();
-            let rt = self.gx.clone();
-            let args = args.clone();
-            self.rt_handle.spawn(async move {
-                if let Err(e) = rt.call(callable_id, args) {
-                    log::warn!("callback invocation failed: {}", e);
-                }
-            });
-        }
-    }
-
-    pub(crate) fn id(&self) -> ExprId {
-        self.prop.id()
-    }
 }
 
 /// Messages from the backend/graphix to the GUI thread
@@ -197,41 +65,30 @@ impl GxCallback {
 pub(crate) enum ToGui {
     View {
         loc: Option<ViewLoc>,
-        spec: view::Widget,
+        source: ArcStr,
         generated: bool,
     },
     Navigate(ViewLoc),
     NavigateInWindow(ViewLoc),
-    Highlight(Vec<WidgetPath>),
     /// Batch of expression value updates from the graphix runtime
     Update(Vec<(ExprId, Value)>),
-    /// Table structure resolved from netidx
-    TableResolved(Path, netidx_netproto::resolver::Table),
     ShowError(String),
     SaveError(String),
     Terminate,
 }
 
-fn default_view(path: Path) -> view::Widget {
-    view::Widget {
-        props: None,
-        kind: view::WidgetKind::Table(view::Table {
-            path: view::GxExpr(format!("{:?}", &*path)),
-            column_editable: view::GxExpr("false".into()),
-            columns_resizable: view::GxExpr("true".into()),
-            selection_mode: view::GxExpr("`Single".into()),
-            on_activate: view::GxExpr("|path: string| browser_navigate(path)".into()),
-            ..Default::default()
-        }),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum WidgetPath {
-    Leaf,
-    Box(usize),
-    GridItem(usize, usize),
-    GridRow(usize),
+fn default_view_source(path: Path) -> ArcStr {
+    ArcStr::from(format!(
+        r#"let current_path: &string = {:?};
+Table({{
+    path: current_path,
+    column_editable: false,
+    columns_resizable: true,
+    selection_mode: `Single,
+    on_activate: |path: string| browser_navigate(path),
+}})"#,
+        &*path
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,255 +220,6 @@ pub(crate) fn val_to_bool(v: &Value) -> bool {
     }
 }
 
-fn align_to_gtk(a: view::Align) -> gtk::Align {
-    match a {
-        view::Align::Fill => gtk::Align::Fill,
-        view::Align::Start => gtk::Align::Start,
-        view::Align::End => gtk::Align::End,
-        view::Align::Center => gtk::Align::Center,
-        view::Align::Baseline => gtk::Align::Baseline,
-    }
-}
-
-fn set_common_props<T: IsA<gtk::Widget> + 'static>(props: &view::WidgetProps, t: &T) {
-    t.set_halign(align_to_gtk(props.halign));
-    t.set_valign(align_to_gtk(props.valign));
-    t.set_hexpand(props.hexpand);
-    t.set_vexpand(props.vexpand);
-    t.set_margin_top(props.margin_top as i32);
-    t.set_margin_bottom(props.margin_bottom as i32);
-    t.set_margin_start(props.margin_start as i32);
-    t.set_margin_end(props.margin_end as i32);
-}
-
-pub(crate) trait BWidget {
-    /// Dispatch a graphix expression value update.
-    /// Returns true if this widget handled the update.
-    fn update(&mut self, id: ExprId, value: &Value) -> bool;
-    fn root(&self) -> Option<&gtk::Widget>;
-
-    /// Forward a table-resolved event to any table widgets in the
-    /// tree. Returns true if any table handled it.
-    fn table_resolved(
-        &mut self,
-        _path: &Path,
-        _table: &resolver::Table,
-    ) -> bool {
-        false
-    }
-
-    fn set_visible(&self, v: bool) {
-        if let Some(w) = self.root() {
-            if v { w.show() } else { w.hide() }
-        }
-    }
-
-    fn set_sensitive(&self, e: bool) {
-        if let Some(w) = self.root() {
-            w.set_sensitive(e);
-        }
-    }
-
-    fn set_highlight(&self, mut path: std::slice::Iter<WidgetPath>, h: bool) {
-        if let (Some(WidgetPath::Leaf), Some(w)) = (path.next(), self.root()) {
-            util::set_highlight(w, h);
-        }
-    }
-}
-
-/// Wraps a BWidget with common properties (sensitive, visible)
-pub(crate) struct Widget {
-    sensitive: Option<GxProp>,
-    visible: Option<GxProp>,
-    widget: Box<dyn BWidget>,
-}
-
-static DEFAULT_PROPS: once_cell::sync::Lazy<view::WidgetProps> =
-    once_cell::sync::Lazy::new(|| view::WidgetProps {
-        halign: view::Align::Fill,
-        valign: view::Align::Fill,
-        hexpand: false,
-        vexpand: false,
-        margin_top: 0,
-        margin_bottom: 0,
-        margin_start: 0,
-        margin_end: 0,
-        keybinds: vec![],
-        sensitive: view::GxExpr("true".into()),
-        visible: view::GxExpr("true".into()),
-    });
-
-impl Widget {
-    pub(crate) fn new(
-        ctx: &BCtx,
-        spec: view::Widget,
-        selected_path: gtk::Label,
-    ) -> Self {
-        let widget: Box<dyn BWidget> = match spec.kind {
-            view::WidgetKind::Table(spec) => {
-                Box::new(table::Table::new(ctx, spec))
-            }
-            view::WidgetKind::Label(spec) => {
-                Box::new(widgets::Label::new(ctx, spec))
-            }
-            view::WidgetKind::Button(spec) => {
-                Box::new(widgets::Button::new(ctx, spec))
-            }
-            view::WidgetKind::BScript(spec) => {
-                Box::new(widgets::BScript::new(ctx, spec))
-            }
-            view::WidgetKind::LinkButton(spec) => {
-                Box::new(widgets::LinkButton::new(ctx, spec))
-            }
-            view::WidgetKind::Switch(spec) => {
-                Box::new(widgets::Switch::new(ctx, spec))
-            }
-            view::WidgetKind::ToggleButton(spec) => {
-                Box::new(widgets::ToggleButton::new(
-                    ctx, spec, || gtk::ToggleButton::new(),
-                ))
-            }
-            view::WidgetKind::CheckButton(spec) => {
-                Box::new(widgets::ToggleButton::new(
-                    ctx, spec, || gtk::CheckButton::new().upcast::<gtk::ToggleButton>(),
-                ))
-            }
-            view::WidgetKind::ProgressBar(spec) => {
-                Box::new(widgets::ProgressBar::new(ctx, spec))
-            }
-            view::WidgetKind::Scale(spec) => {
-                Box::new(widgets::Scale::new(ctx, spec))
-            }
-            view::WidgetKind::ComboBox(spec) => {
-                Box::new(widgets::ComboBox::new(ctx, spec))
-            }
-            view::WidgetKind::RadioButton(spec) => {
-                Box::new(widgets::RadioButton::new(ctx, spec))
-            }
-            view::WidgetKind::Entry(spec) => {
-                Box::new(widgets::Entry::new(ctx, spec))
-            }
-            view::WidgetKind::SearchEntry(spec) => {
-                Box::new(widgets::SearchEntry::new(ctx, spec))
-            }
-            view::WidgetKind::Image(spec) => {
-                Box::new(widgets::Image::new(ctx, spec))
-            }
-            view::WidgetKind::Frame(spec) => {
-                Box::new(containers::Frame::new(ctx, spec, selected_path.clone()))
-            }
-            view::WidgetKind::Box(spec) => {
-                Box::new(containers::Box::new(ctx, spec, selected_path.clone()))
-            }
-            view::WidgetKind::BoxChild(view::BoxChild { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (*w).clone(), selected_path.clone()))
-            }
-            view::WidgetKind::Grid(spec) => {
-                Box::new(containers::Grid::new(ctx, spec, selected_path.clone()))
-            }
-            view::WidgetKind::GridChild(view::GridChild { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (*w).clone(), selected_path.clone()))
-            }
-            view::WidgetKind::GridRow(_) => {
-                let spec = view::Label {
-                    text: view::GxExpr(r#""orphaned grid row""#.into()),
-                    selectable: view::GxExpr("true".into()),
-                    single_line: view::GxExpr("true".into()),
-                    ..Default::default()
-                };
-                Box::new(widgets::Label::new(ctx, spec))
-            }
-            view::WidgetKind::Paned(spec) => {
-                Box::new(containers::Paned::new(ctx, spec, selected_path.clone()))
-            }
-            view::WidgetKind::NotebookPage(view::NotebookPage { widget: w, .. }) => {
-                Box::new(Widget::new(ctx, (*w).clone(), selected_path.clone()))
-            }
-            view::WidgetKind::Notebook(spec) => {
-                Box::new(containers::Notebook::new(ctx, spec, selected_path.clone()))
-            }
-            view::WidgetKind::LinePlot(spec) => {
-                Box::new(lineplot::LinePlot::new(ctx, spec))
-            }
-        };
-        let props = spec.props.as_ref().unwrap_or(&DEFAULT_PROPS);
-        if let Some(r) = widget.root() {
-            set_common_props(props, r);
-        }
-        let sensitive = GxProp::compile(ctx, &props.sensitive);
-        let visible = GxProp::compile(ctx, &props.visible);
-        if let Some(ref p) = sensitive {
-            if let Some(ref v) = p.last {
-                widget.set_sensitive(val_to_bool(v));
-            }
-        }
-        if let Some(ref p) = visible {
-            if let Some(ref v) = p.last {
-                widget.set_visible(val_to_bool(v));
-            }
-        }
-        Self { sensitive, visible, widget }
-    }
-}
-
-impl BWidget for Widget {
-    fn update(&mut self, id: ExprId, value: &Value) -> bool {
-        let mut handled = false;
-        if let Some(ref mut p) = self.sensitive {
-            if p.update(id, value) {
-                self.widget.set_sensitive(val_to_bool(value));
-                handled = true;
-            }
-        }
-        if let Some(ref mut p) = self.visible {
-            if p.update(id, value) {
-                self.widget.set_visible(val_to_bool(value));
-                handled = true;
-            }
-        }
-        if self.widget.update(id, value) {
-            handled = true;
-        }
-        handled
-    }
-
-    fn root(&self) -> Option<&gtk::Widget> {
-        self.widget.root()
-    }
-
-    fn set_visible(&self, v: bool) {
-        self.widget.set_visible(v)
-    }
-
-    fn set_sensitive(&self, e: bool) {
-        self.widget.set_sensitive(e);
-    }
-
-    fn table_resolved(
-        &mut self,
-        path: &Path,
-        table: &resolver::Table,
-    ) -> bool {
-        self.widget.table_resolved(path, table)
-    }
-
-    fn set_highlight(&self, path: std::slice::Iter<WidgetPath>, h: bool) {
-        self.widget.set_highlight(path, h)
-    }
-}
-
-/// Placeholder for unimplemented widgets
-struct PlaceholderWidget(gtk::Widget);
-
-impl BWidget for PlaceholderWidget {
-    fn update(&mut self, _id: ExprId, _value: &Value) -> bool {
-        false
-    }
-    fn root(&self) -> Option<&gtk::Widget> {
-        Some(&self.0)
-    }
-}
-
 fn make_crumbs(ctx: &BCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
     let root = gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
     root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
@@ -700,34 +308,53 @@ fn make_crumbs(ctx: &BCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
 
 struct View {
     root: gtk::Box,
-    widget: Widget,
+    _comp: Option<graphix_rt::CompRes<NoExt>>,
+    /// The top-level expression id, used to detect when to build the widget tree
+    top_id: Option<ExprId>,
+    gtk_root: Option<gtk_widgets::GtkW<NoExt>>,
+    rt_handle: tokio::runtime::Handle,
+    gx: graphix_rt::GXHandle<NoExt>,
+    subscriber: netidx::subscriber::Subscriber,
 }
 
 impl View {
-    fn new(ctx: &BCtx, path: &ViewLoc, spec: view::Widget) -> View {
-        let selected_path = gtk::Label::new(None);
-        selected_path.set_halign(gtk::Align::Start);
-        selected_path.set_margin_start(0);
-        selected_path.set_selectable(true);
-        selected_path.set_single_line_mode(true);
-        let selected_path_window =
-            gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
-        selected_path_window
-            .set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-        selected_path_window.add(&selected_path);
-        let widget = Widget::new(ctx, spec.clone(), selected_path.clone());
+    fn new_from_source(ctx: &BCtx, path: &ViewLoc, source: &str) -> View {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_margin(2);
         root.add(&make_crumbs(ctx, path));
         root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        if let Some(wroot) = widget.root() {
-            root.add(wroot);
-            root.set_child_packing(wroot, true, true, 1, gtk::PackType::Start);
-        }
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        root.add(&selected_path_window);
-        root.set_child_packing(&selected_path, false, false, 1, gtk::PackType::End);
-        View { root, widget }
+        let ctx_ref = ctx.borrow();
+        let rt_handle = ctx_ref.backend.rt_handle.clone();
+        let gx = ctx_ref.backend.gx.clone();
+        let subscriber = ctx_ref.backend.subscriber.clone();
+        drop(ctx_ref);
+        let (comp, top_id) = match rt_handle.block_on(gx.compile(ArcStr::from(source))) {
+            Err(e) => {
+                log::warn!("failed to compile view source: {}", e);
+                let lbl = gtk::Label::new(Some(&format!("Error: {}", e)));
+                root.add(&lbl);
+                root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
+                (None, None)
+            }
+            Ok(comp) => {
+                if comp.exprs.is_empty() {
+                    let lbl = gtk::Label::new(Some("(empty view)"));
+                    root.add(&lbl);
+                    root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
+                    (Some(comp), None)
+                } else {
+                    // Record the top-level expression id; the widget tree will
+                    // be built lazily when its first value arrives via update().
+                    let id = comp.exprs[0].id;
+                    let lbl = gtk::Label::new(Some("Loading..."));
+                    root.add(&lbl);
+                    root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
+                    (Some(comp), Some(id))
+                }
+            }
+        };
+        root.show_all();
+        View { root, _comp: comp, top_id, gtk_root: None, rt_handle, gx, subscriber }
     }
 
     fn root(&self) -> &gtk::Widget {
@@ -735,11 +362,60 @@ impl View {
     }
 
     fn update(&mut self, id: ExprId, value: &Value) {
-        self.widget.update(id, value);
-    }
-
-    fn table_resolved(&mut self, path: &Path, table: &resolver::Table) {
-        self.widget.table_resolved(path, table);
+        // If the top-level expression just produced its first value,
+        // compile it into a GTK widget tree and embed it.
+        if self.gtk_root.is_none() {
+            if let Some(top) = self.top_id {
+                if id == top {
+                    let compile_ctx = gtk_widgets::CompileCtx {
+                        gx: self.gx.clone(),
+                        subscriber: self.subscriber.clone(),
+                    };
+                    match self.rt_handle.block_on(
+                        gtk_widgets::compile(compile_ctx, value.clone()),
+                    ) {
+                        Err(e) => {
+                            log::warn!("failed to compile widget tree: {}", e);
+                            // Remove the "Loading..." label
+                            let children = self.root.children();
+                            if let Some(last) = children.last() {
+                                self.root.remove(last);
+                            }
+                            let lbl = gtk::Label::new(
+                                Some(&format!("Widget error: {}", e)),
+                            );
+                            self.root.add(&lbl);
+                            self.root.set_child_packing(
+                                &lbl, true, true, 1, gtk::PackType::Start,
+                            );
+                            self.root.show_all();
+                            self.top_id = None;
+                        }
+                        Ok(w) => {
+                            // Remove the "Loading..." label
+                            let children = self.root.children();
+                            if let Some(last) = children.last() {
+                                self.root.remove(last);
+                            }
+                            let gw = w.gtk_widget();
+                            self.root.add(gw);
+                            self.root.set_child_packing(
+                                gw, true, true, 1, gtk::PackType::Start,
+                            );
+                            self.root.show_all();
+                            self.gtk_root = Some(w);
+                            self.top_id = None;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(ref mut w) = self.gtk_root {
+            if let Err(e) = w.handle_update(&self.rt_handle, id, value) {
+                log::warn!("widget update error: {}", e);
+            }
+        }
     }
 }
 
@@ -828,7 +504,7 @@ fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLo
 fn save_view(
     ctx: &BCtx,
     save_loc: &Rc<RefCell<Option<ViewLoc>>>,
-    current_spec: &Rc<RefCell<view::Widget>>,
+    current_source: &Rc<RefCell<ArcStr>>,
     save_button: &gtk::ToolButton,
     save_as: bool,
 ) {
@@ -836,11 +512,11 @@ fn save_view(
         glib::MainContext::default().spawn_local({
             let save_button = save_button.clone();
             let save_loc = save_loc.clone();
-            let spec = current_spec.borrow().clone();
+            let source = current_source.borrow().clone();
             let ctx = ctx.clone();
             let backend = ctx.borrow().backend.clone();
             async move {
-                match backend.save(loc.clone(), spec).await {
+                match backend.save(loc.clone(), source).await {
                     Err(e) => {
                         let _: result::Result<_, _> =
                             backend.to_gui.send(ToGui::SaveError(format!(
@@ -919,12 +595,11 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     }
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().current_loc.clone();
-    let current_spec: Rc<RefCell<view::Widget>> =
-        Rc::new(RefCell::new(default_view(Path::from("/"))));
+    let current_source: Rc<RefCell<ArcStr>> =
+        Rc::new(RefCell::new(default_view_source(Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
-    let highlight: Rc<RefCell<Vec<WidgetPath>>> = Rc::new(RefCell::new(vec![]));
     ctx.borrow().window.connect_delete_event(clone!(
         @weak ctx => @default-return Propagation::Proceed, move |w, _| {
             let saved = ctx.borrow().view_saved.get();
@@ -939,20 +614,13 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     design_mode.connect_toggled(clone!(
         @strong editor_window,
         @strong editor,
-        @strong highlight,
-        @strong current,
-        @strong current_spec,
+        @strong current_source,
         @strong current_loc,
         @weak ctx => move |b| {
             if b.is_active() {
-                let scope = match &*current_loc.borrow() {
-                    ViewLoc::Netidx(p) => p.clone(),
-                    ViewLoc::File(_) => Path::from("/"),
-                };
                 let ed = Editor::new(
                     &ctx,
-                    scope,
-                    current_spec.borrow().clone(),
+                    current_source.borrow().clone(),
                 );
                 let win = gtk::Window::builder()
                     .default_width(640)
@@ -974,19 +642,14 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     win.close();
                 }
                 editor.borrow_mut().take();
-                if let Some(cur) = &*current.borrow() {
-                    let hl = highlight.borrow();
-                    cur.widget.set_highlight(hl.iter(), false);
-                }
-                highlight.borrow_mut().clear();
             }
         }
     ));
     save_button.connect_clicked(clone!(
         @strong save_loc,
-        @strong current_spec,
+        @strong current_source,
         @weak ctx => move |b| {
-            save_view(&ctx, &save_loc, &current_spec, b, false)
+            save_view(&ctx, &save_loc, &current_source, b, false)
         }
     ));
     let go_act = gio::SimpleAction::new("go", None);
@@ -1008,10 +671,10 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     ctx.borrow().window.add_action(&save_as_act);
     save_as_act.connect_activate(clone!(
         @strong save_loc,
-        @strong current_spec,
+        @strong current_source,
         @weak ctx,
         @strong save_button => move |_, _| {
-            save_view(&ctx, &save_loc, &current_spec, &save_button, true)
+            save_view(&ctx, &save_loc, &current_source, &save_button, true)
         }
     ));
     let raw_view_act =
@@ -1039,18 +702,26 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let new_window_act = gio::SimpleAction::new("new_window", None);
     ctx.borrow().window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
+    // Drain confirm dialog requests from the graphix runtime
+    let confirm_rx = ctx.borrow().backend.confirm_rx.clone();
+    glib::idle_add_local(clone!(@weak ctx => @default-return ControlFlow::Break, move || {
+        if let Ok(rx) = confirm_rx.try_lock() {
+            while let Ok(req) = rx.try_recv() {
+                let confirmed = ask_modal(
+                    &ctx.borrow().window,
+                    &req.message,
+                );
+                let _ = req.reply.send(confirmed);
+            }
+        }
+        ControlFlow::Continue
+    }));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(updates) => {
             if let Some(root) = &mut *current.borrow_mut() {
                 for (id, value) in &updates {
                     root.update(*id, value);
                 }
-            }
-            ControlFlow::Continue
-        }
-        ToGui::TableResolved(path, table) => {
-            if let Some(root) = &mut *current.borrow_mut() {
-                root.table_resolved(&path, &table);
             }
             ControlFlow::Continue
         }
@@ -1071,7 +742,7 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             app.activate();
             ControlFlow::Continue
         }
-        ToGui::View { loc, spec, generated } => {
+        ToGui::View { loc, source, generated } => {
             match loc {
                 None => {
                     ctx.borrow().view_saved.set(false);
@@ -1088,6 +759,7 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     } else {
                         *save_loc.borrow_mut() = None;
                     }
+                    ctx.borrow().backend.set_current_path(&loc);
                     *current_loc.borrow_mut() = loc;
                     if design_mode.is_active() {
                         design_mode.set_active(false);
@@ -1097,25 +769,13 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             if let Some(cur) = current.borrow_mut().take() {
                 ctx.borrow().window.remove(cur.root());
             }
-            ctx.borrow_mut().radio_groups.clear();
-            *current_spec.borrow_mut() = spec.clone();
-            let cur = View::new(&ctx, &*current_loc.borrow(), spec);
+            *current_source.borrow_mut() = source.clone();
+            let cur = View::new_from_source(&ctx, &*current_loc.borrow(), &source);
             let window = ctx.borrow().window.clone();
             window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
             window.add(cur.root());
             window.show_all();
-            let hl = highlight.borrow();
-            cur.widget.set_highlight(hl.iter(), true);
             *current.borrow_mut() = Some(cur);
-            ControlFlow::Continue
-        }
-        ToGui::Highlight(path) => {
-            if let Some(cur) = &*current.borrow() {
-                let mut hl = highlight.borrow_mut();
-                cur.widget.set_highlight(hl.iter(), false);
-                *hl = path;
-                cur.widget.set_highlight(hl.iter(), true);
-            }
             ControlFlow::Continue
         }
         ToGui::ShowError(s) => {
@@ -1127,12 +787,12 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             idle_add_local(clone!(
                 @weak ctx,
                 @strong save_loc,
-                @strong current_spec,
+                @strong current_source,
                 @strong save_button => @default-return ControlFlow::Break, move || {
                     save_view(
                         &ctx,
                         &save_loc,
-                        &current_spec,
+                        &current_source,
                         &save_button,
                         true,
                     );
@@ -1256,7 +916,6 @@ fn main() {
                     new_window_loc: new_window_loc.clone(),
                     current_loc: Rc::new(RefCell::new(default_loc.clone())),
                     view_saved: Cell::new(true),
-                    radio_groups: HashMap::default(),
                 }));
                 run_gui(ctx, app, rx_to_gui);
             }

@@ -1,0 +1,522 @@
+/// GTK Browser Widget Package
+///
+/// Widgets for the netidx GUI browser. Views are graphix programs
+/// that return a Widget tree.
+
+// ---- Core widget type ----
+
+type Widget = [
+    `Label(Label),
+    `Button(Button),
+    `Entry(Entry),
+    `Switch(Switch),
+    `ToggleButton(ToggleButton),
+    `CheckButton(CheckButton),
+    `RadioButton(RadioButton),
+    `ComboBox(ComboBox),
+    `Scale(Scale),
+    `ProgressBar(ProgressBar),
+    `Image(Image),
+    `LinkButton(LinkButton),
+    `SearchEntry(SearchEntry),
+    `VBox(VBox),
+    `HBox(HBox),
+    `Grid(Grid),
+    `Frame(Frame),
+    `Paned(Paned),
+    `Notebook(Notebook),
+    `Table(Table),
+    `Chart(Chart)
+];
+
+// ---- Common types ----
+
+type Color = { r: f64, g: f64, b: f64, a: f64 };
+
+type SelectionMode = [`None, `Single, `Multi];
+
+type SortDirection = [`Ascending, `Descending];
+type SortMode = [
+    `None,
+    `Disabled,
+    `Column({ name: string, direction: SortDirection }),
+    `External(map<string, SortDirection>)
+];
+
+type FilterMode = [
+    `All,
+    `None,
+    `Include(array<string>),
+    `Exclude(array<string>),
+    `IncludeMatch(array<string>),
+    `ExcludeMatch(array<string>),
+    `KeepRange({ start: i64, end: i64 }),
+    `DropRange({ start: i64, end: i64 })
+];
+
+type EllipsizeMode = [`None, `Start, `Middle, `End];
+type IconSize = [`Menu, `SmallToolbar, `LargeToolbar, `Dnd, `Dialog];
+
+type ImageSpec = [
+    `Icon({ name: string, size: IconSize }),
+    `PixBuf({ data: bytes, width: [i64, null], height: [i64, null], keep_aspect: bool }),
+    string
+];
+
+// ---- Chart types ----
+
+type SeriesStyle = {
+  color: [Color, null],
+  label: [string, null],
+  stroke_width: [f64, null],
+  point_size: [f64, null]
+};
+
+type BarStyle = {
+  color: [Color, null],
+  label: [string, null],
+  margin: [f64, null]
+};
+
+type MeshStyle = {
+  show_x_grid: [bool, null],
+  show_y_grid: [bool, null],
+  grid_color: [Color, null],
+  axis_color: [Color, null],
+  label_color: [Color, null],
+  label_size: [f64, null],
+  x_label_area_size: [f64, null],
+  x_labels: [i64, null],
+  y_label_area_size: [f64, null],
+  y_labels: [i64, null]
+};
+
+type LegendStyle = {
+  background: [Color, null],
+  border: [Color, null],
+  label_color: [Color, null],
+  label_size: [f64, null]
+};
+
+type LegendPosition = [
+  `UpperLeft, `UpperRight, `LowerLeft, `LowerRight,
+  `MiddleLeft, `MiddleRight, `UpperMiddle, `LowerMiddle
+];
+
+type Dataset = [
+  `Line({data: &[Array<(f64, f64)>, Array<(datetime, f64)>], style: SeriesStyle}),
+  `Scatter({data: &[Array<(f64, f64)>, Array<(datetime, f64)>], style: SeriesStyle}),
+  `Bar({data: &Array<(string, f64)>, style: BarStyle}),
+  `Area({data: &[Array<(f64, f64)>, Array<(datetime, f64)>], style: SeriesStyle})
+];
+
+type Chart = {
+  datasets: &Array<Dataset>,
+  title: &[string, null],
+  title_color: &[Color, null],
+  x_label: &[string, null],
+  y_label: &[string, null],
+  x_range: &[{min: f64, max: f64}, {min: datetime, max: datetime}, null],
+  y_range: &[{min: f64, max: f64}, null],
+  background: &[Color, null],
+  margin: &[f64, null],
+  title_size: &[f64, null],
+  legend_position: &[LegendPosition, null],
+  legend_style: &[LegendStyle, null],
+  mesh: &[MeshStyle, null]
+};
+
+// ---- Widget struct types ----
+
+type Label = {
+    text: &string,
+    width: &[i64, null],
+    ellipsize: &EllipsizeMode,
+    selectable: &bool,
+    single_line: &bool
+};
+
+type Button = {
+    label: &string,
+    image: &[ImageSpec, null],
+    on_click: &[fn(null) -> Any, null]
+};
+
+type Entry = {
+    text: &string,
+    on_change: &[fn(string) -> Any, null],
+    on_activate: &[fn(string) -> Any, null]
+};
+
+type Switch = {
+    value: &bool,
+    on_change: &[fn(bool) -> Any, null]
+};
+
+type ToggleButton = {
+    value: &bool,
+    label: &string,
+    image: &[ImageSpec, null],
+    on_change: &[fn(bool) -> Any, null]
+};
+
+type CheckButton = {
+    value: &bool,
+    label: &string,
+    on_change: &[fn(bool) -> Any, null]
+};
+
+type RadioButton = {
+    label: &string,
+    group: &string,
+    value: &bool,
+    on_toggled: &[fn(bool) -> Any, null]
+};
+
+type ComboChoice = { id: string, label: string };
+
+type ComboBox = {
+    choices: &array<ComboChoice>,
+    selected: &string,
+    on_change: &[fn(string) -> Any, null]
+};
+
+type Scale = {
+    value: &f64,
+    min: &f64,
+    max: &f64,
+    on_change: &[fn(f64) -> Any, null]
+};
+
+type ProgressBar = {
+    fraction: &[f64, null],
+    text: &[string, null],
+    pulse: &Any
+};
+
+type Image = {
+    spec: &ImageSpec,
+    on_click: &[fn(null) -> Any, null]
+};
+
+type LinkButton = {
+    uri: &string,
+    label: &string,
+    on_activate_link: &[fn(string) -> Any, null]
+};
+
+type SearchEntry = {
+    text: &string,
+    on_search_changed: &[fn(string) -> Any, null],
+    on_activate: &[fn(string) -> Any, null]
+};
+
+// ---- Container types ----
+
+type VBox = {
+    children: &array<Widget>,
+    spacing: &i64,
+    homogeneous: &bool
+};
+
+type HBox = {
+    children: &array<Widget>,
+    spacing: &i64,
+    homogeneous: &bool
+};
+
+type GridRow = array<Widget>;
+
+type Grid = {
+    rows: &array<GridRow>,
+    column_spacing: &i64,
+    row_spacing: &i64,
+    homogeneous_columns: &bool,
+    homogeneous_rows: &bool
+};
+
+type Frame = {
+    label: &string,
+    child: &Widget
+};
+
+type Paned = {
+    direction: &[`Horizontal, `Vertical],
+    wide_handle: &bool,
+    first: &[Widget, null],
+    second: &[Widget, null]
+};
+
+type NotebookPage = {
+    label: string,
+    reorderable: bool,
+    child: &Widget
+};
+
+type Notebook = {
+    children: &array<NotebookPage>,
+    page: &i64,
+    on_switch_page: &[fn(i64) -> Any, null]
+};
+
+// ---- Data widgets ----
+
+type ColumnType = [
+    `Text,
+    `Toggle,
+    `Combo({ choices: array<{ id: string, label: string }> }),
+    `Spin({ min: f64, max: f64, increment: f64 }),
+    `Progress,
+    `Hidden
+];
+type ColumnSpec = { name: string, typ: ColumnType };
+
+type Table = {
+    path: &string,
+    sort_mode: &SortMode,
+    column_filter: &FilterMode,
+    column_types: &[array<ColumnSpec>, null],
+    column_widths: &[map<string, i64>, null],
+    row_filter: &FilterMode,
+    selection_mode: &SelectionMode,
+    show_row_name: &bool,
+    on_select: &[fn(array<string>) -> Any, null],
+    on_activate: &[fn(string) -> Any, null],
+    on_edit: &[fn({ path: string, value: Any }) -> Any, null],
+    on_header_click: &[fn(string) -> Any, null]
+};
+
+
+// ---- Widget constructors ----
+
+/// A text label
+val label: fn(
+    ?#width: &[i64, null],
+    ?#ellipsize: &EllipsizeMode,
+    ?#selectable: &bool,
+    ?#single_line: &bool,
+    &string
+) -> Widget;
+
+/// A clickable button
+val button: fn(
+    ?#image: &[ImageSpec, null],
+    ?#on_click: fn(null) -> Any,
+    &string
+) -> Widget;
+
+/// A text entry field
+val entry: fn(
+    ?#on_change: fn(string) -> Any,
+    ?#on_activate: fn(string) -> Any,
+    &string
+) -> Widget;
+
+/// A toggle switch
+val switch: fn(
+    ?#on_change: fn(bool) -> Any,
+    &bool
+) -> Widget;
+
+/// A toggle button
+val toggle_button: fn(
+    ?#label: &string,
+    ?#image: &[ImageSpec, null],
+    ?#on_change: fn(bool) -> Any,
+    &bool
+) -> Widget;
+
+/// A checkbox
+val check_button: fn(
+    ?#label: &string,
+    ?#on_change: fn(bool) -> Any,
+    &bool
+) -> Widget;
+
+/// A radio button
+val radio_button: fn(
+    ?#group: &string,
+    ?#on_toggled: fn(bool) -> Any,
+    #label: &string,
+    &bool
+) -> Widget;
+
+/// A dropdown combo box
+val combo_box: fn(
+    ?#on_change: fn(string) -> Any,
+    #choices: &array<ComboChoice>,
+    &string
+) -> Widget;
+
+/// A slider
+val scale: fn(
+    ?#on_change: fn(f64) -> Any,
+    #min: &f64,
+    #max: &f64,
+    &f64
+) -> Widget;
+
+/// A progress bar
+val progress_bar: fn(
+    ?#text: &[string, null],
+    ?#pulse: &Any,
+    &[f64, null]
+) -> Widget;
+
+/// An image
+val image: fn(
+    ?#on_click: fn(null) -> Any,
+    &ImageSpec
+) -> Widget;
+
+/// A hyperlink button
+val link_button: fn(
+    ?#on_activate_link: fn(string) -> Any,
+    #uri: &string,
+    &string
+) -> Widget;
+
+/// A search entry
+val search_entry: fn(
+    ?#on_search_changed: fn(string) -> Any,
+    ?#on_activate: fn(string) -> Any,
+    &string
+) -> Widget;
+
+/// Vertical box layout
+val vbox: fn(
+    ?#spacing: &i64,
+    ?#homogeneous: &bool,
+    &array<Widget>
+) -> Widget;
+
+/// Horizontal box layout
+val hbox: fn(
+    ?#spacing: &i64,
+    ?#homogeneous: &bool,
+    &array<Widget>
+) -> Widget;
+
+/// Grid layout
+val grid: fn(
+    ?#column_spacing: &i64,
+    ?#row_spacing: &i64,
+    ?#homogeneous_columns: &bool,
+    ?#homogeneous_rows: &bool,
+    &array<GridRow>
+) -> Widget;
+
+/// A labeled frame
+val frame: fn(
+    #label: &string,
+    &Widget
+) -> Widget;
+
+/// A split pane
+val paned: fn(
+    ?#direction: &[`Horizontal, `Vertical],
+    ?#wide_handle: &bool,
+    #first: &[Widget, null],
+    #second: &[Widget, null]
+) -> Widget;
+
+/// A tabbed notebook
+val notebook: fn(
+    ?#page: &i64,
+    ?#on_switch_page: fn(i64) -> Any,
+    &array<NotebookPage>
+) -> Widget;
+
+/// A netidx table view
+val table: fn(
+    ?#sort_mode: &SortMode,
+    ?#column_filter: &FilterMode,
+    ?#column_types: &[array<ColumnSpec>, null],
+    ?#column_widths: &[map<string, i64>, null],
+    ?#row_filter: &FilterMode,
+    ?#selection_mode: &SelectionMode,
+    ?#show_row_name: &bool,
+    ?#on_select: fn(array<string>) -> Any,
+    ?#on_activate: fn(string) -> Any,
+    ?#on_edit: fn({ path: string, value: Any }) -> Any,
+    ?#on_header_click: fn(string) -> Any,
+    &string
+) -> Widget;
+
+/// A chart widget
+val chart: fn(
+    ?#title: &[string, null],
+    ?#title_color: &[Color, null],
+    ?#x_label: &[string, null],
+    ?#y_label: &[string, null],
+    ?#x_range: &[{min: f64, max: f64}, {min: datetime, max: datetime}, null],
+    ?#y_range: &[{min: f64, max: f64}, null],
+    ?#background: &[Color, null],
+    ?#margin: &[f64, null],
+    ?#title_size: &[f64, null],
+    ?#legend_position: &[LegendPosition, null],
+    ?#legend_style: &[LegendStyle, null],
+    ?#mesh: &[MeshStyle, null],
+    &Array<Dataset>
+) -> Widget;
+
+/// A line dataset
+val line: fn(
+    ?#color: [Color, null],
+    ?#label: [string, null],
+    ?#stroke_width: [f64, null],
+    ?#point_size: [f64, null],
+    &[Array<(f64, f64)>, Array<(datetime, f64)>]
+) -> Dataset;
+
+/// A scatter dataset
+val scatter: fn(
+    ?#color: [Color, null],
+    ?#label: [string, null],
+    ?#stroke_width: [f64, null],
+    ?#point_size: [f64, null],
+    &[Array<(f64, f64)>, Array<(datetime, f64)>]
+) -> Dataset;
+
+/// A bar dataset
+val bar: fn(
+    ?#color: [Color, null],
+    ?#label: [string, null],
+    ?#margin: [f64, null],
+    &Array<(string, f64)>
+) -> Dataset;
+
+/// An area dataset
+val area: fn(
+    ?#color: [Color, null],
+    ?#label: [string, null],
+    ?#stroke_width: [f64, null],
+    ?#point_size: [f64, null],
+    &[Array<(f64, f64)>, Array<(datetime, f64)>]
+) -> Dataset;
+
+// ---- Key handler ----
+
+type KeyHandler = {
+    child: &Widget,
+    on_key_press: &fn(string) -> Any
+};
+
+/// Wrap a widget with a key press handler.
+/// The handler receives the key name (e.g., "Return", "Escape", "ctrl+s")
+val key_handler: fn(
+    #on_key_press: fn(string) -> Any,
+    &Widget
+) -> Widget;
+
+// ---- Navigation builtins ----
+
+/// Navigate to a netidx path or file location
+val navigate: fn(string) -> null;
+
+/// Navigate in a new window
+val navigate_in_window: fn(string) -> null;
+
+/// Show a confirmation dialog with the given message. If the user
+/// confirms, return the value; otherwise return null.
+val confirm: fn(string, Any) -> Any;

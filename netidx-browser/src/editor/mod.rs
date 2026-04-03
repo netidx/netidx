@@ -1,807 +1,430 @@
-mod widgets;
+//! Two-tab view editor:
+//! - Source tab: sourceview4 text editor for .gx source
+//! - Designer tab: widget tree + type-driven property panel
+//!
+//! The designer generates structured .gx code from its internal
+//! widget tree. Property panels are generated from FnType signatures
+//! obtained via GXHandle::get_env().
 
-use crate::{
-    view, BCtx, WidgetPath,
+use crate::BCtx;
+use arcstr::ArcStr;
+use glib::clone;
+use graphix_compiler::{
+    env::Env,
+    typ::{FnType, Type},
 };
-use glib::{clone, prelude::*, ControlFlow};
 use gtk::{self, prelude::*};
-use netidx::path::Path;
+use netidx::publisher::Typ;
+use sourceview4::prelude::*;
 use std::{
-    boxed,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
 };
 
-type OnChange = Rc<dyn Fn()>;
-
-fn widget_kind_name(kind: &view::WidgetKind) -> &'static str {
-    match kind {
-        view::WidgetKind::BScript(_) => "BScript",
-        view::WidgetKind::Table(_) => "Table",
-        view::WidgetKind::Label(_) => "Label",
-        view::WidgetKind::Button(_) => "Button",
-        view::WidgetKind::LinkButton(_) => "LinkButton",
-        view::WidgetKind::Switch(_) => "Switch",
-        view::WidgetKind::ToggleButton(_) => "ToggleButton",
-        view::WidgetKind::CheckButton(_) => "CheckButton",
-        view::WidgetKind::RadioButton(_) => "RadioButton",
-        view::WidgetKind::ComboBox(_) => "ComboBox",
-        view::WidgetKind::Entry(_) => "Entry",
-        view::WidgetKind::SearchEntry(_) => "SearchEntry",
-        view::WidgetKind::ProgressBar(_) => "ProgressBar",
-        view::WidgetKind::Scale(_) => "Scale",
-        view::WidgetKind::Image(_) => "Image",
-        view::WidgetKind::Frame(_) => "Frame",
-        view::WidgetKind::Box(_) => "Box",
-        view::WidgetKind::BoxChild(_) => "BoxChild",
-        view::WidgetKind::Grid(_) => "Grid",
-        view::WidgetKind::GridChild(_) => "GridChild",
-        view::WidgetKind::GridRow(_) => "GridRow",
-        view::WidgetKind::Paned(_) => "Paned",
-        view::WidgetKind::Notebook(_) => "Notebook",
-        view::WidgetKind::NotebookPage(_) => "NotebookPage",
-        view::WidgetKind::LinePlot(_) => "LinePlot",
-    }
-}
-
-fn default_widget_for_kind(name: &str) -> view::Widget {
-    let kind = match name {
-        "BScript" => view::WidgetKind::BScript(view::GxExpr::default()),
-        "Table" => view::WidgetKind::Table(view::Table::default()),
-        "Label" => view::WidgetKind::Label(view::Label::default()),
-        "Button" => view::WidgetKind::Button(view::Button::default()),
-        "LinkButton" => view::WidgetKind::LinkButton(view::LinkButton::default()),
-        "Switch" => view::WidgetKind::Switch(view::Switch::default()),
-        "ToggleButton" => {
-            view::WidgetKind::ToggleButton(view::ToggleButton::default())
-        }
-        "CheckButton" => {
-            view::WidgetKind::CheckButton(view::ToggleButton::default())
-        }
-        "RadioButton" => {
-            view::WidgetKind::RadioButton(view::RadioButton::default())
-        }
-        "ComboBox" => view::WidgetKind::ComboBox(view::ComboBox::default()),
-        "Entry" => view::WidgetKind::Entry(view::Entry::default()),
-        "SearchEntry" => {
-            view::WidgetKind::SearchEntry(view::SearchEntry::default())
-        }
-        "ProgressBar" => {
-            view::WidgetKind::ProgressBar(view::ProgressBar::default())
-        }
-        "Scale" => view::WidgetKind::Scale(view::Scale::default()),
-        "Image" => view::WidgetKind::Image(view::Image::default()),
-        "Frame" => view::WidgetKind::Frame(view::Frame::default()),
-        "Box" => view::WidgetKind::Box(view::Box::default()),
-        "BoxChild" => view::WidgetKind::BoxChild(view::BoxChild::default()),
-        "Grid" => view::WidgetKind::Grid(view::Grid::default()),
-        "GridChild" => view::WidgetKind::GridChild(view::GridChild::default()),
-        "GridRow" => view::WidgetKind::GridRow(view::GridRow::default()),
-        "Paned" => view::WidgetKind::Paned(view::Paned::default()),
-        "Notebook" => view::WidgetKind::Notebook(view::Notebook::default()),
-        "NotebookPage" => {
-            view::WidgetKind::NotebookPage(view::NotebookPage::default())
-        }
-        "LinePlot" => view::WidgetKind::LinePlot(view::LinePlot::default()),
-        _ => view::WidgetKind::Label(view::Label::default()),
-    };
-    view::Widget { props: None, kind }
-}
-
-static KINDS: [&str; 25] = [
-    "Box",
-    "BoxChild",
-    "BScript",
-    "Button",
-    "CheckButton",
-    "ComboBox",
-    "Entry",
-    "Frame",
-    "Grid",
-    "GridChild",
-    "GridRow",
-    "Image",
-    "Label",
-    "LinePlot",
-    "LinkButton",
-    "Notebook",
-    "NotebookPage",
-    "Paned",
-    "ProgressBar",
-    "RadioButton",
-    "Scale",
-    "SearchEntry",
-    "Switch",
-    "Table",
-    "ToggleButton",
+/// Known widget constructor names
+static WIDGET_KINDS: &[&str] = &[
+    "label", "button", "entry", "switch", "toggle_button",
+    "check_button", "combo_box", "scale", "progress_bar",
+    "image", "link_button", "search_entry",
+    "vbox", "hbox", "grid", "frame", "paned", "notebook",
+    "table", "chart", "key_handler",
 ];
 
-/// A node stored in the tree store via glib::Boxed.
-/// Contains the property editor widget and the view spec for this node.
-#[derive(Clone, Debug, glib::Boxed)]
-#[boxed_type(name = "NetidxEditorNode")]
-struct EditorNode {
-    spec: Rc<RefCell<view::Widget>>,
-    prop_root: gtk::Box,
+/// A node in the designer's widget tree
+#[derive(Clone)]
+struct DesignerNode {
+    kind: String,
+    args: Vec<(String, String)>,
+    children: Vec<DesignerNode>,
 }
 
-impl EditorNode {
-    fn new(on_change: &OnChange, spec: view::Widget) -> Self {
-        let spec = Rc::new(RefCell::new(spec));
-        let prop_root = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        Self::rebuild_props(&prop_root, &spec, on_change);
-        EditorNode { spec, prop_root }
+impl DesignerNode {
+    fn new(kind: &str) -> Self {
+        DesignerNode { kind: kind.to_string(), args: vec![], children: vec![] }
     }
 
-    fn rebuild_props(
-        prop_root: &gtk::Box,
-        spec: &Rc<RefCell<view::Widget>>,
-        on_change: &OnChange,
-    ) {
-        for child in prop_root.children() {
-            prop_root.remove(&child);
+    /// Generate graphix source for this widget subtree
+    fn to_source(&self, indent: usize) -> String {
+        let pad = "    ".repeat(indent);
+        let mut s = format!("{}browser::{}", pad, self.kind);
+        let named: Vec<String> = self.args.iter()
+            .map(|(name, val)| format!("#{}: {}", name, val))
+            .collect();
+        if self.children.is_empty() {
+            if named.is_empty() {
+                s.push_str(r#"("")"#);
+            } else {
+                s.push_str("(\n");
+                for (i, arg) in named.iter().enumerate() {
+                    s.push_str(&format!("{}    {}", pad, arg));
+                    if i < named.len() - 1 { s.push(','); }
+                    s.push('\n');
+                }
+                s.push_str(&format!("{})", pad));
+            }
+        } else {
+            s.push_str("(\n");
+            for arg in &named {
+                s.push_str(&format!("{}    {},\n", pad, arg));
+            }
+            s.push_str(&format!("{}    [\n", pad));
+            for (i, child) in self.children.iter().enumerate() {
+                s.push_str(&child.to_source(indent + 2));
+                if i < self.children.len() - 1 { s.push(','); }
+                s.push('\n');
+            }
+            s.push_str(&format!("{}    ]\n", pad));
+            s.push_str(&format!("{})", pad));
         }
-        let s = spec.borrow();
-        let kind_label = gtk::Label::new(Some(&format!(
-            "<b>{}</b>",
-            widget_kind_name(&s.kind),
-        )));
-        kind_label.set_use_markup(true);
-        kind_label.set_halign(gtk::Align::Start);
-        prop_root.pack_start(&kind_label, false, false, 2);
-        prop_root.pack_start(
-            &gtk::Separator::new(gtk::Orientation::Horizontal),
-            false, false, 2,
-        );
-        // Common properties
-        let common_exp = gtk::Expander::new(Some("Common Properties"));
-        let common_grid = gtk::Grid::new();
-        common_grid.set_column_spacing(4);
-        common_grid.set_row_spacing(2);
-        common_exp.add(&common_grid);
-        widgets::build_common_props(
-            &common_grid,
-            &spec,
-            on_change,
-        );
-        prop_root.pack_start(&common_exp, false, false, 2);
-        // Widget-specific properties
-        let specific_exp = gtk::Expander::new(Some("Widget Properties"));
-        specific_exp.set_expanded(true);
-        let specific_grid = gtk::Grid::new();
-        specific_grid.set_column_spacing(4);
-        specific_grid.set_row_spacing(2);
-        specific_exp.add(&specific_grid);
-        widgets::build_kind_props(
-            &specific_grid,
-            &spec,
-            on_change,
-        );
-        prop_root.pack_start(&specific_exp, false, false, 2);
-        prop_root.show_all();
+        s
     }
+}
 
-    fn widget_spec(&self) -> view::Widget {
-        self.spec.borrow().clone()
+/// Check if a type is a set of unit variants (for combo boxes)
+fn variant_names(typ: &Type) -> Option<Vec<String>> {
+    match typ {
+        Type::Set(variants) => {
+            let names: Vec<String> = variants.iter().filter_map(|t| {
+                match t {
+                    Type::Variant(tag, args) if args.is_empty() => {
+                        Some(format!("`{}", tag))
+                    }
+                    _ => None,
+                }
+            }).collect();
+            if names.len() == variants.len() && !names.is_empty() {
+                Some(names)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Unwrap &T, [T, null], etc. to get the core type
+fn unwrap_type(typ: &Type) -> &Type {
+    match typ {
+        Type::ByRef(inner) => unwrap_type(inner),
+        Type::Set(variants) if variants.len() == 2 => {
+            // [T, null] → T
+            variants.iter()
+                .find(|t| !matches!(t, Type::Primitive(p) if p.is_empty()))
+                .map(|t| unwrap_type(t))
+                .unwrap_or(typ)
+        }
+        _ => typ,
+    }
+}
+
+/// Create a property editor widget for a given type
+fn create_editor_for_type(
+    typ: &Type,
+    current: &str,
+    on_change: impl Fn(String) + Clone + 'static,
+) -> gtk::Widget {
+    let inner = unwrap_type(typ);
+    // Function type → callback label + "Edit in Source" hint
+    if matches!(inner, Type::Fn(_)) {
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let label = gtk::Label::new(Some(if current.is_empty() { "(callback)" } else { current }));
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_max_width_chars(30);
+        label.set_halign(gtk::Align::Start);
+        hbox.pack_start(&label, true, true, 0);
+        let hint = gtk::Label::new(Some("(edit in Source tab)"));
+        hint.set_opacity(0.5);
+        hbox.pack_end(&hint, false, false, 0);
+        return hbox.upcast();
+    }
+    // Variant set → combo box
+    if let Some(names) = variant_names(inner) {
+        let combo = gtk::ComboBoxText::new();
+        for name in &names { combo.append(Some(name), name); }
+        combo.set_active_id(Some(current.trim_start_matches('&')));
+        let on_change = on_change.clone();
+        combo.connect_changed(move |c| {
+            if let Some(id) = c.active_id() { on_change(id.to_string()); }
+        });
+        return combo.upcast();
+    }
+    // Bool → checkbox
+    if let Type::Primitive(flags) = inner {
+        if flags.contains(Typ::Bool) {
+            let check = gtk::CheckButton::new();
+            check.set_active(current == "true" || current == "&true");
+            let on_change = on_change.clone();
+            check.connect_toggled(move |b| {
+                on_change(if b.is_active() { "true".into() } else { "false".into() });
+            });
+            return check.upcast();
+        }
+    }
+    // String → text entry
+    if let Type::Primitive(flags) = inner {
+        if flags.contains(Typ::String) {
+            let entry = gtk::Entry::new();
+            entry.set_text(current.trim_matches('"'));
+            let on_change = on_change.clone();
+            entry.connect_activate(move |e| {
+                on_change(format!("{:?}", e.text().as_str()));
+            });
+            return entry.upcast();
+        }
+    }
+    // Fallback: raw text entry
+    let entry = gtk::Entry::new();
+    entry.set_text(current);
+    let on_change = on_change.clone();
+    entry.connect_activate(move |e| { on_change(e.text().to_string()); });
+    entry.upcast()
+}
+
+/// Build property editors for a widget kind from FnType
+fn build_props_from_fntype(
+    grid: &gtk::Grid,
+    fn_type: &FnType,
+    node: &Rc<RefCell<DesignerNode>>,
+    on_change: &Rc<dyn Fn()>,
+) {
+    let mut row = 0;
+    for arg in fn_type.args.iter() {
+        if let Some((name, _optional)) = &arg.label {
+            let label = gtk::Label::new(Some(&format!("{}:", name)));
+            label.set_halign(gtk::Align::End);
+            grid.attach(&label, 0, row, 1, 1);
+            let current = node.borrow().args.iter()
+                .find(|(n, _)| n == name.as_str())
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            let inner = unwrap_type(&arg.typ);
+            let name = name.clone();
+            let node_c = node.clone();
+            let on_change_c = on_change.clone();
+            let editor = create_editor_for_type(inner, &current, move |val| {
+                let mut n = node_c.borrow_mut();
+                if let Some(existing) = n.args.iter_mut().find(|(k, _)| k == name.as_str()) {
+                    existing.1 = val;
+                } else {
+                    n.args.push((name.to_string(), val));
+                }
+                on_change_c();
+            });
+            editor.set_hexpand(true);
+            grid.attach(&editor, 1, row, 1, 1);
+            row += 1;
+        }
     }
 }
 
 pub(crate) struct Editor {
-    root: gtk::Paned,
+    root: gtk::Notebook,
 }
 
 impl Editor {
-    pub(crate) fn new(ctx: &BCtx, _scope: Path, spec: view::Widget) -> Editor {
-        let root = gtk::Paned::new(gtk::Orientation::Vertical);
-        glib::idle_add_local(
-            clone!(@weak root => @default-return ControlFlow::Break, move || {
-                root.set_position(root.allocated_height() / 2);
-                ControlFlow::Break
-            }),
+    pub(crate) fn new(ctx: &BCtx, source: ArcStr) -> Editor {
+        let root = gtk::Notebook::new();
+        let backend = ctx.borrow().backend.clone();
+
+        // Get Env for type introspection
+        let env: Rc<RefCell<Option<Env>>> = Rc::new(RefCell::new(
+            backend.rt_handle.block_on(backend.gx.get_env()).ok()
+        ));
+
+        // ---- Source tab ----
+        let source_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let source_toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        source_toolbar.set_margin(5);
+        let apply_btn = gtk::Button::with_label("Apply");
+        source_toolbar.pack_start(&apply_btn, false, false, 0);
+        source_box.pack_start(&source_toolbar, false, false, 0);
+        let buf = sourceview4::Buffer::new(None::<&gtk::TextTagTable>);
+        buf.set_text(&source);
+        buf.set_highlight_syntax(true);
+        let source_view = sourceview4::View::with_buffer(&buf);
+        source_view.set_show_line_numbers(true);
+        source_view.set_monospace(true);
+        source_view.set_tab_width(4);
+        source_view.set_auto_indent(true);
+        let scroll = gtk::ScrolledWindow::new(
+            None::<&gtk::Adjustment>, None::<&gtk::Adjustment>,
         );
-        root.set_margin_start(5);
-        root.set_margin_end(5);
-        // Upper: tree view with toolbar
-        let upper = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        // Lower: property editor in scrolled window
-        let lower_win =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        lower_win.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        let lower = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        lower_win.add(&lower);
-        root.pack1(&upper, true, false);
-        root.pack2(&lower_win, true, true);
-        // Toolbar
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        upper.pack_start(&toolbar, false, false, 0);
-        let add_icon = gtk::Image::from_icon_name(
-            Some("list-add-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let add_btn = gtk::ToolButton::new(Some(&add_icon), Some("Add"));
-        let add_child_icon = gtk::Image::from_icon_name(
-            Some("go-down-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let add_child_btn = gtk::ToolButton::new(Some(&add_child_icon), Some("Child"));
-        let del_icon = gtk::Image::from_icon_name(
-            Some("list-remove-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let del_btn = gtk::ToolButton::new(Some(&del_icon), Some("Del"));
-        let dup_icon = gtk::Image::from_icon_name(
-            Some("edit-copy-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let dup_btn = gtk::ToolButton::new(Some(&dup_icon), Some("Dup"));
-        let undo_icon = gtk::Image::from_icon_name(
-            Some("edit-undo-symbolic"),
-            gtk::IconSize::SmallToolbar,
-        );
-        let undo_btn = gtk::ToolButton::new(Some(&undo_icon), Some("Undo"));
-        toolbar.pack_start(&add_btn, false, false, 5);
-        toolbar.pack_start(&add_child_btn, false, false, 5);
-        toolbar.pack_start(&del_btn, false, false, 5);
-        toolbar.pack_start(&dup_btn, false, false, 5);
-        toolbar.pack_start(&undo_btn, false, false, 5);
-        // Tree view
-        let tree_win =
-            gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-        tree_win.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        upper.pack_start(&tree_win, true, true, 5);
-        let tree_view = gtk::TreeView::new();
-        tree_win.add(&tree_view);
-        tree_view.append_column(&{
-            let col = gtk::TreeViewColumn::new();
-            let cell = gtk::CellRendererText::new();
-            gtk::prelude::CellLayoutExt::pack_start(&col, &cell, true);
-            col.set_title("Widget");
-            gtk::prelude::CellLayoutExt::add_attribute(&col, &cell, "text", 0);
-            col
-        });
-        // TreeStore columns: 0=name(String), 1=EditorNode(Boxed)
-        let store = gtk::TreeStore::new(&[
-            String::static_type(),
-            EditorNode::static_type(),
-        ]);
-        tree_view.set_model(Some(&store));
-        tree_view.set_reorderable(true);
-        tree_view.set_enable_tree_lines(true);
-        // State
-        let spec_rc = Rc::new(RefCell::new(spec.clone()));
-        let undo_stack: Rc<RefCell<Vec<view::Widget>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        let undoing = Rc::new(Cell::new(false));
-        let selected: Rc<RefCell<Option<gtk::TreeIter>>> =
-            Rc::new(RefCell::new(None));
-        let properties = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        lower.pack_start(&properties, true, true, 5);
-        let ctx_clone = ctx.clone();
-        let on_change: OnChange = Rc::new({
-            let spec_rc = spec_rc.clone();
-            let store = store.clone();
-            let scheduled = Rc::new(Cell::new(false));
-            let undo_stack = undo_stack.clone();
-            let undoing = undoing.clone();
-            let ctx = ctx_clone.clone();
-            move || {
-                if !scheduled.get() {
-                    scheduled.set(true);
-                    glib::idle_add_local(clone!(
-                        @strong ctx,
-                        @strong spec_rc,
-                        @strong store,
-                        @strong scheduled,
-                        @strong undo_stack,
-                        @strong undoing => move || {
-                            if let Some(root_iter) = store.iter_first() {
-                                if undoing.get() {
-                                    undoing.set(false);
-                                } else {
-                                    undo_stack.borrow_mut()
-                                        .push(spec_rc.borrow().clone());
-                                }
-                                let new_spec =
-                                    build_spec(&store, &root_iter);
-                                *spec_rc.borrow_mut() = new_spec.clone();
-                                ctx.borrow().backend.render(new_spec);
-                            }
-                            scheduled.set(false);
-                            ControlFlow::Break
-                    }));
-                }
+        scroll.add(&source_view);
+        source_box.pack_start(&scroll, true, true, 0);
+        apply_btn.connect_clicked(clone!(@weak buf, @strong backend => move |_| {
+            let (start, end) = buf.bounds();
+            if let Some(text) = buf.text(&start, &end, false) {
+                backend.render(ArcStr::from(text.as_str()));
             }
-        });
-        // Build the tree from the initial spec
-        build_tree(&on_change, &store, None, &spec);
-        // Expand all nodes initially
-        tree_view.expand_all();
-        // Kind selector for changing widget type
+        }));
+        root.append_page(&source_box, Some(&gtk::Label::new(Some("Source"))));
+
+        // ---- Designer tab ----
+        let designer_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let designer_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+
+        // Left: widget palette + tree
+        let left = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        left.set_margin(5);
+        let palette = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let kind_combo = gtk::ComboBoxText::new();
-        for k in &KINDS {
-            kind_combo.append(Some(k), k);
-        }
-        let inhibit_kind_change = Rc::new(Cell::new(false));
-        lower.pack_start(&kind_combo, false, false, 0);
-        lower.reorder_child(&kind_combo, 0);
-        // Selection handling
-        tree_view.selection().connect_changed(clone!(
-            @strong store,
-            @strong selected,
-            @weak properties,
-            @strong kind_combo,
-            @strong inhibit_kind_change => move |sel| {
-                // Remove old property editor
-                for child in properties.children() {
-                    properties.remove(&child);
-                }
-                if let Some((_, iter)) = sel.selected() {
-                    *selected.borrow_mut() = Some(iter.clone());
-                    let v = store.value(&iter, 1);
-                    if let Ok(node) = v.get::<EditorNode>() {
-                        properties.pack_start(&node.prop_root, true, true, 0);
-                        inhibit_kind_change.set(true);
-                        let name = widget_kind_name(
-                            &node.spec.borrow().kind
-                        );
-                        kind_combo.set_active_id(Some(name));
-                        inhibit_kind_change.set(false);
-                    }
-                    properties.show_all();
+        for kind in WIDGET_KINDS { kind_combo.append(Some(kind), kind); }
+        kind_combo.set_active_id(Some("label"));
+        let add_btn = gtk::Button::with_label("Add");
+        let remove_btn = gtk::Button::with_label("Remove");
+        palette.pack_start(&kind_combo, true, true, 0);
+        palette.pack_start(&add_btn, false, false, 0);
+        palette.pack_start(&remove_btn, false, false, 0);
+        left.pack_start(&palette, false, false, 0);
+        let tree_store = gtk::TreeStore::new(&[glib::Type::STRING]);
+        let tree_view = gtk::TreeView::with_model(&tree_store);
+        let col = gtk::TreeViewColumn::new();
+        col.set_title("Widget");
+        let cell = gtk::CellRendererText::new();
+        gtk::prelude::CellLayoutExt::pack_start(&col, &cell, true);
+        gtk::prelude::CellLayoutExt::add_attribute(&col, &cell, "text", 0);
+        tree_view.append_column(&col);
+        let tree_scroll = gtk::ScrolledWindow::new(
+            None::<&gtk::Adjustment>, None::<&gtk::Adjustment>,
+        );
+        tree_scroll.add(&tree_view);
+        left.pack_start(&tree_scroll, true, true, 0);
+        designer_paned.pack1(&left, true, false);
+
+        // Right: property panel
+        let prop_scroll = gtk::ScrolledWindow::new(
+            None::<&gtk::Adjustment>, None::<&gtk::Adjustment>,
+        );
+        let prop_box = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        prop_box.set_margin(5);
+        prop_box.pack_start(
+            &gtk::Label::new(Some("Select a widget to edit properties")),
+            false, false, 0,
+        );
+        prop_scroll.add(&prop_box);
+        designer_paned.pack2(&prop_scroll, true, false);
+        designer_box.pack_start(&designer_paned, true, true, 0);
+        root.append_page(&designer_box, Some(&gtk::Label::new(Some("Designer"))));
+
+        // ---- State ----
+        // Tree of DesignerNodes, indexed by TreeStore path string
+        let nodes: Rc<RefCell<Vec<(String, Rc<RefCell<DesignerNode>>)>>> =
+            Rc::new(RefCell::new(vec![]));
+
+        // Regenerate source from designer nodes and apply live
+        let regenerate = {
+            let nodes_c = nodes.clone();
+            let buf_c = buf.clone();
+            let backend_c = backend.clone();
+            let root_c = root.clone();
+            Rc::new(move || {
+                let ns = nodes_c.borrow();
+                if ns.is_empty() { return; }
+                let mut source = String::from("use browser;\n\n");
+                if ns.len() == 1 {
+                    source.push_str(&ns[0].1.borrow().to_source(0));
                 } else {
-                    *selected.borrow_mut() = None;
-                }
-            }
-        ));
-        // Kind change handler
-        kind_combo.connect_changed(clone!(
-            @strong on_change,
-            @strong store,
-            @strong selected,
-            @weak properties,
-            @strong inhibit_kind_change => move |c| {
-                if inhibit_kind_change.get() {
-                    return;
-                }
-                if let Some(iter) = selected.borrow().clone() {
-                    if let Some(name) = c.active_id() {
-                        let new_widget = default_widget_for_kind(&name);
-                        let node = EditorNode::new(&on_change, new_widget);
-                        // Remove old property editor
-                        for child in properties.children() {
-                            properties.remove(&child);
-                        }
-                        let kind_name: String = name.into();
-                        store.set(
-                            &iter,
-                            &[(0, &kind_name), (1, &node)],
-                        );
-                        properties.pack_start(&node.prop_root, true, true, 0);
-                        properties.show_all();
-                        on_change();
+                    source.push_str("browser::vbox(#spacing: 5, [\n");
+                    for (i, (_, node)) in ns.iter().enumerate() {
+                        source.push_str(&node.borrow().to_source(1));
+                        if i < ns.len() - 1 { source.push(','); }
+                        source.push('\n');
                     }
+                    source.push_str("])");
                 }
-            }
-        ));
-        // Add sibling
+                source.push('\n');
+                buf_c.set_text(&source);
+                backend_c.render(ArcStr::from(source.as_str()));
+            }) as Rc<dyn Fn()>
+        };
+
+        // Add widget
         add_btn.connect_clicked(clone!(
-            @strong on_change,
-            @strong store,
-            @strong selected => move |_| {
-                let new = default_widget_for_kind("Label");
-                let node = EditorNode::new(&on_change, new);
-                let parent = selected.borrow().as_ref()
-                    .and_then(|i| store.iter_parent(i));
-                let iter = store.insert_with_values(
-                    parent.as_ref(), None,
-                    &[(0, &String::from("Label")), (1, &node)],
-                );
-                let _ = iter;
-                on_change();
-            }
-        ));
-        // Add child
-        add_child_btn.connect_clicked(clone!(
-            @strong on_change,
-            @strong store,
-            @strong selected => move |_| {
-                let new = default_widget_for_kind("Label");
-                let node = EditorNode::new(&on_change, new);
-                let parent = selected.borrow().clone();
-                let iter = store.insert_with_values(
-                    parent.as_ref(), None,
-                    &[(0, &String::from("Label")), (1, &node)],
-                );
-                let _ = iter;
-                on_change();
-            }
-        ));
-        // Delete
-        del_btn.connect_clicked(clone!(
-            @strong on_change,
-            @strong store,
-            @strong selected,
-            @weak properties => move |_| {
-                if let Some(iter) = selected.borrow_mut().take() {
-                    for child in properties.children() {
-                        properties.remove(&child);
-                    }
-                    store.remove(&iter);
-                    on_change();
+            @strong kind_combo, @strong tree_store, @strong nodes,
+            @strong tree_view, @strong regenerate => move |_| {
+                if let Some(kind) = kind_combo.active_id() {
+                    let iter = match tree_view.selection().selected() {
+                        Some((_, parent_iter)) => tree_store.append(Some(&parent_iter)),
+                        None => tree_store.append(None),
+                    };
+                    tree_store.set_value(&iter, 0, &kind.to_value());
+                    let node = Rc::new(RefCell::new(DesignerNode::new(&kind)));
+                    let path = tree_store.path(&iter)
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                    nodes.borrow_mut().push((path, node));
+                    regenerate();
                 }
             }
         ));
-        // Duplicate
-        dup_btn.connect_clicked(clone!(
-            @strong on_change,
-            @strong store,
-            @strong selected => move |_| {
-                if let Some(iter) = selected.borrow().clone() {
-                    let parent = store.iter_parent(&iter);
-                    let v = store.value(&iter, 1);
-                    if let Ok(node) = v.get::<EditorNode>() {
-                        let spec = node.widget_spec();
-                        let name = widget_kind_name(&spec.kind);
-                        // Deep copy including children
-                        let dup_node = EditorNode::new(&on_change, spec.clone());
-                        let new_iter = store.insert_with_values(
-                            parent.as_ref(), None,
-                            &[(0, &String::from(name)), (1, &dup_node)],
-                        );
-                        // Also duplicate child tree
-                        copy_children(
-                            &on_change, &store, &iter, &new_iter,
-                        );
-                        on_change();
-                    }
+
+        // Remove widget
+        remove_btn.connect_clicked(clone!(
+            @strong tree_store, @strong tree_view, @strong nodes,
+            @strong regenerate => move |_| {
+                if let Some((_, iter)) = tree_view.selection().selected() {
+                    let path = tree_store.path(&iter)
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                    tree_store.remove(&iter);
+                    nodes.borrow_mut().retain(|(p, _)| *p != path);
+                    regenerate();
                 }
             }
         ));
-        // Undo
-        undo_btn.connect_clicked(clone!(
-            @strong on_change,
-            @strong store,
-            @strong spec_rc,
-            @strong undo_stack,
-            @strong undoing,
-            @weak properties,
-            @weak tree_view => move |_| {
-                if let Some(prev) = undo_stack.borrow_mut().pop() {
-                    undoing.set(true);
-                    for child in properties.children() {
-                        properties.remove(&child);
-                    }
-                    store.clear();
-                    build_tree(&on_change, &store, None, &prev);
-                    tree_view.expand_all();
-                    *spec_rc.borrow_mut() = prev.clone();
-                    on_change();
-                }
-            }
-        ));
-        // Build widget path on selection for highlighting
+
+        // Selection → show properties
         tree_view.selection().connect_changed(clone!(
-            @strong store,
-            @weak ctx_clone => move |sel| {
+            @strong tree_store, @strong prop_box, @strong env,
+            @strong nodes, @strong regenerate, @strong backend => move |sel| {
+                for child in prop_box.children() { prop_box.remove(&child); }
                 if let Some((_, iter)) = sel.selected() {
-                    let mut path = Vec::new();
-                    build_widget_path(&store, &iter, 0, 0, &mut path);
-                    let _: result::Result<_, _> =
-                        ctx_clone.borrow().backend.to_gui
-                            .send(crate::ToGui::Highlight(path));
+                    let kind = tree_store.value(&iter, 0)
+                        .get::<String>().unwrap_or_default();
+                    let path = tree_store.path(&iter)
+                        .map(|p| p.to_string())
+                        .unwrap_or_default();
+                    let header = gtk::Label::new(None);
+                    header.set_markup(&format!("<b>{}</b>", kind));
+                    header.set_halign(gtk::Align::Start);
+                    prop_box.pack_start(&header, false, false, 5);
+                    // Find the node
+                    let node = nodes.borrow().iter()
+                        .find(|(p, _)| *p == path)
+                        .map(|(_, n)| n.clone());
+                    if let (Some(env), Some(node)) = (&*env.borrow(), node) {
+                        let fn_name = format!("browser/{}", kind);
+                        let mod_path = graphix_compiler::expr::ModPath(
+                            netidx::path::Path::from(fn_name),
+                        );
+                        let scope = graphix_compiler::expr::ModPath::root();
+                        if let Some((_, bind)) = env.lookup_bind(&scope, &mod_path) {
+                            if let Type::Fn(fn_type) = &bind.typ {
+                                let grid = gtk::Grid::new();
+                                grid.set_column_spacing(8);
+                                grid.set_row_spacing(4);
+                                build_props_from_fntype(
+                                    &grid, fn_type, &node, &regenerate,
+                                );
+                                prop_box.pack_start(&grid, false, false, 0);
+                            }
+                        }
+                    }
+                    prop_box.show_all();
+                } else {
+                    prop_box.pack_start(
+                        &gtk::Label::new(Some("Select a widget to edit properties")),
+                        false, false, 0,
+                    );
+                    prop_box.show_all();
                 }
             }
         ));
+
         Editor { root }
     }
 
     pub(crate) fn root(&self) -> &gtk::Widget {
         self.root.upcast_ref()
-    }
-}
-
-use std::result;
-
-fn build_tree(
-    on_change: &OnChange,
-    store: &gtk::TreeStore,
-    parent: Option<&gtk::TreeIter>,
-    spec: &view::Widget,
-) {
-    let name = widget_kind_name(&spec.kind);
-    let node = EditorNode::new(on_change, spec.clone());
-    let iter = store.insert_with_values(
-        parent, None,
-        &[(0, &String::from(name)), (1, &node)],
-    );
-    // Recurse into container children
-    match &spec.kind {
-        view::WidgetKind::Frame(f) => {
-            if let Some(child) = &f.child {
-                build_tree(on_change, store, Some(&iter), child);
-            }
-        }
-        view::WidgetKind::Box(b) => {
-            for child in &b.children {
-                build_tree(on_change, store, Some(&iter), child);
-            }
-        }
-        view::WidgetKind::BoxChild(b) => {
-            build_tree(on_change, store, Some(&iter), &*b.widget);
-        }
-        view::WidgetKind::Grid(g) => {
-            for row in &g.rows {
-                build_tree(on_change, store, Some(&iter), row);
-            }
-        }
-        view::WidgetKind::GridChild(g) => {
-            build_tree(on_change, store, Some(&iter), &*g.widget);
-        }
-        view::WidgetKind::GridRow(g) => {
-            for col in &g.columns {
-                build_tree(on_change, store, Some(&iter), col);
-            }
-        }
-        view::WidgetKind::Paned(p) => {
-            if let Some(child) = &p.first_child {
-                build_tree(on_change, store, Some(&iter), child);
-            }
-            if let Some(child) = &p.second_child {
-                build_tree(on_change, store, Some(&iter), child);
-            }
-        }
-        view::WidgetKind::Notebook(n) => {
-            for child in &n.children {
-                build_tree(on_change, store, Some(&iter), child);
-            }
-        }
-        view::WidgetKind::NotebookPage(p) => {
-            build_tree(on_change, store, Some(&iter), &*p.widget);
-        }
-        view::WidgetKind::BScript(_)
-        | view::WidgetKind::Table(_)
-        | view::WidgetKind::Image(_)
-        | view::WidgetKind::Label(_)
-        | view::WidgetKind::Button(_)
-        | view::WidgetKind::LinkButton(_)
-        | view::WidgetKind::ToggleButton(_)
-        | view::WidgetKind::CheckButton(_)
-        | view::WidgetKind::RadioButton(_)
-        | view::WidgetKind::Switch(_)
-        | view::WidgetKind::ComboBox(_)
-        | view::WidgetKind::Scale(_)
-        | view::WidgetKind::ProgressBar(_)
-        | view::WidgetKind::Entry(_)
-        | view::WidgetKind::SearchEntry(_)
-        | view::WidgetKind::LinePlot(_) => {}
-    }
-}
-
-fn build_spec(store: &gtk::TreeStore, iter: &gtk::TreeIter) -> view::Widget {
-    let v = store.value(iter, 1);
-    let node = match v.get::<EditorNode>() {
-        Ok(n) => n,
-        Err(_) => return view::Widget::default(),
-    };
-    let mut spec = node.widget_spec();
-    match &mut spec.kind {
-        view::WidgetKind::Frame(f) => {
-            f.child = None;
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                f.child = Some(boxed::Box::new(build_spec(store, &child_iter)));
-            }
-        }
-        view::WidgetKind::Paned(p) => {
-            p.first_child = None;
-            p.second_child = None;
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                p.first_child =
-                    Some(boxed::Box::new(build_spec(store, &child_iter)));
-                if store.iter_next(&child_iter) {
-                    p.second_child =
-                        Some(boxed::Box::new(build_spec(store, &child_iter)));
-                }
-            }
-        }
-        view::WidgetKind::Box(b) => {
-            b.children.clear();
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                loop {
-                    b.children.push(build_spec(store, &child_iter));
-                    if !store.iter_next(&child_iter) {
-                        break;
-                    }
-                }
-            }
-        }
-        view::WidgetKind::BoxChild(b) => {
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                b.widget = boxed::Box::new(build_spec(store, &child_iter));
-            }
-        }
-        view::WidgetKind::Grid(g) => {
-            g.rows.clear();
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                loop {
-                    g.rows.push(build_spec(store, &child_iter));
-                    if !store.iter_next(&child_iter) {
-                        break;
-                    }
-                }
-            }
-        }
-        view::WidgetKind::GridChild(g) => {
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                g.widget = boxed::Box::new(build_spec(store, &child_iter));
-            }
-        }
-        view::WidgetKind::GridRow(g) => {
-            g.columns.clear();
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                loop {
-                    g.columns.push(build_spec(store, &child_iter));
-                    if !store.iter_next(&child_iter) {
-                        break;
-                    }
-                }
-            }
-        }
-        view::WidgetKind::Notebook(n) => {
-            n.children.clear();
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                loop {
-                    n.children.push(build_spec(store, &child_iter));
-                    if !store.iter_next(&child_iter) {
-                        break;
-                    }
-                }
-            }
-        }
-        view::WidgetKind::NotebookPage(p) => {
-            if let Some(child_iter) = store.iter_children(Some(iter)) {
-                p.widget = boxed::Box::new(build_spec(store, &child_iter));
-            }
-        }
-        view::WidgetKind::BScript(_)
-        | view::WidgetKind::Table(_)
-        | view::WidgetKind::Image(_)
-        | view::WidgetKind::Label(_)
-        | view::WidgetKind::Button(_)
-        | view::WidgetKind::LinkButton(_)
-        | view::WidgetKind::ToggleButton(_)
-        | view::WidgetKind::CheckButton(_)
-        | view::WidgetKind::RadioButton(_)
-        | view::WidgetKind::Switch(_)
-        | view::WidgetKind::ComboBox(_)
-        | view::WidgetKind::Scale(_)
-        | view::WidgetKind::ProgressBar(_)
-        | view::WidgetKind::Entry(_)
-        | view::WidgetKind::SearchEntry(_)
-        | view::WidgetKind::LinePlot(_) => {}
-    }
-    spec
-}
-
-fn copy_children(
-    on_change: &OnChange,
-    store: &gtk::TreeStore,
-    src: &gtk::TreeIter,
-    dst: &gtk::TreeIter,
-) {
-    if let Some(child) = store.iter_children(Some(src)) {
-        loop {
-            let v = store.value(&child, 1);
-            if let Ok(node) = v.get::<EditorNode>() {
-                let spec = node.widget_spec();
-                let name = widget_kind_name(&spec.kind);
-                let new_node = EditorNode::new(on_change, spec);
-                let new_child = store.insert_with_values(
-                    Some(dst), None,
-                    &[(0, &String::from(name)), (1, &new_node)],
-                );
-                copy_children(on_change, store, &child, &new_child);
-            }
-            if !store.iter_next(&child) {
-                break;
-            }
-        }
-    }
-}
-
-fn build_widget_path(
-    store: &gtk::TreeStore,
-    start: &gtk::TreeIter,
-    mut nrow: usize,
-    nchild: usize,
-    path: &mut Vec<WidgetPath>,
-) {
-    let v = store.value(start, 1);
-    let skip_idx = match v.get::<EditorNode>() {
-        Err(_) => false,
-        Ok(node) => {
-            let s = node.spec.borrow();
-            match &s.kind {
-                view::WidgetKind::BScript(_)
-                | view::WidgetKind::Table(_)
-                | view::WidgetKind::Image(_)
-                | view::WidgetKind::Label(_)
-                | view::WidgetKind::Button(_)
-                | view::WidgetKind::LinkButton(_)
-                | view::WidgetKind::ToggleButton(_)
-                | view::WidgetKind::CheckButton(_)
-                | view::WidgetKind::RadioButton(_)
-                | view::WidgetKind::Switch(_)
-                | view::WidgetKind::ComboBox(_)
-                | view::WidgetKind::Scale(_)
-                | view::WidgetKind::ProgressBar(_)
-                | view::WidgetKind::Entry(_)
-                | view::WidgetKind::SearchEntry(_)
-                | view::WidgetKind::LinePlot(_) => {
-                    path.insert(0, WidgetPath::Leaf);
-                    false
-                }
-                view::WidgetKind::Frame(_)
-                | view::WidgetKind::Box(_)
-                | view::WidgetKind::Notebook(_)
-                | view::WidgetKind::Paned(_) => {
-                    if path.is_empty() {
-                        path.insert(0, WidgetPath::Leaf);
-                    } else {
-                        path.insert(0, WidgetPath::Box(nchild));
-                    }
-                    false
-                }
-                view::WidgetKind::NotebookPage(_)
-                | view::WidgetKind::BoxChild(_) => {
-                    if path.is_empty() {
-                        path.insert(0, WidgetPath::Leaf);
-                    }
-                    false
-                }
-                view::WidgetKind::Grid(_) => {
-                    if path.is_empty() {
-                        path.insert(0, WidgetPath::Leaf);
-                    } else {
-                        match path[0] {
-                            WidgetPath::GridRow(_) => (),
-                            WidgetPath::GridItem(_, _) => (),
-                            _ => path.insert(
-                                0, WidgetPath::GridItem(nrow, nchild),
-                            ),
-                        }
-                    }
-                    false
-                }
-                view::WidgetKind::GridChild(_) => {
-                    if path.is_empty() {
-                        path.insert(0, WidgetPath::Leaf);
-                    }
-                    false
-                }
-                view::WidgetKind::GridRow(_) => {
-                    if let Some(tp) = store.path(start) {
-                        if let Some(i) = tp.indices().last() {
-                            nrow = *i as usize;
-                        }
-                    }
-                    if path.is_empty() {
-                        path.insert(0, WidgetPath::GridRow(nrow));
-                    } else {
-                        path.insert(
-                            0, WidgetPath::GridItem(nrow, nchild),
-                        );
-                    }
-                    true
-                }
-            }
-        }
-    };
-    if let Some(parent) = store.iter_parent(start) {
-        if let Some(tp) = store.path(start) {
-            if let Some(i) = tp.indices().last() {
-                let nchild = if skip_idx { nchild } else { *i as usize };
-                build_widget_path(store, &parent, nrow, nchild, path);
-            }
-        }
     }
 }
