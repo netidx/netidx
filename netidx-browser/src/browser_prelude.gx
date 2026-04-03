@@ -1,0 +1,109 @@
+/// Browser prelude: type definitions for view spec expressions.
+/// This module is loaded as the root module before any view expressions
+/// are compiled, providing typed alternatives to bscript's string-encoded configs.
+
+// ---- Sort ----
+
+type SortDirection = [`Ascending, `Descending];
+
+type SortMode = [
+    `None,
+    `Disabled,
+    `Column({ name: string, direction: SortDirection }),
+    `External(map<string, SortDirection>)
+];
+
+// ---- Filters ----
+
+type FilterMode = [
+    `All,
+    `None,
+    `Include(array<string>),
+    `Exclude(array<string>),
+    `IncludeMatch(array<string>),
+    `ExcludeMatch(array<string>),
+    `KeepRange({ start: i64, end: i64 }),
+    `DropRange({ start: i64, end: i64 })
+];
+
+// ---- Column types ----
+
+type ColumnSource = [string, null];
+
+type TextColumn = {
+    source: ColumnSource,
+    foreground: [string, null],
+    foreground_column: [string, null],
+    background: [string, null],
+    background_column: [string, null]
+};
+
+type ToggleColumn = {
+    source: ColumnSource,
+    radio: bool
+};
+
+type ComboChoice = { id: string, label: string };
+
+type ComboColumn = {
+    source: ColumnSource,
+    choices: array<ComboChoice>,
+    has_entry: bool
+};
+
+type SpinColumn = {
+    source: ColumnSource,
+    min: f64,
+    max: f64,
+    increment: f64,
+    digits: i64
+};
+
+type ProgressColumn = {
+    source: ColumnSource,
+    text: [string, null],
+    inverted: bool
+};
+
+type ColumnType = [
+    `Text(TextColumn),
+    `Toggle(ToggleColumn),
+    `Image({ source: ColumnSource }),
+    `Combo(ComboColumn),
+    `Spin(SpinColumn),
+    `Progress(ProgressColumn),
+    `Hidden
+];
+
+type ColumnSpec = { name: string, typ: ColumnType };
+
+// ---- Selection ----
+
+type SelectionMode = [`None, `Single, `Multi];
+
+// ---- Image ----
+
+type IconSize = [`Menu, `SmallToolbar, `LargeToolbar, `Dnd, `Dialog];
+
+type ImageSpec = [
+    `Icon({ name: string, size: IconSize }),
+    `PixBuf({ data: bytes, width: [i64, null], height: [i64, null], keep_aspect: bool })
+];
+
+// ---- LinePlot ----
+
+type AxisType = [`Numeric, `DateTime];
+
+// ---- Ellipsize ----
+
+type EllipsizeMode = [`None, `Start, `Middle, `End];
+
+// ---- Scale draw value ----
+
+type DrawValuePosition = [`Left, `Right, `Top, `Bottom];
+
+type DrawValue = [
+    `Off,
+    `On,
+    `Positioned({ position: DrawValuePosition, digits: [i64, null] })
+];
