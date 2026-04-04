@@ -21,12 +21,15 @@ type Widget = [
     `SearchEntry(SearchEntry),
     `VBox(VBox),
     `HBox(HBox),
+    `BoxChild(BoxChild),
     `Grid(Grid),
+    `GridCell(GridCell),
     `Frame(Frame),
     `Paned(Paned),
     `Notebook(Notebook),
     `Table(Table),
-    `Chart(Chart)
+    `Chart(Chart),
+    `KeyHandler(KeyHandler)
 ];
 
 // ---- Common types ----
@@ -181,16 +184,28 @@ type ComboBox = {
     on_change: &[fn(string) -> Any, null]
 };
 
+type ScaleDirection = [`Horizontal, `Vertical];
+type DrawValuePosition = [`Left, `Right, `Top, `Bottom];
+type ScaleMark = { position: f64, pos: DrawValuePosition, text: [string, null] };
+
 type Scale = {
     value: &f64,
     min: &f64,
     max: &f64,
+    direction: &ScaleDirection,
+    draw_value: &bool,
+    has_origin: &bool,
+    marks: &[array<ScaleMark>, null],
     on_change: &[fn(f64) -> Any, null]
 };
+
+type EllipsizeMode = [`None, `Start, `Middle, `End];
 
 type ProgressBar = {
     fraction: &[f64, null],
     text: &[string, null],
+    show_text: &bool,
+    ellipsize: &EllipsizeMode,
     pulse: &Any
 };
 
@@ -213,6 +228,8 @@ type SearchEntry = {
 
 // ---- Container types ----
 
+type PackType = [`Start, `End];
+
 type VBox = {
     children: &array<Widget>,
     spacing: &i64,
@@ -225,7 +242,19 @@ type HBox = {
     homogeneous: &bool
 };
 
+type BoxChild = {
+    child: &Widget,
+    pack: &PackType,
+    padding: &i64
+};
+
 type GridRow = array<Widget>;
+
+type GridCell = {
+    child: &Widget,
+    colspan: &i64,
+    rowspan: &i64
+};
 
 type Grid = {
     rows: &array<GridRow>,
@@ -256,6 +285,7 @@ type NotebookPage = {
 type Notebook = {
     children: &array<NotebookPage>,
     page: &i64,
+    tabs_popup: &bool,
     on_switch_page: &[fn(i64) -> Any, null]
 };
 

@@ -9,6 +9,10 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct ScaleW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Scale,
+    direction: TRef<X, String>,
+    draw_value: TRef<X, bool>,
+    has_origin: TRef<X, bool>,
+    marks: Ref<X>,
     value: TRef<X, f64>,
     min: TRef<X, f64>,
     max: TRef<X, f64>,
@@ -17,17 +21,81 @@ pub(crate) struct ScaleW<X: GXExt> {
     signal_id: Option<glib::SignalHandlerId>,
 }
 
+fn parse_orientation(s: &str) -> gtk::Orientation {
+    match s {
+        "Vertical" => gtk::Orientation::Vertical,
+        _ => gtk::Orientation::Horizontal,
+    }
+}
+
+fn parse_position(s: &str) -> gtk::PositionType {
+    match s {
+        "Left" => gtk::PositionType::Left,
+        "Right" => gtk::PositionType::Right,
+        "Top" => gtk::PositionType::Top,
+        _ => gtk::PositionType::Bottom,
+    }
+}
+
+fn apply_marks(widget: &gtk::Scale, marks_ref: &Ref<impl GXExt>) {
+    widget.clear_marks();
+    let marks_val = match marks_ref.last.as_ref() {
+        Some(v) => v,
+        None => return,
+    };
+    // marks is either null or array<ScaleMark>
+    // ScaleMark = { position: f64, pos: DrawValuePosition, text: [string, null] }
+    // fields sorted: pos, position, text
+    let items = match marks_val.clone().cast_to::<Vec<Value>>() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    for item in &items {
+        if let Ok([(_, pos_val), (_, position_val), (_, text_val)]) =
+            item.clone().cast_to::<[(ArcStr, Value); 3]>()
+        {
+            let position = position_val.clone().cast_to::<f64>().unwrap_or(0.0);
+            let pos_str = match pos_val.clone().cast_to::<(ArcStr, Value)>() {
+                Ok((tag, _)) => tag.to_string(),
+                Err(_) => "Bottom".to_string(),
+            };
+            let pos = parse_position(&pos_str);
+            let text: Option<String> = text_val.clone().cast_to::<String>().ok();
+            widget.add_mark(position, pos, text.as_deref());
+        }
+    }
+}
+
 impl<X: GXExt> ScaleW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: max, min, on_change, value
-        let [(_, max), (_, min), (_, on_change), (_, value)] =
-            source.cast_to::<[(ArcStr, u64); 4]>().context("scale flds")?;
-        let (max, min, on_change, value) = tokio::try_join! {
-            ctx.gx.compile_ref(max),
-            ctx.gx.compile_ref(min),
-            ctx.gx.compile_ref(on_change),
-            ctx.gx.compile_ref(value),
-        }?;
+        // Fields sorted: direction, draw_value, has_origin, marks, max, min, on_change, value
+        let [
+            (_, direction),
+            (_, draw_value),
+            (_, has_origin),
+            (_, marks),
+            (_, max),
+            (_, min),
+            (_, on_change),
+            (_, value),
+        ] = source.cast_to::<[(ArcStr, u64); 8]>().context("scale flds")?;
+        let (direction, draw_value, has_origin, marks, max, min, on_change, value) =
+            tokio::try_join! {
+                ctx.gx.compile_ref(direction),
+                ctx.gx.compile_ref(draw_value),
+                ctx.gx.compile_ref(has_origin),
+                ctx.gx.compile_ref(marks),
+                ctx.gx.compile_ref(max),
+                ctx.gx.compile_ref(min),
+                ctx.gx.compile_ref(on_change),
+                ctx.gx.compile_ref(value),
+            }?;
+        let direction: TRef<X, String> =
+            TRef::new(direction).context("scale tref direction")?;
+        let draw_value: TRef<X, bool> =
+            TRef::new(draw_value).context("scale tref draw_value")?;
+        let has_origin: TRef<X, bool> =
+            TRef::new(has_origin).context("scale tref has_origin")?;
         let value: TRef<X, f64> =
             TRef::new(value).context("scale tref value")?;
         let min: TRef<X, f64> =
@@ -38,12 +106,18 @@ impl<X: GXExt> ScaleW<X> {
             compile_callable!(ctx.gx, on_change, "scale on_change");
         let min_val = min.t.unwrap_or(0.0);
         let max_val = max.t.unwrap_or(1.0);
+        let orientation = parse_orientation(
+            direction.t.as_deref().unwrap_or("Horizontal"),
+        );
         let widget = gtk::Scale::with_range(
-            gtk::Orientation::Horizontal,
+            orientation,
             min_val,
             max_val,
             (max_val - min_val) / 100.0,
         );
+        widget.set_draw_value(draw_value.t.unwrap_or(true));
+        widget.set_has_origin(has_origin.t.unwrap_or(true));
+        apply_marks(&widget, &marks);
         if let Some(v) = value.t {
             widget.set_value(v);
         }
@@ -52,6 +126,10 @@ impl<X: GXExt> ScaleW<X> {
         Ok(Box::new(ScaleW {
             ctx,
             widget,
+            direction,
+            draw_value,
+            has_origin,
+            marks,
             value,
             min,
             max,
@@ -86,6 +164,35 @@ impl<X: GXExt> GtkWidget<X> for ScaleW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        if let Some(d) = self
+            .direction
+            .update(id, v)
+            .context("scale update direction")?
+        {
+            self.widget.set_orientation(parse_orientation(d));
+            changed = true;
+        }
+        if let Some(dv) = self
+            .draw_value
+            .update(id, v)
+            .context("scale update draw_value")?
+        {
+            self.widget.set_draw_value(*dv);
+            changed = true;
+        }
+        if let Some(ho) = self
+            .has_origin
+            .update(id, v)
+            .context("scale update has_origin")?
+        {
+            self.widget.set_has_origin(*ho);
+            changed = true;
+        }
+        if id == self.marks.id {
+            self.marks.last = Some(v.clone());
+            apply_marks(&self.widget, &self.marks);
+            changed = true;
+        }
         if let Some(val) = self.value.update(id, v).context("scale update value")? {
             if let Some(ref sig) = self.signal_id {
                 self.widget.block_signal(sig);

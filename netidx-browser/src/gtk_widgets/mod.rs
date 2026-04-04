@@ -80,6 +80,7 @@ mod key_handler;
 mod label;
 mod link_button;
 mod progress;
+mod radio;
 mod scale;
 mod search_entry;
 mod switch;
@@ -106,6 +107,17 @@ pub(crate) trait GtkWidget<X: GXExt>: 'static {
 
     /// Get the underlying GTK widget for embedding in containers.
     fn gtk_widget(&self) -> &gtk::Widget;
+
+    /// If this widget is a BoxChild wrapper, return (pack_end, padding).
+    /// pack_end=true means pack_end, false means pack_start.
+    fn box_child_info(&self) -> Option<(bool, u32)> {
+        None
+    }
+
+    /// If this widget is a GridCell wrapper, return (colspan, rowspan).
+    fn grid_cell_info(&self) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 pub(crate) type GtkW<X> = Box<dyn GtkWidget<X>>;
@@ -139,6 +151,27 @@ impl<X: GXExt> GtkWidget<X> for EmptyW {
 
     fn gtk_widget(&self) -> &gtk::Widget {
         self.widget.upcast_ref()
+    }
+}
+
+// ---- Box packing helper ----
+
+fn pack_box_children<X: GXExt>(
+    container: &gtk::Box,
+    children: &[GtkW<X>],
+) {
+    for child in children {
+        match child.box_child_info() {
+            Some((true, padding)) => {
+                container.pack_end(child.gtk_widget(), true, true, padding);
+            }
+            Some((false, padding)) => {
+                container.pack_start(child.gtk_widget(), true, true, padding);
+            }
+            None => {
+                container.pack_start(child.gtk_widget(), true, true, 0);
+            }
+        }
     }
 }
 
@@ -181,9 +214,7 @@ impl<X: GXExt> BoxW<X> {
             spacing_val.t.unwrap_or(0) as i32,
         );
         container.set_homogeneous(homogeneous_val.t.unwrap_or(false));
-        for child in &compiled_children {
-            container.pack_start(child.gtk_widget(), true, true, 0);
-        }
+        pack_box_children(&container, &compiled_children);
         container.show_all();
         Ok(Box::new(BoxW {
             ctx,
@@ -199,9 +230,7 @@ impl<X: GXExt> BoxW<X> {
         for child in self.container.children() {
             self.container.remove(&child);
         }
-        for child in &self.children {
-            self.container.pack_start(child.gtk_widget(), true, true, 0);
-        }
+        pack_box_children(&self.container, &self.children);
         self.container.show_all();
     }
 }
@@ -264,6 +293,7 @@ pub(crate) fn compile<X: GXExt>(
             "Switch" => switch::SwitchW::compile(ctx, v).await,
             "ToggleButton" => toggle::ToggleButtonW::compile_toggle(ctx, v).await,
             "CheckButton" => toggle::ToggleButtonW::compile_check(ctx, v).await,
+            "RadioButton" => radio::RadioButtonW::compile(ctx, v).await,
             "ComboBox" => combo::ComboBoxW::compile(ctx, v).await,
             "Scale" => scale::ScaleW::compile(ctx, v).await,
             "ProgressBar" => progress::ProgressBarW::compile(ctx, v).await,
@@ -272,7 +302,9 @@ pub(crate) fn compile<X: GXExt>(
             "SearchEntry" => search_entry::SearchEntryW::compile(ctx, v).await,
             "VBox" => BoxW::compile(ctx, gtk::Orientation::Vertical, v).await,
             "HBox" => BoxW::compile(ctx, gtk::Orientation::Horizontal, v).await,
+            "BoxChild" => containers::BoxChildW::compile(ctx, v).await,
             "Grid" => containers::GridW::compile(ctx, v).await,
+            "GridCell" => containers::GridCellW::compile(ctx, v).await,
             "Frame" => containers::FrameW::compile(ctx, v).await,
             "Paned" => containers::PanedW::compile(ctx, v).await,
             "Notebook" => containers::NotebookW::compile(ctx, v).await,
