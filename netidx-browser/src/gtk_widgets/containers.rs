@@ -6,6 +6,74 @@ use graphix_rt::{Callable, GXExt, GXHandle, Ref, TRef};
 use gtk::prelude::*;
 use netidx::{protocol::valarray::ValArray, publisher::Value};
 
+// ---- BoxChild ----
+
+pub(crate) struct BoxChildW<X: GXExt> {
+    ctx: CompileCtx<X>,
+    child_ref: Ref<X>,
+    child: GtkW<X>,
+    pack: TRef<X, String>,
+    padding: TRef<X, i64>,
+}
+
+impl<X: GXExt> BoxChildW<X> {
+    pub(crate) async fn compile(
+        ctx: CompileCtx<X>,
+        source: Value,
+    ) -> Result<GtkW<X>> {
+        // Fields alphabetical: child, pack, padding
+        let [(_, child), (_, pack), (_, padding)] =
+            source.cast_to::<[(ArcStr, u64); 3]>().context("box_child flds")?;
+        let (child_ref, pack, padding) = tokio::try_join! {
+            ctx.gx.compile_ref(child),
+            ctx.gx.compile_ref(pack),
+            ctx.gx.compile_ref(padding),
+        }?;
+        let pack: TRef<X, String> =
+            TRef::new(pack).context("box_child tref pack")?;
+        let padding: TRef<X, i64> =
+            TRef::new(padding).context("box_child tref padding")?;
+        let compiled_child = compile_child!(ctx, child_ref, "box_child child");
+        compiled_child.gtk_widget().show();
+        Ok(Box::new(BoxChildW {
+            ctx,
+            child_ref,
+            child: compiled_child,
+            pack,
+            padding,
+        }))
+    }
+}
+
+impl<X: GXExt> GtkWidget<X> for BoxChildW<X> {
+    fn handle_update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        id: ExprId,
+        v: &Value,
+    ) -> Result<bool> {
+        let mut changed = false;
+        update_child!(self, rt, id, v, changed, child_ref, child, "box_child child");
+        if self.pack.update(id, v).context("box_child update pack")?.is_some() {
+            changed = true;
+        }
+        if self.padding.update(id, v).context("box_child update padding")?.is_some() {
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn gtk_widget(&self) -> &gtk::Widget {
+        self.child.gtk_widget()
+    }
+
+    fn box_child_info(&self) -> Option<(bool, u32)> {
+        let pack_end = self.pack.t.as_deref() == Some("End");
+        let padding = self.padding.t.unwrap_or(0).max(0) as u32;
+        Some((pack_end, padding))
+    }
+}
+
 // ---- Grid ----
 
 pub(crate) struct GridW<X: GXExt> {
@@ -90,14 +158,18 @@ fn attach_grid_children<X: GXExt>(
     rows: &[Vec<GtkW<X>>],
 ) {
     for (row_idx, row) in rows.iter().enumerate() {
-        for (col_idx, child) in row.iter().enumerate() {
+        let mut col_idx: i32 = 0;
+        for child in row.iter() {
+            let (colspan, rowspan) = child.grid_cell_info()
+                .unwrap_or((1, 1));
             grid.attach(
                 child.gtk_widget(),
-                col_idx as i32,
+                col_idx,
                 row_idx as i32,
-                1,
-                1,
+                colspan,
+                rowspan,
             );
+            col_idx += colspan;
         }
     }
 }
@@ -177,6 +249,74 @@ impl<X: GXExt> GtkWidget<X> for GridW<X> {
 
     fn gtk_widget(&self) -> &gtk::Widget {
         self.widget.upcast_ref()
+    }
+}
+
+// ---- GridCell ----
+
+pub(crate) struct GridCellW<X: GXExt> {
+    ctx: CompileCtx<X>,
+    child_ref: Ref<X>,
+    child: GtkW<X>,
+    colspan: TRef<X, i64>,
+    rowspan: TRef<X, i64>,
+}
+
+impl<X: GXExt> GridCellW<X> {
+    pub(crate) async fn compile(
+        ctx: CompileCtx<X>,
+        source: Value,
+    ) -> Result<GtkW<X>> {
+        // Fields alphabetical: child, colspan, rowspan
+        let [(_, child), (_, colspan), (_, rowspan)] =
+            source.cast_to::<[(ArcStr, u64); 3]>().context("grid_cell flds")?;
+        let (child_ref, colspan, rowspan) = tokio::try_join! {
+            ctx.gx.compile_ref(child),
+            ctx.gx.compile_ref(colspan),
+            ctx.gx.compile_ref(rowspan),
+        }?;
+        let colspan: TRef<X, i64> =
+            TRef::new(colspan).context("grid_cell tref colspan")?;
+        let rowspan: TRef<X, i64> =
+            TRef::new(rowspan).context("grid_cell tref rowspan")?;
+        let compiled_child = compile_child!(ctx, child_ref, "grid_cell child");
+        compiled_child.gtk_widget().show();
+        Ok(Box::new(GridCellW {
+            ctx,
+            child_ref,
+            child: compiled_child,
+            colspan,
+            rowspan,
+        }))
+    }
+}
+
+impl<X: GXExt> GtkWidget<X> for GridCellW<X> {
+    fn handle_update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        id: ExprId,
+        v: &Value,
+    ) -> Result<bool> {
+        let mut changed = false;
+        update_child!(self, rt, id, v, changed, child_ref, child, "grid_cell child");
+        if self.colspan.update(id, v).context("grid_cell update colspan")?.is_some() {
+            changed = true;
+        }
+        if self.rowspan.update(id, v).context("grid_cell update rowspan")?.is_some() {
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn gtk_widget(&self) -> &gtk::Widget {
+        self.child.gtk_widget()
+    }
+
+    fn grid_cell_info(&self) -> Option<(i32, i32)> {
+        let colspan = self.colspan.t.unwrap_or(1).max(1) as i32;
+        let rowspan = self.rowspan.t.unwrap_or(1).max(1) as i32;
+        Some((colspan, rowspan))
     }
 }
 
@@ -393,6 +533,7 @@ pub(crate) struct NotebookW<X: GXExt> {
     children_ref: Ref<X>,
     children: Vec<NotebookChild<X>>,
     page: TRef<X, i64>,
+    tabs_popup: TRef<X, bool>,
     on_switch_page: Ref<X>,
     on_switch_page_callable: Option<Callable<X>>,
     switch_signal: Option<glib::SignalHandlerId>,
@@ -403,16 +544,19 @@ impl<X: GXExt> NotebookW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: children, on_switch_page, page
-        let [(_, children), (_, on_switch_page), (_, page)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("notebook flds")?;
-        let (children_ref, on_switch_page, page) = tokio::try_join! {
+        // Fields alphabetical: children, on_switch_page, page, tabs_popup
+        let [(_, children), (_, on_switch_page), (_, page), (_, tabs_popup)] =
+            source.cast_to::<[(ArcStr, u64); 4]>().context("notebook flds")?;
+        let (children_ref, on_switch_page, page, tabs_popup) = tokio::try_join! {
             ctx.gx.compile_ref(children),
             ctx.gx.compile_ref(on_switch_page),
             ctx.gx.compile_ref(page),
+            ctx.gx.compile_ref(tabs_popup),
         }?;
         let page: TRef<X, i64> =
             TRef::new(page).context("notebook tref page")?;
+        let tabs_popup: TRef<X, bool> =
+            TRef::new(tabs_popup).context("notebook tref tabs_popup")?;
         let on_switch_page_callable =
             compile_callable!(ctx.gx, on_switch_page, "notebook on_switch_page");
         let compiled_children = match children_ref.last.as_ref() {
@@ -426,6 +570,11 @@ impl<X: GXExt> NotebookW<X> {
         if let Some(p) = page.t {
             widget.set_current_page(Some(p as u32));
         }
+        if tabs_popup.t.unwrap_or(true) {
+            widget.popup_enable();
+        } else {
+            widget.popup_disable();
+        }
         let switch_signal =
             connect_switch_page(&widget, &ctx.gx, &on_switch_page_callable);
         widget.show_all();
@@ -435,6 +584,7 @@ impl<X: GXExt> NotebookW<X> {
             children_ref,
             children: compiled_children,
             page,
+            tabs_popup,
             on_switch_page,
             on_switch_page_callable,
             switch_signal,
@@ -532,6 +682,18 @@ impl<X: GXExt> GtkWidget<X> for NotebookW<X> {
             self.widget.set_current_page(Some(*p as u32));
             if let Some(ref sig) = self.switch_signal {
                 self.widget.unblock_signal(sig);
+            }
+            changed = true;
+        }
+        if let Some(tp) = self
+            .tabs_popup
+            .update(id, v)
+            .context("notebook update tabs_popup")?
+        {
+            if *tp {
+                self.widget.popup_enable();
+            } else {
+                self.widget.popup_disable();
             }
             changed = true;
         }
