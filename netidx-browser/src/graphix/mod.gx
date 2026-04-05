@@ -1,68 +1,63 @@
-/// GTK Browser Widget Package
-///
-/// Widget constructors package arguments into variant values
-/// that the browser's CustomDisplay interprets to build GTK widgets.
-
 let label = |
     #width: &[i64, null] = &null,
     #ellipsize: &EllipsizeMode = &`None,
     #selectable: &bool = &false,
     #single_line: &bool = &false,
-    text: &string
+    #text: &string
 | -> Widget `Label({ text, width, ellipsize, selectable, single_line });
 
 let button = |
     #image: &[ImageSpec, null] = &null,
-    #on_click: fn(null) -> Any = |_| null,
-    label: &string
+    #on_click: [fn(#trigger: null) -> Any, null] = null,
+    #label: &string
 | -> Widget `Button({ label, image, on_click: &on_click });
 
 let entry = |
-    #on_change: fn(string) -> Any = |_| null,
-    #on_activate: fn(string) -> Any = |_| null,
-    text: &string
+    #on_change: [fn(#text: string) -> Any, null] = null,
+    #on_activate: [fn(#text: string) -> Any, null] = null,
+    #text: &string
 | -> Widget `Entry({ text, on_change: &on_change, on_activate: &on_activate });
 
 let switch = |
-    #on_change: fn(bool) -> Any = |_| null,
-    value: &bool
+    #on_change: [fn(#value: bool) -> Any, null] = null,
+    #value: &bool
 | -> Widget `Switch({ value, on_change: &on_change });
 
 let toggle_button = |
     #label: &string = &"",
     #image: &[ImageSpec, null] = &null,
-    #on_change: fn(bool) -> Any = |_| null,
-    value: &bool
+    #on_change: [fn(#value: bool) -> Any, null] = null,
+    #value: &bool
 | -> Widget `ToggleButton({ value, label, image, on_change: &on_change });
 
 let check_button = |
     #label: &string = &"",
-    #on_change: fn(bool) -> Any = |_| null,
-    value: &bool
+    #on_change: [fn(#value: bool) -> Any, null] = null,
+    #value: &bool
 | -> Widget `CheckButton({ value, label, on_change: &on_change });
 
 let radio_button = |
     #group: &string = &"",
-    #on_toggled: fn(bool) -> Any = |_| null,
+    #on_toggled: [fn(#active: bool) -> Any, null] = null,
     #label: &string,
-    value: &bool
+    #value: &bool
 | -> Widget `RadioButton({ label, group, value, on_toggled: &on_toggled });
 
 let combo_box = |
-    #on_change: fn(string) -> Any = |_| null,
-    #choices: &array<ComboChoice>,
-    selected: &string
+    #on_change: [fn(#id: string) -> Any, null] = null,
+    #choices: &Array<ComboChoice>,
+    #selected: &string
 | -> Widget `ComboBox({ choices, selected, on_change: &on_change });
 
 let scale = |
     #direction: &ScaleDirection = &`Horizontal,
     #draw_value: &bool = &true,
     #has_origin: &bool = &true,
-    #marks: &[array<ScaleMark>, null] = &null,
-    #on_change: fn(f64) -> Any = |_| null,
+    #marks: &[Array<ScaleMark>, null] = &null,
+    #on_change: [fn(#value: f64) -> Any, null] = null,
     #min: &f64,
     #max: &f64,
-    value: &f64
+    #value: &f64
 | -> Widget `Scale({ value, min, max, direction, draw_value, has_origin, marks, on_change: &on_change });
 
 let progress_bar = |
@@ -70,24 +65,24 @@ let progress_bar = |
     #show_text: &bool = &false,
     #text: &[string, null] = &null,
     #pulse: &Any = &null,
-    fraction: &[f64, null]
+    #fraction: &[f64, null]
 | -> Widget `ProgressBar({ fraction, text, pulse, show_text, ellipsize });
 
 let image = |
-    #on_click: fn(null) -> Any = |_| null,
-    spec: &ImageSpec
+    #on_click: [fn(#trigger: null) -> Any, null] = null,
+    #spec: &ImageSpec
 | -> Widget `Image({ spec, on_click: &on_click });
 
 let link_button = |
-    #on_activate_link: fn(string) -> Any = |_| null,
+    #on_activate_link: [fn(#uri: string) -> Any, null] = null,
     #uri: &string,
-    label: &string
+    #label: &string
 | -> Widget `LinkButton({ uri, label, on_activate_link: &on_activate_link });
 
 let search_entry = |
-    #on_search_changed: fn(string) -> Any = |_| null,
-    #on_activate: fn(string) -> Any = |_| null,
-    text: &string
+    #on_search_changed: [fn(#text: string) -> Any, null] = null,
+    #on_activate: [fn(#text: string) -> Any, null] = null,
+    #text: &string
 | -> Widget `SearchEntry({ text, on_search_changed: &on_search_changed, on_activate: &on_activate });
 
 // ---- Containers ----
@@ -95,19 +90,19 @@ let search_entry = |
 let vbox = |
     #spacing: &i64 = &0,
     #homogeneous: &bool = &false,
-    children: &array<Widget>
+    #children: &Array<Widget>
 | -> Widget `VBox({ children, spacing, homogeneous });
 
 let hbox = |
     #spacing: &i64 = &0,
     #homogeneous: &bool = &false,
-    children: &array<Widget>
+    #children: &Array<Widget>
 | -> Widget `HBox({ children, spacing, homogeneous });
 
 let box_child = |
     #pack: &PackType = &`Start,
     #padding: &i64 = &0,
-    child: &Widget
+    #child: &Widget
 | -> Widget `BoxChild({ child, pack, padding });
 
 let grid = |
@@ -115,18 +110,18 @@ let grid = |
     #row_spacing: &i64 = &0,
     #homogeneous_columns: &bool = &false,
     #homogeneous_rows: &bool = &false,
-    rows: &array<GridRow>
+    #rows: &Array<GridRow>
 | -> Widget `Grid({ rows, column_spacing, row_spacing, homogeneous_columns, homogeneous_rows });
 
 let grid_cell = |
     #colspan: &i64 = &1,
     #rowspan: &i64 = &1,
-    child: &Widget
+    #child: &Widget
 | -> Widget `GridCell({ child, colspan, rowspan });
 
 let frame = |
     #label: &string,
-    child: &Widget
+    #child: &Widget
 | -> Widget `Frame({ label, child });
 
 let paned = |
@@ -136,16 +131,14 @@ let paned = |
     #second: &[Widget, null] = &null
 | -> Widget `Paned({ direction, wide_handle, first, second });
 
-/// Create a notebook page descriptor
-let page = |#label: string, ?#reorderable: bool, child: &Widget| -> NotebookPage {
-    { label, reorderable: select reorderable { r => r, null as _ => false }, child }
-};
+let page = |#label: string, #reorderable: bool = false, #child: &Widget| -> NotebookPage
+    { label, reorderable, child };
 
 let notebook = |
     #page: &i64 = &0,
     #tabs_popup: &bool = &true,
-    #on_switch_page: fn(i64) -> Any = |_| null,
-    children: &array<NotebookPage>
+    #on_switch_page: [fn(#page: i64) -> Any, null] = null,
+    #children: &Array<NotebookPage>
 | -> Widget `Notebook({ children, page, tabs_popup, on_switch_page: &on_switch_page });
 
 // ---- Data widgets ----
@@ -153,16 +146,16 @@ let notebook = |
 let table = |
     #sort_mode: &SortMode = &`None,
     #column_filter: &FilterMode = &`All,
-    #column_types: &[array<ColumnSpec>, null] = &null,
-    #column_widths: &[map<string, i64>, null] = &null,
+    #column_types: &[Array<ColumnSpec>, null] = &null,
+    #column_widths: &[Map<string, i64>, null] = &null,
     #row_filter: &FilterMode = &`All,
     #selection_mode: &SelectionMode = &`Single,
     #show_row_name: &bool = &true,
-    #on_select: fn(array<string>) -> Any = |_| null,
-    #on_activate: fn(string) -> Any = |_| null,
-    #on_edit: fn({ path: string, value: Any }) -> Any = |_| null,
-    #on_header_click: fn(string) -> Any = |_| null,
-    path: &string
+    #on_select: [fn(#paths: Array<string>) -> Any, null] = null,
+    #on_activate: [fn(#path: string) -> Any, null] = null,
+    #on_edit: [fn(#edit: { path: string, value: Any }) -> Any, null] = null,
+    #on_header_click: [fn(#column: string) -> Any, null] = null,
+    #path: &string
 | -> Widget `Table({
     path, sort_mode, column_filter, column_types, column_widths,
     row_filter, selection_mode, show_row_name,
@@ -177,7 +170,7 @@ let line = |
     #label: [string, null] = null,
     #stroke_width: [f64, null] = null,
     #point_size: [f64, null] = null,
-    data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
+    #data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
 | -> Dataset `Line({ data, style: { color, label, point_size, stroke_width } });
 
 let scatter = |
@@ -185,14 +178,14 @@ let scatter = |
     #label: [string, null] = null,
     #stroke_width: [f64, null] = null,
     #point_size: [f64, null] = null,
-    data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
+    #data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
 | -> Dataset `Scatter({ data, style: { color, label, point_size, stroke_width } });
 
 let bar = |
     #color: [Color, null] = null,
     #label: [string, null] = null,
     #margin: [f64, null] = null,
-    data: &Array<(string, f64)>
+    #data: &Array<(string, f64)>
 | -> Dataset `Bar({ data, style: { color, label, margin } });
 
 let area = |
@@ -200,7 +193,7 @@ let area = |
     #label: [string, null] = null,
     #stroke_width: [f64, null] = null,
     #point_size: [f64, null] = null,
-    data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
+    #data: &[Array<(f64, f64)>, Array<(datetime, f64)>]
 | -> Dataset `Area({ data, style: { color, label, point_size, stroke_width } });
 
 let chart = |
@@ -216,7 +209,7 @@ let chart = |
     #legend_position: &[LegendPosition, null] = &null,
     #legend_style: &[LegendStyle, null] = &null,
     #mesh: &[MeshStyle, null] = &null,
-    datasets: &Array<Dataset>
+    #datasets: &Array<Dataset>
 | -> Widget `Chart({
     background, datasets, legend_position, legend_style,
     margin, mesh, title, title_color, title_size,
@@ -224,6 +217,11 @@ let chart = |
 });
 
 let key_handler = |
-    #on_key_press: fn(string) -> Any,
-    child: &Widget
+    #on_key_press: fn(#key: string) -> Any,
+    #child: &Widget
 | -> Widget `KeyHandler({ child, on_key_press: &on_key_press });
+
+// builtins (implemented in Rust)
+let navigate = |path: string| -> null 'browser_navigate;
+let navigate_in_window = |path: string| -> null 'browser_navigate_in_window;
+let confirm = |msg: string, value: Any| -> Any 'browser_confirm;
