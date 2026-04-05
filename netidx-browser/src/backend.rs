@@ -8,13 +8,11 @@ use futures::{
     stream::StreamExt,
     FutureExt,
 };
-use graphix_compiler::{
-    BindId, ExecCtx,
-};
-use graphix_rt::{
-    GXConfig, GXEvent, GXHandle, GXRt, NoExt,
-};
+use graphix_compiler::{BindId, ExecCtx};
+use graphix_package::Package;
+use graphix_rt::{GXConfig, GXEvent, GXHandle, GXRt, NoExt};
 use log::{info, warn};
+use netidx::pool::global::GPooled;
 use netidx::{
     config::Config,
     path::Path,
@@ -22,7 +20,6 @@ use netidx::{
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, Subscriber, UpdatesFlags},
 };
-use netidx::pool::global::GPooled;
 use std::{
     fs,
     path::PathBuf,
@@ -34,11 +31,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tokio::{
-    runtime::Runtime,
-    sync::mpsc as tmpsc,
-    task,
-};
+use tokio::{runtime::Runtime, sync::mpsc as tmpsc, task};
 
 type RawBatch = GPooled<Vec<(netidx::subscriber::SubId, Event)>>;
 
@@ -61,7 +54,6 @@ pub(crate) struct Ctx {
     pub(crate) rt_handle: tokio::runtime::Handle,
     pub(crate) subscriber: Subscriber,
     current_path_bid: graphix_compiler::BindId,
-    pub(crate) confirm_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<crate::builtins::ConfirmRequest>>>,
 }
 
 impl Ctx {
@@ -75,15 +67,12 @@ impl Ctx {
     }
 
     pub(crate) fn navigate(&self, loc: ViewLoc) {
+        log::info!("Ctx::navigate({:?})", loc);
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Navigate(loc));
     }
 
-    pub(crate) async fn save(
-        &self,
-        loc: ViewLoc,
-        source: ArcStr,
-    ) -> Result<()> {
+    pub(crate) async fn save(&self, loc: ViewLoc, source: ArcStr) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Save(loc, source, tx));
@@ -91,8 +80,7 @@ impl Ctx {
     }
 
     pub(crate) fn terminate(&self) {
-        let _: result::Result<_, _> =
-            self.from_gui.unbounded_send(FromGui::Terminate);
+        let _: result::Result<_, _> = self.from_gui.unbounded_send(FromGui::Terminate);
     }
 
     pub(crate) fn render(&self, source: ArcStr) {
@@ -102,10 +90,7 @@ impl Ctx {
 
     /// Compile a graphix expression synchronously from the GTK thread.
     /// This blocks the GTK main loop briefly for compilation only.
-    pub(crate) fn compile(
-        &self,
-        text: &str,
-    ) -> Result<graphix_rt::CompRes<NoExt>> {
+    pub(crate) fn compile(&self, text: &str) -> Result<graphix_rt::CompRes<NoExt>> {
         self.rt_handle.block_on(self.gx.compile(ArcStr::from(text)))
     }
 
@@ -138,14 +123,21 @@ struct BackendInner {
 
 impl BackendInner {
     async fn navigate_path(&mut self, base_path: Path) -> Result<()> {
+        log::info!("BackendInner::navigate_path({})", base_path);
         self.rx_view = None;
         self.dv_view = None;
+        let source = crate::default_view_source(&base_path);
+        log::info!("default_view_source generated {} bytes", source.len());
         let m = ToGui::View {
             loc: Some(ViewLoc::Netidx(base_path.clone())),
-            source: crate::default_view_source(base_path.clone()),
+            source,
             generated: true,
         };
-        self.to_gui.send(m)?;
+        let to_gui = self.to_gui.clone();
+        glib::idle_add_once(move || match to_gui.send(m) {
+            Ok(()) => log::info!("ToGui::View sent via idle_add_once"),
+            Err(e) => log::error!("ToGui::View send FAILED: {}", e),
+        });
         if !self.raw_view.load(Ordering::Relaxed) {
             let s = self.subscriber.subscribe(base_path.append(".view"));
             let (tx, rx) = futures::channel::mpsc::channel(2);
@@ -198,9 +190,7 @@ impl BackendInner {
                         }
                         Ok(v) => {
                             let _ = fin.send(match v {
-                                Value::Error(s) => {
-                                    Err(anyhow!("{}", s))
-                                }
+                                Value::Error(s) => Err(anyhow!("{}", s)),
                                 _ => Ok(()),
                             });
                         }
@@ -210,11 +200,7 @@ impl BackendInner {
         });
     }
 
-    fn save_view_file(
-        file: PathBuf,
-        source: ArcStr,
-        fin: oneshot::Sender<Result<()>>,
-    ) {
+    fn save_view_file(file: PathBuf, source: ArcStr, fin: oneshot::Sender<Result<()>>) {
         task::spawn(async move {
             match task::block_in_place(|| fs::write(file, source.as_str())) {
                 Err(e) => {
@@ -240,9 +226,7 @@ impl BackendInner {
                         Event::Update(Value::String(s)) => {
                             if let Some(path) = &self.view_path {
                                 let m = ToGui::View {
-                                    loc: Some(ViewLoc::Netidx(
-                                        path.clone(),
-                                    )),
+                                    loc: Some(ViewLoc::Netidx(path.clone())),
                                     source: s,
                                     generated: false,
                                 };
@@ -346,13 +330,9 @@ impl Backend {
             let handle = rt.handle().clone();
             rt_handle_tx.send(handle).unwrap();
             rt.block_on(async move {
-                let subscriber =
-                    Subscriber::new(cfg.clone(), auth.clone()).unwrap();
-                let publisher = PublisherBuilder::new(cfg)
-                    .desired_auth(auth)
-                    .build()
-                    .await
-                    .unwrap();
+                let subscriber = Subscriber::new(cfg.clone(), auth.clone()).unwrap();
+                let publisher =
+                    PublisherBuilder::new(cfg).desired_auth(auth).build().await.unwrap();
                 while let Some(m) = rx.next().await {
                     match m {
                         ToBackend::Stop => break,
@@ -385,29 +365,43 @@ impl Backend {
         let mut ctx = ExecCtx::new(gxrt)?;
         // Register browser-specific builtins
         crate::builtins::register_builtins(&mut ctx)?;
-        // Set up confirm dialog channel
-        let (confirm_tx, confirm_rx) = std::sync::mpsc::sync_channel(16);
         // Set up shared state for builtins
-        ctx.libstate.set(crate::builtins::BrowserLibState {
-            to_gui: to_gui.clone(),
-            confirm_tx,
-        });
+        ctx.libstate
+            .set(crate::builtins::BrowserLibState { to_gui: to_gui.clone() });
 
         // Channel for graphix output events
         let (gx_tx, mut gx_rx) = tmpsc::channel(100);
 
-        // Set up the browser package as a VFS module so views can `use browser;`
+        // Register packages (core provides println, dbg, etc.)
         let mut vfs = fxhash::FxHashMap::default();
+        let mut root_mods = graphix_package::IndexSet::new();
+        graphix_package_core::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
+
+        // Set up the browser package as a VFS module so views can `use browser;`
         vfs.insert(
-            Path::from("/browser/mod"),
+            Path::from("/browser/mod.gx"),
             arcstr::literal!(include_str!("graphix/mod.gx")),
         );
-        let resolvers = vec![
-            graphix_compiler::expr::ModuleResolver::VFS(vfs),
-        ];
+        vfs.insert(
+            Path::from("/browser/mod.gxi"),
+            arcstr::literal!(include_str!("graphix/mod.gxi")),
+        );
+        let resolvers = vec![graphix_compiler::expr::ModuleResolver::VFS(vfs)];
 
-        // Start the graphix runtime with root module defining current_path
-        let root = arcstr::literal!(r#"let current_path: &string = "/";"#);
+        // Build root text: registered packages + browser + current_path
+        let mut root_parts = Vec::new();
+        for name in &root_mods {
+            if name == "core" {
+                root_parts.push(format!("mod core;\nuse core"));
+            } else {
+                root_parts.push(format!("mod {name}"));
+            }
+        }
+        root_parts.push("mod browser".to_string());
+        let root = ArcStr::from(format!(
+            "{};\nlet current_path = \"/\";",
+            root_parts.join(";\n"),
+        ));
         let gx = GXConfig::builder(ctx, gx_tx)
             .root(root)
             .resolvers(resolvers)
@@ -467,7 +461,6 @@ impl Backend {
             rt_handle,
             subscriber,
             current_path_bid,
-            confirm_rx: std::sync::Arc::new(std::sync::Mutex::new(confirm_rx)),
         })
     }
 

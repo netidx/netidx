@@ -25,23 +25,31 @@ impl<X: GXExt> Clone for CompileCtx<X> {
 }
 
 /// Compile an optional callable ref during widget construction.
+/// Handles null values (from nullable callback fields) by returning None.
 macro_rules! compile_callable {
     ($gx:expr, $ref:ident, $label:expr) => {
         match $ref.last.as_ref() {
-            Some(v) => Some($gx.compile_callable(v.clone()).await.context($label)?),
-            None => None,
+            Some(v) if *v != Value::Null => {
+                Some($gx.compile_callable(v.clone()).await.context($label)?)
+            }
+            _ => None,
         }
     };
 }
 
 /// Recompile a callable ref inside `handle_update`.
+/// Handles null values by clearing the callable.
 macro_rules! update_callable {
     ($self:ident, $rt:ident, $id:ident, $v:ident, $field:ident, $callable:ident, $label:expr) => {
         if $id == $self.$field.id {
             $self.$field.last = Some($v.clone());
-            $self.$callable = Some(
-                $rt.block_on($self.ctx.gx.compile_callable($v.clone())).context($label)?,
-            );
+            if *$v == Value::Null {
+                $self.$callable = None;
+            } else {
+                $self.$callable = Some(
+                    $rt.block_on($self.ctx.gx.compile_callable($v.clone())).context($label)?,
+                );
+            }
         }
     };
 }

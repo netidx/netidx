@@ -28,7 +28,10 @@
       "Bash(cd /home/eric/proj/netidx/netidx-ffi/examples && make subscriber_simple_c subscriber_simple_cpp 2>&1)",
       "Bash(cargo check:*)",
       "Bash(git stash:*)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(graphix:*)",
+      "Bash(cp:*)",
+      "Bash(cargo doc:*)"
     ],
     "deny": [],
     "ask": []

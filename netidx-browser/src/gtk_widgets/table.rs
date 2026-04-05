@@ -594,6 +594,7 @@ impl<X: GXExt> TableW<X> {
                 );
                 let as_ = connect_on_activate(
                     &borrow.view, &ctx.gx, &on_activate_callable,
+                    &borrow.descriptor.path,
                 );
                 (ss, as_)
             }
@@ -685,6 +686,7 @@ impl<X: GXExt> TableW<X> {
             );
             self.activate_signal = connect_on_activate(
                 &borrow.view, &self.ctx.gx, &self.on_activate_callable,
+                &borrow.descriptor.path,
             );
         }
         self.state = TableState::Live(inner);
@@ -750,6 +752,7 @@ impl<X: GXExt> TableW<X> {
             );
             self.activate_signal = connect_on_activate(
                 &borrow.view, &self.ctx.gx, &self.on_activate_callable,
+                &borrow.descriptor.path,
             );
         }
         self.state = TableState::Live(inner);
@@ -812,6 +815,7 @@ impl<X: GXExt> TableW<X> {
             );
             self.activate_signal = connect_on_activate(
                 &borrow.view, &self.ctx.gx, &self.on_activate_callable,
+                &borrow.descriptor.path,
             );
         }
         self.state = TableState::Live(inner);
@@ -923,14 +927,17 @@ fn build_table<X: GXExt>(
                                 || cur == "True"
                                 || cur == "1");
                             let cell_path = cp.append(&row_name);
-                            let args = ValArray::from_iter([
-                                Value::String(
-                                    cell_path.to_string().into(),
-                                ),
-                                Value::String(
-                                    toggled.to_string().into(),
-                                ),
-                            ]);
+                            let edit_struct = Value::Array(
+                                ValArray::from_iter([
+                                    Value::String(
+                                        cell_path.to_string().into(),
+                                    ),
+                                    Value::String(
+                                        toggled.to_string().into(),
+                                    ),
+                                ]),
+                            );
+                            let args = ValArray::from_iter([edit_struct]);
                             if let Err(e) = gx.call(eid, args) {
                                 log::warn!(
                                     "table on_edit call failed: {}", e
@@ -989,14 +996,17 @@ fn build_table<X: GXExt>(
                                     .get::<String>()
                                     .unwrap_or_default();
                                 let cell_path = cp.append(&row_name);
-                                let args = ValArray::from_iter([
-                                    Value::String(
-                                        cell_path.to_string().into(),
-                                    ),
-                                    Value::String(
-                                        new_text.to_string().into(),
-                                    ),
-                                ]);
+                                let edit_struct = Value::Array(
+                                    ValArray::from_iter([
+                                        Value::String(
+                                            cell_path.to_string().into(),
+                                        ),
+                                        Value::String(
+                                            new_text.to_string().into(),
+                                        ),
+                                    ]),
+                                );
+                                let args = ValArray::from_iter([edit_struct]);
                                 if let Err(e) = gx.call(eid, args) {
                                     log::warn!(
                                         "table on_edit call failed: {}",
@@ -1036,14 +1046,17 @@ fn build_table<X: GXExt>(
                                     .get::<String>()
                                     .unwrap_or_default();
                                 let cell_path = cp.append(&row_name);
-                                let args = ValArray::from_iter([
-                                    Value::String(
-                                        cell_path.to_string().into(),
-                                    ),
-                                    Value::String(
-                                        new_text.to_string().into(),
-                                    ),
-                                ]);
+                                let edit_struct = Value::Array(
+                                    ValArray::from_iter([
+                                        Value::String(
+                                            cell_path.to_string().into(),
+                                        ),
+                                        Value::String(
+                                            new_text.to_string().into(),
+                                        ),
+                                    ]),
+                                );
+                                let args = ValArray::from_iter([edit_struct]);
                                 if let Err(e) = gx.call(eid, args) {
                                     log::warn!(
                                         "table on_edit call failed: {}",
@@ -1087,14 +1100,17 @@ fn build_table<X: GXExt>(
                                     .get::<String>()
                                     .unwrap_or_default();
                                 let cell_path = cp.append(&row_name);
-                                let args = ValArray::from_iter([
-                                    Value::String(
-                                        cell_path.to_string().into(),
-                                    ),
-                                    Value::String(
-                                        new_text.to_string().into(),
-                                    ),
-                                ]);
+                                let edit_struct = Value::Array(
+                                    ValArray::from_iter([
+                                        Value::String(
+                                            cell_path.to_string().into(),
+                                        ),
+                                        Value::String(
+                                            new_text.to_string().into(),
+                                        ),
+                                    ]),
+                                );
+                                let args = ValArray::from_iter([edit_struct]);
                                 if let Err(e) = gx.call(eid, args) {
                                     log::warn!(
                                         "table on_edit call failed: {}",
@@ -1238,7 +1254,7 @@ fn update_subscriptions(
 /// Drain subscription updates from the mpsc channel and apply them to
 /// the ListStore.
 fn start_update_pump(weak: std::rc::Weak<RefCell<TableInner>>) {
-    glib::idle_add_local(move || {
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         let inner = match weak.upgrade() {
             Some(s) => s,
             None => return ControlFlow::Break,
@@ -1285,7 +1301,8 @@ fn connect_on_select<X: GXExt>(
                 Value::String(name.into())
             })
         }).collect();
-        let args = ValArray::from_iter(names);
+        let arr = Value::Array(ValArray::from_iter(names));
+        let args = ValArray::from_iter([arr]);
         if let Err(e) = gx.call(id, args) {
             log::warn!("table on_select call failed: {}", e);
         }
@@ -1296,17 +1313,21 @@ fn connect_on_activate<X: GXExt>(
     view: &TreeView,
     gx: &graphix_rt::GXHandle<X>,
     callable: &Option<Callable<X>>,
+    base_path: &Path,
 ) -> Option<glib::SignalHandlerId> {
     let callable = callable.as_ref()?;
     let id = callable.id();
     let gx = gx.clone();
+    let base = base_path.clone();
     Some(view.connect_row_activated(move |tv, path, _col| {
         if let Some(model) = tv.model() {
             if let Some(iter) = model.iter(path) {
                 let name: String = model.value(&iter, 0)
                     .get().unwrap_or_default();
+                let full_path = base.append(&name);
+                log::info!("table on_activate: {}", full_path);
                 let args = ValArray::from_iter([
-                    Value::String(name.into()),
+                    Value::String(full_path.to_string().into()),
                 ]);
                 if let Err(e) = gx.call(id, args) {
                     log::warn!("table on_activate call failed: {}", e);
@@ -1479,10 +1500,12 @@ impl<X: GXExt> GtkWidget<X> for TableW<X> {
                 }
             }
             if let TableState::Live(ref inner) = self.state {
+                let borrow = inner.borrow();
                 self.activate_signal = connect_on_activate(
-                    &inner.borrow().view,
+                    &borrow.view,
                     &self.ctx.gx,
                     &self.on_activate_callable,
+                    &borrow.descriptor.path,
                 );
             }
             changed = true;

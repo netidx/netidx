@@ -15,16 +15,9 @@ use netidx::publisher::Value;
 type R = GXRt<NoExt>;
 type E = graphix_compiler::NoUserEvent;
 
-/// A confirm dialog request sent to the GTK thread.
-pub(crate) struct ConfirmRequest {
-    pub message: String,
-    pub reply: tokio::sync::oneshot::Sender<bool>,
-}
-
 /// Shared state accessible by all browser builtins via LibState.
 pub(crate) struct BrowserLibState {
     pub(crate) to_gui: glib::Sender<ToGui>,
-    pub(crate) confirm_tx: std::sync::mpsc::SyncSender<ConfirmRequest>,
 }
 
 // ---- navigate(path) ----
@@ -207,13 +200,16 @@ impl Apply<R, E> for ConfirmInner {
         };
         // Send confirm request to GTK thread via spawn_var
         if let Some(state) = ctx.libstate.get::<BrowserLibState>() {
-            let confirm_tx = state.confirm_tx.clone();
+            let to_gui = state.to_gui.clone();
             let bid = self.result_bid;
             let value_clone = value.clone();
             ctx.rt.spawn_var(async move {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                let req = ConfirmRequest { message, reply: reply_tx };
-                if confirm_tx.send(req).is_ok() {
+                let reply = std::sync::Arc::new(
+                    std::sync::Mutex::new(Some(reply_tx)),
+                );
+                let m = crate::ToGui::Confirm { message, reply };
+                if to_gui.send(m).is_ok() {
                     match reply_rx.await {
                         Ok(true) => (bid, value_clone),
                         _ => (bid, Value::Null),

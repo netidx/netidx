@@ -20,10 +20,7 @@ use graphix_compiler::expr::ExprId;
 use graphix_rt::NoExt;
 use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
 use netidx::{
-    config::Config,
-    path::Path,
-    protocol::value::FromValue,
-    publisher::Value,
+    config::Config, path::Path, protocol::value::FromValue, publisher::Value,
     subscriber::DesiredAuth,
 };
 use std::{
@@ -74,20 +71,21 @@ pub(crate) enum ToGui {
     Update(Vec<(ExprId, Value)>),
     ShowError(String),
     SaveError(String),
+    Confirm {
+        message: String,
+        reply: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+    },
     Terminate,
 }
 
-fn default_view_source(path: Path) -> ArcStr {
+fn default_view_source(path: &Path) -> ArcStr {
     ArcStr::from(format!(
-        r#"let current_path: &string = {:?};
-Table({{
-    path: current_path,
-    column_editable: false,
-    columns_resizable: true,
-    selection_mode: `Single,
-    on_activate: |path: string| browser_navigate(path),
-}})"#,
-        &*path
+        r#"browser::table(
+    #selection_mode: &`Single,
+    #on_activate: |#path: string| browser::navigate(path),
+    #path: &{:?}
+)"#,
+        &**path
     ))
 }
 
@@ -171,9 +169,12 @@ impl FromValue for ImageSpec {
             Value::String(name) => {
                 Ok(Self::Icon { name, size: gtk::IconSize::SmallToolbar })
             }
-            Value::Bytes(bytes) => {
-                Ok(Self::PixBuf { bytes: bytes.into(), width: None, height: None, keep_aspect: true })
-            }
+            Value::Bytes(bytes) => Ok(Self::PixBuf {
+                bytes: bytes.into(),
+                width: None,
+                height: None,
+                keep_aspect: true,
+            }),
             Value::Array(elts) => match &*elts {
                 [Value::String(name), Value::String(size)] => {
                     let size = match &**size {
@@ -193,10 +194,12 @@ impl FromValue for ImageSpec {
                         .remove("image")
                         .ok_or_else(|| anyhow!("missing bytes"))?
                         .cast_to::<Bytes>()?;
-                    let width =
-                        alist.remove("width").and_then(|v: Value| v.cast_to::<u32>().ok());
-                    let height =
-                        alist.remove("height").and_then(|v: Value| v.cast_to::<u32>().ok());
+                    let width = alist
+                        .remove("width")
+                        .and_then(|v: Value| v.cast_to::<u32>().ok());
+                    let height = alist
+                        .remove("height")
+                        .and_then(|v: Value| v.cast_to::<u32>().ok());
                     let keep_aspect = alist
                         .remove("keep-aspect")
                         .and_then(|v: Value| v.cast_to::<bool>().ok())
@@ -319,6 +322,7 @@ struct View {
 
 impl View {
     fn new_from_source(ctx: &BCtx, path: &ViewLoc, source: &str) -> View {
+        log::info!("View::new_from_source compiling {} bytes", source.len());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.set_margin(2);
         root.add(&make_crumbs(ctx, path));
@@ -330,8 +334,8 @@ impl View {
         drop(ctx_ref);
         let (comp, top_id) = match rt_handle.block_on(gx.compile(ArcStr::from(source))) {
             Err(e) => {
-                log::warn!("failed to compile view source: {}", e);
-                let lbl = gtk::Label::new(Some(&format!("Error: {}", e)));
+                log::error!("failed to compile view source: {:?}", e);
+                let lbl = gtk::Label::new(Some(&format!("Error: {:?}", e)));
                 root.add(&lbl);
                 root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
                 (None, None)
@@ -371,22 +375,26 @@ impl View {
                         gx: self.gx.clone(),
                         subscriber: self.subscriber.clone(),
                     };
-                    match self.rt_handle.block_on(
-                        gtk_widgets::compile(compile_ctx, value.clone()),
-                    ) {
+                    match self
+                        .rt_handle
+                        .block_on(gtk_widgets::compile(compile_ctx, value.clone()))
+                    {
                         Err(e) => {
-                            log::warn!("failed to compile widget tree: {}", e);
+                            log::warn!("failed to compile widget tree: {:?}", e);
                             // Remove the "Loading..." label
                             let children = self.root.children();
                             if let Some(last) = children.last() {
                                 self.root.remove(last);
                             }
-                            let lbl = gtk::Label::new(
-                                Some(&format!("Widget error: {}", e)),
-                            );
+                            let lbl =
+                                gtk::Label::new(Some(&format!("Widget error: {:?}", e)));
                             self.root.add(&lbl);
                             self.root.set_child_packing(
-                                &lbl, true, true, 1, gtk::PackType::Start,
+                                &lbl,
+                                true,
+                                true,
+                                1,
+                                gtk::PackType::Start,
                             );
                             self.root.show_all();
                             self.top_id = None;
@@ -400,7 +408,11 @@ impl View {
                             let gw = w.gtk_widget();
                             self.root.add(gw);
                             self.root.set_child_packing(
-                                gw, true, true, 1, gtk::PackType::Start,
+                                gw,
+                                true,
+                                true,
+                                1,
+                                gtk::PackType::Start,
                             );
                             self.root.show_all();
                             self.gtk_root = Some(w);
@@ -596,7 +608,7 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
     let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().current_loc.clone();
     let current_source: Rc<RefCell<ArcStr>> =
-        Rc::new(RefCell::new(default_view_source(Path::from("/"))));
+        Rc::new(RefCell::new(default_view_source(&Path::from("/"))));
     let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
     let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
     let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
@@ -623,8 +635,8 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
                     current_source.borrow().clone(),
                 );
                 let win = gtk::Window::builder()
-                    .default_width(640)
-                    .default_height(480)
+                    .default_width(1024)
+                    .default_height(768)
                     .type_(gtk::WindowType::Toplevel)
                     .title("View Editor")
                     .visible(true)
@@ -702,20 +714,6 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
     let new_window_act = gio::SimpleAction::new("new_window", None);
     ctx.borrow().window.add_action(&new_window_act);
     new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
-    // Drain confirm dialog requests from the graphix runtime
-    let confirm_rx = ctx.borrow().backend.confirm_rx.clone();
-    glib::idle_add_local(clone!(@weak ctx => @default-return ControlFlow::Break, move || {
-        if let Ok(rx) = confirm_rx.try_lock() {
-            while let Ok(req) = rx.try_recv() {
-                let confirmed = ask_modal(
-                    &ctx.borrow().window,
-                    &req.message,
-                );
-                let _ = req.reply.send(confirmed);
-            }
-        }
-        ControlFlow::Continue
-    }));
     to_gui.attach(None, move |m| match m {
         ToGui::Update(updates) => {
             if let Some(root) = &mut *current.borrow_mut() {
@@ -743,6 +741,11 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             ControlFlow::Continue
         }
         ToGui::View { loc, source, generated } => {
+            log::info!(
+                "ToGui::View received, source len={}, generated={}",
+                source.len(),
+                generated
+            );
             match loc {
                 None => {
                     ctx.borrow().view_saved.set(false);
@@ -801,7 +804,17 @@ fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
             ));
             ControlFlow::Continue
         }
-        ToGui::Terminate => ControlFlow::Continue,
+        ToGui::Confirm { message, reply } => {
+            let confirmed = ask_modal(&ctx.borrow().window, &message);
+            if let Some(tx) = reply.lock().ok().and_then(|mut g| g.take()) {
+                let _ = tx.send(confirmed);
+            }
+            ControlFlow::Continue
+        }
+        ToGui::Terminate => {
+            app.quit();
+            ControlFlow::Break
+        }
     });
 }
 
@@ -900,7 +913,8 @@ fn main() {
             move |app| {
                 let app = app.clone();
                 #[allow(deprecated)]
-                let (tx_to_gui, rx_to_gui) = glib::MainContext::channel(Priority::LOW);
+                let (tx_to_gui, rx_to_gui) =
+                    glib::MainContext::channel(Priority::DEFAULT);
                 let raw_view = Arc::new(AtomicBool::new(false));
                 let backend_ctx =
                     backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
