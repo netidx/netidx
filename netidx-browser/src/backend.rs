@@ -54,6 +54,7 @@ pub(crate) struct Ctx {
     pub(crate) rt_handle: tokio::runtime::Handle,
     pub(crate) subscriber: Subscriber,
     current_path_bid: graphix_compiler::BindId,
+    pub(crate) debug_highlighted_bid: graphix_compiler::BindId,
 }
 
 impl Ctx {
@@ -399,7 +400,7 @@ impl Backend {
         }
         root_parts.push("mod browser".to_string());
         let root = ArcStr::from(format!(
-            "{};\nlet current_path = \"/\";",
+            "{};\nlet current_path = \"/\";\nlet debug_highlighted = 0;",
             root_parts.join(";\n"),
         ));
         let gx = GXConfig::builder(ctx, gx_tx)
@@ -415,8 +416,12 @@ impl Backend {
         let name = graphix_compiler::expr::ModPath::from(["current_path"]);
         let current_path_ref = gx.compile_ref_by_name(&env, &scope, &name).await?;
         let current_path_bid = current_path_ref.bid;
-        // Leak the ref so its expression node stays alive for the window lifetime
         std::mem::forget(current_path_ref);
+
+        let dh_name = graphix_compiler::expr::ModPath::from(["debug_highlighted"]);
+        let dh_ref = gx.compile_ref_by_name(&env, &scope, &dh_name).await?;
+        let debug_highlighted_bid = dh_ref.bid;
+        std::mem::forget(dh_ref);
 
         // Bridge: forward graphix events to the GTK main loop
         let to_gui_bridge = to_gui.clone();
@@ -461,6 +466,7 @@ impl Backend {
             rt_handle,
             subscriber,
             current_path_bid,
+            debug_highlighted_bid,
         })
     }
 

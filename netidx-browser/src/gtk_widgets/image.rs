@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -10,6 +10,7 @@ pub(crate) struct ImageW<X: GXExt> {
     ctx: CompileCtx<X>,
     event_box: gtk::EventBox,
     image: gtk::Image,
+    common: CommonProps<X>,
     spec: Ref<X>,
     on_click: Ref<X>,
     on_click_callable: Option<Callable<X>>,
@@ -18,9 +19,10 @@ pub(crate) struct ImageW<X: GXExt> {
 
 impl<X: GXExt> ImageW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: on_click, spec
-        let [(_, on_click), (_, spec)] =
-            source.cast_to::<[(ArcStr, u64); 2]>().context("image flds")?;
+        // Fields sorted: common, debug_highlight, on_click, spec
+        let [(_, common), (_, debug_highlight), (_, on_click), (_, spec)] =
+            source.cast_to::<[(ArcStr, u64); 4]>().context("image flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (on_click, spec) = tokio::try_join! {
             ctx.gx.compile_ref(on_click),
             ctx.gx.compile_ref(spec),
@@ -34,11 +36,13 @@ impl<X: GXExt> ImageW<X> {
         let event_box = gtk::EventBox::new();
         event_box.add(&image);
         let signal_id = connect_on_click(&event_box, &ctx.gx, &on_click_callable);
+        common_props.apply(&event_box);
         event_box.show_all();
         Ok(Box::new(ImageW {
             ctx,
             event_box,
             image,
+            common: common_props,
             spec,
             on_click,
             on_click_callable,
@@ -149,6 +153,7 @@ impl<X: GXExt> GtkWidget<X> for ImageW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.event_box)?;
         if self.spec.update(id, v).is_some() {
             apply_image_spec(&self.image, v);
             changed = true;

@@ -1,4 +1,4 @@
-use super::{compile, CompileCtx, EmptyW, GtkW, GtkWidget};
+use super::{compile, CommonProps, CompileCtx, EmptyW, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use glib::Propagation;
@@ -11,6 +11,7 @@ use netidx::publisher::Value;
 pub(crate) struct KeyHandlerW<X: GXExt> {
     ctx: CompileCtx<X>,
     event_box: gtk::EventBox,
+    common: CommonProps<X>,
     child_ref: Ref<X>,
     child: GtkW<X>,
     on_key_press: Ref<X>,
@@ -19,9 +20,10 @@ pub(crate) struct KeyHandlerW<X: GXExt> {
 
 impl<X: GXExt> KeyHandlerW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: child, on_key_press
-        let [(_, child), (_, on_key_press)] =
-            source.cast_to::<[(ArcStr, u64); 2]>().context("key_handler flds")?;
+        // Fields sorted: child, common, debug_highlight, on_key_press
+        let [(_, child), (_, common), (_, debug_highlight), (_, on_key_press)] =
+            source.cast_to::<[(ArcStr, u64); 4]>().context("key_handler flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (child_ref, on_key_press) = tokio::try_join! {
             ctx.gx.compile_ref(child),
             ctx.gx.compile_ref(on_key_press),
@@ -44,10 +46,12 @@ impl<X: GXExt> KeyHandlerW<X> {
                 Propagation::Stop
             });
         }
+        common_props.apply(&event_box);
         event_box.show_all();
         Ok(Box::new(KeyHandlerW {
             ctx,
             event_box,
+            common: common_props,
             child_ref,
             child: compiled_child,
             on_key_press,
@@ -91,6 +95,7 @@ impl<X: GXExt> GtkWidget<X> for KeyHandlerW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.event_box)?;
         // Update callback
         update_callable!(self, rt, id, v, on_key_press, on_key_press_callable, "key_handler on_key_press");
         // Update child

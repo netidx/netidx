@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct ButtonW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Button,
+    common: CommonProps<X>,
     label: TRef<X, String>,
     on_click: Ref<X>,
     on_click_callable: Option<Callable<X>>,
@@ -17,9 +18,10 @@ pub(crate) struct ButtonW<X: GXExt> {
 
 impl<X: GXExt> ButtonW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: image, label, on_click
-        let [(_, image), (_, label), (_, on_click)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("button flds")?;
+        // Fields sorted: common, debug_highlight, image, label, on_click
+        let [(_, common), (_, debug_highlight), (_, image), (_, label), (_, on_click)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("button flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (_image, label, on_click) = tokio::try_join! {
             ctx.gx.compile_ref(image),
             ctx.gx.compile_ref(label),
@@ -33,10 +35,12 @@ impl<X: GXExt> ButtonW<X> {
             widget.set_label(t);
         }
         let signal_id = connect_on_click(&widget, &ctx.gx, &on_click_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(ButtonW {
             ctx,
             widget,
+            common: common_props,
             label,
             on_click,
             on_click_callable,
@@ -68,6 +72,7 @@ impl<X: GXExt> GtkWidget<X> for ButtonW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(t) = self.label.update(id, v).context("button update label")? {
             self.widget.set_label(t);
             changed = true;

@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct SwitchW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Switch,
+    common: CommonProps<X>,
     value: TRef<X, bool>,
     on_change: Ref<X>,
     on_change_callable: Option<Callable<X>>,
@@ -17,9 +18,10 @@ pub(crate) struct SwitchW<X: GXExt> {
 
 impl<X: GXExt> SwitchW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: on_change, value
-        let [(_, on_change), (_, value)] =
-            source.cast_to::<[(ArcStr, u64); 2]>().context("switch flds")?;
+        // Fields sorted: common, debug_highlight, on_change, value
+        let [(_, common), (_, debug_highlight), (_, on_change), (_, value)] =
+            source.cast_to::<[(ArcStr, u64); 4]>().context("switch flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (on_change, value) = tokio::try_join! {
             ctx.gx.compile_ref(on_change),
             ctx.gx.compile_ref(value),
@@ -33,10 +35,12 @@ impl<X: GXExt> SwitchW<X> {
             widget.set_active(v);
         }
         let signal_id = connect_on_change(&widget, &ctx.gx, &on_change_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(SwitchW {
             ctx,
             widget,
+            common: common_props,
             value,
             on_change,
             on_change_callable,
@@ -70,6 +74,7 @@ impl<X: GXExt> GtkWidget<X> for SwitchW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(val) = self.value.update(id, v).context("switch update value")? {
             if let Some(ref sig) = self.signal_id {
                 self.widget.block_signal(sig);

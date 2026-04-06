@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct SearchEntryW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::SearchEntry,
+    common: CommonProps<X>,
     text: TRef<X, String>,
     on_search_changed: Ref<X>,
     on_search_changed_callable: Option<Callable<X>>,
@@ -20,9 +21,10 @@ pub(crate) struct SearchEntryW<X: GXExt> {
 
 impl<X: GXExt> SearchEntryW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: on_activate, on_search_changed, text
-        let [(_, on_activate), (_, on_search_changed), (_, text)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("search_entry flds")?;
+        // Fields sorted: common, debug_highlight, on_activate, on_search_changed, text
+        let [(_, common), (_, debug_highlight), (_, on_activate), (_, on_search_changed), (_, text)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("search_entry flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (on_activate, on_search_changed, text) = tokio::try_join! {
             ctx.gx.compile_ref(on_activate),
             ctx.gx.compile_ref(on_search_changed),
@@ -42,10 +44,12 @@ impl<X: GXExt> SearchEntryW<X> {
             connect_on_search_changed(&widget, &ctx.gx, &on_search_changed_callable);
         let activate_signal =
             connect_on_activate(&widget, &ctx.gx, &on_activate_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(SearchEntryW {
             ctx,
             widget,
+            common: common_props,
             text,
             on_search_changed,
             on_search_changed_callable,
@@ -99,6 +103,7 @@ impl<X: GXExt> GtkWidget<X> for SearchEntryW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(t) = self.text.update(id, v).context("search_entry update text")? {
             // Block search_changed while setting text programmatically
             if let Some(ref sig) = self.search_signal {

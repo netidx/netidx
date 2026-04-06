@@ -7,6 +7,163 @@ use netidx::publisher::Value;
 use netidx::subscriber::Subscriber;
 use std::{future::Future, pin::Pin};
 
+use crate::util::set_highlight;
+
+/// Common GTK widget properties + debug highlight.
+///
+/// The Common struct fields are `&[T, null]` refs in graphix, so the struct
+/// value contains BindIds (U64). We keep a Ref for the struct itself, and
+/// compile each inner BindId as a separate Ref for fine-grained updates.
+/// When the struct ref updates (e.g. user switches to a different common()
+/// call), we recompile all inner refs from the new BindIds.
+pub(crate) struct CommonProps<X: GXExt> {
+    pub gx: GXHandle<X>,
+    pub common: Ref<X>,
+    pub debug_highlight: TRef<X, bool>,
+    pub fields: Vec<(ArcStr, Ref<X>)>,
+}
+
+impl<X: GXExt> CommonProps<X> {
+    async fn compile_fields(gx: &GXHandle<X>, v: &Value) -> Result<Vec<(ArcStr, Ref<X>)>> {
+        let mut fields = Vec::new();
+        if *v != Value::Null {
+            if let Ok(struct_fields) = v.clone().cast_to::<Vec<(ArcStr, Value)>>() {
+                for (name, val) in struct_fields {
+                    if let Ok(bid) = val.cast_to::<u64>() {
+                        let r = gx.compile_ref(bid).await?;
+                        fields.push((name, r));
+                    }
+                }
+            }
+        }
+        Ok(fields)
+    }
+
+    pub async fn compile(gx: &GXHandle<X>, common_id: u64, dh_id: u64) -> Result<Self> {
+        let (common, debug_highlight) = tokio::try_join! {
+            gx.compile_ref(common_id),
+            gx.compile_ref(dh_id),
+        }?;
+        let debug_highlight: TRef<X, bool> =
+            TRef::new(debug_highlight).context("common tref debug_highlight")?;
+        let fields = match common.last.as_ref() {
+            Some(v) => Self::compile_fields(gx, v).await?,
+            None => Vec::new(),
+        };
+        Ok(CommonProps { gx: gx.clone(), common, debug_highlight, fields })
+    }
+
+    /// Apply common properties to a GTK widget. Call after creation and on updates.
+    pub fn apply(&self, w: &impl IsA<gtk::Widget>) {
+        set_highlight(w, self.debug_highlight.t.unwrap_or(false));
+        for (name, r) in &self.fields {
+            if let Some(v) = r.last.as_ref() {
+                Self::apply_one(w, name, v);
+            }
+        }
+    }
+
+    /// Process an update, return true if handled.
+    pub fn handle_update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        id: ExprId,
+        v: &Value,
+        w: &impl IsA<gtk::Widget>,
+    ) -> Result<bool> {
+        let mut changed = false;
+        if let Some(dh) = self.debug_highlight.update(id, v)
+            .context("common update debug_highlight")?
+        {
+            set_highlight(w, *dh);
+            changed = true;
+        }
+        if id == self.common.id {
+            self.common.last = Some(v.clone());
+            self.fields = rt
+                .block_on(Self::compile_fields(&self.gx, v))
+                .context("common fields recompile")?;
+            for (name, r) in &self.fields {
+                if let Some(v) = r.last.as_ref() {
+                    Self::apply_one(w, name, v);
+                }
+            }
+            changed = true;
+        }
+        for (name, r) in &mut self.fields {
+            if let Some(new_val) = r.update(id, v) {
+                Self::apply_one(w, name, new_val);
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
+    fn apply_one(w: &impl IsA<gtk::Widget>, name: &str, v: &Value) {
+        let w = w.as_ref();
+        match name {
+            "halign" => {
+                let align = match v.clone().cast_to::<ArcStr>().ok() {
+                    Some(ref s) => match s.as_str() {
+                        "Start" => gtk::Align::Start,
+                        "Center" => gtk::Align::Center,
+                        "End" => gtk::Align::End,
+                        "Fill" => gtk::Align::Fill,
+                        _ => gtk::Align::Fill,
+                    },
+                    None => gtk::Align::Fill,
+                };
+                w.set_halign(align);
+            }
+            "valign" => {
+                let align = match v.clone().cast_to::<ArcStr>().ok() {
+                    Some(ref s) => match s.as_str() {
+                        "Start" => gtk::Align::Start,
+                        "Center" => gtk::Align::Center,
+                        "End" => gtk::Align::End,
+                        "Fill" => gtk::Align::Fill,
+                        _ => gtk::Align::Fill,
+                    },
+                    None => gtk::Align::Fill,
+                };
+                w.set_valign(align);
+            }
+            "hexpand" => {
+                w.set_hexpand(v.clone().cast_to::<bool>().unwrap_or(false));
+            }
+            "vexpand" => {
+                w.set_vexpand(v.clone().cast_to::<bool>().unwrap_or(false));
+            }
+            "margin_start" => {
+                w.set_margin_start(v.clone().cast_to::<i64>().unwrap_or(0) as i32);
+            }
+            "margin_end" => {
+                w.set_margin_end(v.clone().cast_to::<i64>().unwrap_or(0) as i32);
+            }
+            "margin_top" => {
+                w.set_margin_top(v.clone().cast_to::<i64>().unwrap_or(0) as i32);
+            }
+            "margin_bottom" => {
+                w.set_margin_bottom(v.clone().cast_to::<i64>().unwrap_or(0) as i32);
+            }
+            "width_request" => {
+                w.set_width_request(v.clone().cast_to::<i64>().unwrap_or(-1) as i32);
+            }
+            "height_request" => {
+                w.set_height_request(v.clone().cast_to::<i64>().unwrap_or(-1) as i32);
+            }
+            "sensitive" => {
+                w.set_sensitive(v.clone().cast_to::<bool>().unwrap_or(true));
+            }
+            "tooltip" => {
+                let tip = v.clone().cast_to::<String>().ok();
+                w.set_tooltip_text(tip.as_deref());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Context passed to widget compile functions.
 /// Carries the GXHandle for expression compilation and the Subscriber
 /// for widgets (like Table) that need to manage their own subscriptions.
@@ -188,6 +345,7 @@ fn pack_box_children<X: GXExt>(
 struct BoxW<X: GXExt> {
     ctx: CompileCtx<X>,
     container: gtk::Box,
+    common: CommonProps<X>,
     spacing: TRef<X, i64>,
     homogeneous: TRef<X, bool>,
     children_ref: Ref<X>,
@@ -200,8 +358,10 @@ impl<X: GXExt> BoxW<X> {
         orientation: gtk::Orientation,
         source: Value,
     ) -> Result<GtkW<X>> {
-        let [(_, children), (_, homogeneous), (_, spacing)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("box flds")?;
+        // Fields alphabetically: children, common, debug_highlight, homogeneous, spacing
+        let [(_, children), (_, common), (_, debug_highlight), (_, homogeneous), (_, spacing)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("box flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (children_ref, homogeneous, spacing) = tokio::try_join! {
             ctx.gx.compile_ref(children),
             ctx.gx.compile_ref(homogeneous),
@@ -223,10 +383,12 @@ impl<X: GXExt> BoxW<X> {
         );
         container.set_homogeneous(homogeneous_val.t.unwrap_or(false));
         pack_box_children(&container, &compiled_children);
+        common_props.apply(&container);
         container.show_all();
         Ok(Box::new(BoxW {
             ctx,
             container,
+            common: common_props,
             spacing: spacing_val,
             homogeneous: homogeneous_val,
             children_ref,
@@ -275,6 +437,7 @@ impl<X: GXExt> GtkWidget<X> for BoxW<X> {
             self.rebuild_children();
             changed = true;
         }
+        changed |= self.common.handle_update(rt, id, v, &self.container)?;
         for child in &mut self.children {
             changed |= child.handle_update(rt, id, v)?;
         }
