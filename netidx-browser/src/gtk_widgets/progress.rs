@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -17,6 +17,7 @@ fn parse_ellipsize_mode(s: &str) -> pango::EllipsizeMode {
 
 pub(crate) struct ProgressBarW<X: GXExt> {
     widget: gtk::ProgressBar,
+    common: CommonProps<X>,
     ellipsize: TRef<X, String>,
     fraction: TRef<X, Option<f64>>,
     pulse: Ref<X>,
@@ -26,9 +27,10 @@ pub(crate) struct ProgressBarW<X: GXExt> {
 
 impl<X: GXExt> ProgressBarW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: ellipsize, fraction, pulse, show_text, text
-        let [(_, ellipsize), (_, fraction), (_, pulse), (_, show_text), (_, text)] =
-            source.cast_to::<[(ArcStr, u64); 5]>().context("progress flds")?;
+        // Fields sorted: common, debug_highlight, ellipsize, fraction, pulse, show_text, text
+        let [(_, common), (_, debug_highlight), (_, ellipsize), (_, fraction), (_, pulse), (_, show_text), (_, text)] =
+            source.cast_to::<[(ArcStr, u64); 7]>().context("progress flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (ellipsize, fraction, pulse, show_text, text) = tokio::try_join! {
             ctx.gx.compile_ref(ellipsize),
             ctx.gx.compile_ref(fraction),
@@ -58,19 +60,21 @@ impl<X: GXExt> ProgressBarW<X> {
                 widget.set_show_text(true);
             }
         }
+        common_props.apply(&widget);
         widget.show();
-        Ok(Box::new(ProgressBarW { widget, ellipsize, fraction, pulse, show_text, text }))
+        Ok(Box::new(ProgressBarW { widget, common: common_props, ellipsize, fraction, pulse, show_text, text }))
     }
 }
 
 impl<X: GXExt> GtkWidget<X> for ProgressBarW<X> {
     fn handle_update(
         &mut self,
-        _rt: &tokio::runtime::Handle,
+        rt: &tokio::runtime::Handle,
         id: ExprId,
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(e) = self
             .ellipsize
             .update(id, v)

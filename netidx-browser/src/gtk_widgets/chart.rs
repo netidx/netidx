@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use crate::cairo_backend::CairoBackend;
@@ -68,17 +68,19 @@ struct ChartData<X: GXExt> {
 
 pub(crate) struct ChartW<X: GXExt> {
     drawing_area: gtk::DrawingArea,
+    common: CommonProps<X>,
     data: Rc<RefCell<ChartData<X>>>,
 }
 
 impl<X: GXExt> ChartW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields arrive sorted alphabetically (13 fields):
-        // background, datasets, legend_position, legend_style, margin,
+        // Fields arrive sorted alphabetically (15 fields):
+        // background, common, datasets, debug_highlight, legend_position, legend_style, margin,
         // mesh, title, title_color, title_size, x_label, x_range,
         // y_label, y_range
-        let [(_, background), (_, datasets), (_, legend_position), (_, legend_style), (_, margin), (_, mesh), (_, title), (_, title_color), (_, title_size), (_, x_label), (_, x_range), (_, y_label), (_, y_range)] =
-            source.cast_to::<[(ArcStr, u64); 13]>().context("chart flds")?;
+        let [(_, background), (_, common), (_, datasets), (_, debug_highlight), (_, legend_position), (_, legend_style), (_, margin), (_, mesh), (_, title), (_, title_color), (_, title_size), (_, x_label), (_, x_range), (_, y_label), (_, y_range)] =
+            source.cast_to::<[(ArcStr, u64); 15]>().context("chart flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (
             background_ref,
             datasets_ref,
@@ -143,8 +145,9 @@ impl<X: GXExt> ChartW<X> {
             }
             glib::Propagation::Proceed
         });
+        common_props.apply(&drawing_area);
         drawing_area.show();
-        Ok(Box::new(ChartW { drawing_area, data }))
+        Ok(Box::new(ChartW { drawing_area, common: common_props, data }))
     }
 }
 
@@ -155,8 +158,9 @@ impl<X: GXExt> GtkWidget<X> for ChartW<X> {
         id: ExprId,
         v: &Value,
     ) -> Result<bool> {
-        let mut d = self.data.borrow_mut();
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.drawing_area)?;
+        let mut d = self.data.borrow_mut();
         if id == d.datasets_ref.id {
             d.datasets_ref.last = Some(v.clone());
             d.datasets = rt

@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -16,6 +16,7 @@ thread_local! {
 pub(crate) struct RadioButtonW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::RadioButton,
+    common: CommonProps<X>,
     group: TRef<X, String>,
     label: TRef<X, String>,
     on_toggled: Ref<X>,
@@ -26,9 +27,10 @@ pub(crate) struct RadioButtonW<X: GXExt> {
 
 impl<X: GXExt> RadioButtonW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: group, label, on_toggled, value
-        let [(_, group), (_, label), (_, on_toggled), (_, value)] =
-            source.cast_to::<[(ArcStr, u64); 4]>().context("radio flds")?;
+        // Fields sorted: common, debug_highlight, group, label, on_toggled, value
+        let [(_, common), (_, debug_highlight), (_, group), (_, label), (_, on_toggled), (_, value)] =
+            source.cast_to::<[(ArcStr, u64); 6]>().context("radio flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (group, label, on_toggled, value) = tokio::try_join! {
             ctx.gx.compile_ref(group),
             ctx.gx.compile_ref(label),
@@ -62,10 +64,12 @@ impl<X: GXExt> RadioButtonW<X> {
             widget.set_active(v);
         }
         let signal_id = connect_on_toggled(&widget, &ctx.gx, &on_toggled_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(RadioButtonW {
             ctx,
             widget,
+            common: common_props,
             group,
             label,
             on_toggled,
@@ -100,6 +104,7 @@ impl<X: GXExt> GtkWidget<X> for RadioButtonW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(val) = self.value.update(id, v).context("radio update value")? {
             if let Some(ref sig) = self.signal_id {
                 self.widget.block_signal(sig);

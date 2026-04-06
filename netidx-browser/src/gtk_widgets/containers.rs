@@ -1,4 +1,4 @@
-use super::{compile, CompileCtx, EmptyW, GtkW, GtkWidget};
+use super::{compile, CommonProps, CompileCtx, EmptyW, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -10,6 +10,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 
 pub(crate) struct BoxChildW<X: GXExt> {
     ctx: CompileCtx<X>,
+    common: CommonProps<X>,
     child_ref: Ref<X>,
     child: GtkW<X>,
     pack: TRef<X, String>,
@@ -21,9 +22,10 @@ impl<X: GXExt> BoxChildW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: child, pack, padding
-        let [(_, child), (_, pack), (_, padding)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("box_child flds")?;
+        // Fields alphabetical: child, common, debug_highlight, pack, padding
+        let [(_, child), (_, common), (_, debug_highlight), (_, pack), (_, padding)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("box_child flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (child_ref, pack, padding) = tokio::try_join! {
             ctx.gx.compile_ref(child),
             ctx.gx.compile_ref(pack),
@@ -34,9 +36,11 @@ impl<X: GXExt> BoxChildW<X> {
         let padding: TRef<X, i64> =
             TRef::new(padding).context("box_child tref padding")?;
         let compiled_child = compile_child!(ctx, child_ref, "box_child child");
+        common_props.apply(compiled_child.gtk_widget());
         compiled_child.gtk_widget().show();
         Ok(Box::new(BoxChildW {
             ctx,
+            common: common_props,
             child_ref,
             child: compiled_child,
             pack,
@@ -53,6 +57,7 @@ impl<X: GXExt> GtkWidget<X> for BoxChildW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, self.child.gtk_widget())?;
         update_child!(self, rt, id, v, changed, child_ref, child, "box_child child");
         if self.pack.update(id, v).context("box_child update pack")?.is_some() {
             changed = true;
@@ -79,6 +84,7 @@ impl<X: GXExt> GtkWidget<X> for BoxChildW<X> {
 pub(crate) struct GridW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Grid,
+    common: CommonProps<X>,
     column_spacing: TRef<X, i64>,
     homogeneous_columns: TRef<X, bool>,
     homogeneous_rows: TRef<X, bool>,
@@ -92,17 +98,20 @@ impl<X: GXExt> GridW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: column_spacing, homogeneous_columns,
-        //   homogeneous_rows, row_spacing, rows
+        // Fields alphabetical: column_spacing, common, debug_highlight,
+        //   homogeneous_columns, homogeneous_rows, row_spacing, rows
         let [
             (_, column_spacing),
+            (_, common),
+            (_, debug_highlight),
             (_, homogeneous_columns),
             (_, homogeneous_rows),
             (_, row_spacing),
             (_, rows),
         ] = source
-            .cast_to::<[(ArcStr, u64); 5]>()
+            .cast_to::<[(ArcStr, u64); 7]>()
             .context("grid flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (column_spacing, homogeneous_columns, homogeneous_rows, row_spacing, rows_ref) =
             tokio::try_join! {
                 ctx.gx.compile_ref(column_spacing),
@@ -131,10 +140,12 @@ impl<X: GXExt> GridW<X> {
         widget.set_column_homogeneous(homogeneous_columns.t.unwrap_or(false));
         widget.set_row_homogeneous(homogeneous_rows.t.unwrap_or(false));
         attach_grid_children(&widget, &compiled_rows);
+        common_props.apply(&widget);
         widget.show_all();
         Ok(Box::new(GridW {
             ctx,
             widget,
+            common: common_props,
             column_spacing,
             homogeneous_columns,
             homogeneous_rows,
@@ -199,6 +210,7 @@ impl<X: GXExt> GtkWidget<X> for GridW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(cs) = self
             .column_spacing
             .update(id, v)
@@ -256,6 +268,7 @@ impl<X: GXExt> GtkWidget<X> for GridW<X> {
 
 pub(crate) struct GridCellW<X: GXExt> {
     ctx: CompileCtx<X>,
+    common: CommonProps<X>,
     child_ref: Ref<X>,
     child: GtkW<X>,
     colspan: TRef<X, i64>,
@@ -267,9 +280,10 @@ impl<X: GXExt> GridCellW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: child, colspan, rowspan
-        let [(_, child), (_, colspan), (_, rowspan)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("grid_cell flds")?;
+        // Fields alphabetical: child, common, colspan, debug_highlight, rowspan
+        let [(_, child), (_, common), (_, colspan), (_, debug_highlight), (_, rowspan)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("grid_cell flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (child_ref, colspan, rowspan) = tokio::try_join! {
             ctx.gx.compile_ref(child),
             ctx.gx.compile_ref(colspan),
@@ -280,9 +294,11 @@ impl<X: GXExt> GridCellW<X> {
         let rowspan: TRef<X, i64> =
             TRef::new(rowspan).context("grid_cell tref rowspan")?;
         let compiled_child = compile_child!(ctx, child_ref, "grid_cell child");
+        common_props.apply(compiled_child.gtk_widget());
         compiled_child.gtk_widget().show();
         Ok(Box::new(GridCellW {
             ctx,
+            common: common_props,
             child_ref,
             child: compiled_child,
             colspan,
@@ -299,6 +315,7 @@ impl<X: GXExt> GtkWidget<X> for GridCellW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, self.child.gtk_widget())?;
         update_child!(self, rt, id, v, changed, child_ref, child, "grid_cell child");
         if self.colspan.update(id, v).context("grid_cell update colspan")?.is_some() {
             changed = true;
@@ -325,6 +342,7 @@ impl<X: GXExt> GtkWidget<X> for GridCellW<X> {
 pub(crate) struct FrameW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Frame,
+    common: CommonProps<X>,
     label: TRef<X, String>,
     child_ref: Ref<X>,
     child: GtkW<X>,
@@ -335,9 +353,10 @@ impl<X: GXExt> FrameW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: child, label
-        let [(_, child), (_, label)] =
-            source.cast_to::<[(ArcStr, u64); 2]>().context("frame flds")?;
+        // Fields alphabetical: child, common, debug_highlight, label
+        let [(_, child), (_, common), (_, debug_highlight), (_, label)] =
+            source.cast_to::<[(ArcStr, u64); 4]>().context("frame flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (child_ref, label) = tokio::try_join! {
             ctx.gx.compile_ref(child),
             ctx.gx.compile_ref(label),
@@ -347,10 +366,12 @@ impl<X: GXExt> FrameW<X> {
             TRef::new(label).context("frame tref label")?;
         let widget = gtk::Frame::new(label.t.as_deref());
         widget.add(compiled_child.gtk_widget());
+        common_props.apply(&widget);
         widget.show_all();
         Ok(Box::new(FrameW {
             ctx,
             widget,
+            common: common_props,
             label,
             child_ref,
             child: compiled_child,
@@ -366,6 +387,7 @@ impl<X: GXExt> GtkWidget<X> for FrameW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(l) = self
             .label
             .update(id, v)
@@ -400,6 +422,7 @@ impl<X: GXExt> GtkWidget<X> for FrameW<X> {
 pub(crate) struct PanedW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Paned,
+    common: CommonProps<X>,
     direction: TRef<X, String>,
     first_ref: Ref<X>,
     first: GtkW<X>,
@@ -413,9 +436,10 @@ impl<X: GXExt> PanedW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: direction, first, second, wide_handle
-        let [(_, direction), (_, first), (_, second), (_, wide_handle)] =
-            source.cast_to::<[(ArcStr, u64); 4]>().context("paned flds")?;
+        // Fields alphabetical: common, debug_highlight, direction, first, second, wide_handle
+        let [(_, common), (_, debug_highlight), (_, direction), (_, first), (_, second), (_, wide_handle)] =
+            source.cast_to::<[(ArcStr, u64); 6]>().context("paned flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (direction, first_ref, second_ref, wide_handle) = tokio::try_join! {
             ctx.gx.compile_ref(direction),
             ctx.gx.compile_ref(first),
@@ -435,10 +459,12 @@ impl<X: GXExt> PanedW<X> {
         widget.set_wide_handle(wide_handle.t.unwrap_or(false));
         widget.pack1(first_child.gtk_widget(), true, false);
         widget.pack2(second_child.gtk_widget(), true, false);
+        common_props.apply(&widget);
         widget.show_all();
         Ok(Box::new(PanedW {
             ctx,
             widget,
+            common: common_props,
             direction,
             first_ref,
             first: first_child,
@@ -464,6 +490,7 @@ impl<X: GXExt> GtkWidget<X> for PanedW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(d) = self
             .direction
             .update(id, v)
@@ -530,6 +557,7 @@ struct NotebookChild<X: GXExt> {
 pub(crate) struct NotebookW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Notebook,
+    common: CommonProps<X>,
     children_ref: Ref<X>,
     children: Vec<NotebookChild<X>>,
     page: TRef<X, i64>,
@@ -544,9 +572,10 @@ impl<X: GXExt> NotebookW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields alphabetical: children, on_switch_page, page, tabs_popup
-        let [(_, children), (_, on_switch_page), (_, page), (_, tabs_popup)] =
-            source.cast_to::<[(ArcStr, u64); 4]>().context("notebook flds")?;
+        // Fields alphabetical: children, common, debug_highlight, on_switch_page, page, tabs_popup
+        let [(_, children), (_, common), (_, debug_highlight), (_, on_switch_page), (_, page), (_, tabs_popup)] =
+            source.cast_to::<[(ArcStr, u64); 6]>().context("notebook flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (children_ref, on_switch_page, page, tabs_popup) = tokio::try_join! {
             ctx.gx.compile_ref(children),
             ctx.gx.compile_ref(on_switch_page),
@@ -577,10 +606,12 @@ impl<X: GXExt> NotebookW<X> {
         }
         let switch_signal =
             connect_switch_page(&widget, &ctx.gx, &on_switch_page_callable);
+        common_props.apply(&widget);
         widget.show_all();
         Ok(Box::new(NotebookW {
             ctx,
             widget,
+            common: common_props,
             children_ref,
             children: compiled_children,
             page,
@@ -670,6 +701,7 @@ impl<X: GXExt> GtkWidget<X> for NotebookW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(p) = self
             .page
             .update(id, v)

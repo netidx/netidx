@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct ComboBoxW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::ComboBoxText,
+    common: CommonProps<X>,
     choices: Ref<X>,
     selected: TRef<X, String>,
     on_change: Ref<X>,
@@ -18,9 +19,10 @@ pub(crate) struct ComboBoxW<X: GXExt> {
 
 impl<X: GXExt> ComboBoxW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: choices, on_change, selected
-        let [(_, choices), (_, on_change), (_, selected)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("combo flds")?;
+        // Fields sorted: choices, common, debug_highlight, on_change, selected
+        let [(_, choices), (_, common), (_, debug_highlight), (_, on_change), (_, selected)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("combo flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (choices, on_change, selected) = tokio::try_join! {
             ctx.gx.compile_ref(choices),
             ctx.gx.compile_ref(on_change),
@@ -38,10 +40,12 @@ impl<X: GXExt> ComboBoxW<X> {
             widget.set_active_id(Some(s.as_str()));
         }
         let signal_id = connect_on_change(&widget, &ctx.gx, &on_change_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(ComboBoxW {
             ctx,
             widget,
+            common: common_props,
             choices,
             selected,
             on_change,
@@ -99,6 +103,7 @@ impl<X: GXExt> GtkWidget<X> for ComboBoxW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if id == self.choices.id {
             self.choices.last = Some(v.clone());
             if let Some(ref sig) = self.signal_id {

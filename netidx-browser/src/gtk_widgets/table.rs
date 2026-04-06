@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use fxhash::FxHashMap;
@@ -455,6 +455,7 @@ enum TableState {
 pub(crate) struct TableW<X: GXExt> {
     ctx: CompileCtx<X>,
     root: ScrolledWindow,
+    common: CommonProps<X>,
     path: TRef<X, String>,
     sort_mode: Ref<X>,
     column_filter: Ref<X>,
@@ -482,13 +483,15 @@ impl<X: GXExt> TableW<X> {
         source: Value,
     ) -> Result<GtkW<X>> {
         // Fields arrive in alphabetical order:
-        // column_filter, column_types, column_widths, on_activate,
-        // on_edit, on_header_click, on_select, path, row_filter,
+        // column_filter, column_types, column_widths, common, debug_highlight,
+        // on_activate, on_edit, on_header_click, on_select, path, row_filter,
         // selection_mode, show_row_name, sort_mode
         let [
             (_, column_filter),
             (_, column_types),
             (_, column_widths),
+            (_, common),
+            (_, debug_highlight),
             (_, on_activate),
             (_, on_edit),
             (_, on_header_click),
@@ -499,8 +502,9 @@ impl<X: GXExt> TableW<X> {
             (_, show_row_name),
             (_, sort_mode),
         ] = source
-            .cast_to::<[(ArcStr, u64); 12]>()
+            .cast_to::<[(ArcStr, u64); 14]>()
             .context("table flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (
             column_filter,
             column_types,
@@ -600,10 +604,12 @@ impl<X: GXExt> TableW<X> {
             }
             TableState::Empty => (None, None),
         };
+        common_props.apply(&root);
         root.show_all();
         Ok(Box::new(TableW {
             ctx,
             root,
+            common: common_props,
             path,
             sort_mode,
             column_filter,
@@ -1354,6 +1360,7 @@ impl<X: GXExt> GtkWidget<X> for TableW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.root)?;
         // Path changed -> re-resolve and rebuild the table.
         let new_path = self.path.update(id, v).context("table update path")?
             .map(|p| p.clone());

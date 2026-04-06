@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct ToggleButtonW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::ToggleButton,
+    common: CommonProps<X>,
     value: TRef<X, bool>,
     label: TRef<X, String>,
     on_change: Ref<X>,
@@ -21,9 +22,10 @@ impl<X: GXExt> ToggleButtonW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields sorted: image, label, on_change, value
-        let [(_, _image), (_, label), (_, on_change), (_, value)] =
-            source.cast_to::<[(ArcStr, u64); 4]>().context("toggle flds")?;
+        // Fields sorted: common, debug_highlight, image, label, on_change, value
+        let [(_, common), (_, debug_highlight), (_, _image), (_, label), (_, on_change), (_, value)] =
+            source.cast_to::<[(ArcStr, u64); 6]>().context("toggle flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (_image, label, on_change, value) = tokio::try_join! {
             ctx.gx.compile_ref(_image),
             ctx.gx.compile_ref(label),
@@ -44,10 +46,12 @@ impl<X: GXExt> ToggleButtonW<X> {
             widget.set_active(v);
         }
         let signal_id = connect_on_change(&widget, &ctx.gx, &on_change_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(ToggleButtonW {
             ctx,
             widget,
+            common: common_props,
             value,
             label,
             on_change,
@@ -60,9 +64,10 @@ impl<X: GXExt> ToggleButtonW<X> {
         ctx: CompileCtx<X>,
         source: Value,
     ) -> Result<GtkW<X>> {
-        // Fields sorted: label, on_change, value
-        let [(_, label), (_, on_change), (_, value)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("check flds")?;
+        // Fields sorted: common, debug_highlight, label, on_change, value
+        let [(_, common), (_, debug_highlight), (_, label), (_, on_change), (_, value)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("check flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (label, on_change, value) = tokio::try_join! {
             ctx.gx.compile_ref(label),
             ctx.gx.compile_ref(on_change),
@@ -83,10 +88,12 @@ impl<X: GXExt> ToggleButtonW<X> {
         // CheckButton is a subclass of ToggleButton
         let widget: gtk::ToggleButton = check.upcast();
         let signal_id = connect_on_change(&widget, &ctx.gx, &on_change_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(ToggleButtonW {
             ctx,
             widget,
+            common: common_props,
             value,
             label,
             on_change,
@@ -120,6 +127,7 @@ impl<X: GXExt> GtkWidget<X> for ToggleButtonW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(val) = self.value.update(id, v).context("toggle update value")? {
             if let Some(ref sig) = self.signal_id {
                 self.widget.block_signal(sig);

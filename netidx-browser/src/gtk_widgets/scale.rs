@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct ScaleW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::Scale,
+    common: CommonProps<X>,
     direction: TRef<X, String>,
     draw_value: TRef<X, bool>,
     has_origin: TRef<X, bool>,
@@ -68,8 +69,10 @@ fn apply_marks(widget: &gtk::Scale, marks_ref: &Ref<impl GXExt>) {
 
 impl<X: GXExt> ScaleW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: direction, draw_value, has_origin, marks, max, min, on_change, value
+        // Fields sorted: common, debug_highlight, direction, draw_value, has_origin, marks, max, min, on_change, value
         let [
+            (_, common),
+            (_, debug_highlight),
             (_, direction),
             (_, draw_value),
             (_, has_origin),
@@ -78,7 +81,8 @@ impl<X: GXExt> ScaleW<X> {
             (_, min),
             (_, on_change),
             (_, value),
-        ] = source.cast_to::<[(ArcStr, u64); 8]>().context("scale flds")?;
+        ] = source.cast_to::<[(ArcStr, u64); 10]>().context("scale flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (direction, draw_value, has_origin, marks, max, min, on_change, value) =
             tokio::try_join! {
                 ctx.gx.compile_ref(direction),
@@ -122,10 +126,12 @@ impl<X: GXExt> ScaleW<X> {
             widget.set_value(v);
         }
         let signal_id = connect_on_change(&widget, &ctx.gx, &on_change_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(ScaleW {
             ctx,
             widget,
+            common: common_props,
             direction,
             draw_value,
             has_origin,
@@ -164,6 +170,7 @@ impl<X: GXExt> GtkWidget<X> for ScaleW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(d) = self
             .direction
             .update(id, v)

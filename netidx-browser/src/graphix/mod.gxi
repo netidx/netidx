@@ -51,6 +51,24 @@ type FilterMode = [
 ];
 
 type EllipsizeMode = [`None, `Start, `Middle, `End];
+
+type Align = [`Start, `Center, `End, `Fill];
+
+type Common = {
+    halign: &[Align, null],
+    valign: &[Align, null],
+    hexpand: &[bool, null],
+    vexpand: &[bool, null],
+    margin_start: &[i64, null],
+    margin_end: &[i64, null],
+    margin_top: &[i64, null],
+    margin_bottom: &[i64, null],
+    width_request: &[i64, null],
+    height_request: &[i64, null],
+    sensitive: &[bool, null],
+    tooltip: &[string, null]
+};
+
 type IconSize = [`Menu, `SmallToolbar, `LargeToolbar, `Dnd, `Dialog];
 
 type ImageSpec = [
@@ -106,23 +124,27 @@ type Dataset = [
 ];
 
 type Chart = {
-  datasets: &Array<Dataset>,
-  title: &[string, null],
-  title_color: &[Color, null],
-  x_label: &[string, null],
-  y_label: &[string, null],
-  x_range: &[{min: f64, max: f64}, {min: datetime, max: datetime}, null],
-  y_range: &[{min: f64, max: f64}, null],
   background: &[Color, null],
-  margin: &[f64, null],
-  title_size: &[f64, null],
+  common: &[Common, null],
+  datasets: &Array<Dataset>,
+  debug_highlight: &bool,
   legend_position: &[LegendPosition, null],
   legend_style: &[LegendStyle, null],
-  mesh: &[MeshStyle, null]
+  margin: &[f64, null],
+  mesh: &[MeshStyle, null],
+  title: &[string, null],
+  title_color: &[Color, null],
+  title_size: &[f64, null],
+  x_label: &[string, null],
+  x_range: &[{min: f64, max: f64}, {min: datetime, max: datetime}, null],
+  y_label: &[string, null],
+  y_range: &[{min: f64, max: f64}, null]
 };
 
 
 type Label = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     text: &string,
     width: &[i64, null],
     ellipsize: &EllipsizeMode,
@@ -131,23 +153,31 @@ type Label = {
 };
 
 type Button = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     label: &string,
     image: &[ImageSpec, null],
     on_click: &[fn(#trigger: null) -> Any, null]
 };
 
 type Entry = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     text: &string,
     on_change: &[fn(#text: string) -> Any, null],
     on_activate: &[fn(#text: string) -> Any, null]
 };
 
 type Switch = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     value: &bool,
     on_change: &[fn(#value: bool) -> Any, null]
 };
 
 type ToggleButton = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     value: &bool,
     label: &string,
     image: &[ImageSpec, null],
@@ -155,12 +185,16 @@ type ToggleButton = {
 };
 
 type CheckButton = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     value: &bool,
     label: &string,
     on_change: &[fn(#value: bool) -> Any, null]
 };
 
 type RadioButton = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     label: &string,
     group: &string,
     value: &bool,
@@ -171,6 +205,8 @@ type ComboChoice = { id: string, label: string };
 
 type ComboBox = {
     choices: &Array<ComboChoice>,
+    common: &[Common, null],
+    debug_highlight: &bool,
     selected: &string,
     on_change: &[fn(#id: string) -> Any, null]
 };
@@ -180,6 +216,8 @@ type DrawValuePosition = [`Left, `Right, `Top, `Bottom];
 type ScaleMark = { position: f64, pos: DrawValuePosition, text: [string, null] };
 
 type Scale = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     value: &f64,
     min: &f64,
     max: &f64,
@@ -191,6 +229,8 @@ type Scale = {
 };
 
 type ProgressBar = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     fraction: &[f64, null],
     text: &[string, null],
     show_text: &bool,
@@ -199,17 +239,23 @@ type ProgressBar = {
 };
 
 type Image = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     spec: &ImageSpec,
     on_click: &[fn(#trigger: null) -> Any, null]
 };
 
 type LinkButton = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     uri: &string,
     label: &string,
     on_activate_link: &[fn(#uri: string) -> Any, null]
 };
 
 type SearchEntry = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     text: &string,
     on_search_changed: &[fn(#text: string) -> Any, null],
     on_activate: &[fn(#text: string) -> Any, null]
@@ -220,18 +266,24 @@ type PackType = [`Start, `End];
 
 type VBox = {
     children: &Array<Widget>,
-    spacing: &i64,
-    homogeneous: &bool
+    common: &[Common, null],
+    debug_highlight: &bool,
+    homogeneous: &bool,
+    spacing: &i64
 };
 
 type HBox = {
     children: &Array<Widget>,
-    spacing: &i64,
-    homogeneous: &bool
+    common: &[Common, null],
+    debug_highlight: &bool,
+    homogeneous: &bool,
+    spacing: &i64
 };
 
 type BoxChild = {
     child: &Widget,
+    common: &[Common, null],
+    debug_highlight: &bool,
     pack: &PackType,
     padding: &i64
 };
@@ -240,28 +292,36 @@ type GridRow = Array<Widget>;
 
 type GridCell = {
     child: &Widget,
+    common: &[Common, null],
     colspan: &i64,
+    debug_highlight: &bool,
     rowspan: &i64
 };
 
 type Grid = {
-    rows: &Array<GridRow>,
     column_spacing: &i64,
-    row_spacing: &i64,
+    common: &[Common, null],
+    debug_highlight: &bool,
     homogeneous_columns: &bool,
-    homogeneous_rows: &bool
+    homogeneous_rows: &bool,
+    rows: &Array<GridRow>,
+    row_spacing: &i64
 };
 
 type Frame = {
-    label: &string,
-    child: &Widget
+    child: &Widget,
+    common: &[Common, null],
+    debug_highlight: &bool,
+    label: &string
 };
 
 type Paned = {
+    common: &[Common, null],
+    debug_highlight: &bool,
     direction: &[`Horizontal, `Vertical],
-    wide_handle: &bool,
     first: &[Widget, null],
-    second: &[Widget, null]
+    second: &[Widget, null],
+    wide_handle: &bool
 };
 
 type NotebookPage = {
@@ -272,9 +332,11 @@ type NotebookPage = {
 
 type Notebook = {
     children: &Array<NotebookPage>,
+    common: &[Common, null],
+    debug_highlight: &bool,
+    on_switch_page: &[fn(#page: i64) -> Any, null],
     page: &i64,
-    tabs_popup: &bool,
-    on_switch_page: &[fn(#page: i64) -> Any, null]
+    tabs_popup: &bool
 };
 
 
@@ -289,24 +351,43 @@ type ColumnType = [
 type ColumnSpec = { name: string, typ: ColumnType };
 
 type Table = {
-    path: &string,
-    sort_mode: &SortMode,
     column_filter: &FilterMode,
     column_types: &[Array<ColumnSpec>, null],
     column_widths: &[Map<string, i64>, null],
+    common: &[Common, null],
+    debug_highlight: &bool,
+    on_activate: &[fn(#path: string) -> Any, null],
+    on_edit: &[fn(#edit: { path: string, value: Any }) -> Any, null],
+    on_header_click: &[fn(#column: string) -> Any, null],
+    on_select: &[fn(#paths: Array<string>) -> Any, null],
+    path: &string,
     row_filter: &FilterMode,
     selection_mode: &SelectionMode,
     show_row_name: &bool,
-    on_select: &[fn(#paths: Array<string>) -> Any, null],
-    on_activate: &[fn(#path: string) -> Any, null],
-    on_edit: &[fn(#edit: { path: string, value: Any }) -> Any, null],
-    on_header_click: &[fn(#column: string) -> Any, null]
+    sort_mode: &SortMode
 };
 
 
 
+val common: fn(
+    ?#halign: &[Align, null],
+    ?#valign: &[Align, null],
+    ?#hexpand: &[bool, null],
+    ?#vexpand: &[bool, null],
+    ?#margin_start: &[i64, null],
+    ?#margin_end: &[i64, null],
+    ?#margin_top: &[i64, null],
+    ?#margin_bottom: &[i64, null],
+    ?#width_request: &[i64, null],
+    ?#height_request: &[i64, null],
+    ?#sensitive: &[bool, null],
+    ?#tooltip: &[string, null]
+) -> Common;
+
 /// A text label
 val label: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#width: &[i64, null],
     ?#ellipsize: &EllipsizeMode,
     ?#selectable: &bool,
@@ -316,6 +397,8 @@ val label: fn(
 
 /// A clickable button
 val button: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#image: &[ImageSpec, null],
     ?#on_click: [fn(#trigger: null) -> Any, null],
     #label: &string
@@ -323,6 +406,8 @@ val button: fn(
 
 /// A text entry field
 val entry: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_change: [fn(#text: string) -> Any, null],
     ?#on_activate: [fn(#text: string) -> Any, null],
     #text: &string
@@ -330,12 +415,16 @@ val entry: fn(
 
 /// A toggle switch
 val switch: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_change: [fn(#value: bool) -> Any, null],
     #value: &bool
 ) -> Widget;
 
 /// A toggle button
 val toggle_button: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#label: &string,
     ?#image: &[ImageSpec, null],
     ?#on_change: [fn(#value: bool) -> Any, null],
@@ -344,6 +433,8 @@ val toggle_button: fn(
 
 /// A checkbox
 val check_button: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#label: &string,
     ?#on_change: [fn(#value: bool) -> Any, null],
     #value: &bool
@@ -351,6 +442,8 @@ val check_button: fn(
 
 /// A radio button
 val radio_button: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#group: &string,
     ?#on_toggled: [fn(#active: bool) -> Any, null],
     #label: &string,
@@ -359,6 +452,8 @@ val radio_button: fn(
 
 /// A dropdown combo box
 val combo_box: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_change: [fn(#id: string) -> Any, null],
     #choices: &Array<ComboChoice>,
     #selected: &string
@@ -366,6 +461,8 @@ val combo_box: fn(
 
 /// A slider
 val scale: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#direction: &ScaleDirection,
     ?#draw_value: &bool,
     ?#has_origin: &bool,
@@ -378,6 +475,8 @@ val scale: fn(
 
 /// A progress bar
 val progress_bar: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#ellipsize: &EllipsizeMode,
     ?#show_text: &bool,
     ?#text: &[string, null],
@@ -387,12 +486,16 @@ val progress_bar: fn(
 
 /// An image
 val image: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_click: [fn(#trigger: null) -> Any, null],
     #spec: &ImageSpec
 ) -> Widget;
 
 /// A hyperlink button
 val link_button: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_activate_link: [fn(#uri: string) -> Any, null],
     #uri: &string,
     #label: &string
@@ -400,6 +503,8 @@ val link_button: fn(
 
 /// A search entry
 val search_entry: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#on_search_changed: [fn(#text: string) -> Any, null],
     ?#on_activate: [fn(#text: string) -> Any, null],
     #text: &string
@@ -407,6 +512,8 @@ val search_entry: fn(
 
 /// Vertical box layout
 val vbox: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#spacing: &i64,
     ?#homogeneous: &bool,
     #children: &Array<Widget>
@@ -414,6 +521,8 @@ val vbox: fn(
 
 /// Horizontal box layout
 val hbox: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#spacing: &i64,
     ?#homogeneous: &bool,
     #children: &Array<Widget>
@@ -421,6 +530,8 @@ val hbox: fn(
 
 /// Grid layout
 val grid: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#column_spacing: &i64,
     ?#row_spacing: &i64,
     ?#homogeneous_columns: &bool,
@@ -430,12 +541,16 @@ val grid: fn(
 
 /// A labeled frame
 val frame: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     #label: &string,
     #child: &Widget
 ) -> Widget;
 
 /// A split pane
 val paned: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#direction: &[`Horizontal, `Vertical],
     ?#wide_handle: &bool,
     ?#first: &[Widget, null],
@@ -444,6 +559,8 @@ val paned: fn(
 
 /// A tabbed notebook
 val notebook: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#page: &i64,
     ?#tabs_popup: &bool,
     ?#on_switch_page: [fn(#page: i64) -> Any, null],
@@ -452,6 +569,8 @@ val notebook: fn(
 
 /// A netidx table view
 val table: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#sort_mode: &SortMode,
     ?#column_filter: &FilterMode,
     ?#column_types: &[Array<ColumnSpec>, null],
@@ -468,6 +587,8 @@ val table: fn(
 
 /// A chart widget
 val chart: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     ?#title: &[string, null],
     ?#title_color: &[Color, null],
     ?#x_label: &[string, null],
@@ -521,12 +642,16 @@ val area: fn(
 
 type KeyHandler = {
     child: &Widget,
+    common: &[Common, null],
+    debug_highlight: &bool,
     on_key_press: &fn(#key: string) -> Any
 };
 
 /// Wrap a widget with a key press handler.
 /// The handler receives the key name (e.g., "Return", "Escape", "ctrl+s")
 val key_handler: fn(
+    ?#common: &[Common, null],
+    ?#debug_highlight: &bool,
     #on_key_press: fn(#key: string) -> Any,
     #child: &Widget
 ) -> Widget;

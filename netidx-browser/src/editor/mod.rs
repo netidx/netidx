@@ -20,7 +20,7 @@ use graphix_compiler::{
     typ::{FnType, Type},
 };
 use gtk::{self, prelude::*};
-use netidx::{publisher::Typ, utils::Either};
+use netidx::{publisher::{Typ, Value}, utils::Either};
 use sourceview4::prelude::*;
 use serde::{Serialize, Deserialize};
 use std::{
@@ -221,8 +221,21 @@ fn tree_to_source(store: &gtk::TreeStore, iter: &gtk::TreeIter) -> String {
     let data: Ref<TreeNodeData> = boxed.borrow();
     let mut parts: Vec<String> = Vec::new();
 
-    // Property args
+    // Collect child_slot labels so we can suppress duplicate args
+    let child_labels: Vec<&ArcStr> = data.child_slots.iter().map(|s| match s {
+        ChildSlot::Array(l) | ChildSlot::Single(l) => l,
+    }).collect();
+
+    // debug_highlight — always emitted, tied to the node's id
+    let node_id = data.id.inner();
+    parts.push(format!("#debug_highlight: &(debug_highlighted == {})", node_id));
+
+    // Property args (skip child_slots, debug_highlight, common)
     for (label, expr) in &data.args {
+        if !label.is_empty() && child_labels.iter().any(|cl| *cl == label) {
+            continue;
+        }
+        if label.as_str() == "debug_highlight" { continue; }
         if label.is_empty() {
             parts.push(format!("{}", expr));
         } else {
@@ -285,7 +298,8 @@ fn reformat_source(src: &str) -> String {
         Ok(exprs) => {
             let mut parts = Vec::new();
             for e in &*exprs {
-                parts.push(e.to_string_pretty(80).to_string());
+                let s = e.to_string_pretty(80).to_string();
+                parts.push(s.trim_end().to_string());
             }
             parts.join(";\n")
         }
@@ -301,7 +315,8 @@ fn full_source_from_tree(
     use graphix_compiler::expr::print::PrettyDisplay;
     let mut parts: Vec<String> = Vec::new();
     for e in user_code {
-        parts.push(e.to_string_pretty(80).to_string());
+        let s = e.to_string_pretty(80).to_string();
+        parts.push(s.trim_end().to_string());
     }
     if let Some(iter) = store.iter_first() {
         loop {
@@ -313,6 +328,7 @@ fn full_source_from_tree(
 }
 
 /// Common update path: reconstruct source from TreeStore, update buffer, re-render.
+/// Full sync: rebuild source from tree, re-parse tree, re-render.
 fn sync_to_source(
     store: &gtk::TreeStore,
     tree_view: &gtk::TreeView,
@@ -327,32 +343,20 @@ fn sync_to_source(
     backend.render(ArcStr::from(new_src.as_str()));
 }
 
+/// Light sync: rebuild source from tree and re-render, but do NOT rebuild tree.
+/// Used for trivial property edits to preserve tree selection state.
+fn sync_source_only(
+    store: &gtk::TreeStore,
+    buf: &sourceview4::Buffer,
+    backend: &crate::backend::Ctx,
+    user_code: &Rc<RefCell<Vec<Expr>>>,
+) {
+    let new_src = full_source_from_tree(store, &user_code.borrow());
+    buf.set_text(&new_src);
+    backend.render(ArcStr::from(new_src.as_str()));
+}
+
 // ---- Type helpers ----
-
-fn unwrap_type(typ: &Type) -> &Type {
-    match typ {
-        Type::ByRef(inner) => unwrap_type(inner),
-        Type::Set(variants) if variants.len() == 2 => {
-            variants.iter()
-                .find(|t| !matches!(t, Type::Primitive(p) if p.contains(Typ::Null)))
-                .map(|t| unwrap_type(t))
-                .unwrap_or(typ)
-        }
-        _ => typ,
-    }
-}
-
-fn variant_names(typ: &Type) -> Option<Vec<String>> {
-    if let Type::Set(variants) = typ {
-        let names: Vec<String> = variants.iter().filter_map(|t| {
-            if let Type::Variant(tag, args) = t {
-                if args.is_empty() { return Some(format!("`{}", tag)); }
-            }
-            None
-        }).collect();
-        if names.len() == variants.len() && !names.is_empty() { Some(names) } else { None }
-    } else { None }
-}
 
 /// Check if a type (deeply) contains Widget.
 fn type_contains_widget(typ: &Type) -> bool {
@@ -360,13 +364,10 @@ fn type_contains_widget(typ: &Type) -> bool {
         Type::ByRef(inner) => type_contains_widget(inner),
         Type::Array(inner) => type_contains_widget(inner),
         Type::Set(variants) => {
-            // Resolved Widget union: check for known variant tags
             variants.iter().any(|v| matches!(v, Type::Variant(tag, _)
                 if tag.as_str() == "Label" || tag.as_str() == "VBox" || tag.as_str() == "Table"))
-            // Or a Set containing a Ref to Widget
             || variants.iter().any(|v| type_contains_widget(v))
         }
-        // Unresolved type reference — check if it's the Widget type
         Type::Ref { name, .. } => {
             let s = name.0.as_ref();
             s == "/Widget" || s.ends_with("/Widget")
@@ -380,9 +381,12 @@ fn child_slots_for_fntype(fn_type: &FnType) -> Vec<ChildSlot> {
     let mut slots = Vec::new();
     for arg in fn_type.args.iter() {
         if let Some((name, _)) = &arg.label {
-            let inner = unwrap_type(&arg.typ);
-            if type_contains_widget(inner) {
-                match inner {
+            if type_contains_widget(&arg.typ) {
+                match &arg.typ {
+                    Type::ByRef(inner) => match inner.as_ref() {
+                        Type::Array(_) => slots.push(ChildSlot::Array(name.clone())),
+                        _ => slots.push(ChildSlot::Single(name.clone())),
+                    },
                     Type::Array(_) => slots.push(ChildSlot::Array(name.clone())),
                     _ => slots.push(ChildSlot::Single(name.clone())),
                 }
@@ -404,8 +408,21 @@ fn parse_expr(s: &str) -> Option<Expr> {
 
 /// Generate a default expression for a required arg based on its type.
 fn default_expr_for_type(typ: &Type) -> Option<Expr> {
-    let inner = unwrap_type(typ);
-    let src = match inner {
+    let mut t = typ;
+    loop {
+        match t {
+            Type::ByRef(inner) => t = inner.as_ref(),
+            Type::Set(v) if v.len() == 2
+                && v.iter().any(|t| matches!(t, Type::Primitive(p) if p.contains(Typ::Null))) =>
+            {
+                t = v.iter()
+                    .find(|t| !matches!(t, Type::Primitive(p) if p.contains(Typ::Null)))
+                    .unwrap_or(&v[0]);
+            }
+            _ => break,
+        }
+    }
+    let src = match t {
         Type::Primitive(flags) => {
             if flags.contains(Typ::String) { "&\"\"" }
             else if flags.contains(Typ::Bool) { "&false" }
@@ -416,6 +433,43 @@ fn default_expr_for_type(typ: &Type) -> Option<Expr> {
         _ => "&null",
     };
     parse_expr(src)
+}
+
+/// Extract labeled args from an Apply expression (e.g., `common(#halign: &\`Center)`).
+/// Returns the args as (name, Display string) pairs.
+fn extract_apply_args(expr: &Expr) -> Vec<(ArcStr, String)> {
+    let inner = match &expr.kind {
+        ExprKind::ByRef(i) => i.as_ref(),
+        _ => expr,
+    };
+    match &inner.kind {
+        ExprKind::Apply(ApplyExpr { args, .. }) => {
+            args.iter().filter_map(|(label, e)| {
+                label.as_ref().map(|l| (l.clone(), format!("{}", e)))
+            }).collect()
+        }
+        _ => vec![],
+    }
+}
+
+/// Rebuild a constructor call from its name and a set of (label, value) args.
+/// Omits args whose value is empty. Returns None if all args are empty
+/// (caller should remove the parent arg entirely).
+fn rebuild_constructor_call(
+    constructor: &str,
+    args: &[(ArcStr, String)],
+) -> Option<String> {
+    let non_empty: Vec<_> = args.iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        None
+    } else {
+        let parts: Vec<String> = non_empty.iter()
+            .map(|(name, val)| format!("#{}: {}", name, val))
+            .collect();
+        Some(format!("browser::{}({})", constructor, parts.join(", ")))
+    }
 }
 
 // ---- Lambda helpers ----
@@ -580,6 +634,11 @@ impl Editor {
                 let (_, iter) = match sel.selected() {
                     Some(x) => x,
                     None => {
+                        // Clear highlight — no widget has id -1
+                        let _ = backend.set_var(
+                            backend.debug_highlighted_bid,
+                            Value::from(-1i64),
+                        );
                         prop_box.pack_start(
                             &gtk::Label::new(Some("Select a widget to edit properties")),
                             false, false, 0,
@@ -594,6 +653,19 @@ impl Editor {
                 updating_combo.set(true);
                 kind_combo.set_active_id(Some(&kind));
                 updating_combo.set(false);
+
+                // Feature 2: highlight selected widget in rendered view
+                {
+                    let boxed = get_node_data(&tree_store, &iter);
+                    let data: Ref<TreeNodeData> = boxed.borrow();
+                    let node_id = data.id.inner() as i64;
+                    drop(data);
+                    drop(boxed);
+                    let _ = backend.set_var(
+                        backend.debug_highlighted_bid,
+                        Value::from(node_id),
+                    );
+                }
 
                 // Read args from TreeStore
                 let node_args: Vec<ArgInfo> = {
@@ -634,146 +706,48 @@ impl Editor {
                             Some((n, opt)) => (n.clone(), *opt),
                             None => continue,
                         };
-                        // Skip child-bearing args — they're shown in the tree
-                        let inner = unwrap_type(&arg.typ);
-                        if type_contains_widget(inner) { continue; }
-
-                        let label = gtk::Label::new(Some(&format!("{}:", name)));
-                        label.set_halign(gtk::Align::End);
-                        grid.attach(&label, 0, row, 1, 1);
+                        // Skip internal/child args
+                        if name.as_str() == "debug_highlight" { continue; }
+                        if type_contains_widget(&arg.typ) { continue; }
 
                         let arg_info = node_args.iter().find(|a| a.label == name);
-                        let fn_inner = unwrap_type(inner);
-                        if let Type::Fn(cb_fn) = fn_inner {
-                            // Callback property — detect mode via AST
-                            match arg_info {
-                                Some(ai) => {
-                                    match &ai.expr.kind {
-                                    ExprKind::Lambda(lambda) => {
-                                        // Mode A: lambda expression
-                                        let sig = lambda_sig(lambda);
-                                        let body = lambda_body(lambda);
-                                        let hbox = gtk::Box::new(
-                                            gtk::Orientation::Horizontal, 4,
-                                        );
-                                        let sig_label = gtk::Label::new(Some(&sig));
-                                        sig_label.set_opacity(0.6);
-                                        hbox.pack_start(&sig_label, false, false, 0);
-                                        let entry = gtk::Entry::new();
-                                        entry.set_text(&body);
-                                        entry.set_hexpand(true);
-                                        entry.set_placeholder_text(
-                                            Some("body expression"),
-                                        );
-                                        let buf_c = buf.clone();
-                                        let backend_c = backend.clone();
-                                        let name_c = name.clone();
-                                        let sig_c = sig.clone();
-                                        let ts_c = tree_store.clone();
-                                        let tv_c = tree_view.clone();
-                                        let uc_c = user_code.clone();
-                                        entry.connect_activate(move |e| {
-                                            let new_body = e.text().to_string();
-                                            if new_body.is_empty() { return; }
-                                            let lambda = format!(
-                                                "{} {}", sig_c, new_body,
-                                            );
-                                            let (s, e2) = buf_c.bounds();
-                                            if let Some(src) = buf_c.text(&s, &e2, false) {
-                                                let new_src = splice_arg(
-                                                    &src, &name_c, &lambda,
-                                                );
-                                                buf_c.set_text(&new_src);
-                                                parse_and_populate(&ts_c, &new_src, &uc_c);
-                                                tv_c.expand_all();
-                                                backend_c.render(ArcStr::from(
-                                                    new_src.as_str(),
-                                                ));
-                                            }
-                                        });
-                                        hbox.pack_start(&entry, true, true, 0);
-                                        hbox.set_hexpand(true);
-                                        grid.attach(&hbox, 1, row, 1, 1);
-                                    }
-                                    _ => {
-                                        // Mode B: named function or other expr
-                                        let val_label = gtk::Label::new(Some(
-                                            &format!("{}", ai.expr),
-                                        ));
-                                        val_label.set_halign(gtk::Align::Start);
-                                        val_label.set_hexpand(true);
-                                        grid.attach(&val_label, 1, row, 1, 1);
-                                    }
-                                }},
-                                None => {
-                                    // Mode C: not specified (optional, null)
-                                    let sig = fntype_sig(cb_fn);
-                                    let hbox = gtk::Box::new(
-                                        gtk::Orientation::Horizontal, 4,
-                                    );
-                                    let sig_label = gtk::Label::new(Some(&sig));
-                                    sig_label.set_opacity(0.6);
-                                    hbox.pack_start(&sig_label, false, false, 0);
-                                    let entry = gtk::Entry::new();
-                                    entry.set_hexpand(true);
-                                    entry.set_placeholder_text(
-                                        Some("body expression"),
-                                    );
-                                    let buf_c = buf.clone();
-                                    let backend_c = backend.clone();
-                                    let name_c = name.clone();
-                                    let sig_c = sig.clone();
-                                    let ts_c = tree_store.clone();
-                                    let tv_c = tree_view.clone();
-                                    let uc_c = user_code.clone();
-                                    entry.connect_activate(move |e| {
-                                        let new_body = e.text().to_string();
-                                        if new_body.is_empty() { return; }
-                                        let lambda = format!(
-                                            "{} {}", sig_c, new_body,
-                                        );
-                                        let (s, e2) = buf_c.bounds();
-                                        if let Some(src) = buf_c.text(&s, &e2, false) {
-                                            let new_src = splice_arg(
-                                                &src, &name_c, &lambda,
-                                            );
-                                            buf_c.set_text(&new_src);
-                                            parse_and_populate(&ts_c, &new_src, &uc_c);
-                                            tv_c.expand_all();
-                                            backend_c.render(ArcStr::from(
-                                                new_src.as_str(),
-                                            ));
-                                        }
-                                    });
-                                    hbox.pack_start(&entry, true, true, 0);
-                                    hbox.set_hexpand(true);
-                                    grid.attach(&hbox, 1, row, 1, 1);
-                                }
-                            }
-                        } else {
-                            // Non-callback property
-                            let current = arg_info
-                                .map(|a| format!("{}", a.expr))
-                                .unwrap_or_default();
-                            let editor = make_prop_editor(
-                                fn_inner, &current, name.to_string(),
-                                buf.clone(), backend.clone(),
-                                tree_store.clone(), tree_view.clone(),
-                                user_code.clone(),
-                            );
-                            editor.set_hexpand(true);
-                            grid.attach(&editor, 1, row, 1, 1);
-                        }
+                        let type_tooltip = format!("{}", arg.typ);
+                        let label = gtk::Label::new(Some(&format!("{}:", name)));
+                        label.set_halign(gtk::Align::Start);
+                        label.set_tooltip_text(Some(&type_tooltip));
+                        grid.attach(&label, 0, row, 1, 1);
+
+                        let current = arg_info
+                            .map(|a| format!("{}", a.expr))
+                            .unwrap_or_default();
+                        let on_change = make_tree_on_change(
+                            name.clone(), tree_store.clone(), tree_view.clone(),
+                            buf.clone(), backend.clone(), user_code.clone(),
+                        );
+                        let editor = type_editor(
+                            &arg.typ, &current, arg_info.map(|a| &a.expr),
+                            env_ref.as_ref(), on_change,
+                        );
+                        editor.set_hexpand(true);
+                        editor.set_tooltip_text(Some(&type_tooltip));
+                        grid.attach(&editor, 1, row, 1, 1);
 
                         // Edit button for every row
                         let edit_btn = gtk::Button::with_label("Edit");
                         let root_c = root.clone();
                         let buf_c = buf.clone();
                         let sv_c = source_view.clone();
-                        let cb_fn_for_insert = if let Type::Fn(ft) = fn_inner {
-                            Some(ft.clone())
-                        } else {
-                            None
+                        let cb_fn_for_insert = {
+                            // Walk through ByRef/nullable to find Fn type
+                            let mut t = &arg.typ;
+                            loop {
+                                match t {
+                                    Type::ByRef(inner) => t = inner.as_ref(),
+                                    Type::Set(v) if is_nullable_set(v) => t = non_null_type(v),
+                                    _ => break,
+                                }
+                            }
+                            if let Type::Fn(ft) = t { Some(ft.clone()) } else { None }
                         };
                         let name_c = name.clone();
                         let ts_c = tree_store.clone();
@@ -896,8 +870,7 @@ impl Editor {
                 if let Some(ref ft) = fn_type {
                     for arg in ft.args.iter() {
                         if let Some((name, is_optional)) = &arg.label {
-                            let inner = unwrap_type(&arg.typ);
-                            if type_contains_widget(inner) { continue; }
+                            if type_contains_widget(&arg.typ) { continue; }
                             // Try to preserve from old args
                             if let Some(old) = old_args.iter().find(|(l, _)| l == name) {
                                 new_args.push(old.clone());
@@ -982,6 +955,12 @@ impl Editor {
         ));
 
         root.set_current_page(Some(0));
+        root.connect_destroy(clone!(@strong backend => move |_| {
+            let _ = backend.set_var(
+                backend.debug_highlighted_bid,
+                Value::from(-1i64),
+            );
+        }));
         Editor { root }
     }
 
@@ -1097,59 +1076,558 @@ fn find_arg_end(s: &str) -> usize {
     s.len()
 }
 
-fn make_prop_editor(
-    typ: &Type,
-    current: &str,
-    name: String,
-    buf: sourceview4::Buffer,
-    backend: crate::backend::Ctx,
-    tree_store: gtk::TreeStore,
-    tree_view: gtk::TreeView,
-    user_code: Rc<RefCell<Vec<Expr>>>,
-) -> gtk::Widget {
-    let name_arc = ArcStr::from(name.as_str());
-    let on_change = {
-        let name = name_arc.clone();
-        let buf = buf.clone();
-        let backend = backend.clone();
-        let tree_store = tree_store.clone();
-        let tree_view = tree_view.clone();
-        let user_code = user_code.clone();
-        move |val: String| {
-            let (start, end) = buf.bounds();
-            if let Some(src) = buf.text(&start, &end, false) {
-                let new_src = splice_arg(&src, &name, &val);
-                buf.set_text(&new_src);
-                parse_and_populate(&tree_store, &new_src, &user_code);
-                tree_view.expand_all();
-                backend.render(ArcStr::from(new_src.as_str()));
-            }
-        }
-    };
+/// Check if an Expr is a simple literal (constant, variant, or ByRef of one).
+fn is_simple_literal(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Constant(_) => true,
+        ExprKind::Variant { .. } => true,
+        ExprKind::ByRef(inner) => is_simple_literal(inner),
+        _ => false,
+    }
+}
 
-    if let Some(names) = variant_names(typ) {
-        let combo = gtk::ComboBoxText::new();
-        for n in &names { combo.append(Some(n), n); }
-        combo.set_active_id(Some(current.trim_start_matches('&')));
-        let on_change = on_change.clone();
-        combo.connect_changed(move |c| {
-            if let Some(id) = c.active_id() { on_change(id.to_string()); }
-        });
-        return combo.upcast();
-    }
-    if let Type::Primitive(flags) = typ {
-        if flags.contains(Typ::Bool) {
-            let check = gtk::CheckButton::new();
-            check.set_active(current == "true" || current == "&true");
-            let on_change = on_change.clone();
-            check.connect_toggled(move |b| {
-                on_change(if b.is_active() { "&true".into() } else { "&false".into() });
-            });
-            return check.upcast();
+// ---- General recursive type editor ----
+
+/// Context for navigating to source from Edit buttons inside type editors.
+#[derive(Clone)]
+struct SourceNav {
+    root: gtk::Notebook,
+    source_view: sourceview4::View,
+    buf: sourceview4::Buffer,
+}
+
+fn navigate_to_field(nav: &SourceNav, search: &str) {
+    nav.root.set_current_page(Some(1));
+    let (s, _) = nav.buf.bounds();
+    if let Some(src) = nav.buf.text(&s, &nav.buf.end_iter(), false) {
+        if let Some(pos) = src.find(search) {
+            let byte_offset = pos + search.len();
+            let mut iter = nav.buf.iter_at_offset(byte_offset as i32);
+            let mut end_iter = iter.clone();
+            if !end_iter.ends_line() { end_iter.forward_to_line_end(); }
+            nav.buf.select_range(&iter, &end_iter);
+            nav.source_view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.5);
         }
     }
+}
+
+fn is_nullable_set(variants: &[Type]) -> bool {
+    variants.len() == 2
+        && variants.iter().any(|t| matches!(t, Type::Primitive(p) if p.contains(Typ::Null)))
+}
+
+fn non_null_type<'a>(variants: &'a [Type]) -> &'a Type {
+    variants.iter()
+        .find(|t| !matches!(t, Type::Primitive(p) if p.contains(Typ::Null)))
+        .unwrap_or(&variants[0])
+}
+
+fn all_argless_variants(variants: &[Type]) -> bool {
+    !variants.is_empty()
+        && variants.iter().all(|t| matches!(t, Type::Variant(_, args) if args.is_empty()))
+}
+
+fn make_entry_editor(current: &str, on_change: Rc<dyn Fn(String)>) -> gtk::Widget {
     let entry = gtk::Entry::new();
     entry.set_text(current);
-    entry.connect_activate(move |e| { on_change(e.text().to_string()); });
+    entry.connect_activate(move |e| on_change(e.text().to_string()));
     entry.upcast()
+}
+
+/// Build an Rc<dyn Fn(String)> that updates TreeNodeData and syncs source.
+fn make_tree_on_change(
+    name: ArcStr,
+    tree_store: gtk::TreeStore,
+    tree_view: gtk::TreeView,
+    buf: sourceview4::Buffer,
+    backend: crate::backend::Ctx,
+    user_code: Rc<RefCell<Vec<Expr>>>,
+) -> Rc<dyn Fn(String)> {
+    Rc::new(move |val: String| {
+        let sel = tree_view.selection();
+        if let Some((_, iter)) = sel.selected() {
+            let boxed = get_node_data(&tree_store, &iter);
+            let mut data: std::cell::RefMut<TreeNodeData> = boxed.borrow_mut();
+            if val.is_empty() {
+                data.args.retain(|(l, _)| *l != name);
+            } else if let Some(new_expr) = parse_expr(&val) {
+                if let Some(arg) = data.args.iter_mut().find(|(l, _)| *l == name) {
+                    arg.1 = new_expr;
+                } else {
+                    data.args.push((name.clone(), new_expr));
+                }
+            }
+            drop(data);
+            drop(boxed);
+            sync_source_only(&tree_store, &buf, &backend, &user_code);
+        }
+    })
+}
+
+/// Public entry point: build a type-driven editor widget.
+fn type_editor(
+    typ: &Type,
+    current: &str,
+    arg_expr: Option<&Expr>,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+) -> gtk::Widget {
+    type_editor_inner(typ, current, arg_expr, env, nav, on_change, false)
+}
+
+/// Recursive type-driven editor dispatch.
+fn type_editor_inner(
+    typ: &Type,
+    current: &str,
+    arg_expr: Option<&Expr>,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+    is_optional: bool,
+) -> gtk::Widget {
+    match typ {
+        // Structural wrappers — always recurse
+        Type::ByRef(inner) => {
+            let inner_current = current.strip_prefix('&').unwrap_or(current);
+            let parent = on_change;
+            let wrapped: Rc<dyn Fn(String)> = Rc::new(move |val: String| {
+                if val.is_empty() { parent(String::new()) }
+                else { parent(format!("&{}", val)) }
+            });
+            type_editor_inner(inner, inner_current, arg_expr, env, nav, wrapped, is_optional)
+        }
+        Type::Set(variants) if is_nullable_set(variants) => {
+            type_editor_inner(non_null_type(variants), current, arg_expr, env, nav, on_change, true)
+        }
+
+        // Callbacks — always use callback editor (before is_simple_literal check)
+        Type::Fn(ft) => callback_editor(ft, current, arg_expr, on_change),
+
+        // Power-user: complex expression → plain Entry
+        _ if arg_expr.map_or(false, |e| !is_simple_literal(e)) => {
+            make_entry_editor(current, on_change)
+        }
+
+        // Simple variant enum → ComboBoxText
+        Type::Set(variants) if all_argless_variants(variants) => {
+            let combo = gtk::ComboBoxText::new();
+            if is_optional { combo.append(Some(""), ""); }
+            for v in variants.iter() {
+                if let Type::Variant(tag, _) = v {
+                    let s = format!("`{}", tag);
+                    combo.append(Some(&s), &s);
+                }
+            }
+            combo.set_active_id(Some(current));
+            let on_change = on_change.clone();
+            combo.connect_changed(move |c| {
+                if let Some(id) = c.active_id() { on_change(id.to_string()) }
+            });
+            combo.upcast()
+        }
+
+        // Type reference → resolve, recurse
+        Type::Ref { name, .. } => {
+            let resolved = env.and_then(|e| typ.lookup_ref(e).ok());
+            match resolved.as_ref() {
+                Some(Type::Struct(fields)) => {
+                    struct_editor(name, fields, current, arg_expr, env, nav, on_change, is_optional)
+                }
+                Some(resolved) => {
+                    type_editor_inner(resolved, current, arg_expr, env, nav, on_change, is_optional)
+                }
+                None => make_entry_editor(current, on_change),
+            }
+        }
+
+        // Bool → CheckButton or 3-state combo
+        Type::Primitive(flags) if flags.contains(Typ::Bool) => {
+            if is_optional {
+                let combo = gtk::ComboBoxText::new();
+                combo.append(Some(""), "");
+                combo.append(Some("true"), "true");
+                combo.append(Some("false"), "false");
+                combo.set_active_id(Some(current));
+                let on_change = on_change.clone();
+                combo.connect_changed(move |c| {
+                    if let Some(id) = c.active_id() { on_change(id.to_string()) }
+                });
+                combo.upcast()
+            } else {
+                let check = gtk::CheckButton::new();
+                check.set_active(current == "true");
+                let on_change = on_change.clone();
+                check.connect_toggled(move |b| {
+                    on_change(if b.is_active() { "true".into() } else { "false".into() });
+                });
+                check.upcast()
+            }
+        }
+
+        // Inline struct (no Ref name) → struct literal editor
+        Type::Struct(fields) => {
+            struct_editor_inline(fields, current, arg_expr, env, on_change, is_optional)
+        }
+
+        // Array → list editor with add/remove
+        Type::Array(elem) => {
+            array_editor(elem, current, env, on_change)
+        }
+
+        // Map → key-value editor with add/remove
+        Type::Map { key, value } => {
+            map_editor(key, value, current, env, on_change)
+        }
+
+        // Tuple → fixed-position editors
+        Type::Tuple(elems) => {
+            tuple_editor(elems, current, env, on_change)
+        }
+
+        // Everything else → Entry
+        _ => make_entry_editor(current, on_change),
+    }
+}
+
+/// Callback editor — Mode A (lambda), B (named func), C (not specified).
+fn callback_editor(
+    fn_type: &FnType,
+    _current: &str,
+    arg_expr: Option<&Expr>,
+    on_change: Rc<dyn Fn(String)>,
+) -> gtk::Widget {
+    let sig = match arg_expr {
+        Some(e) => match &e.kind {
+            ExprKind::Lambda(lambda) => lambda_sig(lambda),
+            _ => fntype_sig(fn_type),
+        },
+        None => fntype_sig(fn_type),
+    };
+    match arg_expr {
+        Some(expr) => match &expr.kind {
+            ExprKind::Lambda(lambda) => {
+                // Mode A: lambda — edit body
+                let body = lambda_body(lambda);
+                let entry = gtk::Entry::new();
+                entry.set_text(&body);
+                entry.set_hexpand(true);
+                entry.set_placeholder_text(Some("body expression"));
+                let on_change = on_change.clone();
+                entry.connect_activate(move |e| {
+                    let b = e.text().to_string();
+                    if !b.is_empty() { on_change(format!("{} {}", sig, b)); }
+                });
+                entry.upcast()
+            }
+            _ => {
+                // Mode B: named function — read-only
+                let label = gtk::Label::new(Some(&format!("{}", expr)));
+                label.set_halign(gtk::Align::Start);
+                label.set_hexpand(true);
+                label.upcast()
+            }
+        },
+        None => {
+            // Mode C: not specified — new lambda
+            let entry = gtk::Entry::new();
+            entry.set_hexpand(true);
+            entry.set_placeholder_text(Some("body expression"));
+            let on_change = on_change.clone();
+            entry.connect_activate(move |e| {
+                let b = e.text().to_string();
+                if !b.is_empty() { on_change(format!("{} {}", sig, b)); }
+            });
+            entry.upcast()
+        }
+    }
+}
+
+/// Named struct editor — uses constructor call syntax for source reconstruction.
+fn struct_editor(
+    ref_name: &expr::ModPath,
+    fields: &[(ArcStr, Type)],
+    _current: &str,
+    arg_expr: Option<&Expr>,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+    _is_optional: bool,
+) -> gtk::Widget {
+    let type_name = netidx::path::Path::basename(&ref_name.0)
+        .unwrap_or("unknown");
+    let ctor_name = ArcStr::from(type_name.to_lowercase().as_str());
+    let current_sub_args = arg_expr
+        .map(|a| extract_apply_args(a))
+        .unwrap_or_default();
+    let sub_values: Rc<RefCell<Vec<(ArcStr, String)>>> = Rc::new(RefCell::new(
+        fields.iter().map(|(name, _)| {
+            let val = current_sub_args.iter()
+                .find(|(l, _)| l == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            (name.clone(), val)
+        }).collect()
+    ));
+    let expander = gtk::Expander::new(None);
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(8);
+    grid.set_row_spacing(4);
+    for (i, (name, typ)) in fields.iter().enumerate() {
+        let label = gtk::Label::new(Some(&format!("{}:", name)));
+        label.set_halign(gtk::Align::Start);
+        label.set_tooltip_text(Some(&format!("{}", typ)));
+        grid.attach(&label, 0, i as i32, 1, 1);
+        let sub_current = sub_values.borrow()[i].1.clone();
+        let sub_expr = current_sub_args.iter()
+            .find(|(l, _)| l == name)
+            .and_then(|(_, v)| parse_expr(v));
+        let sv = sub_values.clone();
+        let ctor = ctor_name.clone();
+        let parent = on_change.clone();
+        let sub_on_change: Rc<dyn Fn(String)> = Rc::new(move |val: String| {
+            sv.borrow_mut()[i].1 = val;
+            match rebuild_constructor_call(&ctor, &sv.borrow()) {
+                Some(src) => parent(src),
+                None => parent(String::new()),
+            }
+        });
+        let editor = type_editor_inner(
+            typ, &sub_current, sub_expr.as_ref(), env, sub_on_change, true,
+        );
+        editor.set_hexpand(true);
+        editor.set_tooltip_text(Some(&format!("{}", typ)));
+        grid.attach(&editor, 1, i as i32, 1, 1);
+    }
+    expander.add(&grid);
+    expander.set_hexpand(true);
+    expander.upcast()
+}
+
+/// Inline struct editor — emits struct literal syntax.
+fn struct_editor_inline(
+    fields: &[(ArcStr, Type)],
+    _current: &str,
+    arg_expr: Option<&Expr>,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+    _is_optional: bool,
+) -> gtk::Widget {
+    // Extract current field values from struct expr
+    let current_fields: Vec<(ArcStr, String)> = match arg_expr {
+        Some(e) => match &e.kind {
+            ExprKind::Struct(se) => se.args.iter()
+                .map(|(n, e)| (n.clone(), format!("{}", e)))
+                .collect(),
+            ExprKind::ByRef(inner) => match &inner.kind {
+                ExprKind::Struct(se) => se.args.iter()
+                    .map(|(n, e)| (n.clone(), format!("{}", e)))
+                    .collect(),
+                _ => vec![],
+            },
+            _ => vec![],
+        },
+        None => vec![],
+    };
+    let sub_values: Rc<RefCell<Vec<(ArcStr, String)>>> = Rc::new(RefCell::new(
+        fields.iter().map(|(name, _)| {
+            let val = current_fields.iter()
+                .find(|(l, _)| l == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            (name.clone(), val)
+        }).collect()
+    ));
+    let expander = gtk::Expander::new(None);
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(8);
+    grid.set_row_spacing(4);
+    for (i, (name, typ)) in fields.iter().enumerate() {
+        let label = gtk::Label::new(Some(&format!("{}:", name)));
+        label.set_halign(gtk::Align::Start);
+        grid.attach(&label, 0, i as i32, 1, 1);
+        let sub_current = sub_values.borrow()[i].1.clone();
+        let sub_expr = current_fields.iter()
+            .find(|(l, _)| l == name)
+            .and_then(|(_, v)| parse_expr(v));
+        let sv = sub_values.clone();
+        let parent = on_change.clone();
+        let sub_on_change: Rc<dyn Fn(String)> = Rc::new(move |val: String| {
+            sv.borrow_mut()[i].1 = val;
+            let vals = sv.borrow();
+            let non_empty: Vec<_> = vals.iter()
+                .filter(|(_, v)| !v.is_empty())
+                .collect();
+            if non_empty.is_empty() {
+                parent(String::new());
+            } else {
+                let parts: Vec<String> = non_empty.iter()
+                    .map(|(n, v)| format!("{}: {}", n, v))
+                    .collect();
+                parent(format!("{{ {} }}", parts.join(", ")));
+            }
+        });
+        let editor = type_editor_inner(
+            typ, &sub_current, sub_expr.as_ref(), env, sub_on_change, true,
+        );
+        editor.set_hexpand(true);
+        grid.attach(&editor, 1, i as i32, 1, 1);
+    }
+    expander.add(&grid);
+    expander.set_hexpand(true);
+    expander.upcast()
+}
+
+/// Array editor — per-element editors with add/remove.
+fn array_editor(
+    elem_type: &Type,
+    current: &str,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+) -> gtk::Widget {
+    // Parse current array to extract element strings
+    let elements: Vec<String> = match parse_expr(current) {
+        Some(e) => match &e.kind {
+            ExprKind::Array { args } => args.iter().map(|e| format!("{}", e)).collect(),
+            _ => vec![],
+        },
+        None => vec![],
+    };
+    let values: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(elements));
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let rebuild: Rc<dyn Fn()> = {
+        let values = values.clone();
+        let on_change = on_change.clone();
+        Rc::new(move || {
+            let vals = values.borrow();
+            if vals.is_empty() {
+                on_change(String::new());
+            } else {
+                on_change(format!("[{}]", vals.join(", ")));
+            }
+        })
+    };
+    // Build editors for existing elements
+    fn build_element_row(
+        container: &gtk::Box,
+        elem_type: &Type,
+        index: usize,
+        values: &Rc<RefCell<Vec<String>>>,
+        env: Option<&Env>,
+        rebuild: &Rc<dyn Fn()>,
+    ) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let current = values.borrow()[index].clone();
+        let sub_expr = parse_expr(&current);
+        let v = values.clone();
+        let rb = rebuild.clone();
+        let sub_on_change: Rc<dyn Fn(String)> = Rc::new(move |val: String| {
+            v.borrow_mut()[index] = val;
+            rb();
+        });
+        let editor = type_editor_inner(
+            elem_type, &current, sub_expr.as_ref(), env, sub_on_change, false,
+        );
+        editor.set_hexpand(true);
+        row.pack_start(&editor, true, true, 0);
+        let remove_btn = gtk::Button::with_label("-");
+        let v = values.clone();
+        let rb = rebuild.clone();
+        let container_c = container.clone();
+        remove_btn.connect_clicked(move |_| {
+            v.borrow_mut().remove(index);
+            rb();
+            // Rebuild UI — remove all children and re-add
+            for child in container_c.children() { container_c.remove(&child); }
+        });
+        row.pack_start(&remove_btn, false, false, 0);
+        container.pack_start(&row, false, false, 0);
+    }
+    for i in 0..values.borrow().len() {
+        build_element_row(&container, elem_type, i, &values, env, &rebuild);
+    }
+    let add_btn = gtk::Button::with_label("+");
+    let v = values.clone();
+    let rb = rebuild.clone();
+    add_btn.connect_clicked(move |_| {
+        v.borrow_mut().push(String::new());
+        rb();
+    });
+    container.pack_start(&add_btn, false, false, 0);
+    let expander = gtk::Expander::new(None);
+    expander.add(&container);
+    expander.set_hexpand(true);
+    expander.upcast()
+}
+
+/// Map editor — key-value pair editors with add/remove.
+fn map_editor(
+    _key_type: &Type,
+    _value_type: &Type,
+    current: &str,
+    _env: Option<&Env>,
+    _nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+) -> gtk::Widget {
+    // For now, use a simple entry — map editing is complex
+    // TODO: proper key-value pair editor
+    make_entry_editor(current, on_change)
+}
+
+/// Tuple editor — fixed-position editors in an expander.
+fn tuple_editor(
+    elem_types: &[Type],
+    current: &str,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(String)>,
+) -> gtk::Widget {
+    // Parse current tuple to extract element strings
+    let elements: Vec<String> = match parse_expr(current) {
+        Some(e) => match &e.kind {
+            ExprKind::Tuple { args } => args.iter().map(|e| format!("{}", e)).collect(),
+            _ => vec![String::new(); elem_types.len()],
+        },
+        None => vec![String::new(); elem_types.len()],
+    };
+    let values: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(
+        elements.into_iter()
+            .chain(std::iter::repeat(String::new()))
+            .take(elem_types.len())
+            .collect()
+    ));
+    let expander = gtk::Expander::new(None);
+    let grid = gtk::Grid::new();
+    grid.set_column_spacing(8);
+    grid.set_row_spacing(4);
+    for (i, typ) in elem_types.iter().enumerate() {
+        let label = gtk::Label::new(Some(&format!("{}:", i)));
+        label.set_halign(gtk::Align::Start);
+        grid.attach(&label, 0, i as i32, 1, 1);
+        let sub_current = values.borrow()[i].clone();
+        let sub_expr = parse_expr(&sub_current);
+        let v = values.clone();
+        let parent = on_change.clone();
+        let n = elem_types.len();
+        let sub_on_change: Rc<dyn Fn(String)> = Rc::new(move |val: String| {
+            v.borrow_mut()[i] = val;
+            let vals = v.borrow();
+            let parts: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
+            if n == 1 {
+                parent(format!("({},)", parts[0]));
+            } else {
+                parent(format!("({})", parts.join(", ")));
+            }
+        });
+        let editor = type_editor_inner(
+            typ, &sub_current, sub_expr.as_ref(), env, sub_on_change, false,
+        );
+        editor.set_hexpand(true);
+        grid.attach(&editor, 1, i as i32, 1, 1);
+    }
+    expander.add(&grid);
+    expander.set_hexpand(true);
+    expander.upcast()
 }

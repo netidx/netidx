@@ -1,4 +1,4 @@
-use super::{CompileCtx, GtkW, GtkWidget};
+use super::{CommonProps, CompileCtx, GtkW, GtkWidget};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_compiler::expr::ExprId;
@@ -9,6 +9,7 @@ use netidx::{protocol::valarray::ValArray, publisher::Value};
 pub(crate) struct LinkButtonW<X: GXExt> {
     ctx: CompileCtx<X>,
     widget: gtk::LinkButton,
+    common: CommonProps<X>,
     label: TRef<X, String>,
     uri: TRef<X, String>,
     on_activate_link: Ref<X>,
@@ -18,9 +19,10 @@ pub(crate) struct LinkButtonW<X: GXExt> {
 
 impl<X: GXExt> LinkButtonW<X> {
     pub(crate) async fn compile(ctx: CompileCtx<X>, source: Value) -> Result<GtkW<X>> {
-        // Fields sorted: label, on_activate_link, uri
-        let [(_, label), (_, on_activate_link), (_, uri)] =
-            source.cast_to::<[(ArcStr, u64); 3]>().context("link_button flds")?;
+        // Fields sorted: common, debug_highlight, label, on_activate_link, uri
+        let [(_, common), (_, debug_highlight), (_, label), (_, on_activate_link), (_, uri)] =
+            source.cast_to::<[(ArcStr, u64); 5]>().context("link_button flds")?;
+        let common_props = CommonProps::compile(&ctx.gx, common, debug_highlight).await?;
         let (label, on_activate_link, uri) = tokio::try_join! {
             ctx.gx.compile_ref(label),
             ctx.gx.compile_ref(on_activate_link),
@@ -36,10 +38,12 @@ impl<X: GXExt> LinkButtonW<X> {
         let widget = gtk::LinkButton::with_label(uri_str, label.t.as_deref().unwrap_or(uri_str));
         let signal_id =
             connect_on_activate_link(&widget, &ctx.gx, &on_activate_link_callable);
+        common_props.apply(&widget);
         widget.show();
         Ok(Box::new(LinkButtonW {
             ctx,
             widget,
+            common: common_props,
             label,
             uri,
             on_activate_link,
@@ -75,6 +79,7 @@ impl<X: GXExt> GtkWidget<X> for LinkButtonW<X> {
         v: &Value,
     ) -> Result<bool> {
         let mut changed = false;
+        changed |= self.common.handle_update(rt, id, v, &self.widget)?;
         if let Some(u) = self.uri.update(id, v).context("link_button update uri")? {
             self.widget.set_uri(u);
             changed = true;
