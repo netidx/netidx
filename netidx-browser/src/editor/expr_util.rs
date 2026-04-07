@@ -406,3 +406,8 @@ pub(super) fn all_argless_variants(variants: &[Type]) -> bool {
     !variants.is_empty()
         && variants.iter().all(|t| matches!(t, Type::Variant(_, args) if args.is_empty()))
 }
+
+pub(super) fn all_variants(variants: &[Type]) -> bool {
+    !variants.is_empty()
+        && variants.iter().all(|t| matches!(t, Type::Variant(_, _)))
+}

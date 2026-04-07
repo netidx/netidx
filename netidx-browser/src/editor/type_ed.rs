@@ -139,6 +139,11 @@ fn type_editor_inner(
             make_entry_editor(arg_expr, on_change)
         }
 
+        // All-variant set with args → dropdown + sub-editors
+        Type::Set(variants) if !all_argless_variants(variants) && all_variants(variants) => {
+            variant_editor(variants, arg_expr, env, nav, on_change, is_optional)
+        }
+
         Type::Set(variants) if all_argless_variants(variants) => {
             let combo = gtk::ComboBoxText::new();
             if is_optional { combo.append(Some(""), ""); }
@@ -619,4 +624,167 @@ fn tuple_editor(
     expander.add(&grid);
     expander.set_hexpand(true);
     expander.upcast()
+}
+
+/// Variant set editor — dropdown to pick variant tag, sub-editors for args.
+fn variant_editor(
+    variants: &[Type],
+    arg_expr: Option<&Expr>,
+    env: Option<&Env>,
+    nav: Option<&SourceNav>,
+    on_change: Rc<dyn Fn(Option<Expr>)>,
+    is_optional: bool,
+) -> gtk::Widget {
+    let (initial_tag, initial_args): (Option<ArcStr>, Vec<Expr>) = match arg_expr {
+        Some(e) => match &e.kind {
+            ExprKind::Variant { tag, args } => {
+                (Some(tag.clone()), args.iter().cloned().collect())
+            }
+            _ => (None, vec![]),
+        },
+        None => (None, vec![]),
+    };
+    let current_tag: Rc<RefCell<Option<ArcStr>>> = Rc::new(RefCell::new(initial_tag.clone()));
+    let sub_values: Rc<RefCell<Vec<Option<Expr>>>> = Rc::new(RefCell::new(
+        initial_args.into_iter().map(Some).collect()
+    ));
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let combo = gtk::ComboBoxText::new();
+    if is_optional { combo.append(Some(""), ""); }
+    for v in variants.iter() {
+        if let Type::Variant(tag, _) = v {
+            let s = format!("`{}", tag);
+            combo.append(Some(&s), &s);
+        }
+    }
+    let active = initial_tag.map(|t| format!("`{}", t)).unwrap_or_default();
+    combo.set_active_id(Some(&active));
+    vbox.pack_start(&combo, false, false, 0);
+    let sub_container = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    vbox.pack_start(&sub_container, false, false, 0);
+    // Owned copies for closures
+    let variants_owned: Vec<Type> = variants.to_vec();
+    let env_owned = env.cloned();
+    let nav_owned = nav.cloned();
+    // Fire on_change with current tag + sub_values
+    let fire_change: Rc<dyn Fn()> = {
+        let ct = current_tag.clone();
+        let sv = sub_values.clone();
+        let on_change = on_change.clone();
+        Rc::new(move || {
+            match ct.borrow().as_ref() {
+                Some(tag) => {
+                    let args: Vec<Expr> = sv.borrow().iter()
+                        .filter_map(|e| e.clone())
+                        .collect();
+                    on_change(Some(ExprKind::Variant {
+                        tag: tag.clone(),
+                        args: Arc::from(args),
+                    }.to_expr_nopos()));
+                }
+                None => on_change(None),
+            }
+        })
+    };
+    // Rebuild sub-editors for the currently selected variant
+    let rebuild_sub: Rc<dyn Fn()> = {
+        let sub_container = sub_container.clone();
+        let ct = current_tag.clone();
+        let sv = sub_values.clone();
+        let fire = fire_change.clone();
+        let variants = variants_owned.clone();
+        let env = env_owned.clone();
+        let nav = nav_owned.clone();
+        Rc::new(move || {
+            for child in sub_container.children() { sub_container.remove(&child); }
+            let tag = ct.borrow().clone();
+            if let Some(tag) = tag {
+                let variant_type = variants.iter()
+                    .find(|v| matches!(v, Type::Variant(t, _) if *t == tag));
+                if let Some(Type::Variant(_, arg_types)) = variant_type {
+                    if arg_types.len() == 1 {
+                        let sub_expr = sv.borrow().first().cloned().flatten();
+                        let sv_c = sv.clone();
+                        let fire_c = fire.clone();
+                        let sub_on_change: Rc<dyn Fn(Option<Expr>)> = Rc::new(move |val| {
+                            let mut vals = sv_c.borrow_mut();
+                            if vals.is_empty() { vals.push(val); }
+                            else { vals[0] = val; }
+                            drop(vals);
+                            fire_c();
+                        });
+                        let editor = type_editor_inner(
+                            &arg_types[0], sub_expr.as_ref(),
+                            env.as_ref(), nav.as_ref(), sub_on_change, false,
+                        );
+                        editor.set_hexpand(true);
+                        sub_container.pack_start(&editor, false, false, 0);
+                    } else if arg_types.len() > 1 {
+                        let grid = gtk::Grid::new();
+                        grid.set_column_spacing(8);
+                        grid.set_row_spacing(4);
+                        for (i, typ) in arg_types.iter().enumerate() {
+                            let label = gtk::Label::new(Some(&format!("{}:", i)));
+                            label.set_halign(gtk::Align::Start);
+                            grid.attach(&label, 0, i as i32, 1, 1);
+                            let sub_expr = sv.borrow().get(i).cloned().flatten();
+                            let sv_c = sv.clone();
+                            let fire_c = fire.clone();
+                            let sub_on_change: Rc<dyn Fn(Option<Expr>)> = Rc::new(move |val| {
+                                let mut vals = sv_c.borrow_mut();
+                                while vals.len() <= i { vals.push(None); }
+                                vals[i] = val;
+                                drop(vals);
+                                fire_c();
+                            });
+                            let editor = type_editor_inner(
+                                typ, sub_expr.as_ref(),
+                                env.as_ref(), nav.as_ref(), sub_on_change, false,
+                            );
+                            editor.set_hexpand(true);
+                            grid.attach(&editor, 1, i as i32, 1, 1);
+                        }
+                        sub_container.pack_start(&grid, false, false, 0);
+                    }
+                }
+            }
+            sub_container.show_all();
+        })
+    };
+    rebuild_sub();
+    // Combo change handler
+    {
+        let ct = current_tag.clone();
+        let sv = sub_values.clone();
+        let fire = fire_change.clone();
+        let rebuild = rebuild_sub.clone();
+        let variants = variants_owned.clone();
+        let env = env_owned.clone();
+        combo.connect_changed(move |c| {
+            match c.active_id() {
+                Some(id) if !id.is_empty() && id.starts_with('`') => {
+                    let tag = ArcStr::from(&id[1..]);
+                    *ct.borrow_mut() = Some(tag.clone());
+                    let variant_type = variants.iter()
+                        .find(|v| matches!(v, Type::Variant(t, _) if *t == tag));
+                    if let Some(Type::Variant(_, arg_types)) = variant_type {
+                        *sv.borrow_mut() = arg_types.iter()
+                            .map(|t| Some(default_expr_for_type(t, env.as_ref())))
+                            .collect();
+                    } else {
+                        sv.borrow_mut().clear();
+                    }
+                    fire();
+                    rebuild();
+                }
+                _ => {
+                    *ct.borrow_mut() = None;
+                    sv.borrow_mut().clear();
+                    fire();
+                    rebuild();
+                }
+            }
+        });
+    }
+    vbox.upcast()
 }
