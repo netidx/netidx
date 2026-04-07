@@ -47,6 +47,7 @@ parking_lot = { workspace = true }
 indexmap = { workspace = true }
 once_cell = { workspace = true }
 arcstr = { workspace = true }
+triomphe = { workspace = true }
 rand = { workspace = true }
 dirs = { workspace = true }
 gtk = "0.18"
