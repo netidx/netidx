@@ -31,7 +31,8 @@
       "Read(//tmp/**)",
       "Bash(graphix:*)",
       "Bash(cp:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(cargo tree:*)"
     ],
     "deny": [],
     "ask": []
