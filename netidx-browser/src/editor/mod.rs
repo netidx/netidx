@@ -8,6 +8,7 @@
 // data model — each row stores a BoxedAnyObject wrapping TreeNodeData
 // (kind, args, child slots). Source reconstruction walks the TreeStore.
 
+mod completion;
 mod expr_util;
 mod tree;
 mod type_ed;
@@ -116,6 +117,21 @@ impl Editor {
         source_view.set_monospace(true);
         source_view.set_tab_width(4);
         source_view.set_auto_indent(true);
+        completion::setup_language(&buf);
+        let provider = completion::GxComplete::new(Rc::clone(&env));
+        if let Some(comp) = source_view.completion() {
+            let _ = comp.add_provider(&provider);
+        }
+        source_view.connect_key_press_event(|view, event| {
+            use gdk::keys::constants;
+            if event.keyval() == constants::space
+                && event.state().contains(gdk::ModifierType::CONTROL_MASK)
+            {
+                view.emit_show_completion();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
         let scroll = gtk::ScrolledWindow::new(
             None::<&gtk::Adjustment>, None::<&gtk::Adjustment>,
         );
