@@ -1,4 +1,4 @@
-use crate::{ToGui, ViewLoc};
+use crate::{BrowserEvent, ViewLoc};
 use anyhow::{anyhow, Error, Result};
 use arcstr::ArcStr;
 use futures::{
@@ -32,6 +32,7 @@ use std::{
     time::Duration,
 };
 use tokio::{runtime::Runtime, sync::mpsc as tmpsc, task};
+use winit::event_loop::EventLoopProxy;
 
 type RawBatch = GPooled<Vec<(netidx::subscriber::SubId, Event)>>;
 
@@ -45,11 +46,10 @@ pub(crate) enum FromGui {
 }
 
 /// Per-window context shared with the GUI thread.
-/// The GUI uses this to communicate with the backend and the graphix runtime.
 #[derive(Clone)]
 pub(crate) struct Ctx {
     pub(crate) gx: GXHandle<NoExt>,
-    pub(crate) to_gui: glib::Sender<ToGui>,
+    pub(crate) proxy: EventLoopProxy<BrowserEvent>,
     pub(crate) from_gui: mpsc::UnboundedSender<FromGui>,
     pub(crate) rt_handle: tokio::runtime::Handle,
     pub(crate) subscriber: Subscriber,
@@ -58,6 +58,154 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
+    /// Create a new backend context. Starts a tokio runtime on a background
+    /// thread, creates Subscriber, graphix runtime, and bridges events
+    /// to the winit event loop via the proxy.
+    pub(crate) fn new(
+        cfg: Config,
+        auth: DesiredAuth,
+        proxy: EventLoopProxy<BrowserEvent>,
+    ) -> Result<Self> {
+        let (ctx_tx, ctx_rx) = std::sync::mpsc::channel();
+        let proxy_clone = proxy.clone();
+        thread::spawn(move || {
+            let rt = Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(async move {
+                match Self::init_inner(cfg, auth, proxy_clone).await {
+                    Ok(ctx) => {
+                        let _ = ctx_tx.send(Ok(ctx));
+                        // Keep runtime alive as long as graphix needs it
+                        pending::<()>().await;
+                    }
+                    Err(e) => {
+                        let _ = ctx_tx.send(Err(e));
+                    }
+                }
+            });
+        });
+        ctx_rx.recv().map_err(|_| anyhow!("backend thread died"))?
+    }
+
+    async fn init_inner(
+        cfg: Config,
+        auth: DesiredAuth,
+        proxy: EventLoopProxy<BrowserEvent>,
+    ) -> Result<Self> {
+        let subscriber = Subscriber::new(cfg.clone(), auth.clone())?;
+        let publisher =
+            PublisherBuilder::new(cfg).desired_auth(auth).build().await?;
+
+        // Set up the graphix runtime
+        let gxrt = GXRt::<NoExt>::new(publisher, subscriber.clone());
+        let mut ctx = ExecCtx::new(gxrt)?;
+
+        // Register browser-specific builtins
+        crate::builtins::register_builtins(&mut ctx)?;
+
+        // Set up shared state for builtins
+        ctx.libstate.set(crate::builtins::BrowserLibState {
+            proxy: proxy.clone(),
+        });
+
+        // Channel for graphix output events
+        let (gx_tx, mut gx_rx) = tmpsc::channel(100);
+
+        // Register packages
+        let mut vfs = fxhash::FxHashMap::default();
+        let mut root_mods = graphix_package::IndexSet::new();
+        graphix_package_core::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
+        graphix_package_sys::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
+        graphix_package_gui::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
+
+        // Set up the browser package as a VFS module so views can `use browser;`
+        vfs.insert(
+            Path::from("/browser/mod.gx"),
+            arcstr::literal!(include_str!("graphix/mod.gx")),
+        );
+        vfs.insert(
+            Path::from("/browser/mod.gxi"),
+            arcstr::literal!(include_str!("graphix/mod.gxi")),
+        );
+        let resolvers = vec![graphix_compiler::expr::ModuleResolver::VFS(vfs)];
+
+        // Build root text: registered packages + browser + current_path
+        let mut root_parts = Vec::new();
+        for name in &root_mods {
+            if name == "core" {
+                root_parts.push(format!("mod core;\nuse core"));
+            } else {
+                root_parts.push(format!("mod {name}"));
+            }
+        }
+        root_parts.push("mod browser".to_string());
+        let root = ArcStr::from(format!(
+            "{};\nlet current_path = \"/\";\nlet debug_highlighted = 0;",
+            root_parts.join(";\n"),
+        ));
+        let gx = GXConfig::builder(ctx, gx_tx)
+            .root(root)
+            .resolvers(resolvers)
+            .build()?
+            .start()
+            .await?;
+
+        // Compile a ref to current_path so we can set it from Rust on navigation
+        let env = gx.get_env().await?;
+        let scope = graphix_compiler::Scope::root();
+        let name = graphix_compiler::expr::ModPath::from(["current_path"]);
+        let current_path_ref = gx.compile_ref_by_name(&env, &scope, &name).await?;
+        let current_path_bid = current_path_ref.bid;
+        std::mem::forget(current_path_ref);
+
+        let dh_name = graphix_compiler::expr::ModPath::from(["debug_highlighted"]);
+        let dh_ref = gx.compile_ref_by_name(&env, &scope, &dh_name).await?;
+        let debug_highlighted_bid = dh_ref.bid;
+        std::mem::forget(dh_ref);
+
+        // Bridge: forward graphix events to the winit event loop
+        let proxy_bridge = proxy.clone();
+        task::spawn(async move {
+            while let Some(batch) = gx_rx.recv().await {
+                let updates: Vec<_> = batch
+                    .iter()
+                    .filter_map(|ev| match ev {
+                        GXEvent::Updated(id, v) => Some((*id, v.clone())),
+                        GXEvent::Env(_) => None,
+                    })
+                    .collect();
+                if !updates.is_empty() {
+                    let _ = proxy_bridge.send_event(BrowserEvent::Update(updates));
+                }
+            }
+        });
+
+        // Channel for navigation/save requests
+        let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
+
+        // Spawn the backend inner task (handles navigation and saves)
+        let inner = BackendInner {
+            subscriber: subscriber.clone(),
+            from_gui: rx_from_gui,
+            proxy: proxy.clone(),
+            raw_view: Arc::new(AtomicBool::new(false)),
+            view_path: None,
+            rx_view: None,
+            dv_view: None,
+        };
+        task::spawn(inner.run());
+
+        let rt_handle = tokio::runtime::Handle::current();
+        Ok(Ctx {
+            gx,
+            proxy,
+            from_gui: tx_from_gui,
+            rt_handle,
+            subscriber,
+            current_path_bid,
+            debug_highlighted_bid,
+        })
+    }
+
     /// Update the current_path graphix variable on navigation
     pub(crate) fn set_current_path(&self, loc: &ViewLoc) {
         let path_str = match loc {
@@ -89,13 +237,12 @@ impl Ctx {
             self.from_gui.unbounded_send(FromGui::Render(source));
     }
 
-    /// Compile a graphix expression synchronously from the GTK thread.
-    /// This blocks the GTK main loop briefly for compilation only.
+    /// Compile a graphix expression synchronously.
     pub(crate) fn compile(&self, text: &str) -> Result<graphix_rt::CompRes<NoExt>> {
         self.rt_handle.block_on(self.gx.compile(ArcStr::from(text)))
     }
 
-    /// Compile a callable expression synchronously from the GTK thread.
+    /// Compile a callable expression synchronously.
     pub(crate) fn compile_callable(
         &self,
         id: Value,
@@ -110,12 +257,10 @@ impl Ctx {
 }
 
 /// Inner backend state running in the tokio runtime.
-/// Handles navigation (view loading) and save operations.
-/// Subscription updates, RPCs, timers are all handled by graphix.
 struct BackendInner {
     subscriber: Subscriber,
     from_gui: mpsc::UnboundedReceiver<FromGui>,
-    to_gui: glib::Sender<ToGui>,
+    proxy: EventLoopProxy<BrowserEvent>,
     raw_view: Arc<AtomicBool>,
     view_path: Option<Path>,
     rx_view: Option<futures::channel::mpsc::Receiver<RawBatch>>,
@@ -129,15 +274,10 @@ impl BackendInner {
         self.dv_view = None;
         let source = crate::default_view_source(&base_path);
         log::info!("default_view_source generated {} bytes", source.len());
-        let m = ToGui::View {
+        let _ = self.proxy.send_event(BrowserEvent::View {
             loc: Some(ViewLoc::Netidx(base_path.clone())),
             source,
             generated: true,
-        };
-        let to_gui = self.to_gui.clone();
-        glib::idle_add_once(move || match to_gui.send(m) {
-            Ok(()) => log::info!("ToGui::View sent via idle_add_once"),
-            Err(e) => log::error!("ToGui::View send FAILED: {}", e),
         });
         if !self.raw_view.load(Ordering::Relaxed) {
             let s = self.subscriber.subscribe(base_path.append(".view"));
@@ -156,15 +296,14 @@ impl BackendInner {
         match fs::read_to_string(&file) {
             Err(e) => {
                 let m = format!("can't load view from file {:?}, {}", file, e);
-                self.to_gui.send(ToGui::ShowError(m))?;
+                let _ = self.proxy.send_event(BrowserEvent::ShowError(m));
             }
             Ok(s) => {
-                let m = ToGui::View {
+                let _ = self.proxy.send_event(BrowserEvent::View {
                     loc: Some(ViewLoc::File(file)),
                     source: ArcStr::from(s.as_str()),
                     generated: false,
-                };
-                self.to_gui.send(m)?;
+                });
             }
         }
         Ok(())
@@ -226,12 +365,11 @@ impl BackendInner {
                     match view {
                         Event::Update(Value::String(s)) => {
                             if let Some(path) = &self.view_path {
-                                let m = ToGui::View {
+                                let _ = self.proxy.send_event(BrowserEvent::View {
                                     loc: Some(ViewLoc::Netidx(path.clone())),
                                     source: s,
                                     generated: false,
-                                };
-                                self.to_gui.send(m)?;
+                                });
                                 info!("updated gui view")
                             }
                         }
@@ -247,8 +385,11 @@ impl BackendInner {
         self.view_path = None;
         self.rx_view = None;
         self.dv_view = None;
-        let m = ToGui::View { loc: None, source, generated: false };
-        self.to_gui.send(m)?;
+        let _ = self.proxy.send_event(BrowserEvent::View {
+            loc: None,
+            source,
+            generated: false,
+        });
         info!("updated gui view (render)");
         Ok(())
     }
@@ -300,191 +441,6 @@ impl BackendInner {
                 },
             }
         }
-        let _: result::Result<_, _> = self.to_gui.send(ToGui::Terminate);
-    }
-}
-
-enum ToBackend {
-    CreateCtx {
-        to_gui: glib::Sender<ToGui>,
-        raw_view: Arc<AtomicBool>,
-        reply: crate::util::OneShot<Result<Ctx>>,
-    },
-    Stop,
-}
-
-#[derive(Clone)]
-pub(crate) struct Backend {
-    tx: mpsc::UnboundedSender<ToBackend>,
-    rt_handle: tokio::runtime::Handle,
-}
-
-impl Backend {
-    pub(crate) fn new(
-        cfg: Config,
-        auth: DesiredAuth,
-    ) -> (thread::JoinHandle<()>, Backend) {
-        let (tx, mut rx) = mpsc::unbounded();
-        let (rt_handle_tx, rt_handle_rx) = std::sync::mpsc::channel();
-        let join_handle = thread::spawn(move || {
-            let rt = Runtime::new().expect("failed to create tokio runtime");
-            let handle = rt.handle().clone();
-            rt_handle_tx.send(handle).unwrap();
-            rt.block_on(async move {
-                let subscriber = Subscriber::new(cfg.clone(), auth.clone()).unwrap();
-                let publisher =
-                    PublisherBuilder::new(cfg).desired_auth(auth).build().await.unwrap();
-                while let Some(m) = rx.next().await {
-                    match m {
-                        ToBackend::Stop => break,
-                        ToBackend::CreateCtx { to_gui, raw_view, reply } => {
-                            let res = Self::create_ctx_inner(
-                                subscriber.clone(),
-                                publisher.clone(),
-                                to_gui,
-                                raw_view,
-                            )
-                            .await;
-                            reply.send(res);
-                        }
-                    }
-                }
-            });
-        });
-        let rt_handle = rt_handle_rx.recv().unwrap();
-        (join_handle, Backend { tx, rt_handle })
-    }
-
-    async fn create_ctx_inner(
-        subscriber: Subscriber,
-        publisher: Publisher,
-        to_gui: glib::Sender<ToGui>,
-        raw_view: Arc<AtomicBool>,
-    ) -> Result<Ctx> {
-        // Set up the graphix runtime
-        let gxrt = GXRt::<NoExt>::new(publisher, subscriber.clone());
-        let mut ctx = ExecCtx::new(gxrt)?;
-        // Register browser-specific builtins
-        crate::builtins::register_builtins(&mut ctx)?;
-        // Set up shared state for builtins
-        ctx.libstate
-            .set(crate::builtins::BrowserLibState { to_gui: to_gui.clone() });
-
-        // Channel for graphix output events
-        let (gx_tx, mut gx_rx) = tmpsc::channel(100);
-
-        // Register packages (core provides println, dbg, etc.)
-        let mut vfs = fxhash::FxHashMap::default();
-        let mut root_mods = graphix_package::IndexSet::new();
-        graphix_package_core::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
-
-        // Set up the browser package as a VFS module so views can `use browser;`
-        vfs.insert(
-            Path::from("/browser/mod.gx"),
-            arcstr::literal!(include_str!("graphix/mod.gx")),
-        );
-        vfs.insert(
-            Path::from("/browser/mod.gxi"),
-            arcstr::literal!(include_str!("graphix/mod.gxi")),
-        );
-        let resolvers = vec![graphix_compiler::expr::ModuleResolver::VFS(vfs)];
-
-        // Build root text: registered packages + browser + current_path
-        let mut root_parts = Vec::new();
-        for name in &root_mods {
-            if name == "core" {
-                root_parts.push(format!("mod core;\nuse core"));
-            } else {
-                root_parts.push(format!("mod {name}"));
-            }
-        }
-        root_parts.push("mod browser".to_string());
-        let root = ArcStr::from(format!(
-            "{};\nlet current_path = \"/\";\nlet debug_highlighted = 0;",
-            root_parts.join(";\n"),
-        ));
-        let gx = GXConfig::builder(ctx, gx_tx)
-            .root(root)
-            .resolvers(resolvers)
-            .build()?
-            .start()
-            .await?;
-
-        // Compile a ref to current_path so we can set it from Rust on navigation
-        let env = gx.get_env().await?;
-        let scope = graphix_compiler::Scope::root();
-        let name = graphix_compiler::expr::ModPath::from(["current_path"]);
-        let current_path_ref = gx.compile_ref_by_name(&env, &scope, &name).await?;
-        let current_path_bid = current_path_ref.bid;
-        std::mem::forget(current_path_ref);
-
-        let dh_name = graphix_compiler::expr::ModPath::from(["debug_highlighted"]);
-        let dh_ref = gx.compile_ref_by_name(&env, &scope, &dh_name).await?;
-        let debug_highlighted_bid = dh_ref.bid;
-        std::mem::forget(dh_ref);
-
-        // Bridge: forward graphix events to the GTK main loop
-        let to_gui_bridge = to_gui.clone();
-        task::spawn(async move {
-            while let Some(batch) = gx_rx.recv().await {
-                let to_gui = to_gui_bridge.clone();
-                let updates: Vec<_> = batch
-                    .iter()
-                    .filter_map(|ev| match ev {
-                        GXEvent::Updated(id, v) => Some((*id, v.clone())),
-                        GXEvent::Env(_) => None,
-                    })
-                    .collect();
-                if !updates.is_empty() {
-                    glib::idle_add_once(move || {
-                        let _ = to_gui.send(ToGui::Update(updates));
-                    });
-                }
-            }
-        });
-
-        // Channel for navigation/save requests
-        let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
-
-        // Spawn the backend inner task (handles navigation and saves)
-        let inner = BackendInner {
-            subscriber: subscriber.clone(),
-            from_gui: rx_from_gui,
-            to_gui: to_gui.clone(),
-            raw_view,
-            view_path: None,
-            rx_view: None,
-            dv_view: None,
-        };
-        task::spawn(inner.run());
-
-        let rt_handle = tokio::runtime::Handle::current();
-        Ok(Ctx {
-            gx,
-            to_gui,
-            from_gui: tx_from_gui,
-            rt_handle,
-            subscriber,
-            current_path_bid,
-            debug_highlighted_bid,
-        })
-    }
-
-    pub(crate) fn stop(&self) {
-        let _: result::Result<_, _> = self.tx.unbounded_send(ToBackend::Stop);
-    }
-
-    pub(crate) fn create_ctx(
-        &self,
-        to_gui: glib::Sender<ToGui>,
-        raw_view: Arc<AtomicBool>,
-    ) -> Result<Ctx> {
-        let reply = crate::util::OneShot::new();
-        self.tx.unbounded_send(ToBackend::CreateCtx {
-            to_gui,
-            raw_view,
-            reply: reply.clone(),
-        })?;
-        reply.wait()
+        let _ = self.proxy.send_event(BrowserEvent::Terminate);
     }
 }

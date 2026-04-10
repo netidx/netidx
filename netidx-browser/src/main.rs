@@ -2,92 +2,69 @@
 
 mod backend;
 mod builtins;
-mod cairo_backend;
-mod editor;
-mod gtk_widgets;
-mod util;
+mod chrome;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use arcstr::ArcStr;
-use bytes::Bytes;
-use editor::Editor;
-use gdk::{self, prelude::*};
-use glib::{
-    clone, idle_add_local, idle_add_local_once, source::Priority, ControlFlow,
-    Propagation,
-};
 use graphix_compiler::expr::ExprId;
+use graphix_package_gui::{
+    convert,
+    render::{GpuState, WindowSurface},
+    theme::GraphixTheme,
+    widgets::{self, GuiW, IcedElement, Message, Renderer},
+};
 use graphix_rt::NoExt;
-use gtk::{self, prelude::*, Adjustment, Application, ApplicationWindow};
+use iced_core::{clipboard, mouse, renderer::Style};
+use iced_runtime::user_interface::{self, UserInterface};
+use iced_wgpu::wgpu;
+use log::error;
 use netidx::{
-    config::Config, path::Path, protocol::value::FromValue, publisher::Value,
+    config::Config,
+    path::Path,
+    publisher::Value,
     subscriber::DesiredAuth,
 };
 use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
+    cell::RefCell,
     fmt, mem,
     path::PathBuf,
-    rc::Rc,
-    result, str,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    str,
+    sync::Arc,
+    time::{Duration, Instant},
 };
-use util::{ask_modal, err_modal};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::ModifiersState,
+    window::{CursorIcon, WindowId},
+};
 
-struct WVal<'a>(&'a Value);
+// ---- Browser UI message type ----
 
-impl<'a> fmt::Display for WVal<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt_naked(f)
-    }
-}
-
-/// Shared browser context accessible from widgets
-pub(crate) type BCtx = Rc<RefCell<BrowserCtx>>;
-
-pub(crate) struct BrowserCtx {
-    pub(crate) backend: backend::Ctx,
-    pub(crate) raw_view: Arc<AtomicBool>,
-    pub(crate) window: gtk::ApplicationWindow,
-    pub(crate) new_window_loc: Rc<RefCell<ViewLoc>>,
-    pub(crate) current_loc: Rc<RefCell<ViewLoc>>,
-    pub(crate) view_saved: Cell<bool>,
-}
-
-/// Messages from the backend/graphix to the GUI thread
+/// Unified message type for the browser UI. Wraps graphix widget
+/// messages and adds browser-specific actions.
 #[derive(Debug, Clone)]
-pub(crate) enum ToGui {
-    View {
-        loc: Option<ViewLoc>,
-        source: ArcStr,
-        generated: bool,
-    },
+pub(crate) enum BrowserMsg {
+    /// Message from a graphix widget (button press, text input, etc.)
+    Widget(Message),
+    /// Navigate to a location (from breadcrumb click or Go button)
     Navigate(ViewLoc),
-    NavigateInWindow(ViewLoc),
-    /// Batch of expression value updates from the graphix runtime
-    Update(Vec<(ExprId, Value)>),
-    ShowError(String),
-    SaveError(String),
-    Confirm {
-        message: String,
-        reply: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
-    },
-    Terminate,
+    /// Navigate to parent path (Backspace)
+    NavigateUp,
+    /// Navigation input text changed
+    NavInputChanged(String),
+    /// Navigation input submitted (Enter or Go button)
+    NavSubmit,
+    /// Toggle design mode (opens/closes design window)
+    ToggleDesignMode,
 }
 
-fn default_view_source(path: &Path) -> ArcStr {
-    ArcStr::from(format!(
-        r#"browser::table(
-    #selection_mode: &`Single,
-    #on_activate: |#path: string| browser::navigate(path),
-    #path: &{:?}
-)"#,
-        &**path
-    ))
-}
+/// Element type for the full browser UI (chrome + content).
+type BrowserElement<'a> =
+    iced_core::Element<'a, BrowserMsg, GraphixTheme, Renderer>;
+
+// ---- ViewLoc ----
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ViewLoc {
@@ -122,826 +99,802 @@ impl fmt::Display for ViewLoc {
     }
 }
 
+// ---- Default view ----
+
+fn default_view_source(path: &Path) -> ArcStr {
+    ArcStr::from(format!(
+        "use gui;\nuse gui::data_table;\nuse sys;\n\
+         let sel = [];\n\
+         data_table(\n\
+         \x20 #on_activate: |#path: string| browser::navigate(path),\n\
+         \x20 #on_select: |#path: string| sel <- [path],\n\
+         \x20 #selection: &sel,\n\
+         \x20 #table: &sys::net::list_table({:?})$\n\
+         )",
+        &**path
+    ))
+}
+
+// ---- BrowserEvent ----
+
+/// Messages delivered to the winit event loop via EventLoopProxy.
 #[derive(Debug)]
-pub(crate) enum ImageSpec {
-    Icon { name: ArcStr, size: gtk::IconSize },
-    PixBuf { bytes: Bytes, width: Option<u32>, height: Option<u32>, keep_aspect: bool },
+pub(crate) enum BrowserEvent {
+    /// A new view to display
+    View {
+        loc: Option<ViewLoc>,
+        source: ArcStr,
+        generated: bool,
+    },
+    /// Navigate to a location (from graphix builtin)
+    Navigate(ViewLoc),
+    /// Open location in a new window
+    NavigateInWindow(ViewLoc),
+    /// Batch of graphix expression updates
+    Update(Vec<(ExprId, Value)>),
+    /// Display an error
+    ShowError(String),
+    /// Request confirmation (reply via oneshot)
+    Confirm {
+        message: String,
+        reply: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+    },
+    /// Shutdown
+    Terminate,
 }
 
-impl ImageSpec {
-    fn get_pixbuf(&self) -> Option<gdk_pixbuf::Pixbuf> {
-        match self {
-            Self::Icon { .. } => None,
-            Self::PixBuf { bytes, width, height, keep_aspect } => {
-                let width = width.map(|i| i as i32).unwrap_or(-1);
-                let height = height.map(|i| i as i32).unwrap_or(-1);
-                let bytes = glib::Bytes::from_owned(bytes.clone());
-                let stream = gio::MemoryInputStream::from_bytes(&bytes);
-                gdk_pixbuf::Pixbuf::from_stream_at_scale(
-                    &stream,
-                    width,
-                    height,
-                    *keep_aspect,
-                    gio::Cancellable::NONE,
-                )
-                .ok()
+// ---- Clipboard ----
+
+struct Clipboard {
+    state: RefCell<Option<arboard::Clipboard>>,
+}
+
+impl Clipboard {
+    fn new() -> Self {
+        Self { state: RefCell::new(arboard::Clipboard::new().ok()) }
+    }
+}
+
+impl clipboard::Clipboard for Clipboard {
+    fn read(&self, kind: clipboard::Kind) -> Option<String> {
+        let mut cb = self.state.borrow_mut();
+        let cb = cb.as_mut()?;
+        match kind {
+            clipboard::Kind::Standard => cb.get_text().ok(),
+            clipboard::Kind::Primary => {
+                #[cfg(target_os = "linux")]
+                {
+                    use arboard::GetExtLinux;
+                    cb.get().clipboard(arboard::LinuxClipboardKind::Primary).text().ok()
+                }
+                #[cfg(not(target_os = "linux"))]
+                None
             }
         }
     }
 
-    pub(crate) fn get(&self) -> gtk::Image {
-        let image = gtk::Image::new();
-        self.apply(&image);
-        image
-    }
-
-    pub(crate) fn apply(&self, image: &gtk::Image) {
-        match self {
-            Self::Icon { name, size } => image.set_from_icon_name(Some(&**name), *size),
-            Self::PixBuf { .. } => image.set_from_pixbuf(self.get_pixbuf().as_ref()),
-        }
-    }
-}
-
-impl FromValue for ImageSpec {
-    fn from_value(v: Value) -> Result<Self> {
-        match v {
-            Value::String(name) => {
-                Ok(Self::Icon { name, size: gtk::IconSize::SmallToolbar })
+    fn write(&mut self, kind: clipboard::Kind, contents: String) {
+        let mut cb = self.state.borrow_mut();
+        let Some(cb) = cb.as_mut() else { return };
+        match kind {
+            clipboard::Kind::Standard => {
+                let _ = cb.set_text(contents);
             }
-            Value::Bytes(bytes) => Ok(Self::PixBuf {
-                bytes: bytes.into(),
-                width: None,
-                height: None,
-                keep_aspect: true,
-            }),
-            Value::Array(elts) => match &*elts {
-                [Value::String(name), Value::String(size)] => {
-                    let size = match &**size {
-                        "menu" => gtk::IconSize::Menu,
-                        "small-toolbar" => gtk::IconSize::SmallToolbar,
-                        "large-toolbar" => gtk::IconSize::LargeToolbar,
-                        "dnd" => gtk::IconSize::Dnd,
-                        "dialog" => gtk::IconSize::Dialog,
-                        _ => bail!("invalid size"),
-                    };
-                    Ok(Self::Icon { name: name.clone(), size })
+            clipboard::Kind::Primary => {
+                #[cfg(target_os = "linux")]
+                {
+                    use arboard::SetExtLinux;
+                    let _ = cb
+                        .set()
+                        .clipboard(arboard::LinuxClipboardKind::Primary)
+                        .text(contents);
                 }
-                _ => {
-                    let mut alist =
-                        Value::Array(elts).cast_to::<HashMap<ArcStr, Value>>()?;
-                    let bytes = alist
-                        .remove("image")
-                        .ok_or_else(|| anyhow!("missing bytes"))?
-                        .cast_to::<Bytes>()?;
-                    let width = alist
-                        .remove("width")
-                        .and_then(|v: Value| v.cast_to::<u32>().ok());
-                    let height = alist
-                        .remove("height")
-                        .and_then(|v: Value| v.cast_to::<u32>().ok());
-                    let keep_aspect = alist
-                        .remove("keep-aspect")
-                        .and_then(|v: Value| v.cast_to::<bool>().ok())
-                        .unwrap_or(true);
-                    Ok(Self::PixBuf { bytes, width, height, keep_aspect })
-                }
-            },
-            _ => bail!("expected bytes or array"),
-        }
-    }
-
-    fn get(v: Value) -> Option<Self> {
-        <Self as FromValue>::from_value(v).ok()
-    }
-}
-
-pub(crate) fn val_to_bool(v: &Value) -> bool {
-    match v {
-        Value::Bool(false) | Value::Null => false,
-        _ => true,
-    }
-}
-
-fn make_crumbs(ctx: &BCtx, loc: &ViewLoc) -> gtk::ScrolledWindow {
-    let root = gtk::ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
-    root.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-    let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-    root.add(&hbox);
-    let ask_saved =
-        Rc::new(clone!(@weak ctx, @weak hbox => @default-return true, move || {
-            if !ctx.borrow().view_saved.get() {
-                ask_modal(&hbox, "Unsaved view will be lost.")
-            } else {
-                true
-            }
-        }));
-    match loc {
-        ViewLoc::Netidx(path) => {
-            for target in Path::dirnames(&path) {
-                let lbl = gtk::Label::new(None);
-                let name = match Path::basename(target) {
-                    None => {
-                        hbox.add(&lbl);
-                        lbl.set_margin_start(10);
-                        " / "
-                    }
-                    Some(name) => {
-                        hbox.add(&gtk::Label::new(Some(" > ")));
-                        hbox.add(&lbl);
-                        name
-                    }
-                };
-                let target = glib::markup_escape_text(target);
-                lbl.set_markup(&format!(r#"<a href="{}">{}</a>"#, &*target, &*name));
-                lbl.connect_activate_link(clone!(
-                    @weak ctx,
-                    @strong ask_saved => @default-return Propagation::Proceed, move |_, uri| {
-                        if !ask_saved() {
-                            return Propagation::Proceed
-                        }
-                        ctx.borrow().backend.navigate(
-                            ViewLoc::Netidx(Path::from(String::from(uri)))
-                        );
-                        Propagation::Proceed
-                    }
-                ));
             }
         }
-        ViewLoc::File(name) => {
-            let rl = gtk::Label::new(None);
-            hbox.add(&rl);
-            rl.set_margin_start(10);
-            rl.set_markup(r#"<a href=""> / </a>"#);
-            rl.connect_activate_link(clone!(
-                @weak ctx,
-                @strong ask_saved => @default-return Propagation::Proceed, move |_, _| {
-                    if !ask_saved() {
-                        return Propagation::Proceed
-                    }
-                    ctx.borrow().backend.navigate(ViewLoc::Netidx(Path::from("/")));
-                    Propagation::Proceed
-                }
-            ));
-            let sep = gtk::Label::new(Some(" > "));
-            hbox.add(&sep);
-            let fl = gtk::Label::new(None);
-            hbox.add(&fl);
-            fl.set_margin_start(10);
-            fl.set_markup(&format!(r#"<a href="">file:{:?}</a>"#, name));
-            fl.connect_activate_link(clone!(
-                @weak ctx,
-                @strong ask_saved,
-                @strong name => @default-return Propagation::Proceed, move |_, _| {
-                    if !ask_saved() {
-                        return Propagation::Proceed
-                    }
-                    ctx.borrow().backend.navigate(ViewLoc::File(name.clone()));
-                    Propagation::Proceed
-                }
-            ));
-        }
     }
-    idle_add_local_once(clone!(@weak root => move || {
-        let a = root.hadjustment();
-        a.set_value(a.upper());
-    }));
-    root
 }
 
-struct View {
-    root: gtk::Box,
-    _comp: Option<graphix_rt::CompRes<NoExt>>,
-    /// The top-level expression id, used to detect when to build the widget tree
-    top_id: Option<ExprId>,
-    gtk_root: Option<gtk_widgets::GtkW<NoExt>>,
-    rt_handle: tokio::runtime::Handle,
+// ---- Mouse interaction mapping ----
+
+fn mouse_interaction_to_cursor(interaction: mouse::Interaction) -> CursorIcon {
+    match interaction {
+        mouse::Interaction::None | mouse::Interaction::Idle => CursorIcon::Default,
+        mouse::Interaction::Hidden => CursorIcon::Default,
+        mouse::Interaction::Pointer => CursorIcon::Pointer,
+        mouse::Interaction::Grab => CursorIcon::Grab,
+        mouse::Interaction::Grabbing => CursorIcon::Grabbing,
+        mouse::Interaction::Text => CursorIcon::Text,
+        mouse::Interaction::Crosshair => CursorIcon::Crosshair,
+        mouse::Interaction::Cell => CursorIcon::Cell,
+        mouse::Interaction::Help => CursorIcon::Help,
+        mouse::Interaction::ContextMenu => CursorIcon::ContextMenu,
+        mouse::Interaction::Progress => CursorIcon::Progress,
+        mouse::Interaction::Wait => CursorIcon::Wait,
+        mouse::Interaction::Alias => CursorIcon::Alias,
+        mouse::Interaction::Copy => CursorIcon::Copy,
+        mouse::Interaction::Move => CursorIcon::Move,
+        mouse::Interaction::NoDrop => CursorIcon::NoDrop,
+        mouse::Interaction::NotAllowed => CursorIcon::NotAllowed,
+        mouse::Interaction::ResizingHorizontally => CursorIcon::EwResize,
+        mouse::Interaction::ResizingVertically => CursorIcon::NsResize,
+        mouse::Interaction::ResizingDiagonallyUp => CursorIcon::NeswResize,
+        mouse::Interaction::ResizingDiagonallyDown => CursorIcon::NwseResize,
+        mouse::Interaction::ResizingColumn => CursorIcon::ColResize,
+        mouse::Interaction::ResizingRow => CursorIcon::RowResize,
+        mouse::Interaction::AllScroll => CursorIcon::AllScroll,
+        mouse::Interaction::ZoomIn => CursorIcon::ZoomIn,
+        mouse::Interaction::ZoomOut => CursorIcon::ZoomOut,
+    }
+}
+
+// ---- Compiled view ----
+
+/// A compiled graphix view ready for rendering.
+struct CompiledView {
+    content: GuiW<NoExt>,
     gx: graphix_rt::GXHandle<NoExt>,
-    subscriber: netidx::subscriber::Subscriber,
+    /// If set, the first update matching this id triggers widget compilation
+    /// from the graphix value. Once compiled, this is set to None.
+    pending_top_id: Option<ExprId>,
+    /// Keeps the CompRes alive so graphix expressions don't get dropped.
+    _comp: Option<graphix_rt::CompRes<NoExt>>,
 }
 
-impl View {
-    fn new_from_source(ctx: &BCtx, path: &ViewLoc, source: &str) -> View {
-        log::info!("View::new_from_source compiling {} bytes", source.len());
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
-        root.set_margin(2);
-        root.add(&make_crumbs(ctx, path));
-        root.add(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        let ctx_ref = ctx.borrow();
-        let rt_handle = ctx_ref.backend.rt_handle.clone();
-        let gx = ctx_ref.backend.gx.clone();
-        let subscriber = ctx_ref.backend.subscriber.clone();
-        drop(ctx_ref);
-        let (comp, top_id) = match rt_handle.block_on(gx.compile(ArcStr::from(source))) {
-            Err(e) => {
-                log::error!("failed to compile view source: {:?}", e);
-                let lbl = gtk::Label::new(Some(&format!("Error: {:?}", e)));
-                root.add(&lbl);
-                root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
-                (None, None)
-            }
-            Ok(comp) => {
-                if comp.exprs.is_empty() {
-                    let lbl = gtk::Label::new(Some("(empty view)"));
-                    root.add(&lbl);
-                    root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
-                    (Some(comp), None)
-                } else {
-                    // Record the top-level expression id; the widget tree will
-                    // be built lazily when its first value arrives via update().
-                    let id = comp.exprs[0].id;
-                    let lbl = gtk::Label::new(Some("Loading..."));
-                    root.add(&lbl);
-                    root.set_child_packing(&lbl, true, true, 1, gtk::PackType::Start);
-                    (Some(comp), Some(id))
-                }
-            }
-        };
-        root.show_all();
-        View { root, _comp: comp, top_id, gtk_root: None, rt_handle, gx, subscriber }
-    }
-
-    fn root(&self) -> &gtk::Widget {
-        self.root.upcast_ref()
-    }
-
-    fn update(&mut self, id: ExprId, value: &Value) {
-        // If the top-level expression just produced its first value,
-        // compile it into a GTK widget tree and embed it.
-        if self.gtk_root.is_none() {
-            if let Some(top) = self.top_id {
-                if id == top {
-                    let compile_ctx = gtk_widgets::CompileCtx {
-                        gx: self.gx.clone(),
-                        subscriber: self.subscriber.clone(),
-                    };
-                    match self
-                        .rt_handle
-                        .block_on(gtk_widgets::compile(compile_ctx, value.clone()))
-                    {
-                        Err(e) => {
-                            log::warn!("failed to compile widget tree: {:?}", e);
-                            // Remove the "Loading..." label
-                            let children = self.root.children();
-                            if let Some(last) = children.last() {
-                                self.root.remove(last);
-                            }
-                            let lbl =
-                                gtk::Label::new(Some(&format!("Widget error: {:?}", e)));
-                            self.root.add(&lbl);
-                            self.root.set_child_packing(
-                                &lbl,
-                                true,
-                                true,
-                                1,
-                                gtk::PackType::Start,
-                            );
-                            self.root.show_all();
-                            self.top_id = None;
-                        }
-                        Ok(w) => {
-                            // Remove the "Loading..." label
-                            let children = self.root.children();
-                            if let Some(last) = children.last() {
-                                self.root.remove(last);
-                            }
-                            let gw = w.gtk_widget();
-                            self.root.add(gw);
-                            self.root.set_child_packing(
-                                gw,
-                                true,
-                                true,
-                                1,
-                                gtk::PackType::Start,
-                            );
-                            self.root.show_all();
-                            self.gtk_root = Some(w);
-                            self.top_id = None;
-                        }
+impl CompiledView {
+    fn handle_update(
+        &mut self,
+        rt: &tokio::runtime::Handle,
+        id: ExprId,
+        v: &Value,
+    ) -> Result<bool> {
+        // If we're waiting for the top expression's first value, compile it
+        // into an actual widget tree.
+        if let Some(top_id) = self.pending_top_id {
+            if id == top_id {
+                match rt.block_on(widgets::compile(self.gx.clone(), v.clone())) {
+                    Ok(w) => {
+                        self.content = w;
+                        self.pending_top_id = None;
+                        return Ok(true);
                     }
-                    return;
-                }
-            }
-        }
-        if let Some(ref mut w) = self.gtk_root {
-            if let Err(e) = w.handle_update(&self.rt_handle, id, value) {
-                log::warn!("widget update error: {}", e);
-            }
-        }
-    }
-}
-
-fn setup_css(screen: &gdk::Screen) {
-    let style = gtk::CssProvider::new();
-    style
-        .load_from_data(
-            r#"*.highlighted {
-    border-width: 2px;
-    border-style: solid;
-    border-color: blue;
-}"#
-            .as_bytes(),
-        )
-        .unwrap();
-    gtk::StyleContext::add_provider_for_screen(screen, &style, 800);
-}
-
-fn choose_location(parent: &gtk::ApplicationWindow, save: bool) -> Option<ViewLoc> {
-    enum W {
-        File(gtk::FileChooserWidget),
-        Netidx(gtk::Box),
-    }
-    let d = gtk::Dialog::with_buttons(
-        Some("Choose Location"),
-        Some(parent),
-        gtk::DialogFlags::MODAL | gtk::DialogFlags::USE_HEADER_BAR,
-        &[("Cancel", gtk::ResponseType::Cancel), ("Choose", gtk::ResponseType::Accept)],
-    );
-    let loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
-    let mainw: Rc<RefCell<Option<W>>> = Rc::new(RefCell::new(None));
-    let root = d.content_area();
-    let cb = gtk::ComboBoxText::new();
-    cb.append(Some("Netidx"), "Netidx");
-    cb.append(Some("File"), "File");
-    root.add(&cb);
-    root.add(&gtk::Separator::new(gtk::Orientation::Vertical));
-    cb.connect_changed(clone!(@weak root, @strong loc, @strong mainw => move |cb| {
-        if let Some(mw) = mainw.borrow_mut().take() {
-            match mw {
-                W::File(w) => root.remove(&w),
-                W::Netidx(w) => root.remove(&w),
-            }
-        }
-        let id = cb.active_id();
-        match id.as_ref().map(|i| &**i) {
-            Some("File") => {
-                let w = gtk::FileChooserWidget::new(
-                    if save {
-                        gtk::FileChooserAction::Save
-                    } else {
-                        gtk::FileChooserAction::Open
-                    });
-                w.connect_selection_changed(clone!(@strong loc => move |w| {
-                    *loc.borrow_mut() = w.filename().map(|f| ViewLoc::File(f));
-                }));
-                root.add(&w);
-                *mainw.borrow_mut() = Some(W::File(w));
-            }
-            Some("Netidx") | None => {
-                let b = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-                let l = gtk::Label::new(Some("Netidx Path:"));
-                let e = gtk::Entry::new();
-                b.pack_start(&l, true, true, 5);
-                b.pack_start(&e, true, true, 5);
-                root.add(&b);
-                e.connect_changed(clone!(@strong loc => move |e| {
-                    let p = Path::from(String::from(e.text()));
-                    *loc.borrow_mut() = Some(ViewLoc::Netidx(p));
-                }));
-                *mainw.borrow_mut() = Some(W::Netidx(b));
-            }
-            Some(_) => unreachable!(),
-        }
-        root.show_all();
-    }));
-    cb.set_active_id(Some("Netidx"));
-    let res = match d.run() {
-        gtk::ResponseType::Accept => loc.borrow_mut().take(),
-        gtk::ResponseType::Cancel | _ => None,
-    };
-    unsafe { d.destroy() };
-    res
-}
-
-fn save_view(
-    ctx: &BCtx,
-    save_loc: &Rc<RefCell<Option<ViewLoc>>>,
-    current_source: &Rc<RefCell<ArcStr>>,
-    save_button: &gtk::ToolButton,
-    save_as: bool,
-) {
-    let do_save = |loc: ViewLoc| {
-        glib::MainContext::default().spawn_local({
-            let save_button = save_button.clone();
-            let save_loc = save_loc.clone();
-            let source = current_source.borrow().clone();
-            let ctx = ctx.clone();
-            let backend = ctx.borrow().backend.clone();
-            async move {
-                match backend.save(loc.clone(), source).await {
                     Err(e) => {
-                        let _: result::Result<_, _> =
-                            backend.to_gui.send(ToGui::SaveError(format!(
-                                "error saving to: {:?}, {}",
-                                &*save_loc.borrow(),
-                                e
-                            )));
-                        *save_loc.borrow_mut() = None;
+                        log::warn!("failed to compile widget tree: {e:?}");
+                        self.content = Box::new(ErrorView(format!("{e:?}")));
+                        self.pending_top_id = None;
+                        return Ok(true);
                     }
-                    Ok(()) => {
-                        ctx.borrow().view_saved.set(true);
-                        save_button.set_sensitive(false);
-                        let mut sl = save_loc.borrow_mut();
-                        if sl.as_ref() != Some(&loc) {
-                            *sl = Some(loc.clone());
-                            backend.navigate(loc.clone());
+                }
+            }
+        }
+        self.content.handle_update(rt, id, v)
+    }
+
+    fn view(&self) -> IcedElement<'_> {
+        self.content.view()
+    }
+}
+
+// ---- Browser window state ----
+
+struct BrowserWindow {
+    window: Arc<winit::window::Window>,
+    pending_events: Vec<iced_core::Event>,
+    cursor_position: iced_core::Point,
+    needs_redraw: bool,
+    last_render: Instant,
+    pending_resize: Option<(u32, u32, f64)>,
+    last_mouse_interaction: mouse::Interaction,
+    /// The currently displayed compiled view, if any
+    view: Option<CompiledView>,
+    /// Current location
+    current_loc: ViewLoc,
+}
+
+impl BrowserWindow {
+    fn new(window: Arc<winit::window::Window>) -> Self {
+        Self {
+            window,
+            pending_events: Vec::new(),
+            cursor_position: iced_core::Point::ORIGIN,
+            needs_redraw: true,
+            last_render: Instant::now(),
+            pending_resize: None,
+            last_mouse_interaction: mouse::Interaction::Idle,
+            view: None,
+            current_loc: ViewLoc::Netidx(Path::from("/")),
+        }
+    }
+
+    fn window_id(&self) -> WindowId {
+        self.window.id()
+    }
+
+    fn push_event(&mut self, ev: iced_core::Event) {
+        self.pending_events.push(ev);
+        self.needs_redraw = true;
+    }
+
+    fn cursor(&self) -> mouse::Cursor {
+        mouse::Cursor::Available(self.cursor_position)
+    }
+
+    fn content_element(&self) -> IcedElement<'_> {
+        match &self.view {
+            Some(v) => v.view(),
+            None => iced_widget::text("Loading...").into(),
+        }
+    }
+}
+
+const RESIZE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
+
+// ---- Main handler ----
+
+struct BrowserHandler {
+    backend: backend::Ctx,
+    gpu: Option<GpuState>,
+    rt: tokio::runtime::Handle,
+    window: Option<BrowserWindow>,
+    surface: Option<WindowSurface>,
+    ui_cache: user_interface::Cache,
+    clipboard: Clipboard,
+    chrome: chrome::Chrome,
+    messages: Vec<BrowserMsg>,
+    modifiers: ModifiersState,
+    /// Initial location to navigate to on startup
+    initial_loc: Option<ViewLoc>,
+}
+
+impl ApplicationHandler<BrowserEvent> for BrowserHandler {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Wait);
+        // Create the initial window on first resume
+        if self.window.is_none() {
+            let attrs = winit::window::WindowAttributes::default()
+                .with_title("Netidx Browser")
+                .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0));
+            match event_loop.create_window(attrs) {
+                Ok(win) => {
+                    let win = Arc::new(win);
+                    // Initialize GPU state from this window
+                    if self.gpu.is_none() {
+                        match self.rt.block_on(GpuState::new(win.clone())) {
+                            Ok(gpu) => {
+                                match WindowSurface::new(&gpu, win.clone()) {
+                                    Ok(ws) => {
+                                        self.surface = Some(ws);
+                                    }
+                                    Err(e) => {
+                                        error!("failed to create window surface: {e:?}");
+                                    }
+                                }
+                                self.gpu = Some(gpu);
+                            }
+                            Err(e) => {
+                                error!("failed to create GPU state: {e:?}");
+                            }
+                        }
+                    }
+                    self.window = Some(BrowserWindow::new(win));
+                    // Navigate to initial location
+                    if let Some(loc) = self.initial_loc.take() {
+                        self.backend.navigate(loc);
+                    }
+                }
+                Err(e) => {
+                    error!("failed to create window: {e:?}");
+                    event_loop.exit();
+                }
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = m.state();
+        }
+
+        let Some(bw) = self.window.as_mut() else { return };
+
+        match &event {
+            WindowEvent::Resized(size) => {
+                let scale = bw.window.scale_factor();
+                bw.pending_resize = Some((size.width, size.height, scale));
+                bw.needs_redraw = true;
+                // Notify data table of new viewport size
+                let logical = size.to_logical::<f32>(scale);
+                if let Some(view) = bw.view.as_mut() {
+                    view.content.handle_viewport_resize(logical.width, logical.height);
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                bw.needs_redraw = true;
+            }
+            WindowEvent::CloseRequested => {
+                self.backend.terminate();
+                self.window = None;
+                self.surface = None;
+                self.gpu = None;
+                event_loop.exit();
+                return;
+            }
+            _ => {
+                // Intercept Backspace for browser "navigate up".
+                // Only fires if no text input widget is focused (iced handles
+                // Backspace for text inputs before it reaches here).
+                if let WindowEvent::KeyboardInput { event: ref key_event, .. } = event {
+                    use winit::keyboard::{Key, NamedKey};
+                    if key_event.state == winit::event::ElementState::Pressed
+                        && key_event.logical_key == Key::Named(NamedKey::Backspace)
+                    {
+                        self.messages.push(BrowserMsg::NavigateUp);
+                    }
+                }
+                let scale = bw.window.scale_factor();
+                let mut iced_events = convert::window_event(&event, scale, self.modifiers);
+                for ev in iced_events.drain(..) {
+                    if let iced_core::Event::Mouse(mouse::Event::CursorMoved {
+                        position,
+                    }) = &ev
+                    {
+                        bw.cursor_position = *position;
+                    }
+                    bw.push_event(ev);
+                }
+            }
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: BrowserEvent) {
+        match event {
+            BrowserEvent::Terminate => {
+                self.window = None;
+                self.surface = None;
+                self.gpu = None;
+                event_loop.exit();
+            }
+            BrowserEvent::View { loc, source, generated: _ } => {
+                if let Some(bw) = self.window.as_mut() {
+                    if let Some(l) = &loc {
+                        bw.current_loc = l.clone();
+                        self.backend.set_current_path(l);
+                    }
+                    // Compile the view source
+                    match self.rt.block_on(
+                        self.backend.gx.compile(source.clone()),
+                    ) {
+                        Err(e) => {
+                            error!("failed to compile view: {e:?}");
+                            bw.view = None;
+                        }
+                        Ok(comp) => {
+                            if comp.exprs.is_empty() {
+                                bw.view = None;
+                            } else {
+                                // Use last expression (use statements may precede it)
+                                let top_id = comp.exprs.last().unwrap().id;
+                                bw.view = Some(CompiledView {
+                                    content: Box::new(LoadingView),
+                                    gx: self.backend.gx.clone(),
+                                    pending_top_id: Some(top_id),
+                                    _comp: Some(comp),
+                                });
+                            }
+                        }
+                    }
+                    bw.needs_redraw = true;
+                }
+            }
+            BrowserEvent::Navigate(loc) => {
+                self.backend.navigate(loc);
+            }
+            BrowserEvent::NavigateInWindow(_loc) => {
+                // TODO: Phase 6 multi-window support
+            }
+            BrowserEvent::Update(updates) => {
+                if let Some(bw) = self.window.as_mut() {
+                    for (id, v) in &updates {
+                        if let Some(view) = bw.view.as_mut() {
+                            match view.handle_update(&self.rt, *id, v) {
+                                Ok(changed) => {
+                                    if changed {
+                                        bw.needs_redraw = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("widget update error: {e:?}");
+                                }
+                            }
                         }
                     }
                 }
             }
-        });
-    };
-    let sl = save_loc.borrow_mut();
-    match &*sl {
-        Some(loc) if !save_as => do_save(loc.clone()),
-        _ => {
-            let window = ctx.borrow().window.clone();
-            match choose_location(&window, true) {
-                None => (),
-                Some(loc) => do_save(loc),
+            BrowserEvent::ShowError(msg) => {
+                error!("browser error: {msg}");
+                // TODO: show error overlay in Phase 2
+            }
+            BrowserEvent::Confirm { message: _, reply } => {
+                // TODO: show confirmation overlay in Phase 6
+                // For now, auto-confirm
+                if let Some(tx) = reply.lock().unwrap().take() {
+                    let _ = tx.send(true);
+                }
             }
         }
     }
-}
 
-fn run_gui(ctx: BCtx, app: Application, to_gui: glib::Receiver<ToGui>) {
-    let group = gtk::WindowGroup::new();
-    group.add_window(&ctx.borrow().window);
-    let headerbar = gtk::HeaderBar::new();
-    let design_mode = gtk::ToggleButton::new();
-    let design_img = gtk::Image::from_icon_name(
-        Some("document-page-setup"),
-        gtk::IconSize::SmallToolbar,
-    );
-    let save_img = gtk::Image::from_icon_name(
-        Some("media-floppy-symbolic"),
-        gtk::IconSize::SmallToolbar,
-    );
-    let save_button = gtk::ToolButton::new(Some(&save_img), None);
-    let prefs_button = gtk::MenuButton::new();
-    let menu_img =
-        gtk::Image::from_icon_name(Some("open-menu"), gtk::IconSize::SmallToolbar);
-    prefs_button.set_image(Some(&menu_img));
-    let main_menu = gio::Menu::new();
-    main_menu.append(Some("Go"), Some("win.go"));
-    main_menu.append(Some("Save View As"), Some("win.save_as"));
-    main_menu.append(Some("Raw View"), Some("win.raw_view"));
-    main_menu.append(Some("New Window"), Some("win.new_window"));
-    prefs_button.set_use_popover(true);
-    prefs_button.set_menu_model(Some(&main_menu));
-    save_button.set_sensitive(false);
-    design_mode.set_image(Some(&design_img));
-    headerbar.set_show_close_button(true);
-    headerbar.pack_start(&design_mode);
-    headerbar.pack_start(&save_button);
-    headerbar.pack_end(&prefs_button);
-    {
-        let w = &ctx.borrow().window;
-        w.set_titlebar(Some(&headerbar));
-        w.set_title("Netidx browser");
-        w.set_default_size(800, 600);
-        w.show_all();
-        if let Some(screen) = WidgetExt::screen(w) {
-            setup_css(&screen);
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.as_ref() else { return };
+        let Some(bw) = self.window.as_mut() else { return };
+        let Some(ws) = self.surface.as_mut() else { return };
+
+        if !bw.needs_redraw {
+            return;
         }
-    }
-    let save_loc: Rc<RefCell<Option<ViewLoc>>> = Rc::new(RefCell::new(None));
-    let current_loc: Rc<RefCell<ViewLoc>> = ctx.borrow().current_loc.clone();
-    let current_source: Rc<RefCell<ArcStr>> =
-        Rc::new(RefCell::new(default_view_source(&Path::from("/"))));
-    let current: Rc<RefCell<Option<View>>> = Rc::new(RefCell::new(None));
-    let editor: Rc<RefCell<Option<Editor>>> = Rc::new(RefCell::new(None));
-    let editor_window: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
-    ctx.borrow().window.connect_delete_event(clone!(
-        @weak ctx => @default-return Propagation::Proceed, move |w, _| {
-            let saved = ctx.borrow().view_saved.get();
-            if saved || ask_modal(w, "Unsaved view will be lost.") {
-                ctx.borrow().backend.terminate();
-                Propagation::Proceed
-            } else {
-                Propagation::Stop
+
+        // During resize, throttle rendering
+        if bw.pending_resize.is_some() {
+            let elapsed = bw.last_render.elapsed();
+            if elapsed < RESIZE_RENDER_INTERVAL {
+                let wake = bw.last_render + RESIZE_RENDER_INTERVAL;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+                return;
             }
         }
-    ));
-    design_mode.connect_toggled(clone!(
-        @strong editor_window,
-        @strong editor,
-        @strong current_source,
-        @strong current_loc,
-        @weak ctx => move |b| {
-            if b.is_active() {
-                let ed = Editor::new(
-                    &ctx,
-                    current_source.borrow().clone(),
-                );
-                let win = gtk::Window::builder()
-                    .default_width(1024)
-                    .default_height(768)
-                    .type_(gtk::WindowType::Toplevel)
-                    .title("View Editor")
-                    .visible(true)
-                    .build();
-                win.connect_destroy(clone!(@strong b, @strong editor_window => move |_| {
-                    editor_window.borrow_mut().take();
-                    b.set_active(false);
-                }));
-                win.add(ed.root());
-                win.show_all();
-                *editor_window.borrow_mut() = Some(win);
-                *editor.borrow_mut() = Some(ed);
-            } else {
-                if let Some(win) = editor_window.borrow_mut().take() {
-                    win.close();
-                }
-                editor.borrow_mut().take();
-            }
-        }
-    ));
-    save_button.connect_clicked(clone!(
-        @strong save_loc,
-        @strong current_source,
-        @weak ctx => move |b| {
-            save_view(&ctx, &save_loc, &current_source, b, false)
-        }
-    ));
-    let go_act = gio::SimpleAction::new("go", None);
-    ctx.borrow().window.add_action(&go_act);
-    go_act.connect_activate(clone!(@weak ctx => move |_, _| {
-        let (saved, window) = {
-            let ctx = ctx.borrow();
-            let saved = ctx.view_saved.get();
-            let window = ctx.window.clone();
-            (saved, window)
-        };
-        if saved || ask_modal(&window, "Unsaved view will be lost.") {
-            if let Some(loc) = choose_location(&window, false) {
-                ctx.borrow().backend.navigate(loc);
-            }
-        }
-    }));
-    let save_as_act = gio::SimpleAction::new("save_as", None);
-    ctx.borrow().window.add_action(&save_as_act);
-    save_as_act.connect_activate(clone!(
-        @strong save_loc,
-        @strong current_source,
-        @weak ctx,
-        @strong save_button => move |_, _| {
-            save_view(&ctx, &save_loc, &current_source, &save_button, true)
-        }
-    ));
-    let raw_view_act =
-        gio::SimpleAction::new_stateful("raw_view", None, &false.to_variant());
-    ctx.borrow().window.add_action(&raw_view_act);
-    raw_view_act.connect_activate(clone!(
-        @weak ctx, @strong current_loc  => move |a, _| {
-            if let Some(v) = a.state() {
-                let new_v = !v.get::<bool>().expect("invalid state");
-                let m = "Unsaved view will be lost.";
-                let (saved, window) = {
-                    let ctx = ctx.borrow();
-                    let saved = ctx.view_saved.get();
-                    let window = ctx.window.clone();
-                    (saved, window)
-                };
-                if !new_v || saved || ask_modal(&window, m) {
-                    ctx.borrow().raw_view.store(new_v, Ordering::Relaxed);
-                    a.change_state(&new_v.to_variant());
-                    ctx.borrow().backend.navigate(current_loc.borrow().clone());
-                }
-            }
-        }
-    ));
-    let new_window_act = gio::SimpleAction::new("new_window", None);
-    ctx.borrow().window.add_action(&new_window_act);
-    new_window_act.connect_activate(clone!(@weak app => move |_, _| app.activate()));
-    to_gui.attach(None, move |m| match m {
-        ToGui::Update(updates) => {
-            if let Some(root) = &mut *current.borrow_mut() {
-                for (id, value) in &updates {
-                    root.update(*id, value);
-                }
-            }
-            ControlFlow::Continue
-        }
-        ToGui::Navigate(loc) => {
-            let (saved, window) = {
-                let ctx = ctx.borrow();
-                let saved = ctx.view_saved.get();
-                let window = ctx.window.clone();
-                (saved, window)
-            };
-            if saved || ask_modal(&window, "Unsaved view will be lost") {
-                ctx.borrow().backend.navigate(loc)
-            }
-            ControlFlow::Continue
-        }
-        ToGui::NavigateInWindow(loc) => {
-            *ctx.borrow().new_window_loc.borrow_mut() = loc;
-            app.activate();
-            ControlFlow::Continue
-        }
-        ToGui::View { loc, source, generated } => {
-            log::info!(
-                "ToGui::View received, source len={}, generated={}",
-                source.len(),
-                generated
-            );
-            match loc {
-                None => {
-                    ctx.borrow().view_saved.set(false);
-                    save_button.set_sensitive(true);
-                }
-                Some(loc) => {
-                    ctx.borrow().view_saved.set(true);
-                    save_button.set_sensitive(false);
-                    if !generated {
-                        *save_loc.borrow_mut() = Some(match loc.clone() {
-                            v @ ViewLoc::File(_) => v,
-                            ViewLoc::Netidx(p) => ViewLoc::Netidx(p.append(".view")),
-                        });
-                    } else {
-                        *save_loc.borrow_mut() = None;
-                    }
-                    ctx.borrow().backend.set_current_path(&loc);
-                    *current_loc.borrow_mut() = loc;
-                    if design_mode.is_active() {
-                        design_mode.set_active(false);
-                    }
-                }
-            }
-            if let Some(cur) = current.borrow_mut().take() {
-                ctx.borrow().window.remove(cur.root());
-            }
-            *current_source.borrow_mut() = source.clone();
-            let cur = View::new_from_source(&ctx, &*current_loc.borrow(), &source);
-            let window = ctx.borrow().window.clone();
-            window.set_title(&format!("Netidx Browser {}", &*current_loc.borrow()));
-            window.add(cur.root());
-            window.show_all();
-            *current.borrow_mut() = Some(cur);
-            ControlFlow::Continue
-        }
-        ToGui::ShowError(s) => {
-            err_modal(&ctx.borrow().window, &s);
-            ControlFlow::Continue
-        }
-        ToGui::SaveError(s) => {
-            err_modal(&ctx.borrow().window, &s);
-            idle_add_local(clone!(
-                @weak ctx,
-                @strong save_loc,
-                @strong current_source,
-                @strong save_button => @default-return ControlFlow::Break, move || {
-                    save_view(
-                        &ctx,
-                        &save_loc,
-                        &current_source,
-                        &save_button,
-                        true,
-                    );
-                    ControlFlow::Break
-                }
+
+        if let Some((pw, ph, scale)) = bw.pending_resize.take() {
+            ws.resize(gpu, pw, ph, scale);
+            bw.push_event(iced_core::Event::Window(
+                iced_core::window::Event::Resized(ws.logical_size()),
             ));
-            ControlFlow::Continue
         }
-        ToGui::Confirm { message, reply } => {
-            let confirmed = ask_modal(&ctx.borrow().window, &message);
-            if let Some(tx) = reply.lock().ok().and_then(|mut g| g.take()) {
-                let _ = tx.send(confirmed);
+
+        // Build and render the UI.
+        // We must extract values from `state` before touching `bw` again,
+        // because `ui` borrows the events in `bw`.
+        let theme = {
+            use iced_core::theme::Base;
+            GraphixTheme {
+                inner: iced_core::Theme::default(iced_core::theme::Mode::Dark),
+                overrides: None,
             }
-            ControlFlow::Continue
-        }
-        ToGui::Terminate => {
-            app.quit();
-            ControlFlow::Break
-        }
-    });
-}
+        };
+        // Compose: chrome wraps around graphix content.
+        // Graphix content uses Message; map it to BrowserMsg::Widget.
+        let content: BrowserElement<'_> =
+            bw.content_element().map(BrowserMsg::Widget);
+        let element = self.chrome.view(&bw.current_loc, content);
+        let viewport_size = ws.logical_size();
+        let cache = mem::take(&mut self.ui_cache);
+        let cursor = bw.cursor();
+        let mut ui = UserInterface::build(element, viewport_size, cache, &mut ws.renderer);
+        let (state, _statuses) = ui.update(
+            &bw.pending_events,
+            cursor,
+            &mut ws.renderer,
+            &mut self.clipboard,
+            &mut self.messages,
+        );
 
-fn add_local_options(application: &gtk::Application) {
-    application.add_main_option(
-        "config",
-        glib::Char::from(b'c'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "use the specified config file instead of the default",
-        Some("the config file to use"),
-    );
-    application.add_main_option(
-        "auth",
-        glib::Char::from(b'a'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "override the default auth mechanism (krb5)",
-        Some("[tls, krb5, local, or anonymous]"),
-    );
-    application.add_main_option(
-        "upn",
-        glib::Char::from(b'u'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "set the krb5 user principal name (the current user)",
-        Some("the name"),
-    );
-    application.add_main_option(
-        "path",
-        glib::Char::from(b'p'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "navigate to the specified path on load (/)",
-        Some("path"),
-    );
-    application.add_main_option(
-        "file",
-        glib::Char::from(b'f'),
-        glib::OptionFlags::empty(),
-        glib::OptionArg::String,
-        "load the specified view file on load",
-        Some("file"),
-    );
-}
+        // Extract mouse interaction and redraw request from state before
+        // consuming the UI (which releases borrows on bw).
+        let new_mouse = match &state {
+            user_interface::State::Updated { mouse_interaction, .. } => {
+                Some(*mouse_interaction)
+            }
+            _ => None,
+        };
+        let redraw_request = match &state {
+            user_interface::State::Outdated => {
+                Some(iced_core::window::RedrawRequest::NextFrame)
+            }
+            user_interface::State::Updated { redraw_request, .. } => {
+                match redraw_request {
+                    iced_core::window::RedrawRequest::Wait => None,
+                    r => Some(*r),
+                }
+            }
+        };
 
-fn parse_auth(cfg: &Config, opts: &glib::VariantDict) -> DesiredAuth {
-    match opts.lookup_value("auth", Some(&glib::VariantTy::STRING)) {
-        None => cfg.default_auth(),
-        Some(auth) => match auth
-            .get::<String>()
-            .unwrap()
-            .parse::<DesiredAuth>()
-            .expect("invalid auth mechanism")
-        {
-            auth @ (DesiredAuth::Local
-            | DesiredAuth::Anonymous
-            | DesiredAuth::Tls { .. }) => auth,
-            DesiredAuth::Krb5 { .. } => {
-                match opts.lookup_value("upn", Some(&glib::VariantTy::STRING)) {
-                    None => DesiredAuth::Krb5 { upn: None, spn: None },
-                    Some(upn) => {
-                        DesiredAuth::Krb5 { upn: upn.get::<String>(), spn: None }
+        let style = Style { text_color: theme.palette().text };
+        ui.draw(&mut ws.renderer, &theme, &style, cursor);
+        self.ui_cache = ui.into_cache();
+        bw.pending_events.clear();
+
+        // Now safe to modify bw
+        if let Some(mi) = new_mouse {
+            if bw.last_mouse_interaction != mi {
+                bw.last_mouse_interaction = mi;
+                match mi {
+                    mouse::Interaction::Hidden => {
+                        bw.window.set_cursor_visible(false);
+                    }
+                    _ => {
+                        bw.window.set_cursor_visible(true);
+                        bw.window.set_cursor(mouse_interaction_to_cursor(mi));
                     }
                 }
             }
-        },
+        }
+
+        match ws.surface.get_current_texture() {
+            Ok(frame) => {
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                ws.renderer.present(
+                    Some(theme.palette().background),
+                    gpu.format,
+                    &view,
+                    &ws.viewport,
+                );
+                frame.present();
+                bw.last_render = Instant::now();
+                // When a view with subscriptions is active, poll at ~20fps
+                // to pick up cell data updates from netidx.
+                let poll_interval = if bw.view.is_some() {
+                    Some(Instant::now() + Duration::from_millis(100))
+                } else {
+                    None
+                };
+                let wake = match (redraw_request, poll_interval) {
+                    (Some(r), Some(p)) => {
+                        let t = match r {
+                            iced_core::window::RedrawRequest::NextFrame => Instant::now(),
+                            iced_core::window::RedrawRequest::At(t) => t,
+                            iced_core::window::RedrawRequest::Wait => unreachable!(),
+                        };
+                        Some(t.min(p))
+                    }
+                    (Some(r), None) => Some(match r {
+                        iced_core::window::RedrawRequest::NextFrame => Instant::now(),
+                        iced_core::window::RedrawRequest::At(t) => t,
+                        iced_core::window::RedrawRequest::Wait => unreachable!(),
+                    }),
+                    (None, Some(p)) => Some(p),
+                    (None, None) => None,
+                };
+                bw.needs_redraw = wake.is_some();
+                if let Some(t) = wake {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+                } else {
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+            }
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                ws.surface.configure(&gpu.device, &ws.config);
+                bw.needs_redraw = true;
+                event_loop.set_control_flow(ControlFlow::Poll);
+            }
+            Err(e) => {
+                error!("surface frame error: {e:?}");
+                bw.needs_redraw = false;
+            }
+        }
+
+        // Handle messages from iced widgets and browser chrome
+        for msg in self.messages.drain(..) {
+            match msg {
+                BrowserMsg::Widget(Message::Nop) => {}
+                BrowserMsg::Widget(Message::CellClick(row, col)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_cell_click(row, col) {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::CellEdit(row, col)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_cell_edit(row, col) {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::CellEditInput(text)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_cell_edit_input(text) {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::CellEditSubmit) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_cell_edit_submit() {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::TableKey(action)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_table_key(&action) {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::CellEditCancel) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_cell_edit_cancel() {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::Scroll(v, h, vp_w, vp_h)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_scroll(v, h, vp_w, vp_h) {
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::Call(id, args)) => {
+                    if let Err(e) = self.backend.gx.call(id, args) {
+                        error!("failed to call: {e:?}");
+                    }
+                }
+                BrowserMsg::Widget(Message::EditorAction(id, action)) => {
+                    if let Some(view) = self.window.as_mut().and_then(|bw| bw.view.as_mut()) {
+                        if let Some((callable_id, v)) =
+                            view.content.editor_action(id, &action)
+                        {
+                            if let Err(e) = self.backend.gx.call(
+                                callable_id,
+                                netidx::protocol::valarray::ValArray::from_iter([v]),
+                            ) {
+                                error!("failed to call editor callback: {e:?}");
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Navigate(loc) => {
+                    self.backend.navigate(loc);
+                }
+                BrowserMsg::NavigateUp => {
+                    if let Some(bw) = self.window.as_ref() {
+                        let parent = match &bw.current_loc {
+                            ViewLoc::Netidx(p) => {
+                                Path::dirname(p).map(|d| {
+                                    ViewLoc::Netidx(Path::from(ArcStr::from(d)))
+                                })
+                            }
+                            ViewLoc::File(_) => {
+                                Some(ViewLoc::Netidx(Path::from("/")))
+                            }
+                        };
+                        if let Some(loc) = parent {
+                            self.backend.navigate(loc);
+                        }
+                    }
+                }
+                BrowserMsg::NavInputChanged(text) => {
+                    self.chrome.nav_input = text;
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::NavSubmit => {
+                    let input = self.chrome.nav_input.trim().to_string();
+                    if !input.is_empty() {
+                        if let Ok(loc) = input.parse::<ViewLoc>() {
+                            self.backend.navigate(loc);
+                            self.chrome.nav_input.clear();
+                        }
+                    }
+                }
+                BrowserMsg::ToggleDesignMode => {
+                    // TODO: Phase 5 — open design window
+                }
+            }
+        }
     }
 }
+
+// ---- Placeholder widgets ----
+
+struct LoadingView;
+
+impl widgets::GuiWidget<NoExt> for LoadingView {
+    fn handle_update(
+        &mut self,
+        _rt: &tokio::runtime::Handle,
+        _id: ExprId,
+        _v: &Value,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn view(&self) -> IcedElement<'_> {
+        iced_widget::text("Loading...").into()
+    }
+}
+
+struct ErrorView(String);
+
+impl widgets::GuiWidget<NoExt> for ErrorView {
+    fn handle_update(
+        &mut self,
+        _rt: &tokio::runtime::Handle,
+        _id: ExprId,
+        _v: &Value,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn view(&self) -> IcedElement<'_> {
+        iced_widget::text(format!("Error: {}", self.0)).into()
+    }
+}
+
+// ---- Entry point ----
 
 fn main() {
     env_logger::init();
-    let application = Application::new(
-        Some("org.netidx.browser"),
-        gio::ApplicationFlags::NON_UNIQUE | Default::default(),
-    );
-    add_local_options(&application);
-    application.connect_handle_local_options(|application, opts| {
-        let cfg = match opts.lookup_value("config", Some(&glib::VariantTy::STRING)) {
-            None => Config::load_default().unwrap(),
-            Some(path) => Config::load(path.get::<String>().unwrap()).unwrap(),
-        };
-        let auth = parse_auth(&cfg, opts);
-        let default_loc = match opts.lookup_value("path", Some(&glib::VariantTy::STRING))
-        {
-            Some(path) => ViewLoc::Netidx(Path::from(path.get::<String>().unwrap())),
-            None => match opts.lookup_value("file", Some(&glib::VariantTy::STRING)) {
-                Some(file) => ViewLoc::File(PathBuf::from(file.get::<String>().unwrap())),
-                None => ViewLoc::Netidx(Path::from("/")),
-            },
-        };
-        let (jh, backend) = backend::Backend::new(cfg, auth);
-        let new_window_loc = Rc::new(RefCell::new(default_loc.clone()));
-        application.connect_activate({
-            let backend = backend.clone();
-            move |app| {
-                let app = app.clone();
-                #[allow(deprecated)]
-                let (tx_to_gui, rx_to_gui) =
-                    glib::MainContext::channel(Priority::DEFAULT);
-                let raw_view = Arc::new(AtomicBool::new(false));
-                let backend_ctx =
-                    backend.create_ctx(tx_to_gui, raw_view.clone()).unwrap();
-                backend_ctx.navigate(mem::replace(
-                    &mut *new_window_loc.borrow_mut(),
-                    default_loc.clone(),
-                ));
-                let window = ApplicationWindow::new(&app);
-                let ctx = Rc::new(RefCell::new(BrowserCtx {
-                    backend: backend_ctx,
-                    raw_view,
-                    window: window.clone(),
-                    new_window_loc: new_window_loc.clone(),
-                    current_loc: Rc::new(RefCell::new(default_loc.clone())),
-                    view_saved: Cell::new(true),
-                }));
-                run_gui(ctx, app, rx_to_gui);
-            }
-        });
-        let jh = RefCell::new(Some(jh));
-        application.connect_shutdown(move |_| {
-            backend.stop();
-            if let Some(jh) = jh.borrow_mut().take() {
-                let _: result::Result<_, _> = jh.join();
-            }
-        });
-        -1
-    });
-    application.run();
+
+    let cfg = match Config::load_default() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to load netidx config: {e}");
+            std::process::exit(1);
+        }
+    };
+    let auth = cfg.default_auth();
+
+    // Determine initial location from CLI args
+    let initial_loc = std::env::args().nth(1).and_then(|a| a.parse::<ViewLoc>().ok());
+    let initial_loc = initial_loc.unwrap_or(ViewLoc::Netidx(Path::from("/")));
+
+    // Create the winit event loop on the main thread
+    let event_loop = match EventLoop::<BrowserEvent>::with_user_event().build() {
+        Ok(el) => el,
+        Err(e) => {
+            eprintln!("failed to create event loop: {e}");
+            std::process::exit(1);
+        }
+    };
+    let proxy = event_loop.create_proxy();
+
+    // Create backend context (starts tokio runtime, graphix, subscriber)
+    let ctx = match backend::Ctx::new(cfg, auth, proxy) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to create backend: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let rt_handle = ctx.rt_handle.clone();
+    let mut handler = BrowserHandler {
+        backend: ctx,
+        gpu: None,
+        rt: rt_handle,
+        window: None,
+        surface: None,
+        ui_cache: user_interface::Cache::default(),
+        clipboard: Clipboard::new(),
+        chrome: chrome::Chrome::new(),
+        messages: Vec::new(),
+        modifiers: ModifiersState::default(),
+        initial_loc: Some(initial_loc),
+    };
+
+    if let Err(e) = event_loop.run_app(&mut handler) {
+        error!("event loop error: {e:?}");
+    }
 }

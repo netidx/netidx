@@ -43,6 +43,7 @@ graphix-compiler = { version = "0.7.0", path = "../graphix/graphix-compiler" }
 graphix-package = { version = "0.7.0", path = "../graphix/graphix-package" }
 graphix-package-core = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-core" }
 graphix-package-gui = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-gui" }
+graphix-package-sys = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-sys" }
 hdrhistogram = "7"
 if-addrs = "0.15"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
@@ -96,6 +97,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
 x509-parser = "0.18"
 zstd = { version = "0.13", features = ["zstdmt"] }
+
+# iced GUI framework (sub-crates used directly for low-level control)
+arboard = "3"
+winit = { version = "0.30", features = ["rwh_06"] }
+iced_core = "0.14"
+iced_renderer = { version = "0.14", features = ["wgpu", "wgpu-bare"] }
+iced_runtime = "0.14"
+iced_wgpu = "0.14"
+iced_widget = { version = "0.14", features = ["canvas", "image", "markdown", "qr_code", "svg"] }
 
 [workspace]
 resolver = "2"

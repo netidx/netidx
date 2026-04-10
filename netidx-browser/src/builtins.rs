@@ -1,9 +1,9 @@
 //! Browser-specific graphix builtins: navigate, confirm
 //!
-//! These builtins communicate with the GTK thread through channels
-//! stored in LibState.
+//! These builtins communicate with the winit event loop through
+//! an EventLoopProxy stored in LibState.
 
-use crate::{ToGui, ViewLoc};
+use crate::{BrowserEvent, ViewLoc};
 use anyhow::Result;
 use graphix_compiler::{
     expr::ExprId, typ::FnType, Apply, BindId, BuiltIn, Event, ExecCtx,
@@ -11,13 +11,14 @@ use graphix_compiler::{
 };
 use graphix_rt::{GXRt, NoExt};
 use netidx::publisher::Value;
+use winit::event_loop::EventLoopProxy;
 
 type R = GXRt<NoExt>;
 type E = graphix_compiler::NoUserEvent;
 
 /// Shared state accessible by all browser builtins via LibState.
 pub(crate) struct BrowserLibState {
-    pub(crate) to_gui: glib::Sender<ToGui>,
+    pub(crate) proxy: EventLoopProxy<BrowserEvent>,
 }
 
 // ---- navigate(path) ----
@@ -58,7 +59,7 @@ impl Apply<R, E> for NavigateInner {
         if let Value::String(s) = &v {
             if let Ok(loc) = s.parse::<ViewLoc>() {
                 if let Some(state) = ctx.libstate.get::<BrowserLibState>() {
-                    let _ = state.to_gui.send(ToGui::Navigate(loc));
+                    let _ = state.proxy.send_event(BrowserEvent::Navigate(loc));
                 }
             }
         }
@@ -110,7 +111,7 @@ impl Apply<R, E> for NavigateInWindowInner {
         if let Value::String(s) = &v {
             if let Ok(loc) = s.parse::<ViewLoc>() {
                 if let Some(state) = ctx.libstate.get::<BrowserLibState>() {
-                    let _ = state.to_gui.send(ToGui::NavigateInWindow(loc));
+                    let _ = state.proxy.send_event(BrowserEvent::NavigateInWindow(loc));
                 }
             }
         }
@@ -125,10 +126,8 @@ impl Apply<R, E> for NavigateInWindowInner {
 pub(crate) type NavigateInWindow = NavigateInWindowInner;
 
 // ---- confirm(message, value) ----
-// Shows a GTK confirmation dialog. Returns value if confirmed, null if cancelled.
-// Uses spawn_var to avoid blocking the graphix runtime — the confirm request
-// is sent to the GTK thread, and the reply arrives as a variable update
-// in the next cycle.
+// Shows a confirmation dialog. Returns value if confirmed, null if cancelled.
+// Uses spawn_var to avoid blocking the graphix runtime.
 
 #[derive(Debug)]
 struct ConfirmInner {
@@ -148,7 +147,6 @@ impl BuiltIn<R, E> for ConfirmInner {
         _from: &'c [Node<R, E>],
         top_id: ExprId,
     ) -> Result<Box<dyn Apply<R, E>>> {
-        // Allocate a BindId for the async result variable
         let result_bid = BindId::new();
         ctx.rt.ref_var(result_bid, top_id);
         Ok(Box::new(ConfirmInner { result_bid, top_id }))
@@ -175,14 +173,12 @@ impl Apply<R, E> for ConfirmInner {
             if let Some(v) = n.update(ctx, event) {
                 any_updated = true;
                 if n_args == 2 {
-                    // confirm(message, value)
                     if i == 0 {
                         msg = Some(v.clone());
                     } else {
                         val = Some(v);
                     }
                 } else {
-                    // confirm(value) — use default message
                     val = Some(v);
                 }
             }
@@ -198,9 +194,9 @@ impl Apply<R, E> for ConfirmInner {
             Some(Value::String(s)) => s.to_string(),
             _ => format!("Proceed with {}?", value),
         };
-        // Send confirm request to GTK thread via spawn_var
+        // Send confirm request via spawn_var
         if let Some(state) = ctx.libstate.get::<BrowserLibState>() {
-            let to_gui = state.to_gui.clone();
+            let proxy = state.proxy.clone();
             let bid = self.result_bid;
             let value_clone = value.clone();
             ctx.rt.spawn_var(async move {
@@ -208,8 +204,8 @@ impl Apply<R, E> for ConfirmInner {
                 let reply = std::sync::Arc::new(
                     std::sync::Mutex::new(Some(reply_tx)),
                 );
-                let m = crate::ToGui::Confirm { message, reply };
-                if to_gui.send(m).is_ok() {
+                let m = BrowserEvent::Confirm { message, reply };
+                if proxy.send_event(m).is_ok() {
                     match reply_rx.await {
                         Ok(true) => (bid, value_clone),
                         _ => (bid, Value::Null),
@@ -219,7 +215,6 @@ impl Apply<R, E> for ConfirmInner {
                 }
             });
         }
-        // Return None for now — the result arrives via the variable update
         None
     }
 
