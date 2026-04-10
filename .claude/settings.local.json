@@ -32,7 +32,11 @@
       "Bash(graphix:*)",
       "Bash(cp:*)",
       "Bash(cargo doc:*)",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "Bash(cargo search:*)",
+      "Bash(cargo info:*)",
+      "Bash(cargo clean:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": []

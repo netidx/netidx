@@ -3,6 +3,7 @@
 mod backend;
 mod builtins;
 mod chrome;
+mod editor;
 
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -14,7 +15,7 @@ use graphix_package_gui::{
     widgets::{self, GuiW, IcedElement, Message, Renderer},
 };
 use graphix_rt::NoExt;
-use iced_core::{clipboard, mouse, renderer::Style};
+use iced_core::{clipboard, mouse, renderer::Style, Color};
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_wgpu::wgpu;
 use log::error;
@@ -139,6 +140,8 @@ pub(crate) enum BrowserEvent {
         message: String,
         reply: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
     },
+    /// Updated Env from graphix runtime (for completions)
+    EnvUpdate(graphix_compiler::env::Env),
     /// Shutdown
     Terminate,
 }
@@ -328,6 +331,185 @@ impl BrowserWindow {
 
 const RESIZE_RENDER_INTERVAL: Duration = Duration::from_millis(8);
 
+// ---- Design window state ----
+
+/// Message type for the design window.
+#[derive(Debug, Clone)]
+pub(crate) enum DesignMsg {
+    // ---- Source editor ----
+    /// Editor text action (keystroke, cursor move, etc.)
+    EditorAction(iced_widget::text_editor::Action),
+    /// Apply: recompile the source and update the main window
+    EditorApply,
+    /// Trigger completion at current cursor
+    TriggerCompletion,
+    /// Select a completion item by index
+    CompletionSelect(usize),
+    /// Dismiss the completion popup
+    CompletionDismiss,
+    /// Navigate completion list up
+    CompletionUp,
+    /// Navigate completion list down
+    CompletionDown,
+    // ---- Widget tree ----
+    /// Select a node in the tree
+    TreeSelect(editor::tree_model::TreeNodeId),
+    /// Toggle expand/collapse of a node
+    TreeToggleExpand(editor::tree_model::TreeNodeId),
+    /// Add a new widget of the given kind
+    TreeAddWidget(String),
+    /// Remove the selected widget
+    TreeRemoveSelected,
+    /// Change the selected widget's kind (from kind dropdown)
+    TreeChangeKind(String),
+    /// Move selected widget up among siblings
+    TreeMoveUp,
+    /// Move selected widget down among siblings
+    TreeMoveDown,
+    /// Indent: make selected widget a child of its previous sibling
+    TreeIndent,
+    /// Outdent: make selected widget a sibling of its parent
+    TreeOutdent,
+    // ---- Property panel ----
+    /// A property edit action (path-based)
+    PropEdit {
+        node_id: editor::tree_model::TreeNodeId,
+        arg: ArcStr,
+        path: Vec<editor::path_update::PathSegment>,
+        action: editor::path_update::PropAction,
+    },
+}
+
+/// Element type for the design window.
+type DesignElement<'a> =
+    iced_core::Element<'a, DesignMsg, GraphixTheme, Renderer>;
+
+/// State for the design (GUI builder) window.
+struct DesignWindow {
+    window: Arc<winit::window::Window>,
+    surface: WindowSurface,
+    pending_events: Vec<iced_core::Event>,
+    cursor_position: iced_core::Point,
+    needs_redraw: bool,
+    last_render: Instant,
+    pending_resize: Option<(u32, u32, f64)>,
+    last_mouse_interaction: mouse::Interaction,
+    ui_cache: user_interface::Cache,
+    /// Source editor content
+    editor_content: iced_widget::text_editor::Content<Renderer>,
+    /// Diagnostic message from last compilation attempt
+    diagnostic: Option<String>,
+    /// Whether the source has been modified since last apply
+    dirty: bool,
+    /// Completion popup state
+    completion: editor::completion::CompletionState,
+    /// Environment snapshot for completions/hover
+    env: Option<graphix_compiler::env::Env>,
+    /// Widget tree model
+    tree: editor::tree_model::TreeModel,
+    /// Highlighter version — bumped on content replacement to force re-highlight
+    highlight_version: u64,
+    /// Timestamp of last edit — for debounced auto-typecheck
+    last_edit: Option<Instant>,
+    /// Whether a typecheck is pending (waiting for debounce)
+    typecheck_pending: bool,
+}
+
+impl DesignWindow {
+    fn new(
+        window: Arc<winit::window::Window>,
+        surface: WindowSurface,
+        source: &str,
+        env: Option<graphix_compiler::env::Env>,
+    ) -> Self {
+        Self {
+            window,
+            surface,
+            pending_events: Vec::new(),
+            cursor_position: iced_core::Point::ORIGIN,
+            needs_redraw: true,
+            last_render: Instant::now(),
+            pending_resize: None,
+            last_mouse_interaction: mouse::Interaction::Idle,
+            ui_cache: user_interface::Cache::default(),
+            editor_content: iced_widget::text_editor::Content::with_text(source),
+            diagnostic: None,
+            dirty: false,
+            completion: editor::completion::CompletionState::new(),
+            env: env.clone(),
+            highlight_version: 0,
+            last_edit: None,
+            typecheck_pending: false,
+            tree: {
+                let mut tree = editor::tree_model::TreeModel::new();
+                if let Some(env) = &env {
+                    tree.populate_from_source(source, env);
+                }
+                tree
+            },
+        }
+    }
+
+    fn push_event(&mut self, ev: iced_core::Event) {
+        self.pending_events.push(ev);
+        self.needs_redraw = true;
+    }
+
+    fn cursor(&self) -> mouse::Cursor {
+        mouse::Cursor::Available(self.cursor_position)
+    }
+
+    fn source_text(&self) -> String {
+        self.editor_content.text()
+    }
+
+    /// Replace the editor content and bump highlight version to force re-highlight.
+    fn set_source(&mut self, source: &str) {
+        self.editor_content = iced_widget::text_editor::Content::with_text(source);
+        self.highlight_version += 1;
+        self.dirty = true;
+    }
+
+    /// Trigger completion at the current cursor position.
+    fn trigger_completion(&mut self) {
+        let env = match &self.env {
+            Some(e) => e,
+            None => return,
+        };
+        let text = self.editor_content.text();
+        let cursor = self.editor_content.cursor();
+        self.completion = editor::completion::complete(
+            env,
+            &text,
+            cursor.position.line,
+            cursor.position.column,
+        );
+    }
+
+    /// Accept the currently selected completion item.
+    fn accept_completion(&mut self) {
+        if !self.completion.active || self.completion.items.is_empty() {
+            return;
+        }
+        let idx = self.completion.selected.min(self.completion.items.len() - 1);
+        let label = self.completion.items[idx].label.clone();
+
+        // We need to replace the prefix text with the completion label.
+        // Strategy: select backward from cursor by (replace_end - replace_start)
+        // chars, then paste the label.
+        let prefix_len = self.completion.replace_end - self.completion.replace_start;
+        use iced_widget::text_editor::{Action, Edit, Motion};
+        for _ in 0..prefix_len {
+            self.editor_content.perform(Action::Select(Motion::Left));
+        }
+        self.editor_content.perform(Action::Edit(Edit::Paste(
+            std::sync::Arc::new(label),
+        )));
+        self.dirty = true;
+        self.completion.dismiss();
+    }
+}
+
 // ---- Main handler ----
 
 struct BrowserHandler {
@@ -337,12 +519,16 @@ struct BrowserHandler {
     window: Option<BrowserWindow>,
     surface: Option<WindowSurface>,
     ui_cache: user_interface::Cache,
+    design: Option<DesignWindow>,
     clipboard: Clipboard,
     chrome: chrome::Chrome,
     messages: Vec<BrowserMsg>,
+    design_messages: Vec<DesignMsg>,
     modifiers: ModifiersState,
     /// Initial location to navigate to on startup
     initial_loc: Option<ViewLoc>,
+    /// Current view source (retained for design mode)
+    current_source: ArcStr,
 }
 
 impl ApplicationHandler<BrowserEvent> for BrowserHandler {
@@ -392,11 +578,44 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         if let WindowEvent::ModifiersChanged(m) = &event {
             self.modifiers = m.state();
+        }
+
+        // Route to design window if its ID matches
+        if let Some(dw) = self.design.as_mut() {
+            if dw.window.id() == window_id {
+                match &event {
+                    WindowEvent::Resized(size) => {
+                        let scale = dw.window.scale_factor();
+                        dw.pending_resize = Some((size.width, size.height, scale));
+                        dw.needs_redraw = true;
+                    }
+                    WindowEvent::RedrawRequested => {
+                        dw.needs_redraw = true;
+                    }
+                    WindowEvent::CloseRequested => {
+                        self.design = None;
+                    }
+                    _ => {
+                        let scale = dw.window.scale_factor();
+                        let mut iced_events = convert::window_event(&event, scale, self.modifiers);
+                        for ev in iced_events.drain(..) {
+                            if let iced_core::Event::Mouse(mouse::Event::CursorMoved {
+                                position,
+                            }) = &ev
+                            {
+                                dw.cursor_position = *position;
+                            }
+                            dw.push_event(ev);
+                        }
+                    }
+                }
+                return;
+            }
         }
 
         let Some(bw) = self.window.as_mut() else { return };
@@ -459,6 +678,7 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                 event_loop.exit();
             }
             BrowserEvent::View { loc, source, generated: _ } => {
+                self.current_source = source.clone();
                 if let Some(bw) = self.window.as_mut() {
                     if let Some(l) = &loc {
                         bw.current_loc = l.clone();
@@ -512,6 +732,11 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                             }
                         }
                     }
+                }
+            }
+            BrowserEvent::EnvUpdate(env) => {
+                if let Some(dw) = self.design.as_mut() {
+                    dw.env = Some(env);
                 }
             }
             BrowserEvent::ShowError(msg) => {
@@ -677,6 +902,698 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
             }
         }
 
+        // ---- Debounced typecheck for design window ----
+        if let Some(dw) = self.design.as_mut() {
+            if dw.typecheck_pending {
+                if let Some(last_edit) = dw.last_edit {
+                    if last_edit.elapsed() >= Duration::from_secs(1) {
+                        dw.typecheck_pending = false;
+                        let source = dw.source_text();
+                        let origin = graphix_compiler::expr::Origin {
+                            parent: None,
+                            source: graphix_compiler::expr::Source::Unspecified,
+                            text: ArcStr::from(source.as_str()),
+                        };
+                        match graphix_compiler::expr::parser::parse(origin) {
+                            Ok(_) => dw.diagnostic = None,
+                            Err(e) => dw.diagnostic = Some(format!("{e}")),
+                        }
+                        dw.needs_redraw = true;
+                    } else {
+                        // Wake up to check again
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(
+                            last_edit + Duration::from_secs(1),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ---- Render design window ----
+        if let Some(dw) = self.design.as_mut() {
+            if dw.needs_redraw {
+                if let Some(gpu) = self.gpu.as_ref() {
+                    if let Some((pw, ph, scale)) = dw.pending_resize.take() {
+                        dw.surface.resize(gpu, pw, ph, scale);
+                        dw.push_event(iced_core::Event::Window(
+                            iced_core::window::Event::Resized(dw.surface.logical_size()),
+                        ));
+                    }
+
+                    let theme = {
+                        use iced_core::theme::Base;
+                        GraphixTheme {
+                            inner: iced_core::Theme::default(iced_core::theme::Mode::Dark),
+                            overrides: None,
+                        }
+                    };
+                    // Build the design window element
+                    use editor::highlight::{GxHighlighter, GxSettings, to_format};
+
+                    // Ensure editor_ui entry exists for selected node
+                    // (must happen before any immutable borrow of dw.tree)
+                    if let Some(sel_id) = dw.tree.selected {
+                        dw.tree.editor_ui.entry(sel_id).or_default();
+                    }
+
+                    // -- Tree panel (left) --
+                    let tree_panel: DesignElement<'_> = editor::tree_view::view(&dw.tree);
+
+                    // -- Property panel (right) --
+                    let prop_panel: DesignElement<'_> = if let Some(sel_id) = dw.tree.selected {
+                        if let Some(node) = dw.tree.get(sel_id) {
+                            let ui_state = dw.tree.editor_ui
+                                .get(&sel_id)
+                                .unwrap(); // safe: inserted above
+                            editor::prop_panel::view(
+                                sel_id,
+                                &node.data,
+                                dw.env.as_ref(),
+                                ui_state,
+                            )
+                        } else {
+                            iced_widget::text("Select a widget").size(13).into()
+                        }
+                    } else {
+                        iced_widget::text("Select a widget").size(13).into()
+                    };
+
+                    // -- Top half: tree | rule | properties --
+                    let top_half: DesignElement<'_> = iced_widget::Row::new()
+                        .push(
+                            iced_widget::container(tree_panel)
+                                .width(iced_core::Length::FillPortion(2))
+                                .height(iced_core::Length::Fill)
+                        )
+                        .push(iced_widget::rule::vertical::<'_, GraphixTheme>(1))
+                        .push(
+                            iced_widget::Scrollable::new(prop_panel)
+                                .width(iced_core::Length::FillPortion(3))
+                                .height(iced_core::Length::Fill)
+                        )
+                        .height(iced_core::Length::FillPortion(1))
+                        .into();
+
+                    // -- Bottom half: source editor --
+                    let dirty_indicator: DesignElement<'_> = if dw.dirty {
+                        iced_widget::text("*modified").size(12).into()
+                    } else {
+                        iced_widget::text("").size(12).into()
+                    };
+                    let apply_btn: DesignElement<'_> = iced_widget::Button::new(
+                        iced_widget::text("Apply (Ctrl+Enter)").size(12)
+                    )
+                        .padding(iced_core::Padding::from([3, 10]))
+                        .on_press(DesignMsg::EditorApply)
+                        .into();
+                    let toolbar: DesignElement<'_> = iced_widget::Row::new()
+                        .push(iced_widget::text("Source").size(13))
+                        .push(dirty_indicator)
+                        .push(apply_btn)
+                        .spacing(8)
+                        .padding(iced_core::Padding::from([2, 8]))
+                        .into();
+                    let completion_active = dw.completion.active;
+                    let te: DesignElement<'_> = iced_widget::TextEditor::new(&dw.editor_content)
+                        .highlight_with::<GxHighlighter>(
+                            GxSettings { version: dw.highlight_version },
+                            to_format,
+                        )
+                        .on_action(DesignMsg::EditorAction)
+                        .key_binding(move |key_press| {
+                            use iced_core::keyboard::{Key, key::Named};
+                            use iced_widget::text_editor::Binding;
+                            let ctrl = key_press.modifiers.command();
+
+                            // Ctrl+Enter → Apply
+                            if ctrl && key_press.key == Key::Named(Named::Enter) {
+                                return Some(Binding::Custom(DesignMsg::EditorApply));
+                            }
+                            // Ctrl+Space → Trigger completion
+                            if ctrl && key_press.key == Key::Named(Named::Space) {
+                                return Some(Binding::Custom(DesignMsg::TriggerCompletion));
+                            }
+                            // When completion popup is active, intercept nav keys
+                            if completion_active {
+                                match &key_press.key {
+                                    Key::Named(Named::Escape) => {
+                                        return Some(Binding::Custom(DesignMsg::CompletionDismiss));
+                                    }
+                                    Key::Named(Named::ArrowUp) => {
+                                        return Some(Binding::Custom(DesignMsg::CompletionUp));
+                                    }
+                                    Key::Named(Named::ArrowDown) => {
+                                        return Some(Binding::Custom(DesignMsg::CompletionDown));
+                                    }
+                                    Key::Named(Named::Tab) | Key::Named(Named::Enter) => {
+                                        return Some(Binding::Custom(DesignMsg::CompletionSelect(0)));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Binding::from_key_press(key_press)
+                        })
+                        .height(iced_core::Length::Fill)
+                        .padding(iced_core::Padding::from(6))
+                        .into();
+                    // Build right pane (completion + diagnostics)
+                    let mut right_pane = iced_widget::Column::new()
+                        .spacing(4)
+                        .padding(iced_core::Padding::from([4, 4]));
+                    let has_right_content = dw.diagnostic.is_some()
+                        || (dw.completion.active && !dw.completion.items.is_empty());
+
+                    // Diagnostics
+                    if let Some(diag) = &dw.diagnostic {
+                        let diag_header: DesignElement<'_> = iced_widget::text("Errors")
+                            .size(12)
+                            .color(Color::from_rgb(1.0, 0.5, 0.5))
+                            .into();
+                        let diag_text: DesignElement<'_> = iced_widget::text(diag.clone())
+                            .size(11)
+                            .color(Color::from_rgb(1.0, 0.4, 0.4))
+                            .into();
+                        right_pane = right_pane
+                            .push(diag_header)
+                            .push(diag_text)
+                            .push(iced_widget::rule::horizontal::<'_, GraphixTheme>(1));
+                    }
+
+                    // Completion list
+                    if dw.completion.active && !dw.completion.items.is_empty() {
+                        let comp_header: DesignElement<'_> = iced_widget::text("Completions")
+                            .size(12)
+                            .color(Color::from_rgb(0.6, 0.7, 0.8))
+                            .into();
+                        right_pane = right_pane.push(comp_header);
+                        let max_items = 12usize;
+                        for (i, item) in dw.completion.items.iter().enumerate().take(max_items) {
+                            let bg = if i == dw.completion.selected {
+                                Color::from_rgb(0.2, 0.3, 0.5)
+                            } else {
+                                Color::TRANSPARENT
+                            };
+                            let label: DesignElement<'_> =
+                                iced_widget::text(&item.label).size(12).into();
+                            let detail: DesignElement<'_> =
+                                iced_widget::text(&item.detail)
+                                    .size(10)
+                                    .color(Color::from_rgb(0.5, 0.5, 0.5))
+                                    .into();
+                            let item_col: DesignElement<'_> = iced_widget::Column::new()
+                                .push(label)
+                                .push(detail)
+                                .spacing(1)
+                                .into();
+                            let idx = i;
+                            let btn: DesignElement<'_> = iced_widget::Button::new(item_col)
+                                .on_press(DesignMsg::CompletionSelect(idx))
+                                .padding(iced_core::Padding::from([2, 4]))
+                                .width(iced_core::Length::Fill)
+                                .style(move |_theme, _status| {
+                                    iced_widget::button::Style {
+                                        background: Some(iced_core::Background::Color(bg)),
+                                        text_color: Color::WHITE,
+                                        border: iced_core::Border::default(),
+                                        shadow: iced_core::Shadow::default(),
+                                        ..Default::default()
+                                    }
+                                })
+                                .into();
+                            right_pane = right_pane.push(btn);
+                        }
+                    }
+
+                    // Bottom: editor (left) | completion+diagnostics (right)
+                    let editor_area: DesignElement<'_> = if has_right_content {
+                        iced_widget::Row::new()
+                            .push(
+                                iced_widget::Column::new()
+                                    .push(toolbar)
+                                    .push(te)
+                                    .width(iced_core::Length::FillPortion(3))
+                            )
+                            .push(iced_widget::rule::vertical::<'_, GraphixTheme>(1))
+                            .push(
+                                iced_widget::Scrollable::new(right_pane)
+                                    .width(iced_core::Length::FillPortion(1))
+                                    .height(iced_core::Length::Fill)
+                            )
+                            .height(iced_core::Length::FillPortion(1))
+                            .into()
+                    } else {
+                        iced_widget::Column::new()
+                            .push(toolbar)
+                            .push(te)
+                            .height(iced_core::Length::FillPortion(1))
+                            .into()
+                    };
+
+                    let element: DesignElement<'_> = iced_widget::Column::new()
+                        .push(top_half)
+                        .push(iced_widget::rule::horizontal::<'_, GraphixTheme>(1))
+                        .push(editor_area)
+                        .into();
+                    let viewport_size = dw.surface.logical_size();
+                    let cache = mem::take(&mut dw.ui_cache);
+                    let cursor = dw.cursor();
+                    let mut ui = UserInterface::build(
+                        element,
+                        viewport_size,
+                        cache,
+                        &mut dw.surface.renderer,
+                    );
+                    let (state, _statuses) = ui.update(
+                        &dw.pending_events,
+                        cursor,
+                        &mut dw.surface.renderer,
+                        &mut self.clipboard,
+                        &mut self.design_messages,
+                    );
+
+                    let new_mouse = match &state {
+                        user_interface::State::Updated { mouse_interaction, .. } => {
+                            Some(*mouse_interaction)
+                        }
+                        _ => None,
+                    };
+
+                    let style = Style { text_color: theme.palette().text };
+                    ui.draw(&mut dw.surface.renderer, &theme, &style, cursor);
+                    dw.ui_cache = ui.into_cache();
+                    dw.pending_events.clear();
+
+                    if let Some(mi) = new_mouse {
+                        if dw.last_mouse_interaction != mi {
+                            dw.last_mouse_interaction = mi;
+                            dw.window.set_cursor(mouse_interaction_to_cursor(mi));
+                        }
+                    }
+
+                    match dw.surface.surface.get_current_texture() {
+                        Ok(frame) => {
+                            let view = frame
+                                .texture
+                                .create_view(&wgpu::TextureViewDescriptor::default());
+                            dw.surface.renderer.present(
+                                Some(theme.palette().background),
+                                gpu.format,
+                                &view,
+                                &dw.surface.viewport,
+                            );
+                            frame.present();
+                            dw.last_render = Instant::now();
+                            dw.needs_redraw = false;
+                        }
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            dw.surface.surface.configure(&gpu.device, &dw.surface.config);
+                            dw.needs_redraw = true;
+                        }
+                        Err(e) => {
+                            error!("design surface error: {e:?}");
+                            dw.needs_redraw = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle design messages
+        for msg in self.design_messages.drain(..) {
+            match msg {
+                DesignMsg::EditorAction(action) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        let is_edit = action.is_edit();
+                        dw.editor_content.perform(action);
+                        if is_edit {
+                            dw.dirty = true;
+                            dw.diagnostic = None;
+                            dw.last_edit = Some(Instant::now());
+                            dw.typecheck_pending = true;
+                            // Auto-trigger completion after typing :: or #
+                            let text = dw.editor_content.text();
+                            let cursor = dw.editor_content.cursor();
+                            let offset = editor::completion::cursor_byte_offset(
+                                &text,
+                                cursor.position.line,
+                                cursor.position.column,
+                            );
+                            if offset >= 2 {
+                                let tail = &text[offset.saturating_sub(2)..offset];
+                                if tail == "::" || tail.ends_with('#') {
+                                    dw.trigger_completion();
+                                } else if dw.completion.active {
+                                    // Re-filter while typing
+                                    dw.trigger_completion();
+                                }
+                            } else if dw.completion.active {
+                                dw.completion.dismiss();
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::EditorApply => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.completion.dismiss();
+                        let source = ArcStr::from(dw.source_text());
+                        match self.rt.block_on(
+                            self.backend.gx.compile(source.clone()),
+                        ) {
+                            Err(e) => {
+                                dw.diagnostic = Some(format!("{e:#}"));
+                            }
+                            Ok(comp) => {
+                                dw.diagnostic = None;
+                                dw.dirty = false;
+                                // Update env for completions
+                                dw.env = Some(comp.env.clone());
+                                // Rebuild tree from source
+                                dw.tree.populate_from_source(&source, &comp.env);
+                                self.current_source = source.clone();
+                                // Update the main window view
+                                if let Some(bw) = self.window.as_mut() {
+                                    if comp.exprs.is_empty() {
+                                        bw.view = None;
+                                    } else {
+                                        let top_id =
+                                            comp.exprs.last().unwrap().id;
+                                        bw.view = Some(CompiledView {
+                                            content: Box::new(LoadingView),
+                                            gx: self.backend.gx.clone(),
+                                            pending_top_id: Some(top_id),
+                                            _comp: Some(comp),
+                                        });
+                                    }
+                                    bw.needs_redraw = true;
+                                }
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TriggerCompletion => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.trigger_completion();
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::CompletionSelect(_) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.accept_completion();
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::CompletionDismiss => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.completion.dismiss();
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::CompletionUp => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.completion.select_up();
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::CompletionDown => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.completion.select_down();
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeSelect(id) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.tree.selected = Some(id);
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeToggleExpand(id) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(node) = dw.tree.get_mut(id) {
+                            node.expanded = !node.expanded;
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeAddWidget(kind) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        let new_id = dw.tree.add_widget(&kind);
+                        dw.tree.selected = Some(new_id);
+                        // Sync tree → source → editor
+                        let source = dw.tree.to_source();
+                        dw.set_source(&source);
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeRemoveSelected => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            dw.tree.remove(sel);
+                            let source = dw.tree.to_source();
+                            dw.set_source(&source);
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeChangeKind(new_kind) => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            if let Some(env) = dw.env.clone() {
+                                dw.tree.change_kind(sel, &new_kind, &env);
+                                let source = dw.tree.to_source();
+                                dw.set_source(&source);
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeMoveUp => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            dw.tree.move_up(sel);
+                            let source = dw.tree.to_source();
+                            dw.set_source(&source);
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeMoveDown => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            dw.tree.move_down(sel);
+                            let source = dw.tree.to_source();
+                            dw.set_source(&source);
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeIndent => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            dw.tree.indent(sel);
+                            let source = dw.tree.to_source();
+                            dw.set_source(&source);
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::TreeOutdent => {
+                    if let Some(dw) = self.design.as_mut() {
+                        if let Some(sel) = dw.tree.selected {
+                            dw.tree.outdent(sel);
+                            let source = dw.tree.to_source();
+                            dw.set_source(&source);
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::PropEdit { node_id, arg, path, action } => {
+                    if let Some(dw) = self.design.as_mut() {
+                        use editor::path_update::{PropAction, apply_at_path};
+                        match action {
+                            PropAction::TextChanged(text) => {
+                                let ui = dw.tree.editor_ui.entry(node_id).or_default();
+                                ui.text_inputs.insert(path, text);
+                                // No sync — just UI state update
+                            }
+                            PropAction::TextCommit => {
+                                let ui = dw.tree.editor_ui.entry(node_id).or_default();
+                                if let Some(text) = ui.text_inputs.remove(&path) {
+                                    if let Some(node) = dw.tree.get_mut(node_id) {
+                                        let new_expr = if text.is_empty() {
+                                            None
+                                        } else {
+                                            graphix_compiler::expr::parser::parse_one(&text).ok()
+                                        };
+                                        apply_at_path(&mut node.data.args, &arg, &path, new_expr);
+                                        let source = dw.tree.to_source();
+                                        dw.set_source(&source);
+                                    }
+                                }
+                            }
+                            PropAction::BoolSet(v) => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let expr = graphix_compiler::expr::ExprKind::Constant(
+                                        netidx::publisher::Value::Bool(v)
+                                    ).to_expr_nopos();
+                                    apply_at_path(&mut node.data.args, &arg, &path, Some(expr));
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::ArglessVariantSelected(tag) => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let expr = graphix_compiler::expr::ExprKind::Variant {
+                                        tag,
+                                        args: triomphe::Arc::from(Vec::<graphix_compiler::expr::Expr>::new()),
+                                    }.to_expr_nopos();
+                                    apply_at_path(&mut node.data.args, &arg, &path, Some(expr));
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::VariantSelected(tag) => {
+                                // TODO: look up variant arg types, generate defaults
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let expr = graphix_compiler::expr::ExprKind::Variant {
+                                        tag,
+                                        args: triomphe::Arc::from(Vec::<graphix_compiler::expr::Expr>::new()),
+                                    }.to_expr_nopos();
+                                    apply_at_path(&mut node.data.args, &arg, &path, Some(expr));
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::ArrayAdd => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let mut elems = editor::path_update::extract_array_elems(
+                                        node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
+                                    );
+                                    // Add a null default
+                                    elems.push(graphix_compiler::expr::ExprKind::Constant(
+                                        netidx::publisher::Value::Null
+                                    ).to_expr_nopos());
+                                    let arr = graphix_compiler::expr::ExprKind::Array {
+                                        args: triomphe::Arc::from(elems),
+                                    }.to_expr_nopos();
+                                    apply_at_path(&mut node.data.args, &arg, &path, Some(arr));
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::ArrayRemove(i) => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let mut elems = editor::path_update::extract_array_elems(
+                                        node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
+                                    );
+                                    if i < elems.len() {
+                                        elems.remove(i);
+                                    }
+                                    let new_expr = if elems.is_empty() {
+                                        None
+                                    } else {
+                                        Some(graphix_compiler::expr::ExprKind::Array {
+                                            args: triomphe::Arc::from(elems),
+                                        }.to_expr_nopos())
+                                    };
+                                    apply_at_path(&mut node.data.args, &arg, &path, new_expr);
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::MapAdd => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let mut entries = editor::path_update::extract_map_entries(
+                                        node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
+                                    );
+                                    let default_key = graphix_compiler::expr::ExprKind::Constant(
+                                        netidx::publisher::Value::String(arcstr::literal!(""))
+                                    ).to_expr_nopos();
+                                    let default_val = graphix_compiler::expr::ExprKind::Constant(
+                                        netidx::publisher::Value::Null
+                                    ).to_expr_nopos();
+                                    entries.push((default_key, default_val));
+                                    let map_expr = graphix_compiler::expr::ExprKind::Map {
+                                        args: triomphe::Arc::from(entries),
+                                    }.to_expr_nopos();
+                                    apply_at_path(&mut node.data.args, &arg, &path, Some(map_expr));
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::MapRemove(i) => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    let mut entries = editor::path_update::extract_map_entries(
+                                        node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
+                                    );
+                                    if i < entries.len() {
+                                        entries.remove(i);
+                                    }
+                                    let new_expr = if entries.is_empty() {
+                                        None
+                                    } else {
+                                        Some(graphix_compiler::expr::ExprKind::Map {
+                                            args: triomphe::Arc::from(entries),
+                                        }.to_expr_nopos())
+                                    };
+                                    apply_at_path(&mut node.data.args, &arg, &path, new_expr);
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                            PropAction::MapKeyChanged(i, text) => {
+                                let ui = dw.tree.editor_ui.entry(node_id).or_default();
+                                let mut key_path = path.clone();
+                                key_path.push(editor::path_update::PathSegment::MapValueIndex(i));
+                                key_path.push(editor::path_update::PathSegment::StructField(arcstr::literal!("__key__")));
+                                ui.text_inputs.insert(key_path, text);
+                            }
+                            PropAction::MapKeyCommit(i) => {
+                                let ui = dw.tree.editor_ui.entry(node_id).or_default();
+                                let mut key_path = path.clone();
+                                key_path.push(editor::path_update::PathSegment::MapValueIndex(i));
+                                key_path.push(editor::path_update::PathSegment::StructField(arcstr::literal!("__key__")));
+                                if let Some(text) = ui.text_inputs.remove(&key_path) {
+                                    if let Some(node) = dw.tree.get_mut(node_id) {
+                                        let new_key = graphix_compiler::expr::parser::parse_one(&text).ok();
+                                        if let Some(new_key) = new_key {
+                                            let mut entries = editor::path_update::extract_map_entries(
+                                                node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
+                                            );
+                                            if i < entries.len() {
+                                                entries[i].0 = new_key;
+                                                let map_expr = graphix_compiler::expr::ExprKind::Map {
+                                                    args: triomphe::Arc::from(entries),
+                                                }.to_expr_nopos();
+                                                apply_at_path(&mut node.data.args, &arg, &path, Some(map_expr));
+                                                let source = dw.tree.to_source();
+                                                dw.set_source(&source);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            PropAction::ToggleSection => {
+                                let ui = dw.tree.editor_ui.entry(node_id).or_default();
+                                if !ui.collapsed.remove(&path) {
+                                    ui.collapsed.insert(path);
+                                }
+                            }
+                            PropAction::Clear => {
+                                if let Some(node) = dw.tree.get_mut(node_id) {
+                                    apply_at_path(&mut node.data.args, &arg, &path, None);
+                                    let source = dw.tree.to_source();
+                                    dw.set_source(&source);
+                                }
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+            }
+        }
+
         // Handle messages from iced widgets and browser chrome
         for msg in self.messages.drain(..) {
             match msg {
@@ -799,7 +1716,40 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                     }
                 }
                 BrowserMsg::ToggleDesignMode => {
-                    // TODO: Phase 5 — open design window
+                    if self.design.is_some() {
+                        // Close design window
+                        self.design = None;
+                    } else if let Some(gpu) = self.gpu.as_ref() {
+                        // Open design window
+                        let attrs = winit::window::WindowAttributes::default()
+                            .with_title("Netidx Browser — Design")
+                            .with_inner_size(winit::dpi::LogicalSize::new(900.0, 700.0));
+                        match event_loop.create_window(attrs) {
+                            Ok(win) => {
+                                let win = Arc::new(win);
+                                match WindowSurface::new(gpu, win.clone()) {
+                                    Ok(ws) => {
+                                        // Seed the env for completions
+                                        let env = self.rt.block_on(
+                                            self.backend.gx.get_env()
+                                        ).ok();
+                                        self.design = Some(DesignWindow::new(
+                                            win,
+                                            ws,
+                                            &self.current_source,
+                                            env,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        error!("failed to create design surface: {e:?}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("failed to create design window: {e:?}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -887,11 +1837,14 @@ fn main() {
         window: None,
         surface: None,
         ui_cache: user_interface::Cache::default(),
+        design: None,
         clipboard: Clipboard::new(),
         chrome: chrome::Chrome::new(),
         messages: Vec::new(),
+        design_messages: Vec::new(),
         modifiers: ModifiersState::default(),
         initial_loc: Some(initial_loc),
+        current_source: ArcStr::from(""),
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
