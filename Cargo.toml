@@ -40,6 +40,7 @@ globset = "0.4"
 graphix-shell = { version = "0.7.0", path = "../graphix/graphix-shell", default-features = false }
 graphix-rt = { version = "0.7.0", path = "../graphix/graphix-rt" }
 graphix-compiler = { version = "0.7.0", path = "../graphix/graphix-compiler" }
+graphix-lsp = { version = "0.6.0", path = "../graphix/graphix-lsp" }
 graphix-package = { version = "0.7.0", path = "../graphix/graphix-package" }
 graphix-package-core = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-core" }
 graphix-package-gui = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-gui" }

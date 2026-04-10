@@ -29,6 +29,7 @@ graphix-compiler = { workspace = true }
 graphix-package = { workspace = true }
 graphix-package-core = { workspace = true }
 graphix-package-gui = { workspace = true }
+graphix-lsp = { workspace = true }
 graphix-package-sys = { workspace = true }
 poolshark = { workspace = true }
 tokio = { workspace = true }

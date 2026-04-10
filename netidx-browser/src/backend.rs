@@ -166,15 +166,19 @@ impl Ctx {
         let proxy_bridge = proxy.clone();
         task::spawn(async move {
             while let Some(batch) = gx_rx.recv().await {
-                let updates: Vec<_> = batch
-                    .iter()
-                    .filter_map(|ev| match ev {
-                        GXEvent::Updated(id, v) => Some((*id, v.clone())),
-                        GXEvent::Env(_) => None,
-                    })
-                    .collect();
+                let mut updates = Vec::new();
+                let mut latest_env = None;
+                for ev in batch.iter() {
+                    match ev {
+                        GXEvent::Updated(id, v) => updates.push((*id, v.clone())),
+                        GXEvent::Env(e) => latest_env = Some(e.clone()),
+                    }
+                }
                 if !updates.is_empty() {
                     let _ = proxy_bridge.send_event(BrowserEvent::Update(updates));
+                }
+                if let Some(env) = latest_env {
+                    let _ = proxy_bridge.send_event(BrowserEvent::EnvUpdate(env));
                 }
             }
         });
