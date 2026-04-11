@@ -92,10 +92,39 @@ fn arg_row<'a>(
 
     let editor = type_editor(node_id, label, path, typ, expr, env, ui_state, optional);
 
+    // Edit button — navigates to the expression in the source editor.
+    // If the arg doesn't exist yet, clicking creates a default first.
+    let edit_msg = match expr {
+        Some(e) => DesignMsg::EditInSource {
+            line: e.pos.line,
+            column: e.pos.column,
+            expr_text: format!("{}", e),
+        },
+        None => DesignMsg::EditInSourceWithDefault {
+            node_id,
+            arg: label.clone(),
+            typ: typ.clone(),
+        },
+    };
+    let edit_btn: Element<'a> = iced_widget::Button::new(
+        iced_widget::text("Edit").size(10)
+    )
+    .on_press(edit_msg)
+    .padding(iced_core::Padding::from([1, 6]))
+    .style(|_t: &GraphixTheme, _s| iced_widget::button::Style {
+        background: None,
+        text_color: Color::from_rgb(0.5, 0.6, 0.8),
+        border: iced_core::Border::default(),
+        shadow: iced_core::Shadow::default(),
+        ..Default::default()
+    })
+    .into();
+
     iced_widget::Row::new()
         .push(label_el)
         .push(editor)
-        .spacing(8)
+        .push(edit_btn)
+        .spacing(4)
         .align_y(iced_core::Alignment::Center)
         .into()
 }
@@ -126,16 +155,20 @@ fn type_editor<'a>(
 
         // Nullable set: unwrap and recurse with optional=true
         Type::Set(variants) if is_nullable_set(variants) => {
-            let inner_expr = expr.and_then(|e| match &e.kind {
-                ExprKind::Constant(Value::Null) => None,
-                _ => Some(e),
+            let inner_expr = expr.and_then(|e| {
+                if matches!(&e.kind, ExprKind::Constant(Value::Null)) {
+                    None
+                } else {
+                    Some(e)
+                }
             });
             let inner_type = non_null_type(variants);
             type_editor(node_id, arg, path, &inner_type, inner_expr, env, ui_state, true)
         }
 
-        // If the expression exists but isn't a simple literal/struct/variant,
-        // show as text entry — the user is in "advanced" mode (e.g. function call)
+        // Expression exists but is a complex expression (function call, binary
+        // op, etc.) — show as text entry. When no expression exists, we always
+        // build from the type so the user can fill fields via GUI.
         _ if expr.map_or(false, |e| !is_gui_editable(e)) => {
             text_entry(node_id, arg, path, expr, ui_state, optional)
         }
@@ -206,17 +239,20 @@ fn text_entry<'a>(
     optional: bool,
 ) -> Element<'a> {
     let path_vec = path.to_vec();
+    let field_key = (arg.clone(), path_vec.clone());
     // Use in-progress text if exists, otherwise format from Expr
-    let display = ui_state.text_inputs.get(&path_vec)
+    let display = ui_state.text_inputs.get(&field_key)
         .cloned()
         .unwrap_or_else(|| expr.map(|e| format!("{e}")).unwrap_or_default());
     let placeholder = if optional { "optional" } else { "" };
+    let has_error = ui_state.parse_errors.contains_key(&field_key);
+    let error_msg = ui_state.parse_errors.get(&field_key).cloned();
     let arg_c = arg.clone();
     let path_for_input = path_vec.clone();
     let path_for_submit = path_vec;
     let arg_submit = arg.clone();
 
-    iced_widget::TextInput::new(placeholder, &display)
+    let input: Element<'a> = iced_widget::TextInput::new(placeholder, &display)
         .on_input(move |text| DesignMsg::PropEdit {
             node_id,
             arg: arg_c.clone(),
@@ -232,7 +268,27 @@ fn text_entry<'a>(
         .size(12)
         .padding(iced_core::Padding::from([3, 6]))
         .width(iced_core::Length::Fill)
-        .into()
+        .style(move |theme: &GraphixTheme, status| {
+            let mut style = iced_widget::text_input::default(&theme.inner, status);
+            style.value = if has_error {
+                Color::from_rgb(1.0, 0.4, 0.4)
+            } else {
+                Color::WHITE
+            };
+            style
+        })
+        .into();
+
+    // Wrap in tooltip showing parse error if present
+    if let Some(err) = error_msg {
+        iced_widget::Tooltip::new(
+            input,
+            iced_widget::text(err).size(11),
+            iced_widget::tooltip::Position::Top,
+        ).into()
+    } else {
+        input
+    }
 }
 
 fn bool_editor<'a>(
@@ -290,7 +346,8 @@ fn callback_editor<'a>(
     let mut body_path = path.to_vec();
     body_path.push(PathSegment::LambdaBody);
 
-    let display = ui_state.text_inputs.get(&body_path)
+    let body_key = (arg.clone(), body_path.clone());
+    let display = ui_state.text_inputs.get(&body_key)
         .cloned()
         .unwrap_or(body);
 
@@ -321,6 +378,11 @@ fn callback_editor<'a>(
         .size(12)
         .padding(iced_core::Padding::from([3, 6]))
         .width(iced_core::Length::Fill)
+        .style(|theme: &GraphixTheme, status| {
+            let mut style = iced_widget::text_input::default(&theme.inner, status);
+            style.value = Color::WHITE;
+            style
+        })
         .into();
 
     iced_widget::Column::new()
@@ -460,7 +522,7 @@ fn struct_editor<'a>(
     ui_state: &'a EditorUiState,
 ) -> Element<'a> {
     let current_fields: Vec<(ArcStr, Expr)> = super::path_update::extract_struct_fields(expr);
-    let collapsed = ui_state.collapsed.contains(&path.to_vec());
+    let collapsed = ui_state.collapsed.contains(&(arg.clone(), path.to_vec()));
 
     let arg_c = arg.clone();
     let path_c = path.to_vec();
@@ -606,7 +668,7 @@ fn map_editor<'a>(
                 let mut p = path_vec.clone();
                 p.push(PathSegment::MapValueIndex(i));
                 p.push(PathSegment::StructField(arcstr::literal!("__key__")));
-                p
+                (arg.clone(), p)
             })
             .cloned()
             .unwrap_or_else(|| format!("{}", key_expr));
@@ -627,6 +689,11 @@ fn map_editor<'a>(
             .size(11)
             .padding(iced_core::Padding::from([2, 4]))
             .width(iced_core::Length::FillPortion(1))
+            .style(|theme: &GraphixTheme, status| {
+                let mut style = iced_widget::text_input::default(&theme.inner, status);
+                style.value = Color::WHITE;
+                style
+            })
             .into();
 
         // Value editor
@@ -716,9 +783,76 @@ fn type_contains_widget(typ: &Type) -> bool {
     }
 }
 
-/// Check if an expression can be meaningfully edited with structured
-/// GUI editors (struct fields, variant dropdowns, etc.). Complex
-/// expressions like function calls should fall back to a text entry.
+/// Generate a default expression for a given type.
+/// Used by ArrayAdd, MapAdd, and variant sub-editor initialization.
+pub(crate) fn default_expr_for_type(typ: &Type, env: Option<&Env>) -> Expr {
+    match typ {
+        Type::ByRef(inner) => {
+            let inner_default = default_expr_for_type(inner, env);
+            ExprKind::ByRef(triomphe::Arc::new(inner_default)).to_expr_nopos()
+        }
+        Type::Primitive(flags) if flags.contains(netidx::publisher::Typ::Bool) => {
+            ExprKind::Constant(Value::Bool(false)).to_expr_nopos()
+        }
+        Type::Primitive(flags) if flags.contains(netidx::publisher::Typ::String) => {
+            ExprKind::Constant(Value::String(arcstr::literal!(""))).to_expr_nopos()
+        }
+        Type::Primitive(_) => {
+            ExprKind::Constant(Value::Null).to_expr_nopos()
+        }
+        Type::Set(variants) if is_nullable_set(variants) => {
+            ExprKind::Constant(Value::Null).to_expr_nopos()
+        }
+        Type::Set(variants) if !variants.is_empty() => {
+            // Pick the first variant
+            if let Some(Type::Variant(tag, args)) = variants.first() {
+                let default_args: Vec<Expr> = args.iter()
+                    .map(|t| default_expr_for_type(t, env))
+                    .collect();
+                ExprKind::Variant {
+                    tag: tag.clone(),
+                    args: triomphe::Arc::from(default_args),
+                }.to_expr_nopos()
+            } else {
+                ExprKind::Constant(Value::Null).to_expr_nopos()
+            }
+        }
+        Type::Struct(fields) => {
+            let field_exprs: Vec<(ArcStr, Expr)> = fields.iter()
+                .map(|(name, typ)| (name.clone(), default_expr_for_type(typ, env)))
+                .collect();
+            ExprKind::Struct(graphix_compiler::expr::StructExpr {
+                args: triomphe::Arc::from(field_exprs),
+            }).to_expr_nopos()
+        }
+        Type::Array(_) => {
+            ExprKind::Array { args: triomphe::Arc::from(Vec::<Expr>::new()) }.to_expr_nopos()
+        }
+        Type::Map { .. } => {
+            ExprKind::Map { args: triomphe::Arc::from(Vec::<(Expr, Expr)>::new()) }.to_expr_nopos()
+        }
+        Type::Tuple(elems) => {
+            let elem_defaults: Vec<Expr> = elems.iter()
+                .map(|t| default_expr_for_type(t, env))
+                .collect();
+            ExprKind::Tuple { args: triomphe::Arc::from(elem_defaults) }.to_expr_nopos()
+        }
+        Type::Ref { .. } => {
+            // Try to resolve and generate default for the resolved type
+            if let Some(env) = env {
+                if let Ok(resolved) = typ.lookup_ref(env) {
+                    return default_expr_for_type(&resolved, Some(env));
+                }
+            }
+            ExprKind::Constant(Value::Null).to_expr_nopos()
+        }
+        _ => ExprKind::Constant(Value::Null).to_expr_nopos(),
+    }
+}
+
+/// Check if an expression is simple enough for structured GUI editing.
+/// Complex expressions (function calls, binary ops, etc.) should be
+/// shown as text entries since the GUI can't decompose them.
 fn is_gui_editable(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Constant(_) => true,
@@ -727,8 +861,8 @@ fn is_gui_editable(expr: &Expr) -> bool {
         ExprKind::Struct(_) => true,
         ExprKind::Array { .. } => true,
         ExprKind::Tuple { .. } => true,
+        ExprKind::Map { .. } => true,
         ExprKind::Lambda(_) => true,
-        ExprKind::Ref { .. } => true,
         _ => false,
     }
 }
@@ -747,15 +881,23 @@ fn all_variants(variants: &[Type]) -> bool {
         && variants.iter().all(|v| matches!(v, Type::Variant(_, _)))
 }
 
+fn is_null_type(typ: &Type) -> bool {
+    match typ {
+        Type::Primitive(flags) => flags.contains(netidx::publisher::Typ::Null),
+        Type::Variant(tag, args) => tag.as_str() == "Null" && args.is_empty(),
+        _ => false,
+    }
+}
+
 fn is_nullable_set(variants: &[Type]) -> bool {
     variants.len() == 2
-        && variants.iter().any(|v| matches!(v, Type::Variant(tag, args) if tag.as_str() == "Null" && args.is_empty()))
-        && variants.iter().any(|v| !matches!(v, Type::Variant(tag, _) if tag.as_str() == "Null"))
+        && variants.iter().any(|v| is_null_type(v))
+        && variants.iter().any(|v| !is_null_type(v))
 }
 
 fn non_null_type(variants: &[Type]) -> Type {
     variants.iter()
-        .find(|v| !matches!(v, Type::Variant(tag, _) if tag.as_str() == "Null"))
+        .find(|v| !is_null_type(v))
         .cloned()
         .unwrap_or(Type::Any)
 }

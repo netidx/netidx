@@ -8,7 +8,7 @@
 use arcstr::ArcStr;
 use graphix_compiler::{
     env::Env,
-    expr::{ApplyExpr, Expr, ExprKind, ModPath},
+    expr::{ApplyExpr, Expr, ExprKind, ModPath, print::PrettyDisplay},
     typ::{FnType, Type},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,9 +87,10 @@ pub(crate) struct TreeModel {
     nodes: Vec<TreeNode>,
     pub roots: Vec<TreeNodeId>,
     pub selected: Option<TreeNodeId>,
-    /// Non-widget source lines (use statements, let bindings, etc.)
-    /// that appear before the widget tree.
-    pub preamble: String,
+    /// Non-widget expressions (use, let, mod, type) that appear
+    /// before the widget tree. Stored as AST so the source is always
+    /// regenerated from the AST, never from stored text.
+    pub preamble: Vec<Expr>,
     /// Per-node UI state for the property editor
     pub editor_ui: fxhash::FxHashMap<TreeNodeId, super::path_update::EditorUiState>,
 }
@@ -100,7 +101,7 @@ impl TreeModel {
             nodes: Vec::new(),
             roots: Vec::new(),
             selected: None,
-            preamble: String::new(),
+            preamble: Vec::new(),
             editor_ui: fxhash::FxHashMap::default(),
         }
     }
@@ -272,8 +273,9 @@ impl TreeModel {
 
         // Look up new widget's FnType
         let paths = [
-            ModPath::from(["gui", new_kind]),
             ModPath::from([new_kind]),
+            ModPath::from(["gui", new_kind]),
+            ModPath::from(["gui", new_kind, new_kind]),
         ];
         let new_ft = paths.iter().find_map(|p| {
             env.lookup_bind(&ModPath::root(), p).and_then(|(_, bind)| {
@@ -340,9 +342,115 @@ impl TreeModel {
         id
     }
 
-    // ---- Populate from parsed source ----
+    // ---- Source → Tree synchronization ----
 
-    /// Parse source and populate the tree.
+    /// Parse source and update the tree. If the tree structure matches
+    /// (same widget kinds in same order), update expressions in-place
+    /// preserving node IDs and selection. If structure differs, rebuild.
+    /// Returns true if the parse succeeded.
+    pub fn update_from_source(&mut self, source: &str, env: &Env) -> bool {
+        let origin = graphix_compiler::expr::Origin {
+            parent: None,
+            source: graphix_compiler::expr::Source::Unspecified,
+            text: ArcStr::from(source),
+        };
+        let exprs = match graphix_compiler::expr::parser::parse(origin) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        let mut preamble_exprs = Vec::new();
+        let mut widget_exprs = Vec::new();
+
+        for expr in exprs.iter() {
+            match &expr.kind {
+                ExprKind::Use { .. }
+                | ExprKind::Module { .. }
+                | ExprKind::TypeDef(_) => {
+                    preamble_exprs.push(expr.clone());
+                }
+                ExprKind::Bind(_) => {
+                    if classify_widget_expr(expr, env).is_some() {
+                        widget_exprs.push(expr.clone());
+                    } else {
+                        preamble_exprs.push(expr.clone());
+                    }
+                }
+                _ => {
+                    widget_exprs.push(expr.clone());
+                }
+            }
+        }
+
+        self.preamble = preamble_exprs;
+
+        // Classify the parsed widgets
+        let mut parsed_widgets = Vec::new();
+        for expr in &widget_exprs {
+            Self::collect_classified(expr, env, &mut parsed_widgets);
+        }
+
+        // Try to match against existing tree — walk in lockstep
+        let existing_walk = self.walk();
+        let structure_matches = existing_walk.len() == parsed_widgets.len()
+            && existing_walk.iter().zip(parsed_widgets.iter()).all(
+                |((id, _depth), (kind, _, _, _, _, _))| {
+                    self.get(*id).map_or(false, |n| n.data.kind == *kind)
+                },
+            );
+
+        if structure_matches {
+            // Update expressions in-place — preserve node IDs
+            for ((id, _), (_, ctor, args, child_slots, _, fn_type)) in
+                existing_walk.iter().zip(parsed_widgets.iter())
+            {
+                if let Some(node) = self.get_mut(*id) {
+                    node.data.constructor_path = ctor.clone();
+                    node.data.args = args.clone();
+                    node.data.child_slots = child_slots.clone();
+                    node.data.fn_type = fn_type.clone();
+                }
+            }
+        } else {
+            // Structure changed — full rebuild (preserving selected kind if possible)
+            let selected_kind = self.selected
+                .and_then(|id| self.get(id))
+                .map(|n| n.data.kind.clone());
+            self.nodes.clear();
+            self.roots.clear();
+            self.selected = None;
+            for expr in &widget_exprs {
+                if let Some(node_id) = self.populate_expr(expr, None, env) {
+                    self.roots.push(node_id);
+                }
+            }
+            // Try to restore selection by finding a node with the same kind
+            if let Some(kind) = selected_kind {
+                self.selected = self.nodes.iter()
+                    .find(|n| n.data.kind == kind)
+                    .map(|n| n.id);
+            }
+        }
+
+        true
+    }
+
+    /// Classify widgets recursively from an expression, collecting in
+    /// depth-first order to match the tree walk order.
+    fn collect_classified(
+        expr: &Expr,
+        env: &Env,
+        out: &mut Vec<(ArcStr, ArcStr, Vec<(ArcStr, Expr)>, Vec<ChildSlot>, Vec<Expr>, Option<TArc<FnType>>)>,
+    ) {
+        if let Some((kind, ctor, args, slots, children, ft)) = classify_widget_expr(expr, env) {
+            out.push((kind, ctor, args, slots.clone(), children.clone(), ft));
+            for child in &children {
+                Self::collect_classified(child, env, out);
+            }
+        }
+    }
+
+    /// Parse source and populate the tree from scratch (for initial load).
     pub fn populate_from_source(&mut self, source: &str, env: &Env) {
         self.nodes.clear();
         self.roots.clear();
@@ -358,8 +466,7 @@ impl TreeModel {
             Err(_) => return,
         };
 
-        // Split expressions into preamble (use, let, mod, type) and widget exprs
-        let mut preamble_lines = Vec::new();
+        let mut preamble_exprs = Vec::new();
         let mut widget_exprs = Vec::new();
 
         for expr in exprs.iter() {
@@ -367,14 +474,13 @@ impl TreeModel {
                 ExprKind::Use { .. }
                 | ExprKind::Module { .. }
                 | ExprKind::TypeDef(_) => {
-                    preamble_lines.push(expr_to_source(expr, source));
+                    preamble_exprs.push(expr.clone());
                 }
                 ExprKind::Bind(_) => {
-                    // Let bindings go to preamble unless their value is a widget
                     if classify_widget_expr(expr, env).is_some() {
                         widget_exprs.push(expr.clone());
                     } else {
-                        preamble_lines.push(expr_to_source(expr, source));
+                        preamble_exprs.push(expr.clone());
                     }
                 }
                 _ => {
@@ -383,7 +489,7 @@ impl TreeModel {
             }
         }
 
-        self.preamble = preamble_lines.join("\n");
+        self.preamble = preamble_exprs;
 
         for expr in &widget_exprs {
             if let Some(node_id) = self.populate_expr(expr, None, env) {
@@ -434,100 +540,88 @@ impl TreeModel {
 
     // ---- Source reconstruction ----
 
-    /// Reconstruct full source from preamble + tree.
+    /// Reconstruct full source from preamble AST + widget tree.
+    /// Everything goes through the Expr pretty printer — no manual
+    /// string building.
     pub fn to_source(&self) -> String {
         let mut out = String::new();
-        if !self.preamble.is_empty() {
-            out.push_str(&self.preamble);
-            out.push('\n');
+        for expr in &self.preamble {
+            out.push_str(expr.to_string_pretty(80).trim());
+            out.push_str(";\n");
         }
         for &root_id in &self.roots {
-            self.node_to_source(root_id, &mut out, 0);
-            out.push('\n');
+            if let Some(expr) = self.node_to_expr(root_id) {
+                out.push_str(expr.to_string_pretty(80).trim());
+                out.push('\n');
+            }
         }
         out
     }
 
-    fn node_to_source(&self, id: TreeNodeId, out: &mut String, depth: usize) {
-        let Some(node) = self.get(id) else { return };
-        let indent: String = "  ".repeat(depth);
+    /// Reconstruct the AST `Expr` for a widget node and its children.
+    fn node_to_expr(&self, id: TreeNodeId) -> Option<Expr> {
+        let node = self.get(id)?;
 
-        out.push_str(&indent);
-        out.push_str(&node.data.constructor_path);
-        out.push('(');
+        // Build the function reference
+        let func_expr = ExprKind::Ref {
+            name: ModPath::from_iter(node.data.constructor_path.split("::")),
+        }.to_expr_nopos();
 
-        let mut first = true;
-        // Write property args
+        // Collect all args: property args + child args
+        let mut args: Vec<(Option<ArcStr>, Expr)> = Vec::new();
+
+        // Property args (labeled)
         for (label, expr) in &node.data.args {
-            if !first { out.push_str(", "); }
-            first = false;
-            out.push('\n');
-            out.push_str(&indent);
-            out.push_str("  #");
-            out.push_str(label);
-            out.push_str(": ");
-            out.push_str(&format!("{}", expr));
+            args.push((Some(label.clone()), expr.clone()));
         }
 
-        // Write children based on child_slots
+        // Child args (from child_slots)
         if !node.children.is_empty() {
             if let Some(slot) = node.data.child_slots.first() {
-                if !first { out.push_str(","); }
-                first = false;
                 match slot {
                     ChildSlot::Array(label) => {
-                        out.push('\n');
-                        out.push_str(&indent);
-                        out.push_str("  #");
-                        out.push_str(label);
-                        out.push_str(": &[\n");
-                        for &child_id in &node.children {
-                            self.node_to_source(child_id, out, depth + 2);
-                            out.push_str(",\n");
-                        }
-                        out.push_str(&indent);
-                        out.push_str("  ]");
+                        let child_exprs: Vec<Expr> = node.children.iter()
+                            .filter_map(|&cid| self.node_to_expr(cid))
+                            .collect();
+                        let arr = ExprKind::Array {
+                            args: TArc::from(child_exprs),
+                        }.to_expr_nopos();
+                        let byref = ExprKind::ByRef(TArc::new(arr)).to_expr_nopos();
+                        args.push((Some(label.clone()), byref));
                     }
                     ChildSlot::Single(label) => {
-                        for &child_id in &node.children {
-                            out.push('\n');
-                            out.push_str(&indent);
-                            out.push_str("  #");
-                            out.push_str(label);
-                            out.push_str(": &");
-                            self.node_to_source(child_id, out, depth + 1);
+                        if let Some(&child_id) = node.children.first() {
+                            if let Some(child_expr) = self.node_to_expr(child_id) {
+                                let byref = ExprKind::ByRef(TArc::new(child_expr)).to_expr_nopos();
+                                args.push((Some(label.clone()), byref));
+                            }
                         }
                     }
                 }
             } else {
-                // No labeled child slot — positional children
-                if !first { out.push_str(","); }
-                out.push_str(" &[\n");
-                for &child_id in &node.children {
-                    self.node_to_source(child_id, out, depth + 2);
-                    out.push_str(",\n");
-                }
-                out.push_str(&indent);
-                out.push(']');
+                // No labeled child slot — positional children in array
+                let child_exprs: Vec<Expr> = node.children.iter()
+                    .filter_map(|&cid| self.node_to_expr(cid))
+                    .collect();
+                let arr = ExprKind::Array {
+                    args: TArc::from(child_exprs),
+                }.to_expr_nopos();
+                let byref = ExprKind::ByRef(TArc::new(arr)).to_expr_nopos();
+                args.push((None, byref));
             }
         }
 
-        out.push(')');
+        Some(ExprKind::Apply(ApplyExpr {
+            function: TArc::new(func_expr),
+            args: TArc::from(args),
+        }).to_expr_nopos())
     }
 }
 
 // ---- AST classification ----
 
 /// Extract the source text corresponding to an expression (approximate).
-fn expr_to_source(expr: &Expr, full_source: &str) -> String {
-    // Use position info to extract the line
-    let line = expr.pos.line.saturating_sub(1) as usize;
-    full_source
-        .lines()
-        .nth(line)
-        .unwrap_or("")
-        .to_string()
-}
+
 
 /// Check if a ModPath refers to a gui:: widget.
 /// Handles both qualified (`gui::text`) and unqualified (`text` after
@@ -599,11 +693,17 @@ pub(crate) fn classify_widget_expr(
 
     // Look up the function type from the env to determine which args
     // are widget-bearing (children) vs properties.
-    // Try both qualified (gui::xxx) and unqualified (xxx) paths.
+    // Try multiple paths since the function may be at different levels
+    // depending on how it was imported.
     let fn_type = {
+        let kind_str = widget_kind.as_str();
         let paths = [
-            ModPath::from(["gui", &widget_kind]),
-            ModPath::from([widget_kind.as_str()]),
+            // Unqualified: data_table (from `use gui::data_table`)
+            ModPath::from([kind_str]),
+            // Module-qualified: gui::data_table (might be module, not fn)
+            ModPath::from(["gui", kind_str]),
+            // Fully qualified: gui::data_table::data_table (the actual fn)
+            ModPath::from(["gui", kind_str, kind_str]),
         ];
         paths.iter().find_map(|p| {
             env.lookup_bind(&ModPath::root(), p).and_then(|(_, bind)| {
