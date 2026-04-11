@@ -67,14 +67,23 @@ pub(crate) enum PropAction {
 
 // ---- Editor UI state ----
 
+/// Key for per-field UI state: (arg label, type path within that arg).
+pub(crate) type FieldKey = (ArcStr, Vec<PathSegment>);
+
 /// Lightweight UI-only state per tree node. Does NOT store expression
 /// values — those live in TreeNodeData.args.
 #[derive(Default)]
 pub(crate) struct EditorUiState {
     /// Paths of collapsed sections (default is expanded)
-    pub collapsed: FxHashSet<Vec<PathSegment>>,
-    /// In-progress text edits before commit (keyed by path)
-    pub text_inputs: FxHashMap<Vec<PathSegment>, String>,
+    pub collapsed: FxHashSet<FieldKey>,
+    /// In-progress text edits before commit
+    pub text_inputs: FxHashMap<FieldKey, String>,
+    /// Per-field parse errors — shown as red text + tooltip
+    pub parse_errors: FxHashMap<FieldKey, String>,
+    /// Fields the user is actively editing. Dirty fields are NOT
+    /// overwritten by debounce syncs. Cleared when the field parses
+    /// successfully, or when the user switches focus to the source editor.
+    pub dirty: FxHashSet<FieldKey>,
 }
 
 // ---- Path-based Expr update ----

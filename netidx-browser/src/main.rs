@@ -371,6 +371,17 @@ pub(crate) enum DesignMsg {
     /// Outdent: make selected widget a sibling of its parent
     TreeOutdent,
     // ---- Property panel ----
+    /// Navigate to a property's expression in the source editor.
+    /// Uses the expression's AST position (1-based line/column) and
+    /// the expression text to compute the exact selection range.
+    EditInSource { line: i32, column: i32, expr_text: String },
+    /// Add a default value for an unset property, sync source, then
+    /// navigate to it in the editor.
+    EditInSourceWithDefault {
+        node_id: editor::tree_model::TreeNodeId,
+        arg: ArcStr,
+        typ: graphix_compiler::typ::Type,
+    },
     /// A property edit action (path-based)
     PropEdit {
         node_id: editor::tree_model::TreeNodeId,
@@ -413,6 +424,12 @@ struct DesignWindow {
     last_edit: Option<Instant>,
     /// Whether a typecheck is pending (waiting for debounce)
     typecheck_pending: bool,
+    /// Whether the pending change came from the property panel (true)
+    /// or the source editor (false). Determines whether debounce
+    /// syncs tree→source or source→tree.
+    pending_from_panel: bool,
+    /// Whether the source editor should be focused on the next render
+    focus_editor: bool,
 }
 
 impl DesignWindow {
@@ -440,6 +457,8 @@ impl DesignWindow {
             highlight_version: 0,
             last_edit: None,
             typecheck_pending: false,
+            pending_from_panel: false,
+            focus_editor: false,
             tree: {
                 let mut tree = editor::tree_model::TreeModel::new();
                 if let Some(env) = &env {
@@ -902,21 +921,95 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
             }
         }
 
-        // ---- Debounced typecheck for design window ----
+        // ---- Debounced parse + compile + tree sync for design window ----
         if let Some(dw) = self.design.as_mut() {
             if dw.typecheck_pending {
                 if let Some(last_edit) = dw.last_edit {
                     if last_edit.elapsed() >= Duration::from_secs(1) {
                         dw.typecheck_pending = false;
-                        let source = dw.source_text();
-                        let origin = graphix_compiler::expr::Origin {
-                            parent: None,
-                            source: graphix_compiler::expr::Source::Unspecified,
-                            text: ArcStr::from(source.as_str()),
+                        let from_panel = dw.pending_from_panel;
+                        dw.pending_from_panel = false;
+                        let source = if from_panel {
+                            // Apply ALL text_inputs to the tree (including dirty).
+                            // This is the debounce — 1 second has passed since
+                            // the last keystroke, so the user has stopped typing.
+                            let pending: Vec<_> = dw.tree.editor_ui.iter()
+                                .flat_map(|(nid, ui)| {
+                                    ui.text_inputs.iter()
+                                        .map(move |((arg, path), text)| {
+                                            (*nid, arg.clone(), path.clone(), text.clone())
+                                        })
+                                })
+                                .collect();
+                            for (nid, arg, path, text) in &pending {
+                                if let Some(node) = dw.tree.get_mut(*nid) {
+                                    if text.is_empty() {
+                                        editor::path_update::apply_at_path(&mut node.data.args, arg, path, None);
+                                    } else {
+                                        match graphix_compiler::expr::parser::parse_one(text) {
+                                            Ok(expr) => {
+                                                editor::path_update::apply_at_path(&mut node.data.args, arg, path, Some(expr));
+                                            }
+                                            Err(e) => {
+                                                // Parse failed — record error for display
+                                                let fk = (arg.clone(), path.clone());
+                                                let ui = dw.tree.editor_ui.entry(*nid).or_default();
+                                                ui.parse_errors.insert(fk, format!("{e}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Clear dirty and successfully-applied text_inputs.
+                            // Failed parses keep their text_inputs for display.
+                            for ui in dw.tree.editor_ui.values_mut() {
+                                ui.dirty.clear();
+                                ui.text_inputs.retain(|fk, _| ui.parse_errors.contains_key(fk));
+                            }
+                            let s = dw.tree.to_source();
+                            dw.set_source(&s);
+                            s
+                        } else {
+                            // Source editor edit — read editor text directly
+                            dw.source_text()
                         };
-                        match graphix_compiler::expr::parser::parse(origin) {
-                            Ok(_) => dw.diagnostic = None,
-                            Err(e) => dw.diagnostic = Some(format!("{e}")),
+                        if let Some(env) = dw.env.clone() {
+                            if dw.tree.update_from_source(&source, &env) {
+                                // Tree updated from source — clear non-dirty text_inputs
+                                for ui in dw.tree.editor_ui.values_mut() {
+                                    ui.text_inputs.retain(|fk, _| ui.dirty.contains(fk));
+                                    ui.parse_errors.retain(|fk, _| ui.dirty.contains(fk));
+                                }
+                                // Parse succeeded — now try full compilation
+                                // to catch name resolution and type errors
+                                match self.rt.block_on(
+                                    self.backend.gx.compile(ArcStr::from(source.as_str())),
+                                ) {
+                                    Ok(_comp) => {
+                                        dw.diagnostic = None;
+                                        // Use get_env() for the full root env
+                                        // (comp.env may be scoped to the compilation)
+                                        if let Ok(env) = self.rt.block_on(
+                                            self.backend.gx.get_env()
+                                        ) {
+                                            dw.env = Some(env);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        dw.diagnostic = Some(format!("{e:#}"));
+                                    }
+                                }
+                            } else {
+                                // Parse failed — show parse error
+                                let origin = graphix_compiler::expr::Origin {
+                                    parent: None,
+                                    source: graphix_compiler::expr::Source::Unspecified,
+                                    text: ArcStr::from(source.as_str()),
+                                };
+                                if let Err(e) = graphix_compiler::expr::parser::parse(origin) {
+                                    dw.diagnostic = Some(format!("{e}"));
+                                }
+                            }
                         }
                         dw.needs_redraw = true;
                     } else {
@@ -1014,7 +1107,9 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         .padding(iced_core::Padding::from([2, 8]))
                         .into();
                     let completion_active = dw.completion.active;
+                    let editor_id = iced_core::widget::Id::new("design-source-editor");
                     let te: DesignElement<'_> = iced_widget::TextEditor::new(&dw.editor_content)
+                        .id(editor_id.clone())
                         .highlight_with::<GxHighlighter>(
                             GxSettings { version: dw.highlight_version },
                             to_format,
@@ -1060,9 +1155,6 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                     let mut right_pane = iced_widget::Column::new()
                         .spacing(4)
                         .padding(iced_core::Padding::from([4, 4]));
-                    let has_right_content = dw.diagnostic.is_some()
-                        || (dw.completion.active && !dw.completion.items.is_empty());
-
                     // Diagnostics
                     if let Some(diag) = &dw.diagnostic {
                         let diag_header: DesignElement<'_> = iced_widget::text("Errors")
@@ -1124,30 +1216,23 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         }
                     }
 
-                    // Bottom: editor (left) | completion+diagnostics (right)
-                    let editor_area: DesignElement<'_> = if has_right_content {
-                        iced_widget::Row::new()
-                            .push(
-                                iced_widget::Column::new()
-                                    .push(toolbar)
-                                    .push(te)
-                                    .width(iced_core::Length::FillPortion(3))
-                            )
-                            .push(iced_widget::rule::vertical::<'_, GraphixTheme>(1))
-                            .push(
-                                iced_widget::Scrollable::new(right_pane)
-                                    .width(iced_core::Length::FillPortion(1))
-                                    .height(iced_core::Length::Fill)
-                            )
-                            .height(iced_core::Length::FillPortion(1))
-                            .into()
-                    } else {
-                        iced_widget::Column::new()
-                            .push(toolbar)
-                            .push(te)
-                            .height(iced_core::Length::FillPortion(1))
-                            .into()
-                    };
+                    // Bottom: editor (left) | right pane (always present for
+                    // stable widget tree — avoids focus loss when content appears)
+                    let editor_area: DesignElement<'_> = iced_widget::Row::new()
+                        .push(
+                            iced_widget::Column::new()
+                                .push(toolbar)
+                                .push(te)
+                                .width(iced_core::Length::FillPortion(3))
+                        )
+                        .push(iced_widget::rule::vertical::<'_, GraphixTheme>(1))
+                        .push(
+                            iced_widget::Scrollable::new(right_pane)
+                                .width(iced_core::Length::FillPortion(1))
+                                .height(iced_core::Length::Fill)
+                        )
+                        .height(iced_core::Length::FillPortion(1))
+                        .into();
 
                     let element: DesignElement<'_> = iced_widget::Column::new()
                         .push(top_half)
@@ -1170,6 +1255,15 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         &mut self.clipboard,
                         &mut self.design_messages,
                     );
+
+                    // Focus the editor if requested
+                    if dw.focus_editor {
+                        dw.focus_editor = false;
+                        let mut op = iced_core::widget::operation::focusable::focus(
+                            editor_id,
+                        );
+                        ui.operate(&dw.surface.renderer, &mut op);
+                    }
 
                     let new_mouse = match &state {
                         user_interface::State::Updated { mouse_interaction, .. } => {
@@ -1225,11 +1319,19 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                     if let Some(dw) = self.design.as_mut() {
                         let is_edit = action.is_edit();
                         dw.editor_content.perform(action);
+                        // User is interacting with source editor — clear all
+                        // dirty flags so panel entries update from the tree
+                        for ui in dw.tree.editor_ui.values_mut() {
+                            ui.dirty.clear();
+                            ui.text_inputs.clear();
+                            ui.parse_errors.clear();
+                        }
                         if is_edit {
                             dw.dirty = true;
                             dw.diagnostic = None;
                             dw.last_edit = Some(Instant::now());
                             dw.typecheck_pending = true;
+                            dw.pending_from_panel = false;
                             // Auto-trigger completion after typing :: or #
                             let text = dw.editor_content.text();
                             let cursor = dw.editor_content.cursor();
@@ -1266,10 +1368,16 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                             Ok(comp) => {
                                 dw.diagnostic = None;
                                 dw.dirty = false;
-                                // Update env for completions
-                                dw.env = Some(comp.env.clone());
-                                // Rebuild tree from source
-                                dw.tree.populate_from_source(&source, &comp.env);
+                                // Use get_env() for full root env
+                                if let Ok(env) = self.rt.block_on(
+                                    self.backend.gx.get_env()
+                                ) {
+                                    dw.env = Some(env);
+                                }
+                                // Update tree from source preserving node IDs
+                                if let Some(env) = &dw.env {
+                                    dw.tree.update_from_source(&source, env);
+                                }
                                 self.current_source = source.clone();
                                 // Update the main window view
                                 if let Some(bw) = self.window.as_mut() {
@@ -1408,18 +1516,97 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         dw.needs_redraw = true;
                     }
                 }
+                DesignMsg::EditInSourceWithDefault { node_id, arg, typ } => {
+                    if let Some(dw) = self.design.as_mut() {
+                        // Insert a default expression for this arg
+                        let default_expr = editor::prop_panel::default_expr_for_type(
+                            &typ, dw.env.as_ref(),
+                        );
+                        if let Some(node) = dw.tree.get_mut(node_id) {
+                            editor::path_update::apply_at_path(
+                                &mut node.data.args, &arg, &[], Some(default_expr),
+                            );
+                        }
+                        // Sync tree → source → editor
+                        let source = dw.tree.to_source();
+                        dw.set_source(&source);
+                        // Re-parse to get real AST positions while
+                        // preserving node IDs and selection
+                        if let Some(env) = dw.env.clone() {
+                            dw.tree.update_from_source(&source, &env);
+                        }
+                        // Now the tree has expressions with real positions
+                        if let Some(node) = dw.tree.get(node_id) {
+                            if let Some((_, expr)) = node.data.args.iter()
+                                .find(|(l, _)| *l == arg)
+                            {
+                                use iced_widget::text_editor::{Cursor, Position};
+                                dw.focus_editor = true;
+                                let expr_text = format!("{}", expr);
+                                let start_line = (expr.pos.line - 1).max(0) as usize;
+                                let start_col = (expr.pos.column - 1).max(0) as usize;
+                                let num_newlines = expr_text.matches('\n').count();
+                                let end_line = start_line + num_newlines;
+                                let end_col = if num_newlines > 0 {
+                                    expr_text.rfind('\n')
+                                        .map(|p| expr_text.len() - p - 1)
+                                        .unwrap_or(0)
+                                } else {
+                                    start_col + expr_text.len()
+                                };
+                                dw.editor_content.move_to(Cursor {
+                                    position: Position { line: start_line, column: start_col },
+                                    selection: Some(Position { line: end_line, column: end_col }),
+                                });
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::EditInSource { line, column, expr_text } => {
+                    if let Some(dw) = self.design.as_mut() {
+                        use iced_widget::text_editor::{Cursor, Position};
+                        let start_line = (line - 1).max(0) as usize;
+                        let start_col = (column - 1).max(0) as usize;
+                        // Request focus on next render
+                        dw.focus_editor = true;
+                        // Compute end position from the expression text
+                        let num_newlines = expr_text.matches('\n').count();
+                        let end_line = start_line + num_newlines;
+                        let end_col = if num_newlines > 0 {
+                            expr_text.rfind('\n')
+                                .map(|p| expr_text.len() - p - 1)
+                                .unwrap_or(0)
+                        } else {
+                            start_col + expr_text.len()
+                        };
+                        dw.editor_content.move_to(Cursor {
+                            position: Position { line: start_line, column: start_col },
+                            selection: Some(Position { line: end_line, column: end_col }),
+                        });
+                        dw.needs_redraw = true;
+                    }
+                }
                 DesignMsg::PropEdit { node_id, arg, path, action } => {
                     if let Some(dw) = self.design.as_mut() {
                         use editor::path_update::{PropAction, apply_at_path};
                         match action {
                             PropAction::TextChanged(text) => {
+                                // Just store the text and mark dirty.
+                                // No parse checking — that happens on debounce
+                                // (1 second after the user stops typing).
+                                let fk = (arg.clone(), path.clone());
                                 let ui = dw.tree.editor_ui.entry(node_id).or_default();
-                                ui.text_inputs.insert(path, text);
-                                // No sync — just UI state update
+                                ui.text_inputs.insert(fk.clone(), text);
+                                ui.dirty.insert(fk);
+                                dw.last_edit = Some(Instant::now());
+                                dw.typecheck_pending = true;
+                                dw.pending_from_panel = true;
                             }
                             PropAction::TextCommit => {
+                                let fk = (arg.clone(), path.clone());
                                 let ui = dw.tree.editor_ui.entry(node_id).or_default();
-                                if let Some(text) = ui.text_inputs.remove(&path) {
+                                if let Some(text) = ui.text_inputs.remove(&fk) {
                                     if let Some(node) = dw.tree.get_mut(node_id) {
                                         let new_expr = if text.is_empty() {
                                             None
@@ -1454,11 +1641,24 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                 }
                             }
                             PropAction::VariantSelected(tag) => {
-                                // TODO: look up variant arg types, generate defaults
                                 if let Some(node) = dw.tree.get_mut(node_id) {
+                                    // Look up variant arg types from the FnType and generate defaults
+                                    let find_variant_args = |ft: &graphix_compiler::typ::FnType| -> Vec<graphix_compiler::expr::Expr> {
+                                        // Find the arg by label, resolve its type, find the variant
+                                        ft.args.iter()
+                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .and_then(|a| {
+                                                let typ = unwrap_byref_type(&a.typ);
+                                                find_variant_arg_types(typ, &tag, dw.env.as_ref())
+                                            })
+                                            .unwrap_or_default()
+                                    };
+                                    let default_args = node.data.fn_type.as_ref()
+                                        .map(|ft| find_variant_args(ft))
+                                        .unwrap_or_default();
                                     let expr = graphix_compiler::expr::ExprKind::Variant {
                                         tag,
-                                        args: triomphe::Arc::from(Vec::<graphix_compiler::expr::Expr>::new()),
+                                        args: triomphe::Arc::from(default_args),
                                     }.to_expr_nopos();
                                     apply_at_path(&mut node.data.args, &arg, &path, Some(expr));
                                     let source = dw.tree.to_source();
@@ -1470,10 +1670,23 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                     let mut elems = editor::path_update::extract_array_elems(
                                         node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
                                     );
-                                    // Add a null default
-                                    elems.push(graphix_compiler::expr::ExprKind::Constant(
-                                        netidx::publisher::Value::Null
-                                    ).to_expr_nopos());
+                                    // Create typed default from the array element type
+                                    let elem_default = if let Some(ft) = &node.data.fn_type {
+                                        ft.args.iter()
+                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .map(|a| {
+                                                let inner = unwrap_to_array_elem(&a.typ);
+                                                editor::prop_panel::default_expr_for_type(inner, dw.env.as_ref())
+                                            })
+                                            .unwrap_or_else(|| graphix_compiler::expr::ExprKind::Constant(
+                                                netidx::publisher::Value::Null
+                                            ).to_expr_nopos())
+                                    } else {
+                                        graphix_compiler::expr::ExprKind::Constant(
+                                            netidx::publisher::Value::Null
+                                        ).to_expr_nopos()
+                                    };
+                                    elems.push(elem_default);
                                     let arr = graphix_compiler::expr::ExprKind::Array {
                                         args: triomphe::Arc::from(elems),
                                     }.to_expr_nopos();
@@ -1507,12 +1720,35 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                     let mut entries = editor::path_update::extract_map_entries(
                                         node.data.args.iter().find(|(l,_)| *l == arg).map(|(_,e)| e)
                                     );
-                                    let default_key = graphix_compiler::expr::ExprKind::Constant(
-                                        netidx::publisher::Value::String(arcstr::literal!(""))
-                                    ).to_expr_nopos();
-                                    let default_val = graphix_compiler::expr::ExprKind::Constant(
-                                        netidx::publisher::Value::Null
-                                    ).to_expr_nopos();
+                                    // Create typed defaults from the map key/value types
+                                    let (default_key, default_val) = if let Some(ft) = &node.data.fn_type {
+                                        ft.args.iter()
+                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .map(|a| {
+                                                let (kt, vt) = unwrap_to_map_kv(&a.typ);
+                                                (
+                                                    editor::prop_panel::default_expr_for_type(kt, dw.env.as_ref()),
+                                                    editor::prop_panel::default_expr_for_type(vt, dw.env.as_ref()),
+                                                )
+                                            })
+                                            .unwrap_or_else(|| (
+                                                graphix_compiler::expr::ExprKind::Constant(
+                                                    netidx::publisher::Value::String(arcstr::literal!(""))
+                                                ).to_expr_nopos(),
+                                                graphix_compiler::expr::ExprKind::Constant(
+                                                    netidx::publisher::Value::Null
+                                                ).to_expr_nopos(),
+                                            ))
+                                    } else {
+                                        (
+                                            graphix_compiler::expr::ExprKind::Constant(
+                                                netidx::publisher::Value::String(arcstr::literal!(""))
+                                            ).to_expr_nopos(),
+                                            graphix_compiler::expr::ExprKind::Constant(
+                                                netidx::publisher::Value::Null
+                                            ).to_expr_nopos(),
+                                        )
+                                    };
                                     entries.push((default_key, default_val));
                                     let map_expr = graphix_compiler::expr::ExprKind::Map {
                                         args: triomphe::Arc::from(entries),
@@ -1547,14 +1783,14 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                 let mut key_path = path.clone();
                                 key_path.push(editor::path_update::PathSegment::MapValueIndex(i));
                                 key_path.push(editor::path_update::PathSegment::StructField(arcstr::literal!("__key__")));
-                                ui.text_inputs.insert(key_path, text);
+                                ui.text_inputs.insert((arg.clone(), key_path), text);
                             }
                             PropAction::MapKeyCommit(i) => {
                                 let ui = dw.tree.editor_ui.entry(node_id).or_default();
                                 let mut key_path = path.clone();
                                 key_path.push(editor::path_update::PathSegment::MapValueIndex(i));
                                 key_path.push(editor::path_update::PathSegment::StructField(arcstr::literal!("__key__")));
-                                if let Some(text) = ui.text_inputs.remove(&key_path) {
+                                if let Some(text) = ui.text_inputs.remove(&(arg.clone(), key_path)) {
                                     if let Some(node) = dw.tree.get_mut(node_id) {
                                         let new_key = graphix_compiler::expr::parser::parse_one(&text).ok();
                                         if let Some(new_key) = new_key {
@@ -1575,9 +1811,10 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                 }
                             }
                             PropAction::ToggleSection => {
+                                let fk = (arg.clone(), path);
                                 let ui = dw.tree.editor_ui.entry(node_id).or_default();
-                                if !ui.collapsed.remove(&path) {
-                                    ui.collapsed.insert(path);
+                                if !ui.collapsed.remove(&fk) {
+                                    ui.collapsed.insert(fk);
                                 }
                             }
                             PropAction::Clear => {
@@ -1793,6 +2030,70 @@ impl widgets::GuiWidget<NoExt> for ErrorView {
 }
 
 // ---- Entry point ----
+
+fn unwrap_byref_type(typ: &graphix_compiler::typ::Type) -> &graphix_compiler::typ::Type {
+    use graphix_compiler::typ::Type;
+    match typ {
+        Type::ByRef(inner) => unwrap_byref_type(inner),
+        other => other,
+    }
+}
+
+/// Find variant arg types in a Set type and generate defaults for them.
+fn find_variant_arg_types(
+    typ: &graphix_compiler::typ::Type,
+    tag: &arcstr::ArcStr,
+    env: Option<&graphix_compiler::env::Env>,
+) -> Option<Vec<graphix_compiler::expr::Expr>> {
+    use graphix_compiler::typ::Type;
+    match typ {
+        Type::Set(variants) => {
+            for v in variants.iter() {
+                if let Type::Variant(t, args) = v {
+                    if t == tag {
+                        return Some(args.iter()
+                            .map(|at| editor::prop_panel::default_expr_for_type(at, env))
+                            .collect());
+                    }
+                }
+            }
+            // Try resolving nullable sets
+            if variants.len() == 2 {
+                for v in variants.iter() {
+                    if !matches!(v, Type::Variant(t, _) if t.as_str() == "Null") {
+                        return find_variant_arg_types(v, tag, env);
+                    }
+                }
+            }
+            None
+        }
+        Type::Ref { .. } => {
+            env.and_then(|e| typ.lookup_ref(e).ok())
+                .and_then(|resolved| find_variant_arg_types(&resolved, tag, env))
+        }
+        _ => None,
+    }
+}
+
+/// Unwrap ByRef/Array layers to get the array element type.
+fn unwrap_to_array_elem(typ: &graphix_compiler::typ::Type) -> &graphix_compiler::typ::Type {
+    use graphix_compiler::typ::Type;
+    match typ {
+        Type::ByRef(inner) => unwrap_to_array_elem(inner),
+        Type::Array(inner) => inner,
+        other => other,
+    }
+}
+
+/// Unwrap ByRef/Map layers to get the map key and value types.
+fn unwrap_to_map_kv(typ: &graphix_compiler::typ::Type) -> (&graphix_compiler::typ::Type, &graphix_compiler::typ::Type) {
+    use graphix_compiler::typ::Type;
+    match typ {
+        Type::ByRef(inner) => unwrap_to_map_kv(inner),
+        Type::Map { key, value } => (key, value),
+        other => (other, other),
+    }
+}
 
 fn main() {
     env_logger::init();

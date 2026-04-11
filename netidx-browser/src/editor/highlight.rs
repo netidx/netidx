@@ -45,10 +45,16 @@ impl Highlighter for GxHighlighter {
         Self { current_line: 0 }
     }
 
-    fn update(&mut self, _new_settings: &Self::Settings) {}
+    fn update(&mut self, _new_settings: &Self::Settings) {
+        // Reset to force re-highlighting all lines when settings change
+        // (e.g. after content replacement bumps the version)
+        self.current_line = 0;
+    }
 
     fn change_line(&mut self, line: usize) {
-        self.current_line = line;
+        // Track the earliest changed line — iced re-highlights from
+        // current_line() forward, so we must keep the minimum.
+        self.current_line = self.current_line.min(line);
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
