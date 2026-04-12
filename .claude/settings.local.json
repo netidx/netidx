@@ -36,7 +36,8 @@
       "Bash(cargo search:*)",
       "Bash(cargo info:*)",
       "Bash(cargo clean:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(git ls-tree:*)"
     ],
     "deny": [],
     "ask": []

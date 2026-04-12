@@ -4,6 +4,7 @@ mod backend;
 mod builtins;
 mod chrome;
 mod editor;
+mod menu_bar;
 
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -49,16 +50,36 @@ use winit::{
 pub(crate) enum BrowserMsg {
     /// Message from a graphix widget (button press, text input, etc.)
     Widget(Message),
-    /// Navigate to a location (from breadcrumb click or Go button)
+    /// Navigate to a location (from breadcrumb click)
     Navigate(ViewLoc),
     /// Navigate to parent path (Backspace)
     NavigateUp,
-    /// Navigation input text changed
-    NavInputChanged(String),
-    /// Navigation input submitted (Enter or Go button)
-    NavSubmit,
     /// Toggle design mode (opens/closes design window)
     ToggleDesignMode,
+    /// Save current view to save_loc (Ctrl+S)
+    Save,
+    /// Save As — open dialog (Ctrl+Shift+S)
+    SaveAs,
+    /// Open a .gx file (Ctrl+O)
+    OpenFile,
+    /// Toggle raw view mode
+    ToggleRawView,
+    /// Show the Go dialog (Ctrl+L)
+    ShowGoDialog,
+    /// Go dialog: text input changed
+    GoDialogInput(String),
+    /// Go dialog: submit
+    GoDialogSubmit,
+    /// Go dialog: cancel
+    GoDialogCancel,
+    /// Save dialog: text input changed
+    SaveDialogInput(String),
+    /// Save dialog: submit
+    SaveDialogSubmit,
+    /// Save dialog: cancel
+    SaveDialogCancel,
+    /// Save dialog: browse for file
+    SaveDialogBrowse,
 }
 
 /// Element type for the full browser UI (chrome + content).
@@ -291,6 +312,8 @@ struct BrowserWindow {
     view: Option<CompiledView>,
     /// Current location
     current_loc: ViewLoc,
+    /// Whether a column resize drag is active
+    column_resizing: bool,
 }
 
 impl BrowserWindow {
@@ -305,6 +328,7 @@ impl BrowserWindow {
             last_mouse_interaction: mouse::Interaction::Idle,
             view: None,
             current_loc: ViewLoc::Netidx(Path::from("/")),
+            column_resizing: false,
         }
     }
 
@@ -341,6 +365,8 @@ pub(crate) enum DesignMsg {
     EditorAction(iced_widget::text_editor::Action),
     /// Apply: recompile the source and update the main window
     EditorApply,
+    /// Save: apply then save to save_loc (Ctrl+S in design window)
+    SaveView,
     /// Trigger completion at current cursor
     TriggerCompletion,
     /// Select a completion item by index
@@ -548,6 +574,10 @@ struct BrowserHandler {
     initial_loc: Option<ViewLoc>,
     /// Current view source (retained for design mode)
     current_source: ArcStr,
+    /// Where to save the current view (None = must use Save As)
+    save_loc: Option<ViewLoc>,
+    /// Whether the current view was auto-generated (no custom .view)
+    view_generated: bool,
 }
 
 impl ApplicationHandler<BrowserEvent> for BrowserHandler {
@@ -662,15 +692,47 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                 return;
             }
             _ => {
-                // Intercept Backspace for browser "navigate up".
-                // Only fires if no text input widget is focused (iced handles
-                // Backspace for text inputs before it reaches here).
+                let dialog_open = self.chrome.show_go_dialog
+                    || self.chrome.show_save_dialog;
                 if let WindowEvent::KeyboardInput { event: ref key_event, .. } = event {
                     use winit::keyboard::{Key, NamedKey};
-                    if key_event.state == winit::event::ElementState::Pressed
-                        && key_event.logical_key == Key::Named(NamedKey::Backspace)
-                    {
-                        self.messages.push(BrowserMsg::NavigateUp);
+                    if key_event.state == winit::event::ElementState::Pressed {
+                        if dialog_open {
+                            // Only Escape while a dialog is open
+                            if key_event.logical_key == Key::Named(NamedKey::Escape) {
+                                self.chrome.show_go_dialog = false;
+                                self.chrome.show_save_dialog = false;
+                                bw.needs_redraw = true;
+                            }
+                        } else {
+                            let ctrl = self.modifiers.control_key();
+                            let shift = self.modifiers.shift_key();
+                            match &key_event.logical_key {
+                                Key::Named(NamedKey::Backspace) => {
+                                    self.messages.push(BrowserMsg::NavigateUp);
+                                }
+                                Key::Character(c) if ctrl && shift && c.as_str().eq_ignore_ascii_case("s") => {
+                                    self.messages.push(BrowserMsg::SaveAs);
+                                }
+                                Key::Character(c) if ctrl && !shift && c.as_str().eq_ignore_ascii_case("s") => {
+                                    self.messages.push(BrowserMsg::Save);
+                                }
+                                Key::Character(c) if ctrl && c.as_str() == "o" => {
+                                    self.messages.push(BrowserMsg::OpenFile);
+                                }
+                                Key::Character(c) if ctrl && c.as_str() == "l" => {
+                                    self.messages.push(BrowserMsg::ShowGoDialog);
+                                }
+                                Key::Character(c) if ctrl && c.as_str() == "d" => {
+                                    self.messages.push(BrowserMsg::ToggleDesignMode);
+                                }
+                                Key::Named(NamedKey::Escape) => {
+                                    self.chrome.show_go_dialog = false;
+                                    self.chrome.show_save_dialog = false;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 let scale = bw.window.scale_factor();
@@ -681,6 +743,37 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                     }) = &ev
                     {
                         bw.cursor_position = *position;
+                        // Forward mouse move to column resize handler
+                        if bw.column_resizing {
+                            if let Some(view) = bw.view.as_mut() {
+                                if let Some((cid, new_w)) =
+                                    view.content.handle_mouse_move_resize(position.x)
+                                {
+                                    if let Err(e) = self.backend.gx.call(
+                                        cid,
+                                        netidx::protocol::valarray::ValArray::from_iter([
+                                            Value::F64(new_w),
+                                        ]),
+                                    ) {
+                                        error!("on_resize call error: {e:?}");
+                                    }
+                                }
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                    // Detect mouse release during column resize
+                    if bw.column_resizing {
+                        if let iced_core::Event::Mouse(
+                            mouse::Event::ButtonReleased(mouse::Button::Left),
+                        ) = &ev
+                        {
+                            if let Some(view) = bw.view.as_mut() {
+                                view.content.handle_column_resize_end();
+                            }
+                            bw.column_resizing = false;
+                            bw.needs_redraw = true;
+                        }
                     }
                     bw.push_event(ev);
                 }
@@ -696,8 +789,23 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                 self.gpu = None;
                 event_loop.exit();
             }
-            BrowserEvent::View { loc, source, generated: _ } => {
+            BrowserEvent::View { loc, source, generated } => {
                 self.current_source = source.clone();
+                self.view_generated = generated;
+                if !generated {
+                    self.save_loc = match &loc {
+                        Some(ViewLoc::Netidx(p)) => {
+                            Some(ViewLoc::Netidx(p.append(".view")))
+                        }
+                        Some(ViewLoc::File(f)) => {
+                            Some(ViewLoc::File(f.clone()))
+                        }
+                        None => None,
+                    };
+                } else {
+                    self.save_loc = None;
+                }
+                self.chrome.save_enabled = self.save_loc.is_some();
                 if let Some(bw) = self.window.as_mut() {
                     if let Some(l) = &loc {
                         bw.current_loc = l.clone();
@@ -1124,6 +1232,10 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                             if ctrl && key_press.key == Key::Named(Named::Enter) {
                                 return Some(Binding::Custom(DesignMsg::EditorApply));
                             }
+                            // Ctrl+S → Save (apply + persist)
+                            if ctrl && key_press.key == Key::Character("s".into()) {
+                                return Some(Binding::Custom(DesignMsg::SaveView));
+                            }
                             // Ctrl+Space → Trigger completion
                             if ctrl && key_press.key == Key::Named(Named::Space) {
                                 return Some(Binding::Custom(DesignMsg::TriggerCompletion));
@@ -1398,6 +1510,57 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                             }
                         }
                         dw.needs_redraw = true;
+                    }
+                }
+                DesignMsg::SaveView => {
+                    // Apply first (same as EditorApply)
+                    if let Some(dw) = self.design.as_mut() {
+                        dw.completion.dismiss();
+                        let source = ArcStr::from(dw.source_text());
+                        match self.rt.block_on(
+                            self.backend.gx.compile(source.clone()),
+                        ) {
+                            Err(e) => {
+                                dw.diagnostic = Some(format!("{e:#}"));
+                            }
+                            Ok(comp) => {
+                                dw.diagnostic = None;
+                                dw.dirty = false;
+                                if let Ok(env) = self.rt.block_on(
+                                    self.backend.gx.get_env()
+                                ) {
+                                    dw.env = Some(env);
+                                }
+                                if let Some(env) = &dw.env {
+                                    dw.tree.update_from_source(&source, env);
+                                }
+                                self.current_source = source.clone();
+                                if let Some(bw) = self.window.as_mut() {
+                                    if comp.exprs.is_empty() {
+                                        bw.view = None;
+                                    } else {
+                                        let top_id =
+                                            comp.exprs.last().unwrap().id;
+                                        bw.view = Some(CompiledView {
+                                            content: Box::new(LoadingView),
+                                            gx: self.backend.gx.clone(),
+                                            pending_top_id: Some(top_id),
+                                            _comp: Some(comp),
+                                        });
+                                    }
+                                    bw.needs_redraw = true;
+                                }
+                            }
+                        }
+                        dw.needs_redraw = true;
+                    }
+                    // Now save
+                    if let Some(loc) = self.save_loc.clone() {
+                        let source = self.current_source.clone();
+                        match self.rt.block_on(self.backend.save(loc, source)) {
+                            Ok(()) => log::info!("view saved"),
+                            Err(e) => error!("failed to save: {e:#}"),
+                        }
                     }
                 }
                 DesignMsg::TriggerCompletion => {
@@ -1898,6 +2061,26 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         }
                     }
                 }
+                BrowserMsg::Widget(Message::ColumnResizeStart(col_idx)) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        let cursor_x = bw.cursor_position.x;
+                        if let Some(view) = bw.view.as_mut() {
+                            if view.content.handle_column_resize_start(col_idx, cursor_x) {
+                                bw.column_resizing = true;
+                                bw.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                BrowserMsg::Widget(Message::ColumnResizeEnd) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            view.content.handle_column_resize_end();
+                        }
+                        bw.column_resizing = false;
+                        bw.needs_redraw = true;
+                    }
+                }
                 BrowserMsg::Widget(Message::Call(id, args)) => {
                     if let Err(e) = self.backend.gx.call(id, args) {
                         error!("failed to call: {e:?}");
@@ -1937,22 +2120,154 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                         }
                     }
                 }
-                BrowserMsg::NavInputChanged(text) => {
-                    self.chrome.nav_input = text;
+                BrowserMsg::ShowGoDialog => {
+                    self.chrome.show_go_dialog = true;
+                    self.chrome.go_dialog_input.clear();
                     if let Some(bw) = self.window.as_mut() {
                         bw.needs_redraw = true;
                     }
                 }
-                BrowserMsg::NavSubmit => {
-                    let input = self.chrome.nav_input.trim().to_string();
+                BrowserMsg::GoDialogInput(text) => {
+                    self.chrome.go_dialog_input = text;
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::GoDialogSubmit => {
+                    let input = self.chrome.go_dialog_input.trim().to_string();
+                    self.chrome.show_go_dialog = false;
                     if !input.is_empty() {
                         if let Ok(loc) = input.parse::<ViewLoc>() {
                             self.backend.navigate(loc);
-                            self.chrome.nav_input.clear();
+                        }
+                    }
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::GoDialogCancel => {
+                    self.chrome.show_go_dialog = false;
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::Save if self.save_loc.is_some() => {
+
+                    let loc = self.save_loc.clone().unwrap();
+                    let source = self.current_source.clone();
+                    match self.rt.block_on(self.backend.save(loc, source)) {
+                        Ok(()) => {
+                            log::info!("view saved successfully");
+                        }
+                        Err(e) => {
+                            error!("failed to save view: {e:#}");
                         }
                     }
                 }
+                BrowserMsg::Save | BrowserMsg::SaveAs => {
+
+                    self.chrome.show_save_dialog = true;
+                    self.chrome.save_dialog_input.clear();
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::OpenFile => {
+
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Graphix", &["gx"])
+                        .pick_file()
+                    {
+                        self.backend.navigate(ViewLoc::File(path));
+                    }
+                }
+                BrowserMsg::ToggleRawView => {
+
+                    let new_val = !self.backend.raw_view.load(std::sync::atomic::Ordering::Relaxed);
+                    self.backend.set_raw_view(new_val);
+                    self.chrome.raw_view = new_val;
+                    // Re-navigate to current path to apply the change
+                    if let Some(bw) = self.window.as_ref() {
+                        self.backend.navigate(bw.current_loc.clone());
+                    }
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::SaveDialogInput(text) => {
+                    self.chrome.save_dialog_input = text;
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::SaveDialogSubmit => {
+                    let input = self.chrome.save_dialog_input.trim().to_string();
+                    self.chrome.show_save_dialog = false;
+                    if !input.is_empty() {
+                        if let Ok(loc) = input.parse::<ViewLoc>() {
+                            let source = self.current_source.clone();
+                            // For netidx paths, append .view if not already there
+                            let save_target = match &loc {
+                                ViewLoc::Netidx(p) => {
+                                    if p.as_ref().ends_with(".view") {
+                                        loc.clone()
+                                    } else {
+                                        ViewLoc::Netidx(p.append(".view"))
+                                    }
+                                }
+                                ViewLoc::File(_) => loc.clone(),
+                            };
+                            match self.rt.block_on(
+                                self.backend.save(save_target.clone(), source),
+                            ) {
+                                Ok(()) => {
+                                    self.save_loc = Some(save_target);
+                                    self.chrome.save_enabled = true;
+                                    log::info!("view saved successfully");
+                                }
+                                Err(e) => {
+                                    error!("failed to save view: {e:#}");
+                                }
+                            }
+                        }
+                    }
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::SaveDialogCancel => {
+                    self.chrome.show_save_dialog = false;
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
+                BrowserMsg::SaveDialogBrowse => {
+                    self.chrome.show_save_dialog = false;
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Graphix", &["gx"])
+                        .save_file()
+                    {
+                        let source = self.current_source.clone();
+                        let loc = ViewLoc::File(path);
+                        match self.rt.block_on(
+                            self.backend.save(loc.clone(), source),
+                        ) {
+                            Ok(()) => {
+                                self.save_loc = Some(loc);
+                                self.chrome.save_enabled = true;
+                                log::info!("view saved to file successfully");
+                            }
+                            Err(e) => {
+                                error!("failed to save view: {e:#}");
+                            }
+                        }
+                    }
+                    if let Some(bw) = self.window.as_mut() {
+                        bw.needs_redraw = true;
+                    }
+                }
                 BrowserMsg::ToggleDesignMode => {
+
                     if self.design.is_some() {
                         // Close design window
                         self.design = None;
@@ -2146,6 +2461,8 @@ fn main() {
         modifiers: ModifiersState::default(),
         initial_loc: Some(initial_loc),
         current_source: ArcStr::from(""),
+        save_loc: None,
+        view_generated: true,
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
