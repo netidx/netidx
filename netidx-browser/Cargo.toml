@@ -59,3 +59,4 @@ iced_renderer = { workspace = true }
 iced_runtime = { workspace = true }
 iced_wgpu = { workspace = true }
 iced_widget = { workspace = true }
+rfd = { workspace = true }

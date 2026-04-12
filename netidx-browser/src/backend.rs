@@ -55,6 +55,7 @@ pub(crate) struct Ctx {
     pub(crate) subscriber: Subscriber,
     current_path_bid: graphix_compiler::BindId,
     pub(crate) debug_highlighted_bid: graphix_compiler::BindId,
+    pub(crate) raw_view: Arc<AtomicBool>,
 }
 
 impl Ctx {
@@ -185,13 +186,14 @@ impl Ctx {
 
         // Channel for navigation/save requests
         let (tx_from_gui, rx_from_gui) = mpsc::unbounded();
+        let raw_view = Arc::new(AtomicBool::new(false));
 
         // Spawn the backend inner task (handles navigation and saves)
         let inner = BackendInner {
             subscriber: subscriber.clone(),
             from_gui: rx_from_gui,
             proxy: proxy.clone(),
-            raw_view: Arc::new(AtomicBool::new(false)),
+            raw_view: raw_view.clone(),
             view_path: None,
             rx_view: None,
             dv_view: None,
@@ -207,6 +209,7 @@ impl Ctx {
             subscriber,
             current_path_bid,
             debug_highlighted_bid,
+            raw_view,
         })
     }
 
@@ -230,6 +233,10 @@ impl Ctx {
         let _: result::Result<_, _> =
             self.from_gui.unbounded_send(FromGui::Save(loc, source, tx));
         Ok(rx.await??)
+    }
+
+    pub(crate) fn set_raw_view(&self, raw: bool) {
+        self.raw_view.store(raw, Ordering::Relaxed);
     }
 
     pub(crate) fn terminate(&self) {
