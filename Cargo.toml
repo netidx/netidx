@@ -37,11 +37,11 @@ fs3 = "0.5"
 futures = "0.3"
 fxhash = "0.2"
 globset = "0.4"
-graphix-shell = { version = "0.6.0", path = "../graphix/graphix-shell", default-features = false }
-graphix-rt = { version = "0.6.0", path = "../graphix/graphix-rt" }
-graphix-compiler = { version = "0.6.0", path = "../graphix/graphix-compiler" }
-graphix-package = { version = "0.6.0", path = "../graphix/graphix-package" }
-graphix-package-core = { version = "0.6.0", path = "../graphix/stdlib/graphix-package-core" }
+graphix-shell = { version = "0.7.0", path = "../graphix/graphix-shell", default-features = false }
+graphix-rt = { version = "0.7.0", path = "../graphix/graphix-rt" }
+graphix-compiler = { version = "0.7.0", path = "../graphix/graphix-compiler" }
+graphix-package = { version = "0.7.0", path = "../graphix/graphix-package" }
+graphix-package-core = { version = "0.7.0", path = "../graphix/stdlib/graphix-package-core" }
 hdrhistogram = "7"
 if-addrs = "0.15"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
@@ -72,7 +72,7 @@ seq-macro = "0.3"
 serde_derive = "1"
 serde_json = "1"
 serde = { version = "1", features = ["rc"] }
-sha3 = "0.10"
+sha3 = "0.11"
 sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
 structopt = "0.3"
