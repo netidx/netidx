@@ -415,10 +415,11 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                         None => break 'main Err(anyhow!("encryption is not supported")),
                     };
                     buf.advance(mem::size_of::<u32>());
-                    let decrypted = try_cf!(break, 'main, ctx.lock().unwrap(&buf[..len]));
-                    buf.advance(len);
-                    buf.extend_from_slice(&*decrypted);
-                    try_cf!(break, 'main, tx.send(mem::take(&mut buf)).await);
+                    let encrypted_chunk = buf.split_to(len);
+                    let decrypted = try_cf!(break, 'main, ctx.lock().unwrap(&*encrypted_chunk));
+                    let mut dec_buf = PBuf::default();
+                    dec_buf.extend_from_slice(&*decrypted);
+                    try_cf!(break, 'main, tx.send(dec_buf).await);
                 }
             }
             if buf.remaining_mut() < BUF {
