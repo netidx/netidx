@@ -16,8 +16,8 @@ let run_command = |c: string, path: string|
         select str::sub(#start:0, #len:2, c)? {
             "w " => {
                 let v = str::sub(#start:2, #len:str::len(c) - 2, c)?;
-                let v = str::parse(v)?;
-                net::write(path, v)?
+                let v: Primitive = str::parse(v)?;
+                sys::net::write(path, v)?
             },
             s => error("invalid command [s]")?
         }
