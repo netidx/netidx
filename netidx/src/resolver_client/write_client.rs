@@ -480,7 +480,10 @@ impl Connection {
         // not relevant for writes
         let publishers = PUBLISHERPOOL.take();
         for (i, m) in rx_batch.drain(..).enumerate() {
-            result.push((tx.batch[i].0, m))
+            match tx.batch.get(i) {
+                Some(txm) => result.push((txm.0, m)),
+                None => bail!("orphan write response from resolver {m:?}"),
+            }
         }
         if let Some(reply) = tx.replies.lock().pop() {
             let _ = reply.send((publishers, result));
@@ -516,7 +519,6 @@ impl Connection {
             disconnect: time::interval_at(now + LINGER, LINGER),
         };
         loop {
-            #[rustfmt::skip]
             select_biased! {
                 _ = t.disconnect.tick().fuse() => {
                     if t.active {
@@ -534,33 +536,33 @@ impl Connection {
                     }
                 },
                 batch = receiver.recv().fuse() => match batch {
-		    Err(RecvError::Closed) => break,
-		    Err(RecvError::Lagged(_)) => {
-			t.con = None;
-			t.degraded = true;
-		    }
-		    Ok(batch) => match t.process_batch(batch.clone()).await {
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => {
+                        t.con = None;
+                        t.degraded = true;
+                    }
+                    Ok(batch) => match t.process_batch(batch.clone()).await {
                         Ok(()) => (),
                         Err(e) => {
-			    t.con = None;
-			    t.degraded = true;
-			    for (_, tx) in batch.batch.iter() {
-				match tx {
-				    ToWrite::Publish(_)
-					| ToWrite::PublishDefault(_)
-					| ToWrite::PublishWithFlags(_, _)
-					| ToWrite::PublishDefaultWithFlags(_, _) => (),
-				    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
-					t.published.insert(p.clone(), tx.clone());
-				    }
-				    ToWrite::Clear => {
-					t.published.insert(Path::from(""), ToWrite::Clear);
-				    },
-				    ToWrite::Heartbeat => (),
-				}
-			    }
-			    warn!("write batch failed {}", e)
-			},
+                            t.con = None;
+                            t.degraded = true;
+                            for (_, tx) in batch.batch.iter() {
+                                match tx {
+                                    ToWrite::Publish(_)
+                                    | ToWrite::PublishDefault(_)
+                                    | ToWrite::PublishWithFlags(_, _)
+                                    | ToWrite::PublishDefaultWithFlags(_, _) => (),
+                                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
+                                        t.published.insert(p.clone(), tx.clone());
+                                    }
+                                    ToWrite::Clear => {
+                                        t.published.insert(Path::from(""), ToWrite::Clear);
+                                    },
+                                    ToWrite::Heartbeat => (),
+                                }
+                            }
+                            warn!("write batch failed {}", e)
+                        },
                     }
                 }
             }

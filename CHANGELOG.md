@@ -1,3 +1,8 @@
+# 0.31.8
+
+- Fix a bug in Kerberos decryption that would cause some Kerberos encrypted
+  connections to fail randomly.
+
 # 0.31.7
 
 - Fix crash on systems with no config by delaying tokio runtime creation until
