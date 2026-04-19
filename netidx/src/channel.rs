@@ -416,7 +416,8 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                     };
                     buf.advance(mem::size_of::<u32>());
                     let encrypted_chunk = buf.split_to(len);
-                    let decrypted = try_cf!(break, 'main, ctx.lock().unwrap(&*encrypted_chunk));
+                    let decrypted =
+                        try_cf!(break, 'main, ctx.lock().unwrap(&*encrypted_chunk));
                     let mut dec_buf = PBuf::default();
                     dec_buf.extend_from_slice(&*decrypted);
                     try_cf!(break, 'main, tx.send(dec_buf).await);
@@ -426,11 +427,10 @@ fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'st
                 buf.reserve_mut(std::cmp::max(buf.capacity(), BUF));
             }
             trace!("reading more from socket");
-            #[rustfmt::skip]
             select_biased! {
                 _ = stop => break Ok(()),
                 i = soc.read_buf(&mut buf).fuse() => {
-		    trace!("read {:?} from the socket", i);
+                    trace!("read {:?} from the socket", i);
                     if try_cf!(i) == 0 {
                         break Err(anyhow!("EOF"));
                     }
