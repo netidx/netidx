@@ -777,21 +777,20 @@ impl Store {
         let mut replies = rx.await??;
         replies.sort_unstable_by_key(|(n, _)| *n);
         trace!("handle_write_batch {} replies", replies.len());
-        if let Some(c) = con.as_mut()
-            && let Some((mut n, mut cur)) = replies.pop()
-        {
-            for (i, m) in replies.drain(..) {
-                if i == n {
-                    if mem::discriminant(&cur) != mem::discriminant(&m) {
-                        panic!("desynced message {cur:?} vs {m:?}")
+        if let Some(c) = con.as_mut() {
+            let mut iter = replies.drain(..).peekable();
+            while let Some((n, m)) = iter.next() {
+                while let Some((i, m2)) = iter.peek() {
+                    if *i != n {
+                        break;
                     }
-                } else {
-                    n = i;
-                    c.queue_send(&cur)?;
-                    cur = m;
+                    if mem::discriminant(&m) != mem::discriminant(m2) {
+                        panic!("desynced message {m:?} vs {m2:?}");
+                    }
+                    iter.next();
                 }
+                c.queue_send(&m)?;
             }
-            c.queue_send(&cur)?;
             c.flush().await?;
         }
         trace!("handle_write_batch processed replies");
