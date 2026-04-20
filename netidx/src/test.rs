@@ -74,7 +74,19 @@ mod resolver {
         )
         .unwrap();
         let r = ResolverRead::new(client_cfg, DesiredAuth::Anonymous);
-        w.publish_default(iter::once(p("/default"))).await.unwrap();
+        let defaults = [
+            p("/default"),
+            p("/default0"),
+            p("/default1"),
+            p("/default2"),
+            p("/default3"),
+            p("/default4"),
+            p("/default5"),
+            p("/default6"),
+            p("/default7"),
+            p("/default8"),
+        ];
+        w.publish_default(defaults.iter().cloned()).await.unwrap();
         let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
         let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
@@ -83,7 +95,7 @@ mod resolver {
             assert_eq!(pb.addr, paddr);
         }
         let l = r.list(p("/")).await.unwrap();
-        assert_eq!(&**l, &[p("/default")]);
+        assert_eq!(&**l, &defaults);
         w.clear().await.unwrap();
         let (_, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {

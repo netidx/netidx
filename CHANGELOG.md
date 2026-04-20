@@ -1,3 +1,8 @@
+# 0.31.9
+
+- Fix a bug in the resolver that could result in duplicated replies to a write
+  request
+
 # 0.31.8
 
 - Fix a bug in Kerberos decryption that would cause some Kerberos encrypted
