@@ -480,10 +480,7 @@ impl Connection {
         // not relevant for writes
         let publishers = PUBLISHERPOOL.take();
         for (i, m) in rx_batch.drain(..).enumerate() {
-            match tx.batch.get(i) {
-                Some(txm) => result.push((txm.0, m)),
-                None => bail!("orphan write response from resolver {m:?}"),
-            }
+            result.push((tx.batch[i].0, m))
         }
         if let Some(reply) = tx.replies.lock().pop() {
             let _ = reply.send((publishers, result));
