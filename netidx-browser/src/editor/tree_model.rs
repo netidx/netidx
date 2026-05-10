@@ -9,7 +9,7 @@ use arcstr::ArcStr;
 use graphix_compiler::{
     env::Env,
     expr::{ApplyExpr, Expr, ExprKind, ModPath, print::PrettyDisplay},
-    typ::{FnType, Type},
+    typ::{FnType, Type, TypeRef},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use triomphe::Arc as TArc;
@@ -92,7 +92,7 @@ pub(crate) struct TreeModel {
     /// regenerated from the AST, never from stored text.
     pub preamble: Vec<Expr>,
     /// Per-node UI state for the property editor
-    pub editor_ui: fxhash::FxHashMap<TreeNodeId, super::path_update::EditorUiState>,
+    pub editor_ui: ahash::AHashMap<TreeNodeId, super::path_update::EditorUiState>,
 }
 
 impl TreeModel {
@@ -102,7 +102,7 @@ impl TreeModel {
             roots: Vec::new(),
             selected: None,
             preamble: Vec::new(),
-            editor_ui: fxhash::FxHashMap::default(),
+            editor_ui: ahash::AHashMap::default(),
         }
     }
 
@@ -290,7 +290,7 @@ impl TreeModel {
         let mut new_args = Vec::new();
         if let Some(ft) = &new_ft {
             for farg in ft.args.iter() {
-                if let Some((lbl, _)) = &farg.label {
+                if let Some(lbl) = farg.label() {
                     if type_contains_widget(&farg.typ) {
                         continue;
                     }
@@ -653,7 +653,7 @@ fn type_contains_widget(typ: &Type) -> bool {
     match typ {
         Type::ByRef(inner) => type_contains_widget(inner),
         Type::Array(inner) => type_contains_widget(inner),
-        Type::Ref { name, .. } => {
+        Type::Ref(TypeRef { name, .. }) => {
             let s = name.0.as_ref();
             s.ends_with("Widget") || s.ends_with("/Widget")
         }
@@ -724,7 +724,7 @@ pub(crate) fn classify_widget_expr(
             // Check if this labeled arg's type contains Widget
             if let Some(ft) = &fn_type {
                 ft.args.iter().any(|a| {
-                    a.label.as_ref().map_or(false, |(l, _)| l == label)
+                    a.label().map_or(false, |l| l == label)
                         && type_contains_widget(&a.typ)
                 })
             } else {

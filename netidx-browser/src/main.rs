@@ -13,7 +13,7 @@ use graphix_package_gui::{
     convert,
     render::{GpuState, WindowSurface},
     theme::GraphixTheme,
-    widgets::{self, GuiW, IcedElement, Message, Renderer},
+    widgets::{self, GuiW, IcedElement, Message, MessageShell, Renderer},
 };
 use graphix_rt::NoExt;
 use iced_core::{clipboard, mouse, renderer::Style, Color};
@@ -312,8 +312,6 @@ struct BrowserWindow {
     view: Option<CompiledView>,
     /// Current location
     current_loc: ViewLoc,
-    /// Whether a column resize drag is active
-    column_resizing: bool,
 }
 
 impl BrowserWindow {
@@ -328,7 +326,6 @@ impl BrowserWindow {
             last_mouse_interaction: mouse::Interaction::Idle,
             view: None,
             current_loc: ViewLoc::Netidx(Path::from("/")),
-            column_resizing: false,
         }
     }
 
@@ -674,11 +671,6 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                 let scale = bw.window.scale_factor();
                 bw.pending_resize = Some((size.width, size.height, scale));
                 bw.needs_redraw = true;
-                // Notify data table of new viewport size
-                let logical = size.to_logical::<f32>(scale);
-                if let Some(view) = bw.view.as_mut() {
-                    view.content.handle_viewport_resize(logical.width, logical.height);
-                }
             }
             WindowEvent::RedrawRequested => {
                 bw.needs_redraw = true;
@@ -743,37 +735,6 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                     }) = &ev
                     {
                         bw.cursor_position = *position;
-                        // Forward mouse move to column resize handler
-                        if bw.column_resizing {
-                            if let Some(view) = bw.view.as_mut() {
-                                if let Some((cid, new_w)) =
-                                    view.content.handle_mouse_move_resize(position.x)
-                                {
-                                    if let Err(e) = self.backend.gx.call(
-                                        cid,
-                                        netidx::protocol::valarray::ValArray::from_iter([
-                                            Value::F64(new_w),
-                                        ]),
-                                    ) {
-                                        error!("on_resize call error: {e:?}");
-                                    }
-                                }
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                    // Detect mouse release during column resize
-                    if bw.column_resizing {
-                        if let iced_core::Event::Mouse(
-                            mouse::Event::ButtonReleased(mouse::Button::Left),
-                        ) = &ev
-                        {
-                            if let Some(view) = bw.view.as_mut() {
-                                view.content.handle_column_resize_end();
-                            }
-                            bw.column_resizing = false;
-                            bw.needs_redraw = true;
-                        }
                     }
                     bw.push_event(ev);
                 }
@@ -1809,7 +1770,7 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                     let find_variant_args = |ft: &graphix_compiler::typ::FnType| -> Vec<graphix_compiler::expr::Expr> {
                                         // Find the arg by label, resolve its type, find the variant
                                         ft.args.iter()
-                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .find(|a| a.label().map_or(false, |l| *l == arg))
                                             .and_then(|a| {
                                                 let typ = unwrap_byref_type(&a.typ);
                                                 find_variant_arg_types(typ, &tag, dw.env.as_ref())
@@ -1836,7 +1797,7 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                     // Create typed default from the array element type
                                     let elem_default = if let Some(ft) = &node.data.fn_type {
                                         ft.args.iter()
-                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .find(|a| a.label().map_or(false, |l| *l == arg))
                                             .map(|a| {
                                                 let inner = unwrap_to_array_elem(&a.typ);
                                                 editor::prop_panel::default_expr_for_type(inner, dw.env.as_ref())
@@ -1886,7 +1847,7 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
                                     // Create typed defaults from the map key/value types
                                     let (default_key, default_val) = if let Some(ft) = &node.data.fn_type {
                                         ft.args.iter()
-                                            .find(|a| a.label.as_ref().map_or(false, |(l,_)| *l == arg))
+                                            .find(|a| a.label().map_or(false, |l| *l == arg))
                                             .map(|a| {
                                                 let (kt, vt) = unwrap_to_map_kv(&a.typ);
                                                 (
@@ -1994,109 +1955,32 @@ impl ApplicationHandler<BrowserEvent> for BrowserHandler {
             }
         }
 
-        // Handle messages from iced widgets and browser chrome
-        for msg in self.messages.drain(..) {
+        // Handle messages from iced widgets and browser chrome.
+        // Widget messages dispatch through `on_message`, which forwards
+        // down the widget tree (data_table, text_editor, etc. all hook
+        // here) and may publish follow-ups (e.g. ColumnResizeMove → Call)
+        // through the shell — those go back into the queue. Mirrors
+        // graphix-shell's event_loop drain.
+        let mut pending: std::collections::VecDeque<BrowserMsg> =
+            self.messages.drain(..).collect();
+        while let Some(msg) = pending.pop_front() {
             match msg {
                 BrowserMsg::Widget(Message::Nop) => {}
-                BrowserMsg::Widget(Message::CellClick(row, col)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_cell_click(row, col) {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::CellEdit(row, col)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_cell_edit(row, col) {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::CellEditInput(text)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_cell_edit_input(text) {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::CellEditSubmit) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_cell_edit_submit() {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::TableKey(action)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_table_key(&action) {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::CellEditCancel) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_cell_edit_cancel() {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::Scroll(v, h, vp_w, vp_h)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_scroll(v, h, vp_w, vp_h) {
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::ColumnResizeStart(col_idx)) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        let cursor_x = bw.cursor_position.x;
-                        if let Some(view) = bw.view.as_mut() {
-                            if view.content.handle_column_resize_start(col_idx, cursor_x) {
-                                bw.column_resizing = true;
-                                bw.needs_redraw = true;
-                            }
-                        }
-                    }
-                }
-                BrowserMsg::Widget(Message::ColumnResizeEnd) => {
-                    if let Some(bw) = self.window.as_mut() {
-                        if let Some(view) = bw.view.as_mut() {
-                            view.content.handle_column_resize_end();
-                        }
-                        bw.column_resizing = false;
-                        bw.needs_redraw = true;
-                    }
-                }
                 BrowserMsg::Widget(Message::Call(id, args)) => {
                     if let Err(e) = self.backend.gx.call(id, args) {
                         error!("failed to call: {e:?}");
                     }
                 }
-                BrowserMsg::Widget(Message::EditorAction(id, action)) => {
-                    if let Some(view) = self.window.as_mut().and_then(|bw| bw.view.as_mut()) {
-                        if let Some((callable_id, v)) =
-                            view.content.editor_action(id, &action)
-                        {
-                            if let Err(e) = self.backend.gx.call(
-                                callable_id,
-                                netidx::protocol::valarray::ValArray::from_iter([v]),
-                            ) {
-                                error!("failed to call editor callback: {e:?}");
+                BrowserMsg::Widget(other) => {
+                    if let Some(bw) = self.window.as_mut() {
+                        if let Some(view) = bw.view.as_mut() {
+                            let mut shell = MessageShell::new(bw.cursor_position);
+                            if view.content.on_message(&other, &mut shell) {
+                                bw.needs_redraw = true;
                             }
+                            pending.extend(
+                                shell.out.drain(..).map(BrowserMsg::Widget),
+                            );
                         }
                     }
                 }

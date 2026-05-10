@@ -112,7 +112,7 @@ impl Ctx {
         let (gx_tx, mut gx_rx) = tmpsc::channel(100);
 
         // Register packages
-        let mut vfs = fxhash::FxHashMap::default();
+        let mut vfs = ahash::AHashMap::default();
         let mut root_mods = graphix_package::IndexSet::new();
         graphix_package_core::P::register(&mut ctx, &mut vfs, &mut root_mods)?;
         graphix_package_sys::P::register(&mut ctx, &mut vfs, &mut root_mods)?;

@@ -6,7 +6,7 @@
 //! with the modification.
 
 use arcstr::ArcStr;
-use fxhash::{FxHashMap, FxHashSet};
+use ahash::{AHashMap, AHashSet};
 use graphix_compiler::expr::{Expr, ExprKind, StructExpr};
 use netidx::utils::Either;
 use triomphe::Arc;
@@ -75,15 +75,15 @@ pub(crate) type FieldKey = (ArcStr, Vec<PathSegment>);
 #[derive(Default)]
 pub(crate) struct EditorUiState {
     /// Paths of collapsed sections (default is expanded)
-    pub collapsed: FxHashSet<FieldKey>,
+    pub collapsed: AHashSet<FieldKey>,
     /// In-progress text edits before commit
-    pub text_inputs: FxHashMap<FieldKey, String>,
+    pub text_inputs: AHashMap<FieldKey, String>,
     /// Per-field parse errors — shown as red text + tooltip
-    pub parse_errors: FxHashMap<FieldKey, String>,
+    pub parse_errors: AHashMap<FieldKey, String>,
     /// Fields the user is actively editing. Dirty fields are NOT
     /// overwritten by debounce syncs. Cleared when the field parses
     /// successfully, or when the user switches focus to the source editor.
-    pub dirty: FxHashSet<FieldKey>,
+    pub dirty: AHashSet<FieldKey>,
 }
 
 // ---- Path-based Expr update ----

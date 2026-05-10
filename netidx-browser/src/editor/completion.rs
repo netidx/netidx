@@ -242,7 +242,7 @@ pub(crate) fn complete(
             if let Some((_, bind)) = env.lookup_bind(&scope, &func_path) {
                 if let Type::Fn(ft) = &bind.typ {
                     for arg in ft.args.iter() {
-                        if let Some((lbl, _)) = &arg.label {
+                        if let Some(lbl) = arg.label() {
                             if lbl.starts_with(prefix.as_str()) {
                                 items.push(CompletionItem {
                                     label: lbl.to_string(),

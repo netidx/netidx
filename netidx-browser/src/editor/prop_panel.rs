@@ -11,7 +11,7 @@ use arcstr::ArcStr;
 use graphix_compiler::{
     env::Env,
     expr::{Expr, ExprKind},
-    typ::{FnType, Type},
+    typ::{FnType, Type, TypeRef},
 };
 use graphix_package_gui::{theme::GraphixTheme, widgets::Renderer};
 use iced_core::Color;
@@ -39,10 +39,11 @@ pub(crate) fn view<'a>(
     match &data.fn_type {
         Some(ft) => {
             for farg in ft.args.iter() {
-                let (label, optional) = match &farg.label {
-                    Some((l, opt)) => (l.clone(), *opt),
+                let label = match farg.label() {
+                    Some(l) => l.clone(),
                     None => continue,
                 };
+                let optional = farg.has_default();
                 if type_contains_widget(&farg.typ) {
                     continue;
                 }
@@ -774,7 +775,7 @@ fn type_contains_widget(typ: &Type) -> bool {
     match typ {
         Type::ByRef(inner) => type_contains_widget(inner),
         Type::Array(inner) => type_contains_widget(inner),
-        Type::Ref { name, .. } => {
+        Type::Ref(TypeRef { name, .. }) => {
             let s = name.0.as_ref();
             s.ends_with("Widget") || s.ends_with("/Widget")
         }
@@ -907,8 +908,8 @@ fn non_null_type(variants: &[Type]) -> Type {
 fn build_lambda_sig(ft: &FnType) -> String {
     let mut parts = Vec::new();
     for arg in ft.args.iter() {
-        let name = match &arg.label {
-            Some((l, _)) => format!("#{l}"),
+        let name = match arg.label() {
+            Some(l) => format!("#{l}"),
             None => "_".to_string(),
         };
         parts.push(format!("{name}: {}", arg.typ));
