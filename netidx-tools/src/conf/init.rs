@@ -163,31 +163,43 @@ struct ParentFlags {
     /// Parent's TLS server name (with `--parent-auth tls`).
     #[structopt(long = "parent-tls-name")]
     parent_tls_name: Option<String>,
-    /// Netidx path the parent attaches at. Default `/`.
-    #[structopt(long = "parent-path", default_value = "/")]
-    parent_path: String,
+    /// Netidx path at which **this** resolver attaches in the
+    /// parent's namespace. Everything *above* this path in the tree
+    /// is handled by the parent; everything *at* and *below* this
+    /// path lives in this resolver's local store.
+    ///
+    /// Default: the resolver's own base path. For the workstation
+    /// template (base `/local`) that means `/local`; for the
+    /// standalone-resolver template (typically `/`) it means `/`.
+    /// Override only if you want this resolver's tree to attach at
+    /// a different path in the parent than where it serves locally
+    /// (rare — the two usually match by convention).
+    #[structopt(long = "parent-path")]
+    parent_path: Option<String>,
     /// TTL in seconds.
     #[structopt(long = "parent-ttl")]
     parent_ttl: Option<u16>,
 }
 
 impl ParentFlags {
-    fn to_parent_ref(&self) -> Result<Option<ParentRef>> {
+    /// Build a `ParentRef` from the parent-* flags. `default_path`
+    /// is the netidx path at which the current resolver attaches in
+    /// the parent's namespace when the operator didn't pass
+    /// `--parent-path` — callers supply the surrounding template's
+    /// base, since that's the conventional value.
+    fn to_parent_ref(&self, default_path: &str) -> Result<Option<ParentRef>> {
         let addr = match self.parent_addr {
             Some(a) => a,
             None => {
                 // Catch the silent-misuse case: any of the
                 // parent-* satellite flags without --parent-addr
                 // would otherwise just no-op into "no parent."
-                // `parent_path` is always `Some` because structopt
-                // applies its `default_value = "/"`, so we flag it
-                // only when it diverges from the default.
                 if self.parent_auth.is_some()
                     || self.parent_spn.is_some()
                     || self.parent_socket.is_some()
                     || self.parent_tls_name.is_some()
                     || self.parent_ttl.is_some()
-                    || self.parent_path != "/"
+                    || self.parent_path.is_some()
                 {
                     bail!("--parent-* flags require --parent-addr");
                 }
@@ -216,8 +228,12 @@ impl ParentFlags {
                     .context("--parent-tls-name required for parent-auth tls")?,
             )),
         };
+        let path = self
+            .parent_path
+            .as_deref()
+            .unwrap_or(default_path);
         Ok(Some(ParentRef {
-            path: ArcStr::from(self.parent_path.as_str()),
+            path: ArcStr::from(path),
             ttl: self.parent_ttl,
             addrs: vec![(addr, auth)],
         }))
@@ -414,10 +430,15 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     // you have a cert or should we generate a CSR?"). The CLI-flag
     // path stays headless-friendly for scripting; the prompt path is
     // the discoverable default.
+    //
+    // `--parent-path` defaults to the workstation's own base (the
+    // path at which this resolver attaches in the parent's namespace).
+    // For the workstation that's `/local` by convention.
+    let parent_default_path = f.base.as_str();
     let parent = if f.parent.parent_addr.is_some() {
-        f.parent.to_parent_ref()?
+        f.parent.to_parent_ref(parent_default_path)?
     } else {
-        match prompt_parent_referral()? {
+        match prompt_parent_referral(parent_default_path)? {
             None => None,
             Some((parent_ref, maybe_ident)) => {
                 if let Some(ident) = maybe_ident {
@@ -465,13 +486,21 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
 /// the TLS identity to add to `tls_identities` when parent auth is
 /// TLS and the operator brought their own cert.
 ///
+/// `default_path` is the netidx path at which the current resolver
+/// attaches in the parent's namespace — typically the resolver's
+/// own base (`/local` for workstation). Operators rarely want to
+/// override it, so the cascade doesn't prompt for it; the CLI's
+/// `--parent-path` flag remains the override.
+///
 /// For the TLS "generate" path this function **bails** with a
 /// next-steps message — the install can't complete without a signed
 /// cert, so silently dropping the parent referral would be a worse
 /// surprise than asking the operator to re-run once they've had the
 /// CSR signed. The CLI flag path (`--parent-addr … --tls-cert …`)
 /// is always available for the non-interactive case.
-fn prompt_parent_referral() -> Result<Option<(ParentRef, Option<TlsIdentitySpec>)>> {
+fn prompt_parent_referral(
+    default_path: &str,
+) -> Result<Option<(ParentRef, Option<TlsIdentitySpec>)>> {
     let addr: SocketAddr = match prompt::optional_parsed::<SocketAddr>(
         "network-wide resolver address (ip:port)",
         None,
@@ -512,7 +541,7 @@ fn prompt_parent_referral() -> Result<Option<(ParentRef, Option<TlsIdentitySpec>
     };
     Ok(Some((
         ParentRef {
-            path: ArcStr::from("/"),
+            path: ArcStr::from(default_path),
             ttl: None,
             addrs: vec![(addr, auth)],
         },
@@ -1128,12 +1157,17 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
         None => None,
     };
+    // `--parent-path` defaults to this resolver's base: in the
+    // referral model, the parent path is the path at which **this**
+    // resolver attaches in the parent's namespace, which is just
+    // wherever this resolver hosts its own tree.
+    let parent_default_path = f.base.clone();
     let params = netidx_conf::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
         listen,
         bind,
-        parent: f.parent.to_parent_ref()?,
+        parent: f.parent.to_parent_ref(&parent_default_path)?,
         perms_seed,
         with_perms_file: !f.no_perms,
         perms_path: f.perms_path,
