@@ -20,8 +20,12 @@ dirs = { workspace = true }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
-openssl = { workspace = true }
 parking_lot = { workspace = true }
+# Cross-platform PEM-cert parsing for `tls::validate_pem_cert_file`.
+# Lighter than openssl and pure-Rust — works on Windows where openssl
+# doesn't, and netidx itself already pulls rustls-pemfile so no new
+# build cost.
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
@@ -29,3 +33,18 @@ tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }
+# CA / CSR / cert handling (the `ca` module) is unix-only — netidx on
+# Windows uses rustls everywhere, and pulling in openssl-sys would
+# require a mingw build of OpenSSL that nobody on Windows wants to
+# install. Gate the entire `ca` module on `cfg(unix)` and keep
+# Windows lean.
+openssl = { workspace = true }
+
+[dev-dependencies]
+# `tokio::test` + multi-thread runtime for the e2e harness in
+# `tests/e2e.rs`. The Publisher / Subscriber background tasks expect
+# to be able to make progress on a separate thread from the test's
+# `await`s, so single-threaded would deadlock on the first
+# unflushed-batch wait.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+env_logger = { workspace = true }

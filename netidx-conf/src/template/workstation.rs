@@ -86,6 +86,30 @@ pub struct WorkstationParams {
     /// units entirely"), so the two flags compose without needing a
     /// tri-state.
     pub with_container: bool,
+    /// Username of the operator who owns this workstation. Used as
+    /// the entity in the auto-seeded perms file (`<base>` →
+    /// `<owner>` → `swlpd`) so the operator has full rights to the
+    /// local resolver's whole namespace from the moment it boots.
+    /// `None` skips the auto-seed for the owner row; combined with
+    /// `perms_seed = None && with_perms_file = true` that produces
+    /// an empty perms map.
+    ///
+    /// The CLI fills this from `nix::unistd::User::from_uid(getuid())`
+    /// so a `conf install workstation` run as `alice` grants `alice`
+    /// the local-resolver namespace. Tests pass an explicit name.
+    pub owner: Option<ArcStr>,
+    /// Initial perms map. `None` + `with_perms_file = true` +
+    /// `owner = Some(...)` auto-seeds `<base>` → `<owner>` → `swlpd`.
+    /// `Some(seed)` is taken as-is, overriding the auto-seed.
+    pub perms_seed: Option<crate::perms::PMap>,
+    /// Set to `false` to skip emitting a perms file entirely (and
+    /// drop the corresponding `include_permissions` reference).
+    /// Default `true` — a workstation with no perms file and
+    /// non-anonymous auth Just Denies every operation, which has
+    /// burned us in the e2e tests.
+    pub with_perms_file: bool,
+    /// Where to write the perms file. `None` ⇒ user default.
+    pub perms_path: Option<PathBuf>,
 }
 
 /// Default port for the installed workstation resolver. Clients
@@ -100,8 +124,20 @@ pub struct WorkstationParams {
 pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 
 /// Render the workstation template.
+///
+/// Platform note: the workstation's local resolver auth is **Local
+/// (unix-socket peer credentials) on unix**, **Anonymous on
+/// everything else**. Local auth requires a unix socket, which
+/// Windows doesn't have, and the netidx resolver-server's Local-auth
+/// path is itself `#[cfg(unix)]`-only — so emitting a Local-auth
+/// config on Windows would produce a config that fails to load.
+/// Anonymous keeps the workstation usable on Windows; the perms
+/// file's owner row is then keyed on the empty-string entity (the
+/// internal name for ANONYMOUS) so the auto-seed grant still
+/// applies.
 pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     let listen_port = p.listen_port.unwrap_or(DEFAULT_LISTEN_PORT);
+    #[cfg(unix)]
     let local_sock_path = match &p.local_socket {
         Some(p) => p.clone(),
         None => default_auth_sock()?,
@@ -138,16 +174,64 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
         listen_port,
     ));
 
-    // -- Resolver config: one member at 127.0.0.1:<port>, Auth::Local -------
-    let local_auth_arc = ArcStr::from(local_sock_path.to_string_lossy().as_ref());
+    // -- Resolver member auth: Local on unix, Anonymous elsewhere --------
+    #[cfg(unix)]
+    let (resolver_auth, client_addr_auth) = {
+        let local_auth_arc =
+            ArcStr::from(local_sock_path.to_string_lossy().as_ref());
+        (
+            rfile::Auth::Local(local_auth_arc.clone()),
+            cfile::Auth::Local(local_auth_arc),
+        )
+    };
+    #[cfg(not(unix))]
+    let (resolver_auth, client_addr_auth) =
+        (rfile::Auth::Anonymous, cfile::Auth::Anonymous);
+
     let resolver_member = rfile::MemberServerBuilder::default()
         .addr(listen_addr)
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
-        .auth(rfile::Auth::Local(local_auth_arc.clone()))
+        .auth(resolver_auth)
         .build()?;
+
+    // -- Perms file (separate from the main config) -------------------------
+    // Resolve the perms path up front so we can wire it into the
+    // resolver's `include_permissions` before building the config —
+    // otherwise the seed file would sit on disk inert.
+    //
+    // Default behaviour: emit a perms file unless `with_perms_file`
+    // is explicitly false. When no explicit seed was supplied:
+    //
+    // - On unix, auto-seed `<base>` → `<owner>` → `swlpd` (when an
+    //   owner was supplied). The workstation resolver uses Local
+    //   auth and the entity name is the unix username.
+    // - On non-unix, auto-seed `<base>` → `""` → `swlpd`. The empty
+    //   entity name is netidx's internal handle for ANONYMOUS (see
+    //   `PMap::from_file` in resolver_server/auth.rs); the
+    //   workstation uses Anonymous auth on non-unix so this is the
+    //   only entity that ever connects. `owner` is ignored — there
+    //   is no per-user auth mechanism to attach it to.
+    let perms_file = if p.with_perms_file {
+        let path = match &p.perms_path {
+            Some(p) => p.clone(),
+            None => paths::user_perms_file()?,
+        };
+        let seed = match &p.perms_seed {
+            Some(s) => s.clone(),
+            None => default_auto_seed(base.as_str(), &p.owner),
+        };
+        Some((path, seed))
+    } else {
+        None
+    };
 
     let mut rcfg_builder = rfile::ConfigBuilder::default();
     rcfg_builder.member_servers(vec![resolver_member]);
+    if let Some((path, _)) = &perms_file {
+        rcfg_builder.include_permissions(vec![ArcStr::from(
+            path.to_string_lossy().as_ref(),
+        )]);
+    }
     if let Some(parent) = &p.parent {
         // Reject the silent footgun: a TLS-auth parent address with
         // no `tls_identities` means we'd generate a config that
@@ -168,13 +252,15 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     // -- Client config: addrs at the local resolver via Local auth -----------
     //    default_auth: derived from parent.addrs (or override).
     //    tls section: built from tls_identities (one entry per spec).
-    let local_addr_auth = cfile::Auth::Local(local_auth_arc);
     let mut ccfg_builder = cfile::ConfigBuilder::default();
     ccfg_builder
-        .addrs(vec![(listen_addr, local_addr_auth)])
+        .addrs(vec![(listen_addr, client_addr_auth)])
         .base(base.as_str());
-    let default_auth =
-        p.default_auth.clone().unwrap_or(DefaultAuthMech::Local);
+    #[cfg(unix)]
+    let auth_default = DefaultAuthMech::Local;
+    #[cfg(not(unix))]
+    let auth_default = DefaultAuthMech::Anonymous;
+    let default_auth = p.default_auth.clone().unwrap_or(auth_default);
     if matches!(default_auth, DefaultAuthMech::Tls) && p.tls_identities.is_empty()
     {
         bail!(
@@ -238,7 +324,7 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     Ok(RenderedTemplate {
         client_config: Some((client_cfg_path, client_cfg)),
         resolver_config: Some((resolver_cfg_path, resolver_cfg)),
-        perms_file: None,
+        perms_file,
         id_map_file: None,
         units,
         units_dir,
@@ -246,6 +332,32 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     })
 }
 
+/// Auto-seed for the workstation perms file when no explicit seed
+/// was passed. See the perms-file block in `workstation` for the
+/// platform-specific rationale.
+#[cfg(unix)]
+fn default_auto_seed(base: &str, owner: &Option<ArcStr>) -> crate::perms::PMap {
+    let mut s = crate::perms::empty();
+    if let Some(owner) = owner {
+        crate::perms::add_entry(&mut s, base, owner.as_str(), "swlpd")
+            .expect("workstation owner seed must validate");
+    }
+    s
+}
+
+#[cfg(not(unix))]
+fn default_auto_seed(base: &str, _owner: &Option<ArcStr>) -> crate::perms::PMap {
+    // Non-unix workstation uses Anonymous auth; grant full rights to
+    // the empty-string entity (the internal handle for ANONYMOUS).
+    // `owner` is ignored — no per-user identity exists on this
+    // platform.
+    let mut s = crate::perms::empty();
+    crate::perms::add_entry(&mut s, base, "", "swlpd")
+        .expect("workstation anonymous seed must validate");
+    s
+}
+
+#[cfg(unix)]
 fn default_auth_sock() -> Result<PathBuf> {
     let mut p = dirs::config_dir().ok_or_else(|| {
         anyhow!("user config dir could not be determined for this platform")
@@ -273,6 +385,14 @@ mod tests {
             units_dir: Some(out.path().join("activation")),
             netidx_binary: PathBuf::from("/usr/local/bin/netidx"),
             with_container: true,
+            // Most existing render-time tests don't care about the
+            // perms file — they assert on units / client / resolver
+            // shapes. Auto-seed-emission is covered by its own test;
+            // tests that need a perms file flip these explicitly.
+            owner: None,
+            perms_seed: None,
+            with_perms_file: false,
+            perms_path: None,
         }
     }
 
@@ -327,6 +447,46 @@ mod tests {
         let args = unit.process.args;
         let api_idx = args.iter().position(|s| s == "--api-path").unwrap();
         assert_eq!(args[api_idx + 1], "/sites/east/container/api");
+    }
+
+    /// Auto-seed: when an owner is supplied and no explicit perms
+    /// seed, the template emits a perms file granting `<base>` →
+    /// `<owner>` → `swlpd`, and wires it into the resolver's
+    /// `include_permissions`. Round-trips through `Config::load` so
+    /// the on-disk shape is known-valid.
+    #[test]
+    fn perms_auto_seed_owner_gets_base_swlpd() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = base_params(&out);
+        p.owner = Some(ArcStr::from("alice"));
+        p.with_perms_file = true;
+        p.perms_path = Some(out.path().join("perms.json"));
+
+        let rt = workstation(&p).unwrap();
+        // perms slot is populated.
+        let (path, seed) = rt.perms_file.as_ref().expect("perms_file emitted");
+        assert_eq!(path, &out.path().join("perms.json"));
+        assert_eq!(
+            crate::perms::lookup(seed, "/local", "alice").map(|s| s.as_str()),
+            Some("swlpd"),
+        );
+        // resolver config references it.
+        let (_, r) = rt.resolver_config.as_ref().unwrap();
+        let perms_path_str = out.path().join("perms.json").to_string_lossy().into_owned();
+        assert!(
+            r.0.include_permissions.iter().any(|p| p.as_str() == perms_path_str),
+            "perms file not wired into include_permissions: {:?}",
+            r.0.include_permissions,
+        );
+        // apply()s without error and the on-disk file loads back via
+        // the resolver config validator — catches dynamic-entry
+        // shape drift (`$[user]` rules) and any tls / referral
+        // cross-checks Config::load performs.
+        rt.apply().unwrap();
+        netidx::resolver_server::config::Config::load(
+            out.path().join("resolver.json"),
+        )
+        .expect("workstation with auto-seeded perms must validate");
     }
 
     #[test]
@@ -436,6 +596,8 @@ mod tests {
     }
 
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn tls_upstream_with_identity() {
         use crate::ca;
         let ca_dir = tempfile::tempdir().unwrap();

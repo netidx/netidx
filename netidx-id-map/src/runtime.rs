@@ -10,9 +10,20 @@
 //! ```
 //!
 //! The daemon holds the parsed [`crate::file::IdMap`] behind an
-//! `RwLock<Arc<IdMap>>`. SIGHUP triggers a re-read of the config
-//! file; parse failures keep the last-known-good map in place so a
-//! botched edit can't lock out every TLS identity.
+//! `RwLock<Arc<IdMap>>`. Two paths trigger a re-read:
+//!
+//! - An `extended-notify` watch on the config file fires whenever
+//!   the file is modified or replaced (atomic-write rename-into-place
+//!   shows up as a Create event for the parent-dir watcher). This is
+//!   the normal path — operators editing `id-map.json` directly or
+//!   running `netidx conf id-map …` get reload-for-free.
+//! - `SIGHUP` is kept as a manual override for the rare case where a
+//!   filesystem doesn't deliver notifications (network mounts, some
+//!   container setups) or the operator wants to force a reload after
+//!   editing through some channel the watcher didn't catch.
+//!
+//! Either way, parse failures keep the last-known-good map in place
+//! so a botched edit can't lock out every TLS identity.
 //!
 //! This file is `unix`-only — `tokio::net::UnixListener` and
 //! `tokio::signal::unix` aren't available elsewhere and the resolver's
@@ -28,6 +39,11 @@
 
 use crate::file::{self, IdMap, Query};
 use anyhow::{Context, Result};
+use enumflags2::make_bitflags;
+use extended_notify::{
+    ArcPath, EventBatch, EventHandler, EventKind, Interest, Watched, Watcher,
+    WatcherConfigBuilder,
+};
 use log::{debug, info, warn};
 use parking_lot::RwLock;
 use std::{
@@ -73,8 +89,9 @@ pub struct ServerParams {
     /// running under a service account that needs to share with the
     /// resolver).
     pub socket_mode: u32,
-    /// Path to the id-map JSON config. Parsed once at startup and
-    /// re-parsed on SIGHUP.
+    /// Path to the id-map JSON config. Parsed once at startup, then
+    /// re-parsed automatically whenever the file changes (via the
+    /// extended-notify watch) or `SIGHUP` is received.
     pub config: PathBuf,
 }
 
@@ -86,18 +103,26 @@ impl ServerParams {
 
 /// A running id-map daemon. Drop the server to shut it down (the
 /// listener loop receives a oneshot and exits; in-flight requests
-/// continue until their timeout).
+/// continue until their timeout). The file watcher and SIGHUP task
+/// shut down implicitly when their handles drop.
 pub struct Server {
     _stop: oneshot::Sender<()>,
     join: Option<JoinHandle<()>>,
     map: Arc<RwLock<Arc<IdMap>>>,
     config_path: PathBuf,
+    // The watcher's background task stays alive as long as either
+    // `_watcher` or `_watched` holds a sender into its command
+    // channel; `_watched` also tears down the specific path watch on
+    // drop, which is what we want at Server shutdown. Both are held
+    // here so they live exactly as long as the Server does.
+    _watcher: Option<Watcher>,
+    _watched: Option<Watched>,
 }
 
 impl Server {
     /// Start the daemon: bind the socket, parse the config, spawn the
-    /// listener loop, and arm SIGHUP. Returns when the listener is
-    /// accepting connections.
+    /// listener loop, install the config-file watcher, and arm SIGHUP.
+    /// Returns when the listener is accepting connections.
     pub async fn start(params: ServerParams) -> Result<Server> {
         let initial = load_config(&params.config)
             .with_context(|| format!("loading {:?}", params.config))?;
@@ -140,6 +165,40 @@ impl Server {
         // SIGHUP runs in its own task so a malformed config reload
         // can't get stuck and block the accept loop.
         tokio::spawn(sighup_task(config_path.clone(), Arc::clone(&map)));
+        // Filesystem watcher for live reload. A failure to start the
+        // watcher logs a warning but doesn't fail the daemon —
+        // SIGHUP still works as a manual fallback, and the daemon
+        // can serve queries against the initial map even if no
+        // reloads ever fire. When the watcher does start, block
+        // briefly waiting for its `Established` event so callers
+        // (and tests) can rely on the daemon being reload-armed by
+        // the time `start` returns.
+        let (watcher, watched) =
+            match start_config_watcher(config_path.clone(), Arc::clone(&map)) {
+                Ok((w, h, ready_rx)) => {
+                    match timeout(Duration::from_secs(2), ready_rx).await {
+                        Ok(Ok(())) => {
+                            debug!("id-map: config-file watcher established");
+                        }
+                        Ok(Err(_)) => warn!(
+                            "id-map: watcher handler exited before establishment; \
+                             reloads will not fire"
+                        ),
+                        Err(_) => warn!(
+                            "id-map: config-file watcher did not establish within 2s; \
+                             continuing — reloads may be delayed or missed"
+                        ),
+                    }
+                    (Some(w), Some(h))
+                }
+                Err(e) => {
+                    warn!(
+                        "id-map: failed to install config-file watcher: {e:#}; \
+                         continuing with SIGHUP-only reload"
+                    );
+                    (None, None)
+                }
+            };
 
         info!(
             "id-map daemon ready on {} (config {})",
@@ -151,6 +210,8 @@ impl Server {
             join: Some(join),
             map,
             config_path,
+            _watcher: watcher,
+            _watched: watched,
         })
     }
 
@@ -275,6 +336,110 @@ async fn handle_one(
     client.write_all(response.as_bytes()).await?;
     client.shutdown().await?;
     Ok(())
+}
+
+/// `extended-notify` event handler that reloads the id-map config
+/// whenever the watched path fires a notification. We inspect each
+/// event's `Interest` so that the synthetic `Established` event
+/// (fired once when the watch is first armed) can resolve a oneshot
+/// without triggering a redundant reload — Server::start awaits that
+/// oneshot before returning, so the daemon is observably ready
+/// instead of relying on a "probably long enough" sleep.
+///
+/// All other events are reloads. `atomic::write_atomic` (the writer
+/// the `netidx conf id-map` tools use) writes to a tempfile then
+/// renames over the target; extended-notify catches that via its
+/// parent-dir watch + polling, so the rename-induced inode swap
+/// doesn't lose us the watch.
+#[derive(Clone)]
+struct ReloadHandler {
+    config_path: PathBuf,
+    map: Arc<RwLock<Arc<IdMap>>>,
+    // Wrapped in Arc<Mutex<>> because `EventHandler` requires `Clone`
+    // (the watcher clones the handler internally) and oneshot senders
+    // aren't `Clone`. The mutex lets the first clone-to-fire `take()`
+    // the sender; subsequent Established events (after a watch is
+    // torn down and re-armed, etc.) find it `None` and skip.
+    established_tx: Arc<parking_lot::Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl EventHandler for ReloadHandler {
+    fn handle_event(
+        &mut self,
+        batch: EventBatch,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        // Classify events synchronously: did we just see the
+        // synthetic Established event (signal readiness, skip
+        // reload), or a real change (do the reload)? Returning Err
+        // from this handler permanently stops the watcher — we never
+        // want that — so always return Ok.
+        let mut saw_change = false;
+        for (_, event) in batch.iter() {
+            if let EventKind::Event(Interest::Established) = event.event {
+                if let Some(tx) = self.established_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+            } else {
+                saw_change = true;
+            }
+        }
+        let path = self.config_path.clone();
+        let map = Arc::clone(&self.map);
+        async move {
+            if !saw_change {
+                return Ok(());
+            }
+            info!(
+                "id-map: detected change to {}, reloading",
+                path.display()
+            );
+            match tokio::task::spawn_blocking(move || load_config(&path)).await {
+                Ok(Ok(new)) => {
+                    *map.write() = Arc::new(new);
+                    info!("id-map: reload OK");
+                }
+                Ok(Err(e)) => warn!(
+                    "id-map: reload failed, keeping last-known-good map: {e:#}"
+                ),
+                Err(e) => warn!("id-map: reload task panicked: {e:#}"),
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Start the config-file watcher and return both ownership handles
+/// plus a oneshot that resolves once the synthetic `Established`
+/// event has fired (i.e. the underlying inotify watch is armed and
+/// any subsequent edits will be observed). The caller is expected to
+/// await the receiver with a timeout — that's the readiness contract
+/// `Server::start` exposes.
+fn start_config_watcher(
+    config_path: PathBuf,
+    map: Arc<RwLock<Arc<IdMap>>>,
+) -> Result<(Watcher, Watched, oneshot::Receiver<()>)> {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let handler = ReloadHandler {
+        config_path: config_path.clone(),
+        map,
+        established_tx: Arc::new(parking_lot::Mutex::new(Some(ready_tx))),
+    };
+    let watcher = WatcherConfigBuilder::default()
+        .event_handler(handler)
+        .build()
+        .context("building config-file watcher")?
+        .start()
+        .context("starting config-file watcher")?;
+    // Modify covers in-place writes; Create covers the rename-to side
+    // of an atomic write (a fresh inode appearing at the path);
+    // Delete covers `rm` followed by a fresh write. Established is
+    // the synthetic "watch armed" event — the handler signals our
+    // readiness oneshot on it and suppresses the reload.
+    let interests =
+        make_bitflags!(Interest::{Established | Modify | Create | Delete});
+    let watched =
+        watcher.add(ArcPath::from(config_path), interests).context("adding watch")?;
+    Ok((watcher, watched, ready_rx))
 }
 
 async fn sighup_task(config_path: PathBuf, map: Arc<RwLock<Arc<IdMap>>>) {
@@ -510,6 +675,88 @@ mod tests {
             !out.contains("uid="),
             "no valid id line should leak past the cap; got: {out:?}",
         );
+    }
+
+    /// Edit the config on disk, then poll the daemon's snapshot until
+    /// it reflects the new identity (or we hit the 10s ceiling). The
+    /// watcher's default debounce timeout is 250ms, so a reload
+    /// should arrive within a few hundred ms; the long ceiling is just
+    /// to be CI-tolerant on slow filesystems.
+    #[tokio::test]
+    async fn config_watcher_reloads_on_modify() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_sample(&cfg_path);
+        let server = Server::start(ServerParams {
+            socket: sock_path,
+            socket_mode: 0o600,
+            config: cfg_path.clone(),
+        })
+        .await
+        .unwrap();
+        // Initial map has alice but not bob. By the time
+        // `Server::start` has returned the watcher's `Established`
+        // event has fired, so any subsequent edit is guaranteed to
+        // be observed — no sleep needed.
+        assert!(server.snapshot().lookup_by_name("alice.example.com").is_some());
+        assert!(server.snapshot().lookup_by_name("bob.example.com").is_none());
+
+        // Edit the file: add bob. We use the same atomic-write
+        // pattern the `netidx conf id-map` tools use, since the
+        // rename-into-place path is the most demanding for the
+        // watcher to catch.
+        let mut groups = BTreeMap::new();
+        groups.insert(arcstr::ArcStr::from("users"), Group { gid: 100 });
+        let mut identities = BTreeMap::new();
+        identities.insert(
+            arcstr::ArcStr::from("alice.example.com"),
+            Identity {
+                uid: 1000,
+                primary_group: arcstr::ArcStr::from("users"),
+                groups: vec![],
+            },
+        );
+        identities.insert(
+            arcstr::ArcStr::from("bob.example.com"),
+            Identity {
+                uid: 1001,
+                primary_group: arcstr::ArcStr::from("users"),
+                groups: vec![],
+            },
+        );
+        let cfg = IdMap {
+            default_uid: 65534,
+            default_gid: 65534,
+            groups,
+            identities,
+        };
+        let bytes = serde_json::to_vec_pretty(&cfg).unwrap();
+        // Atomic write: temp + rename.
+        let tmp = cfg_path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes).unwrap();
+        std::fs::rename(&tmp, &cfg_path).unwrap();
+
+        // Poll for up to ~10s.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if server.snapshot().lookup_by_name("bob.example.com").is_some() {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "watcher did not reload within 10s; snapshot identities: {:?}",
+                    server
+                        .snapshot()
+                        .identities
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     #[tokio::test]

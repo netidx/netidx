@@ -106,6 +106,39 @@ pub fn install_identity_for_user(
     })
 }
 
+/// Verify a file at `path` parses as one or more PEM-encoded X.509
+/// certificates. Used by the conf-install tooling to confirm an
+/// operator has placed signed cert / trusted-CA files before
+/// proceeding with a TLS install — it deliberately stops short of
+/// chain validation (the runtime TLS handshake is the authority on
+/// that) so it can be called in a tight retry loop without false
+/// negatives on intermediate CAs the operator hasn't yet attached.
+///
+/// Cross-platform: implemented with `rustls-pemfile` rather than
+/// openssl so it works on Windows too. The previous openssl-backed
+/// implementation lived in `ca.rs` which is unix-only.
+pub fn validate_pem_cert_file(path: &Path) -> Result<()> {
+    use std::io::BufReader;
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(f);
+    // `rustls_pemfile::certs` returns an iterator of
+    // `Result<CertificateDer, io::Error>` over every BEGIN
+    // CERTIFICATE block in the file. Empty input → empty iterator,
+    // so we count and bail if zero.
+    let mut count = 0usize;
+    for cert in rustls_pemfile::certs(&mut reader) {
+        let _ = cert.with_context(|| {
+            format!("parsing PEM X.509 from {}", path.display())
+        })?;
+        count += 1;
+    }
+    if count == 0 {
+        bail!("{} contains no PEM certificates", path.display());
+    }
+    Ok(())
+}
+
 fn ensure_valid_cn(cn: &str) -> Result<()> {
     if cn.is_empty() {
         bail!("TLS identity name (cn) must not be empty");
@@ -127,6 +160,41 @@ mod tests {
 
     fn write(path: &Path, bytes: &[u8]) {
         std::fs::write(path, bytes).unwrap();
+    }
+
+    /// rustls-pemfile happy path: a well-formed self-contained PEM
+    /// block parses. We don't need openssl to generate the cert —
+    /// any RFC-7468-shaped PEM with a CERTIFICATE label is accepted
+    /// at the syntactic level (rustls-pemfile validates only the
+    /// PEM framing, not the X.509 contents). For "real cert" cross-
+    /// checking against openssl-generated PEMs, see the matching
+    /// test in `ca.rs::validate_pem_cert_file_accepts_openssl_certs`.
+    #[test]
+    fn validate_pem_cert_file_accepts_pem_block() {
+        let dir = tempfile::tempdir().unwrap();
+        // Minimal valid-shape PEM: rustls-pemfile only checks the
+        // BEGIN/END delimiters and base64 body — not the cert
+        // semantics. A 1-byte DER body is fine for the parse test.
+        // We're verifying the framing recogniser, not X.509.
+        let pem = b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n";
+        let p = dir.path().join("ok.pem");
+        write(&p, pem);
+        validate_pem_cert_file(&p).unwrap();
+    }
+
+    #[test]
+    fn validate_pem_cert_file_rejects_missing_empty_and_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file.
+        assert!(validate_pem_cert_file(&dir.path().join("nope.pem")).is_err());
+        // Empty file → "contains no PEM certificates".
+        let empty = dir.path().join("empty.pem");
+        write(&empty, b"");
+        assert!(validate_pem_cert_file(&empty).is_err());
+        // Garbage with no BEGIN markers — same "no certificates" path.
+        let junk = dir.path().join("junk.pem");
+        write(&junk, b"definitely not a PEM file");
+        assert!(validate_pem_cert_file(&junk).is_err());
     }
 
     #[test]

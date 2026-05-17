@@ -59,6 +59,10 @@ netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-protocols = { path = "../netidx-protocols", version = "0.32.0", default-features = false }
 netidx-tools-core = { path = "../netidx-tools-core", version = "0.32.0", default-features = false }
 netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.32.0", default-features = false }
+enumflags2 = { workspace = true }
+# File-watching for live reload (resolver-server config + perms;
+# `netidx-id-map` uses the same crate for the same reason).
+extended-notify = "0.1"
 parking_lot = { workspace = true }
 # Cloud-metadata public-IP detection for `conf install` (see
 # conf/cloud.rs). HTTP-only — no TLS needed for link-local metadata

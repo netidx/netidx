@@ -204,6 +204,8 @@ mod tests {
     }
 
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn tls_with_identity() {
         use crate::ca;
         let ca_dir = tempfile::tempdir().unwrap();

@@ -151,6 +151,15 @@ pub(crate) struct SignArgs {
     /// CN).
     #[structopt(long = "out", short = "o")]
     pub out: Option<PathBuf>,
+    /// Skip the post-sign id-map registration prompt. The default on
+    /// a TTY (when a local id-map exists) is to prompt for groups
+    /// and add the identity to the map; this flag suppresses that
+    /// entirely. Non-TTY callers already skip the prompt by default,
+    /// so this is mostly useful for interactive sessions where you
+    /// want to handle id-map registration separately (or not at
+    /// all).
+    #[structopt(long = "no-id-map")]
+    pub no_id_map: bool,
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -316,7 +325,122 @@ fn sign(mut p: SignArgs) -> Result<()> {
     atomic::write_atomic(&out, &cert_pem, 0o644)
         .with_context(|| format!("writing certificate to {:?}", out))?;
     println!("\nsigned cert (0644): {}", out.display());
+    maybe_register_in_id_map(&summary, &san, p.no_id_map)?;
     Ok(())
+}
+
+/// After signing a cert, optionally register the new identity in
+/// the local id-map (the file the resolver consults to map TLS SANs
+/// to unix uid + groups). Silently skipped when:
+/// - `--no-id-map` was passed, or
+/// - no local id-map exists at the canonical user path, or
+/// - the CSR carries no usable identity name (no SAN DNS entry and
+///   no CN), or
+/// - stdin is not a TTY (scripts use `netidx conf id-map set-user`
+///   for explicit non-interactive registration; we don't want a
+///   level-1 prompt to silently write a wrong UID).
+///
+/// On a TTY with an id-map present, prompts for groups (level-1,
+/// default `users`) and uid (level-1, default = max(existing) + 1
+/// starting from 1000). First group in the list is the primary;
+/// the rest become secondary memberships. Refuses any group not
+/// already in the map — there's no "create group on the fly" path
+/// here because that would let a typo silently introduce a
+/// privilege-bearing group.
+fn maybe_register_in_id_map(
+    summary: &ca::CsrSummary,
+    san: &[SanEntry],
+    no_id_map: bool,
+) -> Result<()> {
+    use netidx_conf::id_map;
+    if no_id_map {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    // The identity NAME in the id-map is what the resolver sees on
+    // the wire: the cert's SAN alt-name, i.e. the first DNS SAN.
+    // Fall back to the CN if no DNS SAN (unlikely; netidx rejects
+    // such certs anyway, but the prompt path shouldn't crash).
+    let identity_name = san
+        .iter()
+        .find_map(|s| if let SanEntry::Dns(d) = s { Some(d.clone()) } else { None })
+        .or_else(|| summary.common_name.clone());
+    let identity_name = match identity_name {
+        Some(n) => n,
+        None => {
+            println!("(no DNS SAN / CN — skipping id-map registration)");
+            return Ok(());
+        }
+    };
+    let map_path = id_map::user_id_map_path()?;
+    let mut map = match id_map::load(&map_path) {
+        Ok(m) => m,
+        Err(_) => {
+            // Most common cause: no map yet. Tell the operator
+            // exactly what's missing so they can `id-map init` if
+            // they want one, but don't fail the sign.
+            println!(
+                "(no local id-map at {} — skipping registration; \
+                 create one with `netidx conf id-map init`)",
+                map_path.display(),
+            );
+            return Ok(());
+        }
+    };
+    if !prompt::confirm(
+        &format!("register identity {identity_name:?} in the local id-map?"),
+        true,
+    )? {
+        return Ok(());
+    }
+    // List groups so the operator knows what's valid; sorted for
+    // readable output and stable across runs.
+    let mut group_names: Vec<&str> =
+        map.groups.keys().map(|k| k.as_str()).collect();
+    group_names.sort_unstable();
+    println!("available groups: {}", group_names.join(", "));
+    let groups_str = prompt::string_with_default(
+        "groups (comma-separated; first is primary)",
+        None,
+        "users",
+    )?;
+    let groups: Vec<&str> =
+        groups_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if groups.is_empty() {
+        bail!(
+            "no groups specified — at least the primary group is required"
+        );
+    }
+    let (primary, secondary): (&str, &[&str]) = (groups[0], &groups[1..]);
+    let uid: u32 = prompt::parsed_with_default(
+        "uid",
+        None,
+        &next_uid_suggestion(&map).to_string(),
+    )?;
+    let prev = id_map::upsert_identity(&mut map, &identity_name, uid, primary, secondary)?;
+    id_map::save(&map_path, &map)?;
+    match prev {
+        Some(old) => println!(
+            "updated id-map: {identity_name} (was uid={} primary={})",
+            old.uid,
+            old.primary_group.as_str(),
+        ),
+        None => println!("added to id-map: {identity_name} uid={uid} primary={primary}"),
+    }
+    Ok(())
+}
+
+/// Suggested next uid: `max(existing uids) + 1`, clamped to start at
+/// 1000. Picking from a deterministic base keeps the suggestion
+/// stable and avoids colliding with low system uids.
+fn next_uid_suggestion(map: &netidx_conf::id_map::IdMap) -> u32 {
+    let max = map.identities.values().map(|i| i.uid).max();
+    match max {
+        Some(n) if n >= 1000 => n + 1,
+        _ => 1000,
+    }
 }
 
 /// Decide which SAN to embed in the signed cert.
@@ -700,6 +824,7 @@ mod tests {
             no_password: true,
             ca_dir: Some(ca_dir.clone()),
             out: Some(cert_path.clone()),
+            no_id_map: true,
         })
         .unwrap();
         assert!(cert_path.exists());
@@ -754,6 +879,7 @@ mod tests {
             no_password: true,
             ca_dir: Some(ca_dir),
             out: Some(out_cert.clone()),
+            no_id_map: true,
         })
         .unwrap();
         // The (true, false) branch went through the prompt-default-Y
@@ -799,6 +925,7 @@ mod tests {
             no_password: true,
             ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
+            no_id_map: true,
         })
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -842,6 +969,7 @@ mod tests {
             no_password: true,
             ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
+            no_id_map: true,
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("not both"));

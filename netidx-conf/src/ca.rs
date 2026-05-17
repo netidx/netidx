@@ -541,24 +541,6 @@ pub struct CsrSummary {
 /// process owns (e.g. handed off to a remote conf-server). The CSR's
 /// requested SAN is also embedded so a signing party can verify the
 /// request before signing.
-/// Verify a file at `path` parses as one or more PEM-encoded X.509
-/// certificates. Used by the conf-install tooling to confirm an
-/// operator has placed signed cert / trusted-CA files before
-/// proceeding with a TLS install — it deliberately stops short of
-/// chain validation (the runtime TLS handshake is the authority on
-/// that) so it can be called in a tight retry loop without false
-/// negatives on intermediate CAs the operator hasn't yet attached.
-pub fn validate_pem_cert_file(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let stack = openssl::x509::X509::stack_from_pem(&bytes)
-        .with_context(|| format!("parsing {} as PEM X.509", path.display()))?;
-    if stack.is_empty() {
-        bail!("{} contains no certificates", path.display());
-    }
-    Ok(())
-}
-
 pub fn generate_csr(
     subject: &Subject,
     san: &[SanEntry],
@@ -730,13 +712,19 @@ mod tests {
         .unwrap()
     }
 
+    /// Cross-check: rustls-pemfile (the implementation in
+    /// `tls::validate_pem_cert_file`) accepts the openssl-produced
+    /// PEMs that `Ca::issue` and `Ca::init` generate. Catches any
+    /// divergence in PEM dialect handling between the two libs.
+    /// The shape-only tests (missing file, empty, garbage) live
+    /// alongside the validator itself in `tls.rs` since they need
+    /// no openssl-generated input.
     #[test]
-    fn validate_pem_cert_file_accepts_real_cert() {
+    fn validate_pem_cert_file_accepts_openssl_certs() {
+        use crate::tls::validate_pem_cert_file;
         let dir = tempfile::tempdir().unwrap();
         let ca = small_ca(dir.path());
-        // The CA's own cert is a real X.509 in PEM form.
         validate_pem_cert_file(&dir.path().join("certificate.pem")).unwrap();
-        // And the leaf issued from it.
         let leaf_dir = tempfile::tempdir().unwrap();
         let issued = ca
             .issue(&IssueParams {
@@ -748,21 +736,6 @@ mod tests {
             })
             .unwrap();
         validate_pem_cert_file(&issued.certificate).unwrap();
-    }
-
-    #[test]
-    fn validate_pem_cert_file_rejects_missing_and_junk() {
-        let dir = tempfile::tempdir().unwrap();
-        // Missing file.
-        assert!(validate_pem_cert_file(&dir.path().join("nope.pem")).is_err());
-        // Empty file.
-        let empty = dir.path().join("empty.pem");
-        std::fs::write(&empty, b"").unwrap();
-        assert!(validate_pem_cert_file(&empty).is_err());
-        // Garbage that's not PEM.
-        let junk = dir.path().join("junk.pem");
-        std::fs::write(&junk, b"definitely not a certificate").unwrap();
-        assert!(validate_pem_cert_file(&junk).is_err());
     }
 
     #[test]

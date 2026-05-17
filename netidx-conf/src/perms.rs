@@ -18,7 +18,7 @@
 use crate::atomic;
 use anyhow::Result;
 use arcstr::ArcStr;
-use netidx::resolver_server::config::PMap;
+pub use netidx::resolver_server::config::PMap;
 use std::{collections::HashMap, path::Path};
 
 /// Parse and validate a permission-bit string. The alphabet is
@@ -113,6 +113,42 @@ pub fn empty() -> PMap {
     PMap(HashMap::new())
 }
 
+/// Sensible starter perms for a freshly-installed resolver:
+///
+/// - `/users/$[user]` → the authenticated user gets `swlpd` (full
+///   subscribe / write / list / publish / publish-default rights)
+///   under their own subtree. `$[user]` is the resolver's built-in
+///   variable, substituted at evaluation time with the connecting
+///   principal's name — so user `alice` gets full control of
+///   `/users/alice/**` without an explicit per-user entry.
+/// - `/users` → members of the `users` group get `swl` (subscribe,
+///   write, list) — i.e. read everyone's published values and write
+///   to existing paths, but *not* `p` (publish) so they can't drop
+///   new paths into someone else's subtree.
+///
+/// Together these give a "shared playground under `/users` with
+/// per-user write-protected directories" out of the box. Operators
+/// who want a different default can override `perms_seed` on the
+/// template or edit the emitted `perms.json` directly.
+pub fn default_seed() -> PMap {
+    let mut p = empty();
+    // Full control of own subtree via the $[user] dynamic entry. The
+    // resolver's PMap loader requires that the only key inside a
+    // `…/$[user]` entry is `$[user]` itself; see `PMap::from_file`
+    // in netidx/src/resolver_server/auth.rs.
+    add_entry(&mut p, "/users/$[user]", "$[user]", "swlpd")
+        .expect("static seed must validate");
+    // Group-wide read+write at the /users root. Not a `$[group]`
+    // dynamic entry — that form requires the group name to appear in
+    // the basename, and we want a fixed reference to the literal
+    // group `users`. So this is just a normal entry whose entity
+    // happens to be a group name; the resolver matches it when the
+    // connecting principal is a member of that group.
+    add_entry(&mut p, "/users", "users", "swl")
+        .expect("static seed must validate");
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +171,50 @@ mod tests {
     fn parser_rejects_misplaced_bang() {
         assert!(validate_perm_bits("s!w").is_err());
         assert!(validate_perm_bits("sw!").is_err());
+    }
+
+    #[test]
+    fn default_seed_has_user_dynamic_and_users_group() {
+        let p = default_seed();
+        // Per-user dynamic entry: full rights for $[user] under
+        // /users/$[user]. Looking up by the literal entity string
+        // `$[user]` exercises the same shape the resolver's
+        // PMap::from_file parses.
+        assert_eq!(
+            lookup(&p, "/users/$[user]", "$[user]").map(|s| s.as_str()),
+            Some("swlpd"),
+        );
+        // Read+write for the users group at /users — no `p`/`d`,
+        // since publishing under someone else's prefix isn't part of
+        // the "playground" contract.
+        assert_eq!(
+            lookup(&p, "/users", "users").map(|s| s.as_str()),
+            Some("swl"),
+        );
+    }
+
+    #[test]
+    fn default_seed_validates_through_resolver_loader() {
+        // The dynamic-entry shape (`$[user]` ending, `$[user]`
+        // entity) has strict rules in PMap::from_file. Catch any
+        // future drift in `default_seed` here rather than at first
+        // resolver-start.
+        use netidx::resolver_server::config;
+        let p = default_seed();
+        let file = config::file::ConfigBuilder::default()
+            .member_servers(vec![
+                config::file::MemberServerBuilder::default()
+                    .addr("127.0.0.1:4564".parse().unwrap())
+                    .bind_addr("127.0.0.1".parse().unwrap())
+                    .auth(config::file::Auth::Anonymous)
+                    .build()
+                    .unwrap(),
+            ])
+            .perms(p)
+            .build()
+            .unwrap();
+        config::Config::from_file(file)
+            .expect("default_seed must pass PMap::from_file");
     }
 
     #[test]

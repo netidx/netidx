@@ -1,6 +1,14 @@
 use anyhow::{Context, Result};
 #[cfg(unix)]
+use arcstr::ArcStr;
+#[cfg(unix)]
 use daemonize::Daemonize;
+#[cfg(unix)]
+use enumflags2::make_bitflags;
+#[cfg(unix)]
+use extended_notify::{
+    ArcPath, EventBatch, EventKind, Interest, Watched, Watcher, WatcherConfigBuilder,
+};
 #[cfg(not(unix))]
 use futures::future;
 #[cfg(unix)]
@@ -14,7 +22,10 @@ use netidx::resolver_server::{
 use std::path::PathBuf;
 use structopt::StructOpt;
 #[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::mpsc,
+};
 
 #[derive(StructOpt, Debug)]
 pub(crate) struct Params {
@@ -81,27 +92,88 @@ async fn run_signal_loop(
     let mut sighup =
         signal(SignalKind::hangup()).context("registering SIGHUP handler")?;
     let _ = id;
+
+    // File-watch path: drive the same reload as SIGHUP whenever the
+    // config or any include_permissions file changes on disk. The
+    // watcher is best-effort — if it fails to start, log and fall
+    // back to SIGHUP-only behaviour.
+    //
+    // `_watched` is held purely for its Drop side effect (RAII watch
+    // stop). It's reassigned when the include set changes; the
+    // assignment is meaningful even though the value isn't read
+    // again — the prior Vec drops, ending those watches.
+    let (events_tx, mut events_rx) = mpsc::channel::<EventBatch>(64);
+    #[allow(unused_assignments)]
+    let (watcher_opt, mut _watched, mut included_paths) =
+        match start_watcher_for(&config_path, &baseline, events_tx) {
+            Ok((w, h, p)) => (Some(w), h, p),
+            Err(e) => {
+                warn!(
+                    "resolver: failed to install config-file watcher: {e:#}; \
+                     continuing with SIGHUP-only reload"
+                );
+                (None, Vec::new(), Vec::new())
+            }
+        };
+
     loop {
-        let _ = sighup.recv().await;
-        match handle_sighup(&server, &config_path, &baseline).await {
-            Ok(()) => info!("perms reloaded successfully"),
-            Err(e) => warn!("SIGHUP perms reload failed: {e:#}"),
+        let trigger = tokio::select! {
+            _ = sighup.recv() => Some("SIGHUP"),
+            batch = events_rx.recv() => match batch {
+                None => None,
+                Some(b) if is_established_only(&b) => continue,
+                Some(_) => Some("file change"),
+            },
+        };
+        let Some(trigger) = trigger else { break Ok(()) };
+        info!("resolver: {trigger} — reloading");
+        match handle_reload(&server, &config_path, &baseline).await {
+            Ok(new_file) => {
+                info!("perms reloaded successfully");
+                // If `include_permissions` changed, rebuild watches
+                // so newly-included files are observed (and removed
+                // ones stop firing). Re-watching the main config is
+                // a no-op idempotent — extended-notify de-dupes.
+                if let Some(w) = watcher_opt.as_ref()
+                    && new_file.include_permissions != included_paths
+                {
+                    info!(
+                        "include_permissions changed; rebuilding watch set ({} → {} paths)",
+                        included_paths.len(),
+                        new_file.include_permissions.len(),
+                    );
+                    match watch_all(w, &config_path, &new_file.include_permissions) {
+                        Ok(new_handles) => {
+                            // Drop old handles AFTER establishing the
+                            // new ones so we don't have a window with
+                            // no watch on the main config.
+                            _watched = new_handles;
+                            included_paths = new_file.include_permissions.clone();
+                        }
+                        Err(e) => warn!(
+                            "resolver: rebuilding watch set failed: {e:#}; \
+                             keeping previous watches in place"
+                        ),
+                    }
+                }
+            }
+            Err(e) => warn!("resolver: reload failed: {e:#}"),
         }
     }
 }
 
 #[cfg(unix)]
-async fn handle_sighup(
+async fn handle_reload(
     server: &Server,
     config_path: &std::path::Path,
     baseline: &file::Config,
-) -> Result<()> {
-    info!("SIGHUP received, re-reading {:?}", config_path);
+) -> Result<file::Config> {
+    info!("re-reading {:?}", config_path);
     let new_file = load_file_config(config_path)?;
     // Merge include_permissions + inline perms WITHOUT going through
     // `Config::from_file`: the full validator opens TLS cert files,
     // re-validates addrs / parent / children / member_servers — none
-    // of which are applied live on SIGHUP, and one of which (TLS
+    // of which are applied live on reload, and one of which (TLS
     // file I/O) could spuriously fail mid-rotation. The merge helper
     // only touches `include_permissions` + `perms` and surfaces the
     // structural-diff warning separately.
@@ -109,7 +181,74 @@ async fn handle_sighup(
         .context("merging perms (include_permissions + inline)")?;
     warn_structural_changes(baseline, &new_file);
     server.reload_perms(&new_perms).await.context("swapping live PMap")?;
-    Ok(())
+    Ok(new_file)
+}
+
+/// Start the file watcher and arm watches for the main config plus
+/// every `include_permissions` entry from `baseline`. Returns the
+/// watcher (kept alive for the lifetime of the daemon), the active
+/// `Watched` handles (one per path; drop to stop), and the path list
+/// the handles correspond to (used downstream to detect changes that
+/// require a rebuild).
+#[cfg(unix)]
+fn start_watcher_for(
+    config_path: &std::path::Path,
+    baseline: &file::Config,
+    events_tx: mpsc::Sender<EventBatch>,
+) -> Result<(Watcher, Vec<Watched>, Vec<ArcStr>)> {
+    let watcher = WatcherConfigBuilder::default()
+        .event_handler(events_tx)
+        .build()
+        .context("building config-file watcher")?
+        .start()
+        .context("starting config-file watcher")?;
+    let watched = watch_all(&watcher, config_path, &baseline.include_permissions)
+        .context("arming initial watch set")?;
+    Ok((watcher, watched, baseline.include_permissions.clone()))
+}
+
+/// Add watches for the main config + each include_permissions path.
+/// Returns the resulting `Watched` handles in the same order as the
+/// input (main config first, then includes). Caller is responsible
+/// for keeping the handles alive — drop ends the watch.
+#[cfg(unix)]
+fn watch_all(
+    watcher: &Watcher,
+    config_path: &std::path::Path,
+    include_paths: &[ArcStr],
+) -> Result<Vec<Watched>> {
+    // Established is included so the receiver loop can log when
+    // watches are armed (and the `is_established_only` guard
+    // suppresses the would-be reload that those synthetic events
+    // would otherwise trigger). Modify / Create / Delete are the
+    // real-change interests; Create covers the rename-into-place that
+    // atomic-write tools produce.
+    let interests = make_bitflags!(Interest::{Established | Modify | Create | Delete});
+    let mut handles = Vec::with_capacity(1 + include_paths.len());
+    handles.push(
+        watcher
+            .add(ArcPath::from(config_path), interests)
+            .context("watching main config")?,
+    );
+    for p in include_paths {
+        let path = std::path::PathBuf::from(p.as_str());
+        handles.push(
+            watcher
+                .add(ArcPath::from(path.as_path()), interests)
+                .with_context(|| format!("watching include_permissions {p:?}"))?,
+        );
+    }
+    Ok(handles)
+}
+
+/// True if every event in the batch is the synthetic `Established`
+/// event. Those fire once per watch when the watcher arms and don't
+/// represent an on-disk change, so they shouldn't trigger a reload.
+#[cfg(unix)]
+fn is_established_only(batch: &EventBatch) -> bool {
+    batch
+        .iter()
+        .all(|(_, e)| matches!(e.event, EventKind::Event(Interest::Established)))
 }
 
 #[cfg(unix)]

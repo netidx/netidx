@@ -5,11 +5,16 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
 use netidx_conf::{
-    paths, tls,
+    paths,
     template::{
         self, AuthChoice, ParentRef, ReferralAuth, RenderedTemplate, TlsIdentitySpec,
     },
 };
+// `tls::identity_dir` is referenced only by the unix-gated TLS cert
+// generation flows (`generate_and_wait_for_parent_cert`,
+// `resolver_tls_generate`); on Windows the import would be unused.
+#[cfg(unix)]
+use netidx_conf::tls;
 use std::{
     io::IsTerminal,
     net::{Ipv4Addr, SocketAddr},
@@ -18,7 +23,10 @@ use std::{
 };
 use structopt::StructOpt;
 
-use super::{ca, cloud, prompt, service};
+// `ca` submodule depends on netidx_conf::ca which is unix-only.
+#[cfg(unix)]
+use super::ca;
+use super::{cloud, prompt, service};
 
 #[derive(StructOpt, Debug)]
 pub(crate) enum Params {
@@ -351,8 +359,47 @@ pub(crate) struct WorkstationFlags {
     /// units; pass this when you don't want a container service.
     #[structopt(long = "no-container")]
     no_container: bool,
+    /// Override the perms-file owner. By default the workstation
+    /// install grants `<base>` → `<current-unix-user>` → `swlpd` so
+    /// the operator has full rights to the local-resolver namespace
+    /// without further setup. Pass `--owner alice` to grant `alice`
+    /// instead — useful when installing as root on behalf of another
+    /// user. Implies `--with-perms` (and conflicts with `--no-perms`).
+    #[structopt(long = "owner", conflicts_with = "no_perms")]
+    owner: Option<String>,
+    /// Skip the auto-seeded perms file entirely. The workstation
+    /// resolver will load with an empty perms map and `Deny` every
+    /// non-anonymous operation — only useful when perms are managed
+    /// out-of-band.
+    #[structopt(long = "no-perms")]
+    no_perms: bool,
+    /// Where to write the perms file. Defaults to
+    /// `~/.config/netidx/perms.json` (same as the resolver template).
+    #[structopt(long = "perms-path")]
+    perms_path: Option<PathBuf>,
     #[structopt(flatten)]
     common: CommonFlags,
+}
+
+/// Resolve the workstation owner: explicit `--owner` first, else the
+/// current Unix user via `nix::unistd`. Returns `None` only if we're
+/// on a platform without `nix` (Windows) and no explicit `--owner`
+/// was passed — the engine then emits an empty perms map.
+#[cfg(unix)]
+fn resolve_workstation_owner(provided: Option<String>) -> Option<ArcStr> {
+    if let Some(s) = provided {
+        return Some(ArcStr::from(s.as_str()));
+    }
+    let uid = nix::unistd::Uid::current();
+    nix::unistd::User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|u| ArcStr::from(u.name.as_str()))
+}
+
+#[cfg(not(unix))]
+fn resolve_workstation_owner(provided: Option<String>) -> Option<ArcStr> {
+    provided.map(|s| ArcStr::from(s.as_str()))
 }
 
 fn run_workstation(f: WorkstationFlags) -> Result<()> {
@@ -380,6 +427,11 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
             }
         }
     };
+    let owner = if f.no_perms {
+        None
+    } else {
+        resolve_workstation_owner(f.owner.clone())
+    };
     // Struct-literal construction so adding a field to
     // WorkstationParams forces a compile error here rather than
     // silently leaving the new field defaulted (14th commandment).
@@ -387,11 +439,15 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
         parent,
         tls_identities,
         default_auth: f.default_auth.map(|k| k.default_mech()),
-        base: ArcStr::from(f.base),
+        base: ArcStr::from(f.base.clone()),
         listen_port: f.listen_port,
         local_socket: f.local_socket,
         client_config_path: f.client_config_path,
         resolver_config_path: f.resolver_config_path,
+        owner,
+        perms_seed: None,
+        with_perms_file: !f.no_perms,
+        perms_path: f.perms_path,
         units_dir: resolve_units_dir(&f.common, f.units_dir.as_deref())?,
         netidx_binary: resolve_netidx_binary(f.netidx_binary)?,
         with_container: !f.no_container,
@@ -472,14 +528,40 @@ fn prompt_parent_referral() -> Result<Option<(ParentRef, Option<TlsIdentitySpec>
 /// does the install proceed, so by the time the activation server
 /// starts the cert files are guaranteed to be on disk.
 fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpec> {
-    let cert_choice = prompt::string_with_default(
-        "your TLS cert (path, or 'generate' to make a new key + CSR)",
-        None,
-        "generate",
-    )?;
-    let (our_name, certificate, private_key, trusted) = if cert_choice == "generate" {
-        generate_and_wait_for_parent_cert()?
+    // On unix the operator can choose 'generate' and we'll make a
+    // key + CSR for them via the openssl-backed `ca` module. On
+    // non-unix that module isn't available, so the prompt only
+    // accepts an explicit cert path.
+    #[cfg(unix)]
+    let cert_default = "generate";
+    #[cfg(not(unix))]
+    let cert_default = "";
+    #[cfg(unix)]
+    let cert_label = "your TLS cert (path, or 'generate' to make a new key + CSR)";
+    #[cfg(not(unix))]
+    let cert_label =
+        "your TLS cert path (CSR generation is unix-only; bring a pre-issued cert)";
+    let cert_choice = prompt::string_with_default(cert_label, None, cert_default)?;
+    #[cfg(unix)]
+    let is_generate = cert_choice == "generate";
+    #[cfg(not(unix))]
+    let is_generate = false;
+    let (our_name, certificate, private_key, trusted) = if is_generate {
+        #[cfg(unix)]
+        {
+            generate_and_wait_for_parent_cert()?
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("generate path is unix-only")
+        }
     } else {
+        if cert_choice.is_empty() {
+            bail!(
+                "TLS cert path required (CSR generation is unix-only — \
+                 provide a pre-issued cert on this platform)"
+            );
+        }
         let certificate = PathBuf::from(cert_choice);
         let private_key = prompt::required_path("your TLS private key path", None)?;
         let trusted = prompt::required_path(
@@ -534,6 +616,7 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
 /// readable certs. Non-TTY callers bail immediately if the files
 /// aren't already there — scripted installs should use `--tls-cert`
 /// directly.
+#[cfg(unix)]
 fn generate_and_wait_for_parent_cert(
 ) -> Result<(String, PathBuf, PathBuf, PathBuf)> {
     let our_name = prompt::required_string(
@@ -592,6 +675,7 @@ fn generate_and_wait_for_parent_cert(
 /// re-check; on each "not ready" verdict, print *why* and loop. On a
 /// non-TTY caller: check once and bail if anything is missing —
 /// scripted installs shouldn't hang waiting for human input.
+#[cfg(unix)]
 fn wait_for_cert_files(cert_path: &Path, trusted_path: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         return check_cert_files_present(cert_path, trusted_path).with_context(|| {
@@ -626,9 +710,15 @@ fn wait_for_cert_files(cert_path: &Path, trusted_path: &Path) -> Result<()> {
 /// that at save time and give a more precise error). The point is to
 /// catch the obvious "you forgot to drop the file" case before the
 /// engine's config-validation step.
+#[cfg(unix)]
 fn check_cert_files_present(cert: &Path, trusted: &Path) -> Result<()> {
-    netidx_conf::ca::validate_pem_cert_file(cert)?;
-    netidx_conf::ca::validate_pem_cert_file(trusted)?;
+    // Lives in `tls` (cross-platform, rustls-pemfile backed), not
+    // `ca` (unix-only, openssl) — even though this caller itself is
+    // currently cfg(unix). Splitting the validator out gives a
+    // Windows install path a way to validate operator-provided
+    // certs without us having to add an openssl Windows toolchain.
+    netidx_conf::tls::validate_pem_cert_file(cert)?;
+    netidx_conf::tls::validate_pem_cert_file(trusted)?;
     Ok(())
 }
 
@@ -911,13 +1001,23 @@ pub(crate) struct ResolverFlags {
     #[structopt(long = "base", default_value = "/")]
     base: String,
     /// Path to a seed perms.json. Its contents are written to
-    /// `--perms-path` (or `~/.config/netidx/perms.json`).
+    /// `--perms-path` (or `~/.config/netidx/perms.json`). When
+    /// omitted, the template auto-seeds a per-user-playground layout
+    /// (full rights for `$[user]` under `/users/$[user]`, read+write
+    /// for the `users` group under `/users`). Pass `--no-perms` to
+    /// skip emitting a perms file entirely.
     #[structopt(long = "perms-seed")]
     perms_seed: Option<PathBuf>,
     /// Where to write the perms file. Defaults to
     /// `~/.config/netidx/perms.json`.
     #[structopt(long = "perms-path")]
     perms_path: Option<PathBuf>,
+    /// Skip emitting a perms file (and the corresponding
+    /// `include_permissions` reference). Use when perms are managed
+    /// out-of-band by some other tool / process. Mutually exclusive
+    /// with `--perms-seed`.
+    #[structopt(long = "no-perms", conflicts_with = "perms_seed")]
+    no_perms: bool,
     #[structopt(flatten)]
     parent: ParentFlags,
     #[structopt(long = "resolver-config")]
@@ -1035,6 +1135,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         bind,
         parent: f.parent.to_parent_ref()?,
         perms_seed,
+        with_perms_file: !f.no_perms,
         perms_path: f.perms_path,
         resolver_config_path: f.resolver_config_path,
         units_dir: resolve_units_dir(&f.common, f.units_dir.as_deref())?,
@@ -1086,29 +1187,57 @@ fn resolver_self_auth(f: &ResolverFlags) -> Result<AuthChoice> {
 fn resolver_tls_auth(f: &ResolverFlags) -> Result<AuthChoice> {
     let name =
         prompt::required_string("resolver TLS name", f.tls_name.clone())?;
-    let cert_choice = prompt::string_with_default(
+    // 'generate' (issue from local CA) is unix-only — the CA module
+    // depends on openssl which we don't ship to Windows.
+    #[cfg(unix)]
+    let (label, default) = (
         "resolver certificate (a path, or 'generate' to issue one from a local CA)",
-        f.tls_cert.as_ref().map(|p| p.to_string_lossy().into_owned()),
         "generate",
+    );
+    #[cfg(not(unix))]
+    let (label, default) = (
+        "resolver certificate path (CA-issued; local issuance is unix-only)",
+        "",
+    );
+    let cert_choice = prompt::string_with_default(
+        label,
+        f.tls_cert.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        default,
     )?;
-    if cert_choice == "generate" {
-        resolver_tls_generate(f, &name)
-    } else {
-        // Explicit cert path — the operator is bringing their own
-        // identity, so the key and trusted-CA bundle are required too.
-        Ok(AuthChoice::Tls {
-            name: ArcStr::from(name.as_str()),
-            certificate: PathBuf::from(cert_choice),
-            private_key: prompt::required_path(
-                "path to the resolver private key",
-                f.tls_key.clone(),
-            )?,
-            trusted: prompt::required_path(
-                "path to the trusted CA bundle",
-                f.tls_trusted.clone(),
-            )?,
-        })
+    #[cfg(unix)]
+    let is_generate = cert_choice == "generate";
+    #[cfg(not(unix))]
+    let is_generate = false;
+    if is_generate {
+        #[cfg(unix)]
+        {
+            return resolver_tls_generate(f, &name);
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("generate path is unix-only")
+        }
     }
+    if cert_choice.is_empty() {
+        bail!(
+            "resolver certificate path required (local issuance is \
+             unix-only — provide a pre-issued cert on this platform)"
+        );
+    }
+    // Explicit cert path — the operator is bringing their own
+    // identity, so the key and trusted-CA bundle are required too.
+    Ok(AuthChoice::Tls {
+        name: ArcStr::from(name.as_str()),
+        certificate: PathBuf::from(cert_choice),
+        private_key: prompt::required_path(
+            "path to the resolver private key",
+            f.tls_key.clone(),
+        )?,
+        trusted: prompt::required_path(
+            "path to the trusted CA bundle",
+            f.tls_trusted.clone(),
+        )?,
+    })
 }
 
 /// Issue a resolver certificate from the local CA, creating the CA
@@ -1119,6 +1248,7 @@ fn resolver_tls_auth(f: &ResolverFlags) -> Result<AuthChoice> {
 /// do and returns the *intended* paths. `apply()` doesn't run in a
 /// dry run, so those paths are never read; they exist only so the
 /// template can render its plan.
+#[cfg(unix)]
 fn resolver_tls_generate(
     f: &ResolverFlags,
     name: &str,

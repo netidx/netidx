@@ -73,10 +73,16 @@ pub fn save_default(map: &IdMap) -> Result<()> {
     save(user_id_map_path()?, map)
 }
 
-/// An empty starter map. Useful for `netidx conf id-map init` (which
-/// writes this if the file doesn't exist yet).
+/// Starter map with a single `users` group at gid 100 — matches the
+/// conventional Linux `/etc/group` line for `users` and gives the
+/// `ca sign` flow a sensible default group to assign new identities
+/// to without forcing the operator to define one up front. The
+/// `$default_gid` for unknown queries stays 65534 (nobody) so an
+/// unrecognised principal doesn't accidentally land in `users`.
 pub fn empty() -> IdMap {
-    IdMap::default()
+    let mut m = IdMap::default();
+    m.groups.insert(ArcStr::from("users"), Group { gid: 100 });
+    m
 }
 
 // ---- editor helpers ----------------------------------------------------

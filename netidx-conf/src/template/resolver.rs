@@ -31,12 +31,29 @@ pub struct ResolverParams {
     pub listen: SocketAddr,
     pub bind: Option<std::net::IpAddr>,
     pub parent: Option<ParentRef>,
-    /// Optional initial perms map. When `perms_path` is `Some`, the
-    /// engine emits a separate perms file at that path and **leaves
-    /// the resolver config's inline `perms` empty** — that's the
-    /// Part-B-friendly layout. Default: emit at
-    /// `~/.config/netidx/perms.json` whenever `perms_seed` is `Some`.
+    /// Initial perms map. The engine emits this as a separate file
+    /// (referenced from the resolver config's `include_permissions`)
+    /// and **leaves the resolver config's inline `perms` empty** —
+    /// that's the layout the SIGHUP / file-watch reload path is built
+    /// around.
+    ///
+    /// `None` does **not** mean "no perms file". When the field is
+    /// `None` AND [`Self::with_perms_file`] is `true` (the default),
+    /// the template auto-seeds via
+    /// [`crate::perms::default_seed`] — full rights for the
+    /// authenticated user under `/users/$[user]`, read+write for the
+    /// `users` group under `/users`. That gives a fresh install a
+    /// working "per-user playground" without forcing the operator to
+    /// hand-author a perms map up front.
+    ///
+    /// To skip emitting a perms file entirely, set `with_perms_file`
+    /// to `false`.
     pub perms_seed: Option<PMap>,
+    /// Set to `false` to skip emitting a perms file entirely (and
+    /// drop the associated `include_permissions` reference from the
+    /// resolver config). Default `true`. Useful for advanced layouts
+    /// where perms come from somewhere else.
+    pub with_perms_file: bool,
     pub perms_path: Option<PathBuf>,
     /// Output paths. `None` ⇒ standard user-config locations.
     pub resolver_config_path: Option<PathBuf>,
@@ -143,19 +160,25 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     }
     let member = member_builder.build()?;
 
-    // -- Perms file (optional, separate from the main config) ---------------
+    // -- Perms file (separate from the main config) -------------------------
     // Resolve the perms path up front so we can wire it into the
     // resolver's `include_permissions` before building the config —
     // otherwise the seed file would sit on disk inert.
-    let perms_file = match &p.perms_seed {
-        Some(seed) => {
-            let path = match &p.perms_path {
-                Some(p) => p.clone(),
-                None => paths::user_perms_file()?,
-            };
-            Some((path, seed.clone()))
-        }
-        None => None,
+    //
+    // Default behaviour: emit a perms file unless `with_perms_file`
+    // is explicitly false. When no seed was supplied, auto-seed via
+    // `perms::default_seed` so a fresh install boots with a
+    // per-user-playground layout under `/users` rather than an empty
+    // perms map that denies everything.
+    let perms_file = if p.with_perms_file {
+        let path = match &p.perms_path {
+            Some(p) => p.clone(),
+            None => paths::user_perms_file()?,
+        };
+        let seed = p.perms_seed.clone().unwrap_or_else(crate::perms::default_seed);
+        Some((path, seed))
+    } else {
+        None
     };
 
     let mut rcfg_builder = rfile::ConfigBuilder::default();
@@ -333,6 +356,11 @@ mod tests {
             bind: None,
             parent: None,
             perms_seed: None,
+            // Most existing tests opt out of the perms file — the
+            // auto-seed behaviour is exercised by its own test
+            // (`auto_seeds_default_perms_when_enabled`). Tests that
+            // explicitly need a perms file flip this back on.
+            with_perms_file: false,
             perms_path: None,
             resolver_config_path: Some(out.path().join("resolver.json")),
             units_dir: Some(out.path().join("activation")),
@@ -406,6 +434,8 @@ mod tests {
     /// client. Verifies the client config points at the resolver's
     /// installed identity (same cert, key, and trust anchor).
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn local_client_tls_reuses_resolver_identity() {
         use crate::ca;
         let ca_dir = tempfile::tempdir().unwrap();
@@ -480,6 +510,45 @@ mod tests {
         assert!(rt.client_config.is_none());
     }
 
+    /// When `with_perms_file = true` and `perms_seed = None`, the
+    /// template must auto-seed `default_seed()` rather than emit an
+    /// empty perms map. A fresh install needs at least the
+    /// per-user-playground rule to be usable without manual edits.
+    #[test]
+    fn auto_seeds_default_perms_when_enabled() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.with_perms_file = true;
+        p.perms_path = Some(out.path().join("perms.json"));
+        let rt = resolver(&p).unwrap();
+        // The slot in RenderedTemplate carries the auto-seeded map.
+        let (path, seeded) = rt.perms_file.as_ref().expect("perms_file emitted");
+        assert_eq!(path, &out.path().join("perms.json"));
+        // PMap doesn't impl PartialEq, so compare flat (path, entity,
+        // perm) triples — same entries, ignoring iteration order.
+        let collect = |m: &netidx::resolver_server::config::PMap| {
+            let mut v: Vec<(String, String, String)> = crate::perms::iter(m)
+                .map(|(p, e, r)| (p.to_string(), e.to_string(), r.to_string()))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(collect(seeded), collect(&crate::perms::default_seed()));
+        // Validate the on-disk shape after apply — must parse back
+        // into the same map.
+        rt.apply().unwrap();
+        let loaded =
+            crate::perms::load_perms(out.path().join("perms.json")).unwrap();
+        assert_eq!(collect(&loaded), collect(&crate::perms::default_seed()));
+        // And the round-trip-through-resolver-validation step
+        // accepts it (the $[user] dynamic entry shape can trip up
+        // PMap::from_file if the seed is malformed).
+        netidx::resolver_server::config::Config::load(
+            out.path().join("resolver.json"),
+        )
+        .expect("resolver config including auto-seed perms must validate");
+    }
+
     #[test]
     fn perms_seed_emits_separate_file() {
         let out = tempfile::tempdir().unwrap();
@@ -487,6 +556,7 @@ mod tests {
         let mut seed = perms::empty();
         perms::add_entry(&mut seed, "/", "alice", "swlpd").unwrap();
         p.perms_seed = Some(seed);
+        p.with_perms_file = true;
         p.perms_path = Some(out.path().join("perms.json"));
 
         let rt = resolver(&p).unwrap();
@@ -527,6 +597,8 @@ mod tests {
     }
 
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn tls_resolver_emits_install_job() {
         // Stand up a real CA-issued identity so the round-trip
         // validate path through Config::from_file is meaningful.
@@ -574,6 +646,8 @@ mod tests {
     /// socket, (b) an `id-map.unit` is emitted, and (c) a starter
     /// `id-map.json` lands on disk after `apply()`.
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn tls_resolver_with_id_map_emits_unit_and_starter() {
         use crate::ca;
         let ca_dir = tempfile::tempdir().unwrap();
@@ -640,6 +714,8 @@ mod tests {
     /// Re-running `apply()` after the operator has populated the
     /// id-map JSON must not flatten their edits back to empty.
     #[test]
+    // `ca` module is unix-only (depends on openssl).
+    #[cfg(unix)]
     fn id_map_starter_does_not_clobber_existing_file() {
         use crate::ca;
         let ca_dir = tempfile::tempdir().unwrap();
