@@ -104,3 +104,4 @@ version.texi
 !src/vendor/**
 /src/target/
 no_llvm_build
+.claude/scheduled_tasks.lock

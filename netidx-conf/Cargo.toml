@@ -1,0 +1,31 @@
+[package]
+name = "netidx-conf"
+version = "0.32.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "netidx configuration tooling engine"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+documentation = "https://docs.rs/netidx-conf"
+keywords = ["networking", "distributed", "configuration"]
+categories = ["network-programming"]
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+compact_str = { workspace = true }
+dirs = { workspace = true }
+netidx = { path = "../netidx", version = "0.32.0", default-features = false }
+netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
+netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
+openssl = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["user"] }

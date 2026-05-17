@@ -858,7 +858,7 @@ async fn server_loop(
     cfg: Config,
     delay_reads: bool,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<SocketAddr>,
+    ready: oneshot::Sender<(SocketAddr, SecCtx)>,
     id: usize,
     listener: Option<TcpListener>,
 ) -> Result<()> {
@@ -898,7 +898,7 @@ async fn server_loop(
     debug!("signaling ready");
     let mut listen_addr = listener.local_addr()?;
     listen_addr.set_ip(id.ip());
-    let _ = ready.send(listen_addr);
+    let _ = ready.send((listen_addr, ctx.secctx.clone()));
     loop {
         select_biased! {
             _ = stop => {
@@ -938,10 +938,16 @@ async fn server_loop(
 }
 
 /// Run a resolver server
-#[derive(Debug)]
 pub struct Server {
     stop: Option<oneshot::Sender<()>>,
     local_addr: SocketAddr,
+    secctx: SecCtx,
+}
+
+impl std::fmt::Debug for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server").field("local_addr", &self.local_addr).finish()
+    }
 }
 
 impl Drop for Server {
@@ -976,11 +982,11 @@ impl Server {
             }
             res
         });
-        let local_addr = match recv_ready.await {
+        let (local_addr, secctx) = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
-            Ok(addr) => addr,
+            Ok(t) => t,
         };
-        Ok(Server { stop: Some(send_stop), local_addr })
+        Ok(Server { stop: Some(send_stop), local_addr, secctx })
     }
 
     /// Start a new local only resolver server
@@ -1014,15 +1020,40 @@ impl Server {
             }
             res
         });
-        let local_addr = match recv_ready.await {
+        let (local_addr, secctx) = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
-            Ok(addr) => addr,
+            Ok(t) => t,
         };
-        Ok(Server { stop: Some(send_stop), local_addr })
+        Ok(Server { stop: Some(send_stop), local_addr, secctx })
     }
 
     /// Get the local address this resolver server is bound to
     pub fn local_addr(&self) -> &SocketAddr {
         &self.local_addr
+    }
+
+    /// Replace the running PMap with one rebuilt from `new_perms`.
+    ///
+    /// This is the runtime hook the SIGHUP-handler in
+    /// `netidx-tools/src/resolver_server.rs` calls when the operator
+    /// sends `SIGHUP`. Callers pass the merged file-level perms map
+    /// (use `Config::merge_perms_only` to compute it from a
+    /// `file::Config`); the cluster root and children are reused
+    /// from the running server's startup state. On the `Anonymous`
+    /// auth variant the call is a no-op (no PMap to swap). On any
+    /// other variant it acquires the relevant write lock, rebuilds
+    /// the `PMap` using the existing `UserDb` (so previously-
+    /// resolved entity IDs stay valid for in-flight connections),
+    /// and swaps it in.
+    ///
+    /// On any error the running PMap is left intact and the error
+    /// is returned to the caller. Callers are expected to log it
+    /// at WARN level and continue — never crash the server because
+    /// a perms reload failed.
+    pub async fn reload_perms(
+        &self,
+        new_perms: &crate::resolver_server::config::PMap,
+    ) -> Result<()> {
+        self.secctx.reload_pmap(new_perms).await
     }
 }

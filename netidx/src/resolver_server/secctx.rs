@@ -1,7 +1,10 @@
 use super::{
     auth::{PMap, UserDb},
-    config::{Auth, Config, MemberServer},
+    config::{self, Auth, Config, MemberServer},
 };
+use crate::path::Path as NetidxPath;
+use crate::protocol::resolver::Referral;
+use std::collections::BTreeMap;
 use crate::{
     channel::K5CtxWrap,
     os::{
@@ -50,6 +53,15 @@ pub(super) trait SecDataCommon {
 pub(super) struct SecCtxData<S: 'static> {
     pub(super) users: UserDb,
     pub(super) pmap: PMap,
+    /// Cluster root path captured at construction. Used as the
+    /// `root` argument to `PMap::from_file` on perms reload so the
+    /// reload validates against the running structure rather than a
+    /// possibly-edited parent/children section the operator has
+    /// changed without restarting.
+    pub(super) root: arcstr::ArcStr,
+    /// Cluster children captured at construction; same rationale as
+    /// `root`.
+    pub(super) children: BTreeMap<NetidxPath, Referral>,
     data: IntMap<PublisherId, S>,
 }
 
@@ -58,7 +70,13 @@ impl<S: 'static + SecDataCommon> SecCtxData<S> {
         let mut users =
             UserDb::new(member.id_map_timeout, Mapper::new(cfg, member).await?);
         let pmap = PMap::from_file(&cfg.perms, &mut users, cfg.root(), &cfg.children)?;
-        Ok(Self { users, pmap, data: HashMap::default() })
+        Ok(Self {
+            users,
+            pmap,
+            root: arcstr::ArcStr::from(cfg.root()),
+            children: cfg.children.clone(),
+            data: HashMap::default(),
+        })
     }
 
     pub(super) fn remove(&mut self, id: &PublisherId) {
@@ -156,6 +174,51 @@ pub(super) enum SecCtx {
 }
 
 impl SecCtx {
+    /// Replace the in-memory `PMap` with one rebuilt from
+    /// `new_perms`. The existing `UserDb` is reused so previously-
+    /// resolved entity IDs remain valid for in-flight connections.
+    /// The cluster root and children captured at startup are also
+    /// reused — perms validation runs against the *running* tree
+    /// structure, not against whatever the operator's edited config
+    /// claims now (those edits aren't applied live and are warned
+    /// about separately).
+    ///
+    /// On the `Anonymous` variant this is a no-op (no `PMap` to
+    /// reload). For the other variants we acquire the write lock,
+    /// build the new `PMap` against the existing `UserDb`, then swap.
+    /// On any error the existing `PMap` is left intact.
+    ///
+    /// The write lock IS held across `PMap::from_file`. That builder
+    /// performs HashMap inserts into the existing `UserDb` and runs
+    /// netidx-path validation; both are pure CPU work, no I/O or
+    /// async waits. Hold time is microseconds for typical perms
+    /// files. `tokio::sync::RwLock` doesn't poison on panic, so a
+    /// crash inside the builder simply releases the guard.
+    pub(crate) async fn reload_pmap(
+        &self,
+        new_perms: &config::PMap,
+    ) -> Result<()> {
+        async fn swap_one<S: 'static>(
+            store: &RwLock<SecCtxData<S>>,
+            new_perms: &config::PMap,
+        ) -> Result<()> {
+            let mut w = store.write().await;
+            // Split-borrow: distinct fields of the guard, OK for the
+            // borrow checker.
+            let SecCtxData { users, root, children, .. } = &mut *w;
+            let rebuilt =
+                PMap::from_file(new_perms, users, root.as_str(), children)?;
+            w.pmap = rebuilt;
+            Ok(())
+        }
+        match self {
+            SecCtx::Anonymous => Ok(()),
+            SecCtx::Krb5(a) => swap_one(&a.1, new_perms).await,
+            SecCtx::Local(a) => swap_one(&a.1, new_perms).await,
+            SecCtx::Tls(a) => swap_one(&a.1, new_perms).await,
+        }
+    }
+
     pub(super) async fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
         let t = match &member.auth {
             Auth::Anonymous => SecCtx::Anonymous,

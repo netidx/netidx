@@ -25,6 +25,7 @@ crossbeam = "0.8"
 crossbeam-queue = "0.3"
 cross-krb5 = { version = "0.4", default-features = false }
 ctrlc = { version = "3", features = ["termination"] }
+daemonize = "0.5"
 derive_builder = "0.20"
 digest = "0.11"
 diligent-date-parser = "0.1.4"
@@ -50,8 +51,11 @@ indexmap = "2"
 keyring = "3"
 log = "0.4"
 memmap2 = "0.9"
+nix = { version = "0.31", features = ["process", "signal"] }
 num_cpus = "1"
 once_cell = "1.17.2"
+openssl = "0.10"
+rpassword = "7"
 packed_struct = "0.10"
 packed_struct_codegen = "0.10"
 parking_lot = "0.12.1"
@@ -78,6 +82,7 @@ sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
 structopt = "0.3"
 tempdir = "0.3.7"
+tempfile = "3"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -108,6 +113,9 @@ members = [
     "netidx-protocols",
     "netidx-tools",
     "netidx-tools-core",
+    "netidx-activation",
+    "netidx-id-map",
+    "netidx-conf",
     "netidx-container",
     "netidx-derive",
     "netidx-wsproxy",

@@ -317,6 +317,53 @@ impl<'a> IntoIterator for &'a ValArray {
 }
 
 impl ValArray {
+    /// Read element `i`'s payload as `T`, skipping the bounds check
+    /// and the per-element variant tag check that
+    /// `Value::get_as_unchecked` already skips.
+    ///
+    /// Intended for fused kernels: the typechecker has already proven
+    /// every element of `self` carries the matching primitive variant
+    /// (e.g. all `Value::F64(_)`), so the per-element work shrinks to
+    /// one indexed load at offset 8 inside the 16-byte slot. Lets a
+    /// hot loop iterate `&ValArray` without ever allocating an
+    /// unboxed `Vec<T>`.
+    ///
+    /// # Safety
+    ///
+    /// 1. `i < self.len()` — there is no bounds check.
+    /// 2. The element at index `i` must actually carry a `T` payload.
+    ///    `T` must be one of the `Copy` primitives that `Value`'s
+    ///    `#[repr(u64)]` layout stores inline at offset 8 (`i8` …
+    ///    `i64`, `u8` … `u64`, `f32`, `f64`, `bool`). Heap-backed
+    ///    payloads (`String`, `Bytes`, `Array`, …) are not safe to
+    ///    extract this way — read the slot via `&self[i]` and clone.
+    ///
+    /// Both invariants are statically guaranteed when this is called
+    /// from a kernel built by `graphix_compiler::fusion`.
+    #[inline]
+    pub unsafe fn get_unchecked<T: Copy>(&self, i: usize) -> T {
+        debug_assert!(i < self.len(), "ValArray::get_unchecked OOB");
+        let slice: &[Value] = self;
+        unsafe { *<[Value]>::get_unchecked(slice, i).get_as_unchecked::<T>() }
+    }
+
+    /// Borrow element `i`'s payload as `&T` without bounds-check or
+    /// variant-tag check. Companion to [`Self::get_unchecked`] for
+    /// non-`Copy` payloads like `ArcStr` (strings) where moving out
+    /// would invalidate the array's slot.
+    ///
+    /// # Safety
+    ///
+    /// Same invariants as `get_unchecked`: `i < self.len()` and the
+    /// slot must actually carry a `T` payload. The returned reference
+    /// borrows the `ValArray` for as long as needed.
+    #[inline]
+    pub unsafe fn get_ref_unchecked<T>(&self, i: usize) -> &T {
+        debug_assert!(i < self.len(), "ValArray::get_ref_unchecked OOB");
+        let slice: &[Value] = self;
+        unsafe { <[Value]>::get_unchecked(slice, i).get_as_unchecked::<T>() }
+    }
+
     pub fn from_iter_exact<I: Iterator<Item = Value> + ExactSizeIterator>(
         iter: I,
     ) -> Self {

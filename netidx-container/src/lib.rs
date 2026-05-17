@@ -86,6 +86,13 @@ pub struct Params {
     #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
     #[builder(default = "false")]
     pub sparse: bool,
+    /// Reserved for on-disk zstd compression. Currently a no-op
+    /// (sled 0.34's compression feature conflicts with the zstd version
+    /// netidx-archive uses); the flag is accepted so service templates
+    /// can plumb it through without breakage when sled is upgraded.
+    #[structopt(long = "compress", help = "(reserved) enable on-disk db compression")]
+    #[builder(default = "false")]
+    pub compress: bool,
 }
 
 impl Params {

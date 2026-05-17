@@ -1384,6 +1384,21 @@ impl Db {
             .ok_or_else(|| {
                 anyhow!("db dir not specified and no default could be determined")
             })?;
+        // sled's `use_compression` requires the `compression` cargo
+        // feature, which pulls in zstd 0.9 — incompatible with the
+        // zstd 0.13 used by netidx-archive (both link to libzstd).
+        // The `cfg.compress` field is accepted by the CLI so service
+        // templates can wire it through without breaking, but the
+        // actual on-disk compression is currently a no-op. Re-enable
+        // once sled is upgraded to a release that uses a newer zstd.
+        if cfg.compress {
+            log::warn!(
+                "--compress was passed but is currently a no-op: sled 0.34's \
+                 compression feature pulls zstd 0.9 which conflicts with \
+                 netidx-archive's zstd 0.13; flag will take effect once \
+                 sled is upgraded"
+            );
+        }
         let db = sled::Config::default()
             .cache_capacity(cfg.cache_size.unwrap_or(16 * 1024 * 1024))
             .path(&path)

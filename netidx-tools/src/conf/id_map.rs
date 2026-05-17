@@ -1,0 +1,392 @@
+//! `netidx conf id-map …` — edit the id-map JSON file used by the
+//! id-mapper daemon. Mirrors the perms CLI in shape: each subcommand
+//! loads, mutates, and atomically saves the JSON file.
+//!
+//! A separate `init` subcommand creates an empty starter file (useful
+//! for `netidx conf install resolver --auth tls`, which wires
+//! up the daemon's activation unit but leaves the actual map empty
+//! for the operator to fill in).
+//!
+//! `show` prints the loaded map for inspection; the editor flow for
+//! free-form JSON edits goes through `netidx conf` directly via your
+//! editor of choice.
+
+use anyhow::{Context, Result};
+use netidx_conf::id_map;
+use std::path::PathBuf;
+use structopt::StructOpt;
+
+use super::prompt;
+
+#[derive(StructOpt, Debug)]
+pub(crate) enum Cmd {
+    #[structopt(name = "init", about = "create an empty id-map file if one doesn't exist")]
+    Init {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Default uid returned for unknown queries.
+        #[structopt(long = "default-uid", default_value = "65534")]
+        default_uid: u32,
+        /// Default gid returned for unknown queries.
+        #[structopt(long = "default-gid", default_value = "65534")]
+        default_gid: u32,
+    },
+    #[structopt(name = "show", about = "pretty-print the id-map JSON")]
+    Show {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+    },
+    #[structopt(name = "list", about = "list identities and groups in a table")]
+    List {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+    },
+    #[structopt(name = "set-group", about = "set or update a group's gid")]
+    SetGroup {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Group name. Prompted when omitted.
+        name: Option<String>,
+        /// Numeric gid. Prompted when omitted.
+        gid: Option<u32>,
+    },
+    #[structopt(name = "remove-group", about = "remove a group (fails if in use)")]
+    RemoveGroup {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Group name. Prompted when omitted.
+        name: Option<String>,
+    },
+    #[structopt(name = "set-user", about = "set or update an identity")]
+    SetUser {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Netidx name (typically the TLS SubjectAltName DNS entry).
+        /// Prompted when omitted.
+        name: Option<String>,
+        /// Numeric uid. Prompted when omitted.
+        uid: Option<u32>,
+        /// Primary group name (must already exist). Prompted when
+        /// omitted.
+        primary_group: Option<String>,
+        /// Secondary group memberships. Repeatable.
+        #[structopt(long = "group", short = "g", number_of_values = 1)]
+        groups: Vec<String>,
+    },
+    #[structopt(name = "remove-user", about = "remove an identity")]
+    RemoveUser {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Netidx name. Prompted when omitted.
+        name: Option<String>,
+    },
+    #[structopt(name = "add-member", about = "add an identity to a secondary group")]
+    AddMember {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Netidx name. Prompted when omitted.
+        name: Option<String>,
+        /// Group name. Prompted when omitted.
+        group: Option<String>,
+    },
+    #[structopt(name = "remove-member", about = "remove an identity from a secondary group")]
+    RemoveMember {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Netidx name. Prompted when omitted.
+        name: Option<String>,
+        /// Group name. Prompted when omitted.
+        group: Option<String>,
+    },
+    #[structopt(name = "set-defaults", about = "update the default uid/gid")]
+    SetDefaults {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+        /// Default uid for unknown queries. Prompted when omitted.
+        default_uid: Option<u32>,
+        /// Default gid for unknown queries. Prompted when omitted.
+        default_gid: Option<u32>,
+    },
+}
+
+pub(crate) fn run(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Init { file, default_uid, default_gid } => {
+            init(resolve(file)?, default_uid, default_gid)
+        }
+        Cmd::Show { file } => show(resolve(file)?),
+        Cmd::List { file } => list(resolve(file)?),
+        Cmd::SetGroup { file, name, gid } => {
+            let name = prompt::required_string("group name", name)?;
+            let gid = prompt::required_parsed("gid", gid)?;
+            set_group(resolve(file)?, name, gid)
+        }
+        Cmd::RemoveGroup { file, name } => {
+            let name = prompt::required_string("group name", name)?;
+            remove_group(resolve(file)?, name)
+        }
+        Cmd::SetUser { file, name, uid, primary_group, groups } => {
+            let name = prompt::required_string("identity name", name)?;
+            let uid = prompt::required_parsed("uid", uid)?;
+            let primary_group =
+                prompt::required_string("primary group", primary_group)?;
+            set_user(resolve(file)?, name, uid, primary_group, groups)
+        }
+        Cmd::RemoveUser { file, name } => {
+            let name = prompt::required_string("identity name", name)?;
+            remove_user(resolve(file)?, name)
+        }
+        Cmd::AddMember { file, name, group } => {
+            let name = prompt::required_string("identity name", name)?;
+            let group = prompt::required_string("group name", group)?;
+            add_member(resolve(file)?, name, group)
+        }
+        Cmd::RemoveMember { file, name, group } => {
+            let name = prompt::required_string("identity name", name)?;
+            let group = prompt::required_string("group name", group)?;
+            remove_member(resolve(file)?, name, group)
+        }
+        Cmd::SetDefaults { file, default_uid, default_gid } => {
+            // Level-1: 65534 is the conventional nobody uid/gid, a
+            // safe fallback for unmatched queries.
+            let default_uid =
+                prompt::parsed_with_default("default uid", default_uid, "65534")?;
+            let default_gid =
+                prompt::parsed_with_default("default gid", default_gid, "65534")?;
+            set_defaults(resolve(file)?, default_uid, default_gid)
+        }
+    }
+}
+
+fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
+    match file {
+        Some(p) => Ok(p),
+        None => id_map::user_id_map_path().context("resolving default id-map path"),
+    }
+}
+
+fn init(file: PathBuf, default_uid: u32, default_gid: u32) -> Result<()> {
+    if file.exists() {
+        bail!(
+            "{} already exists; refusing to overwrite",
+            file.display()
+        );
+    }
+    let mut m = id_map::empty();
+    id_map::set_defaults(&mut m, default_uid, default_gid);
+    id_map::save(&file, &m)?;
+    println!("initialized id-map at {}", file.display());
+    Ok(())
+}
+
+fn show(file: PathBuf) -> Result<()> {
+    let m = id_map::load(&file)?;
+    let s = serde_json::to_string_pretty(&m)?;
+    println!("{s}");
+    Ok(())
+}
+
+fn list(file: PathBuf) -> Result<()> {
+    let m = id_map::load(&file)?;
+    println!("# defaults: uid={} gid={}", m.default_uid, m.default_gid);
+    if m.groups.is_empty() {
+        println!("# (no groups)");
+    } else {
+        println!("# groups:");
+        let w = m.groups.keys().map(|k| k.len()).max().unwrap_or(0);
+        for (name, g) in &m.groups {
+            println!("  {:<w$}  gid={}", name.as_str(), g.gid, w = w);
+        }
+    }
+    if m.identities.is_empty() {
+        println!("# (no identities)");
+    } else {
+        println!("# identities:");
+        let w = m.identities.keys().map(|k| k.len()).max().unwrap_or(0);
+        for (name, ident) in &m.identities {
+            let extra: Vec<&str> =
+                ident.groups.iter().map(|g| g.as_str()).collect();
+            println!(
+                "  {:<w$}  uid={}  primary={}  groups=[{}]",
+                name.as_str(),
+                ident.uid,
+                ident.primary_group.as_str(),
+                extra.join(","),
+                w = w,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn load_or_empty(file: &std::path::Path) -> Result<id_map::IdMap> {
+    if file.exists() {
+        id_map::load(file)
+    } else {
+        Ok(id_map::empty())
+    }
+}
+
+fn set_group(file: PathBuf, name: String, gid: u32) -> Result<()> {
+    let mut m = load_or_empty(&file)?;
+    let prev = id_map::upsert_group(&mut m, &name, gid);
+    id_map::save(&file, &m)?;
+    match prev {
+        Some(old) => println!("group {name}: gid {old} → {gid}"),
+        None => println!("added group {name} (gid={gid})"),
+    }
+    Ok(())
+}
+
+fn remove_group(file: PathBuf, name: String) -> Result<()> {
+    let mut m = id_map::load(&file)?;
+    id_map::remove_group(&mut m, &name)?;
+    id_map::save(&file, &m)?;
+    println!("removed group {name}");
+    Ok(())
+}
+
+fn set_user(
+    file: PathBuf,
+    name: String,
+    uid: u32,
+    primary_group: String,
+    groups: Vec<String>,
+) -> Result<()> {
+    let mut m = load_or_empty(&file)?;
+    let group_refs: Vec<&str> = groups.iter().map(|s| s.as_str()).collect();
+    let prev = id_map::upsert_identity(
+        &mut m,
+        &name,
+        uid,
+        &primary_group,
+        &group_refs,
+    )?;
+    id_map::save(&file, &m)?;
+    match prev {
+        Some(old) => println!(
+            "updated {name} (was uid={} primary={} groups={:?})",
+            old.uid,
+            old.primary_group.as_str(),
+            old.groups
+                .iter()
+                .map(|g| g.as_str())
+                .collect::<Vec<_>>(),
+        ),
+        None => println!("added identity {name} (uid={uid})"),
+    }
+    Ok(())
+}
+
+fn remove_user(file: PathBuf, name: String) -> Result<()> {
+    let mut m = id_map::load(&file)?;
+    match id_map::remove_identity(&mut m, &name) {
+        Some(_) => {
+            id_map::save(&file, &m)?;
+            println!("removed identity {name}");
+        }
+        None => println!("no such identity {name}"),
+    }
+    Ok(())
+}
+
+fn add_member(file: PathBuf, name: String, group: String) -> Result<()> {
+    let mut m = id_map::load(&file)?;
+    id_map::add_group_member(&mut m, &name, &group)?;
+    id_map::save(&file, &m)?;
+    println!("{name} ∈ {group}");
+    Ok(())
+}
+
+fn remove_member(file: PathBuf, name: String, group: String) -> Result<()> {
+    let mut m = id_map::load(&file)?;
+    id_map::remove_group_member(&mut m, &name, &group)?;
+    id_map::save(&file, &m)?;
+    println!("{name} ∉ {group}");
+    Ok(())
+}
+
+fn set_defaults(file: PathBuf, default_uid: u32, default_gid: u32) -> Result<()> {
+    let mut m = load_or_empty(&file)?;
+    id_map::set_defaults(&mut m, default_uid, default_gid);
+    id_map::save(&file, &m)?;
+    println!("defaults: uid={default_uid} gid={default_gid}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_to_end_editing_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("id-map.json");
+        init(f.clone(), 65534, 65534).unwrap();
+        // Groups first, then identities — the validate step enforces
+        // referential integrity on every save.
+        set_group(f.clone(), "users".into(), 100).unwrap();
+        set_group(f.clone(), "wheel".into(), 10).unwrap();
+        set_user(
+            f.clone(),
+            "alice.example.com".into(),
+            1000,
+            "users".into(),
+            vec!["wheel".into()],
+        )
+        .unwrap();
+        // Reload via the engine to confirm what we wrote.
+        let m = id_map::load(&f).unwrap();
+        assert_eq!(m.lookup_by_name("alice.example.com").unwrap().uid, 1000);
+        assert_eq!(m.groups.len(), 2);
+
+        // Add-member is idempotent; remove-member won't drop the primary.
+        add_member(f.clone(), "alice.example.com".into(), "wheel".into()).unwrap();
+        assert!(
+            remove_member(
+                f.clone(),
+                "alice.example.com".into(),
+                "users".into()
+            )
+            .is_err(),
+            "removing primary via remove-member must error",
+        );
+
+        remove_user(f.clone(), "alice.example.com".into()).unwrap();
+        let m = id_map::load(&f).unwrap();
+        assert!(m.identities.is_empty());
+
+        // remove-group succeeds now that nothing references them.
+        remove_group(f.clone(), "wheel".into()).unwrap();
+        let m = id_map::load(&f).unwrap();
+        assert_eq!(m.groups.len(), 1);
+    }
+
+    #[test]
+    fn init_refuses_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("id-map.json");
+        init(f.clone(), 65534, 65534).unwrap();
+        let err = init(f, 65534, 65534).unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"));
+    }
+
+    #[test]
+    fn set_user_rejects_unknown_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("id-map.json");
+        init(f.clone(), 65534, 65534).unwrap();
+        let err = set_user(
+            f,
+            "alice".into(),
+            1000,
+            "ghost".into(),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("primary_group"),
+            "got {err:#}",
+        );
+    }
+}

@@ -8,7 +8,7 @@ use crate::{
     protocol::resolver::{self, Referral},
     tls, utils,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use serde_json::from_str;
 use std::{
@@ -81,8 +81,18 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
                     bail!("spn is required in krb5 mode")
                 }
             }
-            // CR estokes: verify the certificates
-            resolver::Auth::Tls { .. } => (),
+            // Only the TLS subject name is reachable at this layer —
+            // the generic `T: Into<resolver::Auth>` strips cert paths
+            // before they get here. Per-member-server cert/key/trusted
+            // files are loaded and verified separately in
+            // `Config::from_file`; referral entries (`file::RefAuth::Tls`)
+            // carry no cert paths because the certs live at the
+            // referred-to server.
+            resolver::Auth::Tls { name } => {
+                if name.is_empty() {
+                    bail!("name is required in tls mode")
+                }
+            }
         }
     }
     if !a.iter().all(|(a, _)| a.ip().is_loopback())
@@ -101,6 +111,51 @@ impl Default for PMap {
     fn default() -> Self {
         PMap(HashMap::new())
     }
+}
+
+/// Merge `from` into `into` with entity-level "later wins" semantics:
+/// for each `(path, entity)` pair in `from`, replace the value in
+/// `into`. Paths only present in `from` are added; paths only in
+/// `into` are untouched.
+pub fn merge_pmap(into: &mut PMap, from: PMap) {
+    for (path, table) in from.0 {
+        let entry = into.0.entry(path).or_insert_with(HashMap::new);
+        for (entity, perms) in table {
+            entry.insert(entity, perms);
+        }
+    }
+}
+
+/// Apply the merge contract: walk `cfg.include_permissions` in order
+/// (later wins), then merge the inline `cfg.perms` last so it
+/// overrides anything from included files. Returns the merged file-
+/// level `PMap`.
+///
+/// This is the perms-only slice of `Config::from_file`, exposed for
+/// the SIGHUP reload path: that path needs the merged perms but
+/// **not** the rest of `from_file`'s validation (which opens TLS
+/// cert files from disk and re-validates structural fields the
+/// running server won't apply live anyway). Splitting the merge
+/// out keeps the reload's I/O footprint small and prevents spurious
+/// failures from e.g. mid-rotation cert files.
+pub fn merge_perms_only(cfg: &file::Config) -> Result<PMap> {
+    let mut merged = load_included_pmap(&cfg.include_permissions)?;
+    merge_pmap(&mut merged, cfg.perms.clone());
+    Ok(merged)
+}
+
+/// Load each path in `paths` as a `PMap` and merge them in list order
+/// (later wins). Returns the accumulator. Empty list ⇒ empty PMap.
+pub(crate) fn load_included_pmap(paths: &[ArcStr]) -> Result<PMap> {
+    let mut merged = PMap::default();
+    for p in paths {
+        let bytes = std::fs::read(p.as_str())
+            .with_context(|| format!("reading include_permissions {p:?}"))?;
+        let pm: PMap = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing include_permissions {p:?}"))?;
+        merge_pmap(&mut merged, pm);
+    }
+    Ok(merged)
 }
 
 /// The on disk format, encoded as JSON
@@ -341,6 +396,19 @@ pub mod file {
         #[serde(default)]
         #[builder(default)]
         pub perms: PMap,
+        /// Optional list of additional perms files to merge into
+        /// `perms`. Each entry is a filesystem path pointing at a
+        /// JSON `PMap`. The resolver loads them in order, merging
+        /// later files over earlier ones (entity-level "later wins"
+        /// semantics). The inline `perms` field is treated as the
+        /// final file in the merge chain, so anything specified
+        /// inline always overrides values from included files.
+        ///
+        /// Empty by default — old configs that only set inline `perms`
+        /// are unaffected.
+        #[serde(default)]
+        #[builder(default)]
+        pub include_permissions: Vec<ArcStr>,
     }
 }
 
@@ -508,7 +576,16 @@ impl Config {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Config { parent, children, perms: cfg.perms, member_servers })
+        // Walk include_permissions in order, merging each file's PMap
+        // (later wins), then merge the inline `perms` last so it
+        // overrides anything from included files. Backwards-compatible:
+        // empty `include_permissions` reduces to just `cfg.perms`.
+        let perms = {
+            let mut merged = load_included_pmap(&cfg.include_permissions)?;
+            merge_pmap(&mut merged, cfg.perms);
+            merged
+        };
+        Ok(Config { parent, children, perms, member_servers })
     }
 
     /// Parse a file::Config and translate it into a validated netidx cluster Config
@@ -516,12 +593,242 @@ impl Config {
         Self::from_file(from_str(s)?)
     }
 
+    /// Read and parse a resolver config file, resolving relative
+    /// `include_permissions` entries against the config file's parent
+    /// directory. Semantic validation (TLS cert loading, addr checks,
+    /// referral coherence) is **not** run — the caller can either
+    /// feed the result to [`Config::from_file`] for that, or use it
+    /// for diffing / SIGHUP-style comparisons.
+    ///
+    /// **Path-traversal posture.** Relative include entries are
+    /// joined with the canonicalized parent directory, then the
+    /// result is canonicalized too — so `"../foo.json"` resolves to
+    /// the literal `../foo.json` from the operator's perspective.
+    /// The engine does **not** sandbox include paths to remain under
+    /// the config dir: the config file is operator-trusted, and
+    /// preventing traversal would break legitimate layouts (e.g. a
+    /// `/etc/netidx/resolver.json` pointing at `/var/lib/netidx/perms/foo.json`).
+    pub fn load_file<P: AsRef<FsPath>>(file: P) -> Result<file::Config> {
+        let file_path = file.as_ref();
+        let contents = read_to_string(file_path)?;
+        let mut parsed: file::Config = from_str(&contents)?;
+        // Canonicalize the parent so a config given with a relative
+        // path like `./resolver.json` still produces absolute include
+        // paths (otherwise the joined `./perms.d/main.json` would
+        // break after daemonize chdir's the process to `/`).
+        let parent = match file_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+            _ => None,
+        };
+        let parent_canon = match parent {
+            Some(p) => Some(
+                p.canonicalize()
+                    .with_context(|| format!("canonicalizing parent dir {:?}", p))?,
+            ),
+            None => None,
+        };
+        if let Some(parent) = parent_canon.as_deref() {
+            for entry in parsed.include_permissions.iter_mut() {
+                let p = FsPath::new(entry.as_str());
+                if p.is_relative() {
+                    let abs = parent.join(p);
+                    *entry = ArcStr::from(abs.to_string_lossy().as_ref());
+                }
+            }
+        }
+        Ok(parsed)
+    }
+
     /// Load the cluster config from the specified file.
+    ///
+    /// Relative paths in `include_permissions` are resolved against
+    /// the config file's parent directory (via [`Config::load_file`]),
+    /// so an operator can write
+    /// `"include_permissions": ["perms.d/main.json"]` and have it
+    /// keep working after `daemonize` chdirs the process to `/`.
+    /// Absolute include paths pass through unchanged.
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
-        Config::parse(&read_to_string(file)?)
+        Self::from_file(Self::load_file(file)?)
     }
 
     pub(super) fn root(&self) -> &str {
         self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
+    }
+
+    /// Borrow the merged file-level permission map (after
+    /// `include_permissions` + inline `perms` have been folded
+    /// together by `from_file`). Exposed primarily for testing the
+    /// merge semantics.
+    pub fn perms(&self) -> &PMap {
+        &self.perms
+    }
+}
+
+#[cfg(test)]
+mod perms_merge_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::NamedTempFile;
+
+    fn pmap(pairs: &[(&str, &[(&str, &str)])]) -> PMap {
+        let mut top: HashMap<ArcStr, HashMap<ArcStr, ArcStr>> = HashMap::new();
+        for (path, entries) in pairs {
+            let mut tbl: HashMap<ArcStr, ArcStr> = HashMap::new();
+            for (ent, bits) in *entries {
+                tbl.insert(ArcStr::from(*ent), ArcStr::from(*bits));
+            }
+            top.insert(ArcStr::from(*path), tbl);
+        }
+        PMap(top)
+    }
+
+    #[test]
+    fn merge_pmap_later_wins() {
+        let mut a = pmap(&[("/foo", &[("alice", "swlpd"), ("bob", "sl")])]);
+        let b = pmap(&[
+            ("/foo", &[("alice", "sl")]),     // override alice
+            ("/bar", &[("alice", "p")]),      // new path
+        ]);
+        merge_pmap(&mut a, b);
+        assert_eq!(a.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl");
+        assert_eq!(a.0.get("/foo").unwrap().get("bob").unwrap().as_str(), "sl");
+        assert_eq!(a.0.get("/bar").unwrap().get("alice").unwrap().as_str(), "p");
+    }
+
+    #[test]
+    fn load_included_pmap_in_order() {
+        use std::io::Write;
+        let a = NamedTempFile::new().unwrap();
+        let b = NamedTempFile::new().unwrap();
+        writeln!(
+            &mut a.as_file(),
+            "{}",
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])])).unwrap()
+        )
+        .unwrap();
+        writeln!(
+            &mut b.as_file(),
+            "{}",
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "sl")])])).unwrap()
+        )
+        .unwrap();
+        let merged = load_included_pmap(&[
+            ArcStr::from(a.path().to_string_lossy().as_ref()),
+            ArcStr::from(b.path().to_string_lossy().as_ref()),
+        ])
+        .unwrap();
+        // b is later → wins.
+        assert_eq!(merged.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl");
+    }
+
+    #[test]
+    fn inline_perms_override_includes_in_from_file() {
+        use std::io::Write;
+        let included = NamedTempFile::new().unwrap();
+        writeln!(
+            &mut included.as_file(),
+            "{}",
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])])).unwrap()
+        )
+        .unwrap();
+        let raw_cfg = format!(
+            r#"{{
+              "member_servers": [
+                {{
+                  "addr": "127.0.0.1:5001",
+                  "bind_addr": "127.0.0.1",
+                  "auth": "Anonymous"
+                }}
+              ],
+              "perms": {{ "/foo": {{ "alice": "sl" }} }},
+              "include_permissions": [{:?}]
+            }}"#,
+            included.path().to_string_lossy()
+        );
+        let cfg = Config::parse(&raw_cfg).unwrap();
+        // Inline `perms` is merged last → alice = "sl" wins over the
+        // included file's "swlpd".
+        assert_eq!(
+            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            "sl",
+        );
+    }
+
+    #[test]
+    fn missing_include_file_errors_clearly() {
+        let raw_cfg = r#"{
+          "member_servers": [
+            {
+              "addr": "127.0.0.1:5001",
+              "bind_addr": "127.0.0.1",
+              "auth": "Anonymous"
+            }
+          ],
+          "include_permissions": ["/does/not/exist/perms.json"]
+        }"#;
+        let err = Config::parse(raw_cfg).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("include_permissions"));
+    }
+
+    #[test]
+    fn relative_include_paths_resolve_against_config_dir() {
+        use std::io::Write;
+        // A perms file in a subdirectory of the config dir, referenced
+        // by a relative path in the main config — like a typical
+        // `/etc/netidx/perms.d/main.json` layout.
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let perms_dir = cfg_dir.path().join("perms.d");
+        std::fs::create_dir(&perms_dir).unwrap();
+        let perms_file = perms_dir.join("main.json");
+        std::fs::write(
+            &perms_file,
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])]))
+                .unwrap(),
+        )
+        .unwrap();
+
+        let cfg_file = cfg_dir.path().join("resolver.json");
+        let mut f = std::fs::File::create(&cfg_file).unwrap();
+        writeln!(
+            f,
+            r#"{{
+              "member_servers": [
+                {{
+                  "addr": "127.0.0.1:5001",
+                  "bind_addr": "127.0.0.1",
+                  "auth": "Anonymous"
+                }}
+              ],
+              "include_permissions": ["perms.d/main.json"]
+            }}"#,
+        )
+        .unwrap();
+        drop(f);
+
+        let cfg = Config::load(&cfg_file).unwrap();
+        assert_eq!(
+            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            "swlpd",
+        );
+    }
+
+    #[test]
+    fn backwards_compat_no_include_field() {
+        let raw_cfg = r#"{
+          "member_servers": [
+            {
+              "addr": "127.0.0.1:5001",
+              "bind_addr": "127.0.0.1",
+              "auth": "Anonymous"
+            }
+          ],
+          "perms": { "/foo": { "alice": "swlpd" } }
+        }"#;
+        let cfg = Config::parse(raw_cfg).unwrap();
+        assert_eq!(
+            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            "swlpd",
+        );
     }
 }

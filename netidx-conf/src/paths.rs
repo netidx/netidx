@@ -1,0 +1,180 @@
+//! Canonical config-path discovery.
+//!
+//! For client and resolver configs, mirrors the historical search order
+//! from `netidx::config::Config::default_path` and
+//! `netidx::config::Config::user_platform_default_path`. The
+//! `system_*` helpers do not check existence; the `user_*` helpers
+//! return the platform user-config directory location (also without
+//! existence checks — callers are responsible).
+
+use anyhow::Result;
+use std::path::PathBuf;
+
+/// `${dirs::config_dir}/netidx/client.json`. No existence check.
+pub fn user_client_config() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("client.json");
+    Ok(p)
+}
+
+/// `/etc/netidx/client.json` on unix, `C:\netidx\client.json` on windows.
+pub fn system_client_config() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("C:\\netidx\\client.json")
+    } else {
+        PathBuf::from("/etc/netidx/client.json")
+    }
+}
+
+/// `${dirs::config_dir}/netidx/resolver.json`. No existence check.
+pub fn user_resolver_config() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("resolver.json");
+    Ok(p)
+}
+
+/// `/etc/netidx/resolver.json` on unix, `C:\netidx\resolver.json` on windows.
+pub fn system_resolver_config() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("C:\\netidx\\resolver.json")
+    } else {
+        PathBuf::from("/etc/netidx/resolver.json")
+    }
+}
+
+/// `${dirs::config_dir}/netidx/perms.json`. No existence check.
+pub fn user_perms_file() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("perms.json");
+    Ok(p)
+}
+
+/// `${dirs::config_dir}/netidx/activation/`. No existence check.
+pub fn user_activation_dir() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("activation");
+    Ok(p)
+}
+
+/// `${dirs::config_dir}/netidx/tls/`. No existence check.
+pub fn user_tls_dir() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("tls");
+    Ok(p)
+}
+
+/// `${dirs::config_dir}/netidx/ca/`. No existence check.
+///
+/// There is one CA per netidx install. Operators who genuinely want
+/// multiple CAs on the same machine (rare — most users want a single
+/// local CA per workstation/server) can pass `--dir` to point at a
+/// non-default location.
+pub fn user_ca_dir() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    p.push("ca");
+    Ok(p)
+}
+
+/// Find the first existing client config in the standard search order:
+/// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
+/// `${HOME}/.config/netidx/client.json`, then the system path. Errors
+/// if none exists.
+pub fn discover_client_config() -> Result<PathBuf> {
+    if let Some(cfg) = std::env::var_os("NETIDX_CFG") {
+        let p = PathBuf::from(cfg);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Ok(p) = user_client_config() {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Some(mut home) = dirs::home_dir() {
+        home.push(".config");
+        home.push("netidx");
+        home.push("client.json");
+        if home.is_file() {
+            return Ok(home);
+        }
+    }
+    let sys = system_client_config();
+    if sys.is_file() {
+        return Ok(sys);
+    }
+    bail!("no client config found in any standard location")
+}
+
+/// Find the first existing resolver-server config in standard order:
+/// `${dirs::config_dir}/netidx/resolver.json` then the system path.
+/// Errors if none exists.
+pub fn discover_resolver_config() -> Result<PathBuf> {
+    if let Ok(p) = user_resolver_config() {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    let sys = system_resolver_config();
+    if sys.is_file() {
+        return Ok(sys);
+    }
+    bail!("no resolver config found in any standard location")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_paths_are_under_netidx() {
+        let p = user_client_config().unwrap();
+        assert!(p.ends_with("netidx/client.json"));
+
+        let p = user_resolver_config().unwrap();
+        assert!(p.ends_with("netidx/resolver.json"));
+
+        let p = user_perms_file().unwrap();
+        assert!(p.ends_with("netidx/perms.json"));
+
+        let p = user_activation_dir().unwrap();
+        assert!(p.ends_with("netidx/activation"));
+
+        let p = user_tls_dir().unwrap();
+        assert!(p.ends_with("netidx/tls"));
+    }
+
+    #[test]
+    fn system_paths_are_well_known() {
+        let p = system_client_config();
+        if cfg!(windows) {
+            assert_eq!(p.to_str().unwrap(), "C:\\netidx\\client.json");
+        } else {
+            assert_eq!(p.to_str().unwrap(), "/etc/netidx/client.json");
+        }
+        let p = system_resolver_config();
+        if cfg!(windows) {
+            assert_eq!(p.to_str().unwrap(), "C:\\netidx\\resolver.json");
+        } else {
+            assert_eq!(p.to_str().unwrap(), "/etc/netidx/resolver.json");
+        }
+    }
+}

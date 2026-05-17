@@ -12,6 +12,9 @@ mod wsproxy;
 
 #[cfg(unix)]
 mod activation;
+mod conf;
+#[cfg(unix)]
+mod id_map;
 mod container;
 #[cfg(unix)]
 mod recorder;
@@ -56,6 +59,13 @@ enum Stress {
         #[structopt(flatten)]
         params: stress_channel_subscriber::Params,
     },
+}
+
+#[cfg(unix)]
+#[derive(StructOpt, Debug)]
+enum IdMapCmd {
+    #[structopt(name = "serve", about = "run the id-mapper daemon")]
+    Serve(id_map::Params),
 }
 
 #[derive(StructOpt, Debug)]
@@ -116,6 +126,17 @@ enum Opt {
         #[structopt(flatten)]
         params: activation::Params,
     },
+    #[cfg(unix)]
+    #[structopt(name = "id-map", about = "id-mapper daemon (TLS-friendly group lookups)")]
+    IdMap {
+        #[structopt(subcommand)]
+        cmd: IdMapCmd,
+    },
+    #[structopt(name = "conf", about = "configuration management")]
+    Conf {
+        #[structopt(subcommand)]
+        params: conf::Params,
+    },
     #[structopt(name = "stress", about = "stress test")]
     Stress {
         #[structopt(subcommand)]
@@ -148,6 +169,10 @@ fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)
         }
+        #[cfg(unix)]
+        Opt::IdMap { cmd } => match cmd {
+            IdMapCmd::Serve(p) => id_map::run(p),
+        },
         Opt::Resolver { common, cmd } => {
             let (cfg, auth) = common.load();
             resolver::run(cfg, auth, cmd)
@@ -164,6 +189,7 @@ fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params)
         }
+        Opt::Conf { params } => conf::run(params),
         Opt::RecordClient { cmd } => record_client::run(cmd),
         #[cfg(unix)]
         Opt::Record { config, example } => recorder::run(config, example),

@@ -218,6 +218,32 @@ fn get_unchecked() {
 }
 
 #[test]
+fn valarray_get_unchecked() {
+    // f64s
+    let a = ValArray::from_iter_exact(
+        [Value::F64(1.0), Value::F64(2.5), Value::F64(-3.25)].into_iter(),
+    );
+    assert_eq!(unsafe { a.get_unchecked::<f64>(0) }, 1.0);
+    assert_eq!(unsafe { a.get_unchecked::<f64>(1) }, 2.5);
+    assert_eq!(unsafe { a.get_unchecked::<f64>(2) }, -3.25);
+    // i64s — same offset, different reinterpret
+    let a = ValArray::from_iter_exact(
+        [Value::I64(7), Value::I64(-9), Value::I64(i64::MAX)].into_iter(),
+    );
+    assert_eq!(unsafe { a.get_unchecked::<i64>(0) }, 7);
+    assert_eq!(unsafe { a.get_unchecked::<i64>(1) }, -9);
+    assert_eq!(unsafe { a.get_unchecked::<i64>(2) }, i64::MAX);
+    // bool: stored at offset 8 as u8; reinterpreting as bool is well-defined
+    // for the values 0/1 the Bool variant carries.
+    let a = ValArray::from_iter_exact(
+        [Value::Bool(true), Value::Bool(false), Value::Bool(true)].into_iter(),
+    );
+    assert!(unsafe { a.get_unchecked::<bool>(0) });
+    assert!(!unsafe { a.get_unchecked::<bool>(1) });
+    assert!(unsafe { a.get_unchecked::<bool>(2) });
+}
+
+#[test]
 fn arith_no_panics() {
     // operator impls: wrapping for +/-/*, checked for //%
     // div by zero returns Error, not panic

@@ -1,11 +1,42 @@
 use crate::resolver_server::config::{Config, IdMap, MemberServer};
 use anyhow::{anyhow, Result};
 use arcstr::ArcStr;
+use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     process::Command,
+    time::sleep,
 };
+
+/// How many times to retry a connect to the id-map socket before
+/// giving up. The activation supervisor can start the resolver and
+/// the id-map daemon in parallel; the resolver's first TLS handshake
+/// may arrive before the daemon's `bind()` returns. A short retry
+/// window papers over the boot race without pessimising the steady
+/// state — once the daemon is up, every subsequent connect succeeds
+/// on the first try.
+const SOCKET_CONNECT_TRIES: u32 = 5;
+const SOCKET_CONNECT_BACKOFF: Duration = Duration::from_millis(200);
+
+async fn connect_with_retry(path: &str) -> Result<UnixStream> {
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..SOCKET_CONNECT_TRIES {
+        match UnixStream::connect(path).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < SOCKET_CONNECT_TRIES {
+                    sleep(SOCKET_CONNECT_BACKOFF).await;
+                }
+            }
+        }
+    }
+    Err(last_err
+        .map(|e| anyhow!(e))
+        .unwrap_or_else(|| anyhow!("connect failed"))
+        .context(format!("connecting to id-map socket {path:?}")))
+}
 
 // Unix group membership is a little complex, it can come from a
 // lot of places, and it's not entirely standardized at the api
@@ -55,7 +86,7 @@ impl Mapper {
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
             }
             Mapper::Socket(path) => {
-                let mut sock = UnixStream::connect(&**path).await?;
+                let mut sock = connect_with_retry(&**path).await?;
                 sock.write_all(format!("{}\n", user).as_bytes()).await?;
                 let mut reply = vec![];
                 sock.read_to_end(&mut reply).await?;
@@ -80,7 +111,7 @@ impl Mapper {
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
             }
             Mapper::Socket(path) => {
-                let mut sock = UnixStream::connect(&**path).await?;
+                let mut sock = connect_with_retry(&**path).await?;
                 sock.write_all(format!("{}\n", user).as_bytes()).await?;
                 let mut reply = vec![];
                 sock.read_to_end(&mut reply).await?;

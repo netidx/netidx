@@ -1,0 +1,219 @@
+//! Minimal TLS identity file management.
+//!
+//! v1 has **no** CA, **no** cert issuance — just file shuttling. An
+//! operator who already has a cert/key/trusted-CA bundle (from their
+//! corporate PKI or from the `cfg/tls/*/gen.sh` shell scripts in this
+//! repo) calls [`install_identity`] to copy the three files into the
+//! canonical `~/.config/netidx/tls/<cn>/` layout with correct modes.
+//! The templates then reference the installed paths from the generated
+//! configs.
+//!
+//! Issuance, signing, CRLs, and the `--tls-auto` flow are FUTURE.md.
+
+use crate::{atomic, paths};
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+/// What an installed identity looks like on disk.
+#[derive(Debug, Clone)]
+pub struct InstalledIdentity {
+    pub cn: String,
+    pub directory: PathBuf,
+    pub certificate: PathBuf,
+    pub private_key: PathBuf,
+    pub trusted: PathBuf,
+}
+
+/// Inputs for [`install_identity`].
+#[derive(Debug, Clone)]
+pub struct InstallIdentity<'a> {
+    /// Common name. Used as the identity's display name and (with
+    /// [`install_identity_for_user`]) as the subdirectory under
+    /// `~/.config/netidx/tls/`.
+    pub cn: &'a str,
+    /// Directory to copy into. With [`install_identity_for_user`] this
+    /// is computed automatically; with [`install_identity`] callers
+    /// supply it explicitly.
+    pub dest_dir: &'a Path,
+    pub certificate_src: &'a Path,
+    pub private_key_src: &'a Path,
+    pub trusted_src: &'a Path,
+}
+
+/// Copy a (cert, key, trusted-CA) triple into `dest_dir`, atomically,
+/// with correct unix modes (0600 on the private key, 0644 on cert and
+/// CA). Returns the installed paths.
+///
+/// Idempotent: re-installing with identical inputs is a no-op of the
+/// "writes the same bytes back" kind. Installing with different inputs
+/// overwrites.
+pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
+    ensure_valid_cn(p.cn)?;
+
+    let dir = p.dest_dir.to_path_buf();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating tls dir {dir:?}"))?;
+
+    let cert_bytes = std::fs::read(p.certificate_src).with_context(|| {
+        format!("reading certificate source {:?}", p.certificate_src)
+    })?;
+    let key_bytes = std::fs::read(p.private_key_src).with_context(|| {
+        format!("reading private key source {:?}", p.private_key_src)
+    })?;
+    let ca_bytes = std::fs::read(p.trusted_src)
+        .with_context(|| format!("reading trusted CA source {:?}", p.trusted_src))?;
+
+    let cert_dst = dir.join("certificate.pem");
+    let key_dst = dir.join("private.key");
+    let ca_dst = dir.join("trusted.pem");
+
+    atomic::write_atomic(&cert_dst, &cert_bytes, 0o644)?;
+    atomic::write_atomic(&key_dst, &key_bytes, 0o600)?;
+    atomic::write_atomic(&ca_dst, &ca_bytes, 0o644)?;
+
+    Ok(InstalledIdentity {
+        cn: p.cn.to_string(),
+        directory: dir,
+        certificate: cert_dst,
+        private_key: key_dst,
+        trusted: ca_dst,
+    })
+}
+
+/// Where this identity lives by convention: `${user_tls_dir}/<cn>`.
+pub fn identity_dir(cn: &str) -> Result<PathBuf> {
+    ensure_valid_cn(cn)?;
+    let mut p = paths::user_tls_dir()?;
+    p.push(cn);
+    Ok(p)
+}
+
+/// Convenience: same as [`install_identity`] but resolves the
+/// destination directory automatically to `${user_tls_dir}/<cn>/`.
+pub fn install_identity_for_user(
+    cn: &str,
+    certificate_src: &Path,
+    private_key_src: &Path,
+    trusted_src: &Path,
+) -> Result<InstalledIdentity> {
+    let dest_dir = identity_dir(cn)?;
+    install_identity(&InstallIdentity {
+        cn,
+        dest_dir: &dest_dir,
+        certificate_src,
+        private_key_src,
+        trusted_src,
+    })
+}
+
+fn ensure_valid_cn(cn: &str) -> Result<()> {
+    if cn.is_empty() {
+        bail!("TLS identity name (cn) must not be empty");
+    }
+    if cn.contains('/') || cn.contains('\\') {
+        bail!(
+            "TLS identity name (cn) may not contain path separators: {cn:?}"
+        );
+    }
+    if cn == "." || cn == ".." {
+        bail!("TLS identity name (cn) must not be a relative-dir marker");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn cn_validation() {
+        assert!(ensure_valid_cn("alice.example.com").is_ok());
+        assert!(ensure_valid_cn("").is_err());
+        assert!(ensure_valid_cn("a/b").is_err());
+        assert!(ensure_valid_cn("a\\b").is_err());
+        assert!(ensure_valid_cn(".").is_err());
+        assert!(ensure_valid_cn("..").is_err());
+    }
+
+    #[test]
+    fn install_round_trip() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let cert_src = src.path().join("cert.pem");
+        let key_src = src.path().join("key.pem");
+        let ca_src = src.path().join("ca.pem");
+        write(&cert_src, b"-----BEGIN CERTIFICATE-----\n...");
+        write(&key_src, b"-----BEGIN PRIVATE KEY-----\n...");
+        write(&ca_src, b"-----BEGIN CERTIFICATE-----\n...ca...");
+
+        let id = install_identity(&InstallIdentity {
+            cn: "host.example.com",
+            dest_dir: dest.path(),
+            certificate_src: &cert_src,
+            private_key_src: &key_src,
+            trusted_src: &ca_src,
+        })
+        .unwrap();
+
+        assert_eq!(id.cn, "host.example.com");
+        assert!(id.certificate.exists());
+        assert!(id.private_key.exists());
+        assert!(id.trusted.exists());
+        assert_eq!(id.directory, dest.path());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| {
+                std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+            };
+            assert_eq!(mode(&id.private_key), 0o600);
+            assert_eq!(mode(&id.certificate), 0o644);
+            assert_eq!(mode(&id.trusted), 0o644);
+        }
+
+        assert_eq!(
+            std::fs::read(&id.certificate).unwrap(),
+            std::fs::read(&cert_src).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&id.private_key).unwrap(),
+            std::fs::read(&key_src).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&id.trusted).unwrap(),
+            std::fs::read(&ca_src).unwrap()
+        );
+    }
+
+    #[test]
+    fn install_overwrites() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let cert_src = src.path().join("cert.pem");
+        let key_src = src.path().join("key.pem");
+        let ca_src = src.path().join("ca.pem");
+        write(&cert_src, b"first cert");
+        write(&key_src, b"first key");
+        write(&ca_src, b"first ca");
+
+        let p = InstallIdentity {
+            cn: "h",
+            dest_dir: dest.path(),
+            certificate_src: &cert_src,
+            private_key_src: &key_src,
+            trusted_src: &ca_src,
+        };
+        let id = install_identity(&p).unwrap();
+        assert_eq!(std::fs::read(&id.certificate).unwrap(), b"first cert");
+
+        write(&cert_src, b"second cert");
+        let id2 = install_identity(&p).unwrap();
+        assert_eq!(std::fs::read(&id2.certificate).unwrap(), b"second cert");
+        assert_eq!(id.certificate, id2.certificate);
+    }
+}
