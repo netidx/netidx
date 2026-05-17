@@ -330,8 +330,9 @@ pub(crate) struct WorkstationFlags {
     /// Base path of the local resolver cluster (default `/local`).
     #[structopt(long = "base", default_value = "/local")]
     base: String,
-    /// Port the local resolver listens on. Default 59200 (the
-    /// netidx machine-local convention).
+    /// Port the local resolver listens on. Default 4654 — chosen to
+    /// not clash with 59200, the port the process-spawned automatic
+    /// local resolver uses when no netidx config exists.
     #[structopt(long = "listen-port")]
     listen_port: Option<u16>,
     /// Local-auth unix socket path.
@@ -516,11 +517,17 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
     })
 }
 
-/// Generate a key + CSR at the canonical install location, then
-/// loop until the operator confirms they've placed the signed cert
-/// and trusted-CA bundle alongside. Returns
-/// `(our_name, certificate_path, private_key_path, trusted_path)`
-/// all under `~/.config/netidx/tls/<our-name>/`.
+/// Generate a key + CSR, then loop until the operator confirms
+/// they've placed the signed cert and trusted-CA bundle at the
+/// canonical install location. Returns
+/// `(our_name, certificate_path, private_key_path, trusted_path)` —
+/// key/cert/trusted all under `~/.config/netidx/tls/<our-name>/`.
+///
+/// The CSR itself lands in the *current working directory* as
+/// `./<our-name>.csr` (matching `netidx conf ca request`), not in
+/// the identity dir — it's something the operator hands off to the
+/// CA admin, so it needs to be where they'll naturally look for it
+/// (attach to an email, scp, etc.), not buried under XDG config.
 ///
 /// The install proceeds only after the cert files validate, so
 /// downstream config save + activation start are guaranteed to find
@@ -538,9 +545,10 @@ fn generate_and_wait_for_parent_cert(
         format!("creating identity dir {}", dest_dir.display())
     })?;
     let key_path = dest_dir.join("private.key");
-    let csr_path = dest_dir.join("request.csr");
     let cert_path = dest_dir.join("certificate.pem");
     let trusted_path = dest_dir.join("trusted.pem");
+    // CSR lives in CWD — same convention as `netidx conf ca request`.
+    let csr_path = super::ca::default_csr_filename(&our_name);
 
     if key_path.exists() {
         bail!(

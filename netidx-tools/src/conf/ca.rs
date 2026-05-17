@@ -384,7 +384,7 @@ fn san_display(s: &SanEntry) -> String {
 /// a single path component — no separators survive — so a defaulted
 /// output path can't traverse out of the cwd. Empty input collapses
 /// to `_` so we never produce a bare extension like `.csr`.
-fn sanitize_filename(s: &str) -> String {
+pub(super) fn sanitize_filename(s: &str) -> String {
     let out: String = s
         .chars()
         .map(|c| {
@@ -399,7 +399,7 @@ fn sanitize_filename(s: &str) -> String {
 }
 
 /// Default `request` CSR path: `./<cn>.csr`.
-fn default_csr_filename(cn: &str) -> PathBuf {
+pub(super) fn default_csr_filename(cn: &str) -> PathBuf {
     PathBuf::from(format!("{}.csr", sanitize_filename(cn)))
 }
 

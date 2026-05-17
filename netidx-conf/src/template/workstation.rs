@@ -51,8 +51,14 @@ pub struct WorkstationParams {
     pub default_auth: Option<DefaultAuthMech>,
     /// Base path of the local resolver cluster. Default `/local`.
     pub base: ArcStr,
-    /// Local resolver TCP port. Default 59200 (matches
-    /// `netidx::config::local_only::DEFAULT_PORT`).
+    /// Local resolver TCP port. Default 4654 — distinct from
+    /// `netidx::config::local_only::DEFAULT_PORT` (59200) so the
+    /// installed workstation resolver does not clash with the
+    /// process-spawned automatic local resolver. Tools only start the
+    /// 59200 local resolver when no netidx config exists, so it's
+    /// safe to leave it running once a workstation config is
+    /// installed — netidx-using processes just need a restart to pick
+    /// up the new resolver.
     pub listen_port: Option<u16>,
     /// Local-auth socket path. Default
     /// `${dirs::config_dir}/netidx/auth.sock`.
@@ -82,10 +88,16 @@ pub struct WorkstationParams {
     pub with_container: bool,
 }
 
-/// Default port for the local resolver — matches
-/// `netidx::config::local_only::DEFAULT_PORT`. Clients of the local
-/// resolver need a known address, so this *must* be deterministic.
-pub const DEFAULT_LISTEN_PORT: u16 = 59200;
+/// Default port for the installed workstation resolver. Clients
+/// need a deterministic address; 4654 is reserved in netidx for the
+/// "installed local resolver" role and is intentionally distinct
+/// from 59200 (`netidx::config::local_only::DEFAULT_PORT`, the port
+/// the process-spawned automatic local resolver uses). Keeping them
+/// separate means installing a workstation config doesn't clash with
+/// a tool that already brought up a 59200 resolver in the same
+/// session — those tools only auto-spawn when no netidx config
+/// exists, so they'll go away on their next restart.
+pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 
 /// Render the workstation template.
 pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
