@@ -178,6 +178,7 @@ impl Poolable for ValArrayInner {
 }
 
 #[derive(Debug, Clone)]
+#[repr(transparent)]
 pub struct ValArray(PArc<ValArrayInner>);
 
 impl Default for ValArray {

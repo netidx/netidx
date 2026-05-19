@@ -168,14 +168,33 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // Default behaviour: emit a perms file unless `with_perms_file`
     // is explicitly false. When no seed was supplied, auto-seed via
     // `perms::default_seed` so a fresh install boots with a
-    // per-user-playground layout under `/users` rather than an empty
-    // perms map that denies everything.
+    // per-user-playground layout under the resolver's base, rather
+    // than an empty perms map that denies everything.
+    //
+    // For TLS auth we additionally grant the resolver's own cert
+    // identity full rights at the base — without it the resolver
+    // can't subscribe / publish under its own tree (e.g. for the
+    // local-client config we emit below to actually reach the data
+    // it's publishing). The entity is the cert SAN, which is what
+    // the resolver matches against on the wire.
     let perms_file = if p.with_perms_file {
         let path = match &p.perms_path {
             Some(p) => p.clone(),
             None => paths::user_perms_file()?,
         };
-        let seed = p.perms_seed.clone().unwrap_or_else(crate::perms::default_seed);
+        let base_str = if p.base.is_empty() { "/" } else { p.base.as_str() };
+        let mut seed = p
+            .perms_seed
+            .clone()
+            .unwrap_or_else(|| crate::perms::default_seed(base_str));
+        if let AuthChoice::Tls { name, .. } = &p.auth {
+            crate::perms::add_entry(&mut seed, base_str, name.as_str(), "swlpd")
+                .with_context(|| {
+                    format!(
+                        "seeding resolver TLS-cert perms ({base_str} → {name} → swlpd)"
+                    )
+                })?;
+        }
         Some((path, seed))
     } else {
         None
@@ -294,10 +313,23 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
             certificate: dest.join("certificate.pem").to_string_lossy().into_owned(),
             private_key: dest.join("private.key").to_string_lossy().into_owned(),
         };
+        // Key the entry in `client.tls.identities` by the *domain*
+        // part of the cert SAN, not the full SAN. netidx keys
+        // identities by domain (one entry per administrative trust
+        // domain) — the runtime matches any host under that domain
+        // via the reverse-domain prefix lookup in `tls::get_match`.
+        // The install dir stays at the full SAN so two hosts in the
+        // same domain don't clobber each other's cert files.
+        let domain = tlsmod::domain_from_san(name.as_str()).with_context(|| {
+            format!(
+                "deriving identity domain from resolver cert SAN {:?}",
+                name
+            )
+        })?;
         let mut identities = BTreeMap::new();
-        identities.insert(name.to_string(), identity);
+        identities.insert(domain.to_string(), identity);
         ccfg.tls(cfile::Tls {
-            default_identity: Some(name.to_string()),
+            default_identity: Some(domain.to_string()),
             identities,
             askpass: None,
         });
@@ -453,8 +485,8 @@ mod tests {
         let id_src = tempfile::tempdir().unwrap();
         let issued = ca
             .issue(&ca::IssueParams {
-                subject: ca::Subject::cn("resolver"),
-                san: vec![ca::SanEntry::Dns("resolver".into())],
+                subject: ca::Subject::cn("resolver.example.com"),
+                san: vec![ca::SanEntry::Dns("resolver.example.com".into())],
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
@@ -464,7 +496,7 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.auth = AuthChoice::Tls {
-            name: ArcStr::from("resolver"),
+            name: ArcStr::from("resolver.example.com"),
             certificate: issued.certificate.clone(),
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
@@ -476,9 +508,13 @@ mod tests {
 
         let (_, c) = rt.client_config.as_ref().unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Tls));
-        // The single addr carries the resolver's TLS name.
+        // The single addr carries the resolver's TLS name (the full
+        // SAN — this is what the client expects to see in the
+        // server's cert at handshake time).
         match &c.0.addrs[0].1 {
-            cfile::Auth::Tls(name) => assert_eq!(name.as_str(), "resolver"),
+            cfile::Auth::Tls(name) => {
+                assert_eq!(name.as_str(), "resolver.example.com")
+            }
             other => panic!("expected Tls auth, got {other:?}"),
         }
         // The TLS section must reference the *installed* identity
@@ -486,11 +522,19 @@ mod tests {
         // hard-code the absolute path (it depends on the user's
         // config dir) but we check the leaf filenames.
         let tls = c.0.tls.as_ref().expect("client tls section");
-        let identity = tls.identities.get("resolver").expect("identity 'resolver'");
+        // The identity is keyed by the *domain* part of the cert
+        // SAN (`example.com`), not the full SAN (`resolver.example.com`).
+        // netidx keys identities per administrative trust domain and
+        // matches hosts under that domain via reverse-domain prefix
+        // lookup at handshake time.
+        let identity = tls
+            .identities
+            .get("example.com")
+            .expect("identity 'example.com' (domain part of resolver.example.com)");
         assert!(identity.certificate.ends_with("certificate.pem"));
         assert!(identity.private_key.ends_with("private.key"));
         assert!(identity.trusted.ends_with("trusted.pem"));
-        assert_eq!(tls.default_identity.as_deref(), Some("resolver"));
+        assert_eq!(tls.default_identity.as_deref(), Some("example.com"));
         // The cert install path *is* what the resolver-side rfile::Auth
         // points at; this is the "same cert" guarantee in code form.
         let resolver_auth = &rt.resolver_config.as_ref().unwrap().1.0.member_servers[0].auth;
@@ -533,13 +577,15 @@ mod tests {
             v.sort();
             v
         };
-        assert_eq!(collect(seeded), collect(&crate::perms::default_seed()));
+        // `anon_params` uses base "/", so auto-seed should anchor at
+        // root — that's what we compare against.
+        assert_eq!(collect(seeded), collect(&crate::perms::default_seed("/")));
         // Validate the on-disk shape after apply — must parse back
         // into the same map.
         rt.apply().unwrap();
         let loaded =
             crate::perms::load_perms(out.path().join("perms.json")).unwrap();
-        assert_eq!(collect(&loaded), collect(&crate::perms::default_seed()));
+        assert_eq!(collect(&loaded), collect(&crate::perms::default_seed("/")));
         // And the round-trip-through-resolver-validation step
         // accepts it (the $[user] dynamic entry shape can trip up
         // PMap::from_file if the seed is malformed).

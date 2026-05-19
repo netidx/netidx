@@ -712,6 +712,33 @@ mod tests {
         .unwrap()
     }
 
+    /// Cross-check: `tls::extract_dns_san_from_pem` reads the SAN
+    /// out of an openssl-issued cert — same direction the install
+    /// tools rely on for deriving `our_name` from a user-supplied
+    /// cert. If x509-parser and openssl ever disagree on SAN
+    /// encoding the install tooling would silently pick the wrong
+    /// name; this catches that.
+    #[test]
+    fn extract_dns_san_reads_openssl_issued_cert() {
+        use crate::tls::extract_dns_san_from_pem;
+        let dir = tempfile::tempdir().unwrap();
+        let ca = small_ca(dir.path());
+        let leaf_dir = tempfile::tempdir().unwrap();
+        let issued = ca
+            .issue(&IssueParams {
+                subject: Subject::cn("ignored"),
+                san: vec![SanEntry::Dns("alice.example.com".into())],
+                key_bits: 2048,
+                validity_days: 30,
+                out_dir: leaf_dir.path().to_path_buf(),
+            })
+            .unwrap();
+        assert_eq!(
+            extract_dns_san_from_pem(&issued.certificate).unwrap(),
+            "alice.example.com",
+        );
+    }
+
     /// Cross-check: rustls-pemfile (the implementation in
     /// `tls::validate_pem_cert_file`) accepts the openssl-produced
     /// PEMs that `Ca::issue` and `Ca::init` generate. Catches any

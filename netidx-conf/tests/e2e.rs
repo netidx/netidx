@@ -208,11 +208,12 @@ async fn resolver_template_anonymous_round_trip() -> Result<()> {
 /// Same as the anonymous round-trip, but with the auto-seeded
 /// perms file in play (the default behaviour from change set
 /// "resolver template includes perms.json by default"). Verifies
-/// that the auto-seeded `/users/$[user]` + `users` group rules are
-/// loadable by the resolver, AND don't break anonymous publish at a
-/// path *outside* `/users` (anonymous principals have no entity that
-/// matches the seed entries, but anonymous auth bypasses perms
-/// checks entirely — so this round-trip must still succeed).
+/// that the auto-seeded base-anchored rules (`<base>/$[user]` →
+/// `$[user]` → swlpd and `<base>` → users group → swl) are
+/// loadable by the resolver, AND don't break anonymous publish at
+/// any path — anonymous principals match no entity in the seed,
+/// but anonymous auth bypasses perms checks entirely, so the
+/// round-trip must still succeed.
 #[tokio::test(flavor = "multi_thread")]
 async fn resolver_template_anonymous_with_default_perms_round_trip() -> Result<()> {
     let _ = env_logger::try_init();
@@ -296,13 +297,15 @@ async fn workstation_template_local_round_trip() -> Result<()> {
 }
 
 /// Resolver template with TLS auth + id-map, end-to-end. The most
-/// demanding case: a local CA issues a cert for the resolver; the
-/// resolver template's auto-seeded perms file grants
-/// `/users/$[user]` → `$[user]` → `swlpd`; the in-process id-map
-/// daemon maps the TLS SAN `resolver` to uid 1000 + group `users`;
-/// pub/sub at `/users/resolver/foo` succeeds because the resolver
-/// sees the TLS principal, resolves their uid via the id-map, and
-/// the perm check finds the dynamic `$[user]` entry matches.
+/// demanding case: a local CA issues a cert for the resolver; with
+/// base="/" the auto-seeded perms file grants `/$[user]` →
+/// `$[user]` → `swlpd` *and* `/` → `<cert-SAN>` → `swlpd` (the
+/// resolver-cert seed); the in-process id-map daemon maps the TLS
+/// SAN `resolver` to uid 1000 + group `users`; pub/sub at
+/// `/resolver/foo` succeeds because the resolver sees the TLS
+/// principal, resolves their uid via the id-map, and the perm
+/// check finds the dynamic `$[user]` entry (and the TLS-cert
+/// entry) match.
 ///
 /// What this catches end-to-end that pure render tests can't:
 /// - TLS path mismatches (resolver's cert dir vs client's cert dir).
@@ -335,27 +338,31 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         },
         None,
     )?;
-    // Resolver cert: SAN = "resolver" so the template's
-    // `AuthChoice::Tls { name: "resolver", … }` matches.
+    // Resolver cert: SAN = "resolver.example.com" — the multi-label
+    // form lets the template derive the identity domain
+    // (`example.com`) for the client-side `tls.identities` key while
+    // keeping `resolver.example.com` as the wire identity / install
+    // dir name. Single-label SANs are rejected by
+    // `tls::domain_from_san`.
     let resolver_id_src = dir.path().join("resolver-id-src");
     let resolver_issued = ca.issue(&ca::IssueParams {
-        subject: ca::Subject::cn("resolver"),
-        san: vec![ca::SanEntry::Dns("resolver".into())],
+        subject: ca::Subject::cn("resolver.example.com"),
+        san: vec![ca::SanEntry::Dns("resolver.example.com".into())],
         key_bits: 2048,
         validity_days: 30,
         out_dir: resolver_id_src.clone(),
     })?;
 
     // Render the resolver template with TLS auth + auto-seed perms +
-    // the id-map daemon enabled. The auto-seeded perms grant
-    // `/users/$[user]` to `$[user]`, so the publish path
-    // `/users/resolver/foo` matches when the id-map maps "resolver"
-    // to a uid the perms validator can pin to the `$[user]` entry.
+    // the id-map daemon enabled. With base="/", the auto-seeded perms
+    // grant `/users/$[user]` to `$[user]` and (for TLS) `/` to the
+    // cert SAN — so a publish under either `/users/<SAN>/...` or
+    // anywhere at `/` succeeds once the id-map maps the SAN to a uid.
     let id_map_sock = dir.path().join("id-map.sock");
     let id_map_json = dir.path().join("id-map.json");
     let mut params = anon_params(&dir, port);
     params.auth = AuthChoice::Tls {
-        name: ArcStr::from("resolver"),
+        name: ArcStr::from("resolver.example.com"),
         certificate: resolver_issued.certificate.clone(),
         private_key: resolver_issued.private_key.clone(),
         trusted: ca_dir.join("certificate.pem"),
@@ -370,7 +377,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
 
     // Sanity check: the install actually placed the resolver's cert
     // at the canonical (XDG-redirected) location.
-    let resolver_tls_dir = tls_install::identity_dir("resolver")?;
+    let resolver_tls_dir = tls_install::identity_dir("resolver.example.com")?;
     assert!(
         resolver_tls_dir.join("certificate.pem").exists(),
         "resolver identity not installed at canonical location ({})",
@@ -381,7 +388,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // Overwrite the empty starter the template's apply() dropped —
     // `id_map_engine::save` validates structurally before writing.
     let mut map = id_map_engine::empty();
-    id_map_engine::upsert_identity(&mut map, "resolver", 1000, "users", &[])?;
+    id_map_engine::upsert_identity(&mut map, "resolver.example.com", 1000, "users", &[])?;
     id_map_engine::save(&id_map_json, &map)?;
 
     // Start the id-map daemon in-process. The resolver's auth check
@@ -393,10 +400,12 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
     let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
 
-    // Path is under `/users/resolver/` to match the auto-seed
-    // `/users/$[user]` dynamic entry with $[user]=resolver.
+    // Path under `/users/resolver.example.com/` matches the auto-seed
+    // `/users/$[user]` dynamic entry with $[user]=resolver.example.com
+    // (the TLS-cert entry at base "/" would also cover it).
     let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
-    round_trip(client_cfg, "/users/resolver/e2e", Value::I64(99)).await?;
+    round_trip(client_cfg, "/users/resolver.example.com/e2e", Value::I64(99))
+        .await?;
     Ok(())
 }
 

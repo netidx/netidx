@@ -256,11 +256,34 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     ccfg_builder
         .addrs(vec![(listen_addr, client_addr_auth)])
         .base(base.as_str());
-    #[cfg(unix)]
-    let auth_default = DefaultAuthMech::Local;
-    #[cfg(not(unix))]
-    let auth_default = DefaultAuthMech::Anonymous;
-    let default_auth = p.default_auth.clone().unwrap_or(auth_default);
+    // `default_auth` is what the client uses when it follows a
+    // referral that doesn't pin auth (i.e. for any address the
+    // resolver hands back beyond its local store — which means
+    // *the parent's namespace*). So the right default is "whatever
+    // the parent uses". With no parent, the client only ever talks
+    // to the local loopback resolver, so the right default is the
+    // local-machine convention: `Local` on unix (the resolver runs
+    // Local-auth over a unix socket), `Anonymous` on non-unix
+    // (where Local-auth isn't available and the resolver is
+    // Anonymous-only).
+    let default_auth = match &p.default_auth {
+        Some(d) => d.clone(),
+        None => match &p.parent {
+            Some(parent) => {
+                derive_default_auth(parent.addrs.iter().map(|(_, a)| a))
+            }
+            None => {
+                #[cfg(unix)]
+                {
+                    DefaultAuthMech::Local
+                }
+                #[cfg(not(unix))]
+                {
+                    DefaultAuthMech::Anonymous
+                }
+            }
+        },
+    };
     if matches!(default_auth, DefaultAuthMech::Tls) && p.tls_identities.is_empty()
     {
         bail!(
@@ -552,16 +575,16 @@ mod tests {
         rt.apply().unwrap();
 
         let c = client::ClientConfig::load(out.path().join("client.json")).unwrap();
-        // Workstation default_auth is Local regardless of upstream;
-        // it's the auth our local publishers accept, not what we use
-        // to follow referrals.
-        assert!(matches!(c.0.default_auth, DefaultAuthMech::Local));
+        // default_auth is derived from the parent's auth, so a
+        // parent that speaks Anonymous → client speaks Anonymous
+        // for any address it doesn't have explicit auth for
+        // (parent referrals it follows, etc.).
+        assert!(matches!(c.0.default_auth, DefaultAuthMech::Anonymous));
         assert!(c.0.tls.is_none());
 
         let r = ResolverConfig::load(out.path().join("resolver.json"))
             .unwrap();
         let parent = r.0.parent.as_ref().unwrap();
-        // But the parent referral correctly carries the upstream auth.
         assert!(matches!(parent.addrs[0].1, rfile::RefAuth::Anonymous));
     }
 
@@ -583,10 +606,9 @@ mod tests {
         rt.apply().unwrap();
 
         let c = client::ClientConfig::load(out.path().join("client.json")).unwrap();
-        // Default_auth is Local; upstream is followed via the
-        // per-referral Krb5 auth, which the runtime picks
-        // automatically.
-        assert!(matches!(c.0.default_auth, DefaultAuthMech::Local));
+        // default_auth is derived from the parent's auth: Krb5
+        // upstream → Krb5 default for follow-up referrals.
+        assert!(matches!(c.0.default_auth, DefaultAuthMech::Krb5));
         assert!(c.0.tls.is_none());
 
         let r = ResolverConfig::load(out.path().join("resolver.json"))
@@ -653,9 +675,11 @@ mod tests {
         assert_eq!(rt.tls_install[0].cn, "workstation");
 
         let (_, c) = rt.client_config.as_ref().unwrap();
-        // Still Local — the TLS identity is for outbound referral
-        // following, not for what we accept from local subscribers.
-        assert!(matches!(c.0.default_auth, DefaultAuthMech::Local));
+        // default_auth is derived from the parent's auth: TLS
+        // upstream → TLS default for follow-up referrals (this is
+        // also the auth the client uses to authenticate to the
+        // parent itself when following a referral).
+        assert!(matches!(c.0.default_auth, DefaultAuthMech::Tls));
         let tls = c.0.tls.as_ref().expect("client tls section");
         // Key is the SERVER pattern, not our SAN.
         assert!(tls.identities.contains_key("example.com"));

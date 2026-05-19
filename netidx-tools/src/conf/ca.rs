@@ -886,7 +886,7 @@ mod tests {
         // path: same code as `accept_csr_san=true`, so it would have
         // bailed pre-change with "must pass either --san or
         // --accept-csr-san". Output cert is a real PEM X.509.
-        ca::validate_pem_cert_file(&out_cert).unwrap();
+        netidx_conf::tls::validate_pem_cert_file(&out_cert).unwrap();
     }
 
     #[test]

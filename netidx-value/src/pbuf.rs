@@ -41,6 +41,7 @@ static POOL: LazyLock<RawPool<PArc<PooledBytes>>> =
     LazyLock::new(|| RawPool::new(8124, 64));
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct PBytes(PArc<PooledBytes>);
 
 impl Deref for PBytes {

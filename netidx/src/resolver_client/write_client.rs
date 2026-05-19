@@ -97,7 +97,7 @@ impl Connection {
             if self.degraded {
                 con.send_one(&ToWrite::Clear).await?;
                 match con.receive().await? {
-                    FromWrite::Unpublished => {
+                    FromWrite::Unpublished | FromWrite::Referral(_) => {
                         self.degraded = false;
                     }
                     m => warn!("unexpected response to clear {:?}", m),
@@ -122,13 +122,13 @@ impl Connection {
                     | ToWrite::PublishDefault(_)
                     | ToWrite::PublishWithFlags(_, _)
                     | ToWrite::PublishDefaultWithFlags(_, _) => match reply {
-                        FromWrite::Published => success += 1,
+                        FromWrite::Published | FromWrite::Referral(_) => success += 1,
                         r => {
                             warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
                         }
                     },
                     ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => match reply {
-                        FromWrite::Unpublished => {
+                        FromWrite::Unpublished | FromWrite::Referral(_) => {
                             success += 1;
                             to_remove.push(Some(p.clone()));
                         }
@@ -137,7 +137,7 @@ impl Connection {
                         }
                     },
                     ToWrite::Clear => match reply {
-                        FromWrite::Unpublished => {
+                        FromWrite::Unpublished | FromWrite::Referral(_) => {
                             has_clear = true;
                             success += 1;
                             to_remove.push(None);
@@ -470,7 +470,7 @@ impl Connection {
         for ((_, tx), rx) in tx.batch.iter().zip(rx_batch.iter()) {
             match tx {
                 ToWrite::Publish(_) => match rx {
-                    FromWrite::Published => (),
+                    FromWrite::Published | FromWrite::Referral(_) => (),
                     _ => {
                         self.degraded = true;
                     }

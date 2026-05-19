@@ -597,23 +597,43 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
             "trusted CA bundle (signs the parent's cert)",
             None,
         )?;
-        let our_name = prompt::required_string(
-            "your TLS identity name (cert SAN; installed at ~/.config/netidx/tls/<name>/)",
-            None,
-        )?;
+        // Extract the identity name from the cert's DNS SAN rather
+        // than asking the operator. netidx's runtime keys identities
+        // by the cert's `alt_name` at TLS-load time, so the on-disk
+        // install dir (and any matching elsewhere) must use that
+        // same name — asking would let the operator type something
+        // that disagrees with the cert, producing an install that
+        // looks fine on disk but doesn't match at runtime.
+        let our_name = netidx_conf::tls::extract_dns_san_from_pem(&certificate)
+            .with_context(|| {
+                format!(
+                    "deriving TLS identity name from {} — supply a cert \
+                     with a DNS SubjectAlternativeName entry",
+                    certificate.display()
+                )
+            })?;
         (our_name, certificate, private_key, trusted)
     };
-    // The default reverse-domain key is the parent's TLS name
-    // unaltered — netidx's match is "closest reverse-domain prefix
-    // wins", so the exact name is the most specific possible entry.
-    // The operator can broaden it later by editing client.json.
-    let server_pattern = prompt::string_with_default(
-        "server pattern (reverse-domain key in tls.identities)",
-        None,
-        parent_server_name,
-    )?;
+    // Key the entry in `tls.identities` by the *domain* part of our
+    // SAN, not the full SAN. netidx's convention is
+    // `<user>.<domain>` (e.g. `mazikeen.local`) — one identity entry
+    // covers the whole domain (`local`) and the runtime matches any
+    // host under it via the reverse-domain prefix match in
+    // `tls::get_match`. Keying by the full SAN would still match,
+    // but it forces a separate identity per host where one per
+    // domain is what operators actually want. `our_name` (the
+    // install dir name) stays as the full SAN so multiple hosts'
+    // certs don't clobber each other on disk.
+    let _ = parent_server_name; // intentionally unused — see comment above
+    let server_pattern = netidx_conf::tls::domain_from_san(our_name.as_str())
+        .with_context(|| {
+            format!(
+                "deriving identity domain from cert SAN {:?}",
+                our_name
+            )
+        })?;
     Ok(TlsIdentitySpec {
-        server_pattern: ArcStr::from(server_pattern.as_str()),
+        server_pattern: ArcStr::from(server_pattern),
         our_name: ArcStr::from(our_name.as_str()),
         certificate,
         private_key,

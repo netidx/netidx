@@ -26,6 +26,10 @@ parking_lot = { workspace = true }
 # doesn't, and netidx itself already pulls rustls-pemfile so no new
 # build cost.
 rustls-pemfile = { workspace = true }
+# Cross-platform DER X.509 parsing for `tls::extract_dns_san_from_pem`.
+# Pure-Rust, already a transitive dep of netidx (via the resolver-server
+# cert handling), so no new build cost.
+x509-parser = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }

@@ -113,38 +113,56 @@ pub fn empty() -> PMap {
     PMap(HashMap::new())
 }
 
-/// Sensible starter perms for a freshly-installed resolver:
+/// Sensible starter perms for a freshly-installed resolver. The
+/// `users`-group rule anchors at `base` — the resolver's own
+/// subtree — so the seed says "members of `users` can subscribe /
+/// write / list anywhere this resolver controls". The per-user
+/// playground lives at `<base>/users/$[user]` so it's always under a
+/// real directory: netidx's PMap loader (see
+/// `auth.rs::PMap::from_file`) rejects a `$[user]` entry whose
+/// dirname is root, so anchoring it directly at base would break
+/// the root-resolver case.
 ///
-/// - `/users/$[user]` → the authenticated user gets `swlpd` (full
-///   subscribe / write / list / publish / publish-default rights)
-///   under their own subtree. `$[user]` is the resolver's built-in
-///   variable, substituted at evaluation time with the connecting
-///   principal's name — so user `alice` gets full control of
-///   `/users/alice/**` without an explicit per-user entry.
-/// - `/users` → members of the `users` group get `swl` (subscribe,
-///   write, list) — i.e. read everyone's published values and write
-///   to existing paths, but *not* `p` (publish) so they can't drop
-///   new paths into someone else's subtree.
+/// - `<base>` → members of the `users` group get `swl` (subscribe,
+///   write, list) — read everyone's published values and write to
+///   existing paths, but *not* `p` (publish) so they can't drop new
+///   paths into someone else's subtree.
+/// - `<base>/users/$[user]` → the authenticated user gets `swlpd`
+///   (full subscribe / write / list / publish / publish-default
+///   rights) under their own subtree. `$[user]` is the resolver's
+///   built-in variable, substituted at evaluation time with the
+///   connecting principal's name — so user `alice` gets full control
+///   of `<base>/users/alice/**` without an explicit per-user entry.
 ///
-/// Together these give a "shared playground under `/users` with
-/// per-user write-protected directories" out of the box. Operators
-/// who want a different default can override `perms_seed` on the
-/// template or edit the emitted `perms.json` directly.
-pub fn default_seed() -> PMap {
+/// Together these give a "shared read-write tree under the
+/// resolver's base, plus a per-user playground under
+/// `<base>/users`" out of the box. Operators who want a different
+/// default can override `perms_seed` on the template or edit the
+/// emitted `perms.json` directly.
+pub fn default_seed(base: &str) -> PMap {
+    use netidx::path::Path;
     let mut p = empty();
-    // Full control of own subtree via the $[user] dynamic entry. The
-    // resolver's PMap loader requires that the only key inside a
-    // `…/$[user]` entry is `$[user]` itself; see `PMap::from_file`
-    // in netidx/src/resolver_server/auth.rs.
-    add_entry(&mut p, "/users/$[user]", "$[user]", "swlpd")
-        .expect("static seed must validate");
-    // Group-wide read+write at the /users root. Not a `$[group]`
+    // Normalise base to a canonical netidx path. `""` or unset bases
+    // collapse to `/`, and `Path::append` handles redundant
+    // separators when we build the `<base>/users/$[user]` path
+    // below.
+    let base_path =
+        if base.is_empty() { Path::root() } else { Path::from_str(base) };
+    // Group-wide read+write at the resolver's base. Not a `$[group]`
     // dynamic entry — that form requires the group name to appear in
     // the basename, and we want a fixed reference to the literal
     // group `users`. So this is just a normal entry whose entity
     // happens to be a group name; the resolver matches it when the
     // connecting principal is a member of that group.
-    add_entry(&mut p, "/users", "users", "swl")
+    add_entry(&mut p, base_path.as_ref(), "users", "swl")
+        .expect("static seed must validate");
+    // Per-user playground under `<base>/users/$[user]`. The intermediate
+    // `users` segment is mandatory: the PMap loader unwraps
+    // `Path::dirname(...)` on `$[user]` paths, and dirname of a
+    // path directly under root is `None` — so anchoring this
+    // entry at e.g. `/$[user]` would panic the resolver at startup.
+    let user_subtree = base_path.append("users").append("$[user]");
+    add_entry(&mut p, user_subtree.as_ref(), "$[user]", "swlpd")
         .expect("static seed must validate");
     p
 }
@@ -174,22 +192,49 @@ mod tests {
     }
 
     #[test]
-    fn default_seed_has_user_dynamic_and_users_group() {
-        let p = default_seed();
-        // Per-user dynamic entry: full rights for $[user] under
-        // /users/$[user]. Looking up by the literal entity string
-        // `$[user]` exercises the same shape the resolver's
-        // PMap::from_file parses.
+    fn default_seed_root_base_anchors_at_root() {
+        let p = default_seed("/");
+        // Users group `swl` at the resolver's base (`/` here).
+        assert_eq!(lookup(&p, "/", "users").map(|s| s.as_str()), Some("swl"));
+        // Per-user dynamic entry under `<base>/users/$[user]` —
+        // `/users/$[user]` for a root resolver. The intermediate
+        // `users` segment exists because PMap::from_file rejects
+        // a `$[user]` entry whose dirname is root.
         assert_eq!(
             lookup(&p, "/users/$[user]", "$[user]").map(|s| s.as_str()),
             Some("swlpd"),
         );
-        // Read+write for the users group at /users — no `p`/`d`,
-        // since publishing under someone else's prefix isn't part of
-        // the "playground" contract.
+    }
+
+    #[test]
+    fn default_seed_child_base_anchors_under_base() {
+        // A workstation-style resolver attached at /local should
+        // anchor the seed entries at /local and /local/users/$[user]
+        // — not the old root-level /users paths, which sit in a
+        // different subtree and are useless to this resolver.
+        let p = default_seed("/local");
         assert_eq!(
-            lookup(&p, "/users", "users").map(|s| s.as_str()),
+            lookup(&p, "/local", "users").map(|s| s.as_str()),
             Some("swl"),
+        );
+        assert_eq!(
+            lookup(&p, "/local/users/$[user]", "$[user]").map(|s| s.as_str()),
+            Some("swlpd"),
+        );
+        // The bare root-level entries shouldn't appear — guards
+        // against accidental regressions to the hard-coded layout.
+        assert!(lookup(&p, "/users", "users").is_none());
+    }
+
+    #[test]
+    fn default_seed_empty_base_collapses_to_root() {
+        // Defensive: an empty `base` arg should be treated as `/`
+        // so callers don't have to special-case it.
+        let p = default_seed("");
+        assert_eq!(lookup(&p, "/", "users").map(|s| s.as_str()), Some("swl"));
+        assert_eq!(
+            lookup(&p, "/users/$[user]", "$[user]").map(|s| s.as_str()),
+            Some("swlpd"),
         );
     }
 
@@ -200,7 +245,7 @@ mod tests {
         // future drift in `default_seed` here rather than at first
         // resolver-start.
         use netidx::resolver_server::config;
-        let p = default_seed();
+        let p = default_seed("/");
         let file = config::file::ConfigBuilder::default()
             .member_servers(vec![
                 config::file::MemberServerBuilder::default()

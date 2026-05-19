@@ -213,6 +213,7 @@ struct AbstractInner {
 /// remains compatible, then it can be seamlessly used without interfering with
 /// non participarting applications.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct Abstract(Arc<AbstractInner>);
 
 impl Abstract {

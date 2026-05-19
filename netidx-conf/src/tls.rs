@@ -139,6 +139,68 @@ pub fn validate_pem_cert_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the first PEM-encoded X.509 cert from `path` and return its
+/// first DNS SubjectAlternativeName entry. Used by the install tools
+/// to derive `our_name` from a cert the operator brought along —
+/// always more reliable than asking the operator to type the name
+/// and risking it diverging from what's actually in the cert.
+///
+/// netidx's TLS runtime (`Tls::load` in netidx/src/config/mod.rs)
+/// keys identities by the cert's `alt_name` SAN at load time, so
+/// this helper extracts exactly that field — the on-disk name we
+/// choose for install paths matches what the runtime will see on
+/// the wire.
+///
+/// Errors if the file doesn't parse, the file is empty, or the
+/// first cert carries no DNS SAN (other SAN forms — IP, URI, email
+/// — are deliberately not accepted; netidx pins TLS identities by
+/// DNS name).
+pub fn extract_dns_san_from_pem(path: &Path) -> Result<String> {
+    use std::io::BufReader;
+    use x509_parser::prelude::FromDer;
+    let f = std::fs::File::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(f);
+    let der = rustls_pemfile::certs(&mut reader)
+        .next()
+        .ok_or_else(|| anyhow!("{} contains no PEM certificates", path.display()))?
+        .with_context(|| format!("parsing PEM in {}", path.display()))?;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der.as_ref())
+        .with_context(|| format!("parsing DER X.509 in {}", path.display()))?;
+    let ext = cert
+        .subject_alternative_name()
+        .with_context(|| format!("reading SAN extension from {}", path.display()))?
+        .ok_or_else(|| {
+            anyhow!("{} has no SubjectAlternativeName extension", path.display())
+        })?;
+    for name in &ext.value.general_names {
+        if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
+            return Ok(dns.to_string());
+        }
+    }
+    bail!("{} has no DNS SubjectAlternativeName entry", path.display())
+}
+
+/// Strip the leftmost DNS label off a SAN to get the *domain* that
+/// `tls.identities` should be keyed by. In netidx's convention the
+/// SAN is `<user>.<domain>` (e.g. `mazikeen.local`) and one identity
+/// entry covers the whole domain (`local`), with the runtime matching
+/// any host under that domain via the reverse-domain prefix match in
+/// `tls::get_match`.
+///
+/// Errors when the SAN has no `.` separator — a single-label SAN
+/// (e.g. `localhost`) has no domain to derive and the operator should
+/// pick an identity key explicitly.
+pub fn domain_from_san(san: &str) -> Result<&str> {
+    match san.split_once('.') {
+        Some((_user, domain)) if !domain.is_empty() => Ok(domain),
+        _ => bail!(
+            "cannot derive identity domain from SAN {san:?}: expected \
+             `<user>.<domain>` form (e.g. `host.example.com`)"
+        ),
+    }
+}
+
 fn ensure_valid_cn(cn: &str) -> Result<()> {
     if cn.is_empty() {
         bail!("TLS identity name (cn) must not be empty");
@@ -195,6 +257,42 @@ mod tests {
         let junk = dir.path().join("junk.pem");
         write(&junk, b"definitely not a PEM file");
         assert!(validate_pem_cert_file(&junk).is_err());
+    }
+
+    #[test]
+    fn extract_dns_san_rejects_missing_and_junk() {
+        // Pure-shape failure cases. The "cert with a SAN" happy
+        // path can't be tested here cheaply without openssl
+        // (rustls-pemfile only validates framing, not contents) —
+        // that test lives in `ca.rs` alongside the issuer.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(extract_dns_san_from_pem(&dir.path().join("nope.pem")).is_err());
+        let empty = dir.path().join("empty.pem");
+        write(&empty, b"");
+        assert!(extract_dns_san_from_pem(&empty).is_err());
+        // Well-formed PEM with garbage DER inside — passes the
+        // framing check, fails the X.509 parse.
+        let bad_der = dir.path().join("bad-der.pem");
+        write(
+            &bad_der,
+            b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
+        );
+        assert!(extract_dns_san_from_pem(&bad_der).is_err());
+    }
+
+    #[test]
+    fn domain_from_san_splits_off_leftmost_label() {
+        assert_eq!(domain_from_san("mazikeen.local").unwrap(), "local");
+        assert_eq!(
+            domain_from_san("host.subdomain.example.com").unwrap(),
+            "subdomain.example.com"
+        );
+        // Single-label SAN has no domain → error
+        assert!(domain_from_san("localhost").is_err());
+        // Trailing-dot edge case: empty domain after split → error
+        assert!(domain_from_san("user.").is_err());
+        // Empty input
+        assert!(domain_from_san("").is_err());
     }
 
     #[test]
