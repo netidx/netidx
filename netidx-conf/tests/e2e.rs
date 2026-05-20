@@ -351,6 +351,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         key_bits: 2048,
         validity_days: 30,
         out_dir: resolver_id_src.clone(),
+        password: None,
     })?;
 
     // Render the resolver template with TLS auth + auto-seed perms +
@@ -366,6 +367,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         certificate: resolver_issued.certificate.clone(),
         private_key: resolver_issued.private_key.clone(),
         trusted: ca_dir.join("certificate.pem"),
+        askpass: None,
     };
     params.with_perms_file = true;
     params.perms_path = Some(dir.path().join("perms.json"));

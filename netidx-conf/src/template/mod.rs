@@ -69,6 +69,14 @@ pub enum AuthChoice {
         certificate: PathBuf,
         private_key: PathBuf,
         trusted: PathBuf,
+        /// Path to an askpass program — written to the
+        /// `cfile::Tls.askpass` slot of any client config the
+        /// template emits. Used when the private key is encrypted:
+        /// netidx invokes this program at TLS-load time to fetch
+        /// the passphrase if the system keychain doesn't have it.
+        /// `None` leaves the config slot unset (the keychain is
+        /// then the only source of decryption).
+        askpass: Option<PathBuf>,
     },
 }
 
@@ -134,6 +142,15 @@ pub struct TlsIdentitySpec {
     /// Override the install destination. `None` ⇒ the canonical
     /// `${user_tls_dir}/<our_name>/` location.
     pub dest_dir: Option<PathBuf>,
+    /// Path to an askpass program. When the private key is
+    /// encrypted, netidx invokes this program at TLS-load time to
+    /// fetch the passphrase (after checking the system keychain).
+    /// Lives at the `cfile::Tls` *section* level in the on-disk
+    /// config — not per-identity — but we carry it on the spec so
+    /// the install flow can declare it alongside the matching key.
+    /// When multiple identities share a section, the first
+    /// non-`None` askpass wins.
+    pub askpass: Option<PathBuf>,
 }
 
 impl TlsIdentitySpec {
@@ -390,6 +407,13 @@ pub(crate) fn client_tls_section_from(
 
     let mut map = BTreeMap::new();
     let mut default = None;
+    // `cfile::Tls.askpass` is a single section-level field; if
+    // multiple identities have different askpass paths set we
+    // take the first non-`None` and ignore the rest. In practice a
+    // single template emits one identity, so this case is mostly
+    // theoretical — but it's better to make the precedence explicit
+    // than to silently let last-write-wins through a BTreeMap.
+    let mut askpass: Option<String> = None;
     for spec in identities {
         let dest = spec.dest_dir()?;
         let identity = cfile::TlsIdentity {
@@ -407,12 +431,18 @@ pub(crate) fn client_tls_section_from(
         if default.is_none() {
             default = Some(key.clone());
         }
+        if askpass.is_none() {
+            askpass = spec
+                .askpass
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+        }
         map.insert(key, identity);
     }
     Ok(Some(cfile::Tls {
         default_identity: default,
         identities: map,
-        askpass: None,
+        askpass,
     }))
 }
 
@@ -423,7 +453,10 @@ pub(crate) fn client_tls_section_from(
 pub(crate) fn resolver_tls_copy_job(
     choice: &AuthChoice,
 ) -> Result<Option<TlsCopyJob>> {
-    let AuthChoice::Tls { name, certificate, private_key, trusted } = choice else {
+    let AuthChoice::Tls {
+        name, certificate, private_key, trusted, askpass: _,
+    } = choice
+    else {
         return Ok(None);
     };
     let dest = tlsmod::identity_dir(name.as_str())?;

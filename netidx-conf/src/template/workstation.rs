@@ -642,6 +642,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -668,6 +669,7 @@ mod tests {
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
             dest_dir: Some(install_dest.clone()),
+            askpass: None,
         }];
 
         let rt = workstation(&p).unwrap();

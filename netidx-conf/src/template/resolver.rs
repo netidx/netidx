@@ -302,7 +302,7 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
     if let Some(bind) = default_bind_cfg_for_listen(p.listen) {
         ccfg.default_bind_config(bind);
     }
-    if let AuthChoice::Tls { name, .. } = &p.auth {
+    if let AuthChoice::Tls { name, askpass, .. } = &p.auth {
         // Reuse the resolver's installed identity. The cert is
         // installed at `identity_dir(<resolver-tls-name>)` by the
         // tls_install copy job; we just point the client section at
@@ -331,7 +331,9 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
         ccfg.tls(cfile::Tls {
             default_identity: Some(domain.to_string()),
             identities,
-            askpass: None,
+            askpass: askpass
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
         });
     }
     Ok(ClientConfig::from(ccfg.build()?))
@@ -490,6 +492,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -500,6 +503,7 @@ mod tests {
             certificate: issued.certificate.clone(),
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
+            askpass: None,
         };
         p.with_local_client = true;
         let client_path = out.path().join("client.json");
@@ -669,6 +673,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -679,6 +684,7 @@ mod tests {
             certificate: issued.certificate.clone(),
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
+            askpass: None,
         };
         let rt = resolver(&p).unwrap();
         assert_eq!(rt.tls_install.len(), 1);
@@ -716,6 +722,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -726,6 +733,7 @@ mod tests {
             certificate: issued.certificate.clone(),
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
+            askpass: None,
         };
         p.with_id_map = true;
         let id_map_socket = out.path().join("id-map.sock");
@@ -784,6 +792,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -794,6 +803,7 @@ mod tests {
             certificate: issued.certificate.clone(),
             private_key: issued.private_key.clone(),
             trusted: ca_dir.path().join("certificate.pem"),
+            askpass: None,
         };
         p.with_id_map = true;
         let id_map_path = out.path().join("id-map.json");

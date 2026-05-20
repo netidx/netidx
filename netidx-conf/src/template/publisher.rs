@@ -223,11 +223,12 @@ mod tests {
         let id_src = tempfile::tempdir().unwrap();
         let issued = ca
             .issue(&ca::IssueParams {
-                subject: ca::Subject::cn("client"),
+                subject: ca::Subject::cn("client.example.com"),
                 san: vec![ca::SanEntry::Dns("client.example.com".into())],
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -238,13 +239,19 @@ mod tests {
                 ReferralAuth::Tls(ArcStr::from("resolver.example.com")),
             )],
             default_auth: Some(DefaultAuthMech::Tls),
+            // Standard layout: identity keyed by the trust domain
+            // (`example.com`) while `our_name` is the full host SAN
+            // (`client.example.com`) so the install dir matches
+            // what netidx sees on the wire. Same convention as the
+            // resolver and workstation templates.
             tls_identities: vec![TlsIdentitySpec {
                 server_pattern: ArcStr::from("example.com"),
-                our_name: ArcStr::from("client"),
+                our_name: ArcStr::from("client.example.com"),
                 certificate: issued.certificate.clone(),
                 private_key: issued.private_key.clone(),
                 trusted: ca_dir.path().join("certificate.pem"),
                 dest_dir: Some(out.path().join("installed-tls")),
+                askpass: None,
             }],
             base: ArcStr::from("/"),
             config_path: Some(cfg_path(&out)),
@@ -255,11 +262,62 @@ mod tests {
         let (_, c) = rt.client_config.as_ref().unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Tls));
         let tls = c.0.tls.as_ref().expect("tls section");
+        // Identity is keyed by domain, not full SAN — same shape
+        // the resolver template's local-client config produces.
         assert!(tls.identities.contains_key("example.com"));
+        assert!(!tls.identities.contains_key("client.example.com"));
+        assert_eq!(tls.default_identity.as_deref(), Some("example.com"));
 
         // apply() exercises install-before-validate ordering.
         rt.apply().unwrap();
         assert!(out.path().join("installed-tls/certificate.pem").exists());
+    }
+
+    /// `cfile::Tls.askpass` survives the template round-trip. When a
+    /// `TlsIdentitySpec` carries an `askpass` path, it must land in
+    /// the emitted `client.tls.askpass` slot — that's the only
+    /// place netidx reads the value at TLS-load time.
+    #[test]
+    fn tls_askpass_round_trips() {
+        let out = tempfile::tempdir().unwrap();
+        let cert = out.path().join("cert.pem");
+        let key = out.path().join("key.pem");
+        let trusted = out.path().join("trusted.pem");
+        // Minimal-shape PEM — apply()'s validator only checks PEM
+        // framing, not X.509 content (the runtime handshake is the
+        // authority on that). The askpass plumbing under test
+        // doesn't touch the cert files at all.
+        let dummy = b"-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n";
+        std::fs::write(&cert, dummy).unwrap();
+        std::fs::write(&key, b"-----BEGIN PRIVATE KEY-----\n...\n").unwrap();
+        std::fs::write(&trusted, dummy).unwrap();
+        let askpass_path = PathBuf::from("/usr/bin/ssh-askpass");
+        let p = PublisherParams {
+            addrs: vec![(
+                addr("10.0.0.1:4564"),
+                ReferralAuth::Tls(ArcStr::from("resolver.example.com")),
+            )],
+            default_auth: Some(DefaultAuthMech::Tls),
+            tls_identities: vec![TlsIdentitySpec {
+                server_pattern: ArcStr::from("example.com"),
+                our_name: ArcStr::from("client.example.com"),
+                certificate: cert,
+                private_key: key,
+                trusted,
+                dest_dir: Some(out.path().join("installed-tls")),
+                askpass: Some(askpass_path.clone()),
+            }],
+            base: ArcStr::from("/"),
+            config_path: Some(cfg_path(&out)),
+            default_bind_config: None,
+        };
+        let rt = publisher(&p).unwrap();
+        let (_, c) = rt.client_config.as_ref().unwrap();
+        let tls = c.0.tls.as_ref().expect("tls section");
+        assert_eq!(
+            tls.askpass.as_deref(),
+            Some(askpass_path.to_string_lossy().as_ref()),
+        );
     }
 
     #[test]

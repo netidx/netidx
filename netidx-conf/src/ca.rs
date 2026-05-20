@@ -165,6 +165,14 @@ pub struct IssueParams {
     pub key_bits: u32,
     pub validity_days: u32,
     pub out_dir: PathBuf,
+    /// Encrypt the on-disk private key with this passphrase. `None`
+    /// writes an unencrypted PKCS#8 key; `Some(s)` writes a PKCS#8
+    /// key encrypted with AES-256-CBC. Same semantics as the
+    /// password parameter on `Ca::init`. Callers that want to
+    /// support encrypted leaf keys also need to plumb the password
+    /// somewhere a netidx process can find it (e.g. the system
+    /// keychain via `netidx::tls::save_password_for_key`).
+    pub password: Option<String>,
 }
 
 /// Output of `Ca::issue`.
@@ -410,7 +418,12 @@ impl Ca {
         std::fs::create_dir_all(&params.out_dir).with_context(|| {
             format!("creating identity directory {:?}", params.out_dir)
         })?;
-        let kr = generate_csr(&params.subject, &params.san, params.key_bits)?;
+        let kr = generate_csr(
+            &params.subject,
+            &params.san,
+            params.key_bits,
+            params.password.as_deref(),
+        )?;
         let cert_pem = self.sign_request(
             &kr.csr_pem,
             &params.san,
@@ -541,10 +554,16 @@ pub struct CsrSummary {
 /// process owns (e.g. handed off to a remote conf-server). The CSR's
 /// requested SAN is also embedded so a signing party can verify the
 /// request before signing.
+/// Generate a fresh RSA keypair and a matching CSR. The CSR is
+/// always returned unencrypted (a CSR is a public document by
+/// definition); `password` controls whether the *private key* is
+/// returned as encrypted or unencrypted PKCS#8 PEM, with the same
+/// semantics as `Ca::init`'s `password` parameter.
 pub fn generate_csr(
     subject: &Subject,
     san: &[SanEntry],
     key_bits: u32,
+    password: Option<&str>,
 ) -> Result<KeyAndRequest> {
     check_key_bits(key_bits)?;
     let rsa = Rsa::generate(key_bits).context("generating RSA key")?;
@@ -568,10 +587,19 @@ pub fn generate_csr(
     req.sign(&pkey, MessageDigest::sha512()).context("signing CSR")?;
     let req = req.build();
 
-    Ok(KeyAndRequest {
-        private_key_pem: pkey.private_key_to_pem_pkcs8()?,
-        csr_pem: req.to_pem()?,
-    })
+    let private_key_pem = match password {
+        Some(p) => pkey
+            .private_key_to_pem_pkcs8_passphrase(
+                Cipher::aes_256_cbc(),
+                p.as_bytes(),
+            )
+            .context("encrypting private key")?,
+        None => pkey
+            .private_key_to_pem_pkcs8()
+            .context("encoding private key")?,
+    };
+
+    Ok(KeyAndRequest { private_key_pem, csr_pem: req.to_pem()? })
 }
 
 fn build_name(s: &Subject) -> Result<openssl::x509::X509Name> {
@@ -731,6 +759,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: leaf_dir.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
         assert_eq!(
@@ -760,6 +789,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: leaf_dir.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
         validate_pem_cert_file(&issued.certificate).unwrap();
@@ -798,7 +828,7 @@ mod tests {
 
     #[test]
     fn generate_csr_rejects_weak_key_bits() {
-        let err = generate_csr(&Subject::cn("h"), &[], 1024).unwrap_err();
+        let err = generate_csr(&Subject::cn("h"), &[], 1024, None).unwrap_err();
         assert!(format!("{err:#}").contains("below MIN_KEY_BITS"));
     }
 
@@ -817,6 +847,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
+                password: None,
             })
             .unwrap_err();
         assert!(format!("{err:#}").contains("exactly one DNS SAN"));
@@ -834,6 +865,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
+                password: None,
             })
             .unwrap_err();
         assert!(format!("{err:#}").contains("exactly one DNS SAN"));
@@ -874,6 +906,7 @@ mod tests {
                     &Subject::cn("h.example.com"),
                     &[SanEntry::Dns("h.example.com".into())],
                     2048,
+                    None,
                 )
                 .unwrap()
                 .csr_pem,
@@ -953,6 +986,7 @@ mod tests {
                 SanEntry::Ip("10.0.0.1".parse().unwrap()),
             ],
             2048,
+            None,
         )
         .unwrap();
         let summary = inspect_csr(&kr.csr_pem).unwrap();
@@ -983,6 +1017,7 @@ mod tests {
             &Subject::cn("alice.example.com"),
             &[SanEntry::Dns("alice.example.com".into())],
             2048,
+            None,
         )
         .unwrap();
         // Flip a byte in the middle of the PEM body — base64 changes
@@ -1000,10 +1035,48 @@ mod tests {
             &Subject::cn("host.example.com"),
             &[SanEntry::Dns("host.example.com".into())],
             2048,
+            None,
         )
         .unwrap();
         assert!(kr.private_key_pem.starts_with(b"-----BEGIN PRIVATE KEY-----"));
         assert!(kr.csr_pem.starts_with(b"-----BEGIN CERTIFICATE REQUEST-----"));
+        let req = X509Req::from_pem(&kr.csr_pem).unwrap();
+        let pubkey = req.public_key().unwrap();
+        assert!(req.verify(&pubkey).unwrap());
+    }
+
+    /// Round-trip an encrypted-leaf-key CSR: generating with
+    /// `password = Some(p)` must produce an ENCRYPTED PRIVATE KEY
+    /// PEM block, and parsing it back with the matching password
+    /// (via `parse_key_pem`) must succeed. The CSR signature is
+    /// independent of key encryption — verify both halves.
+    #[test]
+    fn generate_csr_with_password_encrypts_key() {
+        let kr = generate_csr(
+            &Subject::cn("host.example.com"),
+            &[SanEntry::Dns("host.example.com".into())],
+            2048,
+            Some("hunter2"),
+        )
+        .unwrap();
+        // PKCS#8 + AES marker — same shape `Ca::init` writes for
+        // an encrypted CA key.
+        assert!(
+            kr.private_key_pem.starts_with(b"-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+            "encrypted key PEM header missing: {:?}",
+            std::str::from_utf8(&kr.private_key_pem[..40]).unwrap_or("?"),
+        );
+        // Decrypt round-trip — the existing `parse_key_pem` is the
+        // same code path netidx::tls::load_private_key takes for
+        // encrypted keys at runtime, so this also exercises the
+        // wire-format compatibility.
+        assert!(parse_key_pem(&kr.private_key_pem, Some("hunter2")).is_ok());
+        // Wrong password fails.
+        assert!(parse_key_pem(&kr.private_key_pem, Some("nope")).is_err());
+        // No password fails with the "encrypted but no password" error.
+        let err = parse_key_pem(&kr.private_key_pem, None).unwrap_err();
+        assert!(format!("{err:#}").contains("encrypted"));
+        // CSR itself is still a valid CSR even with an encrypted key.
         let req = X509Req::from_pem(&kr.csr_pem).unwrap();
         let pubkey = req.public_key().unwrap();
         assert!(req.verify(&pubkey).unwrap());
@@ -1017,6 +1090,7 @@ mod tests {
             &Subject::cn("host.example.com"),
             &[SanEntry::Dns("host.example.com".into())],
             2048,
+            None,
         )
         .unwrap();
         let leaf_pem = ca
@@ -1061,6 +1135,7 @@ mod tests {
                 key_bits: 2048,
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
+                password: None,
             })
             .unwrap();
 
@@ -1102,6 +1177,7 @@ mod tests {
                     key_bits: 2048,
                     validity_days: 30,
                     out_dir: id_dir.path().to_path_buf(),
+                    password: None,
                 })
                 .unwrap();
             let leaf =

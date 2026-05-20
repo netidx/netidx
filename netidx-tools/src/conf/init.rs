@@ -101,18 +101,26 @@ struct TlsIdentityFlags {
     #[structopt(long = "tls-trusted")]
     trusted: Option<PathBuf>,
     /// Our SAN — drives the install subdirectory under
-    /// `~/.config/netidx/tls/<our-name>/`.
+    /// `~/.config/netidx/tls/<our-name>/`. Optional: defaults to
+    /// the DNS SAN inside `--tls-cert` so the on-disk name always
+    /// agrees with what netidx will see on the wire.
     #[structopt(long = "tls-our-name")]
     our_name: Option<String>,
     /// Server domain pattern this identity covers — the key in
     /// `tls.identities`. Closest reverse-domain match wins.
+    /// Optional: defaults to the *domain* part of `our_name` (e.g.
+    /// SAN `mazikeen.local` ⇒ key `local`), matching the
+    /// interactive cascade.
     #[structopt(long = "tls-server-pattern")]
     server_pattern: Option<String>,
 }
 
 impl TlsIdentityFlags {
-    /// Return `Some(spec)` if all five flags are populated, `None` if
-    /// none are, error if partially populated.
+    /// Return `Some(spec)` if any flag in this group is populated,
+    /// `None` if none are. Errors if a required flag is missing
+    /// once the group is "active" — but `--tls-our-name` and
+    /// `--tls-server-pattern` are derivable from the cert SAN, so
+    /// they're optional.
     fn to_spec(&self) -> Result<Option<TlsIdentitySpec>> {
         let any = self.cert.is_some()
             || self.key.is_some()
@@ -126,13 +134,41 @@ impl TlsIdentityFlags {
         let key = self.key.as_ref().context("--tls-key required")?.clone();
         let trusted =
             self.trusted.as_ref().context("--tls-trusted required")?.clone();
-        let our_name =
-            self.our_name.as_ref().context("--tls-our-name required")?.clone();
-        let server_pattern = self
-            .server_pattern
-            .as_ref()
-            .context("--tls-server-pattern required")?
-            .clone();
+        // Default `our_name` to the cert's DNS SAN — same trick the
+        // interactive cascade uses for BYO certs. Asking the
+        // operator to type the SAN that's already in the cert just
+        // lets them get it wrong; reading it is always correct.
+        let our_name = match &self.our_name {
+            Some(s) => s.clone(),
+            None => netidx_conf::tls::extract_dns_san_from_pem(&cert).with_context(
+                || {
+                    format!(
+                        "deriving --tls-our-name from {} — supply a cert with a \
+                         DNS SubjectAlternativeName entry, or pass \
+                         --tls-our-name explicitly",
+                        cert.display(),
+                    )
+                },
+            )?,
+        };
+        // Default `server_pattern` to the *domain* part of the SAN.
+        // netidx keys `tls.identities` by trust domain (one entry
+        // covers any host SAN under that domain via the
+        // reverse-domain prefix match), so the domain is almost
+        // always what the operator wants. Override with
+        // `--tls-server-pattern` if a more specific key is needed.
+        let server_pattern = match &self.server_pattern {
+            Some(s) => s.clone(),
+            None => netidx_conf::tls::domain_from_san(&our_name)
+                .with_context(|| {
+                    format!(
+                        "deriving --tls-server-pattern from SAN {our_name:?} — \
+                         supply a `<user>.<domain>` SAN, or pass \
+                         --tls-server-pattern explicitly",
+                    )
+                })?
+                .to_string(),
+        };
         Ok(Some(TlsIdentitySpec {
             server_pattern: ArcStr::from(server_pattern),
             our_name: ArcStr::from(our_name),
@@ -140,6 +176,11 @@ impl TlsIdentityFlags {
             private_key: key,
             trusted,
             dest_dir: None,
+            // CLI-flag path doesn't carry an askpass override.
+            // Operators driving the CLI non-interactively are
+            // expected to bring their own (unencrypted) key — or
+            // edit `tls.askpass` in the emitted config by hand.
+            askpass: None,
         }))
     }
 }
@@ -535,7 +576,7 @@ fn prompt_parent_referral(
                 prompt::required_string("parent TLS server name", None)?;
             // identity is required for TLS — either bring one or
             // (the generate path diverges via `bail!`)
-            let ident = prompt_parent_tls_identity(&server_name)?;
+            let ident = prompt_tls_client_identity()?;
             (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(ident))
         }
     };
@@ -549,14 +590,25 @@ fn prompt_parent_referral(
     )))
 }
 
-/// TLS sub-cascade for the parent prompt. Returns the identity to
-/// install + reference from the client config. For the "generate"
-/// path this generates a key + CSR, prints instructions, then waits
-/// for the operator to confirm they've placed the signed cert and
-/// trusted-CA bundle at the canonical install location — only then
-/// does the install proceed, so by the time the activation server
-/// starts the cert files are guaranteed to be on disk.
-fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpec> {
+/// Interactive cascade for a client-side TLS identity: a cert/key
+/// pair the operator will use to authenticate to *some* upstream
+/// server. Used by both the workstation parent-referral flow and
+/// the publisher template — they both need exactly the same
+/// "bring a cert or generate a CSR" prompt and produce a
+/// `TlsIdentitySpec` that goes into `client.tls.identities`.
+///
+/// For the "generate" path: writes a key + CSR locally, prints
+/// instructions, then waits for the operator to confirm they've
+/// placed the signed cert and trusted-CA bundle at the canonical
+/// install location — only then does the install proceed, so by
+/// the time the daemon starts the cert files are guaranteed to be
+/// on disk. Local-CA-issue is deliberately *not* offered: in this
+/// flow the upstream is a different trust domain (the parent
+/// resolver, or whoever the publisher talks to), and the local
+/// CA's certs wouldn't be trusted there. Operators wanting to use
+/// their local CA can run `netidx conf ca issue` and then point
+/// `--tls-cert / --tls-key / --tls-trusted` at the result.
+fn prompt_tls_client_identity() -> Result<TlsIdentitySpec> {
     // On unix the operator can choose 'generate' and we'll make a
     // key + CSR for them via the openssl-backed `ca` module. On
     // non-unix that module isn't available, so the prompt only
@@ -575,7 +627,7 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
     let is_generate = cert_choice == "generate";
     #[cfg(not(unix))]
     let is_generate = false;
-    let (our_name, certificate, private_key, trusted) = if is_generate {
+    let (our_name, certificate, private_key, trusted, askpass) = if is_generate {
         #[cfg(unix)]
         {
             generate_and_wait_for_parent_cert()?
@@ -612,7 +664,16 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
                     certificate.display()
                 )
             })?;
-        (our_name, certificate, private_key, trusted)
+        // BYO-cert path: the key already exists, we don't touch its
+        // encryption. The operator is responsible for placing the
+        // password into the system keychain (or attaching an
+        // askpass) if they brought an encrypted key. We don't
+        // prompt for an askpass here because we don't know whether
+        // the key is encrypted at all — guessing wrong would either
+        // bury an extraneous `askpass` line in the config or skip a
+        // needed one. Operators with encrypted external keys can
+        // edit `tls.askpass` after install.
+        (our_name, certificate, private_key, trusted, None)
     };
     // Key the entry in `tls.identities` by the *domain* part of our
     // SAN, not the full SAN. netidx's convention is
@@ -624,7 +685,6 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
     // domain is what operators actually want. `our_name` (the
     // install dir name) stays as the full SAN so multiple hosts'
     // certs don't clobber each other on disk.
-    let _ = parent_server_name; // intentionally unused — see comment above
     let server_pattern = netidx_conf::tls::domain_from_san(our_name.as_str())
         .with_context(|| {
             format!(
@@ -645,6 +705,7 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
         // and writing it back — a no-op-ish round-trip. For the
         // explicit-path case it's a real copy as before.
         dest_dir: None,
+        askpass,
     })
 }
 
@@ -667,20 +728,186 @@ fn prompt_parent_tls_identity(parent_server_name: &str) -> Result<TlsIdentitySpe
 /// directly.
 #[cfg(unix)]
 fn generate_and_wait_for_parent_cert(
-) -> Result<(String, PathBuf, PathBuf, PathBuf)> {
+) -> Result<(String, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     let our_name = prompt::required_string(
         "your TLS identity name (CN for the CSR; cert SAN)",
         None,
     )?;
-    let dest_dir = tls::identity_dir(&our_name)?;
+    let (cert_path, key_path, trusted_path, askpass) =
+        generate_csr_and_wait_for_cert(&our_name)?;
+    Ok((our_name, cert_path, key_path, trusted_path, askpass))
+}
+
+/// Walk the canonical places askpass programs live and return the
+/// first one we find. Used as the level-1 default for the
+/// "askpass program" prompt that fires when the operator chooses
+/// to encrypt a private key. Order is:
+///
+/// 1. `$SSH_ASKPASS` if set and pointing at a real file.
+/// 2. PATH lookups for the common command names.
+/// 3. Known absolute paths from the major distros.
+///
+/// Returns `None` if nothing matched — the prompt then falls back
+/// to "no default" so the operator must type a path explicitly (or
+/// hit Enter to leave askpass unset).
+#[cfg(unix)]
+fn find_askpass() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+            .unwrap_or(false)
+    };
+    // 1. SSH_ASKPASS — the OS-standard way to point at one. If the
+    //    operator set this, respect it before searching.
+    if let Some(p) = std::env::var_os("SSH_ASKPASS") {
+        let p = PathBuf::from(p);
+        if executable(&p) {
+            return Some(p);
+        }
+    }
+    // 2. PATH lookup. ssh-askpass is the de-facto name; the Gnome
+    //    and KDE wrappers ship variants under their own names.
+    const PATH_NAMES: &[&str] =
+        &["ssh-askpass", "ksshaskpass", "ssh-askpass-gnome", "ssh-askpass-fullscreen"];
+    if let Some(path_env) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_env) {
+            for name in PATH_NAMES {
+                let p = dir.join(name);
+                if executable(&p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    // 3. Common absolute install paths. Most distros tuck their
+    //    askpass into `libexec` rather than on PATH (so they don't
+    //    accidentally shadow other tools), which the PATH search
+    //    above misses by design.
+    const ABS_PATHS: &[&str] = &[
+        "/usr/libexec/openssh/x11-ssh-askpass",
+        "/usr/libexec/openssh/gnome-ssh-askpass",
+        "/usr/libexec/openssh/gnome-ssh-askpass3",
+        "/usr/libexec/openssh/ssh-askpass",
+        "/usr/libexec/ssh-askpass",
+        "/usr/lib/openssh/ssh-askpass",
+        "/usr/lib/openssh/gnome-ssh-askpass3",
+        "/usr/lib/ssh/ssh-askpass",
+    ];
+    for p in ABS_PATHS {
+        let p = PathBuf::from(p);
+        if executable(&p) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Prompt for a private-key password, and if one is given, for an
+/// askpass program with [`find_askpass`]'s discovery result as the
+/// level-1 default. Returns `(Some(password), Some(askpass))` if
+/// the operator chose encryption, `(None, None)` if they didn't
+/// (blank password, no TTY, etc.).
+///
+/// `key_path` is the canonical on-disk location the encrypted key
+/// will eventually live at. When a password is collected, this
+/// function *also* writes it into the system keychain under
+/// `("netidx", key_path)` — that's where `netidx::tls::load_private_key`
+/// looks first at startup. Pre-populating the keychain lets the
+/// resolver server (which has no `askpass` field in its
+/// per-member-server `Auth::Tls` schema) still decrypt its own
+/// key without operator intervention. The `askpass` we return is
+/// for the client-side `cfile::Tls.askpass` fallback, in case the
+/// keychain entry is missing or the keyring isn't unlocked.
+#[cfg(unix)]
+fn collect_key_password_and_askpass(
+    key_path: &Path,
+) -> Result<(Option<String>, Option<PathBuf>)> {
+    // Skip everything on non-interactive runs. Scripted installs
+    // shouldn't hang at an rpassword prompt, and they have no
+    // realistic way to feed in a password anyway.
+    if !std::io::stdin().is_terminal() {
+        return Ok((None, None));
+    }
+    let pw = rpassword::prompt_password(
+        "private key password (blank for no encryption): ",
+    )?;
+    if pw.is_empty() {
+        return Ok((None, None));
+    }
+    let again = rpassword::prompt_password("private key password (again): ")?;
+    if again != pw {
+        bail!("passwords did not match");
+    }
+    // Search for an askpass program and prompt the operator to
+    // confirm or override it. A blank answer takes the default; an
+    // operator who explicitly wants no askpass can type an empty
+    // string when the default is itself empty.
+    let discovered = find_askpass();
+    let default = discovered
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let answer = prompt::string_with_default(
+        "askpass program (used to ask for the key password at startup)",
+        None,
+        &default,
+    )?;
+    let askpass = if answer.is_empty() { None } else { Some(PathBuf::from(answer)) };
+    // Save into the system keychain so the resolver server can
+    // decrypt its key without an askpass at startup. Failure here
+    // isn't fatal — the keychain might be locked, sandboxed, or
+    // missing entirely, and the askpass fallback still lets the
+    // client config work. We log and continue.
+    if let Err(e) = netidx::tls::save_password_for_key(
+        &key_path.to_string_lossy(),
+        &pw,
+    ) {
+        eprintln!(
+            "warning: failed to save key password to the system keychain ({e:#}); \
+             the resolver may need an askpass at startup. \
+             Re-run with the keychain unlocked, or pre-populate the entry manually.",
+        );
+    }
+    Ok((Some(pw), askpass))
+}
+
+/// Generate a private key + CSR for `name`, write the key to the
+/// canonical identity dir and the CSR to CWD, print operator
+/// next-steps, then block until both the signed cert and the
+/// trusted-CA bundle appear at their expected paths. Returns
+/// `(cert_path, key_path, trusted_path, askpass_path)`.
+///
+/// Shared by the two "no local CA available, BYO the cert" flows:
+/// the parent referral path (operator's resolver attaches to an
+/// upstream that signs the parent's cert), and the resolver TLS
+/// path when the operator declines to create a local CA. Both end
+/// up in the same place: a generated key + CSR locally, a
+/// "drop the signed cert here when ready" wait, and an
+/// `AuthChoice::Tls` (or `TlsIdentitySpec`) pointing at the
+/// canonical install paths.
+///
+/// If the operator picks a password at the prompt, the key is
+/// written as encrypted PKCS#8 and the askpass program they chose
+/// (defaulting to whatever [`find_askpass`] discovers) is returned
+/// so the caller can plumb it into the emitted client config.
+///
+/// The CSR itself lands in the *current working directory* as
+/// `./<name>.csr` (matching `netidx conf ca request`), not in the
+/// identity dir — the operator hands it off to a CA admin, so it
+/// needs to be where they'll naturally look for it.
+#[cfg(unix)]
+fn generate_csr_and_wait_for_cert(
+    name: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
+    let dest_dir = tls::identity_dir(name)?;
     std::fs::create_dir_all(&dest_dir).with_context(|| {
         format!("creating identity dir {}", dest_dir.display())
     })?;
     let key_path = dest_dir.join("private.key");
     let cert_path = dest_dir.join("certificate.pem");
     let trusted_path = dest_dir.join("trusted.pem");
-    // CSR lives in CWD — same convention as `netidx conf ca request`.
-    let csr_path = super::ca::default_csr_filename(&our_name);
+    let csr_path = super::ca::default_csr_filename(name);
 
     if key_path.exists() {
         bail!(
@@ -690,10 +917,12 @@ fn generate_and_wait_for_parent_cert(
             key_path.display(),
         );
     }
+    let (password, askpass) = collect_key_password_and_askpass(&key_path)?;
     let kr = netidx_conf::ca::generate_csr(
-        &netidx_conf::ca::Subject::cn(our_name.clone()),
-        &[netidx_conf::ca::SanEntry::Dns(our_name.clone())],
+        &netidx_conf::ca::Subject::cn(name.to_string()),
+        &[netidx_conf::ca::SanEntry::Dns(name.to_string())],
         2048,
+        password.as_deref(),
     )
     .context("generating private key + CSR")?;
     netidx_conf::atomic::write_atomic(&key_path, &kr.private_key_pem, 0o600)
@@ -702,21 +931,24 @@ fn generate_and_wait_for_parent_cert(
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
 
     println!();
-    println!("Generated TLS identity '{}':", our_name);
+    println!("Generated TLS identity '{}':", name);
     println!("  private key (0600): {}", key_path.display());
     println!("  CSR         (0644): {}", csr_path.display());
+    if password.is_some() {
+        println!("  private key is encrypted; password saved to the system keychain.");
+    }
     println!();
     println!("Next steps:");
     println!("  1. Send {} to your CA admin to sign.", csr_path.display());
     println!("  2. Place the signed certificate at:");
     println!("       {}", cert_path.display());
-    println!("  3. Place the trusted-CA bundle (the cert that signs the parent's");
-    println!("     cert; usually the upstream CA's certificate.pem) at:");
+    println!("  3. Place the trusted-CA bundle (the cert that signs the");
+    println!("     signing CA's cert chain) at:");
     println!("       {}", trusted_path.display());
     println!();
 
     wait_for_cert_files(&cert_path, &trusted_path)?;
-    Ok((our_name, cert_path, key_path, trusted_path))
+    Ok((cert_path, key_path, trusted_path, askpass))
 }
 
 /// Loop until `cert_path` and `trusted_path` both exist and parse as
@@ -1291,6 +1523,12 @@ fn resolver_tls_auth(f: &ResolverFlags) -> Result<AuthChoice> {
             "path to the trusted CA bundle",
             f.tls_trusted.clone(),
         )?,
+        // BYO-cert path: the key already exists. We don't know
+        // whether it's encrypted, and guessing wrong either buries
+        // an extraneous askpass in the config or skips a needed
+        // one — same trade-off as the parent-referral BYO branch.
+        // Operators can edit `tls.askpass` post-install.
+        askpass: None,
     })
 }
 
@@ -1332,15 +1570,25 @@ fn resolver_tls_generate(
             certificate: identity_dir.join("certificate.pem"),
             private_key: identity_dir.join("private.key"),
             trusted: ca_cert,
+            askpass: None,
         });
     }
 
+    // Resolve the CA (open existing, create new, or fall through to
+    // BYO-CSR) before collecting the password — that way an operator
+    // who abandons CA creation doesn't have to type a password they
+    // won't end up using. The BYO-CSR branch collects its own
+    // password inside `generate_csr_and_wait_for_cert`.
     let ca = if ca::default_ca_present() {
         println!("issuing from the local CA at {}", ca_dir.display());
         ca::open_default_ca()?
     } else {
-        // No CA — offer to create one. Declining drops back to the
-        // bring-your-own-cert path.
+        // No CA — offer to create one. Declining falls through to
+        // the same "generate a key + CSR locally and wait for the
+        // operator to drop in a signed cert" flow the parent-cert
+        // prompt uses for the same situation: the operator has
+        // their own CA (corporate PKI, etc.) and wants to take the
+        // CSR there rather than spinning up a local one.
         if !prompt::confirm(
             &format!(
                 "no CA found at {} — create a new local CA now?",
@@ -1348,26 +1596,43 @@ fn resolver_tls_generate(
             ),
             true,
         )? {
-            bail!(
-                "cannot generate a resolver certificate without a CA; re-run \
-                 with explicit --tls-cert/--tls-key/--tls-trusted, or create a \
-                 CA first with `netidx conf ca init`"
-            );
+            let (certificate, private_key, trusted, askpass) =
+                generate_csr_and_wait_for_cert(name)?;
+            return Ok(AuthChoice::Tls {
+                name: ArcStr::from(name),
+                certificate,
+                private_key,
+                trusted,
+                askpass,
+            });
         }
         ca::create_default_ca()?
     };
+    // Local-CA-issue path: prompt for an optional leaf-key password
+    // (and an askpass program if one is given). The password is saved
+    // to the system keychain alongside the canonical key path so the
+    // resolver server can decrypt at startup without needing askpass
+    // wiring (the rfile::Auth::Tls schema has none); the askpass goes
+    // into the emitted client config as the fallback if the keychain
+    // entry is ever missing.
+    let key_path = identity_dir.join("private.key");
+    let (password, askpass) = collect_key_password_and_askpass(&key_path)?;
     println!("issuing resolver certificate '{name}' (this may take a moment)...");
-    let issued = ca::issue_identity(&ca, name)?;
+    let issued = ca::issue_identity(&ca, name, password.as_deref())?;
     println!("issued resolver certificate:");
     println!("  name:        {name}");
     println!("  certificate: {}", issued.certificate.display());
     println!("  private key: {}", issued.private_key.display());
     println!("  trusted CA:  {}", ca_cert.display());
+    if password.is_some() {
+        println!("  private key is encrypted; password saved to the system keychain.");
+    }
     Ok(AuthChoice::Tls {
         name: ArcStr::from(name),
         certificate: issued.certificate,
         private_key: issued.private_key,
         trusted: ca_cert,
+        askpass,
     })
 }
 
@@ -1432,6 +1697,15 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     let mut tls_identities = vec![];
     if let Some(spec) = f.tls.to_spec()? {
         tls_identities.push(spec);
+    } else if matches!(f.auth, Some(AuthKind::Tls)) {
+        // Interactive TLS path: `--auth tls` without `--tls-cert`
+        // (etc.) used to dead-end at the template's
+        // "default_auth=Tls requires at least one tls_identity"
+        // check. Mirror the workstation/resolver UX instead — walk
+        // the operator through a cert-or-generate cascade so they
+        // can either point at an existing cert or get a key+CSR
+        // produced on the spot.
+        tls_identities.push(prompt_tls_client_identity()?);
     }
     let default_auth = f.default_auth.map(|k| k.default_mech());
     // Level-1 prompt: same loopback-mixing pitfall as the resolver

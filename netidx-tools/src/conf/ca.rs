@@ -230,6 +230,13 @@ fn issue(p: IssueArgs) -> Result<()> {
         key_bits: p.key_bits,
         validity_days: p.validity_days,
         out_dir,
+        // Leaf key encryption is wired through the install flow
+        // (`netidx conf init`), where the engine knows how to plumb
+        // an askpass entry into the emitted client config. The bare
+        // `ca issue` CLI deliberately stays unencrypted: callers
+        // here are doing manual cert issuance and don't necessarily
+        // have a netidx config to receive the askpass.
+        password: None,
     })?;
     println!("issued cert:");
     println!("  cn:          {}", cn);
@@ -273,6 +280,11 @@ fn request(p: RequestArgs) -> Result<()> {
         },
         &san,
         p.key_bits,
+        // Bare `ca request` CLI doesn't encrypt the key — same
+        // rationale as the `ca issue` CLI: encrypted leaf keys are
+        // wired through `netidx conf init`, which knows how to set
+        // the matching `tls.askpass` in the emitted config.
+        None,
     )?;
     atomic::write_atomic(&out_key, &kr.private_key_pem, 0o600)
         .with_context(|| format!("writing private key to {:?}", out_key))?;
@@ -637,9 +649,19 @@ pub(super) fn create_default_ca() -> Result<Ca> {
 /// Issue an identity (CN = SAN-DNS = `name`) from `ca`, into the
 /// canonical `${user_tls_dir}/<name>/` directory. Returns the issued
 /// file paths.
-pub(super) fn issue_identity(ca: &Ca, name: &str) -> Result<IssuedFiles> {
+///
+/// `password = Some(p)` encrypts the on-disk private key with `p`
+/// (PKCS#8 + AES-256-CBC). `None` writes an unencrypted key.
+/// Encrypted-key callers in the install flow also wire an
+/// `askpass` entry into the emitted client config so netidx can
+/// decrypt the key at startup.
+pub(super) fn issue_identity(
+    ca: &Ca,
+    name: &str,
+    password: Option<&str>,
+) -> Result<IssuedFiles> {
     let out_dir = tls::identity_dir(name)?;
-    issue_identity_into(ca, name, out_dir, ca::DEFAULT_KEY_BITS)
+    issue_identity_into(ca, name, out_dir, ca::DEFAULT_KEY_BITS, password)
 }
 
 /// Inner form of [`issue_identity`] with the destination directory
@@ -650,6 +672,7 @@ fn issue_identity_into(
     name: &str,
     out_dir: PathBuf,
     key_bits: u32,
+    password: Option<&str>,
 ) -> Result<IssuedFiles> {
     ca.issue(&IssueParams {
         subject: Subject::cn(name),
@@ -659,6 +682,7 @@ fn issue_identity_into(
         key_bits,
         validity_days: ca::DEFAULT_LEAF_VALIDITY_DAYS,
         out_dir,
+        password: password.map(|s| s.to_string()),
     })
     .with_context(|| format!("issuing certificate for {name}"))
 }
@@ -901,6 +925,7 @@ mod tests {
             &Subject::cn("no-san"),
             &[],
             2048,
+            None,
         )
         .unwrap();
         let csr_path = scratch.path().join("no-san.csr");
@@ -1035,6 +1060,7 @@ mod tests {
             "resolver.example.com",
             out.path().to_path_buf(),
             2048,
+            None,
         )
         .unwrap();
         assert!(issued.certificate.exists());
