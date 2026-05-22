@@ -115,12 +115,35 @@ async fn run_signal_loop(
                 (None, Vec::new(), Vec::new())
             }
         };
+    // Gate on this rather than just on the channel state: when the
+    // watcher fails to start, `events_tx` was already dropped inside
+    // `start_watcher_for` and `events_rx.recv()` would return `None`
+    // immediately — the same path codex flagged as a daemon-kill,
+    // just at startup. Initialising from `watcher_opt.is_some()`
+    // covers both that case and post-start watcher death uniformly.
+    // XCR codex for eestokes: channel closure (start-time or
+    // post-start) now disables the file-watch select arm and logs;
+    // the loop keeps serving SIGHUP-driven reloads.
+    let mut watcher_alive = watcher_opt.is_some();
 
     loop {
         let trigger = tokio::select! {
             _ = sighup.recv() => Some("SIGHUP"),
-            batch = events_rx.recv() => match batch {
-                None => None,
+            batch = events_rx.recv(), if watcher_alive => match batch {
+                None => {
+                    // The watcher task / channel died. File-change
+                    // reloads are off from here on; SIGHUP still works.
+                    // Disabling the select arm via `watcher_alive`
+                    // avoids the busy-loop that would otherwise come
+                    // from `recv()` returning `None` immediately for
+                    // every subsequent poll on a closed receiver.
+                    warn!(
+                        "resolver: file watcher channel closed; \
+                         continuing with SIGHUP-only reload"
+                    );
+                    watcher_alive = false;
+                    continue;
+                }
                 Some(b) if is_established_only(&b) => continue,
                 Some(_) => Some("file change"),
             },
@@ -134,7 +157,13 @@ async fn run_signal_loop(
                 // so newly-included files are observed (and removed
                 // ones stop firing). Re-watching the main config is
                 // a no-op idempotent — extended-notify de-dupes.
-                if let Some(w) = watcher_opt.as_ref()
+                // Also gate on `watcher_alive`: if the watcher
+                // channel closed post-start, the underlying watch
+                // task is gone and adding paths to its `Watcher`
+                // handle would silently do nothing — better to skip
+                // the rebuild entirely until the operator restarts.
+                if watcher_alive
+                    && let Some(w) = watcher_opt.as_ref()
                     && new_file.include_permissions != included_paths
                 {
                     info!(

@@ -468,8 +468,27 @@ impl Connection {
             time::timeout(timeout, c.receive_batch(&mut *rx_batch)).await??
         }
         for ((_, tx), rx) in tx.batch.iter().zip(rx_batch.iter()) {
+            // Mirror the response-classification `republish()` uses
+            // for all four publish variants — `Referral` is a
+            // successful outcome (the ResolverWrap layer follows it
+            // and publishes on the child), `Published` is the
+            // direct-success case, anything else is a real failure
+            // that should flip us into the degraded-state retry path.
+            // Before this fix only plain `Publish` was checked, so a
+            // `PublishDefault` / `PublishWithFlags` /
+            // `PublishDefaultWithFlags` that came back as e.g. Error
+            // would silently leave `degraded = false`, and the
+            // publisher would think the operation succeeded until the
+            // next TTL-driven republish surfaced the mismatch.
+            // XCR codex for eestokes: extended the match to cover
+            // all four publish variants; Unpublish/Clear response
+            // handling on this path is out-of-scope for this CR-
+            // response pass (see PR description).
             match tx {
-                ToWrite::Publish(_) => match rx {
+                ToWrite::Publish(_)
+                | ToWrite::PublishDefault(_)
+                | ToWrite::PublishWithFlags(_, _)
+                | ToWrite::PublishDefaultWithFlags(_, _) => match rx {
                     FromWrite::Published | FromWrite::Referral(_) => (),
                     _ => {
                         self.degraded = true;

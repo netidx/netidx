@@ -74,6 +74,17 @@ pub struct ServiceParams {
     /// Service / unit name. Defaults to `"netidx"`; overrideable so
     /// operators running multiple netidx setups on one host (a
     /// development scenario) can install distinct services.
+    ///
+    /// Validated by [`ensure_valid_service_name`] from every install /
+    /// uninstall / status entry point — path separators, `.`/`..`,
+    /// systemd specifier `%`, and the five XML entity bytes are all
+    /// rejected before any code that interpolates this value into a
+    /// filename or plist body runs.
+    // XCR codex for eestokes: added ensure_valid_service_name and
+    // wired it into the systemd/launchd entry points (mod.rs:189,
+    // launchd.rs:install/uninstall/status, systemd.rs:install/
+    // uninstall/status). XML and systemd escaping live in
+    // launchd::render_plist / systemd::render_unit respectively.
     pub service_name: String,
     /// Override the activation directory the supervisor reads its
     /// unit files from. `None` ⇒ the activation supervisor's own
@@ -163,4 +174,209 @@ pub fn uninstall(_p: &ServiceParams) -> Result<()> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn status(_p: &ServiceParams) -> Result<ServiceStatus> {
     Ok(ServiceStatus::NotInstalled)
+}
+
+// ---- shared helpers --------------------------------------------------------
+
+/// Reject service names that would compromise the renderers below.
+/// `service_name` ends up in the systemd unit filename (`<name>.service`
+/// or `<name>@.service`) and the launchd plist label
+/// (`com.netidx.<name>`). A system-scope install runs as root, so an
+/// unvalidated name is a directory-traversal / XML-injection foothold.
+///
+/// Reuses the shape from [`crate::tls::ensure_valid_cn`] and
+/// `crate::activation::ensure_valid_basename`, plus the extra characters
+/// codex flagged (systemd specifier `%`, XML entity bytes).
+// XCR codex for eestokes: added this validator; called from every
+// install / uninstall / status entry point on every supported
+// platform.
+fn ensure_valid_service_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("service_name must not be empty");
+    }
+    if name == "." || name == ".." {
+        anyhow::bail!("service_name must not be a relative-dir marker");
+    }
+    if name.contains('/') || name.contains('\\') {
+        anyhow::bail!(
+            "service_name may not contain path separators: {name:?}"
+        );
+    }
+    // `%` is the systemd specifier-escape prefix (e.g. `%i`). `&<>'"`
+    // need entity-escaping inside XML, which launchd would otherwise
+    // see and reject. Whitespace is rejected because both backends
+    // splice the name into single-token contexts (filename, label).
+    for c in name.chars() {
+        if matches!(c, '%' | '&' | '<' | '>' | '\'' | '"')
+            || c.is_whitespace()
+        {
+            anyhow::bail!(
+                "service_name contains reserved character {c:?}: {name:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// XML-escape the five entity-reference characters. Used by the
+/// launchd plist renderer to safely interpolate operator-supplied
+/// paths into `<string>...</string>` content; without this a path
+/// like `~/bin/foo & bar/netidx` produces invalid XML and
+/// `launchctl bootstrap` rejects the plist outright.
+// XCR codex for eestokes: added xml_escape; render_plist now wraps
+// every interpolated value with it.
+//
+// `xml_escape` is only consumed by the launchd backend (macOS) plus
+// the unit tests below. The `cfg_attr` keeps the unused-fn warning
+// off on non-mac builds while still letting the test module link to
+// it under `cfg(test)`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Quote an argument for systemd's `ExecStart=` token list. systemd
+/// parses ExecStart as a whitespace-split sequence of tokens with
+/// double-quote support and treats `%` as a specifier prefix
+/// regardless of quoting. Both rules need to hold for any path
+/// containing spaces or `%`, which is realistic for `current_exe()`
+/// on macOS / WSL / `~/Documents/...` installs.
+///
+/// Rules (cross-checked against `man systemd.service`):
+/// - `%` always doubled to `%%` to escape the specifier syntax.
+/// - If the resulting string contains any whitespace or quoting
+///   metacharacter (`"`, `'`, `\`, `;`, `\n`), wrap the whole arg in
+///   `"..."` and backslash-escape `"` and `\` inside the quotes.
+// XCR codex for eestokes: added systemd_quote_exec_arg; render_unit
+// now feeds the exe + activation_dir through it instead of raw
+// `to_string_lossy`.
+fn systemd_quote_exec_arg(s: &str) -> String {
+    let percent_escaped: String = s
+        .chars()
+        .flat_map(|c| {
+            if c == '%' {
+                vec!['%', '%']
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    let needs_quoting = percent_escaped.chars().any(|c| {
+        c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ';')
+    });
+    if !needs_quoting {
+        return percent_escaped;
+    }
+    let mut out = String::with_capacity(percent_escaped.len() + 2);
+    out.push('"');
+    for c in percent_escaped.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_valid_service_name_accepts_typical_names() {
+        for ok in ["netidx", "netidx-dev", "netidx_alt", "netidx2"] {
+            assert!(
+                ensure_valid_service_name(ok).is_ok(),
+                "should accept {ok:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_valid_service_name_rejects_dangerous_input() {
+        // Path traversal — would let a root install write outside
+        // /etc/systemd/system or /Library/LaunchDaemons.
+        for bad in ["", ".", "..", "a/b", "a\\b", "../../etc/passwd"] {
+            assert!(
+                ensure_valid_service_name(bad).is_err(),
+                "should reject {bad:?}",
+            );
+        }
+        // systemd specifier + XML entities + whitespace — the
+        // injection vectors codex pointed at for the two renderers.
+        for bad in ["%i", "n&e", "n<e", "n>e", "n'e", "n\"e", "n e", "n\te"] {
+            assert!(
+                ensure_valid_service_name(bad).is_err(),
+                "should reject {bad:?}",
+            );
+        }
+        // `.` in the middle is also rejected via the "is just `.`"
+        // check above only matching exact `.` / `..` — confirm the
+        // permissive case still works.
+        assert!(
+            ensure_valid_service_name("mycompany-netidx").is_ok(),
+            "hyphenated names are valid",
+        );
+    }
+
+    #[test]
+    fn xml_escape_converts_the_five_entities() {
+        assert_eq!(
+            xml_escape("a & b < c > d \" e ' f"),
+            "a &amp; b &lt; c &gt; d &quot; e &apos; f",
+        );
+        // Idempotency / round-trip safety on ASCII strings.
+        assert_eq!(xml_escape("/usr/bin/netidx"), "/usr/bin/netidx");
+        // Empty in, empty out.
+        assert_eq!(xml_escape(""), "");
+    }
+
+    #[test]
+    fn systemd_quote_exec_arg_handles_plain_paths() {
+        // Bare path: passes through unchanged.
+        assert_eq!(systemd_quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
+    }
+
+    #[test]
+    fn systemd_quote_exec_arg_doubles_percent() {
+        // `%` is a systemd specifier prefix — always escaped,
+        // regardless of whether quoting kicks in.
+        assert_eq!(systemd_quote_exec_arg("a%b"), "a%%b");
+        // Combined with quoting.
+        assert_eq!(
+            systemd_quote_exec_arg("a % b"),
+            "\"a %% b\"",
+        );
+    }
+
+    #[test]
+    fn systemd_quote_exec_arg_quotes_spaces() {
+        assert_eq!(
+            systemd_quote_exec_arg("/home/user with space/netidx"),
+            "\"/home/user with space/netidx\"",
+        );
+    }
+
+    #[test]
+    fn systemd_quote_exec_arg_escapes_quotes_and_backslashes() {
+        assert_eq!(systemd_quote_exec_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(systemd_quote_exec_arg("a\\b"), "\"a\\\\b\"");
+        // Even without spaces, a `"` or `\` triggers quoting because
+        // those would otherwise need their own escape outside quotes.
+    }
 }

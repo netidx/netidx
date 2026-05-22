@@ -215,10 +215,40 @@ impl Server {
         })
     }
 
-    /// Block until the listener exits (e.g. after `drop`). Mostly
-    /// useful in tests; production use just runs the daemon forever.
-    pub async fn join(mut self) -> Result<()> {
-        if let Some(h) = self.join.take() {
+    /// Signal shutdown and block until the listener exits. The
+    /// previous `join`-by-self API deadlocked on a live server
+    /// because `self` still owned `_stop` while awaiting the listener
+    /// task — the `oneshot::Receiver` in `run_loop` would never fire,
+    /// so the task would never exit. This method destructures `Self`
+    /// up front so `_stop` (and the watcher handles) drop *before* we
+    /// start awaiting the listener.
+    ///
+    /// The only other way to stop the daemon is dropping the `Server`
+    /// (same drop order via the struct's implicit `Drop`, just without
+    /// the await). Both paths produce the same shutdown sequence; this
+    /// one additionally lets the caller observe the listener-task
+    /// result.
+    // XCR codex for eestokes: renamed from `join` to
+    // `shutdown_and_join`, destructured `self` so `_stop` drops
+    // before awaiting the task handle.
+    pub async fn shutdown_and_join(self) -> Result<()> {
+        // Exhaustive destructure — adding a new field to `Server`
+        // forces this site to declare what its drop order should be,
+        // rather than silently letting it ride along on the implicit
+        // end-of-function drop (which is what caused the original
+        // deadlock).
+        let Self {
+            _stop,
+            mut join,
+            _watcher,
+            _watched,
+            map: _,
+            config_path: _,
+        } = self;
+        drop(_stop);
+        drop(_watcher);
+        drop(_watched);
+        if let Some(h) = join.take() {
             h.await.context("id-map listener task panicked")?;
         }
         Ok(())
@@ -772,5 +802,34 @@ mod tests {
         })
         .await;
         assert!(r.is_err());
+    }
+
+    /// `shutdown_and_join` on a live server must terminate the
+    /// listener task and return — *not* hang waiting for a `_stop`
+    /// signal that can only fire after `self` is fully dropped. This
+    /// is the regression guard for the original `join`-by-self
+    /// deadlock that codex flagged. Without the destructure +
+    /// explicit drop, this test would never return.
+    #[tokio::test]
+    async fn shutdown_and_join_returns_on_live_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_sample(&cfg_path);
+        let server = Server::start(ServerParams {
+            socket: sock_path,
+            socket_mode: 0o600,
+            config: cfg_path,
+        })
+        .await
+        .unwrap();
+        // Tight timeout: a working shutdown is essentially instant;
+        // 1s is plenty of headroom for slow CI. The bug being
+        // regressed would manifest as an indefinite hang, so the
+        // exact value just bounds the diagnostic latency.
+        tokio::time::timeout(Duration::from_secs(1), server.shutdown_and_join())
+            .await
+            .expect("shutdown_and_join hung — regression of the _stop drop-order bug")
+            .expect("listener task returned an error");
     }
 }

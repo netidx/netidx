@@ -6,7 +6,10 @@
 //! out — there's no Rust crate worth pulling in for the small number
 //! of `systemctl` commands we need.
 
-use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
+use super::{
+    InstalledService, ServiceParams, ServiceScope, ServiceStatus,
+    ensure_valid_service_name, systemd_quote_exec_arg,
+};
 use anyhow::{Context, Result};
 use std::{
     path::PathBuf,
@@ -21,14 +24,23 @@ use std::{
 /// instantiated per service-user; the operator enables
 /// `netidx@<user>.service`.
 pub(super) fn render_unit(p: &ServiceParams) -> String {
-    let exe = p.binary.to_string_lossy();
+    // Pipe both paths through `systemd_quote_exec_arg` so spaces in
+    // `current_exe()` (common on macOS and corporate Linux installs
+    // under `~/Documents/...`) and stray `%` chars (a systemd
+    // specifier prefix that would otherwise be interpreted) don't
+    // produce a broken ExecStart line. systemd parses ExecStart as
+    // a whitespace-split token list with double-quote support, so
+    // wrapping in `"..."` plus `%`-doubling is exactly the
+    // contract the helper implements.
+    // XCR codex for eestokes: exe and activation_dir now go through
+    // the systemd-quote helper instead of raw `to_string_lossy`.
+    let exe = systemd_quote_exec_arg(&p.binary.to_string_lossy());
     let mut exec_start = format!("{exe} activation -f");
     if let Some(dir) = &p.activation_dir {
         // `netidx activation` takes the unit directory via `--units`.
-        // Quote nothing — the dir path is one token; systemd parses
-        // ExecStart as a shell-like list but doesn't run a shell.
         exec_start.push_str(" --units ");
-        exec_start.push_str(&dir.to_string_lossy());
+        exec_start
+            .push_str(&systemd_quote_exec_arg(&dir.to_string_lossy()));
     }
     match p.scope {
         ServiceScope::User => format!(
@@ -100,6 +112,7 @@ fn service_id(p: &ServiceParams, for_user: &str) -> String {
 }
 
 pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
+    ensure_valid_service_name(&p.service_name)?;
     let path = unit_path(p)?;
     let body = render_unit(p);
     if let Some(parent) = path.parent() {
@@ -120,6 +133,7 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
 }
 
 pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
+    ensure_valid_service_name(&p.service_name)?;
     let for_user = resolve_for_user(p)?;
     let id = service_id(p, &for_user);
     let path = unit_path(p)?;
@@ -135,6 +149,7 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
 }
 
 pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
+    ensure_valid_service_name(&p.service_name)?;
     let path = unit_path(p)?;
     if !path.exists() {
         return Ok(ServiceStatus::NotInstalled);
@@ -271,5 +286,52 @@ mod tests {
     fn user_service_id_has_no_instance_suffix() {
         let p = params(ServiceScope::User);
         assert_eq!(service_id(&p, "alice"), "netidx.service");
+    }
+
+    /// `ExecStart=` must survive a binary path with spaces. Before
+    /// the escape fix the line ended up as
+    /// `ExecStart=/Applications/My App/netidx activation -f`, which
+    /// systemd splits into 5 tokens, calls `/Applications/My` with
+    /// the rest as args, and the unit fails at start with ENOENT.
+    #[test]
+    fn render_unit_quotes_paths_with_spaces() {
+        let mut p = params(ServiceScope::User);
+        p.binary = PathBuf::from("/Applications/My App/netidx");
+        p.activation_dir = Some(PathBuf::from("/var/lib/netidx units"));
+        let body = render_unit(&p);
+        assert!(
+            body.contains(
+                "ExecStart=\"/Applications/My App/netidx\" activation -f \
+                 --units \"/var/lib/netidx units\""
+            ),
+            "got: {body}",
+        );
+    }
+
+    /// `%` is a systemd specifier prefix and must always be escaped
+    /// to `%%` in ExecStart, regardless of quoting. A path like
+    /// `/srv/100%backup/netidx` would otherwise have `%b` consumed
+    /// by systemd as the boot-id specifier.
+    #[test]
+    fn render_unit_doubles_percent_in_paths() {
+        let mut p = params(ServiceScope::User);
+        p.binary = PathBuf::from("/srv/100%backup/netidx");
+        let body = render_unit(&p);
+        assert!(
+            body.contains("ExecStart=/srv/100%%backup/netidx activation -f"),
+            "got: {body}",
+        );
+    }
+
+    #[test]
+    fn install_uninstall_status_reject_invalid_service_name() {
+        // The validator is called from all three entry points; we
+        // can only directly exercise the error path because the
+        // success path would actually try to talk to systemd.
+        let mut p = params(ServiceScope::User);
+        p.service_name = "../../etc/passwd".into();
+        assert!(install(&p).is_err());
+        assert!(uninstall(&p).is_err());
+        assert!(status(&p).is_err());
     }
 }

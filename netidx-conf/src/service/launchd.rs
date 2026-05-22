@@ -5,7 +5,10 @@
 //! everything else (file writes, `launchctl` invocations) is shelled
 //! out.
 
-use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
+use super::{
+    InstalledService, ServiceParams, ServiceScope, ServiceStatus,
+    ensure_valid_service_name, xml_escape,
+};
 use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -26,11 +29,24 @@ fn label(p: &ServiceParams) -> String {
 /// `/Library/LaunchDaemons` and need a `UserName` key set to the
 /// service account, otherwise they'd run as root.
 pub(super) fn render_plist(p: &ServiceParams) -> String {
-    let label = label(p);
-    let exe = p.binary.to_string_lossy();
+    // Every interpolated value goes through `xml_escape`. The plist
+    // is XML and a bare `&`, `<`, `>`, `"`, or `'` anywhere inside a
+    // `<string>...</string>` element produces ill-formed XML that
+    // launchctl bootstrap will outright reject. `current_exe()` and
+    // operator-supplied `--activation-dir` can both contain `&` and
+    // `'` in real installs (e.g. `~/Library/Application Support`
+    // gets quoted oddly on some shells; corporate paths often carry
+    // `&` from project codenames).
+    // XCR codex for eestokes: every value interpolated into the
+    // plist now flows through xml_escape.
+    let label = xml_escape(&label(p));
+    let exe = xml_escape(&p.binary.to_string_lossy());
     let user_name_block = match (p.scope, p.for_user.as_deref()) {
         (ServiceScope::System, Some(u)) => {
-            format!("\n  <key>UserName</key><string>{u}</string>")
+            format!(
+                "\n  <key>UserName</key><string>{}</string>",
+                xml_escape(u),
+            )
         }
         // User scope: launchd runs the LaunchAgent as the session
         // user, so an explicit UserName key is redundant (and wrong
@@ -45,7 +61,7 @@ pub(super) fn render_plist(p: &ServiceParams) -> String {
     if let Some(dir) = &p.activation_dir {
         args.push_str(&format!(
             "\n    <string>--units</string>\n    <string>{}</string>",
-            dir.to_string_lossy(),
+            xml_escape(&dir.to_string_lossy()),
         ));
     }
     format!(
@@ -84,6 +100,7 @@ fn plist_path(p: &ServiceParams) -> Result<PathBuf> {
 }
 
 pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
+    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     let body = render_plist(p);
     if let Some(parent) = path.parent() {
@@ -98,6 +115,7 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
 }
 
 pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
+    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     // `launchctl bootout` removes the loaded job. If the service was
     // never bootstrapped, bootout errors — best-effort, ignore.
@@ -110,6 +128,7 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
 }
 
 pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
+    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     if !path.exists() {
         return Ok(ServiceStatus::NotInstalled);
@@ -248,5 +267,64 @@ mod tests {
             plist_path(&p).unwrap(),
             PathBuf::from("/Library/LaunchDaemons/com.netidx.netidx.plist"),
         );
+    }
+
+    /// Paths containing XML-entity bytes (`&`, `<`, `>`, `"`, `'`)
+    /// have to be escaped or `launchctl bootstrap` rejects the plist
+    /// outright. The regression these tests guard is "operator
+    /// installs from a path containing `&` and the daemon never
+    /// boots; the failure is opaque because `launchctl` just says
+    /// `Bootstrap failed: 5: Input/output error`".
+    #[test]
+    fn render_plist_xml_escapes_paths_with_entities() {
+        let mut p = params(ServiceScope::User);
+        p.binary = PathBuf::from("/Applications/My & Tools/netidx");
+        p.activation_dir = Some(PathBuf::from("/var/lib/<netidx>/units"));
+        let body = render_plist(&p);
+        // Body must not contain the raw entity-bytes inside an
+        // interpolated string.
+        assert!(
+            !body.contains("My & Tools"),
+            "raw `&` leaked into plist: {body}",
+        );
+        assert!(
+            !body.contains("<netidx>/units"),
+            "raw `<` leaked into plist: {body}",
+        );
+        // And it MUST contain the escaped forms.
+        assert!(
+            body.contains("<string>/Applications/My &amp; Tools/netidx</string>"),
+            "escaped binary path missing: {body}",
+        );
+        assert!(
+            body.contains(
+                "<string>/var/lib/&lt;netidx&gt;/units</string>"
+            ),
+            "escaped activation_dir missing: {body}",
+        );
+    }
+
+    /// Even the `UserName` value gets escaped — `for_user` is
+    /// operator-supplied and shouldn't be a syntactic foothold even
+    /// for an attacker who already has shell access (defence in
+    /// depth, the validator already rejects most of these names).
+    #[test]
+    fn render_plist_xml_escapes_for_user() {
+        let mut p = params(ServiceScope::System);
+        p.for_user = Some("a&b".into());
+        let body = render_plist(&p);
+        assert!(
+            body.contains("<string>a&amp;b</string>"),
+            "for_user wasn't escaped: {body}",
+        );
+    }
+
+    #[test]
+    fn install_uninstall_status_reject_invalid_service_name() {
+        let mut p = params(ServiceScope::User);
+        p.service_name = "../escape".into();
+        assert!(install(&p).is_err());
+        assert!(uninstall(&p).is_err());
+        assert!(status(&p).is_err());
     }
 }
