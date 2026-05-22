@@ -121,9 +121,6 @@ async fn run_signal_loop(
     // immediately — the same path codex flagged as a daemon-kill,
     // just at startup. Initialising from `watcher_opt.is_some()`
     // covers both that case and post-start watcher death uniformly.
-    // XCR codex for eestokes: channel closure (start-time or
-    // post-start) now disables the file-watch select arm and logs;
-    // the loop keeps serving SIGHUP-driven reloads.
     let mut watcher_alive = watcher_opt.is_some();
 
     loop {

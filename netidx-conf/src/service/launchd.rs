@@ -37,8 +37,6 @@ pub(super) fn render_plist(p: &ServiceParams) -> String {
     // `'` in real installs (e.g. `~/Library/Application Support`
     // gets quoted oddly on some shells; corporate paths often carry
     // `&` from project codenames).
-    // XCR codex for eestokes: every value interpolated into the
-    // plist now flows through xml_escape.
     let label = xml_escape(&label(p));
     let exe = xml_escape(&p.binary.to_string_lossy());
     let user_name_block = match (p.scope, p.for_user.as_deref()) {

@@ -32,8 +32,6 @@ pub(super) fn render_unit(p: &ServiceParams) -> String {
     // a whitespace-split token list with double-quote support, so
     // wrapping in `"..."` plus `%`-doubling is exactly the
     // contract the helper implements.
-    // XCR codex for eestokes: exe and activation_dir now go through
-    // the systemd-quote helper instead of raw `to_string_lossy`.
     let exe = systemd_quote_exec_arg(&p.binary.to_string_lossy());
     let mut exec_start = format!("{exe} activation -f");
     if let Some(dir) = &p.activation_dir {

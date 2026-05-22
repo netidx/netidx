@@ -108,6 +108,15 @@ impl ServerParams {
 pub struct Server {
     _stop: oneshot::Sender<()>,
     join: Option<JoinHandle<()>>,
+    /// Shutdown signal + JoinHandle for the SIGHUP-reload task.
+    /// Spawned alongside the listener so a malformed reload can't
+    /// block accept(), but tracked here (rather than detached) so
+    /// `Drop` / `shutdown_and_join` actually stop it — otherwise the
+    /// task lives until runtime shutdown, holds an `Arc<RwLock<…>>`
+    /// to the (now-orphaned) map across restarts, and races a fresh
+    /// server's SIGHUP handler.
+    _sighup_stop: oneshot::Sender<()>,
+    sighup_join: Option<JoinHandle<()>>,
     map: Arc<RwLock<Arc<IdMap>>>,
     config_path: PathBuf,
     // The watcher's background task stays alive as long as either
@@ -163,8 +172,17 @@ impl Server {
         let config_path = params.config.clone();
         let join = tokio::spawn(run_loop(listener, map_clone, stop_rx));
         // SIGHUP runs in its own task so a malformed config reload
-        // can't get stuck and block the accept loop.
-        tokio::spawn(sighup_task(config_path.clone(), Arc::clone(&map)));
+        // can't get stuck and block the accept loop. The JoinHandle
+        // and a separate oneshot stop go into `Server` so shutdown
+        // signals both tasks and awaits both — without this the
+        // SIGHUP task would outlive the Server, hold an Arc to the
+        // map that nobody reads, and race a fresh Server's handler.
+        let (sighup_stop_tx, sighup_stop_rx) = oneshot::channel();
+        let sighup_join = tokio::spawn(sighup_task(
+            config_path.clone(),
+            Arc::clone(&map),
+            sighup_stop_rx,
+        ));
         // Filesystem watcher for live reload. A failure to start the
         // watcher logs a warning but doesn't fail the daemon —
         // SIGHUP still works as a manual fallback, and the daemon
@@ -208,6 +226,8 @@ impl Server {
         Ok(Server {
             _stop: stop_tx,
             join: Some(join),
+            _sighup_stop: sighup_stop_tx,
+            sighup_join: Some(sighup_join),
             map,
             config_path,
             _watcher: watcher,
@@ -228,9 +248,6 @@ impl Server {
     /// the await). Both paths produce the same shutdown sequence; this
     /// one additionally lets the caller observe the listener-task
     /// result.
-    // XCR codex for eestokes: renamed from `join` to
-    // `shutdown_and_join`, destructured `self` so `_stop` drops
-    // before awaiting the task handle.
     pub async fn shutdown_and_join(self) -> Result<()> {
         // Exhaustive destructure — adding a new field to `Server`
         // forces this site to declare what its drop order should be,
@@ -240,16 +257,24 @@ impl Server {
         let Self {
             _stop,
             mut join,
+            _sighup_stop,
+            mut sighup_join,
             _watcher,
             _watched,
             map: _,
             config_path: _,
         } = self;
+        // Signal both tasks to exit before awaiting either, so the
+        // joins can finish in any order.
         drop(_stop);
+        drop(_sighup_stop);
         drop(_watcher);
         drop(_watched);
         if let Some(h) = join.take() {
             h.await.context("id-map listener task panicked")?;
+        }
+        if let Some(h) = sighup_join.take() {
+            h.await.context("id-map SIGHUP task panicked")?;
         }
         Ok(())
     }
@@ -472,7 +497,11 @@ fn start_config_watcher(
     Ok((watcher, watched, ready_rx))
 }
 
-async fn sighup_task(config_path: PathBuf, map: Arc<RwLock<Arc<IdMap>>>) {
+async fn sighup_task(
+    config_path: PathBuf,
+    map: Arc<RwLock<Arc<IdMap>>>,
+    stop: oneshot::Receiver<()>,
+) {
     let mut sighup = match signal(SignalKind::hangup()) {
         Ok(s) => s,
         Err(e) => {
@@ -480,27 +509,44 @@ async fn sighup_task(config_path: PathBuf, map: Arc<RwLock<Arc<IdMap>>>) {
             return;
         }
     };
+    tokio::pin!(stop);
     loop {
-        if sighup.recv().await.is_none() {
-            // Signal stream closed (e.g. runtime shutdown). Exit.
-            break;
-        }
-        info!("id-map: SIGHUP received, reloading {}", config_path.display());
-        // Move the disk-read + parse off the runtime thread so a slow
-        // disk doesn't stall accept(). On a single-threaded runtime
-        // the previous `std::fs::read` blocked every other task for
-        // the duration of the read.
-        let path = config_path.clone();
-        let result = tokio::task::spawn_blocking(move || load_config(&path)).await;
-        match result {
-            Ok(Ok(new)) => {
-                *map.write() = Arc::new(new);
-                info!("id-map: reload OK");
+        // Biased: shutdown wins over a coincident SIGHUP, so a
+        // race between operator-triggered reload and Server drop
+        // doesn't leak one extra reload onto a dying map.
+        tokio::select! {
+            biased;
+            _ = &mut stop => {
+                debug!("id-map: SIGHUP task shutdown");
+                break;
             }
-            Ok(Err(e)) => warn!(
-                "id-map: reload failed, keeping last-known-good map: {e:#}"
-            ),
-            Err(e) => warn!("id-map: reload task panicked: {e:#}"),
+            s = sighup.recv() => {
+                if s.is_none() {
+                    // Signal stream closed (e.g. runtime shutdown).
+                    break;
+                }
+                info!(
+                    "id-map: SIGHUP received, reloading {}",
+                    config_path.display()
+                );
+                // Move the disk-read + parse off the runtime thread so a
+                // slow disk doesn't stall accept(). On a single-threaded
+                // runtime the previous `std::fs::read` blocked every other
+                // task for the duration of the read.
+                let path = config_path.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || load_config(&path)).await;
+                match result {
+                    Ok(Ok(new)) => {
+                        *map.write() = Arc::new(new);
+                        info!("id-map: reload OK");
+                    }
+                    Ok(Err(e)) => warn!(
+                        "id-map: reload failed, keeping last-known-good map: {e:#}"
+                    ),
+                    Err(e) => warn!("id-map: reload task panicked: {e:#}"),
+                }
+            }
         }
     }
 }

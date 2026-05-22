@@ -480,10 +480,6 @@ impl Connection {
             // would silently leave `degraded = false`, and the
             // publisher would think the operation succeeded until the
             // next TTL-driven republish surfaced the mismatch.
-            // XCR codex for eestokes: extended the match to cover
-            // all four publish variants; Unpublish/Clear response
-            // handling on this path is out-of-scope for this CR-
-            // response pass (see PR description).
             match tx {
                 ToWrite::Publish(_)
                 | ToWrite::PublishDefault(_)

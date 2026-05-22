@@ -80,11 +80,6 @@ pub struct ServiceParams {
     /// systemd specifier `%`, and the five XML entity bytes are all
     /// rejected before any code that interpolates this value into a
     /// filename or plist body runs.
-    // XCR codex for eestokes: added ensure_valid_service_name and
-    // wired it into the systemd/launchd entry points (mod.rs:189,
-    // launchd.rs:install/uninstall/status, systemd.rs:install/
-    // uninstall/status). XML and systemd escaping live in
-    // launchd::render_plist / systemd::render_unit respectively.
     pub service_name: String,
     /// Override the activation directory the supervisor reads its
     /// unit files from. `None` ⇒ the activation supervisor's own
@@ -187,9 +182,6 @@ pub fn status(_p: &ServiceParams) -> Result<ServiceStatus> {
 /// Reuses the shape from [`crate::tls::ensure_valid_cn`] and
 /// `crate::activation::ensure_valid_basename`, plus the extra characters
 /// codex flagged (systemd specifier `%`, XML entity bytes).
-// XCR codex for eestokes: added this validator; called from every
-// install / uninstall / status entry point on every supported
-// platform.
 fn ensure_valid_service_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!("service_name must not be empty");
@@ -223,9 +215,6 @@ fn ensure_valid_service_name(name: &str) -> Result<()> {
 /// paths into `<string>...</string>` content; without this a path
 /// like `~/bin/foo & bar/netidx` produces invalid XML and
 /// `launchctl bootstrap` rejects the plist outright.
-// XCR codex for eestokes: added xml_escape; render_plist now wraps
-// every interpolated value with it.
-//
 // `xml_escape` is only consumed by the launchd backend (macOS) plus
 // the unit tests below. The `cfg_attr` keeps the unused-fn warning
 // off on non-mac builds while still letting the test module link to
@@ -258,9 +247,6 @@ fn xml_escape(s: &str) -> String {
 /// - If the resulting string contains any whitespace or quoting
 ///   metacharacter (`"`, `'`, `\`, `;`, `\n`), wrap the whole arg in
 ///   `"..."` and backslash-escape `"` and `\` inside the quotes.
-// XCR codex for eestokes: added systemd_quote_exec_arg; render_unit
-// now feeds the exe + activation_dir through it instead of raw
-// `to_string_lossy`.
 fn systemd_quote_exec_arg(s: &str) -> String {
     let percent_escaped: String = s
         .chars()
