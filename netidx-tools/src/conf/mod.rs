@@ -19,11 +19,17 @@ mod perms;
 mod prompt;
 mod resolver;
 mod service;
+mod uninstall;
 
 #[derive(StructOpt, Debug)]
 pub(crate) enum Params {
     #[structopt(name = "install", about = "install a templated netidx setup")]
     Install(init::Params),
+    #[structopt(
+        name = "uninstall",
+        about = "tear down a netidx install (config dir + OS service)"
+    )]
+    Uninstall(uninstall::Params),
     #[structopt(name = "client", about = "show or edit the client config")]
     Client {
         #[structopt(subcommand)]
@@ -67,6 +73,7 @@ pub(crate) enum Params {
 pub(crate) fn run(p: Params) -> Result<()> {
     match p {
         Params::Install(p) => init::run(p),
+        Params::Uninstall(p) => uninstall::run(p),
         Params::Client { cmd } => client::run(cmd),
         Params::Resolver { cmd } => resolver::run(cmd),
         Params::Perms { cmd } => perms::run(cmd),

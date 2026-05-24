@@ -68,16 +68,23 @@ pub struct ResolverParams {
     /// The CLI fills this from `std::env::current_exe()` when the
     /// operator doesn't pass `--netidx-binary`.
     pub netidx_binary: PathBuf,
-    /// Auto-install the id-mapper daemon. Only meaningful for
-    /// `AuthChoice::Tls` — Anonymous / Local / Krb5 either don't need
-    /// it or have their own group-lookup path. When the auth is TLS
-    /// and this is `true`:
+    /// Auto-install the id-mapper daemon. Meaningful for
+    /// `AuthChoice::Tls` and `AuthChoice::Krb5` — both feed the
+    /// resolver a name string (cert SAN, or kerberos principal with
+    /// realm) that needs translating to a unix uid/gid set. Anonymous
+    /// has no user; Local goes through `Mapper::user(uid)` against
+    /// `/bin/id` and doesn't benefit. When auth is TLS or Krb5 and
+    /// this is `true`:
     /// - The resolver config's member auth is set to
     ///   `id_map_type: Socket` + `id_map_command: <socket path>`.
     /// - An `id-map.unit` activation unit is emitted alongside
     ///   `resolver.unit`.
     /// - A starter id-map JSON file is written if `id_map_path` does
     ///   not already exist (so `apply()` is idempotent on re-runs).
+    ///
+    /// Note for Krb5: the resolver passes the **full principal with
+    /// realm** (e.g. `eric@RYU-OH.ORG`) as the lookup key, so id-map
+    /// entries must be written in that exact form.
     pub with_id_map: bool,
     /// Where to put the id-map JSON. `None` ⇒
     /// `netidx_conf::id_map::user_id_map_path()`.
@@ -123,13 +130,15 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         .map(|j| j.dest_dir.clone())
         .unwrap_or_else(|| PathBuf::from("/dev/null"));
 
-    // -- Id-map wiring (TLS only) -------------------------------------------
-    // For TLS-auth resolvers we point the member at the local
-    // id-mapper daemon over a unix socket — that's the only auth
-    // mode where uid/group lookups go through a non-local path.
-    // Anonymous / Local / Krb5 keep the resolver's existing
-    // `Command` default.
-    let id_map_active = p.with_id_map && matches!(p.auth, AuthChoice::Tls { .. });
+    // -- Id-map wiring (TLS / Krb5) -----------------------------------------
+    // TLS and Krb5 both hand the resolver an opaque name string
+    // (cert SAN, or kerberos principal with realm) that has to be
+    // turned into a unix uid/gid set. Point those at the local
+    // id-mapper daemon over a unix socket. Anonymous has no user;
+    // Local goes through `Mapper::user(uid)` against `/bin/id` and
+    // doesn't benefit from the daemon.
+    let id_map_active = p.with_id_map
+        && matches!(p.auth, AuthChoice::Tls { .. } | AuthChoice::Krb5 { .. });
     let id_map_socket_path = if id_map_active {
         Some(match &p.id_map_socket {
             Some(p) => p.clone(),
@@ -171,12 +180,11 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // per-user-playground layout under the resolver's base, rather
     // than an empty perms map that denies everything.
     //
-    // For TLS auth we additionally grant the resolver's own cert
-    // identity full rights at the base — without it the resolver
-    // can't subscribe / publish under its own tree (e.g. for the
-    // local-client config we emit below to actually reach the data
-    // it's publishing). The entity is the cert SAN, which is what
-    // the resolver matches against on the wire.
+    // For auth modes that carry a stable identity for the resolver
+    // itself (TLS cert SAN, Krb5 SPN), grant that identity full
+    // rights at the base — without it the resolver can't
+    // subscribe / publish under its own tree (e.g. the local-client
+    // config we emit below, or future self-published cluster state).
     let perms_file = if p.with_perms_file {
         let path = match &p.perms_path {
             Some(p) => p.clone(),
@@ -187,11 +195,11 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
             .perms_seed
             .clone()
             .unwrap_or_else(|| crate::perms::default_seed(base_str));
-        if let AuthChoice::Tls { name, .. } = &p.auth {
-            crate::perms::add_entry(&mut seed, base_str, name.as_str(), "swlpd")
+        if let Some(entity) = resolver_self_entity(&p.auth) {
+            crate::perms::add_entry(&mut seed, base_str, entity, "swlpd")
                 .with_context(|| {
                     format!(
-                        "seeding resolver TLS-cert perms ({base_str} → {name} → swlpd)"
+                        "seeding resolver self perms ({base_str} → {entity} → swlpd)"
                     )
                 })?;
         }
@@ -337,6 +345,20 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
         });
     }
     Ok(ClientConfig::from(ccfg.build()?))
+}
+
+/// The stable on-the-wire identity string that the resolver itself
+/// presents when acting as a client (TLS handshake SAN; Krb5 client
+/// principal of the SPN). `None` for auth modes that don't carry one
+/// (Anonymous has no identity; Local is peer-credentials based and
+/// has no fixed name for the resolver process). Used to seed
+/// resolver-side perms for the resolver's own tree.
+pub(super) fn resolver_self_entity(a: &AuthChoice) -> Option<&str> {
+    match a {
+        AuthChoice::Tls { name, .. } => Some(name.as_str()),
+        AuthChoice::Krb5 { spn } => Some(spn.as_str()),
+        AuthChoice::Anonymous | AuthChoice::Local { .. } => None,
+    }
 }
 
 fn auth_choice_to_cfile_auth(a: &AuthChoice) -> cfile::Auth {
@@ -833,16 +855,117 @@ mod tests {
         assert!(after.groups.contains_key("users"));
     }
 
-    /// Non-TLS auth must NOT get id-map auto-installation even with
-    /// `with_id_map = true`. The id-map daemon only buys you anything
-    /// for TLS auth.
+    /// Anonymous and Local auth must NOT get id-map auto-installation
+    /// even with `with_id_map = true`. Anonymous has no user; Local
+    /// goes through `/bin/id` against the peer's uid and doesn't need
+    /// the daemon.
     #[test]
-    fn id_map_not_installed_for_non_tls_auth() {
+    fn id_map_not_installed_for_anonymous_or_local() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.with_id_map = true;
         let rt = resolver(&p).unwrap();
         assert!(rt.id_map_file.is_none());
         assert!(!rt.units.contains_key("id-map"));
+
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.auth = AuthChoice::Local { path: PathBuf::from("/tmp/netidx-local.sock") };
+        p.with_id_map = true;
+        let rt = resolver(&p).unwrap();
+        assert!(rt.id_map_file.is_none());
+        assert!(!rt.units.contains_key("id-map"));
+    }
+
+    /// Krb5 with `with_id_map = true` must install the daemon: the
+    /// resolver hands the daemon the full principal (e.g.
+    /// `eric@RYU-OH.ORG`) as the lookup key, and gets back the
+    /// uid/gid set the perms map keys on.
+    #[test]
+    fn krb5_resolver_with_id_map_emits_unit_and_starter() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.auth = AuthChoice::Krb5 { spn: ArcStr::from("netidx/resolver@RYU-OH.ORG") };
+        p.with_id_map = true;
+        let id_map_socket = out.path().join("id-map.sock");
+        let id_map_path = out.path().join("id-map.json");
+        p.id_map_socket = Some(id_map_socket.clone());
+        p.id_map_path = Some(id_map_path.clone());
+        let rt = resolver(&p).unwrap();
+
+        let (_, r) = rt.resolver_config.as_ref().unwrap();
+        let member = &r.0.member_servers[0];
+        assert!(matches!(member.id_map_type, IdMapType::Socket));
+        assert_eq!(
+            member.id_map_command.as_ref().map(|s| s.as_str()),
+            Some(id_map_socket.to_string_lossy().as_ref()),
+        );
+
+        assert!(rt.units.contains_key("resolver"));
+        assert!(rt.units.contains_key("id-map"));
+        let (file_path, starter) = rt.id_map_file.as_ref().unwrap();
+        assert_eq!(file_path, &id_map_path);
+        assert!(starter.identities.is_empty());
+
+        rt.apply().unwrap();
+        assert!(id_map_path.exists());
+        assert!(out.path().join("activation/id-map.unit").exists());
+        assert!(out.path().join("activation/resolver.unit").exists());
+    }
+
+    /// Krb5 resolver must grant its own SPN full rights at the base —
+    /// same shape as the TLS branch, just keyed by SPN instead of
+    /// cert SAN. Without it the resolver can't subscribe / publish
+    /// under its own tree once cluster / self-published state lands.
+    #[test]
+    fn krb5_resolver_seeds_self_spn_in_perms() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        let spn = ArcStr::from("netidx/resolver@RYU-OH.ORG");
+        p.auth = AuthChoice::Krb5 { spn: spn.clone() };
+        p.with_perms_file = true;
+        p.perms_path = Some(out.path().join("perms.json"));
+        let rt = resolver(&p).unwrap();
+        let (_, seeded) = rt.perms_file.as_ref().expect("perms_file emitted");
+        // Base "/" with the SPN as the entity and swlpd as the perm.
+        assert_eq!(
+            crate::perms::lookup(seeded, "/", spn.as_str()).map(|s| s.as_str()),
+            Some("swlpd"),
+            "krb5 SPN must appear at base with full rights",
+        );
+        // Round-trips through Config validation (the $[user] template
+        // entry from the default seed can trip up PMap::from_file if
+        // the file shape is wrong).
+        rt.apply().unwrap();
+        netidx::resolver_server::config::Config::load(
+            out.path().join("resolver.json"),
+        )
+        .expect("resolver config including krb5-SPN perms must validate");
+    }
+
+    /// Anonymous and Local auth have no stable identity for the
+    /// resolver itself — so `resolver_self_entity` returns None, and
+    /// the perms seed should contain only the default
+    /// per-user-playground rules (no `swlpd` entry at the base).
+    #[test]
+    fn anonymous_resolver_does_not_seed_self_entity() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.with_perms_file = true;
+        p.perms_path = Some(out.path().join("perms.json"));
+        let rt = resolver(&p).unwrap();
+        let (_, seeded) = rt.perms_file.as_ref().unwrap();
+        // No entity gets swlpd at base; the default seed's entries
+        // (e.g. $[user]) don't carry that string at `/`.
+        let entries_at_root: Vec<_> = crate::perms::iter(seeded)
+            .filter(|(p, _, _)| *p == "/")
+            .collect();
+        for (_, ent, perm) in &entries_at_root {
+            assert_ne!(
+                perm.as_str(),
+                "swlpd",
+                "unexpected swlpd entry for {ent} at / in anonymous seed",
+            );
+        }
     }
 }

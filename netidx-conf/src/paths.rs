@@ -10,6 +10,27 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+/// `${dirs::config_dir}/netidx`. No existence check. Root of the
+/// user's netidx config tree — every other `user_*` path lives
+/// under here.
+pub fn user_config_root() -> Result<PathBuf> {
+    let mut p = dirs::config_dir().ok_or_else(|| {
+        anyhow!("user config dir could not be determined for this platform")
+    })?;
+    p.push("netidx");
+    Ok(p)
+}
+
+/// `/etc/netidx` on unix, `C:\netidx` on windows. No existence check.
+/// Root of the system-scope netidx config tree.
+pub fn system_config_root() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("C:\\netidx")
+    } else {
+        PathBuf::from("/etc/netidx")
+    }
+}
+
 /// `${dirs::config_dir}/netidx/client.json`. No existence check.
 pub fn user_client_config() -> Result<PathBuf> {
     let mut p = dirs::config_dir().ok_or_else(|| {
@@ -146,6 +167,9 @@ mod tests {
 
     #[test]
     fn user_paths_are_under_netidx() {
+        let p = user_config_root().unwrap();
+        assert!(p.ends_with("netidx"));
+
         let p = user_client_config().unwrap();
         assert!(p.ends_with("netidx/client.json"));
 
@@ -175,6 +199,12 @@ mod tests {
             assert_eq!(p.to_str().unwrap(), "C:\\netidx\\resolver.json");
         } else {
             assert_eq!(p.to_str().unwrap(), "/etc/netidx/resolver.json");
+        }
+        let p = system_config_root();
+        if cfg!(windows) {
+            assert_eq!(p.to_str().unwrap(), "C:\\netidx");
+        } else {
+            assert_eq!(p.to_str().unwrap(), "/etc/netidx");
         }
     }
 }

@@ -186,12 +186,12 @@ fn status(a: CommonArgs) -> Result<()> {
 /// True if we're already running as root (uid 0). The system-scope
 /// install path skips sudo when this is true.
 #[cfg(unix)]
-fn is_elevated() -> Result<bool> {
+pub(super) fn is_elevated() -> Result<bool> {
     Ok(nix::unistd::geteuid().is_root())
 }
 
 #[cfg(windows)]
-fn is_elevated() -> Result<bool> {
+pub(super) fn is_elevated() -> Result<bool> {
     // Honour the explicit sentinel — a re-exec'd child must not loop
     // through another elevation attempt.
     if std::env::var_os(ELEVATED_ENV).is_some() {
@@ -209,7 +209,7 @@ fn is_elevated() -> Result<bool> {
 /// sudo to the original invoker) and finally falls back to the
 /// current uid → name lookup.
 #[cfg(unix)]
-fn resolve_for_user(provided: Option<String>) -> Result<String> {
+pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
     if let Some(u) = provided {
         return Ok(u);
     }
@@ -229,7 +229,7 @@ fn resolve_for_user(provided: Option<String>) -> Result<String> {
 }
 
 #[cfg(windows)]
-fn resolve_for_user(provided: Option<String>) -> Result<String> {
+pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
     provided.or_else(|| std::env::var("USERNAME").ok())
         .ok_or_else(|| anyhow!("could not determine current Windows user; pass --for-user"))
 }
@@ -304,7 +304,7 @@ fn escalate_for_uninstall(_a: &CommonArgs) -> Result<()> {
 /// Path / name of the elevation helper. `sudo` on POSIX and Win11;
 /// the latter ships a `sudo` shim that forwards to UAC.
 #[cfg(unix)]
-fn elevator() -> &'static str {
+pub(super) fn elevator() -> &'static str {
     "sudo"
 }
 

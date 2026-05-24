@@ -1307,12 +1307,18 @@ pub(crate) struct ResolverFlags {
     units_dir: Option<PathBuf>,
     #[structopt(long = "netidx-binary")]
     netidx_binary: Option<PathBuf>,
-    /// Skip auto-installing the id-mapper daemon. By default `--auth
-    /// tls` installs an `id-map.unit` and a starter `id-map.json`
-    /// alongside the resolver, and wires the resolver to talk to it
-    /// over a unix socket. Pass this when running under an external
-    /// id mapper or with `IdMapType::Command` (default behavior for
-    /// non-TLS auth is unchanged).
+    /// Skip auto-installing the id-mapper daemon. When set, the
+    /// resolver uses its `IdMapType::Command` default (`/bin/id`) and
+    /// no `id-map.unit` is written. When unset:
+    /// - `--auth tls` prompts with default Y (cert SANs have no
+    ///   meaningful `/bin/id` translation path).
+    /// - `--auth krb5` prompts with default N — most kerberos sites
+    ///   have a system-level IdM (FreeIPA, AD, OpenIDM) handling
+    ///   principal → uid via SSSD / nsswitch already.
+    /// - Anonymous / Local auth never use the daemon.
+    ///
+    /// For `--auth krb5`, id-map entries are keyed by the full
+    /// kerberos principal including realm (e.g. `eric@RYU-OH.ORG`).
     #[structopt(long = "no-id-map")]
     no_id_map: bool,
     /// Override the id-map socket path (default
@@ -1414,6 +1420,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // resolver attaches in the parent's namespace, which is just
     // wherever this resolver hosts its own tree.
     let parent_default_path = f.base.clone();
+    let with_id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
     let params = netidx_conf::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
@@ -1426,7 +1433,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         resolver_config_path: f.resolver_config_path,
         units_dir: resolve_units_dir(&f.common, f.units_dir.as_deref())?,
         netidx_binary: resolve_netidx_binary(f.netidx_binary)?,
-        with_id_map: !f.no_id_map,
+        with_id_map,
         id_map_path: f.id_map_path,
         id_map_socket: f.id_map_socket,
         with_local_client: !f.no_client,
@@ -1437,6 +1444,35 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // is what makes it boot-triggered and visible to the OS. The
     // service-install flow will re-exec under sudo if needed.
     finish(rt, &f.common, Some(service::ScopeArg::System))
+}
+
+/// Decide whether to install the id-mapper daemon alongside the
+/// resolver. `--no-id-map` is always honoured (skip). Otherwise the
+/// default depends on auth: TLS gets the daemon (cert SANs have no
+/// other lookup path through `id`), Krb5 defaults to NO on the
+/// assumption that most kerberos sites already have a system-level
+/// IdM (FreeIPA, AD, OpenIDM) handling principal → uid via SSSD /
+/// nsswitch — `prompt::confirm` flips silently to the default on
+/// a non-TTY. Anonymous and Local don't use the daemon.
+fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
+    if no_id_map {
+        return Ok(false);
+    }
+    match auth {
+        AuthChoice::Tls { .. } => prompt::confirm(
+            "install the netidx id-mapper daemon (maps TLS cert identities \
+             to unix uids)?",
+            true,
+        ),
+        AuthChoice::Krb5 { .. } => prompt::confirm(
+            "install the netidx id-mapper daemon? Most kerberos sites use a \
+             system-level IdM (FreeIPA, AD, OpenIDM) and answer N here; \
+             answer Y only if you don't have one and want netidx to map \
+             principals to uids itself",
+            false,
+        ),
+        AuthChoice::Anonymous | AuthChoice::Local { .. } => Ok(false),
+    }
 }
 
 fn resolver_self_auth(f: &ResolverFlags) -> Result<AuthChoice> {

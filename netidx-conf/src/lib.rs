@@ -31,3 +31,4 @@ pub mod perms;
 pub mod resolver;
 pub mod template;
 pub mod tls;
+pub mod uninstall;
