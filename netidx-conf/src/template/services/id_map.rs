@@ -33,9 +33,15 @@ pub struct IdMapServiceParams {
 /// id-map daemon must already be up before the resolver accepts its
 /// first TLS connection.
 pub fn unit(p: &IdMapServiceParams) -> Result<Unit> {
+    // `-f` is required under the activation supervisor: without it,
+    // `id-map serve` forks via `Daemonize::start()` and the parent
+    // (the one the supervisor monitors) immediately exits 0. The
+    // supervisor sees exit-0 and restarts, looping forever while
+    // detached daemons race to bind the socket.
     let mut args: Vec<String> = vec![
         "id-map".to_string(),
         "serve".to_string(),
+        "-f".to_string(),
         "--socket".to_string(),
         p.socket.to_string_lossy().into_owned(),
         "--config".to_string(),
@@ -72,6 +78,7 @@ mod tests {
             vec![
                 "id-map",
                 "serve",
+                "-f",
                 "--socket",
                 "/var/run/netidx/id-map.sock",
                 "--config",
@@ -81,6 +88,29 @@ mod tests {
             .map(String::from)
             .collect::<Vec<_>>(),
         );
+    }
+
+    /// Regression: under the activation supervisor `id-map serve`
+    /// MUST run in the foreground. Without `-f` the daemon forks
+    /// and the parent exits 0; the supervisor sees exit-0, restarts,
+    /// and the cycle repeats every second.
+    #[test]
+    fn always_passes_foreground_flag() {
+        let cases = [None, Some(0o660)];
+        for socket_mode in cases {
+            let u = unit(&IdMapServiceParams {
+                netidx_binary: PathBuf::from("/usr/local/bin/netidx"),
+                socket: PathBuf::from("/tmp/s"),
+                config: PathBuf::from("/tmp/c"),
+                socket_mode,
+            })
+            .unwrap();
+            assert!(
+                u.process.args.iter().any(|a| a == "-f"),
+                "missing -f for socket_mode={socket_mode:?}: {:?}",
+                u.process.args,
+            );
+        }
     }
 
     #[test]
