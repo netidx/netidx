@@ -7,16 +7,17 @@
 //! up the daemon's activation unit but leaves the actual map empty
 //! for the operator to fill in).
 //!
-//! `show` prints the loaded map for inspection; the editor flow for
-//! free-form JSON edits goes through `netidx conf` directly via your
-//! editor of choice.
+//! `show` prints the loaded map for inspection; `edit` opens the
+//! JSON in `$VISUAL`/`$EDITOR`, validates on save, and only then
+//! atomically replaces the file (the daemon's file-watcher picks up
+//! the reload).
 
 use anyhow::{Context, Result};
 use netidx_conf::id_map;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
-use super::prompt;
+use super::{editor, prompt};
 
 #[derive(StructOpt, Debug)]
 pub(crate) enum Cmd {
@@ -36,18 +37,29 @@ pub(crate) enum Cmd {
         #[structopt(long = "file", short = "f")]
         file: Option<PathBuf>,
     },
+    #[structopt(
+        name = "edit",
+        about = "open the id-map JSON in $VISUAL / $EDITOR, validate on save"
+    )]
+    Edit {
+        #[structopt(long = "file", short = "f")]
+        file: Option<PathBuf>,
+    },
     #[structopt(name = "list", about = "list identities and groups in a table")]
     List {
         #[structopt(long = "file", short = "f")]
         file: Option<PathBuf>,
     },
-    #[structopt(name = "set-group", about = "set or update a group's gid")]
-    SetGroup {
+    #[structopt(name = "add-group", about = "add a group (or update an existing one)")]
+    AddGroup {
         #[structopt(long = "file", short = "f")]
         file: Option<PathBuf>,
         /// Group name. Prompted when omitted.
         name: Option<String>,
-        /// Numeric gid. Prompted when omitted.
+        /// Numeric gid. Auto-allocated (≥1000, above any existing gid)
+        /// when omitted; an existing group keeps its current gid
+        /// unless this flag is given. The resolver only reads group
+        /// names, never numeric gids — the value is decorative.
         gid: Option<u32>,
     },
     #[structopt(name = "remove-group", about = "remove a group (fails if in use)")]
@@ -57,14 +69,20 @@ pub(crate) enum Cmd {
         /// Group name. Prompted when omitted.
         name: Option<String>,
     },
-    #[structopt(name = "set-user", about = "set or update an identity")]
-    SetUser {
+    #[structopt(name = "add-user", about = "add an identity (or update an existing one)")]
+    AddUser {
         #[structopt(long = "file", short = "f")]
         file: Option<PathBuf>,
         /// Netidx name (typically the TLS SubjectAltName DNS entry).
         /// Prompted when omitted.
         name: Option<String>,
-        /// Numeric uid. Prompted when omitted.
+        /// Numeric uid. Auto-allocated (≥1000, above any existing uid)
+        /// when omitted; an existing identity keeps its current uid
+        /// unless this flag is given. The resolver only reads uids in
+        /// the local-auth (Unix-socket peer-cred) path, and that path
+        /// is normally served by `/bin/id` rather than the id-map
+        /// daemon — so for any realistic id-map-daemon deployment the
+        /// uid is decorative and the auto-allocated value is fine.
         uid: Option<u32>,
         /// Primary group name (must already exist). Prompted when
         /// omitted.
@@ -98,15 +116,6 @@ pub(crate) enum Cmd {
         /// Group name. Prompted when omitted.
         group: Option<String>,
     },
-    #[structopt(name = "set-defaults", about = "update the default uid/gid")]
-    SetDefaults {
-        #[structopt(long = "file", short = "f")]
-        file: Option<PathBuf>,
-        /// Default uid for unknown queries. Prompted when omitted.
-        default_uid: Option<u32>,
-        /// Default gid for unknown queries. Prompted when omitted.
-        default_gid: Option<u32>,
-    },
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -115,22 +124,30 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
             init(resolve(file)?, default_uid, default_gid)
         }
         Cmd::Show { file } => show(resolve(file)?),
+        Cmd::Edit { file } => edit(resolve(file)?),
         Cmd::List { file } => list(resolve(file)?),
-        Cmd::SetGroup { file, name, gid } => {
+        Cmd::AddGroup { file, name, gid } => {
+            let file = resolve(file)?;
+            let m = load_or_empty(&file)?;
             let name = prompt::required_string("group name", name)?;
-            let gid = prompt::required_parsed("gid", gid)?;
-            set_group(resolve(file)?, name, gid)
+            let gid = gid
+                .or_else(|| m.groups.get(name.as_str()).map(|g| g.gid))
+                .unwrap_or_else(|| next_group_gid(&m));
+            add_group(file, name, gid)
         }
         Cmd::RemoveGroup { file, name } => {
             let name = prompt::required_string("group name", name)?;
             remove_group(resolve(file)?, name)
         }
-        Cmd::SetUser { file, name, uid, primary_group, groups } => {
+        Cmd::AddUser { file, name, uid, primary_group, groups } => {
+            let file = resolve(file)?;
+            let m = load_or_empty(&file)?;
             let name = prompt::required_string("identity name", name)?;
-            let uid = prompt::required_parsed("uid", uid)?;
-            let primary_group =
-                prompt::required_string("primary group", primary_group)?;
-            set_user(resolve(file)?, name, uid, primary_group, groups)
+            let uid = uid
+                .or_else(|| m.identities.get(name.as_str()).map(|i| i.uid))
+                .unwrap_or_else(|| next_user_uid(&m));
+            let primary_group = prompt_primary_group(&m, primary_group)?;
+            add_user(file, name, uid, primary_group, groups)
         }
         Cmd::RemoveUser { file, name } => {
             let name = prompt::required_string("identity name", name)?;
@@ -145,15 +162,6 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
             let name = prompt::required_string("identity name", name)?;
             let group = prompt::required_string("group name", group)?;
             remove_member(resolve(file)?, name, group)
-        }
-        Cmd::SetDefaults { file, default_uid, default_gid } => {
-            // Level-1: 65534 is the conventional nobody uid/gid, a
-            // safe fallback for unmatched queries.
-            let default_uid =
-                prompt::parsed_with_default("default uid", default_uid, "65534")?;
-            let default_gid =
-                prompt::parsed_with_default("default gid", default_gid, "65534")?;
-            set_defaults(resolve(file)?, default_uid, default_gid)
         }
     }
 }
@@ -183,6 +191,26 @@ fn show(file: PathBuf) -> Result<()> {
     let m = id_map::load(&file)?;
     let s = serde_json::to_string_pretty(&m)?;
     println!("{s}");
+    Ok(())
+}
+
+fn edit(file: PathBuf) -> Result<()> {
+    let initial = if file.exists() {
+        let m = id_map::load(&file)?;
+        serde_json::to_string_pretty(&m)?
+    } else {
+        eprintln!("# {file:?} does not exist — starting with an empty template");
+        serde_json::to_string_pretty(&id_map::empty())?
+    };
+    // `parse_bytes` does both serde + structural validation, so a
+    // botched edit (typo, dangling group reference, ...) is rejected
+    // here and the operator gets a re-edit prompt — the on-disk file
+    // is untouched until validation passes.
+    let validated = editor::edit_with_validation(&initial, |s| {
+        id_map::parse_bytes(s.as_bytes()).context("parsing edited id-map JSON")
+    })?;
+    id_map::save(&file, &validated)?;
+    println!("saved {}", file.display());
     Ok(())
 }
 
@@ -227,7 +255,46 @@ fn load_or_empty(file: &std::path::Path) -> Result<id_map::IdMap> {
     }
 }
 
-fn set_group(file: PathBuf, name: String, gid: u32) -> Result<()> {
+/// Next free id above the conventional Linux user floor of 1000 and
+/// any existing id. The resolver doesn't read these values for the
+/// id-map daemon's TLS/Kerberos path; an operator who needs a
+/// specific value passes the explicit `--uid` / `--gid` flag.
+fn next_id(existing: impl Iterator<Item = u32>) -> u32 {
+    let highest = existing.max().unwrap_or(0);
+    highest.max(999).saturating_add(1)
+}
+
+fn next_user_uid(m: &id_map::IdMap) -> u32 {
+    next_id(m.identities.values().map(|i| i.uid))
+}
+
+fn next_group_gid(m: &id_map::IdMap) -> u32 {
+    next_id(m.groups.values().map(|g| g.gid))
+}
+
+/// Prompt for the primary group. When unprovided, list the available
+/// groups (so the operator sees the legal set) and offer `users` as
+/// the default if it exists — that's the group seeded by `init` and
+/// the conventional Linux primary for human accounts.
+fn prompt_primary_group(
+    m: &id_map::IdMap,
+    provided: Option<String>,
+) -> Result<String> {
+    if let Some(g) = provided {
+        return Ok(g);
+    }
+    if !m.groups.is_empty() {
+        let names: Vec<&str> = m.groups.keys().map(|k| k.as_str()).collect();
+        println!("available groups: {}", names.join(", "));
+    }
+    if m.groups.contains_key("users") {
+        prompt::string_with_default("primary group", None, "users")
+    } else {
+        prompt::required_string("primary group", None)
+    }
+}
+
+fn add_group(file: PathBuf, name: String, gid: u32) -> Result<()> {
     let mut m = load_or_empty(&file)?;
     let prev = id_map::upsert_group(&mut m, &name, gid);
     id_map::save(&file, &m)?;
@@ -246,7 +313,7 @@ fn remove_group(file: PathBuf, name: String) -> Result<()> {
     Ok(())
 }
 
-fn set_user(
+fn add_user(
     file: PathBuf,
     name: String,
     uid: u32,
@@ -306,14 +373,6 @@ fn remove_member(file: PathBuf, name: String, group: String) -> Result<()> {
     Ok(())
 }
 
-fn set_defaults(file: PathBuf, default_uid: u32, default_gid: u32) -> Result<()> {
-    let mut m = load_or_empty(&file)?;
-    id_map::set_defaults(&mut m, default_uid, default_gid);
-    id_map::save(&file, &m)?;
-    println!("defaults: uid={default_uid} gid={default_gid}");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,9 +384,9 @@ mod tests {
         init(f.clone(), 65534, 65534).unwrap();
         // Groups first, then identities — the validate step enforces
         // referential integrity on every save.
-        set_group(f.clone(), "users".into(), 100).unwrap();
-        set_group(f.clone(), "wheel".into(), 10).unwrap();
-        set_user(
+        add_group(f.clone(), "users".into(), 100).unwrap();
+        add_group(f.clone(), "wheel".into(), 10).unwrap();
+        add_user(
             f.clone(),
             "alice.example.com".into(),
             1000,
@@ -372,11 +431,11 @@ mod tests {
     }
 
     #[test]
-    fn set_user_rejects_unknown_primary() {
+    fn add_user_rejects_unknown_primary() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("id-map.json");
         init(f.clone(), 65534, 65534).unwrap();
-        let err = set_user(
+        let err = add_user(
             f,
             "alice".into(),
             1000,

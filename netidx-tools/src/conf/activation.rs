@@ -430,11 +430,14 @@ mod tests {
         let u: netidx_conf::activation::Unit =
             serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
+        // `-f` is mandatory under the activation supervisor; see the
+        // regression note on `template::services::id_map::unit`.
         assert_eq!(
             u.process.args,
             vec![
                 "id-map",
                 "serve",
+                "-f",
                 "--socket",
                 "/run/netidx/id-map.sock",
                 "--config",
