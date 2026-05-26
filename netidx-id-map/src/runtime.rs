@@ -383,11 +383,13 @@ async fn handle_one(
     // here — `IdMap::validate` only covers what's *stored* in the
     // map.
     file::check_name_chars("id-map query", line)?;
+    debug!("id-map query: {line}");
     let snapshot = Arc::clone(&*map.read());
     let response = match Query::parse(line) {
         Query::Uid(u) => snapshot.format_id_line_for_uid(u),
         Query::Name(n) => snapshot.format_id_line_for_name(n),
     };
+    debug!("id-map response: {}", response.trim_end());
     client.write_all(response.as_bytes()).await?;
     client.shutdown().await?;
     Ok(())

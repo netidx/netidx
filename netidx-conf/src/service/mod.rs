@@ -310,12 +310,14 @@ mod tests {
         assert_eq!(xml_escape(""), "");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_handles_plain_paths() {
         // Bare path: passes through unchanged.
         assert_eq!(systemd_quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_doubles_percent() {
         // `%` is a systemd specifier prefix — always escaped,
@@ -325,6 +327,7 @@ mod tests {
         assert_eq!(systemd_quote_exec_arg("a % b"), "\"a %% b\"",);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_quotes_spaces() {
         assert_eq!(
@@ -333,6 +336,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_escapes_quotes_and_backslashes() {
         assert_eq!(systemd_quote_exec_arg("a\"b"), "\"a\\\"b\"");
