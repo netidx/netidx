@@ -37,12 +37,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
-mod systemd;
 #[cfg(target_os = "macos")]
 mod launchd;
 #[cfg(target_os = "windows")]
 mod scm;
+#[cfg(target_os = "linux")]
+mod systemd;
 
 /// Whether the service runs at user scope (per-login) or system
 /// scope (boot-triggered, root-owned).
@@ -190,21 +190,15 @@ fn ensure_valid_service_name(name: &str) -> Result<()> {
         anyhow::bail!("service_name must not be a relative-dir marker");
     }
     if name.contains('/') || name.contains('\\') {
-        anyhow::bail!(
-            "service_name may not contain path separators: {name:?}"
-        );
+        anyhow::bail!("service_name may not contain path separators: {name:?}");
     }
     // `%` is the systemd specifier-escape prefix (e.g. `%i`). `&<>'"`
     // need entity-escaping inside XML, which launchd would otherwise
     // see and reject. Whitespace is rejected because both backends
     // splice the name into single-token contexts (filename, label).
     for c in name.chars() {
-        if matches!(c, '%' | '&' | '<' | '>' | '\'' | '"')
-            || c.is_whitespace()
-        {
-            anyhow::bail!(
-                "service_name contains reserved character {c:?}: {name:?}"
-            );
+        if matches!(c, '%' | '&' | '<' | '>' | '\'' | '"') || c.is_whitespace() {
+            anyhow::bail!("service_name contains reserved character {c:?}: {name:?}");
         }
     }
     Ok(())
@@ -247,20 +241,13 @@ fn xml_escape(s: &str) -> String {
 /// - If the resulting string contains any whitespace or quoting
 ///   metacharacter (`"`, `'`, `\`, `;`, `\n`), wrap the whole arg in
 ///   `"..."` and backslash-escape `"` and `\` inside the quotes.
+#[cfg(target_os = "linux")]
 fn systemd_quote_exec_arg(s: &str) -> String {
-    let percent_escaped: String = s
+    let percent_escaped: String =
+        s.chars().flat_map(|c| if c == '%' { vec!['%', '%'] } else { vec![c] }).collect();
+    let needs_quoting = percent_escaped
         .chars()
-        .flat_map(|c| {
-            if c == '%' {
-                vec!['%', '%']
-            } else {
-                vec![c]
-            }
-        })
-        .collect();
-    let needs_quoting = percent_escaped.chars().any(|c| {
-        c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ';')
-    });
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ';'));
     if !needs_quoting {
         return percent_escaped;
     }
@@ -286,10 +273,7 @@ mod tests {
     #[test]
     fn ensure_valid_service_name_accepts_typical_names() {
         for ok in ["netidx", "netidx-dev", "netidx_alt", "netidx2"] {
-            assert!(
-                ensure_valid_service_name(ok).is_ok(),
-                "should accept {ok:?}",
-            );
+            assert!(ensure_valid_service_name(ok).is_ok(), "should accept {ok:?}",);
         }
     }
 
@@ -298,18 +282,12 @@ mod tests {
         // Path traversal — would let a root install write outside
         // /etc/systemd/system or /Library/LaunchDaemons.
         for bad in ["", ".", "..", "a/b", "a\\b", "../../etc/passwd"] {
-            assert!(
-                ensure_valid_service_name(bad).is_err(),
-                "should reject {bad:?}",
-            );
+            assert!(ensure_valid_service_name(bad).is_err(), "should reject {bad:?}",);
         }
         // systemd specifier + XML entities + whitespace — the
         // injection vectors codex pointed at for the two renderers.
         for bad in ["%i", "n&e", "n<e", "n>e", "n'e", "n\"e", "n e", "n\te"] {
-            assert!(
-                ensure_valid_service_name(bad).is_err(),
-                "should reject {bad:?}",
-            );
+            assert!(ensure_valid_service_name(bad).is_err(), "should reject {bad:?}",);
         }
         // `.` in the middle is also rejected via the "is just `.`"
         // check above only matching exact `.` / `..` — confirm the
@@ -344,10 +322,7 @@ mod tests {
         // regardless of whether quoting kicks in.
         assert_eq!(systemd_quote_exec_arg("a%b"), "a%%b");
         // Combined with quoting.
-        assert_eq!(
-            systemd_quote_exec_arg("a % b"),
-            "\"a %% b\"",
-        );
+        assert_eq!(systemd_quote_exec_arg("a % b"), "\"a %% b\"",);
     }
 
     #[test]
