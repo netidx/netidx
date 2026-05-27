@@ -103,6 +103,23 @@ pub struct ResolverParams {
     /// `paths::user_client_config()`. Ignored when
     /// `with_local_client` is `false`.
     pub client_config_path: Option<PathBuf>,
+    /// Override the local client's `default_bind_config` (a `BindCfg`
+    /// string — `<ip>/<prefix>`, `<advertise>@<subnet>/<prefix>`, or
+    /// `local`). The template uses this verbatim when set.
+    ///
+    /// Needed for the cloud-elastic case where `listen` is the public
+    /// IP and `bind` is the private NIC IP: the template can't derive
+    /// the Elastic form (`<public>@<private-subnet>/<prefix>`) from
+    /// `listen`/`bind` alone because it lacks the private-subnet
+    /// netmask. The CLI carries that via `NetShape`, computes the
+    /// right `BindCfg`, and passes it through here.
+    ///
+    /// When `None`, the template falls back to `<bind-ip>/32` (or
+    /// `<bind-ip>/128`) of `bind.unwrap_or(listen.ip())`. Skipped
+    /// entirely for loopback addresses since the publisher default
+    /// (`BindCfg::Local`) already matches. Ignored when
+    /// `with_local_client` is `false`.
+    pub local_client_bind: Option<String>,
 }
 
 pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
@@ -307,7 +324,7 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
     // address (mixing loopback with non-loopback breaks check_addrs).
     // Match the publisher's bind to the resolver's own interface so
     // `netidx publisher`/`netidx-activation` Just Works locally.
-    if let Some(bind) = default_bind_cfg_for_listen(p.listen) {
+    if let Some(bind) = default_local_client_bind_cfg(p) {
         ccfg.default_bind_config(bind);
     }
     if let AuthChoice::Tls { name, askpass, .. } = &p.auth {
@@ -328,16 +345,22 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
         // via the reverse-domain prefix lookup in `tls::get_match`.
         // The install dir stays at the full SAN so two hosts in the
         // same domain don't clobber each other's cert files.
-        let domain = tlsmod::domain_from_san(name.as_str()).with_context(|| {
-            format!(
-                "deriving identity domain from resolver cert SAN {:?}",
-                name
-            )
-        })?;
+        //
+        // Single-label SANs (LAN hostnames like `resolver`, k8s
+        // service names, mDNS short names) have no domain to peel
+        // off. The runtime is fine with a single-label key — both
+        // sides of the match get reverse-domain-name'd and the
+        // exact-match arm of `tls::get_match` handles it — so we
+        // fall back to the full SAN as the identity key rather than
+        // dead-ending the install. Operators who want a different
+        // identity layout can edit the emitted client.json.
+        let identity_key = tlsmod::domain_from_san(name.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|_| name.to_string());
         let mut identities = BTreeMap::new();
-        identities.insert(domain.to_string(), identity);
+        identities.insert(identity_key.clone(), identity);
         ccfg.tls(cfile::Tls {
-            default_identity: Some(domain.to_string()),
+            default_identity: Some(identity_key),
             identities,
             askpass: askpass
                 .as_ref()
@@ -382,14 +405,27 @@ fn auth_choice_to_default_mech(a: &AuthChoice) -> DefaultAuthMech {
 }
 
 /// Pick a sensible `default_bind_config` for a client that lives on
-/// the same host as a resolver bound to `listen`. The publisher
-/// default is `BindCfg::Local` (127.0.0.1); a non-loopback resolver
-/// rejects that, so we emit a `<ip>/32` (v4) or `<ip>/128` (v6)
-/// `BindCfg::Match` pointing at the resolver's own interface. For a
-/// loopback listen address the publisher default is already correct,
-/// so we leave the field unset.
-fn default_bind_cfg_for_listen(listen: SocketAddr) -> Option<String> {
-    let ip = listen.ip();
+/// the same host as this resolver. The publisher default is
+/// `BindCfg::Local` (127.0.0.1); a non-loopback resolver rejects that.
+///
+/// Precedence:
+///   1. `p.local_client_bind` is an explicit override (used verbatim).
+///      The CLI fills this from `NetShape` in cloud-elastic deployments
+///      so the local client gets the Elastic form
+///      (`<public>@<private-subnet>/<prefix>`) the publisher needs to
+///      bind to the private NIC while advertising the public IP.
+///   2. Otherwise emit `<bind-ip>/32` (v4) or `<bind-ip>/128` (v6) of
+///      `p.bind.unwrap_or(p.listen.ip())`. Using `bind` (not `listen`)
+///      matters when the two differ: the local publisher must bind to
+///      a real local interface, and the public listen IP is NAT'd onto
+///      the private NIC, not assigned to it.
+///   3. Loopback bind ⇒ leave unset; publisher's `BindCfg::Local`
+///      default already matches.
+fn default_local_client_bind_cfg(p: &ResolverParams) -> Option<String> {
+    if let Some(override_) = p.local_client_bind.as_ref() {
+        return Some(override_.clone());
+    }
+    let ip = p.bind.unwrap_or_else(|| p.listen.ip());
     if ip.is_loopback() {
         return None;
     }
@@ -429,6 +465,7 @@ mod tests {
             // the local-client tests below opt in explicitly.
             with_local_client: false,
             client_config_path: None,
+            local_client_bind: None,
         }
     }
 
@@ -484,6 +521,40 @@ mod tests {
         let rt = resolver(&p).unwrap();
         let (_, c) = rt.client_config.as_ref().unwrap();
         assert_eq!(c.0.default_bind_config.as_deref(), Some("10.0.0.1/32"));
+    }
+
+    /// Cloud-elastic shape: resolver listens on a public IP but binds
+    /// to a private NIC. The local client must bind to the private NIC
+    /// (the public IP is NAT'd onto it, not assigned). When the CLI
+    /// supplies the elastic `BindCfg` string via `local_client_bind`,
+    /// the template emits it verbatim; without that override the
+    /// fallback uses `bind` (not `listen`) so we never emit a
+    /// public-IP/32 that can't actually be bound.
+    #[test]
+    fn local_client_bind_handles_cloud_elastic() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.listen = "54.32.224.1:4564".parse().unwrap();
+        p.bind = Some("10.0.0.5".parse().unwrap());
+        p.with_local_client = true;
+        p.client_config_path = Some(out.path().join("client.json"));
+
+        // With explicit override: template uses it verbatim.
+        p.local_client_bind = Some("54.32.224.1@10.0.0.0/24".to_string());
+        let rt = resolver(&p).unwrap();
+        let (_, c) = rt.client_config.as_ref().unwrap();
+        assert_eq!(
+            c.0.default_bind_config.as_deref(),
+            Some("54.32.224.1@10.0.0.0/24"),
+        );
+
+        // Without override: fall back to bind/32, NOT listen/32. The
+        // previous code used listen here and produced an unbindable
+        // public-IP/32 in the cloud-elastic case.
+        p.local_client_bind = None;
+        let rt = resolver(&p).unwrap();
+        let (_, c) = rt.client_config.as_ref().unwrap();
+        assert_eq!(c.0.default_bind_config.as_deref(), Some("10.0.0.5/32"));
     }
 
     /// Stand up a TLS-auth resolver template that also wants a local

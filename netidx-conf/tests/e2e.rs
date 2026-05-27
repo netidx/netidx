@@ -176,6 +176,7 @@ fn anon_params(dir: &TempDir, port: u16) -> ResolverParams {
         id_map_socket: None,
         with_local_client: true,
         client_config_path: Some(dir.path().join("client.json")),
+        local_client_bind: None,
     }
 }
 

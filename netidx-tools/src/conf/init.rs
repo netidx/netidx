@@ -223,6 +223,31 @@ struct ParentFlags {
 }
 
 impl ParentFlags {
+    /// True if the operator passed any `--parent-*` flag. Used by
+    /// callers to decide between flag-driven construction and the
+    /// interactive prompt cascade — the prompt should only fire when
+    /// nothing was specified, so a script that passes `--parent-spn`
+    /// without `--parent-addr` fails loudly instead of silently
+    /// dropping the flag on a non-TTY.
+    fn any_set(&self) -> bool {
+        let Self {
+            parent_addr,
+            parent_auth,
+            parent_spn,
+            parent_socket,
+            parent_tls_name,
+            parent_path,
+            parent_ttl,
+        } = self;
+        parent_addr.is_some()
+            || parent_auth.is_some()
+            || parent_spn.is_some()
+            || parent_socket.is_some()
+            || parent_tls_name.is_some()
+            || parent_path.is_some()
+            || parent_ttl.is_some()
+    }
+
     /// Build a `ParentRef` from the parent-* flags. `default_path`
     /// is the netidx path at which the current resolver attaches in
     /// the parent's namespace when the operator didn't pass
@@ -235,13 +260,7 @@ impl ParentFlags {
                 // Catch the silent-misuse case: any of the
                 // parent-* satellite flags without --parent-addr
                 // would otherwise just no-op into "no parent."
-                if self.parent_auth.is_some()
-                    || self.parent_spn.is_some()
-                    || self.parent_socket.is_some()
-                    || self.parent_tls_name.is_some()
-                    || self.parent_ttl.is_some()
-                    || self.parent_path.is_some()
-                {
+                if self.any_set() {
                     bail!("--parent-* flags require --parent-addr");
                 }
                 return Ok(None);
@@ -466,24 +485,43 @@ pub(crate) struct WorkstationFlags {
 }
 
 /// Resolve the workstation owner: explicit `--owner` first, else the
-/// current Unix user via `nix::unistd`. Returns `None` only if we're
-/// on a platform without `nix` (Windows) and no explicit `--owner`
-/// was passed — the engine then emits an empty perms map.
+/// current Unix user via `nix::unistd`. On unix, bails when the current
+/// uid has no passwd entry (distroless / scratch containers, uid-mapped
+/// namespaces, some CI runners) — silently producing `None` here would
+/// flow through to an empty `PMap`, which the local-auth resolver
+/// treats as deny-everything and the install would report success while
+/// being fundamentally broken. Operators in that situation must pass
+/// `--owner <name>` (or `--no-perms` to skip perms generation
+/// entirely).
+///
+/// Returns `Ok(None)` only on non-unix platforms (Windows) when no
+/// explicit `--owner` was passed — the engine then emits an empty
+/// perms map and the operator is expected to author one themselves.
 #[cfg(unix)]
-fn resolve_workstation_owner(provided: Option<String>) -> Option<ArcStr> {
+fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
     if let Some(s) = provided {
-        return Some(ArcStr::from(s.as_str()));
+        return Ok(Some(ArcStr::from(s.as_str())));
     }
     let uid = nix::unistd::Uid::current();
-    nix::unistd::User::from_uid(uid)
-        .ok()
-        .flatten()
-        .map(|u| ArcStr::from(u.name.as_str()))
+    match nix::unistd::User::from_uid(uid) {
+        Ok(Some(u)) => Ok(Some(ArcStr::from(u.name.as_str()))),
+        Ok(None) => bail!(
+            "could not resolve current uid ({uid}) to a passwd entry. \
+             This usually means you're running in a container or namespace \
+             without an /etc/passwd entry for your uid. Pass --owner <name> \
+             to name the workstation owner explicitly, or --no-perms to skip \
+             perms generation entirely."
+        ),
+        Err(e) => bail!(
+            "getpwuid_r failed for current uid ({uid}): {e}. \
+             Pass --owner <name> or --no-perms to proceed."
+        ),
+    }
 }
 
 #[cfg(not(unix))]
-fn resolve_workstation_owner(provided: Option<String>) -> Option<ArcStr> {
-    provided.map(|s| ArcStr::from(s.as_str()))
+fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
+    Ok(provided.map(|s| ArcStr::from(s.as_str())))
 }
 
 fn run_workstation(f: WorkstationFlags) -> Result<()> {
@@ -503,7 +541,14 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     // path at which this resolver attaches in the parent's namespace).
     // For the workstation that's `/local` by convention.
     let parent_default_path = f.base.as_str();
-    let parent = if f.parent.parent_addr.is_some() {
+    // Route through `to_parent_ref` when any `--parent-*` flag is set
+    // (not just `--parent-addr`) so a script that passes `--parent-spn`
+    // without `--parent-addr` hits the misuse bail inside
+    // `to_parent_ref` rather than silently dropping the flag values
+    // into the prompt cascade — which, on a non-TTY, returns `None`
+    // and produces a workstation with no parent referral at all. Same
+    // contract `run_resolver` already has.
+    let parent = if f.parent.any_set() {
         f.parent.to_parent_ref(parent_default_path)?
     } else {
         match prompt_parent_referral(parent_default_path)? {
@@ -519,7 +564,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let owner = if f.no_perms {
         None
     } else {
-        resolve_workstation_owner(f.owner.clone())
+        resolve_workstation_owner(f.owner.clone())?
     };
     // Struct-literal construction so adding a field to
     // WorkstationParams forces a compile error here rather than
@@ -1433,6 +1478,22 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             None => None,
         }
     };
+    // Local-client bind override: when the resolver listens on a
+    // public IP while binding to a private NIC (cloud-elastic), the
+    // local client's publisher cannot bind to the public IP — it's
+    // NAT'd onto the private NIC, not present on any local interface.
+    // Emit the `BindCfg::Elastic` form so the local publisher binds to
+    // the private subnet but advertises the public IP, matching how
+    // the standalone publisher template handles the same shape.
+    //
+    // Only kicks in when shape was actually detected (operator didn't
+    // pass both --listen and --bind) and the shape is cloud-elastic.
+    // Other shapes fall through to the template's default (bind/32),
+    // which already does the right thing for symmetric setups.
+    let local_client_bind = match shape.get() {
+        Some(s @ NetShape::CloudElastic { .. }) => Some(s.publisher_bind_suggestion()),
+        _ => None,
+    };
     // The auth-scheme sub-args (tls cert paths, krb5 spn, local
     // socket) are level-2 prompts inside `resolver_self_auth` — so
     // defaulting `--auth` to tls walks the operator through the cert
@@ -1465,6 +1526,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         id_map_socket: f.id_map_socket,
         with_local_client: !f.no_client,
         client_config_path: f.client_config_path,
+        local_client_bind,
     };
     let rt = template::resolver(&params)?;
     // A standalone resolver is a network-facing daemon — system-scope
