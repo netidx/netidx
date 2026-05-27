@@ -351,21 +351,48 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     if force {
         return Ok(());
     }
-    let mut existing: Vec<&Path> = Vec::new();
+    let mut existing: Vec<PathBuf> = Vec::new();
     if let Some((p, _)) = &rt.client_config
         && p.exists()
     {
-        existing.push(p);
+        existing.push(p.clone());
     }
     if let Some((p, _)) = &rt.resolver_config
         && p.exists()
     {
-        existing.push(p);
+        existing.push(p.clone());
     }
     if let Some((p, _)) = &rt.perms_file
         && p.exists()
     {
-        existing.push(p);
+        existing.push(p.clone());
+    }
+    // Activation unit files are real generated artifacts written by
+    // `apply()` via `ActivationDir::save` with no per-unit existence
+    // guard, so they need the same --force protection as the configs
+    // above. Without this, moving the main config paths off-default
+    // (or running a template that produces *only* units) would let a
+    // non-forced re-install silently clobber operator-edited
+    // `resolver.unit` / `container.unit` / `id-map.unit` files.
+    if let Some(dir) = &rt.units_dir {
+        for name in rt.units.keys() {
+            let p = netidx_conf::activation::unit_path_in(dir, name);
+            if p.exists() {
+                existing.push(p);
+            }
+        }
+    }
+    // TLS install copies cert/key/CA into <dest_dir>/, overwriting
+    // unconditionally (see `install_identity`'s docstring). If an
+    // operator already populated the directory by hand or by an earlier
+    // run, a re-install without --force would silently replace their
+    // material — including the private key.
+    for job in &rt.tls_install {
+        for p in netidx_conf::tls::installed_files_in(&job.dest_dir) {
+            if p.exists() {
+                existing.push(p);
+            }
+        }
     }
     if existing.is_empty() {
         Ok(())

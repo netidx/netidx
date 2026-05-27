@@ -127,9 +127,18 @@ impl ActivationDir {
         }
     }
 
-    fn unit_path(&self, name: &str) -> PathBuf {
-        self.dir.join(format!("{name}{UNIT_SUFFIX}"))
+    /// Resolve the on-disk path for a unit basename in this directory.
+    /// Does not check whether the file exists.
+    pub fn unit_path(&self, name: &str) -> PathBuf {
+        unit_path_in(&self.dir, name)
     }
+}
+
+/// Free-function form of [`ActivationDir::unit_path`] for callers that
+/// know the directory but don't want to `open()` it (e.g. pre-write
+/// existence checks against a `RenderedTemplate`).
+pub fn unit_path_in(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{UNIT_SUFFIX}"))
 }
 
 fn ensure_valid_basename(name: &str) -> Result<()> {

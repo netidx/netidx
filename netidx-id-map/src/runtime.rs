@@ -38,7 +38,7 @@
 //! length but small enough to make a slow-loris flood cheap to shed.
 
 use crate::file::{self, IdMap, Query};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use enumflags2::make_bitflags;
 use extended_notify::{
     ArcPath, EventBatch, EventHandler, EventKind, Interest, Watched, Watcher,
@@ -142,23 +142,47 @@ impl Server {
         // Activation supervision already enforces single-instance
         // per unit; this defends against direct `netidx id-map serve`
         // misuse and against a stale path racing a fresh start.
-        if params.socket.exists() {
-            match UnixStream::connect(&params.socket).await {
-                Ok(_) => {
-                    bail!(
-                        "another id-map daemon already listening on {:?}; \
-                         refusing to take the socket",
-                        params.socket
-                    );
+        //
+        // We `lstat` (not `stat`) the path so a symlink at --socket is
+        // treated as "not a socket" rather than followed. Only an
+        // actual socket inode is eligible for cleanup — anything else
+        // (regular file, FIFO, directory, symlink) is almost certainly
+        // operator misconfiguration and we'd rather bail than unlink it.
+        use std::os::unix::fs::FileTypeExt;
+        match tokio::fs::symlink_metadata(&params.socket).await {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("stat {:?} before bind", params.socket)
+                });
+            }
+            Ok(md) if md.file_type().is_socket() => {
+                match UnixStream::connect(&params.socket).await {
+                    Ok(_) => {
+                        bail!(
+                            "another id-map daemon already listening on {:?}; \
+                             refusing to take the socket",
+                            params.socket
+                        );
+                    }
+                    Err(_) => {
+                        // Stale socket — safe to clean up. The connect
+                        // probe is best-effort: a live peer that's hung
+                        // could also produce a connect error, but the
+                        // operator-facing outcome is the same (we bind,
+                        // they didn't notice they had a hung daemon).
+                        let _ = tokio::fs::remove_file(&params.socket).await;
+                    }
                 }
-                Err(_) => {
-                    // Stale socket — safe to clean up. The connect
-                    // probe is best-effort: a live peer that's hung
-                    // could also produce a connect error, but the
-                    // operator-facing outcome is the same (we bind,
-                    // they didn't notice they had a hung daemon).
-                    let _ = tokio::fs::remove_file(&params.socket).await;
-                }
+            }
+            Ok(md) => {
+                bail!(
+                    "refusing to bind id-map socket: {:?} exists but is not a \
+                     unix socket (file type: {:?}). Pick a different --socket \
+                     path or remove this file by hand.",
+                    params.socket,
+                    md.file_type()
+                );
             }
         }
         let listener = UnixListener::bind(&params.socket)

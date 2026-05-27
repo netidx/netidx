@@ -63,9 +63,7 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
     let ca_bytes = std::fs::read(p.trusted_src)
         .with_context(|| format!("reading trusted CA source {:?}", p.trusted_src))?;
 
-    let cert_dst = dir.join("certificate.pem");
-    let key_dst = dir.join("private.key");
-    let ca_dst = dir.join("trusted.pem");
+    let [cert_dst, key_dst, ca_dst] = installed_files_in(&dir);
 
     atomic::write_atomic(&cert_dst, &cert_bytes, 0o644)?;
     atomic::write_atomic(&key_dst, &key_bytes, 0o600)?;
@@ -78,6 +76,18 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
         private_key: key_dst,
         trusted: ca_dst,
     })
+}
+
+/// The three on-disk files [`install_identity`] writes into
+/// `dest_dir`, in the order `(certificate, private_key, trusted)`. Use
+/// from pre-write existence checks (e.g. --force gating) so the
+/// filenames live in exactly one place.
+pub fn installed_files_in(dest_dir: &Path) -> [PathBuf; 3] {
+    [
+        dest_dir.join("certificate.pem"),
+        dest_dir.join("private.key"),
+        dest_dir.join("trusted.pem"),
+    ]
 }
 
 /// Where this identity lives by convention: `${user_tls_dir}/<cn>`.
