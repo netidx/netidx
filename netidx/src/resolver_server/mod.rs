@@ -383,7 +383,7 @@ pub(crate) async fn krb5_authentication(
 ) -> Result<ServerCtx> {
     let spn = spn.map(ArcStr::from);
     let mut ctx = task::spawn_blocking(move || {
-        ServerCtx::new(AcceptFlags::empty(), spn.as_ref().map(|s| s.as_str()))
+        ServerCtx::new(AcceptFlags::empty(), spn.as_ref().map(|s| s.as_str()), None)
     })
     .await??;
     loop {

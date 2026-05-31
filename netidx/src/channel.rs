@@ -35,21 +35,21 @@ const MAX_BATCH: usize = 0x3FFFFFFF;
 const ENC_MASK: u32 = 0x80000000;
 
 #[derive(Debug)]
-pub struct K5CtxWrap<C: K5Ctx + Debug + Send + Sync + 'static>(Arc<Mutex<C>>);
+pub struct K5CtxWrap<C: K5Ctx + Debug + Send + 'static>(Arc<Mutex<C>>);
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> K5CtxWrap<C> {
+impl<C: K5Ctx + Debug + Send + 'static> K5CtxWrap<C> {
     pub fn new(ctx: C) -> Self {
         K5CtxWrap(Arc::new(Mutex::new(ctx)))
     }
 }
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> Clone for K5CtxWrap<C> {
+impl<C: K5Ctx + Debug + Send + 'static> Clone for K5CtxWrap<C> {
     fn clone(&self) -> Self {
         K5CtxWrap(Arc::clone(&self.0))
     }
 }
 
-impl<C: K5Ctx + Debug + Send + Sync + 'static> Deref for K5CtxWrap<C> {
+impl<C: K5Ctx + Debug + Send + 'static> Deref for K5CtxWrap<C> {
     type Target = Mutex<C>;
 
     fn deref(&self) -> &Self::Target {
@@ -126,7 +126,7 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
 }
 
 fn flush_task<
-    C: K5Ctx + Debug + Send + Sync + 'static,
+    C: K5Ctx + Debug + Send + 'static,
     S: AsyncWrite + Send + 'static,
 >(
     ctx: Option<K5CtxWrap<C>>,
@@ -159,7 +159,7 @@ pub(crate) struct WriteChannel {
 
 impl WriteChannel {
     pub(crate) fn new<
-        C: K5Ctx + Debug + Send + Sync + 'static,
+        C: K5Ctx + Debug + Send + 'static,
         S: AsyncWrite + Send + 'static,
     >(
         ctx: Option<K5CtxWrap<C>>,
@@ -376,7 +376,7 @@ impl DerefMut for PBuf {
     }
 }
 
-fn read_task<C: K5Ctx + Debug + Send + Sync + 'static, S: AsyncRead + Send + 'static>(
+fn read_task<C: K5Ctx + Debug + Send + 'static, S: AsyncRead + Send + 'static>(
     stop: oneshot::Receiver<()>,
     mut soc: ReadHalf<S>,
     ctx: Option<K5CtxWrap<C>>,
@@ -450,7 +450,7 @@ pub(crate) struct ReadChannel {
 
 impl ReadChannel {
     pub(crate) fn new<
-        C: K5Ctx + Debug + Send + Sync + 'static,
+        C: K5Ctx + Debug + Send + 'static,
         S: AsyncRead + Send + 'static,
     >(
         k5ctx: Option<K5CtxWrap<C>>,
@@ -528,7 +528,7 @@ pub(crate) struct Channel {
 
 impl Channel {
     pub(crate) fn new<
-        C: K5Ctx + Debug + Send + Sync + 'static,
+        C: K5Ctx + Debug + Send + 'static,
         S: AsyncRead + AsyncWrite + Send + 'static,
     >(
         k5ctx: Option<K5CtxWrap<C>>,

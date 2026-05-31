@@ -23,7 +23,7 @@ combine = "4"
 compact_str = { version = "0.9", features = ["serde"] }
 crossbeam = "0.8"
 crossbeam-queue = "0.3"
-cross-krb5 = { version = "0.4", default-features = false }
+cross-krb5 = { version = "0.5", default-features = false }
 ctrlc = { version = "3", features = ["termination"] }
 daemonize = "0.5"
 derive_builder = "0.20"

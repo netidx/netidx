@@ -1,3 +1,6 @@
+#[cfg(unix)]
+mod kdc;
+
 mod resolver {
     use crate::{
         config::Config as ClientConfig,
@@ -623,6 +626,100 @@ mod publisher {
         run_subscriber(pub_cfg, default_destroyed, DesiredAuth::Tls { identity: None })
             .await;
         drop(server)
+    }
+
+    /// Kerberos end-to-end test against an in-process KDC. Mirrors
+    /// `tls_publish_subscribe` but uses real GSSAPI handshakes between
+    /// resolver/publisher/subscriber. Held by `_env` for the duration to
+    /// keep `KRB5_CONFIG`/`KRB5CCNAME`/`KRB5_KTNAME` pointed at this
+    /// fixture's tempdir; the guard serializes against other krb5 tests
+    /// that share the same process-wide env.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn krb5_publish_subscribe() {
+        use crate::resolver_server::config::{self as sconfig, file as sfile, PMap};
+        use crate::config::{self as cconfig, file as cfile, DefaultAuthMech};
+        use arcstr::ArcStr;
+        use std::collections::HashMap;
+        use super::kdc::TestKdc;
+
+        let _ = env_logger::try_init();
+
+        const RESOLVER_SPN: &str = "netidx/test.example.com@EXAMPLE.COM";
+        const PUBLISHER_SPN: &str = "publisher/test.example.com@EXAMPLE.COM";
+        const USER_UPN: &str = "testuser@EXAMPLE.COM";
+        const USER_PASS: &str = "testpass";
+
+        // Bring up the KDC and provision principals/keytabs/ccache. All of
+        // this is blocking (spawning kdb5_util, krb5kdc, kadmin.local,
+        // kinit), so push it onto the blocking pool to keep the runtime
+        // unblocked.
+        let kdc = task::spawn_blocking(|| {
+            let kdc = TestKdc::new();
+            kdc.add_principal_with_password("testuser", USER_PASS);
+            kdc.add_principal_random_key(RESOLVER_SPN);
+            kdc.add_principal_random_key(PUBLISHER_SPN);
+            kdc.export_keytab(RESOLVER_SPN);
+            kdc.export_keytab(PUBLISHER_SPN);
+            kdc.kinit("testuser", USER_PASS);
+            kdc
+        })
+        .await
+        .expect("kdc setup");
+        let _env = kdc.apply_env().await;
+
+        // Resolver server config: Krb5 auth, DoNotMap so the principal name
+        // is used verbatim as the entity (skips id-mapping which would try
+        // to resolve testuser@EXAMPLE.COM to a unix user via /bin/id), and
+        // perms granting swlpd on / to testuser.
+        let mut entity_perms = HashMap::new();
+        entity_perms.insert(ArcStr::from(USER_UPN), ArcStr::from("swlpd"));
+        let mut paths = HashMap::new();
+        paths.insert(ArcStr::from("/"), entity_perms);
+        let server_cfg = sfile::ConfigBuilder::default()
+            .member_servers(vec![sfile::MemberServerBuilder::default()
+                .auth(sfile::Auth::Krb5(ArcStr::from(RESOLVER_SPN)))
+                .addr("127.0.0.1:0".parse().unwrap())
+                .bind_addr("127.0.0.1".parse().unwrap())
+                .id_map_type(sfile::IdMapType::DoNotMap)
+                .build()
+                .unwrap()])
+            .perms(PMap(paths))
+            .build()
+            .unwrap();
+        let server_cfg = sconfig::Config::from_file(server_cfg).expect("from_file");
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        let addr = *server.local_addr();
+
+        // Client (resolver-side) config: same SPN as the resolver, used
+        // when subscribers/publishers obtain a service ticket for the
+        // resolver.
+        let client_cfg = cfile::ConfigBuilder::default()
+            .addrs(vec![(addr, cfile::Auth::Krb5(ArcStr::from(RESOLVER_SPN)))])
+            .default_auth(DefaultAuthMech::Krb5)
+            .default_bind_config("local")
+            .build()
+            .unwrap();
+        let client_cfg = cconfig::Config::from_file(client_cfg).expect("from_file");
+
+        let default_destroyed = Arc::new(Mutex::new(false));
+        let (tx, ready) = oneshot::channel();
+        let pub_auth = DesiredAuth::Krb5 {
+            upn: Some(USER_UPN.to_string()),
+            spn: Some(PUBLISHER_SPN.to_string()),
+        };
+        let sub_auth =
+            DesiredAuth::Krb5 { upn: Some(USER_UPN.to_string()), spn: None };
+        task::spawn(run_publisher(
+            client_cfg.clone(),
+            default_destroyed.clone(),
+            tx,
+            pub_auth,
+        ));
+        time::timeout(Duration::from_secs(5), ready).await.unwrap().unwrap();
+        run_subscriber(client_cfg, default_destroyed, sub_auth).await;
+        drop(server);
+        drop(_env);
     }
 
     #[tokio::test(flavor = "multi_thread")]
