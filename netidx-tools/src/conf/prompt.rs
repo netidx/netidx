@@ -27,8 +27,29 @@ use std::{
     str::FromStr,
 };
 
-fn stdin_is_tty() -> bool {
+/// Is stdin a real terminal we can prompt on?
+///
+/// In test builds this is unconditionally `false`. `cargo test` does
+/// not redirect the test binary's stdin — it inherits the launching
+/// terminal's stdin, so a live `is_terminal()` here returns `true`
+/// whenever the suite is run from a terminal, and every prompt-driven
+/// test then blocks forever on input that never comes. (It passes in
+/// CI only because CI hands the runner a non-TTY stdin — i.e. the
+/// behaviour was a property of the environment, not the test.) Pinning
+/// it to `false` makes the non-interactive branches deterministic
+/// regardless of how the suite was launched; the interactive branches
+/// are smoke-tested against the built binary.
+///
+/// `pub(super)` so the other `conf` submodules share this single
+/// definition rather than re-checking `is_terminal()` themselves.
+#[cfg(not(test))]
+pub(super) fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+pub(super) fn stdin_is_tty() -> bool {
+    false
 }
 
 /// Wrap `s` in ANSI bold, but only when stdout is a real terminal —
@@ -330,7 +351,8 @@ pub fn confirm(question: &str, default: bool) -> Result<bool> {
 mod tests {
     use super::*;
 
-    // `cargo test` runs without a TTY on stdin, so these exercise the
+    // In test builds `stdin_is_tty()` is pinned to `false` (see its
+    // doc comment), so these deterministically exercise the
     // provided-value and non-TTY branches. The interactive branches
     // are smoke-tested against the built binary.
 

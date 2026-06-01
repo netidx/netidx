@@ -81,13 +81,6 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
                     bail!("spn is required in krb5 mode")
                 }
             }
-            // Only the TLS subject name is reachable at this layer —
-            // the generic `T: Into<resolver::Auth>` strips cert paths
-            // before they get here. Per-member-server cert/key/trusted
-            // files are loaded and verified separately in
-            // `Config::from_file`; referral entries (`file::RefAuth::Tls`)
-            // carry no cert paths because the certs live at the
-            // referred-to server.
             resolver::Auth::Tls { name } => {
                 if name.is_empty() {
                     bail!("name is required in tls mode")
@@ -686,8 +679,8 @@ mod perms_merge_tests {
     fn merge_pmap_later_wins() {
         let mut a = pmap(&[("/foo", &[("alice", "swlpd"), ("bob", "sl")])]);
         let b = pmap(&[
-            ("/foo", &[("alice", "sl")]),     // override alice
-            ("/bar", &[("alice", "p")]),      // new path
+            ("/foo", &[("alice", "sl")]), // override alice
+            ("/bar", &[("alice", "p")]),  // new path
         ]);
         merge_pmap(&mut a, b);
         assert_eq!(a.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl");
@@ -783,8 +776,7 @@ mod perms_merge_tests {
         let perms_file = perms_dir.join("main.json");
         std::fs::write(
             &perms_file,
-            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])]))
-                .unwrap(),
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])])).unwrap(),
         )
         .unwrap();
 

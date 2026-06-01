@@ -16,7 +16,7 @@ use tokio::{
 /// window papers over the boot race without pessimising the steady
 /// state — once the daemon is up, every subsequent connect succeeds
 /// on the first try.
-const SOCKET_CONNECT_TRIES: u32 = 5;
+const SOCKET_CONNECT_TRIES: u32 = 25;
 const SOCKET_CONNECT_BACKOFF: Duration = Duration::from_millis(200);
 
 async fn connect_with_retry(path: &str) -> Result<UnixStream> {

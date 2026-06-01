@@ -4,7 +4,7 @@ use netidx_conf::{
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     paths, tls,
 };
-use std::{io::IsTerminal, net::IpAddr, path::PathBuf};
+use std::{net::IpAddr, path::PathBuf};
 use structopt::StructOpt;
 
 use super::prompt;
@@ -368,7 +368,7 @@ fn maybe_register_in_id_map(
     if no_id_map {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    if !prompt::stdin_is_tty() {
         return Ok(());
     }
     // The identity NAME in the id-map is what the resolver sees on
@@ -603,7 +603,7 @@ pub(super) fn open_default_ca() -> Result<Ca> {
         // with a message containing "encrypted"; treat that as
         // "prompt and retry" and everything else as a hard failure.
         Err(e) if format!("{e:#}").contains("encrypted") => {
-            if !is_stdin_tty() {
+            if !prompt::stdin_is_tty() {
                 bail!(
                     "the CA at {} has an encrypted private key and stdin is \
                      not a TTY; cannot prompt for the password",
@@ -735,7 +735,7 @@ pub(super) fn collect_password(
     if no_password {
         return Ok(None);
     }
-    if !is_stdin_tty() {
+    if !prompt::stdin_is_tty() {
         bail!(
             "stdin is not a TTY and no password was supplied. Pass --no-password to write an unencrypted key, or run with a TTY attached to be prompted."
         );
@@ -751,10 +751,6 @@ pub(super) fn collect_password(
         }
     }
     Ok(Some(pw))
-}
-
-fn is_stdin_tty() -> bool {
-    std::io::stdin().is_terminal()
 }
 
 #[cfg(test)]
@@ -862,11 +858,12 @@ mod tests {
     #[test]
     fn sign_without_flags_accepts_csr_san_by_default() {
         // With neither --san nor --accept-csr-san, `sign` now drops
-        // through a level-1 prompt (default Y). `cargo test` runs
-        // without a TTY, so `prompt::confirm` returns the default,
-        // which means signing succeeds and the resulting cert carries
-        // the CSR's SAN. The interactive path is "type 'n' to reject
-        // and bail" — covered by smoke-testing the built binary.
+        // through a level-1 prompt (default Y). In test builds
+        // `prompt::stdin_is_tty()` is pinned to `false`, so
+        // `prompt::confirm` returns the default, which means signing
+        // succeeds and the resulting cert carries the CSR's SAN. The
+        // interactive path is "type 'n' to reject and bail" — covered
+        // by smoke-testing the built binary.
         let scratch = tempfile::tempdir().unwrap();
         let csr_path = scratch.path().join("client.csr");
         let key_path = scratch.path().join("client.key");
@@ -1090,10 +1087,9 @@ mod tests {
 
     #[test]
     fn prompt_required_fails_without_tty() {
-        // CI runs without a TTY on stdin, so an omitted required arg
-        // must bail rather than hang. We exercise the non-TTY branch
-        // by passing `None` and trusting `is_stdin_tty()` returns
-        // false here (which it does under cargo test).
+        // In test builds `prompt::stdin_is_tty()` is pinned to
+        // `false`, so an omitted required arg must bail rather than
+        // hang. We exercise the non-TTY branch by passing `None`.
         let r = prompt::required_string("test prompt", None);
         assert!(r.is_err());
         let msg = format!("{:#}", r.unwrap_err());
