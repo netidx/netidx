@@ -590,12 +590,11 @@ impl Config {
         Self::from_file(from_str(s)?)
     }
 
-    /// Read and parse a resolver config file, resolving relative
-    /// `include_permissions` entries against the config file's parent
-    /// directory. Semantic validation (TLS cert loading, addr checks,
-    /// referral coherence) is **not** run — the caller can either
-    /// feed the result to [`Config::from_file`] for that, or use it
-    /// for diffing / SIGHUP-style comparisons.
+    /// Read and parse a resolver config file in it's raw form.
+    ///
+    /// This will load the raw resolver config, the only difference between
+    /// this function reading the file with serde is that this function will
+    /// canonicalize the paths of any included permissions files.
     ///
     /// **Path-traversal posture.** Relative include entries are
     /// joined with the canonicalized parent directory, then the
@@ -605,7 +604,7 @@ impl Config {
     /// the config dir: the config file is operator-trusted, and
     /// preventing traversal would break legitimate layouts (e.g. a
     /// `/etc/netidx/resolver.json` pointing at `/var/lib/netidx/perms/foo.json`).
-    pub fn load_file<P: AsRef<FsPath>>(file: P) -> Result<file::Config> {
+    pub fn load_raw<P: AsRef<FsPath>>(file: P) -> Result<file::Config> {
         let file_path = file.as_ref();
         let contents = read_to_string(file_path)?;
         let mut parsed: file::Config = from_str(&contents)?;
@@ -645,7 +644,7 @@ impl Config {
     /// keep working after `daemonize` chdirs the process to `/`.
     /// Absolute include paths pass through unchanged.
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
-        Self::from_file(Self::load_file(file)?)
+        Self::from_file(Self::load_raw(file)?)
     }
 
     pub(super) fn root(&self) -> &str {
