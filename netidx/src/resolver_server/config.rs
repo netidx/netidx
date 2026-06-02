@@ -480,94 +480,98 @@ impl Config {
             }
             children
         };
-        let member_servers = cfg
-            .member_servers
-            .into_iter()
-            .map(|m| {
-		let id_map = match &m.id_map_type {
-		    IdMapType::DoNotMap => IdMap::DoNotMap,
-		    IdMapType::Socket => match m.id_map_command {
-			None => bail!("you must specify the socket path as id_map_command"),
-			Some(path) => IdMap::Socket(path),
-		    }
-		    IdMapType::Command => match m.id_map_command {
-			None => IdMap::PlatformDefault,
-			Some(cmd) => {
-			    if let Err(e) = std::fs::File::open(&*cmd) {
-				bail!("id_map_command error: {}", e)
-			    }
-			    #[cfg(unix)]
-			    {
-				use std::os::unix::fs::MetadataExt;
-				if std::fs::metadata(&*cmd)?.mode() & 0o001 == 0 {
-				    bail!("id_map_command must be executable")
-				}
-			    }
-			    // lets pretend the resolver server will someday run on windows
-			    #[cfg(windows)]
-			    {
-				if !cmd.ends_with(".exe") {
-				    bail!("id_map_command must be executable")
-				}
-			    }
-			    IdMap::Command(cmd)
-			}
-		    }
-		};
-                match &m.auth {
-                    file::Auth::Anonymous
-                    | file::Auth::Krb5 { .. }
-                    | file::Auth::Local { .. } => (),
-                    file::Auth::Tls { name, trusted, certificate, private_key } => {
-                        if let Err(e) = tls::load_certs(&trusted) {
-                            bail!("failed to load trusted certificates {}", e)
-                        }
-                        if let Err(e) = tls::load_private_key(None, private_key) {
-                            bail!("failed to load the private key {}", e)
-                        }
-                        match tls::load_certs(&certificate) {
-                            Err(e) => bail!("failed to load server certificate {}", e),
-                            Ok(cert) => {
-                                if cert.len() == 0 || cert.len() > 1 {
-                                    bail!("certificate should contain exactly 1 cert")
+        fn check_member_server_auth(m: &file::MemberServer) -> Result<()> {
+            match &m.auth {
+                file::Auth::Anonymous
+                | file::Auth::Krb5 { .. }
+                | file::Auth::Local { .. } => Ok(()),
+                file::Auth::Tls { name, trusted, certificate, private_key } => {
+                    if let Err(e) = tls::load_certs(&trusted) {
+                        bail!("failed to load trusted certificates {}", e)
+                    }
+                    if let Err(e) = tls::load_private_key(None, private_key) {
+                        bail!("failed to load the private key {}", e)
+                    }
+                    match tls::load_certs(&certificate) {
+                        Err(e) => bail!("failed to load server certificate {}", e),
+                        Ok(cert) => {
+                            if cert.len() == 0 || cert.len() > 1 {
+                                bail!("certificate should contain exactly 1 cert")
+                            }
+                            match tls::get_names(&*cert[0])? {
+                                None => {
+                                    bail!("server certificate has no subjectAltName name")
                                 }
-                                match tls::get_names(&*cert[0])? {
-                                    None => {
-                                        bail!("server certificate has no subjectAltName name")
-                                    }
-                                    Some(names) if &names.alt_name != name => {
-                                        bail!("name must match the subjectAltName name")
-                                    }
-                                    Some(_) => (),
+                                Some(names) if &names.alt_name != name => {
+                                    bail!("name must match the subjectAltName name")
                                 }
+                                Some(_) => Ok(()),
                             }
                         }
                     }
                 }
-                if m.max_connections == 0 {
-                    bail!("max_connections must be positive")
-                }
-                if m.reader_ttl == 0 {
-                    bail!("reader_ttl must be positive")
-                }
-                if m.writer_ttl == 0 {
-                    bail!("writer_ttl must be positive")
-                }
-                if m.hello_timeout == 0 {
-                    bail!("hello_timeout must be positive")
-                }
-                Ok(MemberServer {
-                    addr: m.addr,
-                    bind_addr: m.bind_addr,
-                    auth: m.auth.into(),
-                    hello_timeout: Duration::from_secs(m.hello_timeout),
-                    max_connections: m.max_connections,
-                    reader_ttl: Duration::from_secs(m.reader_ttl),
-                    writer_ttl: Duration::from_secs(m.writer_ttl),
-                    id_map,
-		    id_map_timeout: chrono::Duration::seconds(m.id_map_timeout as i64),
-                })
+            }
+        }
+        fn member_server_from_file(m: file::MemberServer) -> Result<MemberServer> {
+            if m.max_connections == 0 {
+                bail!("max_connections must be positive")
+            }
+            if m.reader_ttl == 0 {
+                bail!("reader_ttl must be positive")
+            }
+            if m.writer_ttl == 0 {
+                bail!("writer_ttl must be positive")
+            }
+            if m.hello_timeout == 0 {
+                bail!("hello_timeout must be positive")
+            }
+            check_member_server_auth(&m)?;
+            let id_map = match &m.id_map_type {
+                IdMapType::DoNotMap => IdMap::DoNotMap,
+                IdMapType::Socket => match m.id_map_command {
+                    None => bail!("you must specify the socket path as id_map_command"),
+                    Some(path) => IdMap::Socket(path),
+                },
+                IdMapType::Command => match m.id_map_command {
+                    None => IdMap::PlatformDefault,
+                    Some(cmd) => {
+                        if let Err(e) = std::fs::File::open(&*cmd) {
+                            bail!("id_map_command error: {}", e)
+                        }
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            if std::fs::metadata(&*cmd)?.mode() & 0o001 == 0 {
+                                bail!("id_map_command must be executable")
+                            }
+                        }
+                        // lets pretend the resolver server will someday run on windows
+                        #[cfg(windows)]
+                        {
+                            if !cmd.ends_with(".exe") {
+                                bail!("id_map_command must be executable")
+                            }
+                        }
+                        IdMap::Command(cmd)
+                    }
+                },
+            };
+            Ok(MemberServer {
+                addr: m.addr,
+                bind_addr: m.bind_addr,
+                auth: m.auth.into(),
+                hello_timeout: Duration::from_secs(m.hello_timeout),
+                max_connections: m.max_connections,
+                reader_ttl: Duration::from_secs(m.reader_ttl),
+                writer_ttl: Duration::from_secs(m.writer_ttl),
+                id_map,
+                id_map_timeout: chrono::Duration::seconds(m.id_map_timeout as i64),
             })
+        }
+        let member_servers = cfg
+            .member_servers
+            .into_iter()
+            .map(|m| member_server_from_file(m))
             .collect::<Result<Vec<_>>>()?;
         // Walk include_permissions in order, merging each file's PMap
         // (later wins), then merge the inline `perms` last so it
