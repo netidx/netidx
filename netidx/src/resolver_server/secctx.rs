@@ -2,16 +2,14 @@ use super::{
     auth::{PMap, UserDb},
     config::{self, Auth, Config, MemberServer},
 };
-use crate::path::Path as NetidxPath;
-use crate::protocol::resolver::Referral;
-use std::collections::BTreeMap;
 use crate::{
     channel::K5CtxWrap,
     os::{
         local_auth::{AuthServer, Credential},
         Mapper,
     },
-    protocol::resolver::PublisherId,
+    path::Path,
+    protocol::resolver::{PublisherId, Referral},
     tls,
 };
 use anyhow::{bail, Result};
@@ -20,7 +18,10 @@ use cross_krb5::{K5Ctx, ServerCtx};
 use log::debug;
 use netidx_core::pack::Pack;
 use nohash::IntMap;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub(super) struct LocalAuth(AuthServer);
@@ -58,10 +59,10 @@ pub(super) struct SecCtxData<S: 'static> {
     /// reload validates against the running structure rather than a
     /// possibly-edited parent/children section the operator has
     /// changed without restarting.
-    pub(super) root: arcstr::ArcStr,
+    pub(super) root: Path,
     /// Cluster children captured at construction; same rationale as
     /// `root`.
-    pub(super) children: BTreeMap<NetidxPath, Referral>,
+    pub(super) children: BTreeMap<Path, Referral>,
     data: IntMap<PublisherId, S>,
 }
 
@@ -73,7 +74,7 @@ impl<S: 'static + SecDataCommon> SecCtxData<S> {
         Ok(Self {
             users,
             pmap,
-            root: arcstr::ArcStr::from(cfg.root()),
+            root: Path::from(ArcStr::from(cfg.root())),
             children: cfg.children.clone(),
             data: HashMap::default(),
         })
@@ -194,10 +195,7 @@ impl SecCtx {
     /// async waits. Hold time is microseconds for typical perms
     /// files. `tokio::sync::RwLock` doesn't poison on panic, so a
     /// crash inside the builder simply releases the guard.
-    pub(crate) async fn reload_pmap(
-        &self,
-        new_perms: &config::PMap,
-    ) -> Result<()> {
+    pub(crate) async fn reload_pmap(&self, new_perms: &config::PMap) -> Result<()> {
         async fn swap_one<S: 'static>(
             store: &RwLock<SecCtxData<S>>,
             new_perms: &config::PMap,
@@ -206,8 +204,7 @@ impl SecCtx {
             // Split-borrow: distinct fields of the guard, OK for the
             // borrow checker.
             let SecCtxData { users, root, children, .. } = &mut *w;
-            let rebuilt =
-                PMap::from_file(new_perms, users, root.as_str(), children)?;
+            let rebuilt = PMap::from_file(new_perms, users, &*root, children)?;
             w.pmap = rebuilt;
             Ok(())
         }
