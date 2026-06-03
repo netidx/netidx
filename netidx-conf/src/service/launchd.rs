@@ -6,14 +6,38 @@
 //! out.
 
 use super::{
-    InstalledService, ServiceParams, ServiceScope, ServiceStatus,
-    ensure_valid_service_name, xml_escape,
+    ensure_valid_service_name, InstalledService, ServiceParams, ServiceScope,
+    ServiceStatus,
 };
 use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+/// XML-escape the five entity-reference characters. Used by the
+/// launchd plist renderer to safely interpolate operator-supplied
+/// paths into `<string>...</string>` content; without this a path
+/// like `~/bin/foo & bar/netidx` produces invalid XML and
+/// `launchctl bootstrap` rejects the plist outright.
+// `xml_escape` is only consumed by the launchd backend (macOS) plus
+// the unit tests below. The `cfg_attr` keeps the unused-fn warning
+// off on non-mac builds while still letting the test module link to
+// it under `cfg(test)`.
+pub(super) fn quote_exec_arg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 /// Launchd label — what shows up in `launchctl list`. Conventionally
 /// reverse-DNS; `com.netidx.<name>` keeps multiple parallel installs
@@ -37,14 +61,11 @@ pub(super) fn render_plist(p: &ServiceParams) -> String {
     // `'` in real installs (e.g. `~/Library/Application Support`
     // gets quoted oddly on some shells; corporate paths often carry
     // `&` from project codenames).
-    let label = xml_escape(&label(p));
-    let exe = xml_escape(&p.binary.to_string_lossy());
+    let label = quote_exec_arg(&label(p));
+    let exe = quote_exec_arg(&p.binary.to_string_lossy());
     let user_name_block = match (p.scope, p.for_user.as_deref()) {
         (ServiceScope::System, Some(u)) => {
-            format!(
-                "\n  <key>UserName</key><string>{}</string>",
-                xml_escape(u),
-            )
+            format!("\n  <key>UserName</key><string>{}</string>", quote_exec_arg(u),)
         }
         // User scope: launchd runs the LaunchAgent as the session
         // user, so an explicit UserName key is redundant (and wrong
@@ -59,7 +80,7 @@ pub(super) fn render_plist(p: &ServiceParams) -> String {
     if let Some(dir) = &p.activation_dir {
         args.push_str(&format!(
             "\n    <string>--units</string>\n    <string>{}</string>",
-            xml_escape(&dir.to_string_lossy()),
+            quote_exec_arg(&dir.to_string_lossy()),
         ));
     }
     format!(
@@ -144,11 +165,7 @@ pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
         .stderr(Stdio::null())
         .status()
         .context("running launchctl print")?;
-    Ok(if status.success() {
-        ServiceStatus::Active
-    } else {
-        ServiceStatus::Inactive
-    })
+    Ok(if status.success() { ServiceStatus::Active } else { ServiceStatus::Inactive })
 }
 
 fn bootstrap(p: &ServiceParams, plist: &Path) -> Result<()> {
@@ -281,23 +298,15 @@ mod tests {
         let body = render_plist(&p);
         // Body must not contain the raw entity-bytes inside an
         // interpolated string.
-        assert!(
-            !body.contains("My & Tools"),
-            "raw `&` leaked into plist: {body}",
-        );
-        assert!(
-            !body.contains("<netidx>/units"),
-            "raw `<` leaked into plist: {body}",
-        );
+        assert!(!body.contains("My & Tools"), "raw `&` leaked into plist: {body}",);
+        assert!(!body.contains("<netidx>/units"), "raw `<` leaked into plist: {body}",);
         // And it MUST contain the escaped forms.
         assert!(
             body.contains("<string>/Applications/My &amp; Tools/netidx</string>"),
             "escaped binary path missing: {body}",
         );
         assert!(
-            body.contains(
-                "<string>/var/lib/&lt;netidx&gt;/units</string>"
-            ),
+            body.contains("<string>/var/lib/&lt;netidx&gt;/units</string>"),
             "escaped activation_dir missing: {body}",
         );
     }
@@ -324,5 +333,17 @@ mod tests {
         assert!(install(&p).is_err());
         assert!(uninstall(&p).is_err());
         assert!(status(&p).is_err());
+    }
+
+    #[test]
+    fn xml_escape_converts_the_five_entities() {
+        assert_eq!(
+            platform::quote_exec_arg("a & b < c > d \" e ' f"),
+            "a &amp; b &lt; c &gt; d &quot; e &apos; f",
+        );
+        // Idempotency / round-trip safety on ASCII strings.
+        assert_eq!(platform::quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
+        // Empty in, empty out.
+        assert_eq!(platform::quote_exec_arg(""), "");
     }
 }

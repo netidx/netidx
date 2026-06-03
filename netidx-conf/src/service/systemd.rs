@@ -7,14 +7,51 @@
 //! of `systemctl` commands we need.
 
 use super::{
-    InstalledService, ServiceParams, ServiceScope, ServiceStatus,
-    ensure_valid_service_name, systemd_quote_exec_arg,
+    ensure_valid_service_name, InstalledService, ServiceParams, ServiceScope,
+    ServiceStatus,
 };
 use anyhow::{Context, Result};
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
 };
+
+/// Quote an argument for systemd's `ExecStart=` token list. systemd
+/// parses ExecStart as a whitespace-split sequence of tokens with
+/// double-quote support and treats `%` as a specifier prefix
+/// regardless of quoting. Both rules need to hold for any path
+/// containing spaces or `%`, which is realistic for `current_exe()`
+/// on macOS / WSL / `~/Documents/...` installs.
+///
+/// Rules (cross-checked against `man systemd.service`):
+/// - `%` always doubled to `%%` to escape the specifier syntax.
+/// - If the resulting string contains any whitespace or quoting
+///   metacharacter (`"`, `'`, `\`, `;`, `\n`), wrap the whole arg in
+///   `"..."` and backslash-escape `"` and `\` inside the quotes.
+#[cfg(target_os = "linux")]
+pub(super) fn quote_exec_arg(s: &str) -> String {
+    let percent_escaped: String =
+        s.chars().flat_map(|c| if c == '%' { vec!['%', '%'] } else { vec![c] }).collect();
+    let needs_quoting = percent_escaped
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ';'));
+    if !needs_quoting {
+        return percent_escaped;
+    }
+    let mut out = String::with_capacity(percent_escaped.len() + 2);
+    out.push('"');
+    for c in percent_escaped.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 
 /// Render the contents of a `.service` unit file. Pure — no I/O.
 ///
@@ -32,13 +69,12 @@ pub(super) fn render_unit(p: &ServiceParams) -> String {
     // a whitespace-split token list with double-quote support, so
     // wrapping in `"..."` plus `%`-doubling is exactly the
     // contract the helper implements.
-    let exe = systemd_quote_exec_arg(&p.binary.to_string_lossy());
+    let exe = quote_exec_arg(&p.binary.to_string_lossy());
     let mut exec_start = format!("{exe} activation -f");
     if let Some(dir) = &p.activation_dir {
         // `netidx activation` takes the unit directory via `--units`.
         exec_start.push_str(" --units ");
-        exec_start
-            .push_str(&systemd_quote_exec_arg(&dir.to_string_lossy()));
+        exec_start.push_str(&quote_exec_arg(&dir.to_string_lossy()));
     }
     match p.scope {
         ServiceScope::User => format!(
@@ -163,11 +199,7 @@ pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
         .stderr(Stdio::null())
         .status()
         .context("running systemctl is-active")?;
-    Ok(if status.success() {
-        ServiceStatus::Active
-    } else {
-        ServiceStatus::Inactive
-    })
+    Ok(if status.success() { ServiceStatus::Active } else { ServiceStatus::Inactive })
 }
 
 fn resolve_for_user(p: &ServiceParams) -> Result<String> {
@@ -196,8 +228,7 @@ fn systemctl_command(scope: ServiceScope) -> Command {
 fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
     let mut cmd = systemctl_command(scope);
     cmd.args(args);
-    let status =
-        cmd.status().context("spawning systemctl (is it installed?)")?;
+    let status = cmd.status().context("spawning systemctl (is it installed?)")?;
     if !status.success() {
         bail!("systemctl {args:?} failed: {status}");
     }

@@ -650,6 +650,15 @@ impl Config {
     pub(super) fn root(&self) -> &str {
         self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
     }
+
+    /// Borrow the merged file-level permission map (after
+    /// `include_permissions` + inline `perms` have been folded
+    /// together by `from_file`). Exposed primarily for testing the
+    /// merge semantics, including from `netidx-conf`'s cross-crate
+    /// template tests.
+    pub fn perms(&self) -> &PMap {
+        &self.perms
+    }
 }
 
 #[cfg(test)]

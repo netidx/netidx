@@ -37,12 +37,37 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-#[cfg(target_os = "macos")]
-mod launchd;
-#[cfg(target_os = "windows")]
-mod scm;
+// Each init-system backend exposes the same install/uninstall/status
+// API, so bind whichever matches the target to a single `platform`
+// module and write the user-facing hooks once against it. Unsupported
+// targets get a stub backend so those hooks need no per-platform cfg.
 #[cfg(target_os = "linux")]
-mod systemd;
+#[path = "systemd.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+#[path = "launchd.rs"]
+mod platform;
+#[cfg(target_os = "windows")]
+#[path = "scm.rs"]
+mod platform;
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+mod platform {
+    use super::{InstalledService, ServiceParams, ServiceStatus};
+    use anyhow::Result;
+
+    pub(super) fn install(_p: &ServiceParams) -> Result<InstalledService> {
+        anyhow::bail!(
+            "OS service install is only implemented on Linux, macOS, and Windows; \
+             run `netidx activation` from your platform's init system manually"
+        )
+    }
+    pub(super) fn uninstall(_p: &ServiceParams) -> Result<()> {
+        anyhow::bail!("OS service uninstall is not implemented on this platform")
+    }
+    pub(super) fn status(_p: &ServiceParams) -> Result<ServiceStatus> {
+        Ok(ServiceStatus::NotInstalled)
+    }
+}
 
 /// Whether the service runs at user scope (per-login) or system
 /// scope (boot-triggered, root-owned).
@@ -116,59 +141,14 @@ pub enum ServiceStatus {
     NotInstalled,
 }
 
-#[cfg(target_os = "linux")]
 pub fn install(p: &ServiceParams) -> Result<InstalledService> {
-    systemd::install(p)
+    platform::install(p)
 }
-#[cfg(target_os = "linux")]
 pub fn uninstall(p: &ServiceParams) -> Result<()> {
-    systemd::uninstall(p)
+    platform::uninstall(p)
 }
-#[cfg(target_os = "linux")]
 pub fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    systemd::status(p)
-}
-
-#[cfg(target_os = "macos")]
-pub fn install(p: &ServiceParams) -> Result<InstalledService> {
-    launchd::install(p)
-}
-#[cfg(target_os = "macos")]
-pub fn uninstall(p: &ServiceParams) -> Result<()> {
-    launchd::uninstall(p)
-}
-#[cfg(target_os = "macos")]
-pub fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    launchd::status(p)
-}
-
-#[cfg(target_os = "windows")]
-pub fn install(p: &ServiceParams) -> Result<InstalledService> {
-    scm::install(p)
-}
-#[cfg(target_os = "windows")]
-pub fn uninstall(p: &ServiceParams) -> Result<()> {
-    scm::uninstall(p)
-}
-#[cfg(target_os = "windows")]
-pub fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    scm::status(p)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn install(_p: &ServiceParams) -> Result<InstalledService> {
-    anyhow::bail!(
-        "OS service install is only implemented on Linux, macOS, and Windows; \
-         run `netidx activation` from your platform's init system manually"
-    )
-}
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn uninstall(_p: &ServiceParams) -> Result<()> {
-    anyhow::bail!("OS service uninstall is not implemented on this platform")
-}
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn status(_p: &ServiceParams) -> Result<ServiceStatus> {
-    Ok(ServiceStatus::NotInstalled)
+    platform::status(p)
 }
 
 // ---- shared helpers --------------------------------------------------------
@@ -204,68 +184,6 @@ fn ensure_valid_service_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// XML-escape the five entity-reference characters. Used by the
-/// launchd plist renderer to safely interpolate operator-supplied
-/// paths into `<string>...</string>` content; without this a path
-/// like `~/bin/foo & bar/netidx` produces invalid XML and
-/// `launchctl bootstrap` rejects the plist outright.
-// `xml_escape` is only consumed by the launchd backend (macOS) plus
-// the unit tests below. The `cfg_attr` keeps the unused-fn warning
-// off on non-mac builds while still letting the test module link to
-// it under `cfg(test)`.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Quote an argument for systemd's `ExecStart=` token list. systemd
-/// parses ExecStart as a whitespace-split sequence of tokens with
-/// double-quote support and treats `%` as a specifier prefix
-/// regardless of quoting. Both rules need to hold for any path
-/// containing spaces or `%`, which is realistic for `current_exe()`
-/// on macOS / WSL / `~/Documents/...` installs.
-///
-/// Rules (cross-checked against `man systemd.service`):
-/// - `%` always doubled to `%%` to escape the specifier syntax.
-/// - If the resulting string contains any whitespace or quoting
-///   metacharacter (`"`, `'`, `\`, `;`, `\n`), wrap the whole arg in
-///   `"..."` and backslash-escape `"` and `\` inside the quotes.
-#[cfg(target_os = "linux")]
-fn systemd_quote_exec_arg(s: &str) -> String {
-    let percent_escaped: String =
-        s.chars().flat_map(|c| if c == '%' { vec!['%', '%'] } else { vec![c] }).collect();
-    let needs_quoting = percent_escaped
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ';'));
-    if !needs_quoting {
-        return percent_escaped;
-    }
-    let mut out = String::with_capacity(percent_escaped.len() + 2);
-    out.push('"');
-    for c in percent_escaped.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,23 +216,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn xml_escape_converts_the_five_entities() {
-        assert_eq!(
-            xml_escape("a & b < c > d \" e ' f"),
-            "a &amp; b &lt; c &gt; d &quot; e &apos; f",
-        );
-        // Idempotency / round-trip safety on ASCII strings.
-        assert_eq!(xml_escape("/usr/bin/netidx"), "/usr/bin/netidx");
-        // Empty in, empty out.
-        assert_eq!(xml_escape(""), "");
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_handles_plain_paths() {
         // Bare path: passes through unchanged.
-        assert_eq!(systemd_quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
+        assert_eq!(platform::quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
     }
 
     #[cfg(target_os = "linux")]
@@ -322,16 +228,16 @@ mod tests {
     fn systemd_quote_exec_arg_doubles_percent() {
         // `%` is a systemd specifier prefix — always escaped,
         // regardless of whether quoting kicks in.
-        assert_eq!(systemd_quote_exec_arg("a%b"), "a%%b");
+        assert_eq!(platform::quote_exec_arg("a%b"), "a%%b");
         // Combined with quoting.
-        assert_eq!(systemd_quote_exec_arg("a % b"), "\"a %% b\"",);
+        assert_eq!(platform::quote_exec_arg("a % b"), "\"a %% b\"",);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_quotes_spaces() {
         assert_eq!(
-            systemd_quote_exec_arg("/home/user with space/netidx"),
+            platform::quote_exec_arg("/home/user with space/netidx"),
             "\"/home/user with space/netidx\"",
         );
     }
@@ -339,8 +245,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn systemd_quote_exec_arg_escapes_quotes_and_backslashes() {
-        assert_eq!(systemd_quote_exec_arg("a\"b"), "\"a\\\"b\"");
-        assert_eq!(systemd_quote_exec_arg("a\\b"), "\"a\\\\b\"");
+        assert_eq!(platform::quote_exec_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(platform::quote_exec_arg("a\\b"), "\"a\\\\b\"");
         // Even without spaces, a `"` or `\` triggers quoting because
         // those would otherwise need their own escape outside quotes.
     }
