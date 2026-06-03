@@ -272,9 +272,7 @@ fn watch_all(
 /// represent an on-disk change, so they shouldn't trigger a reload.
 #[cfg(unix)]
 fn is_established_only(batch: &EventBatch) -> bool {
-    batch
-        .iter()
-        .all(|(_, e)| matches!(e.event, EventKind::Event(Interest::Established)))
+    batch.iter().all(|(_, e)| matches!(e.event, EventKind::Event(Interest::Established)))
 }
 
 #[cfg(unix)]
@@ -283,7 +281,7 @@ fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
     // relative `include_permissions` paths are resolved against the
     // config file's parent directory — matching the startup load
     // path exactly.
-    Config::load_file(path).with_context(|| format!("reading {:?}", path))
+    Config::load_raw(path).with_context(|| format!("reading {:?}", path))
 }
 
 /// Emit one WARN per non-perms field that changed between the
@@ -336,8 +334,8 @@ pub(crate) fn run(params: Params) -> Result<()> {
             .context("failed to daemonize")?;
     }
     let baseline = file_cfg.clone();
-    let config = Config::from_file(file_cfg)
-        .context("validating resolver server config")?;
+    let config =
+        Config::from_file(file_cfg).context("validating resolver server config")?;
     tokio_run(config, baseline, config_path, params)
 }
 
@@ -345,7 +343,7 @@ pub(crate) fn run(params: Params) -> Result<()> {
 pub(crate) fn run(params: Params) -> Result<()> {
     env_logger::init();
     let config_path = PathBuf::from(&params.config);
-    let config = Config::load(&config_path)
-        .context("failed to load resolver server config")?;
+    let config =
+        Config::load(&config_path).context("failed to load resolver server config")?;
     tokio_run(config, params)
 }
