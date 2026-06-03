@@ -175,34 +175,13 @@ pub(super) enum SecCtx {
 }
 
 impl SecCtx {
-    /// Replace the in-memory `PMap` with one rebuilt from
-    /// `new_perms`. The existing `UserDb` is reused so previously-
-    /// resolved entity IDs remain valid for in-flight connections.
-    /// The cluster root and children captured at startup are also
-    /// reused — perms validation runs against the *running* tree
-    /// structure, not against whatever the operator's edited config
-    /// claims now (those edits aren't applied live and are warned
-    /// about separately).
-    ///
-    /// On the `Anonymous` variant this is a no-op (no `PMap` to
-    /// reload). For the other variants we acquire the write lock,
-    /// build the new `PMap` against the existing `UserDb`, then swap.
-    /// On any error the existing `PMap` is left intact.
-    ///
-    /// The write lock IS held across `PMap::from_file`. That builder
-    /// performs HashMap inserts into the existing `UserDb` and runs
-    /// netidx-path validation; both are pure CPU work, no I/O or
-    /// async waits. Hold time is microseconds for typical perms
-    /// files. `tokio::sync::RwLock` doesn't poison on panic, so a
-    /// crash inside the builder simply releases the guard.
+    /// Replace the in-memory `PMap` with one rebuilt from `new_perms`.
     pub(crate) async fn reload_pmap(&self, new_perms: &config::PMap) -> Result<()> {
         async fn swap_one<S: 'static>(
             store: &RwLock<SecCtxData<S>>,
             new_perms: &config::PMap,
         ) -> Result<()> {
             let mut w = store.write().await;
-            // Split-borrow: distinct fields of the guard, OK for the
-            // borrow checker.
             let SecCtxData { users, root, children, .. } = &mut *w;
             let rebuilt = PMap::from_file(new_perms, users, &*root, children)?;
             w.pmap = rebuilt;
