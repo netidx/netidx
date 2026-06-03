@@ -1,8 +1,10 @@
 //! Canonical config-path discovery.
 //!
-//! For client and resolver configs, mirrors the historical search order
-//! from `netidx::config::Config::default_path` and
-//! `netidx::config::Config::user_platform_default_path`. The
+//! The client helpers delegate to netidx
+//! (`netidx::config::file::Config::{user_platform_default_path,
+//! default_path}`) so there is a single source of truth for the client
+//! config location and search order. netidx has no resolver-config
+//! discovery, so the resolver helpers mirror the same scheme here. The
 //! `system_*` helpers do not check existence; the `user_*` helpers
 //! return the platform user-config directory location (also without
 //! existence checks — callers are responsible).
@@ -32,13 +34,11 @@ pub fn system_config_root() -> PathBuf {
 }
 
 /// `${dirs::config_dir}/netidx/client.json`. No existence check.
+///
+/// Delegates to netidx so there is a single source of truth for the
+/// client config location.
 pub fn user_client_config() -> Result<PathBuf> {
-    let mut p = dirs::config_dir().ok_or_else(|| {
-        anyhow!("user config dir could not be determined for this platform")
-    })?;
-    p.push("netidx");
-    p.push("client.json");
-    Ok(p)
+    netidx::config::file::Config::user_platform_default_path()
 }
 
 /// `/etc/netidx/client.json` on unix, `C:\netidx\client.json` on windows.
@@ -118,31 +118,11 @@ pub fn user_ca_dir() -> Result<PathBuf> {
 /// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
 /// `${HOME}/.config/netidx/client.json`, then the system path. Errors
 /// if none exists.
+///
+/// Delegates to netidx so the search order stays in lockstep with the
+/// library's own client config discovery.
 pub fn discover_client_config() -> Result<PathBuf> {
-    if let Some(cfg) = std::env::var_os("NETIDX_CFG") {
-        let p = PathBuf::from(cfg);
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-    if let Ok(p) = user_client_config() {
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-    if let Some(mut home) = dirs::home_dir() {
-        home.push(".config");
-        home.push("netidx");
-        home.push("client.json");
-        if home.is_file() {
-            return Ok(home);
-        }
-    }
-    let sys = system_client_config();
-    if sys.is_file() {
-        return Ok(sys);
-    }
-    bail!("no client config found in any standard location")
+    netidx::config::file::Config::default_path()
 }
 
 /// Find the first existing resolver-server config in standard order:
