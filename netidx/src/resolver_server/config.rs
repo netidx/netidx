@@ -650,14 +650,6 @@ impl Config {
     pub(super) fn root(&self) -> &str {
         self.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/")
     }
-
-    /// Borrow the merged file-level permission map (after
-    /// `include_permissions` + inline `perms` have been folded
-    /// together by `from_file`). Exposed primarily for testing the
-    /// merge semantics.
-    pub fn perms(&self) -> &PMap {
-        &self.perms
-    }
 }
 
 #[cfg(test)]
@@ -744,10 +736,7 @@ mod perms_merge_tests {
         let cfg = Config::parse(&raw_cfg).unwrap();
         // Inline `perms` is merged last → alice = "sl" wins over the
         // included file's "swlpd".
-        assert_eq!(
-            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
-            "sl",
-        );
+        assert_eq!(cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl",);
     }
 
     #[test]
@@ -803,7 +792,7 @@ mod perms_merge_tests {
 
         let cfg = Config::load(&cfg_file).unwrap();
         assert_eq!(
-            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(),
             "swlpd",
         );
     }
@@ -822,7 +811,7 @@ mod perms_merge_tests {
         }"#;
         let cfg = Config::parse(raw_cfg).unwrap();
         assert_eq!(
-            cfg.perms().0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(),
             "swlpd",
         );
     }
