@@ -333,10 +333,11 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
         // tls_install copy job; we just point the client section at
         // those installed paths — no second copy job is needed.
         let dest = tlsmod::identity_dir(name.as_str())?;
+        let [certificate, private_key, trusted] = tlsmod::installed_files_in(&dest);
         let identity = cfile::TlsIdentity {
-            trusted: dest.join("trusted.pem").to_string_lossy().into_owned(),
-            certificate: dest.join("certificate.pem").to_string_lossy().into_owned(),
-            private_key: dest.join("private.key").to_string_lossy().into_owned(),
+            trusted: trusted.to_string_lossy().into_owned(),
+            certificate: certificate.to_string_lossy().into_owned(),
+            private_key: private_key.to_string_lossy().into_owned(),
         };
         // Key the entry in `client.tls.identities` by the *domain*
         // part of the cert SAN, not the full SAN. netidx keys

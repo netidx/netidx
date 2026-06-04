@@ -79,9 +79,12 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
 }
 
 /// The three on-disk files [`install_identity`] writes into
-/// `dest_dir`, in the order `(certificate, private_key, trusted)`. Use
-/// from pre-write existence checks (e.g. --force gating) so the
-/// filenames live in exactly one place.
+/// `dest_dir`, in the order `(certificate, private_key, trusted)`. The
+/// single source of truth for these filenames — used by pre-write
+/// existence checks (e.g. --force gating) and by the template layer
+/// when emitting the `trusted`/`certificate`/`private_key` paths into
+/// generated configs, so the install location and the config always
+/// agree.
 pub fn installed_files_in(dest_dir: &Path) -> [PathBuf; 3] {
     [
         dest_dir.join("certificate.pem"),

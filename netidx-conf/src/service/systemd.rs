@@ -78,33 +78,35 @@ pub(super) fn render_unit(p: &ServiceParams) -> String {
     }
     match p.scope {
         ServiceScope::User => format!(
-            "[Unit]\n\
-             Description=netidx activation supervisor\n\
-             After=network.target\n\
-             \n\
-             [Service]\n\
-             ExecStart={exec_start}\n\
-             Restart=on-failure\n\
-             RestartSec=2s\n\
-             \n\
-             [Install]\n\
-             WantedBy=default.target\n",
+            r#"[Unit]
+Description=netidx activation supervisor
+After=network.target
+
+[Service]
+ExecStart={exec_start}
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
+"#
         ),
         ServiceScope::System => format!(
-            "[Unit]\n\
-             Description=netidx activation supervisor for %i\n\
-             After=network.target\n\
-             \n\
-             [Service]\n\
-             # `%i` is the instance name — the user the service runs as.\n\
-             # Operators enable this as `netidx@<user>.service`.\n\
-             User=%i\n\
-             ExecStart={exec_start}\n\
-             Restart=on-failure\n\
-             RestartSec=2s\n\
-             \n\
-             [Install]\n\
-             WantedBy=multi-user.target\n",
+            r#"[Unit]
+Description=netidx activation supervisor for %i
+After=network.target
+
+[Service]
+# `%i` is the instance name — the user the service runs as.
+# Operators enable this as `netidx@<user>.service`.
+User=%i
+ExecStart={exec_start}
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+"#
         ),
     }
 }

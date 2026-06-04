@@ -18,36 +18,16 @@
 use crate::atomic;
 use anyhow::Result;
 use arcstr::ArcStr;
+use netidx::resolver_server::auth::Permissions;
 pub use netidx::resolver_server::config::PMap;
 use std::{collections::HashMap, path::Path};
 
-/// Parse and validate a permission-bit string. The alphabet is
-/// `!swlpd`, with `!` only allowed as the first character (where it
-/// marks the entry as a *deny* mask). Mirrors the parser in
-/// `netidx::resolver_server::auth::Permissions::try_from`, which we
-/// can't import (the `auth` module is private to the netidx crate).
-pub fn validate_perm_bits(s: &str) -> Result<()> {
-    for (i, c) in s.chars().enumerate() {
-        match c {
-            '!' if i == 0 => {}
-            '!' => bail!("'!' may only be used as the first character"),
-            's' | 'w' | 'l' | 'p' | 'd' => {}
-            other => bail!(
-                "unrecognized permission bit {other}, valid bits are !swlpd"
-            ),
-        }
-    }
-    Ok(())
-}
-
-/// Read a perms file from `path`.
+/// Read a perms file from `path`. Thin wrapper over
+/// [`netidx::resolver_server::config::load_perms`] so the read/parse
+/// implementation lives once in netidx; kept here to pair with
+/// [`save_perms`], which is tooling-only (netidx never writes perms).
 pub fn load_perms<P: AsRef<Path>>(path: P) -> Result<PMap> {
-    let path = path.as_ref();
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow!("reading perms {:?}: {e}", path))?;
-    let p: PMap = serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow!("parsing perms {:?}: {e}", path))?;
-    Ok(p)
+    netidx::resolver_server::config::load_perms(path)
 }
 
 /// Atomically save `p` to `path` at mode 0o644.
@@ -64,7 +44,7 @@ pub fn add_entry(
     entity: &str,
     perms: &str,
 ) -> Result<()> {
-    validate_perm_bits(perms)?;
+    Permissions::try_from(perms)?;
     let path = ArcStr::from(path);
     let entity = ArcStr::from(entity);
     let perms = ArcStr::from(perms);
@@ -170,26 +150,6 @@ pub fn default_seed(base: &str) -> PMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parser_accepts_canonical_alphabet() {
-        for s in ["s", "w", "l", "p", "d", "swlpd", "!swlpd", "sw", "lpd"] {
-            assert!(validate_perm_bits(s).is_ok(), "should accept {s}");
-        }
-    }
-
-    #[test]
-    fn parser_rejects_unknown_bits() {
-        for s in ["x", "swx", "S", "1"] {
-            assert!(validate_perm_bits(s).is_err(), "should reject {s}");
-        }
-    }
-
-    #[test]
-    fn parser_rejects_misplaced_bang() {
-        assert!(validate_perm_bits("s!w").is_err());
-        assert!(validate_perm_bits("sw!").is_err());
-    }
 
     #[test]
     fn default_seed_root_base_anchors_at_root() {

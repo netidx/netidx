@@ -75,29 +75,33 @@ pub(super) fn render_plist(p: &ServiceParams) -> String {
         _ => String::new(),
     };
     let mut args = format!(
-        "    <string>{exe}</string>\n    <string>activation</string>\n    <string>-f</string>"
+        r#"    <string>{exe}</string>
+    <string>activation</string>
+    <string>-f</string>"#
     );
     if let Some(dir) = &p.activation_dir {
         args.push_str(&format!(
-            "\n    <string>--units</string>\n    <string>{}</string>",
+            r#"
+    <string>--units</string>
+    <string>{}</string>"#,
             quote_exec_arg(&dir.to_string_lossy()),
         ));
     }
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-         \x20\x20<key>Label</key><string>{label}</string>\n\
-         \x20\x20<key>ProgramArguments</key>\n\
-         \x20\x20<array>\n\
-         {args}\n\
-         \x20\x20</array>\n\
-         \x20\x20<key>RunAtLoad</key><true/>\n\
-         \x20\x20<key>KeepAlive</key><true/>{user_name_block}\n\
-         </dict>\n\
-         </plist>\n"
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{args}
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>{user_name_block}
+</dict>
+</plist>
+"#
     )
 }
 

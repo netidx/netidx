@@ -98,7 +98,7 @@ fn list(file: PathBuf, path_filter: Option<String>) -> Result<()> {
 }
 
 fn set(file: PathBuf, path: String, entity: String, bits: String) -> Result<()> {
-    perms::validate_perm_bits(&bits)
+    netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
         .with_context(|| format!("validating bits {bits:?}"))?;
     let mut pmap = load_or_empty(&file)?;
     perms::add_entry(&mut pmap, &path, &entity, &bits)?;

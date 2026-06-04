@@ -5,6 +5,7 @@
 //! are exposed (via `derive_builder`) so the schema can be constructed
 //! programmatically by configuration tooling.
 
+use anyhow::{bail, Result};
 use derive_builder::Builder;
 use netidx_core::path::Path;
 use std::{
@@ -126,6 +127,31 @@ pub struct Unit {
     pub trigger: Trigger,
     /// How to run the supervised process.
     pub process: ProcessCfg,
+}
+
+/// Check that no two units claim the same `OnAccess` trigger path.
+/// `units` yields `(unit_name, unit)` pairs. This is the single
+/// implementation of the cross-unit trigger-conflict invariant, shared
+/// by the daemon's `load_units` (runtime) and the `netidx-conf`
+/// editor's pre-save `validate`, so the two can't drift.
+pub fn check_trigger_conflicts<'a, I>(units: I) -> Result<()>
+where
+    I: IntoIterator<Item = (&'a str, &'a Unit)>,
+{
+    let mut claimed: BTreeSet<&Path> = BTreeSet::new();
+    for (name, unit) in units {
+        if let Trigger::OnAccess(paths) = &unit.trigger {
+            for p in paths {
+                if !claimed.insert(p) {
+                    bail!(
+                        "conflicting OnAccess trigger {p}: unit {name} \
+                         claims a path already claimed by another unit"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

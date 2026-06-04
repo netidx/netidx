@@ -10,11 +10,10 @@ use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
 use netidx::{
     config::Config,
-    path::Path,
     publisher::{BindCfg, DefaultHandle, DesiredAuth, Publisher, PublisherBuilder},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::ExitStatus,
@@ -141,20 +140,12 @@ pub async fn load_units(dir: Option<&PathBuf>) -> Result<HashMap<String, Unit>> 
             }
         }
     }
-    let mut triggers: HashSet<Path> = HashSet::new();
     for unit in hm.values() {
         unit.process.validate().await?;
-        match &unit.trigger {
-            Trigger::OnStart => (),
-            Trigger::OnAccess(paths) => {
-                for path in paths {
-                    if !triggers.insert(path.clone()) {
-                        bail!("conflicting unit trigger {}", path)
-                    }
-                }
-            }
-        }
     }
+    crate::file::check_trigger_conflicts(
+        hm.iter().map(|(name, u)| (name.as_str(), u)),
+    )?;
     Ok(hm)
 }
 

@@ -20,6 +20,12 @@ use std::{
 };
 
 bitflags! {
+    /// A set of resolver permission bits. Parse from the on-disk
+    /// `!swlpd` string form via `Permissions::try_from(&str)`: `s`
+    /// subscribe, `w` write, `l` list, `p` publish, `d`
+    /// publish-default, and a leading `!` marks the entry as a deny
+    /// mask. This is the single canonical parser for permission
+    /// strings — config tooling validates by attempting this parse.
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
     pub struct Permissions: u32 {
         const DENY             = 0x01;
@@ -73,7 +79,7 @@ impl TryFrom<&str> for Permissions {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Entity(u32);
+pub(crate) struct Entity(u32);
 
 impl nohash::IsEnabled for Entity {}
 
@@ -382,5 +388,38 @@ impl PMap {
             };
             p
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Permissions;
+
+    #[test]
+    fn parses_canonical_alphabet() {
+        for s in ["s", "w", "l", "p", "d", "swlpd", "!swlpd", "sw", "lpd"] {
+            assert!(Permissions::try_from(s).is_ok(), "should accept {s}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_bits() {
+        for s in ["x", "swx", "S", "1"] {
+            assert!(Permissions::try_from(s).is_err(), "should reject {s}");
+        }
+    }
+
+    #[test]
+    fn rejects_misplaced_bang() {
+        assert!(Permissions::try_from("s!w").is_err());
+        assert!(Permissions::try_from("sw!").is_err());
+    }
+
+    #[test]
+    fn leading_bang_sets_deny() {
+        let p = Permissions::try_from("!swlpd").unwrap();
+        assert!(p.contains(Permissions::DENY));
+        let p = Permissions::try_from("swlpd").unwrap();
+        assert!(!p.contains(Permissions::DENY));
     }
 }

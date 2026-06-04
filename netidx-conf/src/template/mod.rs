@@ -351,18 +351,16 @@ pub(crate) fn resolver_auth_from(
             rfile::Auth::Local(ArcStr::from(path.to_string_lossy().as_ref()))
         }
         AuthChoice::Krb5 { spn } => rfile::Auth::Krb5(spn.clone()),
-        AuthChoice::Tls { name, .. } => rfile::Auth::Tls {
-            name: name.clone(),
-            trusted: ArcStr::from(
-                tls_dest.join("trusted.pem").to_string_lossy().as_ref(),
-            ),
-            certificate: ArcStr::from(
-                tls_dest.join("certificate.pem").to_string_lossy().as_ref(),
-            ),
-            private_key: ArcStr::from(
-                tls_dest.join("private.key").to_string_lossy().as_ref(),
-            ),
-        },
+        AuthChoice::Tls { name, .. } => {
+            let [certificate, private_key, trusted] =
+                tlsmod::installed_files_in(tls_dest);
+            rfile::Auth::Tls {
+                name: name.clone(),
+                trusted: ArcStr::from(trusted.to_string_lossy().as_ref()),
+                certificate: ArcStr::from(certificate.to_string_lossy().as_ref()),
+                private_key: ArcStr::from(private_key.to_string_lossy().as_ref()),
+            }
+        }
     }
 }
 
@@ -416,16 +414,11 @@ pub(crate) fn client_tls_section_from(
     let mut askpass: Option<String> = None;
     for spec in identities {
         let dest = spec.dest_dir()?;
+        let [certificate, private_key, trusted] = tlsmod::installed_files_in(&dest);
         let identity = cfile::TlsIdentity {
-            trusted: dest.join("trusted.pem").to_string_lossy().into_owned(),
-            certificate: dest
-                .join("certificate.pem")
-                .to_string_lossy()
-                .into_owned(),
-            private_key: dest
-                .join("private.key")
-                .to_string_lossy()
-                .into_owned(),
+            trusted: trusted.to_string_lossy().into_owned(),
+            certificate: certificate.to_string_lossy().into_owned(),
+            private_key: private_key.to_string_lossy().into_owned(),
         };
         let key = spec.server_pattern.to_string();
         if default.is_none() {

@@ -137,18 +137,80 @@ pub fn merge_perms_only(cfg: &file::Config) -> Result<PMap> {
     Ok(merged)
 }
 
+/// Read and parse a single permissions file in the on-disk `PMap`
+/// JSON format. The one place that knows how to load a perms file:
+/// `load_included_pmap` and the `netidx-conf` config tooling both go
+/// through here rather than re-implementing the read/parse.
+pub fn load_perms<P: AsRef<FsPath>>(path: P) -> Result<PMap> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading perms file {path:?}"))?;
+    let pm: PMap = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing perms file {path:?}"))?;
+    Ok(pm)
+}
+
 /// Load each path in `paths` as a `PMap` and merge them in list order
 /// (later wins). Returns the accumulator. Empty list ⇒ empty PMap.
 pub(crate) fn load_included_pmap(paths: &[ArcStr]) -> Result<PMap> {
     let mut merged = PMap::default();
     for p in paths {
-        let bytes = std::fs::read(p.as_str())
-            .with_context(|| format!("reading include_permissions {p:?}"))?;
-        let pm: PMap = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing include_permissions {p:?}"))?;
+        let pm = load_perms(p.as_str())
+            .with_context(|| format!("loading include_permissions file {p:?}"))?;
         merge_pmap(&mut merged, pm);
     }
     Ok(merged)
+}
+
+/// Rewrite relative `include_permissions` entries in `cfg` to absolute
+/// paths, joining each against the canonicalized parent directory of
+/// `config_path` (the location the config is, or will be, stored at).
+/// Absolute entries pass through unchanged. A no-op when there are no
+/// relative entries — so it won't fail when `config_path`'s parent
+/// doesn't exist yet (e.g. validating a config before its
+/// fresh-install directory is created).
+///
+/// This is the single implementation shared by `Config::load_raw`
+/// (runtime load) and the `netidx-conf` editor's pre-save validation,
+/// so the two can't drift.
+///
+/// **Path-traversal posture.** Relative entries are joined with the
+/// canonicalized parent directory; the engine does **not** sandbox
+/// include paths to remain under the config dir. The config file is
+/// operator-trusted, and preventing traversal would break legitimate
+/// layouts (e.g. a `/etc/netidx/resolver.json` pointing at
+/// `/var/lib/netidx/perms/foo.json`).
+pub fn resolve_relative_includes(
+    cfg: &mut file::Config,
+    config_path: &FsPath,
+) -> Result<()> {
+    let has_relative = cfg
+        .include_permissions
+        .iter()
+        .any(|e| FsPath::new(e.as_str()).is_relative());
+    if !has_relative {
+        return Ok(());
+    }
+    // Canonicalize the parent so a config given with a relative path
+    // like `./resolver.json` still produces absolute include paths
+    // (otherwise the joined `./perms.d/main.json` would break after
+    // daemonize chdir's the process to `/`).
+    let parent = match config_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
+        _ => None,
+    };
+    if let Some(parent) = parent {
+        let parent = parent
+            .canonicalize()
+            .with_context(|| format!("canonicalizing parent dir {parent:?}"))?;
+        for entry in cfg.include_permissions.iter_mut() {
+            let p = FsPath::new(entry.as_str());
+            if p.is_relative() {
+                *entry = ArcStr::from(parent.join(p).to_string_lossy().as_ref());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The on disk format, encoded as JSON
@@ -594,44 +656,13 @@ impl Config {
     ///
     /// This will load the raw resolver config, the only difference between
     /// this function reading the file with serde is that this function will
-    /// canonicalize the paths of any included permissions files.
-    ///
-    /// **Path-traversal posture.** Relative include entries are
-    /// joined with the canonicalized parent directory, then the
-    /// result is canonicalized too — so `"../foo.json"` resolves to
-    /// the literal `../foo.json` from the operator's perspective.
-    /// The engine does **not** sandbox include paths to remain under
-    /// the config dir: the config file is operator-trusted, and
-    /// preventing traversal would break legitimate layouts (e.g. a
-    /// `/etc/netidx/resolver.json` pointing at `/var/lib/netidx/perms/foo.json`).
+    /// canonicalize the paths of any included permissions files (see
+    /// [`resolve_relative_includes`]).
     pub fn load_raw<P: AsRef<FsPath>>(file: P) -> Result<file::Config> {
         let file_path = file.as_ref();
         let contents = read_to_string(file_path)?;
         let mut parsed: file::Config = from_str(&contents)?;
-        // Canonicalize the parent so a config given with a relative
-        // path like `./resolver.json` still produces absolute include
-        // paths (otherwise the joined `./perms.d/main.json` would
-        // break after daemonize chdir's the process to `/`).
-        let parent = match file_path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
-            _ => None,
-        };
-        let parent_canon = match parent {
-            Some(p) => Some(
-                p.canonicalize()
-                    .with_context(|| format!("canonicalizing parent dir {:?}", p))?,
-            ),
-            None => None,
-        };
-        if let Some(parent) = parent_canon.as_deref() {
-            for entry in parsed.include_permissions.iter_mut() {
-                let p = FsPath::new(entry.as_str());
-                if p.is_relative() {
-                    let abs = parent.join(p);
-                    *entry = ArcStr::from(abs.to_string_lossy().as_ref());
-                }
-            }
-        }
+        resolve_relative_includes(&mut parsed, file_path)?;
         Ok(parsed)
     }
 

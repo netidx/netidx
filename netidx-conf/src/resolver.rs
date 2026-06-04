@@ -6,8 +6,7 @@
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};
-use arcstr::ArcStr;
-use netidx::resolver_server::config::{Config, file};
+use netidx::resolver_server::config::{self, Config, file};
 use std::path::{Path, PathBuf};
 
 /// A loaded resolver-server config. Wraps
@@ -54,7 +53,13 @@ impl ResolverConfig {
     /// Use this instead of [`Self::validate`] anywhere the caller knows
     /// the on-disk location — `save`, `edit`, etc.
     pub fn validate_for_path(&self, path: &Path) -> Result<()> {
-        let resolved = resolve_includes_against(&self.0, path)?;
+        // Resolve relative include_permissions against `path`'s parent
+        // using netidx's own canonicalizer, so pre-save validation
+        // matches runtime startup exactly (see
+        // `config::resolve_relative_includes`). Clone so the on-disk
+        // form keeps its relative paths.
+        let mut resolved = self.0.clone();
+        config::resolve_relative_includes(&mut resolved, path)?;
         Config::from_file(resolved).map(|_| ())
     }
 
@@ -84,52 +89,6 @@ impl ResolverConfig {
     }
 }
 
-/// Clone `cfg` with relative `include_permissions` entries rewritten
-/// to be absolute, joined against the canonicalized parent dir of
-/// `target_path`. Mirrors the rewrite in
-/// `netidx::resolver_server::config::Config::load_file` so validation
-/// before save matches validation at runtime startup.
-///
-/// The original `cfg` is left untouched — relative paths on disk are
-/// preserved.
-///
-/// Skips the canonicalize entirely when there is nothing to resolve
-/// (no relative entries) — otherwise saving to a path under a
-/// not-yet-created parent dir (e.g. fresh install before
-/// `~/.config/netidx/` exists) would error out before the atomic
-/// write would have created the dir.
-fn resolve_includes_against(cfg: &file::Config, target_path: &Path) -> Result<file::Config> {
-    let mut resolved = cfg.clone();
-    let has_relative = resolved
-        .include_permissions
-        .iter()
-        .any(|e| Path::new(e.as_str()).is_relative());
-    if !has_relative {
-        return Ok(resolved);
-    }
-    let parent = match target_path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
-        _ => None,
-    };
-    let parent_canon = match parent {
-        Some(p) => Some(
-            p.canonicalize()
-                .with_context(|| format!("canonicalizing parent dir {p:?}"))?,
-        ),
-        None => None,
-    };
-    if let Some(parent) = parent_canon.as_deref() {
-        for entry in resolved.include_permissions.iter_mut() {
-            let p = Path::new(entry.as_str());
-            if p.is_relative() {
-                let abs = parent.join(p);
-                *entry = ArcStr::from(abs.to_string_lossy().as_ref());
-            }
-        }
-    }
-    Ok(resolved)
-}
-
 impl From<file::Config> for ResolverConfig {
     fn from(c: file::Config) -> Self {
         Self(c)
@@ -143,6 +102,7 @@ pub fn default_save_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcstr::ArcStr;
 
     fn minimal() -> ResolverConfig {
         ResolverConfig(

@@ -14,9 +14,8 @@
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};
-use netidx::path::Path as NetidxPath;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -161,27 +160,16 @@ fn ensure_valid_basename(name: &str) -> Result<()> {
 /// is executable) belong to the daemon and are deliberately *not* run
 /// here.
 pub fn validate(units: &BTreeMap<String, Unit>) -> Result<()> {
-    let mut claimed: BTreeSet<NetidxPath> = BTreeSet::new();
-    for (name, unit) in units {
-        if let Trigger::OnAccess(paths) = &unit.trigger {
-            for p in paths {
-                if !claimed.insert(p.clone()) {
-                    bail!(
-                        "conflicting OnAccess trigger {}: unit {} \
-                         claims a path already claimed by another unit",
-                        p,
-                        name,
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
+    netidx_activation::file::check_trigger_conflicts(
+        units.iter().map(|(name, unit)| (name.as_str(), unit)),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netidx::path::Path as NetidxPath;
+    use std::collections::BTreeSet;
 
     fn unit(exe: &str) -> Unit {
         UnitBuilder::default()

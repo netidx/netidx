@@ -43,7 +43,7 @@ use tokio::{
     time::{self, Instant},
 };
 
-pub(crate) mod auth;
+pub mod auth;
 pub mod config;
 pub(crate) mod secctx;
 mod shard_store;
