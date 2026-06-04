@@ -32,7 +32,7 @@ poolshark = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 sled = { workspace = true }
-structopt = { workspace = true }
+clap = { workspace = true }
 tokio = { workspace = true }
 triomphe = { workspace = true }
 derive_builder = { workspace = true }

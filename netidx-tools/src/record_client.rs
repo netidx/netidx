@@ -12,80 +12,84 @@ use netidx_archive::{
     logfile::{self, AlreadyCompressed, ArchiveReader, BatchItem, Cursor, Seek},
     recorder_client::{Client, OneshotReplyShard},
 };
+use clap::{Args, Subcommand};
 use netidx_tools_core::ClientParams;
 use std::{collections::HashSet, future, path::PathBuf};
-use structopt::StructOpt;
 use tokio::io::{stdout, AsyncWriteExt};
 use triomphe::Arc;
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct OneshotParams {
-    #[structopt(long = "base", help = "the base path of the recorder instance")]
+    /// the base path of the recorder instance
+    #[arg(long)]
     base: Path,
-    #[structopt(long = "start", help = "the time to start the recording at")]
+    /// the time to start the recording at
+    #[arg(long)]
     start: Option<String>,
-    #[structopt(long = "end", help = "the time to end the recording at")]
+    /// the time to end the recording at
+    #[arg(long)]
     end: Option<String>,
-    #[structopt(short = "f", long = "filter", help = "glob pattern(s) to include")]
+    /// glob pattern(s) to include
+    #[arg(short, long)]
     filter: Vec<String>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct SessionParams {
-    #[structopt(long = "base", help = "the base path of the recorder instance")]
+    /// the base path of the recorder instance
+    #[arg(long)]
     base: Path,
-    #[structopt(long = "pos", help = "the position to start the replay at")]
+    /// the position to start the replay at
+    #[arg(long)]
     pos: Option<String>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "oneshot", about = "get a oneshot recording")]
+    /// get a oneshot recording
     Oneshot {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: OneshotParams,
     },
-    #[structopt(name = "session", about = "run a recorder session")]
+    /// run a recorder session
     Session {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: SessionParams,
     },
-    #[structopt(name = "compress", about = "generate a compressed archive file")]
+    /// generate a compressed archive file
     Compress {
-        #[structopt(long = "keep", help = "don't delete the input file")]
+        /// don't delete the input file
+        #[arg(long)]
         keep: bool,
-        #[structopt(
-            long = "window",
-            help = "how many batches to compress in parallel",
-            default_value = "2"
-        )]
+        /// how many batches to compress in parallel
+        #[arg(long, default_value = "2")]
         window: usize,
         file: Vec<PathBuf>,
     },
-    #[structopt(name = "index", about = "index the archive file")]
+    /// index the archive file
     Index {
-        #[structopt(long = "keep", help = "don't delete the input file")]
+        /// don't delete the input file
+        #[arg(long)]
         keep: bool,
         file: PathBuf,
     },
-    #[structopt(name = "dump", about = "print the contents of an archive")]
+    /// print the contents of an archive
     Dump {
         file: PathBuf,
-        #[structopt(long = "metadata-only", about = "don't print the data")]
+        /// don't print the data
+        #[arg(long = "metadata-only")]
         metadata: bool,
-        #[structopt(
-            long = "check-index",
-            about = "don't dump data but check all the indexes"
-        )]
+        /// don't dump data but check all the indexes
+        #[arg(long)]
         check_index: bool,
     },
-    #[structopt(name = "verify", about = "verify that an archive can be read")]
+    /// verify that an archive can be read
     Verify { file: PathBuf },
-    #[structopt(name = "compressed", about = "if file compressed exit 0, 1 no")]
+    /// if file compressed exit 0, 1 no
     Compressed { file: PathBuf },
 }
 

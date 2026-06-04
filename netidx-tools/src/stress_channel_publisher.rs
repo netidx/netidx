@@ -7,23 +7,17 @@ use netidx::{
     path::Path,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder},
 };
+use clap::Args;
 use netidx_protocols::pack_channel::server::{Connection, Listener};
-use structopt::StructOpt;
 use tokio::task;
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
-    )]
+    /// configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000
+    #[arg(short, long)]
     bind: Option<BindCfg>,
-    #[structopt(
-        long = "base",
-        help = "base path",
-        default_value = "/local/channel/bench"
-    )]
+    /// base path
+    #[arg(long, default_value = "/local/channel/bench")]
     base: Path,
 }
 

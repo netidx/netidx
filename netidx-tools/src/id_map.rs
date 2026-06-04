@@ -9,28 +9,30 @@ use daemonize::Daemonize;
 use log::info;
 use netidx_conf::id_map as id_map_engine;
 use netidx_id_map::runtime::{Server, ServerParams};
+use clap::Args;
 use std::path::PathBuf;
-use structopt::StructOpt;
 use tokio::signal::unix::{signal, SignalKind};
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct Params {
     /// Path to the unix socket the daemon will bind. Resolver
     /// connects here when its config has
     /// `id_map_type: Socket` + `id_map_command: <this path>`.
-    #[structopt(long = "socket", short = "s")]
+    #[arg(short, long)]
     socket: PathBuf,
     /// Path to the id-map JSON config.
-    #[structopt(long = "config", short = "c")]
+    #[arg(short, long)]
     config: PathBuf,
     /// File mode applied to the bound socket. 0o600 keeps it
     /// per-user; widen to 0o660 (and chgrp afterward) for a shared
     /// service account.
-    #[structopt(long = "socket-mode", default_value = "0600")]
+    #[arg(long, default_value = "0600")]
     socket_mode: String,
-    #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
+    /// don't daemonize
+    #[arg(short, long)]
     foreground: bool,
-    #[structopt(long = "pid-file", help = "write pid here when daemonized")]
+    /// write pid here when daemonized
+    #[arg(long)]
     pid_file: Option<PathBuf>,
 }
 

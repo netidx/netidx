@@ -15,150 +15,145 @@ use netidx_conf::{
 };
 
 use super::prompt;
+use clap::{Args, Subcommand};
 use std::{collections::BTreeSet, path::PathBuf};
-use structopt::StructOpt;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "list", about = "list installed activation units")]
+    /// list installed activation units
     List {
-        #[structopt(long = "dir", short = "d", help = "activation directory")]
+        /// activation directory
+        #[arg(short, long)]
         dir: Option<PathBuf>,
     },
-    #[structopt(name = "add", about = "add or replace an activation unit")]
-    Add(AddCmd),
-    #[structopt(name = "remove", about = "remove an activation unit")]
+    /// add or replace an activation unit
+    Add {
+        #[command(subcommand)]
+        cmd: AddCmd,
+    },
+    /// remove an activation unit
     Remove {
-        #[structopt(long = "dir", short = "d")]
+        #[arg(short, long)]
         dir: Option<PathBuf>,
         /// Unit basename to remove. Prompted when omitted.
         name: Option<String>,
     },
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum AddCmd {
-    #[structopt(
-        name = "generic",
-        about = "drop a hand-rolled unit (any exe + args + trigger)"
-    )]
+    /// drop a hand-rolled unit (any exe + args + trigger)
     Generic(GenericAddArgs),
-    #[structopt(
-        name = "container",
-        about = "drop a netidx container service unit"
-    )]
+    /// drop a netidx container service unit
     Container(ContainerAddArgs),
-    #[structopt(
-        name = "id-map",
-        about = "drop an id-mapper daemon service unit"
-    )]
+    /// drop an id-mapper daemon service unit
     IdMap(IdMapAddArgs),
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct GenericAddArgs {
-    #[structopt(long = "dir", short = "d")]
+    #[arg(short, long)]
     pub dir: Option<PathBuf>,
     /// Unit basename (no `.unit` suffix). Prompted when omitted.
     pub name: Option<String>,
     /// Path to the executable. Prompted when omitted.
-    #[structopt(long = "exe")]
+    #[arg(long)]
     pub exe: Option<String>,
     /// Argument passed after the exe. Repeatable.
-    #[structopt(long = "arg", number_of_values = 1)]
+    #[arg(long = "arg", num_args = 1)]
     pub args: Vec<String>,
     /// Netidx path that, when subscribed, triggers this unit.
     /// Repeatable. If any are given, the trigger is `OnAccess`
     /// rather than `OnStart`.
-    #[structopt(long = "on-access", number_of_values = 1)]
+    #[arg(long, num_args = 1)]
     pub on_access: Vec<String>,
     /// Restart policy: `no`, `yes`, or `rate-limited:<seconds>`
     /// (default `rate-limited:1.0`).
-    #[structopt(long = "restart")]
+    #[arg(long)]
     pub restart: Option<String>,
-    #[structopt(long = "working-dir")]
+    #[arg(long)]
     pub working_dir: Option<PathBuf>,
-    #[structopt(long = "uid")]
+    #[arg(long)]
     pub uid: Option<u32>,
-    #[structopt(long = "gid")]
+    #[arg(long)]
     pub gid: Option<u32>,
-    #[structopt(long = "stdin")]
+    #[arg(long)]
     pub stdin: Option<PathBuf>,
-    #[structopt(long = "stdout")]
+    #[arg(long)]
     pub stdout: Option<PathBuf>,
-    #[structopt(long = "stderr")]
+    #[arg(long)]
     pub stderr: Option<PathBuf>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct IdMapAddArgs {
     /// Where to drop the unit file. `None` ⇒ the user activation dir.
-    #[structopt(long = "dir", short = "d")]
+    #[arg(short, long)]
     pub dir: Option<PathBuf>,
     /// Unit basename. Default `id-map`.
-    #[structopt(long = "name", default_value = "id-map")]
+    #[arg(long, default_value = "id-map")]
     pub name: String,
     /// Override the netidx binary the unit launches. Default: the
     /// currently-running binary (via `std::env::current_exe`).
-    #[structopt(long = "netidx-binary")]
+    #[arg(long)]
     pub netidx_binary: Option<PathBuf>,
     /// Unix socket the daemon will bind. Default:
     /// `${dirs::config_dir}/netidx/id-map.sock`.
-    #[structopt(long = "socket", short = "s")]
+    #[arg(short, long)]
     pub socket: Option<PathBuf>,
     /// JSON config the daemon will load. Default:
     /// `${dirs::config_dir}/netidx/id-map.json`.
-    #[structopt(long = "config", short = "c")]
+    #[arg(short, long)]
     pub config: Option<PathBuf>,
     /// File mode applied to the bound socket (octal). Default 600.
-    #[structopt(long = "socket-mode")]
+    #[arg(long)]
     pub socket_mode: Option<String>,
     /// Restart policy: `no`, `yes`, or `rate-limited:<seconds>`.
-    #[structopt(long = "restart")]
+    #[arg(long)]
     pub restart: Option<String>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct ContainerAddArgs {
     /// Where to drop the unit file. `None` ⇒ the user activation dir.
-    #[structopt(long = "dir", short = "d")]
+    #[arg(short, long)]
     pub dir: Option<PathBuf>,
     /// Unit basename. Default `container`.
-    #[structopt(long = "name", default_value = "container")]
+    #[arg(long, default_value = "container")]
     pub name: String,
     /// Where the container should publish its API. Default:
     /// `<client.base>/container/api` from the user client config
     /// (so a workstation gets `/local/container/api`), or
     /// `/container/api` when no client config can be loaded.
-    #[structopt(long = "api-path")]
+    #[arg(long)]
     pub api_path: Option<String>,
     /// Override the on-disk db directory. `None` ⇒ container default
     /// (`$XDG_DATA_HOME/netidx/container/db`).
-    #[structopt(long = "db")]
+    #[arg(long)]
     pub db: Option<PathBuf>,
     /// Pass `--compress` to the container.
-    #[structopt(long = "compress")]
+    #[arg(long)]
     pub compress: bool,
     /// Pass `--bind <cfg>` to the container.
-    #[structopt(long = "bind")]
+    #[arg(long)]
     pub bind: Option<String>,
     /// Override the binary the unit launches. Default:
     /// the currently-running `netidx` binary (via `std::env::current_exe`).
     /// The `netidx` subcommand for the container is appended
     /// automatically.
-    #[structopt(long = "netidx-binary")]
+    #[arg(long)]
     pub netidx_binary: Option<PathBuf>,
     /// Restart policy: `no`, `yes`, or `rate-limited:<seconds>`.
-    #[structopt(long = "restart")]
+    #[arg(long)]
     pub restart: Option<String>,
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { dir } => list(dir),
-        Cmd::Add(AddCmd::Generic(args)) => add_generic(args),
-        Cmd::Add(AddCmd::Container(args)) => add_container(args),
-        Cmd::Add(AddCmd::IdMap(args)) => add_id_map(args),
+        Cmd::Add { cmd: AddCmd::Generic(args) } => add_generic(args),
+        Cmd::Add { cmd: AddCmd::Container(args) } => add_container(args),
+        Cmd::Add { cmd: AddCmd::IdMap(args) } => add_id_map(args),
         Cmd::Remove { dir, name } => {
             let name = prompt::required_string("unit name", name)?;
             remove(dir, name)

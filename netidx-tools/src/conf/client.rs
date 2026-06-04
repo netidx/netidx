@@ -1,23 +1,20 @@
 use anyhow::{Context, Result};
+use clap::Subcommand;
 use netidx_conf::{client::ClientConfig, paths};
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 use super::editor;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "show", about = "load and pretty-print the client config")]
+    /// load and pretty-print the client config
     Show {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    #[structopt(
-        name = "edit",
-        about = "open the client config in $VISUAL / $EDITOR, validate on save"
-    )]
+    /// open the client config in $VISUAL / $EDITOR, validate on save
     Edit {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
 }

@@ -10,49 +10,30 @@ use netidx::{
     resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
 };
 use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
-use structopt::StructOpt;
+use clap::Subcommand;
 use tokio::time;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(super) enum ResolverCmd {
-    #[structopt(name = "resolve", about = "resolve an in the resolver server")]
+    /// resolve an in the resolver server
     Resolve { path: Vec<Path> },
-    #[structopt(name = "list", about = "list entries in the resolver server")]
+    /// list entries in the resolver server
     List {
-        #[structopt(
-            long = "no-structure",
-            short = "n",
-            help = "don't list structural items, only published paths"
-        )]
+        /// don't list structural items, only published paths
+        #[arg(short, long)]
         no_structure: bool,
-        #[structopt(
-            long = "watch",
-            short = "w",
-            help = "poll the resolver for new paths matching the specified pattern"
-        )]
+        /// poll the resolver for new paths matching the specified pattern
+        #[arg(short, long)]
         watch: bool,
-        #[structopt(name = "pattern")]
+        #[arg(value_name = "pattern")]
         path: Option<String>,
     },
-    #[structopt(name = "table", about = "table descriptor for path")]
-    Table {
-        #[structopt(name = "path")]
-        path: Option<Path>,
-    },
-    #[structopt(name = "add", about = "add a new entry")]
-    Add {
-        #[structopt(name = "path")]
-        path: Path,
-        #[structopt(name = "socketaddr")]
-        socketaddr: SocketAddr,
-    },
-    #[structopt(name = "remove", about = "remove an entry")]
-    Remove {
-        #[structopt(name = "path")]
-        path: Path,
-        #[structopt(name = "socketaddr")]
-        socketaddr: SocketAddr,
-    },
+    /// table descriptor for path
+    Table { path: Option<Path> },
+    /// add a new entry
+    Add { path: Path, socketaddr: SocketAddr },
+    /// remove an entry
+    Remove { path: Path, socketaddr: SocketAddr },
 }
 
 #[tokio::main]

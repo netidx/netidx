@@ -46,51 +46,51 @@ use std::{
     pin::Pin,
     time::Duration,
 };
-use structopt::StructOpt;
+use clap::Args;
 use tokio::task;
 use triomphe::Arc;
 
-#[derive(StructOpt, Builder, Debug)]
+#[derive(Args, Builder, Debug)]
 pub struct Params {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000"
-    )]
+    /// configure the bind address e.g. local, 192.168.0.0/16, 127.0.0.1:5000
+    #[arg(short, long)]
     #[builder(setter(strip_option), default)]
     pub bind: Option<BindCfg>,
-    #[structopt(
-        long = "timeout",
-        help = "require subscribers to consume values before timeout (seconds)"
-    )]
+    /// require subscribers to consume values before timeout (seconds)
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub timeout: Option<u64>,
-    #[structopt(long = "slack", help = "set the publisher slack (default 3 batches)")]
+    /// set the publisher slack (default 3 batches)
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub slack: Option<usize>,
-    #[structopt(
-        long = "max_clients",
-        help = "set the maximum number of clients (default 768)"
-    )]
+    /// set the maximum number of clients (default 768)
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub max_clients: Option<usize>,
-    #[structopt(long = "api-path", help = "the netidx path of the container api")]
+    /// the netidx path of the container api
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub api_path: Option<Path>,
-    #[structopt(long = "db", help = "the db file")]
+    /// the db file
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub db: Option<String>,
-    #[structopt(long = "cache-size", help = "db page cache size in bytes")]
+    /// db page cache size in bytes
+    #[arg(long)]
     #[builder(setter(strip_option), default)]
     pub cache_size: Option<u64>,
-    #[structopt(long = "sparse", help = "don't even advertise the contents of the db")]
+    /// don't even advertise the contents of the db
+    #[arg(long)]
     #[builder(default = "false")]
     pub sparse: bool,
-    /// Reserved for on-disk zstd compression. Currently a no-op
-    /// (sled 0.34's compression feature conflicts with the zstd version
-    /// netidx-archive uses); the flag is accepted so service templates
-    /// can plumb it through without breakage when sled is upgraded.
-    #[structopt(long = "compress", help = "(reserved) enable on-disk db compression")]
+    /// (reserved) enable on-disk db compression
+    ///
+    /// Currently a no-op: sled 0.34's compression feature conflicts
+    /// with the zstd version netidx-archive uses. The flag is accepted
+    /// so service templates can plumb it through without breakage when
+    /// sled is upgraded.
+    #[arg(long)]
     #[builder(default = "false")]
     pub compress: bool,
 }

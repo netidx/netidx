@@ -27,142 +27,141 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use netidx_tools_core::ClientParams;
-use structopt::StructOpt;
+use clap::{Parser, Subcommand};
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum Stress {
-    #[structopt(name = "publisher", about = "run a stress test publisher")]
+    /// run a stress test publisher
     Publisher {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: stress_publisher::Params,
     },
-    #[structopt(name = "subscriber", about = "run a stress test subscriber")]
+    /// run a stress test subscriber
     Subscriber {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: stress_subscriber::Params,
     },
-    #[structopt(name = "channel_publisher", about = "run a stress channel publisher")]
+    /// run a stress channel publisher
     ChannelPublisher {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: stress_channel_publisher::Params,
     },
-    #[structopt(name = "channel_subscriber", about = "run a stress channel subscriber")]
+    /// run a stress channel subscriber
     ChannelSubscriber {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: stress_channel_subscriber::Params,
     },
 }
 
 #[cfg(unix)]
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum IdMapCmd {
-    #[structopt(name = "serve", about = "run the id-mapper daemon")]
+    /// run the id-mapper daemon
     Serve(id_map::Params),
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "netidx")]
+#[derive(Parser, Debug)]
+#[command(name = "netidx", version)]
 enum Opt {
-    #[structopt(name = "resolver-server", about = "run a resolver")]
+    /// run a resolver
     ResolverServer(resolver_server::Params),
-    #[structopt(name = "resolver", about = "query the resolver")]
+    /// query the resolver
     Resolver {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: resolver::ResolverCmd,
     },
-    #[structopt(name = "publisher", about = "publish data")]
+    /// publish data
     Publisher {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: publisher::Params,
     },
-    #[structopt(name = "subscriber", about = "subscribe to values")]
+    /// subscribe to values
     Subscriber {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: subscriber::Params,
     },
-    #[structopt(name = "container", about = "a hierarchical database in netidx")]
+    /// a hierarchical database in netidx
     Container {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: container::Params,
     },
+    /// record and republish archives
     #[cfg(unix)]
-    #[structopt(name = "record", about = "record and republish archives")]
     Record {
-        #[structopt(short = "c", long = "config", help = "recorder config file")]
+        /// recorder config file
+        #[arg(short, long)]
         config: Option<PathBuf>,
-        #[structopt(
-            short = "e",
-            long = "example",
-            help = "print an example config file"
-        )]
+        /// print an example config file
+        #[arg(short, long)]
         example: bool,
     },
-    #[structopt(name = "record-client", about = "control the recorder")]
+    /// control the recorder
     RecordClient {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: record_client::Cmd,
     },
+    /// manage netidx processes
     #[cfg(unix)]
-    #[structopt(name = "activation", about = "manage netidx processes")]
     Activation {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: activation::Params,
     },
+    /// id-mapper daemon (TLS-friendly group lookups)
     #[cfg(unix)]
-    #[structopt(name = "id-map", about = "id-mapper daemon (TLS-friendly group lookups)")]
     IdMap {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: IdMapCmd,
     },
-    #[structopt(name = "conf", about = "configuration management")]
+    /// configuration management
     Conf {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         params: conf::Params,
     },
-    #[structopt(name = "stress", about = "stress test")]
+    /// stress test
     Stress {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: Stress,
     },
-    #[structopt(name = "wsproxy", about = "websocket proxy")]
+    /// websocket proxy
+    #[command(name = "wsproxy")]
     WsProxy {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         publisher: publisher::Params,
-        #[structopt(flatten)]
+        #[command(flatten)]
         proxy: netidx_wsproxy::config::Config,
     },
-    #[structopt(name = "browser", about = "tui browser")]
+    /// tui browser
     Browser {
-        #[structopt(flatten)]
+        #[command(flatten)]
         common: ClientParams,
-        #[structopt(flatten)]
+        #[command(flatten)]
         publisher: publisher::Params,
     },
 }
 
 fn main() -> Result<()> {
     netidx::config::Config::maybe_run_machine_local_resolver()?;
-    match Opt::from_args() {
+    match Opt::parse() {
         Opt::ResolverServer(p) => resolver_server::run(p),
         #[cfg(unix)]
         Opt::Activation { common, params } => {

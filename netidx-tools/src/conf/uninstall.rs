@@ -11,42 +11,42 @@ use netidx_conf::{
     service::ServiceScope,
     uninstall::{self, UninstallParams, UninstallReport},
 };
+use clap::Args;
 use std::{path::PathBuf, process::Command};
-use structopt::StructOpt;
 
 use super::{prompt, service::{self as svc_cli, ELEVATED_ENV, ScopeArg}};
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct Params {
     /// User or system scope. System-scope re-execs under sudo. The
     /// config root and the OS service are both per-scope. As a
     /// convenience, an unelevated `--scope user` run also probes for
     /// a matching system-scope install (which the resolver template
     /// registers via sudo) and offers to escalate + remove it.
-    #[structopt(long = "scope", default_value = "user")]
+    #[arg(long, default_value = "user")]
     pub scope: ScopeArg,
     /// Service name to disable + remove. Default "netidx".
-    #[structopt(long = "service-name", default_value = "netidx")]
+    #[arg(long, default_value = "netidx")]
     pub service_name: String,
     /// For system-scope only: the user the templated systemd unit
     /// was instantiated as. Defaults like `service uninstall`
     /// (`$SUDO_USER` then current user).
-    #[structopt(long = "for-user")]
+    #[arg(long)]
     pub for_user: Option<String>,
     /// Override the config root. Default: the canonical user / system
     /// root for `--scope`.
-    #[structopt(long = "config-dir")]
+    #[arg(long)]
     pub config_dir: Option<PathBuf>,
     /// Also delete the CA private key and issued certs. DANGEROUS —
     /// anything signed by this CA cannot be re-issued without
     /// bootstrapping a new chain of trust. Default: keep `ca/`.
-    #[structopt(long = "with-ca")]
+    #[arg(long)]
     pub with_ca: bool,
     /// Skip the confirmation prompt.
-    #[structopt(long = "yes", short = "y")]
+    #[arg(short, long)]
     pub yes: bool,
     /// Report what would be done without doing it.
-    #[structopt(long = "dry-run")]
+    #[arg(long)]
     pub dry_run: bool,
 }
 

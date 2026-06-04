@@ -1,23 +1,20 @@
 use anyhow::{Context, Result};
+use clap::Subcommand;
 use netidx_conf::{paths, resolver::ResolverConfig};
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 use super::editor;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "show", about = "load and pretty-print the resolver config")]
+    /// load and pretty-print the resolver config
     Show {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    #[structopt(
-        name = "edit",
-        about = "open the resolver-server config in $VISUAL / $EDITOR, validate on save"
-    )]
+    /// open the resolver-server config in $VISUAL / $EDITOR, validate on save
     Edit {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
 }

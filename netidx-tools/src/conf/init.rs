@@ -21,29 +21,20 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use structopt::StructOpt;
+use clap::{Args, Subcommand};
 
 // `ca` submodule depends on netidx_conf::ca which is unix-only.
 #[cfg(unix)]
 use super::ca;
 use super::{cloud, prompt, service};
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Params {
-    #[structopt(
-        name = "workstation",
-        about = "local-auth resolver + matching client"
-    )]
+    /// local-auth resolver + matching client
     Workstation(WorkstationFlags),
-    #[structopt(
-        name = "resolver",
-        about = "single network-facing resolver-server"
-    )]
+    /// single network-facing resolver-server
     Resolver(ResolverFlags),
-    #[structopt(
-        name = "publisher",
-        about = "publisher-host config pointing at a remote cluster"
-    )]
+    /// publisher-host config pointing at a remote cluster
     Publisher(PublisherFlags),
 }
 
@@ -89,29 +80,29 @@ impl AuthKind {
     }
 }
 
-#[derive(StructOpt, Debug, Clone)]
+#[derive(Args, Debug, Clone)]
 struct TlsIdentityFlags {
     /// Source path of our certificate.
-    #[structopt(long = "tls-cert")]
+    #[arg(long = "tls-cert")]
     cert: Option<PathBuf>,
     /// Source path of our private key.
-    #[structopt(long = "tls-key")]
+    #[arg(long = "tls-key")]
     key: Option<PathBuf>,
     /// Source path of the trusted-CA bundle.
-    #[structopt(long = "tls-trusted")]
+    #[arg(long = "tls-trusted")]
     trusted: Option<PathBuf>,
     /// Our SAN — drives the install subdirectory under
     /// `~/.config/netidx/tls/<our-name>/`. Optional: defaults to
     /// the DNS SAN inside `--tls-cert` so the on-disk name always
     /// agrees with what netidx will see on the wire.
-    #[structopt(long = "tls-our-name")]
+    #[arg(long = "tls-our-name")]
     our_name: Option<String>,
     /// Server domain pattern this identity covers — the key in
     /// `tls.identities`. Closest reverse-domain match wins.
     /// Optional: defaults to the *domain* part of `our_name` (e.g.
     /// SAN `mazikeen.local` ⇒ key `local`), matching the
     /// interactive cascade.
-    #[structopt(long = "tls-server-pattern")]
+    #[arg(long = "tls-server-pattern")]
     server_pattern: Option<String>,
 }
 
@@ -185,24 +176,24 @@ impl TlsIdentityFlags {
     }
 }
 
-#[derive(StructOpt, Debug, Clone)]
+#[derive(Args, Debug, Clone)]
 struct ParentFlags {
     /// Parent referral address. Required to enable a parent.
     /// Currently supports a single address; for multiple addresses,
     /// edit the generated resolver.json.
-    #[structopt(long = "parent-addr")]
+    #[arg(long = "parent-addr")]
     parent_addr: Option<SocketAddr>,
     /// Auth scheme for the parent. Required when `--parent-addr` is set.
-    #[structopt(long = "parent-auth")]
+    #[arg(long = "parent-auth")]
     parent_auth: Option<AuthKind>,
     /// Parent's Kerberos SPN (with `--parent-auth krb5`).
-    #[structopt(long = "parent-spn")]
+    #[arg(long = "parent-spn")]
     parent_spn: Option<String>,
     /// Parent's local-auth socket path (with `--parent-auth local`).
-    #[structopt(long = "parent-socket")]
+    #[arg(long = "parent-socket")]
     parent_socket: Option<PathBuf>,
     /// Parent's TLS server name (with `--parent-auth tls`).
-    #[structopt(long = "parent-tls-name")]
+    #[arg(long = "parent-tls-name")]
     parent_tls_name: Option<String>,
     /// Netidx path at which **this** resolver attaches in the
     /// parent's namespace. Everything *above* this path in the tree
@@ -215,10 +206,10 @@ struct ParentFlags {
     /// Override only if you want this resolver's tree to attach at
     /// a different path in the parent than where it serves locally
     /// (rare — the two usually match by convention).
-    #[structopt(long = "parent-path")]
+    #[arg(long = "parent-path")]
     parent_path: Option<String>,
     /// TTL in seconds.
-    #[structopt(long = "parent-ttl")]
+    #[arg(long = "parent-ttl")]
     parent_ttl: Option<u16>,
 }
 
@@ -300,27 +291,27 @@ impl ParentFlags {
     }
 }
 
-#[derive(StructOpt, Debug, Clone)]
+#[derive(Args, Debug, Clone)]
 struct CommonFlags {
     /// Print the plan and exit without writing anything.
-    #[structopt(long = "dry-run")]
+    #[arg(long = "dry-run")]
     dry_run: bool,
     /// Overwrite existing config files. Without this, `install`
     /// errors if any target path is non-empty.
-    #[structopt(long = "force")]
+    #[arg(long = "force")]
     force: bool,
     /// Don't drop activation unit files.
-    #[structopt(long = "no-units")]
+    #[arg(long = "no-units")]
     no_units: bool,
     /// After the templated install succeeds, also register netidx as
     /// an OS service. Default (on a TTY) is to prompt; pass this to
     /// install non-interactively. Mutually exclusive with
     /// `--no-service`.
-    #[structopt(long = "with-service", conflicts_with = "no_service")]
+    #[arg(long = "with-service", conflicts_with = "no_service")]
     with_service: bool,
     /// Skip the post-install service prompt. Default (on a TTY) is
     /// to prompt; pass this to suppress the prompt entirely.
-    #[structopt(long = "no-service")]
+    #[arg(long = "no-service")]
     no_service: bool,
 }
 
@@ -427,40 +418,40 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
 
 // -- workstation --------------------------------------------------------------
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct WorkstationFlags {
-    #[structopt(flatten)]
+    #[command(flatten)]
     parent: ParentFlags,
-    #[structopt(flatten)]
+    #[command(flatten)]
     tls: TlsIdentityFlags,
     /// `default_auth` on the client config. Defaults to `local`.
     /// Override only when the workstation hosts publishers that
     /// network subscribers must reach.
-    #[structopt(long = "default-auth")]
+    #[arg(long = "default-auth")]
     default_auth: Option<AuthKind>,
     /// Base path of the local resolver cluster (default `/local`).
-    #[structopt(long = "base", default_value = "/local")]
+    #[arg(long = "base", default_value = "/local")]
     base: String,
     /// Port the local resolver listens on. Default 4654 — chosen to
     /// not clash with 59200, the port the process-spawned automatic
     /// local resolver uses when no netidx config exists.
-    #[structopt(long = "listen-port")]
+    #[arg(long = "listen-port")]
     listen_port: Option<u16>,
     /// Local-auth unix socket path.
-    #[structopt(long = "local-socket")]
+    #[arg(long = "local-socket")]
     local_socket: Option<PathBuf>,
-    #[structopt(long = "client-config")]
+    #[arg(long = "client-config")]
     client_config_path: Option<PathBuf>,
-    #[structopt(long = "resolver-config")]
+    #[arg(long = "resolver-config")]
     resolver_config_path: Option<PathBuf>,
-    #[structopt(long = "units-dir")]
+    #[arg(long = "units-dir")]
     units_dir: Option<PathBuf>,
-    #[structopt(long = "netidx-binary")]
+    #[arg(long = "netidx-binary")]
     netidx_binary: Option<PathBuf>,
     /// Skip emitting the default `container` activation unit. By
     /// default a workstation gets both `resolver` and `container`
     /// units; pass this when you don't want a container service.
-    #[structopt(long = "no-container")]
+    #[arg(long = "no-container")]
     no_container: bool,
     /// Override the perms-file owner. By default the workstation
     /// install grants `<base>` → `<current-unix-user>` → `swlpd` so
@@ -468,19 +459,19 @@ pub(crate) struct WorkstationFlags {
     /// without further setup. Pass `--owner alice` to grant `alice`
     /// instead — useful when installing as root on behalf of another
     /// user. Implies `--with-perms` (and conflicts with `--no-perms`).
-    #[structopt(long = "owner", conflicts_with = "no_perms")]
+    #[arg(long = "owner", conflicts_with = "no_perms")]
     owner: Option<String>,
     /// Skip the auto-seeded perms file entirely. The workstation
     /// resolver will load with an empty perms map and `Deny` every
     /// non-anonymous operation — only useful when perms are managed
     /// out-of-band.
-    #[structopt(long = "no-perms")]
+    #[arg(long = "no-perms")]
     no_perms: bool,
     /// Where to write the perms file. Defaults to
     /// `~/.config/netidx/perms.json` (same as the resolver template).
-    #[structopt(long = "perms-path")]
+    #[arg(long = "perms-path")]
     perms_path: Option<PathBuf>,
-    #[structopt(flatten)]
+    #[command(flatten)]
     common: CommonFlags,
 }
 
@@ -1303,36 +1294,36 @@ impl NetShape {
     }
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct ResolverFlags {
     /// Auth scheme this resolver exposes (anonymous, local, krb5,
     /// tls). Prompted when omitted.
-    #[structopt(long = "auth")]
+    #[arg(long = "auth")]
     auth: Option<AuthKind>,
     /// Kerberos SPN (with `--auth krb5`).
-    #[structopt(long = "spn")]
+    #[arg(long = "spn")]
     spn: Option<String>,
     /// Local-auth socket path (with `--auth local`).
-    #[structopt(long = "socket")]
+    #[arg(long = "socket")]
     socket: Option<PathBuf>,
     /// Resolver's own TLS name (with `--auth tls`).
-    #[structopt(long = "tls-name")]
+    #[arg(long = "tls-name")]
     tls_name: Option<String>,
     /// Source path of the resolver's certificate, or the literal
     /// `generate` to issue one from the local CA — creating that CA
     /// first if none exists. The interactive prompt defaults to
     /// `generate`, which is the painless path for the common
     /// "resolver host is also the CA host" case.
-    #[structopt(long = "tls-cert")]
+    #[arg(long = "tls-cert")]
     tls_cert: Option<PathBuf>,
     /// Source path of the resolver's private key (with `--auth tls`).
     /// Not needed when `--tls-cert` is `generate`.
-    #[structopt(long = "tls-key")]
+    #[arg(long = "tls-key")]
     tls_key: Option<PathBuf>,
     /// Source path of the trusted-CA bundle (with `--auth tls`). Not
     /// needed when `--tls-cert` is `generate` — the generating CA's
     /// own certificate becomes the trust anchor.
-    #[structopt(long = "tls-trusted")]
+    #[arg(long = "tls-trusted")]
     tls_trusted: Option<PathBuf>,
     /// The resolver's advertised address — what clients connect to.
     /// Must be a concrete address (not `0.0.0.0`). The interactive
@@ -1342,16 +1333,16 @@ pub(crate) struct ResolverFlags {
     /// type it explicitly, but not suggested as the default. Use
     /// `--bind` if the socket should bind somewhere other than the
     /// advertised address.
-    #[structopt(long = "listen")]
+    #[arg(long = "listen")]
     listen: Option<SocketAddr>,
     /// Override the bind address (default: same as `listen`'s ip).
     /// This is where the socket actually binds — it *may* be
     /// `0.0.0.0` to listen on every interface even when `--listen`
     /// advertises one concrete address.
-    #[structopt(long = "bind")]
+    #[arg(long = "bind")]
     bind: Option<std::net::IpAddr>,
     /// Base path (default `/`).
-    #[structopt(long = "base", default_value = "/")]
+    #[arg(long = "base", default_value = "/")]
     base: String,
     /// Path to a seed perms.json. Its contents are written to
     /// `--perms-path` (or `~/.config/netidx/perms.json`). When
@@ -1359,25 +1350,25 @@ pub(crate) struct ResolverFlags {
     /// (full rights for `$[user]` under `/users/$[user]`, read+write
     /// for the `users` group under `/users`). Pass `--no-perms` to
     /// skip emitting a perms file entirely.
-    #[structopt(long = "perms-seed")]
+    #[arg(long = "perms-seed")]
     perms_seed: Option<PathBuf>,
     /// Where to write the perms file. Defaults to
     /// `~/.config/netidx/perms.json`.
-    #[structopt(long = "perms-path")]
+    #[arg(long = "perms-path")]
     perms_path: Option<PathBuf>,
     /// Skip emitting a perms file (and the corresponding
     /// `include_permissions` reference). Use when perms are managed
     /// out-of-band by some other tool / process. Mutually exclusive
     /// with `--perms-seed`.
-    #[structopt(long = "no-perms", conflicts_with = "perms_seed")]
+    #[arg(long = "no-perms", conflicts_with = "perms_seed")]
     no_perms: bool,
-    #[structopt(flatten)]
+    #[command(flatten)]
     parent: ParentFlags,
-    #[structopt(long = "resolver-config")]
+    #[arg(long = "resolver-config")]
     resolver_config_path: Option<PathBuf>,
-    #[structopt(long = "units-dir")]
+    #[arg(long = "units-dir")]
     units_dir: Option<PathBuf>,
-    #[structopt(long = "netidx-binary")]
+    #[arg(long = "netidx-binary")]
     netidx_binary: Option<PathBuf>,
     /// Skip auto-installing the id-mapper daemon. When set, the
     /// resolver uses its `IdMapType::Command` default (`/bin/id`) and
@@ -1391,15 +1382,15 @@ pub(crate) struct ResolverFlags {
     ///
     /// For `--auth krb5`, id-map entries are keyed by the full
     /// kerberos principal including realm (e.g. `eric@RYU-OH.ORG`).
-    #[structopt(long = "no-id-map")]
+    #[arg(long = "no-id-map")]
     no_id_map: bool,
     /// Override the id-map socket path (default
     /// `${dirs::config_dir}/netidx/id-map.sock`).
-    #[structopt(long = "id-map-socket")]
+    #[arg(long = "id-map-socket")]
     id_map_socket: Option<PathBuf>,
     /// Override the id-map JSON path (default
     /// `${dirs::config_dir}/netidx/id-map.json`).
-    #[structopt(long = "id-map-path")]
+    #[arg(long = "id-map-path")]
     id_map_path: Option<PathBuf>,
     /// Skip writing a client.json pointing at this resolver. By
     /// default `install resolver` drops a local client config — for
@@ -1408,14 +1399,14 @@ pub(crate) struct ResolverFlags {
     /// without extra setup. Pass this if a different client config
     /// already exists, or if the resolver host should not also be a
     /// client.
-    #[structopt(long = "no-client")]
+    #[arg(long = "no-client")]
     no_client: bool,
     /// Override the client config path (default
     /// `${dirs::config_dir}/netidx/client.json`). Ignored when
     /// `--no-client` is set.
-    #[structopt(long = "client-config")]
+    #[arg(long = "client-config")]
     client_config_path: Option<PathBuf>,
-    #[structopt(flatten)]
+    #[command(flatten)]
     common: CommonFlags,
 }
 
@@ -1763,41 +1754,41 @@ fn resolver_tls_generate(
 
 // -- client-only --------------------------------------------------------------
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct PublisherFlags {
     /// Cluster address (repeatable). All addresses share the auth
     /// scheme; for heterogeneous setups, edit the generated JSON.
     /// Prompted (single address) when omitted.
-    #[structopt(long = "addr", number_of_values = 1)]
+    #[arg(long = "addr", num_args = 1)]
     addrs: Vec<SocketAddr>,
     /// Auth scheme (anonymous|local|krb5|tls). Prompted when omitted.
-    #[structopt(long = "auth")]
+    #[arg(long = "auth")]
     auth: Option<AuthKind>,
-    #[structopt(long = "spn")]
+    #[arg(long = "spn")]
     spn: Option<String>,
-    #[structopt(long = "socket")]
+    #[arg(long = "socket")]
     socket: Option<PathBuf>,
     /// Server's TLS name (when `--auth tls`).
-    #[structopt(long = "tls-server-name")]
+    #[arg(long = "tls-server-name")]
     tls_server_name: Option<String>,
-    #[structopt(flatten)]
+    #[command(flatten)]
     tls: TlsIdentityFlags,
     /// Override `default_auth` on the client config. None ⇒ derive
     /// from `--auth`.
-    #[structopt(long = "default-auth")]
+    #[arg(long = "default-auth")]
     default_auth: Option<AuthKind>,
-    #[structopt(long = "base", default_value = "/")]
+    #[arg(long = "base", default_value = "/")]
     base: String,
-    #[structopt(long = "config")]
+    #[arg(long = "config")]
     config_path: Option<PathBuf>,
     /// `default_bind_config` string (e.g. `10.0.0.5/32` for an exact
     /// interface, `10.0.0.0/24` for a subnet match). Default: the
     /// first public/private IPv4 enumerated on this host, formatted
     /// as `<ip>/32`. Use `local` to bind to 127.0.0.1 (only safe when
     /// the resolver is also on loopback).
-    #[structopt(long = "bind")]
+    #[arg(long = "bind")]
     bind: Option<String>,
-    #[structopt(flatten)]
+    #[command(flatten)]
     common: CommonFlags,
 }
 

@@ -4,27 +4,23 @@ use netidx::{
     config::Config,
     publisher::{BindCfg, DesiredAuth},
 };
+use clap::Args;
 use netidx_activation::runtime::{Server, ServerParams};
 use std::path::PathBuf;
-use structopt::StructOpt;
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. local, 192.168.0.0/16"
-    )]
+    /// configure the bind address e.g. local, 192.168.0.0/16
+    #[arg(short, long)]
     bind: Option<BindCfg>,
-    #[structopt(
-        short = "u",
-        long = "units",
-        help = "path to directory containing the unit files to manage"
-    )]
+    /// path to directory containing the unit files to manage
+    #[arg(short, long)]
     units: Option<PathBuf>,
-    #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
+    /// don't daemonize
+    #[arg(short, long)]
     foreground: bool,
-    #[structopt(long = "pid-file", help = "write the pid to file")]
+    /// write the pid to file
+    #[arg(long)]
     pid_file: Option<PathBuf>,
 }
 

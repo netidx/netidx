@@ -19,31 +19,28 @@ use netidx::resolver_server::{
     config::{file, Config},
     Server,
 };
+use clap::Args;
 use std::path::PathBuf;
-use structopt::StructOpt;
 #[cfg(unix)]
 use tokio::{
     signal::unix::{signal, SignalKind},
     sync::mpsc,
 };
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct Params {
-    #[structopt(short = "c", long = "config", help = "path to the server config")]
+    /// path to the server config
+    #[arg(short, long)]
     config: String,
-    #[structopt(short = "f", long = "foreground", help = "don't daemonize")]
+    /// don't daemonize
+    #[arg(short, long)]
     #[allow(dead_code)]
     foreground: bool,
-    #[structopt(
-        long = "delay-reads",
-        help = "don't allow read clients until 1 writer ttl has passed"
-    )]
+    /// don't allow read clients until 1 writer ttl has passed
+    #[arg(long)]
     delay_reads: bool,
-    #[structopt(
-        long = "id",
-        help = "index of the member server to run",
-        default_value = "0"
-    )]
+    /// index of the member server to run
+    #[arg(long, default_value = "0")]
     id: usize,
 }
 

@@ -4,125 +4,119 @@ use netidx_conf::{
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     paths, tls,
 };
+use clap::{Args, Subcommand};
 use std::{net::IpAddr, path::PathBuf};
-use structopt::StructOpt;
 
 use super::prompt;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "init", about = "create a new local CA")]
+    /// create a new local CA
     Init(InitParams),
-    #[structopt(name = "issue", about = "issue a leaf certificate from a CA")]
+    /// issue a leaf certificate from a CA
     Issue(IssueArgs),
-    #[structopt(
-        name = "request",
-        about = "generate a private key + CSR locally, to be signed by a CA elsewhere"
-    )]
+    /// generate a private key + CSR locally, to be signed by a CA elsewhere
     Request(RequestArgs),
-    #[structopt(
-        name = "sign",
-        about = "sign an externally-supplied CSR with a local CA"
-    )]
+    /// sign an externally-supplied CSR with a local CA
     Sign(SignArgs),
-    #[structopt(name = "list", about = "list local CAs")]
+    /// list local CAs
     List,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct InitParams {
     /// Common Name on the CA cert. Prompted for when stdin is a TTY
     /// and this flag is omitted.
-    #[structopt(long = "cn")]
+    #[arg(long)]
     pub cn: Option<String>,
-    #[structopt(long = "country")]
+    #[arg(long)]
     pub country: Option<String>,
-    #[structopt(long = "state")]
+    #[arg(long)]
     pub state: Option<String>,
-    #[structopt(long = "locality")]
+    #[arg(long)]
     pub locality: Option<String>,
-    #[structopt(long = "organization", short = "O")]
+    #[arg(short = 'O', long)]
     pub organization: Option<String>,
     /// SubjectAltName entry. Repeatable. Form: `dns:<name>`,
     /// `ip:<addr>`, `uri:<uri>`, or `email:<addr>`. Defaults to a
     /// single `dns:<cn>` if not given.
-    #[structopt(long = "san", number_of_values = 1)]
+    #[arg(long, num_args = 1)]
     pub san: Vec<String>,
-    #[structopt(long = "key-bits", default_value = "4096")]
+    #[arg(long, default_value = "4096")]
     pub key_bits: u32,
-    #[structopt(long = "validity-days", default_value = "7300")]
+    #[arg(long, default_value = "7300")]
     pub validity_days: u32,
     /// Skip the password prompt and write an unencrypted key.
-    #[structopt(long = "no-password")]
+    #[arg(long)]
     pub no_password: bool,
     /// Override the directory the CA is created in. Defaults to
     /// `${basedir}/ca/` — one CA per netidx install.
-    #[structopt(long = "dir")]
+    #[arg(long)]
     pub dir: Option<PathBuf>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct IssueArgs {
     /// Common Name for the issued cert. Prompted when omitted.
-    #[structopt(long = "cn")]
+    #[arg(long)]
     pub cn: Option<String>,
-    #[structopt(long = "country")]
+    #[arg(long)]
     pub country: Option<String>,
-    #[structopt(long = "state")]
+    #[arg(long)]
     pub state: Option<String>,
-    #[structopt(long = "locality")]
+    #[arg(long)]
     pub locality: Option<String>,
-    #[structopt(long = "organization", short = "O")]
+    #[arg(short = 'O', long)]
     pub organization: Option<String>,
-    #[structopt(long = "san", number_of_values = 1)]
+    #[arg(long, num_args = 1)]
     pub san: Vec<String>,
-    #[structopt(long = "key-bits", default_value = "4096")]
+    #[arg(long, default_value = "4096")]
     pub key_bits: u32,
-    #[structopt(long = "validity-days", default_value = "730")]
+    #[arg(long, default_value = "730")]
     pub validity_days: u32,
-    #[structopt(long = "no-password")]
+    #[arg(long)]
     pub no_password: bool,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
-    #[structopt(long = "ca-dir")]
+    #[arg(long)]
     pub ca_dir: Option<PathBuf>,
     /// Where to write the issued `private.key` + `certificate.pem`.
     /// Prompted when omitted.
-    #[structopt(long = "out", short = "o")]
+    #[arg(short, long = "out")]
     pub out_dir: Option<PathBuf>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct RequestArgs {
     /// Common Name for the requested cert. Prompted when omitted.
-    #[structopt(long = "cn")]
+    #[arg(long)]
     pub cn: Option<String>,
-    #[structopt(long = "country")]
+    #[arg(long)]
     pub country: Option<String>,
-    #[structopt(long = "state")]
+    #[arg(long)]
     pub state: Option<String>,
-    #[structopt(long = "locality")]
+    #[arg(long)]
     pub locality: Option<String>,
-    #[structopt(long = "organization", short = "O")]
+    #[arg(short = 'O', long)]
     pub organization: Option<String>,
     /// SubjectAltName entry. Repeatable. Form: `dns:<name>`,
     /// `ip:<addr>`, `uri:<uri>`, or `email:<addr>`. Defaults to a
     /// single `dns:<cn>` if not given.
-    #[structopt(long = "san", number_of_values = 1)]
+    #[arg(long, num_args = 1)]
     pub san: Vec<String>,
-    #[structopt(long = "key-bits", default_value = "4096")]
+    #[arg(long, default_value = "4096")]
     pub key_bits: u32,
     /// Output path for the generated private key (mode 0600).
     /// Defaults to `./private.key`; the default path refuses to
     /// overwrite an existing file (an explicit `--out-key` does not).
-    #[structopt(long = "out-key")]
+    #[arg(long)]
     pub out_key: Option<PathBuf>,
     /// Output path for the generated CSR (mode 0644). Defaults to
     /// `./<cn>.csr`.
-    #[structopt(long = "out-csr")]
+    #[arg(long)]
     pub out_csr: Option<PathBuf>,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct SignArgs {
     /// Path to the CSR (PEM-encoded) to sign. Prompted when omitted.
     pub csr_path: Option<PathBuf>,
@@ -132,24 +126,24 @@ pub(crate) struct SignArgs {
     /// the CLI deliberately does not silently inherit SAN from the
     /// CSR, since an absent-minded admin signing whatever was
     /// requested is the most likely failure mode of a CA tool.
-    #[structopt(long = "san", number_of_values = 1)]
+    #[arg(long, num_args = 1)]
     pub san: Vec<String>,
     /// Accept the CSR's embedded SAN as-is. The summary is still
     /// printed before signing; this flag just makes the
     /// inherit-from-CSR decision explicit rather than implicit.
-    #[structopt(long = "accept-csr-san")]
+    #[arg(long)]
     pub accept_csr_san: bool,
-    #[structopt(long = "validity-days", default_value = "730")]
+    #[arg(long, default_value = "730")]
     pub validity_days: u32,
-    #[structopt(long = "no-password")]
+    #[arg(long)]
     pub no_password: bool,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
-    #[structopt(long = "ca-dir")]
+    #[arg(long)]
     pub ca_dir: Option<PathBuf>,
     /// Where to write the signed certificate (mode 0644). Defaults
     /// to `./<csr-cn>.pem` (or `./certificate.pem` if the CSR has no
     /// CN).
-    #[structopt(long = "out", short = "o")]
+    #[arg(short, long)]
     pub out: Option<PathBuf>,
     /// Skip the post-sign id-map registration prompt. The default on
     /// a TTY (when a local id-map exists) is to prompt for groups
@@ -158,7 +152,7 @@ pub(crate) struct SignArgs {
     /// so this is mostly useful for interactive sessions where you
     /// want to handle id-map registration separately (or not at
     /// all).
-    #[structopt(long = "no-id-map")]
+    #[arg(long)]
     pub no_id_map: bool,
 }
 

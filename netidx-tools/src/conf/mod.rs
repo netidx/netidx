@@ -2,7 +2,7 @@
 //! `netidx-conf`.
 
 use anyhow::Result;
-use structopt::StructOpt;
+use clap::Subcommand;
 
 mod activation;
 // `ca` subcommand and its supporting CLI helpers depend on the
@@ -21,58 +21,58 @@ mod resolver;
 mod service;
 mod uninstall;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Params {
-    #[structopt(name = "install", about = "install a templated netidx setup")]
-    Install(init::Params),
-    #[structopt(
-        name = "uninstall",
-        about = "tear down a netidx install (config dir + OS service)"
-    )]
+    /// install a templated netidx setup
+    Install {
+        #[command(subcommand)]
+        params: init::Params,
+    },
+    /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
-    #[structopt(name = "client", about = "show or edit the client config")]
+    /// show or edit the client config
     Client {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: client::Cmd,
     },
-    #[structopt(name = "resolver", about = "show or edit the resolver-server config")]
+    /// show or edit the resolver-server config
     Resolver {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: resolver::Cmd,
     },
-    #[structopt(name = "perms", about = "edit resolver-server perms")]
+    /// edit resolver-server perms
     Perms {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: perms::Cmd,
     },
-    #[structopt(name = "activation", about = "edit netidx-activation units")]
+    /// edit netidx-activation units
     Activation {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: activation::Cmd,
     },
-    /// Unix-only — the engine module (`netidx_conf::ca`) needs
-    /// openssl, which we don't ship to Windows.
+    /// manage a local certificate authority
+    // Unix-only — the engine module (`netidx_conf::ca`) needs
+    // openssl, which we don't ship to Windows.
     #[cfg(unix)]
-    #[structopt(name = "ca", about = "manage a local certificate authority")]
     Ca {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: ca::Cmd,
     },
-    #[structopt(name = "id-map", about = "edit the netidx id-map (TLS uid/group lookups)")]
+    /// edit the netidx id-map (TLS uid/group lookups)
     IdMap {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: id_map::Cmd,
     },
-    #[structopt(name = "service", about = "install netidx as an OS service")]
+    /// install netidx as an OS service
     Service {
-        #[structopt(subcommand)]
+        #[command(subcommand)]
         cmd: service::Cmd,
     },
 }
 
 pub(crate) fn run(p: Params) -> Result<()> {
     match p {
-        Params::Install(p) => init::run(p),
+        Params::Install { params } => init::run(params),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Client { cmd } => client::run(cmd),
         Params::Resolver { cmd } => resolver::run(cmd),

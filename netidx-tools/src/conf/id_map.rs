@@ -13,46 +13,43 @@
 //! the reload).
 
 use anyhow::{Context, Result};
+use clap::Subcommand;
 use netidx_conf::id_map;
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 use super::{editor, prompt};
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "init", about = "create an empty id-map file if one doesn't exist")]
+    /// create an empty id-map file if one doesn't exist
     Init {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Default uid returned for unknown queries.
-        #[structopt(long = "default-uid", default_value = "65534")]
+        #[arg(long, default_value = "65534")]
         default_uid: u32,
         /// Default gid returned for unknown queries.
-        #[structopt(long = "default-gid", default_value = "65534")]
+        #[arg(long, default_value = "65534")]
         default_gid: u32,
     },
-    #[structopt(name = "show", about = "pretty-print the id-map JSON")]
+    /// pretty-print the id-map JSON
     Show {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    #[structopt(
-        name = "edit",
-        about = "open the id-map JSON in $VISUAL / $EDITOR, validate on save"
-    )]
+    /// open the id-map JSON in $VISUAL / $EDITOR, validate on save
     Edit {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    #[structopt(name = "list", about = "list identities and groups in a table")]
+    /// list identities and groups in a table
     List {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    #[structopt(name = "add-group", about = "add a group (or update an existing one)")]
+    /// add a group (or update an existing one)
     AddGroup {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Group name. Prompted when omitted.
         name: Option<String>,
@@ -62,16 +59,16 @@ pub(crate) enum Cmd {
         /// names, never numeric gids — the value is decorative.
         gid: Option<u32>,
     },
-    #[structopt(name = "remove-group", about = "remove a group (fails if in use)")]
+    /// remove a group (fails if in use)
     RemoveGroup {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Group name. Prompted when omitted.
         name: Option<String>,
     },
-    #[structopt(name = "add-user", about = "add an identity (or update an existing one)")]
+    /// add an identity (or update an existing one)
     AddUser {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx name (typically the TLS SubjectAltName DNS entry).
         /// Prompted when omitted.
@@ -88,28 +85,28 @@ pub(crate) enum Cmd {
         /// omitted.
         primary_group: Option<String>,
         /// Secondary group memberships. Repeatable.
-        #[structopt(long = "group", short = "g", number_of_values = 1)]
+        #[arg(short, long = "group", num_args = 1)]
         groups: Vec<String>,
     },
-    #[structopt(name = "remove-user", about = "remove an identity")]
+    /// remove an identity
     RemoveUser {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx name. Prompted when omitted.
         name: Option<String>,
     },
-    #[structopt(name = "add-member", about = "add an identity to a secondary group")]
+    /// add an identity to a secondary group
     AddMember {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx name. Prompted when omitted.
         name: Option<String>,
         /// Group name. Prompted when omitted.
         group: Option<String>,
     },
-    #[structopt(name = "remove-member", about = "remove an identity from a secondary group")]
+    /// remove an identity from a secondary group
     RemoveMember {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx name. Prompted when omitted.
         name: Option<String>,

@@ -1,22 +1,24 @@
 use anyhow::{Context, Result};
+use clap::Subcommand;
 use netidx_conf::{paths, perms};
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 use super::prompt;
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "list", about = "list perm entries")]
+    /// list perm entries
     List {
-        #[structopt(long = "file", short = "f", help = "perms file (default: ~/.config/netidx/perms.json)")]
+        /// perms file (default: ~/.config/netidx/perms.json)
+        #[arg(short, long)]
         file: Option<PathBuf>,
-        #[structopt(long = "path", short = "p", help = "filter to a specific path")]
+        /// filter to a specific path
+        #[arg(short, long)]
         path: Option<String>,
     },
-    #[structopt(name = "set", about = "set <bits> for <entity> at <path>")]
+    /// set <bits> for <entity> at <path>
     Set {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx path the entry applies to. Prompted when omitted.
         path: Option<String>,
@@ -26,9 +28,9 @@ pub(crate) enum Cmd {
         /// Permission bits (e.g. `swlpd`). Prompted when omitted.
         bits: Option<String>,
     },
-    #[structopt(name = "remove", about = "remove <entity>'s entry at <path>")]
+    /// remove <entity>'s entry at <path>
     Remove {
-        #[structopt(long = "file", short = "f")]
+        #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx path the entry applies to. Prompted when omitted.
         path: Option<String>,

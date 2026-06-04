@@ -12,15 +12,15 @@ use anyhow::{Context, Result};
 use netidx_conf::service::{
     self, ServiceParams, ServiceScope, ServiceStatus,
 };
+use clap::{Args, Subcommand};
 use std::{io::IsTerminal, path::PathBuf, process::Command};
-use structopt::StructOpt;
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.
 /// Public so the install-flow can read it (`std::env::var_os`).
 pub(super) const ELEVATED_ENV: &str = "NETIDX_ELEVATED";
 
-#[derive(StructOpt, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeArg {
     User,
     System,
@@ -46,47 +46,47 @@ impl From<ScopeArg> for ServiceScope {
     }
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    #[structopt(name = "install", about = "install netidx as an OS service")]
+    /// install netidx as an OS service
     Install(InstallArgs),
-    #[structopt(name = "uninstall", about = "remove the netidx OS service")]
+    /// remove the netidx OS service
     Uninstall(CommonArgs),
-    #[structopt(name = "status", about = "report whether the netidx service is running")]
+    /// report whether the netidx service is running
     Status(CommonArgs),
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct CommonArgs {
     /// User or system scope. User scope is unprivileged; system scope
     /// writes to /etc and needs root (we re-exec via `sudo` if not
     /// already elevated).
-    #[structopt(long = "scope", default_value = "user")]
+    #[arg(long, default_value = "user")]
     pub scope: ScopeArg,
     /// For system scope, the username the service should run as.
     /// Defaults to the pre-escalation user (`$SUDO_USER` if set,
     /// otherwise the current user). Ignored for user scope.
-    #[structopt(long = "for-user")]
+    #[arg(long)]
     pub for_user: Option<String>,
     /// Service name. Defaults to "netidx"; override when running
     /// multiple parallel netidx setups on one host.
-    #[structopt(long = "service-name", default_value = "netidx")]
+    #[arg(long, default_value = "netidx")]
     pub service_name: String,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct InstallArgs {
-    #[structopt(flatten)]
+    #[command(flatten)]
     pub common: CommonArgs,
     /// Path to the netidx binary the service should run. Defaults to
     /// the currently-running binary (`std::env::current_exe`) so the
     /// installed service is the same binary the operator invoked.
-    #[structopt(long = "netidx-binary")]
+    #[arg(long)]
     pub netidx_binary: Option<PathBuf>,
     /// Override the activation directory the supervisor reads from.
     /// `None` ⇒ the platform-default user activation dir of the
     /// service-running user.
-    #[structopt(long = "activation-dir")]
+    #[arg(long)]
     pub activation_dir: Option<PathBuf>,
 }
 

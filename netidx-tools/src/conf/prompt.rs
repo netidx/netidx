@@ -3,7 +3,7 @@
 //! Three levels of "required-ness" for a CLI argument:
 //!
 //! - **Level 0** — no prompt. The argument has a silent default
-//!   (structopt `default_value`, or `.unwrap_or(...)` at the call
+//!   (clap `default_value`, or `.unwrap_or(...)` at the call
 //!   site). Nothing in this module handles level 0; there's nothing
 //!   to ask.
 //! - **Level 1** — prompt, but offer a default. Blank input (just

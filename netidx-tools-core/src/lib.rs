@@ -1,20 +1,22 @@
+use clap::Args;
 use netidx::{config::Config, resolver_client::DesiredAuth};
-use structopt::StructOpt;
 
-#[derive(StructOpt, Debug, Clone)]
+#[derive(Args, Debug, Clone)]
 pub struct ClientParams {
-    #[structopt(short = "c", long = "config", help = "path to the client config")]
+    /// path to the client config
+    #[arg(short, long)]
     pub config: Option<String>,
-    #[structopt(short = "a", long = "auth", help = "auth mechanism")]
+    /// auth mechanism
+    #[arg(short, long)]
     pub auth: Option<DesiredAuth>,
-    #[structopt(long = "upn", help = "kerberos upn, only if auth = krb5")]
+    /// kerberos upn, only if auth = krb5
+    #[arg(long)]
     pub upn: Option<String>,
-    #[structopt(long = "spn", help = "kerberos spn, only if auth = krb5")]
+    /// kerberos spn, only if auth = krb5
+    #[arg(long)]
     pub spn: Option<String>,
-    #[structopt(
-        long = "identity",
-        help = "the tls identity to publish as, default_identity if omitted"
-    )]
+    /// the tls identity to publish as, default_identity if omitted
+    #[arg(long)]
     pub identity: Option<String>,
 }
 

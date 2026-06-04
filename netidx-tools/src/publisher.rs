@@ -16,25 +16,20 @@ use netidx::{
 use nohash::IntMap;
 use parking_lot::Mutex;
 use poolshark::global::GPooled;
+use clap::Args;
 use std::{convert::From, sync::Arc, time::Duration};
-use structopt::StructOpt;
 use tokio::{
     io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
     signal, task,
 };
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(crate) struct Params {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. local, 192.168.0.0/16"
-    )]
+    /// configure the bind address e.g. local, 192.168.0.0/16
+    #[arg(short, long)]
     pub(crate) bind: Option<BindCfg>,
-    #[structopt(
-        long = "timeout",
-        help = "require subscribers to consume values before timeout (seconds)"
-    )]
+    /// require subscribers to consume values before timeout (seconds)
+    #[arg(long)]
     pub(crate) timeout: Option<u64>,
 }
 

@@ -7,13 +7,14 @@ use netidx::{
     resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Subscriber, UpdatesFlags},
 };
+use clap::Args;
 use std::time::Duration;
-use structopt::StructOpt;
 use tokio::time::{self, Instant};
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(long = "base", help = "base path", default_value = "/bench")]
+    /// base path
+    #[arg(long, default_value = "/bench")]
     base: String,
 }
 

@@ -19,6 +19,7 @@ bitflags = "2"
 byteorder = "1"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "^0.4.24", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 combine = "4"
 compact_str = { version = "0.9", features = ["serde"] }
 crossbeam = "0.8"
@@ -80,7 +81,6 @@ serde = { version = "1", features = ["rc"] }
 sha3 = "0.11"
 sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
-structopt = "0.3"
 tempdir = "0.3.7"
 tempfile = "3"
 tokio-rustls = "0.26"

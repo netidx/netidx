@@ -5,29 +5,24 @@ use netidx::{
     path::Path,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
 };
+use clap::Args;
 use std::time::{Duration, Instant};
-use structopt::StructOpt;
 use tokio::{signal, task, time};
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(
-        short = "b",
-        long = "bind",
-        help = "configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000"
-    )]
+    /// configure the bind address e.g. 192.168.0.0/16, 127.0.0.1:5000
+    #[arg(short, long)]
     bind: Option<BindCfg>,
-    #[structopt(
-        long = "delay",
-        help = "time in ms to wait between batches",
-        default_value = "100"
-    )]
+    /// time in ms to wait between batches
+    #[arg(long, default_value = "100")]
     delay: u64,
-    #[structopt(long = "base", help = "base path", default_value = "/bench")]
+    /// base path
+    #[arg(long, default_value = "/bench")]
     base: String,
-    #[structopt(name = "rows", default_value = "100")]
+    #[arg(default_value = "100")]
     rows: usize,
-    #[structopt(name = "cols", default_value = "10")]
+    #[arg(default_value = "10")]
     cols: usize,
 }
 

@@ -32,31 +32,26 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use structopt::StructOpt;
+use clap::Args;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     time,
 };
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(
-        short = "o",
-        long = "oneshot",
-        help = "unsubscribe after printing one value for each subscription"
-    )]
+    /// unsubscribe after printing one value for each subscription
+    #[arg(short, long)]
     oneshot: bool,
-    #[structopt(short = "n", long = "no-stdin", help = "don't read commands from stdin")]
+    /// don't read commands from stdin
+    #[arg(short, long)]
     no_stdin: bool,
-    #[structopt(short = "r", long = "raw", help = "don't print the path or the type")]
+    /// don't print the path or the type
+    #[arg(short, long)]
     raw: bool,
-    #[structopt(
-        short = "t",
-        long = "subscribe-timeout",
-        help = "cancel subscription unless it succeeds within timeout"
-    )]
+    /// cancel subscription unless it succeeds within timeout
+    #[arg(short = 't', long)]
     subscribe_timeout: Option<u64>,
-    #[structopt(name = "paths")]
     paths: Vec<String>,
 }
 

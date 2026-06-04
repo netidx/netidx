@@ -9,27 +9,22 @@ use netidx::{
     subscriber::{DesiredAuth, Subscriber},
 };
 use netidx_protocols::pack_channel::client::Connection;
+use clap::Args;
 use std::{sync::Arc, time::Duration};
-use structopt::StructOpt;
 use tokio::time::{self, Instant};
 
-#[derive(StructOpt, Debug)]
+#[derive(Args, Debug)]
 pub(super) struct Params {
-    #[structopt(
-        long = "base",
-        help = "base path",
-        default_value = "/local/channel/bench"
-    )]
+    /// base path
+    #[arg(long, default_value = "/local/channel/bench")]
     base: Path,
-    #[structopt(
-        long = "delay",
-        help = "time in ms to wait between batches",
-        default_value = "100"
-    )]
+    /// time in ms to wait between batches
+    #[arg(long, default_value = "100")]
     delay: u64,
-    #[structopt(long = "latency", help = "test latency not throughput")]
+    /// test latency not throughput
+    #[arg(long)]
     latency: bool,
-    #[structopt(name = "batch-size", default_value = "100")]
+    #[arg(value_name = "batch-size", default_value = "100")]
     batch: usize,
 }
 
