@@ -8,7 +8,8 @@
 //! The templates then reference the installed paths from the generated
 //! configs.
 //!
-//! Issuance, signing, CRLs, and the `--tls-auto` flow are FUTURE.md.
+//! Issuance, signing, CRLs, and the `--tls-auto` flow are
+//! design/netidx-conf-future.md.
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};

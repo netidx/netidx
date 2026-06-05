@@ -11,7 +11,8 @@
 //! extensions so the resulting certs validate through netidx's
 //! existing `tls::load_certs` / `tls::get_names`.
 //!
-//! Deferred to FUTURE.md: CRL generation, revocation, encrypted CA
+//! Deferred to design/netidx-conf-future.md: CRL generation,
+//! revocation, encrypted CA
 //! keys, hardware-token backing, `Ca::trust_into_*` config-wiring
 //! helpers, CA inventory / index files, the `--tls-auto` template
 //! integration.

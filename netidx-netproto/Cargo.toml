@@ -28,7 +28,7 @@ serde_derive = { workspace = true }
 smallvec = { workspace = true }
 
 [dev-dependencies]
-proptest = "1"
+proptest = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 triomphe = { workspace = true }

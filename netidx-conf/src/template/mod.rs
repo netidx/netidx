@@ -16,7 +16,7 @@
 //! emits a [`TlsCopyJob`] in the [`RenderedTemplate`] that
 //! [`apply()`](RenderedTemplate::apply) carries out using
 //! [`crate::tls::install_identity`]. Auto-issuance via the CA module
-//! is documented in FUTURE.md.
+//! is documented in design/netidx-conf-future.md.
 
 use crate::{
     activation, client, id_map as id_map_engine, perms,

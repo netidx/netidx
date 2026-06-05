@@ -62,13 +62,13 @@ netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.32.0", default-featu
 enumflags2 = { workspace = true }
 # File-watching for live reload (resolver-server config + perms;
 # `netidx-id-map` uses the same crate for the same reason).
-extended-notify = "0.1"
+extended-notify = { workspace = true }
 parking_lot = { workspace = true }
 # Cloud-metadata public-IP detection for `conf install` (see
 # conf/cloud.rs). HTTP-only — no TLS needed for link-local metadata
 # endpoints; default features pull rustls anyway since graphix already
 # uses reqwest 0.13 in this tree, so we don't bloat the build.
-reqwest = { version = "0.13", default-features = false }
+reqwest = { workspace = true }
 rpassword = { workspace = true }
 serde_derive = { workspace = true }
 tempfile = { workspace = true }

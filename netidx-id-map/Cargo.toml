@@ -21,7 +21,7 @@ enumflags2 = { workspace = true }
 # atomic-write rename-into-place (which is what `atomic::write_atomic`
 # does) by watching the parent dir + polling, so it survives the
 # pattern that breaks naive inotify-on-the-file watches.
-extended-notify = "0.1"
+extended-notify = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

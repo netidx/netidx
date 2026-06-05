@@ -185,6 +185,29 @@ The reviewer will change CR to XCR when addressed and may add explanation. On fo
 - **Configuration**: JSON files at `~/.config/netidx.json` or system-wide
 - **Async runtime**: Uses tokio for all async operations
 
+## Workspace Dependencies
+
+Every external dependency MUST be a workspace dependency. Declare the
+version/features once in the root `Cargo.toml` under
+`[workspace.dependencies]`, and reference it from each member crate as
+`foo = { workspace = true }` (add per-crate `features`/`default-features`
+on the `workspace = true` line only when a crate genuinely needs them).
+
+This rule applies to **all** dependency tables — `[dependencies]`,
+`[dev-dependencies]`, `[build-dependencies]`, and target-specific
+`[target.'cfg(...)'.dependencies]` — in every member crate.
+
+The only exception is path dependencies on other crates **in this
+workspace** (e.g. `netidx-core = { path = "../netidx-core", version =
+"0.32.0" }`); those stay inline because they carry a `path`. External
+path dependencies (e.g. the `graphix-*` crates from the sibling repo)
+still go through `[workspace.dependencies]`.
+
+When adding a new external crate to any member, add it to
+`[workspace.dependencies]` first, then reference it with
+`{ workspace = true }`. `cfg/tls/id-win` is `exclude`d from the
+workspace and is not subject to this rule.
+
 ## Transport & Networking
 
 - **Channel abstraction** (`channel.rs`): Length-prefixed message framing (4-byte BE header) with optional encryption
