@@ -1,31 +1,21 @@
 use anyhow::{Context, Result};
-#[cfg(unix)]
 use arcstr::ArcStr;
+use clap::Args;
 #[cfg(unix)]
 use daemonize::Daemonize;
-#[cfg(unix)]
 use enumflags2::make_bitflags;
-#[cfg(unix)]
 use extended_notify::{
     ArcPath, EventBatch, EventKind, Interest, Watched, Watcher, WatcherConfigBuilder,
 };
-#[cfg(not(unix))]
-use futures::future;
-#[cfg(unix)]
 use log::{info, warn};
-#[cfg(unix)]
-use netidx::resolver_server::config;
 use netidx::resolver_server::{
-    config::{file, Config},
+    config::{self, file, Config},
     Server,
 };
-use clap::Args;
 use std::path::PathBuf;
 #[cfg(unix)]
-use tokio::{
-    signal::unix::{signal, SignalKind},
-    sync::mpsc,
-};
+use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::sync::mpsc;
 
 #[derive(Args, Debug)]
 pub(crate) struct Params {
@@ -44,7 +34,54 @@ pub(crate) struct Params {
     id: usize,
 }
 
+// What we tell the operator when the file watcher is unavailable. On
+// unix SIGHUP is still a working reload trigger; on platforms without
+// unix signals the watcher was the only trigger, so losing it disables
+// live reload entirely.
 #[cfg(unix)]
+const RELOAD_FALLBACK: &str = "continuing with SIGHUP-only reload";
+#[cfg(not(unix))]
+const RELOAD_FALLBACK: &str = "live config reload is now disabled";
+
+/// SIGHUP-driven reload trigger. On unix this is a real signal stream;
+/// elsewhere it simply never fires, leaving the file watcher as the
+/// only reload trigger. Keeping it as an always-present (if pending)
+/// select arm means the reload loop's `select!` never ends up with all
+/// branches disabled — which would otherwise panic on Windows the
+/// moment the watcher arm is gated off.
+enum Sighup {
+    #[cfg(unix)]
+    Signal(Signal),
+    #[cfg(not(unix))]
+    Never,
+}
+
+impl Sighup {
+    fn new() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::Signal(
+                signal(SignalKind::hangup()).context("registering SIGHUP handler")?,
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self::Never)
+        }
+    }
+
+    async fn recv(&mut self) {
+        match self {
+            #[cfg(unix)]
+            Self::Signal(s) => {
+                s.recv().await;
+            }
+            #[cfg(not(unix))]
+            Self::Never => std::future::pending::<()>().await,
+        }
+    }
+}
+
 #[tokio::main]
 async fn tokio_run(
     config: Config,
@@ -55,27 +92,15 @@ async fn tokio_run(
     let server = Server::new(config, params.delay_reads, params.id)
         .await
         .context("starting server")?;
-    run_signal_loop(server, config_path, params.id, baseline).await
+    run_reload_loop(server, config_path, baseline).await
 }
 
-#[cfg(not(unix))]
-#[tokio::main]
-async fn tokio_run(config: Config, params: Params) -> Result<()> {
-    let server = Server::new(config, params.delay_reads, params.id)
-        .await
-        .context("starting server")?;
-    // No SIGHUP on Windows yet. The server stays up until the process
-    // is killed.
-    let _server = server;
-    let _ = params;
-    future::pending::<Result<()>>().await
-}
-
-#[cfg(unix)]
-async fn run_signal_loop(
+/// Reload loop, driven by SIGHUP (unix) and/or on-disk changes to the
+/// config or any `include_permissions` file (all platforms). Both
+/// triggers run the same reload.
+async fn run_reload_loop(
     server: Server,
     config_path: PathBuf,
-    id: usize,
     baseline: file::Config,
 ) -> Result<()> {
     // Diff baseline for structural-field warnings. Frozen at startup
@@ -84,16 +109,14 @@ async fn run_signal_loop(
     // has the startup values. Diffing against startup means an
     // operator who edits a field and then reverts it gets the warn
     // once and silence after; an operator who edits without
-    // reverting keeps getting the warn on every SIGHUP, which is
+    // reverting keeps getting the warn on every reload, which is
     // honest: "your edit still hasn't taken effect; restart to apply."
-    let mut sighup =
-        signal(SignalKind::hangup()).context("registering SIGHUP handler")?;
-    let _ = id;
+    let mut sighup = Sighup::new()?;
 
     // File-watch path: drive the same reload as SIGHUP whenever the
     // config or any include_permissions file changes on disk. The
     // watcher is best-effort — if it fails to start, log and fall
-    // back to SIGHUP-only behaviour.
+    // back to SIGHUP (unix) or no live reload (elsewhere).
     //
     // `_watched` is held purely for its Drop side effect (RAII watch
     // stop). It's reassigned when the include set changes; the
@@ -107,7 +130,7 @@ async fn run_signal_loop(
             Err(e) => {
                 warn!(
                     "resolver: failed to install config-file watcher: {e:#}; \
-                     continuing with SIGHUP-only reload"
+                     {RELOAD_FALLBACK}"
                 );
                 (None, Vec::new(), Vec::new())
             }
@@ -126,14 +149,13 @@ async fn run_signal_loop(
             batch = events_rx.recv(), if watcher_alive => match batch {
                 None => {
                     // The watcher task / channel died. File-change
-                    // reloads are off from here on; SIGHUP still works.
-                    // Disabling the select arm via `watcher_alive`
-                    // avoids the busy-loop that would otherwise come
-                    // from `recv()` returning `None` immediately for
-                    // every subsequent poll on a closed receiver.
+                    // reloads are off from here on. Disabling the
+                    // select arm via `watcher_alive` avoids the
+                    // busy-loop that would otherwise come from
+                    // `recv()` returning `None` immediately for every
+                    // subsequent poll on a closed receiver.
                     warn!(
-                        "resolver: file watcher channel closed; \
-                         continuing with SIGHUP-only reload"
+                        "resolver: file watcher channel closed; {RELOAD_FALLBACK}"
                     );
                     watcher_alive = false;
                     continue;
@@ -185,7 +207,6 @@ async fn run_signal_loop(
     }
 }
 
-#[cfg(unix)]
 async fn handle_reload(
     server: &Server,
     config_path: &std::path::Path,
@@ -213,7 +234,6 @@ async fn handle_reload(
 /// `Watched` handles (one per path; drop to stop), and the path list
 /// the handles correspond to (used downstream to detect changes that
 /// require a rebuild).
-#[cfg(unix)]
 fn start_watcher_for(
     config_path: &std::path::Path,
     baseline: &file::Config,
@@ -234,7 +254,6 @@ fn start_watcher_for(
 /// Returns the resulting `Watched` handles in the same order as the
 /// input (main config first, then includes). Caller is responsible
 /// for keeping the handles alive — drop ends the watch.
-#[cfg(unix)]
 fn watch_all(
     watcher: &Watcher,
     config_path: &std::path::Path,
@@ -267,12 +286,10 @@ fn watch_all(
 /// True if every event in the batch is the synthetic `Established`
 /// event. Those fire once per watch when the watcher arms and don't
 /// represent an on-disk change, so they shouldn't trigger a reload.
-#[cfg(unix)]
 fn is_established_only(batch: &EventBatch) -> bool {
     batch.iter().all(|(_, e)| matches!(e.event, EventKind::Event(Interest::Established)))
 }
 
-#[cfg(unix)]
 fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
     // Goes through `Config::load_file` (not raw serde_json) so that
     // relative `include_permissions` paths are resolved against the
@@ -288,7 +305,6 @@ fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
 /// Comparison is by serialized JSON so we get a stable, structural
 /// equality without depending on `PartialEq` impls. None of the
 /// compared fields contain hash maps with nondeterministic ordering.
-#[cfg(unix)]
 fn warn_structural_changes(orig: &file::Config, new: &file::Config) {
     macro_rules! cmp {
         ($field:ident) => {
@@ -307,21 +323,26 @@ fn warn_structural_changes(orig: &file::Config, new: &file::Config) {
     cmp!(member_servers);
 }
 
-#[cfg(unix)]
 pub(crate) fn run(params: Params) -> Result<()> {
     env_logger::init();
-    // Canonicalize before daemonizing so SIGHUP can find the
-    // config after `daemonize` chdirs to `/`.
+    // Canonicalize on unix so SIGHUP / the watcher can still find the
+    // config after `daemonize` chdirs to `/`. On Windows we keep the
+    // path as given — `canonicalize` there yields a `\\?\` extended
+    // path the watcher doesn't reliably handle, and there's no chdir
+    // to canonicalize against.
+    #[cfg(unix)]
     let config_path = std::path::Path::new(&params.config)
         .canonicalize()
         .with_context(|| format!("canonicalizing config path {:?}", params.config))?;
+    #[cfg(not(unix))]
+    let config_path = PathBuf::from(&params.config);
     // Load the file once at startup. We need:
-    //   - the file::Config for the SIGHUP baseline diff
-    //   - the file::Config to set pid_file before daemonizing
+    //   - the file::Config for the reload baseline diff
+    //   - the file::Config to set pid_file before daemonizing (unix)
     //   - the validated Config for the running server
-    // All three come from this single load via `Config::from_file` —
-    // there is no second read of the file from disk.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut file_cfg = load_file_config(&config_path)?;
+    #[cfg(unix)]
     if !params.foreground {
         let member = &mut file_cfg.member_servers[params.id];
         member.pid_file.set_extension(params.id.to_string());
@@ -334,13 +355,4 @@ pub(crate) fn run(params: Params) -> Result<()> {
     let config =
         Config::from_file(file_cfg).context("validating resolver server config")?;
     tokio_run(config, baseline, config_path, params)
-}
-
-#[cfg(windows)]
-pub(crate) fn run(params: Params) -> Result<()> {
-    env_logger::init();
-    let config_path = PathBuf::from(&params.config);
-    let config =
-        Config::load(&config_path).context("failed to load resolver server config")?;
-    tokio_run(config, params)
 }
