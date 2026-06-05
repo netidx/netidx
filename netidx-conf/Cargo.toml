@@ -12,6 +12,14 @@ documentation = "https://docs.rs/netidx-conf"
 keywords = ["networking", "distributed", "configuration"]
 categories = ["network-programming"]
 
+[features]
+default = []
+# Deployment-environment network-shape detection for `conf install`
+# (the `netshape` module). Off by default because it pulls an HTTP
+# client (reqwest) + interface enumeration that config-only consumers
+# of this crate don't need; `netidx-tools` enables it.
+cloud-detect = ["dep:reqwest", "dep:if-addrs", "dep:futures", "dep:tokio"]
+
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
@@ -34,6 +42,12 @@ serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# Optional — only compiled with the `cloud-detect` feature (the
+# `netshape` / cloud-metadata detection used by `conf install`).
+reqwest = { workspace = true, optional = true }
+if-addrs = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }

@@ -1,6 +1,6 @@
 //! Deployment-environment IP discovery for the `conf install`
 //! tooling: cloud-metadata probes, env-var overrides, and container
-//! detection.
+//! detection. Internal to [`crate::netshape`].
 //!
 //! Public-cloud VMs (AWS / GCP / Azure) almost always bind to a
 //! private RFC1918 address locally while networking equipment NATs
@@ -30,7 +30,7 @@ const TIMEOUT: Duration = Duration::from_millis(400);
 /// public IPv4 we can confirm, else `None`. Synchronous wrapper —
 /// constructs a single-threaded tokio runtime for the duration of
 /// the detection. Safe to call from any sync context.
-pub fn detect_public_ip() -> Option<Ipv4Addr> {
+pub(crate) fn detect_public_ip() -> Option<Ipv4Addr> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -125,7 +125,7 @@ async fn detect_azure() -> Option<Ipv4Addr> {
 /// IPv4 — same rules as the metadata-service responses — so a stray
 /// `NETIDX_PUBLIC_IP=` or `NETIDX_PUBLIC_IP=10.0.0.5` in the
 /// environment doesn't quietly poison the suggested config.
-pub fn env_public_ip() -> Option<Ipv4Addr> {
+pub(crate) fn env_public_ip() -> Option<Ipv4Addr> {
     let raw = std::env::var("NETIDX_PUBLIC_IP").ok()?;
     parse_ipv4(&raw)
 }
@@ -141,7 +141,7 @@ pub fn env_public_ip() -> Option<Ipv4Addr> {
 /// Linux-only: outside Linux this returns false. Docker on macOS /
 /// Windows runs in a Linux VM, so the in-container check still hits
 /// `/.dockerenv` correctly from inside the workload container.
-pub fn detect_container() -> bool {
+pub(crate) fn detect_container() -> bool {
     detect_container_at("/.dockerenv", "/run/.containerenv", "/proc/1/cgroup")
 }
 

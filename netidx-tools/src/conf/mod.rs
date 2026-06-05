@@ -11,7 +11,6 @@ mod activation;
 #[cfg(unix)]
 mod ca;
 mod client;
-mod cloud;
 mod editor;
 mod id_map;
 mod init;

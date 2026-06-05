@@ -6,9 +6,10 @@
 //! OS service installer. The CLI in `netidx-tools` is a thin shell over
 //! the API exposed here.
 //!
-//! Synchronous wherever possible; the only network surface is the
-//! optional `confsrv` Layer 4 module (gated behind a feature flag,
-//! TBD).
+//! Synchronous wherever possible. The only network surfaces are both
+//! optional and feature-gated: the `cloud-detect` feature (cloud
+//! metadata probes for [`netshape`]) and the `confsrv` Layer 4 module
+//! (gated behind a feature flag, TBD).
 
 #[macro_use]
 extern crate anyhow;
@@ -24,7 +25,16 @@ pub mod atomic;
 #[cfg(unix)]
 pub mod ca;
 pub mod client;
+/// Internal cloud-metadata / container detection backing [`netshape`].
+#[cfg(feature = "cloud-detect")]
+mod cloud;
 pub mod id_map;
+/// Deployment-environment network-shape detection (`--listen` /
+/// `--bind` suggestions) for the `conf install` flow. Behind the
+/// `cloud-detect` feature because it pulls an HTTP client + interface
+/// enumeration that config-only consumers don't need.
+#[cfg(feature = "cloud-detect")]
+pub mod netshape;
 pub mod paths;
 pub mod service;
 pub mod perms;

@@ -40,7 +40,6 @@ dirs = { workspace = true }
 env_logger = { workspace = true }
 escaping = { workspace = true }
 futures = { workspace = true }
-if-addrs = { workspace = true }
 nohash = { workspace = true }
 ahash = { workspace = true }
 poolshark = { workspace = true }
@@ -51,7 +50,7 @@ graphix-package = { workspace = true }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
-netidx-conf = { path = "../netidx-conf", version = "0.32.0" }
+netidx-conf = { path = "../netidx-conf", version = "0.32.0", features = ["cloud-detect"] }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-archive = { path = "../netidx-archive", version = "0.32.0", default-features = false }
 netidx-container = { path = "../netidx-container", version = "0.32.0", default-features = false }
@@ -64,11 +63,6 @@ enumflags2 = { workspace = true }
 # `netidx-id-map` uses the same crate for the same reason).
 extended-notify = { workspace = true }
 parking_lot = { workspace = true }
-# Cloud-metadata public-IP detection for `conf install` (see
-# conf/cloud.rs). HTTP-only — no TLS needed for link-local metadata
-# endpoints; default features pull rustls anyway since graphix already
-# uses reqwest 0.13 in this tree, so we don't bloat the build.
-reqwest = { workspace = true }
 rpassword = { workspace = true }
 serde_derive = { workspace = true }
 tempfile = { workspace = true }
