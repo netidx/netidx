@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    paths, tls,
+    paths,
 };
 use clap::{Args, Subcommand};
 use std::{net::IpAddr, path::PathBuf};
@@ -640,9 +640,11 @@ pub(super) fn create_default_ca() -> Result<Ca> {
     Ok(ca)
 }
 
-/// Issue an identity (CN = SAN-DNS = `name`) from `ca`, into the
-/// canonical `${user_tls_dir}/<name>/` directory. Returns the issued
-/// file paths.
+/// Issue an identity (CN = SAN-DNS = `name`) from `ca` into `out_dir`.
+/// Returns the issued file paths. The caller chooses `out_dir`: the
+/// install flow issues into a staging dir and lets `apply()` copy the
+/// result into the canonical location, so nothing under the config
+/// tree is touched until the apply phase.
 ///
 /// `password = Some(p)` encrypts the on-disk private key with `p`
 /// (PKCS#8 + AES-256-CBC). `None` writes an unencrypted key.
@@ -652,9 +654,9 @@ pub(super) fn create_default_ca() -> Result<Ca> {
 pub(super) fn issue_identity(
     ca: &Ca,
     name: &str,
+    out_dir: PathBuf,
     password: Option<&str>,
 ) -> Result<IssuedFiles> {
-    let out_dir = tls::identity_dir(name)?;
     issue_identity_into(ca, name, out_dir, ca::DEFAULT_KEY_BITS, password)
 }
 

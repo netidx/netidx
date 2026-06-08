@@ -398,10 +398,21 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     // operator already populated the directory by hand or by an earlier
     // run, a re-install without --force would silently replace their
     // material — including the private key.
+    //
+    // Exception: the local-CA "generate" path issues the cert and key
+    // *straight into* the canonical identity dir, which is also the
+    // install destination — so the copy job's source and destination
+    // are the same file. Those are files this run just produced, not
+    // pre-existing operator material, and "installing" them is the
+    // identity copy: it can't clobber anything. Only a destination that
+    // differs from its source can overwrite something we didn't create.
     for job in &rt.tls_install {
-        for p in netidx_conf::tls::installed_files_in(&job.dest_dir) {
-            if p.exists() {
-                existing.push(p);
+        let srcs = [&job.certificate_src, &job.private_key_src, &job.trusted_src];
+        for (dst, src) in
+            netidx_conf::tls::installed_files_in(&job.dest_dir).iter().zip(srcs)
+        {
+            if dst.exists() && dst != src {
+                existing.push(dst.clone());
             }
         }
     }
@@ -1268,7 +1279,13 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // socket) are level-2 prompts inside `resolver_self_auth` — so
     // defaulting `--auth` to tls walks the operator through the cert
     // paths rather than dead-ending on "--tls-name required".
-    let auth = resolver_self_auth(&f)?;
+    //
+    // `_tls_staging` holds the TLS-issuance staging tempdir (Some only
+    // on the local-CA-issue path). It must outlive `finish()` below so
+    // the issued cert/key survive until `apply()` copies them into the
+    // canonical location — hence a named binding scoped to the whole
+    // function, not a discard.
+    let (auth, _tls_staging) = resolver_self_auth(&f)?;
     let perms_seed = match &f.perms_seed {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
         None => None,
@@ -1334,7 +1351,13 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
     }
 }
 
-fn resolver_self_auth(f: &ResolverFlags) -> Result<AuthChoice> {
+/// Resolve the resolver's own auth choice. The optional `TempDir` is
+/// the TLS-issuance staging guard (see [`resolver_tls_generate`]); the
+/// caller must keep it alive until `apply()` has run. All non-TLS
+/// schemes (and the BYO / wait-for-CSR TLS paths) return `None`.
+fn resolver_self_auth(
+    f: &ResolverFlags,
+) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
     // per-scheme sub-args are level-2 prompts — once the operator
@@ -1342,18 +1365,24 @@ fn resolver_self_auth(f: &ResolverFlags) -> Result<AuthChoice> {
     // optional.
     let auth = f.auth.expect("auth resolved before resolver_self_auth");
     match auth {
-        AuthKind::Anonymous => Ok(AuthChoice::Anonymous),
-        AuthKind::Local => Ok(AuthChoice::Local {
-            path: prompt::required_path(
-                "local-auth socket path",
-                f.socket.clone(),
-            )?,
-        }),
-        AuthKind::Krb5 => Ok(AuthChoice::Krb5 {
-            spn: ArcStr::from(
-                prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
-            ),
-        }),
+        AuthKind::Anonymous => Ok((AuthChoice::Anonymous, None)),
+        AuthKind::Local => Ok((
+            AuthChoice::Local {
+                path: prompt::required_path(
+                    "local-auth socket path",
+                    f.socket.clone(),
+                )?,
+            },
+            None,
+        )),
+        AuthKind::Krb5 => Ok((
+            AuthChoice::Krb5 {
+                spn: ArcStr::from(
+                    prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
+                ),
+            },
+            None,
+        )),
         AuthKind::Tls => resolver_tls_auth(f),
     }
 }
@@ -1365,7 +1394,9 @@ fn resolver_self_auth(f: &ResolverFlags) -> Result<AuthChoice> {
 /// the common small-org case where the resolver host is also the CA
 /// host, hitting return through the prompts gets you a working
 /// self-signed setup.
-fn resolver_tls_auth(f: &ResolverFlags) -> Result<AuthChoice> {
+fn resolver_tls_auth(
+    f: &ResolverFlags,
+) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     let name =
         prompt::required_string("resolver TLS name", f.tls_name.clone())?;
     // 'generate' (issue from local CA) is unix-only — the CA module
@@ -1407,43 +1438,61 @@ fn resolver_tls_auth(f: &ResolverFlags) -> Result<AuthChoice> {
     }
     // Explicit cert path — the operator is bringing their own
     // identity, so the key and trusted-CA bundle are required too.
-    Ok(AuthChoice::Tls {
-        name: ArcStr::from(name.as_str()),
-        certificate: PathBuf::from(cert_choice),
-        private_key: prompt::required_path(
-            "path to the resolver private key",
-            f.tls_key.clone(),
-        )?,
-        trusted: prompt::required_path(
-            "path to the trusted CA bundle",
-            f.tls_trusted.clone(),
-        )?,
-        // BYO-cert path: the key already exists. We don't know
-        // whether it's encrypted, and guessing wrong either buries
-        // an extraneous askpass in the config or skips a needed
-        // one — same trade-off as the parent-referral BYO branch.
-        // Operators can edit `tls.askpass` post-install.
-        askpass: None,
-    })
+    // No staging dir: the sources are wherever the operator put them,
+    // and the copy into the canonical dir happens in `apply()`.
+    Ok((
+        AuthChoice::Tls {
+            name: ArcStr::from(name.as_str()),
+            certificate: PathBuf::from(cert_choice),
+            private_key: prompt::required_path(
+                "path to the resolver private key",
+                f.tls_key.clone(),
+            )?,
+            trusted: prompt::required_path(
+                "path to the trusted CA bundle",
+                f.tls_trusted.clone(),
+            )?,
+            // BYO-cert path: the key already exists. We don't know
+            // whether it's encrypted, and guessing wrong either buries
+            // an extraneous askpass in the config or skips a needed
+            // one — same trade-off as the parent-referral BYO branch.
+            // Operators can edit `tls.askpass` post-install.
+            askpass: None,
+        },
+        None,
+    ))
 }
 
 /// Issue a resolver certificate from the local CA, creating the CA
 /// first if there isn't one. Returns an [`AuthChoice::Tls`] pointing
-/// at the issued files.
+/// at the issued files, plus an optional staging-dir guard.
+///
+/// The local-CA-issue path issues into a **staging tempdir** rather
+/// than the canonical install location, and returns that `TempDir` so
+/// the caller can keep it alive until `apply()` has copied the files
+/// into place. This keeps the prompt phase side-effect-free under the
+/// config tree: `check_no_overwrite` sees a pristine destination, so a
+/// re-install without `--force` is caught *before* the issued cert/key
+/// could clobber an existing identity. The BYO-CSR fallthrough
+/// (`generate_csr_and_wait_for_cert`) returns `None` — it must use the
+/// canonical dir as the operator's cert-drop rendezvous.
 ///
 /// Under `--dry-run` this issues nothing — it prints what it would
-/// do and returns the *intended* paths. `apply()` doesn't run in a
-/// dry run, so those paths are never read; they exist only so the
-/// template can render its plan.
+/// do and returns the *intended* canonical paths (and no staging dir).
+/// `apply()` doesn't run in a dry run, so those paths are never read;
+/// they exist only so the template can render its plan.
 #[cfg(unix)]
 fn resolver_tls_generate(
     f: &ResolverFlags,
     name: &str,
-) -> Result<AuthChoice> {
+) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     let ca_dir = paths::user_ca_dir()?;
     let ca_cert = ca_dir.join("certificate.pem");
     // `identity_dir` also validates `name` (no path separators) — do
-    // it up front so a bad name fails before we touch the CA.
+    // it up front so a bad name fails before we touch the CA. It is the
+    // *canonical* install location: where `apply()` copies the issued
+    // files and what the keychain entry is keyed on, even though
+    // issuance itself writes to the staging dir below.
     let identity_dir = tls::identity_dir(name)?;
 
     if f.common.dry_run {
@@ -1460,13 +1509,16 @@ fn resolver_tls_generate(
                 ca_dir.display(),
             );
         }
-        return Ok(AuthChoice::Tls {
-            name: ArcStr::from(name),
-            certificate: identity_dir.join("certificate.pem"),
-            private_key: identity_dir.join("private.key"),
-            trusted: ca_cert,
-            askpass: None,
-        });
+        return Ok((
+            AuthChoice::Tls {
+                name: ArcStr::from(name),
+                certificate: identity_dir.join("certificate.pem"),
+                private_key: identity_dir.join("private.key"),
+                trusted: ca_cert,
+                askpass: None,
+            },
+            None,
+        ));
     }
 
     // Resolve the CA (open existing, create new, or fall through to
@@ -1493,42 +1545,56 @@ fn resolver_tls_generate(
         )? {
             let (certificate, private_key, trusted, askpass) =
                 generate_csr_and_wait_for_cert(name)?;
-            return Ok(AuthChoice::Tls {
-                name: ArcStr::from(name),
-                certificate,
-                private_key,
-                trusted,
-                askpass,
-            });
+            return Ok((
+                AuthChoice::Tls {
+                    name: ArcStr::from(name),
+                    certificate,
+                    private_key,
+                    trusted,
+                    askpass,
+                },
+                None,
+            ));
         }
         ca::create_default_ca()?
     };
     // Local-CA-issue path: prompt for an optional leaf-key password
     // (and an askpass program if one is given). The password is saved
-    // to the system keychain alongside the canonical key path so the
-    // resolver server can decrypt at startup without needing askpass
-    // wiring (the rfile::Auth::Tls schema has none); the askpass goes
-    // into the emitted client config as the fallback if the keychain
-    // entry is ever missing.
+    // to the system keychain keyed on the *canonical* key path (where
+    // the daemon will read it from), so the resolver server can decrypt
+    // at startup without needing askpass wiring (the rfile::Auth::Tls
+    // schema has none); the askpass goes into the emitted client config
+    // as the fallback if the keychain entry is ever missing.
     let key_path = identity_dir.join("private.key");
     let (password, askpass) = collect_key_password_and_askpass(&key_path)?;
+    // Issue into a staging dir, not the canonical location: `apply()`
+    // is the only thing that should write under the config tree. The
+    // returned guard keeps the staging files alive until apply() copies
+    // them into place, then drops (cleaning the tempdir up).
+    let staging = tempfile::TempDir::new().context("creating tls staging dir")?;
     println!("issuing resolver certificate '{name}' (this may take a moment)...");
-    let issued = ca::issue_identity(&ca, name, password.as_deref())?;
+    let issued =
+        ca::issue_identity(&ca, name, staging.path().to_path_buf(), password.as_deref())?;
     println!("issued resolver certificate:");
     println!("  name:        {name}");
-    println!("  certificate: {}", issued.certificate.display());
-    println!("  private key: {}", issued.private_key.display());
+    // Show the *installed* paths apply() will create, not the transient
+    // staging paths the files currently sit in.
+    println!("  certificate: {}", identity_dir.join("certificate.pem").display());
+    println!("  private key: {}", identity_dir.join("private.key").display());
     println!("  trusted CA:  {}", ca_cert.display());
     if password.is_some() {
         println!("  private key is encrypted; password saved to the system keychain.");
     }
-    Ok(AuthChoice::Tls {
-        name: ArcStr::from(name),
-        certificate: issued.certificate,
-        private_key: issued.private_key,
-        trusted: ca_cert,
-        askpass,
-    })
+    Ok((
+        AuthChoice::Tls {
+            name: ArcStr::from(name),
+            certificate: issued.certificate,
+            private_key: issued.private_key,
+            trusted: ca_cert,
+            askpass,
+        },
+        Some(staging),
+    ))
 }
 
 // -- client-only --------------------------------------------------------------
@@ -1749,4 +1815,92 @@ fn maybe_install_service(
         service::install_with_defaults(scope)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netidx_conf::template::TlsCopyJob;
+    use std::collections::BTreeMap;
+
+    fn empty_rt() -> RenderedTemplate {
+        RenderedTemplate {
+            client_config: None,
+            resolver_config: None,
+            perms_file: None,
+            id_map_file: None,
+            units: BTreeMap::new(),
+            units_dir: None,
+            tls_install: Vec::new(),
+        }
+    }
+
+    // The BYO-CSR generate flows (resolver-declines-local-CA, and the
+    // client/parent identity prompt) deliberately use the canonical
+    // identity dir as the operator's cert-drop rendezvous: the key is
+    // generated there and the signed cert + trusted bundle are dropped
+    // there. So the copy job's source == destination for all three
+    // files. The guard must treat a self-copy as a no-op, not as
+    // clobbering operator material. (The local-CA-issue path avoids
+    // this entirely now by staging in a tempdir — see
+    // `resolver_tls_generate`.)
+    #[test]
+    fn self_copy_install_is_not_an_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().to_path_buf();
+        let [cert, key, _trusted] = netidx_conf::tls::installed_files_in(&dest);
+        // The issued cert + key already live at their install paths.
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+        // The trusted CA is the one genuine copy: a different source, and
+        // its destination (dest/trusted.pem) doesn't exist yet.
+        let ca_src = dir.path().join("ca-certificate.pem");
+        std::fs::write(&ca_src, b"ca").unwrap();
+
+        let mut rt = empty_rt();
+        rt.tls_install.push(TlsCopyJob {
+            cn: "resolver.example.com".to_string(),
+            dest_dir: dest,
+            certificate_src: cert,
+            private_key_src: key,
+            trusted_src: ca_src,
+        });
+        check_no_overwrite(&rt, false).unwrap();
+    }
+
+    // A BYO-cert install whose source is elsewhere must still refuse to
+    // clobber an identity already at the destination without --force.
+    #[test]
+    fn foreign_source_over_existing_dest_is_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let [cert_dst, key_dst, _trusted_dst] =
+            netidx_conf::tls::installed_files_in(&dest);
+        // An identity already installed at the destination.
+        std::fs::write(&cert_dst, b"old cert").unwrap();
+        std::fs::write(&key_dst, b"old key").unwrap();
+        // Operator brings their own cert/key/ca from a different dir.
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let cert_src = src.join("certificate.pem");
+        let key_src = src.join("private.key");
+        let ca_src = src.join("ca.pem");
+        for p in [&cert_src, &key_src, &ca_src] {
+            std::fs::write(p, b"new").unwrap();
+        }
+
+        let mut rt = empty_rt();
+        rt.tls_install.push(TlsCopyJob {
+            cn: "resolver.example.com".to_string(),
+            dest_dir: dest,
+            certificate_src: cert_src,
+            private_key_src: key_src,
+            trusted_src: ca_src,
+        });
+        // Without --force this must bail (cert + key dests pre-exist).
+        assert!(check_no_overwrite(&rt, false).is_err());
+        // With --force it proceeds.
+        check_no_overwrite(&rt, true).unwrap();
+    }
 }
