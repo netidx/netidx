@@ -487,8 +487,15 @@ impl Sub for Value {
                         Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
                 },
+            // Duration is unsigned (no negative durations), so the
+            // UNCHECKED `-` SATURATES to zero on underflow (1s - 2s = 0s)
+            // rather than producing an error. `checked_sub` (the `-?`
+            // operator) still detects the underflow. Without this, an
+            // unchecked duration underflow produced a `Value::Error` that
+            // the graphix node-walk dropped to bottom but the fused
+            // backend emitted as a value — a divergence (graphix #176 C).
             (Value::Duration(d0), Value::Duration(d1)) => {
-                checked_dur!(d0.checked_sub(*d1))
+                Value::Duration(Arc::new(d0.saturating_sub(*d1)))
             },
             (Value::Duration(_), _)
                 | (_, Value::Duration(_))
