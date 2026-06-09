@@ -498,8 +498,9 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("new admin name", a.name)?;
             let policy = prompt_policy(&a.allow_san, a.max_validity_days, "")?;
-            let existing =
-                collect_existing_password("an existing admin password (to authorize)")?;
+            let existing = collect_existing_password(
+                "your own (existing) admin password — unlocks the CA key to enroll the new admin",
+            )?;
             let new_pw =
                 collect_required_password(&format!("password for new admin {name:?}"))?;
             ca_vault::add_admin(&dir, &existing, &name, &new_pw, policy)?;
@@ -509,7 +510,12 @@ fn admin(cmd: AdminCmd) -> Result<()> {
         AdminCmd::Remove(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin to revoke", a.name)?;
-            let auth = collect_existing_password("an admin password (to authorize)")?;
+            // The authorizing password is the operator's OWN (any
+            // current admin's) — never the departed admin's. You revoke
+            // a slot by name; you don't need its password.
+            let auth = collect_existing_password(&format!(
+                "your own admin password (authorizes revoking {name:?})"
+            ))?;
             ca_vault::remove_admin(&dir, &auth, &name, a.force)?;
             println!("revoked admin {name:?}");
             Ok(())
