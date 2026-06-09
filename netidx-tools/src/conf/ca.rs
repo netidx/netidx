@@ -4,6 +4,7 @@ use netidx_conf::{
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     ca_join, ca_proto, ca_server, ca_vault,
     fingerprint::{ColorMode, Fingerprint},
+    netshape::NetShape,
     paths, tls,
 };
 use clap::{Args, Subcommand};
@@ -315,70 +316,153 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn init(p: InitParams) -> Result<()> {
-    let directory = ca_dir_for(p.dir)?;
-    let cn = prompt::required_string("CA common name", p.cn)?;
-    let san = parse_sans(&p.san, &cn)?;
-    // The first admin: name + password + issuance policy.
-    let admin = match p.admin {
+/// Inputs to [`create_vaulted_ca`], the single new-CA entry point.
+/// Fields are primitive so callers (the `ca init` command *and* the
+/// resolver install) don't need the engine's `Subject` / `SanEntry`
+/// types — `create_vaulted_ca` builds those internally.
+pub(super) struct NewCaOpts {
+    pub dir: PathBuf,
+    pub common_name: String,
+    pub country: Option<String>,
+    pub state: Option<String>,
+    pub locality: Option<String>,
+    pub organization: Option<String>,
+    /// Raw `--san` strings for the CA cert; empty ⇒ `dns:<cn>`.
+    pub san: Vec<String>,
+    pub key_bits: u32,
+    pub validity_days: u32,
+    /// First admin name; `None` ⇒ the current unix user.
+    pub admin: Option<String>,
+    /// First admin's issuance policy globs; empty ⇒ prompt (default
+    /// derived from the CA CN's domain).
+    pub allowed_san: Vec<String>,
+    pub max_validity_days: u32,
+    /// `None` ⇒ prompt "set up the CA server?"; `Some(b)` ⇒ forced.
+    pub setup_server: Option<bool>,
+    /// Explicit `--listen` for the CA server (skips the prompt).
+    pub listen: Option<SocketAddr>,
+    /// IP to suggest for the CA server's listen address when prompting
+    /// (e.g. the resolver being created in the same flow). `None` ⇒
+    /// fall back to an existing resolver's IP, then the public IP.
+    pub listen_hint: Option<IpAddr>,
+    /// Where to drop the `ca` activation unit (already resolved).
+    /// `None` ⇒ don't write a unit (e.g. `--no-units`); the server is
+    /// still configured for manual `ca serve`.
+    pub units_dir: Option<PathBuf>,
+}
+
+/// **The** entry point for building a new vaulted CA, shared verbatim
+/// by `netidx conf ca init` and the `netidx conf install resolver`
+/// "create a new CA" branch — so the operator gets the identical
+/// experience (admin/policy, identicon, the "set up the CA server?"
+/// question) either way.
+///
+/// Returns the in-memory signing [`Ca`] (use it to issue certs before
+/// it drops — e.g. the resolver issues its own identity from it) and
+/// the [`ServiceNeed`](service::ServiceNeed) the caller folds into its
+/// single service offer. This function never offers the service itself;
+/// that's the caller's end-of-process step, so a resolver install can
+/// merge this need with its own and offer once.
+pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::ServiceNeed)> {
+    let admin = match opts.admin {
         Some(a) => a,
         None => default_admin_name()?,
     };
+    let san = parse_sans(&opts.san, &opts.common_name)?;
     let password = collect_required_password(&format!(
         "set a CA password for admin {admin:?} (this signs certs)"
     ))?;
-    let policy = prompt_policy(&p.allow_san, p.max_validity_days, &cn)?;
+    let policy = prompt_policy(&opts.allowed_san, opts.max_validity_days, &opts.common_name)?;
 
     // Generate the CA with its key returned (never written to disk in
     // plaintext) and seal it into the vault under the first admin.
     let (ca, key_pem) = Ca::init_vaulted(&CaParams {
-        directory: directory.clone(),
+        directory: opts.dir.clone(),
         subject: Subject {
-            common_name: cn.clone(),
-            country: p.country,
-            state: p.state,
-            locality: p.locality,
-            organization: p.organization,
+            common_name: opts.common_name.clone(),
+            country: opts.country,
+            state: opts.state,
+            locality: opts.locality,
+            organization: opts.organization,
         },
         san,
-        key_bits: p.key_bits,
-        validity_days: p.validity_days,
+        key_bits: opts.key_bits,
+        validity_days: opts.validity_days,
     })?;
-    ca_vault::create(&directory, &key_pem, &admin, &password, policy)
+    ca_vault::create(&opts.dir, &key_pem, &admin, &password, policy)
         .context("sealing CA key into the vault")?;
 
-    println!("initialized CA at {}", directory.display());
+    println!("created a new CA at {}", opts.dir.display());
     println!("  admin {admin:?} can sign; the CA key is encrypted at rest (keyslot vault)");
     println!();
-    show_ca_identity(&directory)?;
+    show_ca_identity(&opts.dir)?;
     println!();
     println!(
         "Share the fingerprint/identicon above with anyone joining, so they can\n\
          verify they're talking to the real CA before sending a password."
     );
 
-    // Optionally set up the server (serving cert + server.json + unit).
-    let set_up_server = if p.no_server {
-        false
-    } else if p.with_server {
-        true
-    } else {
-        prompt::confirm(
+    let set_up_server = match opts.setup_server {
+        Some(b) => b,
+        None => prompt::confirm(
             "set up the CA server (so nodes can request certs over the network)?",
             true,
-        )?
+        )?,
     };
     let need = if set_up_server {
-        setup_server(&directory, &ca, p.listen, p.units_dir.clone())?
+        setup_server(
+            &opts.dir,
+            &ca,
+            opts.listen,
+            opts.listen_hint,
+            opts.units_dir.as_deref(),
+        )?
     } else {
         service::ServiceNeed::NONE
     };
+    Ok((ca, need))
+}
 
-    // Single end-of-process hook: if we installed a server unit, offer
-    // to register the activation supervisor as a system service. This
-    // is the SAME entry point the `conf install` templates use; when a
-    // future flow sets up a CA *and* a resolver, both contribute a
-    // `ServiceNeed` and the offer still fires exactly once.
+fn init(p: InitParams) -> Result<()> {
+    let directory = ca_dir_for(p.dir)?;
+    let common_name = prompt::required_string("CA common name", p.cn)?;
+    // `ca init` always wants the unit when a server is set up (it has no
+    // `--no-units`); default the dir so the activation supervisor finds
+    // it.
+    let units_dir = Some(match p.units_dir {
+        Some(d) => d,
+        None => paths::user_activation_dir()?,
+    });
+    let setup_server = if p.no_server {
+        Some(false)
+    } else if p.with_server {
+        Some(true)
+    } else {
+        None
+    };
+    let (_ca, need) = create_vaulted_ca(NewCaOpts {
+        dir: directory,
+        common_name,
+        country: p.country,
+        state: p.state,
+        locality: p.locality,
+        organization: p.organization,
+        san: p.san,
+        key_bits: p.key_bits,
+        validity_days: p.validity_days,
+        admin: p.admin,
+        allowed_san: p.allow_san,
+        max_validity_days: p.max_validity_days,
+        setup_server,
+        listen: p.listen,
+        // No resolver in this flow; default_ca_listen_ip falls back to
+        // an existing resolver's IP, then the public IP.
+        listen_hint: None,
+        units_dir,
+    })?;
+
+    // Single end-of-process hook — the same one the `conf install`
+    // templates use.
     service::offer(need, service::ServiceGate {
         dry_run: false,
         no_service: p.no_service,
@@ -386,20 +470,36 @@ fn init(p: InitParams) -> Result<()> {
     })
 }
 
+/// IP to suggest for the CA server's listen address: the resolver being
+/// created in this same flow (`hint`), else an existing resolver's
+/// listen IP, else the machine's first public IP. The CA server usually
+/// co-locates with a resolver, so its address is the resolver's.
+fn default_ca_listen_ip(hint: Option<IpAddr>) -> IpAddr {
+    hint.or_else(existing_resolver_listen_ip)
+        .unwrap_or_else(|| NetShape::detect().advertised_ip().into())
+}
+
+/// The listen IP of the default resolver config, if one is present and
+/// parseable.
+fn existing_resolver_listen_ip() -> Option<IpAddr> {
+    netidx_conf::resolver::ResolverConfig::load_default()
+        .ok()
+        .and_then(|c| c.0.member_servers.first().map(|m| m.addr.ip()))
+}
+
 /// Issue the daemon's serving cert (a CA-issued leaf with the reserved
-/// `SERVING_SAN`), write `server.json`, and drop the `ca` activation
-/// unit. Returns the [`ServiceNeed`](service::ServiceNeed) the caller
-/// folds into its single end-of-process service offer — a CA server is
-/// a network daemon, so it needs a **system**-scope service.
-///
-/// This is the reusable seam: `ca init` calls it standalone, and a
-/// future resolver flow that also stands up a CA can call it and merge
-/// the returned need with its own.
+/// `SERVING_SAN`), write `server.json`, and (when `units_dir` is set)
+/// drop the `ca` activation unit. Returns the
+/// [`ServiceNeed`](service::ServiceNeed) the caller folds into its
+/// single end-of-process service offer — a CA server is a network
+/// daemon, so it needs a **system**-scope service when a unit was
+/// written, or `NONE` when `--no-units` left the operator to run it.
 fn setup_server(
     ca_dir: &std::path::Path,
     ca: &Ca,
     listen: Option<SocketAddr>,
-    units_dir: Option<PathBuf>,
+    listen_hint: Option<IpAddr>,
+    units_dir: Option<&std::path::Path>,
 ) -> Result<service::ServiceNeed> {
     let server_dir = ca_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -422,8 +522,28 @@ fn setup_server(
     atomic::write_atomic(&serving_cert, &chain, 0o644)?;
     atomic::write_atomic(&serving_key, kc.private_key_pem.as_bytes(), 0o600)?;
 
-    let listen = listen
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], ca_proto::DEFAULT_PORT)));
+    // Ask for the listen IP and port. The IP defaults to the resolver
+    // this CA is being set up alongside (or an existing resolver's
+    // listen address, or the machine's first public IP); the port
+    // defaults to the conventional 4565. An explicit `--listen` skips
+    // the prompt.
+    let listen = match listen {
+        Some(addr) => addr,
+        None => {
+            let ip_default = default_ca_listen_ip(listen_hint);
+            let ip = prompt::parsed_with_default::<IpAddr>(
+                "CA server listen IP",
+                None,
+                &ip_default.to_string(),
+            )?;
+            let port = prompt::parsed_with_default::<u16>(
+                "CA server listen port",
+                None,
+                &ca_proto::DEFAULT_PORT.to_string(),
+            )?;
+            SocketAddr::new(ip, port)
+        }
+    };
     let cfg = CaServerConfig {
         ca_dir: ca_dir.to_path_buf(),
         listen,
@@ -437,12 +557,24 @@ fn setup_server(
         0o644,
     )?;
 
-    // Drop the activation unit so the supervisor runs `ca serve`.
-    let units_dir = match units_dir {
-        Some(d) => d,
-        None => paths::user_activation_dir()?,
+    println!();
+    println!("CA server configured:");
+    println!("  config:   {}", cfg_path.display());
+    println!("  listen:   {listen}");
+
+    // Drop the activation unit so the supervisor runs `ca serve` — but
+    // only when we have a units dir. With `--no-units` the operator
+    // wires activation themselves, so there's no system service to
+    // offer for it.
+    let Some(units_dir) = units_dir else {
+        println!(
+            "  (--no-units: no activation unit written; run it yourself with\n\
+             \x20  netidx conf ca serve -c {})",
+            cfg_path.display()
+        );
+        return Ok(service::ServiceNeed::NONE);
     };
-    std::fs::create_dir_all(&units_dir)
+    std::fs::create_dir_all(units_dir)
         .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
     let netidx_binary = std::env::current_exe()
         .context("could not determine current netidx binary for the CA server unit")?;
@@ -452,14 +584,9 @@ fn setup_server(
             config: cfg_path.clone(),
         },
     )?;
-    let dir = netidx_conf::activation::ActivationDir::open(Some(&units_dir))?;
+    let dir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
     dir.save("ca", &unit).context("writing the ca activation unit")?;
-
-    println!();
-    println!("CA server configured:");
-    println!("  config:   {}", cfg_path.display());
-    println!("  listen:   {listen}");
-    println!("  unit:     {}", netidx_conf::activation::unit_path_in(&units_dir, "ca").display());
+    println!("  unit:     {}", netidx_conf::activation::unit_path_in(units_dir, "ca").display());
     // A CA server is a network daemon → system-scope service.
     Ok(service::ServiceNeed::at(service::ScopeArg::System))
 }
@@ -1036,25 +1163,46 @@ fn list() -> Result<()> {
 pub(super) fn default_ca_present() -> bool {
     match paths::user_ca_dir() {
         Ok(dir) => {
+            // A CA exists if its cert is present and *either* a vault
+            // (the current format) or a legacy unencrypted/encrypted
+            // `private.key` is alongside it.
             dir.join("certificate.pem").is_file()
-                && dir.join("private.key").is_file()
+                && (ca_vault::exists(&dir) || dir.join("private.key").is_file())
         }
         Err(_) => false,
     }
 }
 
-/// Open the CA at the default location. Tries an unencrypted open
-/// first and only prompts for a password if the key turns out to be
-/// encrypted — so the common unencrypted-CA case needs no prompt at
-/// all. A non-TTY caller facing an encrypted key bails rather than
+/// Open the CA at the default location as a signer. Handles both
+/// formats:
+/// - **vaulted** (current): prompt for an admin password and unlock the
+///   keyslot vault to recover the signing key.
+/// - **legacy** `private.key`: unencrypted open, prompting only if the
+///   key turns out to be encrypted.
+///
+/// A non-TTY caller that would need a password bails rather than
 /// hanging.
 pub(super) fn open_default_ca() -> Result<Ca> {
     let dir = paths::user_ca_dir()?;
+    if ca_vault::exists(&dir) {
+        if !prompt::stdin_is_tty() {
+            bail!(
+                "the CA at {} is vault-protected and needs an admin password, \
+                 but stdin is not a TTY",
+                dir.display(),
+            );
+        }
+        let pw = collect_existing_password("your CA admin password")?;
+        let unlocked = ca_vault::unlock(&dir, &pw)
+            .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?;
+        let cert = std::fs::read(dir.join("certificate.pem"))
+            .with_context(|| format!("reading CA cert in {}", dir.display()))?;
+        return Ca::from_pem(dir.clone(), &unlocked.ca_key_pem, &cert)
+            .with_context(|| format!("loading CA at {}", dir.display()));
+    }
+    // Legacy `private.key` CA.
     match Ca::open(&dir, None) {
         Ok(ca) => Ok(ca),
-        // `Ca::open` reports the encrypted-key-without-password case
-        // with a message containing "encrypted"; treat that as
-        // "prompt and retry" and everything else as a hard failure.
         Err(e) if format!("{e:#}").contains("encrypted") => {
             if !prompt::stdin_is_tty() {
                 bail!(
@@ -1068,35 +1216,8 @@ pub(super) fn open_default_ca() -> Result<Ca> {
             Ca::open(&dir, Some(&pw))
                 .with_context(|| format!("opening CA at {}", dir.display()))
         }
-        Err(e) => {
-            Err(e).with_context(|| format!("opening CA at {}", dir.display()))
-        }
+        Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
     }
-}
-
-/// Create a new CA at the default location, prompting for the common
-/// name and an optional password (blank = unencrypted, exactly as
-/// `ca init`).
-pub(super) fn create_default_ca() -> Result<Ca> {
-    let dir = paths::user_ca_dir()?;
-    let cn = prompt::required_string("CA common name", None)?;
-    let password = collect_password(false, true)?;
-    let ca = Ca::init(
-        &CaParams {
-            directory: dir.clone(),
-            subject: Subject::cn(cn.clone()),
-            san: vec![SanEntry::Dns(cn)],
-            key_bits: ca::DEFAULT_KEY_BITS,
-            validity_days: ca::DEFAULT_CA_VALIDITY_DAYS,
-        },
-        password.as_deref(),
-    )
-    .with_context(|| format!("creating CA at {}", dir.display()))?;
-    println!("created a new local CA at {}", dir.display());
-    if password.is_some() {
-        println!("  (private key is encrypted; password required to sign)");
-    }
-    Ok(ca)
 }
 
 /// Issue an identity (CN = SAN-DNS = `name`) from `ca` into `out_dir`.

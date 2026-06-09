@@ -1,9 +1,11 @@
 # CA server — design
 
-**Status: Engine + CLI + activation/service setup implemented and
-tested end-to-end.** Remaining is only `ca migrate` (v1 → vault) and
-wiring a composite flow (a resolver install that *also* stands up a CA);
-the service-setup architecture for that composition is in place (§15).
+**Status: Engine + CLI + activation/service setup + composite
+resolver-install flow implemented and tested end-to-end.** Remaining is
+only `ca migrate` (v1 → vault). `netidx conf ca init` and the
+`netidx conf install resolver` "create a new CA" branch now share one
+entry point, `create_vaulted_ca` (§15), so creating a CA is identical
+either way — vault, identicon, and the "set up the CA server?" prompt.
 
 Built and tested:
 - **Engine** (`netidx-conf`, real-TLS e2e): `fingerprint` (identicon),
@@ -44,12 +46,30 @@ registered as an OS service **once** per top-level process. The design:
   need and the `--dry-run/--no-service/--with-service` gate, it offers
   (or installs, or skips) the OS service exactly once. Both the
   `conf install` templates (via `finish`) and `ca init` call it.
-- **Composition**: a flow that stands up several daemons merges their
-  needs and calls `offer` once. `ca init`'s server setup is factored as
-  `setup_server(...) -> ServiceNeed`, so a future "resolver install that
-  also stands up a CA" merges that with the resolver's own need and
-  still offers a single service. No step needs to know about the
-  others.
+- **Composition**: a flow that stands up several daemons drops all their
+  units into one activation dir and offers a single service.
+  **Implemented**: `netidx conf install resolver` creating a CA calls
+  the shared `create_vaulted_ca` (the same entry point as
+  `netidx conf ca init`), which writes the `ca.unit` into the resolver's
+  *own* activation dir; the resolver install then makes its single
+  system-service offer, and that one supervisor runs the resolver,
+  id-map, and CA-server units together. The resolver always needs a
+  system service (it installs `resolver.unit`), so it passes
+  `ServiceNeed::at(System)` directly and discards the CA's returned
+  need — `System` dominates regardless. `ServiceNeed::merge` remains the
+  seam (tested, `allow(dead_code)`) for a future flow whose dominant
+  scope isn't fixed up front.
+
+### One entry point for CA creation
+
+`create_vaulted_ca(opts) -> (Ca, ServiceNeed)` is the single new-CA
+workflow. `ca init` and the resolver-install "create a new CA" branch
+both call it, so the operator gets the identical experience (admin +
+policy, identicon, "set up the CA server?"). It returns the in-memory
+signer (the resolver issues its own identity from it before it drops)
+and the service need (which `ca init` offers and the resolver folds into
+its own). `open_default_ca` / `default_ca_present` are vault-aware, so
+each command sees the other's CAs.
 
 A daemon on the CA box that receives a CSR over the wire, signs it, and
 returns the signed cert plus the CA cert — so a node joining a netidx

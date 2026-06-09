@@ -1021,6 +1021,7 @@ fn find_askpass() -> Option<PathBuf> {
 #[cfg(unix)]
 fn collect_key_password_and_askpass(
     key_path: &Path,
+    name: &str,
 ) -> Result<(Option<String>, Option<PathBuf>)> {
     // Skip everything on non-interactive runs. Scripted installs
     // shouldn't hang at an rpassword prompt, and they have no
@@ -1028,13 +1029,16 @@ fn collect_key_password_and_askpass(
     if !std::io::stdin().is_terminal() {
         return Ok((None, None));
     }
-    let pw = rpassword::prompt_password(
-        "private key password (blank for no encryption): ",
-    )?;
+    // Name the identity so an operator setting up several certs in one
+    // session knows which key this password is for.
+    let pw = rpassword::prompt_password(format!(
+        "private key password for {name} (blank for no encryption): "
+    ))?;
     if pw.is_empty() {
         return Ok((None, None));
     }
-    let again = rpassword::prompt_password("private key password (again): ")?;
+    let again =
+        rpassword::prompt_password(format!("private key password for {name} (again): "))?;
     if again != pw {
         bail!("passwords did not match");
     }
@@ -1116,7 +1120,7 @@ fn generate_csr_and_wait_for_cert(
             key_path.display(),
         );
     }
-    let (password, askpass) = collect_key_password_and_askpass(&key_path)?;
+    let (password, askpass) = collect_key_password_and_askpass(&key_path, name)?;
     let kr = netidx_conf::ca::generate_csr(
         &netidx_conf::ca::Subject::cn(name.to_string()),
         &[netidx_conf::ca::SanEntry::Dns(name.to_string())],
@@ -1428,7 +1432,13 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // the issued cert/key survive until `apply()` copies them into the
     // canonical location — hence a named binding scoped to the whole
     // function, not a discard.
-    let (auth, _tls_staging) = resolver_self_auth(&f, Some(listen.ip()))?;
+    // Resolve the activation units dir up front: if the TLS flow stands
+    // up a CA server, its `ca.unit` must land in the *same* dir as the
+    // resolver/id-map units so the one supervisor (and the one system
+    // service we offer below) runs them all.
+    let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
+    let (auth, _tls_staging) =
+        resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref())?;
     let perms_seed = match &f.perms_seed {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
         None => None,
@@ -1449,7 +1459,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         with_perms_file: !f.no_perms,
         perms_path: f.perms_path,
         resolver_config_path: f.resolver_config_path,
-        units_dir: resolve_units_dir(&f.common, f.units_dir.as_deref())?,
+        units_dir,
         netidx_binary: resolve_netidx_binary(f.netidx_binary)?,
         with_id_map,
         id_map_path: f.id_map_path,
@@ -1501,6 +1511,7 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
 fn resolver_self_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
+    units_dir: Option<&Path>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
@@ -1527,7 +1538,7 @@ fn resolver_self_auth(
             },
             None,
         )),
-        AuthKind::Tls => resolver_tls_auth(f, default_ca_ip),
+        AuthKind::Tls => resolver_tls_auth(f, default_ca_ip, units_dir),
     }
 }
 
@@ -1541,6 +1552,7 @@ fn resolver_self_auth(
 fn resolver_tls_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
+    units_dir: Option<&Path>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     let name =
         prompt::required_string("resolver TLS name", f.tls_name.clone())?;
@@ -1568,11 +1580,11 @@ fn resolver_tls_auth(
     if is_generate {
         #[cfg(unix)]
         {
-            return resolver_tls_generate(f, &name, default_ca_ip);
+            return resolver_tls_generate(f, &name, default_ca_ip, units_dir);
         }
         #[cfg(not(unix))]
         {
-            let _ = default_ca_ip;
+            let _ = (default_ca_ip, units_dir);
             unreachable!("generate path is unix-only")
         }
     }
@@ -1632,6 +1644,7 @@ fn resolver_tls_generate(
     f: &ResolverFlags,
     name: &str,
     default_ca_ip: Option<IpAddr>,
+    units_dir: Option<&Path>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // First offer the network path: a CA server signs our CSR on the
     // spot (no staging dir needed — the join installs directly).
@@ -1710,7 +1723,41 @@ fn resolver_tls_generate(
                 None,
             ));
         }
-        ca::create_default_ca()?
+        // Create the CA via the SAME entry point as `netidx conf ca
+        // init` — admin/policy, identicon, and the "set up the CA
+        // server?" question all included. The CA CN defaults to the
+        // domain of the resolver's TLS name (e.g. `resolver.ryu-oh.org`
+        // → `ryu-oh.org`), so a fresh deployment gets a sensibly-named
+        // CA without extra typing.
+        let ca_cn = netidx_conf::tls::domain_from_san(name)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|_| name.to_string());
+        let (created, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
+            dir: ca_dir.clone(),
+            common_name: ca_cn,
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec![],
+            key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
+            validity_days: netidx_conf::ca::DEFAULT_CA_VALIDITY_DAYS,
+            admin: None,
+            allowed_san: vec![],
+            max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            setup_server: None,
+            listen: None,
+            // The CA co-locates with this resolver — suggest its IP for
+            // the CA server's listen address.
+            listen_hint: default_ca_ip,
+            units_dir: units_dir.map(|p| p.to_path_buf()),
+        })?;
+        // The returned `ServiceNeed` (System, if the CA server was set
+        // up) is intentionally dropped: this resolver install always
+        // ends with a single system-service offer (it installs the
+        // resolver unit), and the `ca.unit` we just wrote lands in the
+        // resolver's own units dir, so that one service supervises it.
+        created
     };
     // Local-CA-issue path: prompt for an optional leaf-key password
     // (and an askpass program if one is given). The password is saved
@@ -1720,7 +1767,7 @@ fn resolver_tls_generate(
     // schema has none); the askpass goes into the emitted client config
     // as the fallback if the keychain entry is ever missing.
     let key_path = identity_dir.join("private.key");
-    let (password, askpass) = collect_key_password_and_askpass(&key_path)?;
+    let (password, askpass) = collect_key_password_and_askpass(&key_path, name)?;
     // Issue into a staging dir, not the canonical location: `apply()`
     // is the only thing that should write under the config tree. The
     // returned guard keeps the staging files alive until apply() copies

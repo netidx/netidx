@@ -35,7 +35,10 @@
   - DONE: `ca init --with-server` drops the `ca` activation unit and,
     standalone, offers to register the system service via the single
     shared `service::offer` entry point. `ServiceNeed` (merge:
-    System>User>None) is the composition seam so a future composite flow
-    offers the service once.
-  - TODO: `ca migrate` (v1 single-password CA → vault); wire a composite
-    flow (resolver install that also stands up a CA).
+    System>User>None) is the composition seam.
+  - DONE: one entry point for CA creation — `create_vaulted_ca`, shared
+    by `ca init` and the `conf install resolver` "create a new CA"
+    branch (vault + identicon + "set up the CA server?"), with
+    vault-aware open/detect. The resolver writes the `ca.unit` into its
+    own activation dir so its single system-service offer supervises it.
+  - TODO: `ca migrate` (v1 single-password CA → vault).
