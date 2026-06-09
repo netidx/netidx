@@ -284,6 +284,17 @@ never touches services it didn't install.
 
 ## Sketched: configuration server (Layer 4)
 
+> **Superseded in part.** The *certificate-issuance* role below (item 1)
+> and the *discovery* role (item 2) have since been redesigned, simpler
+> and sharper, as a standalone CA-signing daemon — see
+> [`ca-server.md`](ca-server.md). That design drops multicast discovery
+> (the join operator types `ip:port`, defaulting to the upstream
+> resolver's IP) and replaces per-admin SCRAM with a LUKS-style keyslot
+> vault (the CA key password is the join secret; multiple admins, each a
+> revocable slot) plus syncthing-style identicon verification. The
+> **perms-publishing + admin-RPC role (item 3)** below is the part that
+> remains future Layer-4 work.
+
 A single daemon (`netidx conf serve`) that does three things, intended
 to run **one instance per resolver-server machine**, coordinating with
 peers via the `netidx-protocols` cluster protocol so any one of them

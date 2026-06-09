@@ -1,17 +1,35 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    paths,
+    ca_join, ca_proto, ca_server, ca_vault,
+    fingerprint::{ColorMode, Fingerprint},
+    paths, tls,
 };
 use clap::{Args, Subcommand};
-use std::{net::IpAddr, path::PathBuf};
+use serde_derive::{Deserialize, Serialize};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
+use zeroize::Zeroizing;
 
-use super::prompt;
+use super::{prompt, service};
+
+/// CA-server daemon config (`<ca-dir>/server.json`): everything `ca
+/// serve` needs. Issuance policy lives per-admin in the vault, so this
+/// is transport-only.
+#[derive(Debug, Serialize, Deserialize)]
+struct CaServerConfig {
+    ca_dir: PathBuf,
+    listen: SocketAddr,
+    serving_cert: PathBuf,
+    serving_key: PathBuf,
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// create a new local CA
+    /// create a new local CA (keyslot vault; can run as a server)
     Init(InitParams),
     /// issue a leaf certificate from a CA
     Issue(IssueArgs),
@@ -21,6 +39,95 @@ pub(crate) enum Cmd {
     Sign(SignArgs),
     /// list local CAs
     List,
+    /// run the CA server (signs CSRs received over TLS)
+    Serve(ServeArgs),
+    /// manage CA admin keyslots (add / revoke / list)
+    Admin {
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
+    /// show the CA's fingerprint + identicon for out-of-band verification
+    Fingerprint(FingerprintArgs),
+    /// request a certificate from a CA server and install it
+    Join(JoinArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum AdminCmd {
+    /// add an admin keyslot (a new password that can sign)
+    Add(AdminAddArgs),
+    /// revoke an admin keyslot
+    Remove(AdminRemoveArgs),
+    /// list admin keyslots and their issuance policy
+    List(AdminScopeArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminScopeArgs {
+    /// Override the CA directory. Defaults to `${basedir}/ca/`.
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminAddArgs {
+    /// Name of the new admin. Prompted when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// SAN glob this admin may issue (repeatable). Prompted when omitted.
+    #[arg(long = "allow-san", num_args = 1)]
+    pub allow_san: Vec<String>,
+    /// Max validity (days) this admin may issue. Default 730.
+    #[arg(long, default_value = "730")]
+    pub max_validity_days: u32,
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminRemoveArgs {
+    /// Name of the admin to revoke. Prompted when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Allow removing the last admin (locks the CA permanently).
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct FingerprintArgs {
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ServeArgs {
+    /// Path to the server config (`<ca-dir>/server.json`). Defaults to
+    /// the default CA dir's `server.json`.
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+    /// Don't daemonize (run in the foreground).
+    #[arg(short, long)]
+    #[allow(dead_code)]
+    pub foreground: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct JoinArgs {
+    /// CA server address (`ip:port`). Prompted when omitted.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
+    /// The TLS identity name to request (one DNS SAN). Prompted when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The admin name to authenticate as. Prompted when omitted.
+    #[arg(long)]
+    pub admin: Option<String>,
+    /// Validity (days) to request. Default 730 (capped by server policy).
+    #[arg(long, default_value = "730")]
+    pub validity_days: u32,
 }
 
 #[derive(Args, Debug)]
@@ -46,9 +153,40 @@ pub(crate) struct InitParams {
     pub key_bits: u32,
     #[arg(long, default_value = "7300")]
     pub validity_days: u32,
-    /// Skip the password prompt and write an unencrypted key.
+    /// The first admin's name (keyslot label). Defaults to the current
+    /// unix user; prompted only if that can't be determined.
     #[arg(long)]
-    pub no_password: bool,
+    pub admin: Option<String>,
+    /// SAN glob the first admin may issue (repeatable). Prompted when
+    /// omitted — e.g. `*.example.com`.
+    #[arg(long = "allow-san", num_args = 1)]
+    pub allow_san: Vec<String>,
+    /// Max validity (days) the first admin may issue. Default 730.
+    #[arg(long, default_value = "730")]
+    pub max_validity_days: u32,
+    /// Set up the CA server (issue a serving cert + write server.json)
+    /// without prompting. By default `ca init` asks.
+    #[arg(long)]
+    pub with_server: bool,
+    /// Skip the CA-server setup entirely (offline CA only).
+    #[arg(long, conflicts_with = "with_server")]
+    pub no_server: bool,
+    /// Address the CA server should listen on when set up. Default
+    /// `0.0.0.0:<ca-port>`.
+    #[arg(long)]
+    pub listen: Option<SocketAddr>,
+    /// Where to drop the CA server's activation unit. Defaults to the
+    /// user activation dir (same place the resolver/id-map units go).
+    #[arg(long = "units-dir")]
+    pub units_dir: Option<PathBuf>,
+    /// After setting up the CA server, also register netidx as an OS
+    /// service without prompting. Mutually exclusive with
+    /// `--no-service`.
+    #[arg(long = "with-service", conflicts_with = "no_service")]
+    pub with_service: bool,
+    /// Skip the OS-service prompt after setting up the CA server.
+    #[arg(long = "no-service")]
+    pub no_service: bool,
     /// Override the directory the CA is created in. Defaults to
     /// `${basedir}/ca/` — one CA per netidx install.
     #[arg(long)]
@@ -163,6 +301,10 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Request(p) => request(p),
         Cmd::Sign(p) => sign(p),
         Cmd::List => list(),
+        Cmd::Serve(p) => serve(p),
+        Cmd::Admin { cmd } => admin(cmd),
+        Cmd::Fingerprint(p) => fingerprint(p),
+        Cmd::Join(p) => join(p),
     }
 }
 
@@ -176,32 +318,343 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
 fn init(p: InitParams) -> Result<()> {
     let directory = ca_dir_for(p.dir)?;
     let cn = prompt::required_string("CA common name", p.cn)?;
-    let password = collect_password(p.no_password, true)?;
     let san = parse_sans(&p.san, &cn)?;
-    let ca = Ca::init(
-        &CaParams {
-            directory: directory.clone(),
-            subject: Subject {
-                common_name: cn.clone(),
-                country: p.country,
-                state: p.state,
-                locality: p.locality,
-                organization: p.organization,
-            },
-            san,
-            key_bits: p.key_bits,
-            validity_days: p.validity_days,
+    // The first admin: name + password + issuance policy.
+    let admin = match p.admin {
+        Some(a) => a,
+        None => default_admin_name()?,
+    };
+    let password = collect_required_password(&format!(
+        "set a CA password for admin {admin:?} (this signs certs)"
+    ))?;
+    let policy = prompt_policy(&p.allow_san, p.max_validity_days, &cn)?;
+
+    // Generate the CA with its key returned (never written to disk in
+    // plaintext) and seal it into the vault under the first admin.
+    let (ca, key_pem) = Ca::init_vaulted(&CaParams {
+        directory: directory.clone(),
+        subject: Subject {
+            common_name: cn.clone(),
+            country: p.country,
+            state: p.state,
+            locality: p.locality,
+            organization: p.organization,
         },
-        password.as_deref(),
-    )?;
-    let _ = ca;
+        san,
+        key_bits: p.key_bits,
+        validity_days: p.validity_days,
+    })?;
+    ca_vault::create(&directory, &key_pem, &admin, &password, policy)
+        .context("sealing CA key into the vault")?;
+
     println!("initialized CA at {}", directory.display());
-    if password.is_some() {
-        println!("  (private key is encrypted; password required to issue)");
+    println!("  admin {admin:?} can sign; the CA key is encrypted at rest (keyslot vault)");
+    println!();
+    show_ca_identity(&directory)?;
+    println!();
+    println!(
+        "Share the fingerprint/identicon above with anyone joining, so they can\n\
+         verify they're talking to the real CA before sending a password."
+    );
+
+    // Optionally set up the server (serving cert + server.json + unit).
+    let set_up_server = if p.no_server {
+        false
+    } else if p.with_server {
+        true
     } else {
-        println!("  (private key is unencrypted)");
+        prompt::confirm(
+            "set up the CA server (so nodes can request certs over the network)?",
+            true,
+        )?
+    };
+    let need = if set_up_server {
+        setup_server(&directory, &ca, p.listen, p.units_dir.clone())?
+    } else {
+        service::ServiceNeed::NONE
+    };
+
+    // Single end-of-process hook: if we installed a server unit, offer
+    // to register the activation supervisor as a system service. This
+    // is the SAME entry point the `conf install` templates use; when a
+    // future flow sets up a CA *and* a resolver, both contribute a
+    // `ServiceNeed` and the offer still fires exactly once.
+    service::offer(need, service::ServiceGate {
+        dry_run: false,
+        no_service: p.no_service,
+        with_service: p.with_service,
+    })
+}
+
+/// Issue the daemon's serving cert (a CA-issued leaf with the reserved
+/// `SERVING_SAN`), write `server.json`, and drop the `ca` activation
+/// unit. Returns the [`ServiceNeed`](service::ServiceNeed) the caller
+/// folds into its single end-of-process service offer — a CA server is
+/// a network daemon, so it needs a **system**-scope service.
+///
+/// This is the reusable seam: `ca init` calls it standalone, and a
+/// future resolver flow that also stands up a CA can call it and merge
+/// the returned need with its own.
+fn setup_server(
+    ca_dir: &std::path::Path,
+    ca: &Ca,
+    listen: Option<SocketAddr>,
+    units_dir: Option<PathBuf>,
+) -> Result<service::ServiceNeed> {
+    let server_dir = ca_dir.join("server");
+    std::fs::create_dir_all(&server_dir)
+        .with_context(|| format!("creating {}", server_dir.display()))?;
+    // Generate the serving key + CSR (ECDSA) and have the CA sign it.
+    let kc = ca_join::generate_key_and_csr(ca_proto::SERVING_SAN)?;
+    let leaf = ca
+        .sign_request(
+            kc.csr_pem.as_bytes(),
+            &[SanEntry::Dns(ca_proto::SERVING_SAN.to_string())],
+            ca::DEFAULT_LEAF_VALIDITY_DAYS,
+        )
+        .context("signing the CA server's serving certificate")?;
+    let ca_cert = std::fs::read(ca_dir.join("certificate.pem"))?;
+    // Chain = [serving leaf, ca cert] so the client receives the CA.
+    let mut chain = leaf;
+    chain.extend_from_slice(&ca_cert);
+    let serving_cert = server_dir.join("cert.pem");
+    let serving_key = server_dir.join("key.pem");
+    atomic::write_atomic(&serving_cert, &chain, 0o644)?;
+    atomic::write_atomic(&serving_key, kc.private_key_pem.as_bytes(), 0o600)?;
+
+    let listen = listen
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], ca_proto::DEFAULT_PORT)));
+    let cfg = CaServerConfig {
+        ca_dir: ca_dir.to_path_buf(),
+        listen,
+        serving_cert,
+        serving_key,
+    };
+    let cfg_path = ca_dir.join("server.json");
+    atomic::write_atomic(
+        &cfg_path,
+        serde_json::to_vec_pretty(&cfg).context("serializing server.json")?.as_slice(),
+        0o644,
+    )?;
+
+    // Drop the activation unit so the supervisor runs `ca serve`.
+    let units_dir = match units_dir {
+        Some(d) => d,
+        None => paths::user_activation_dir()?,
+    };
+    std::fs::create_dir_all(&units_dir)
+        .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
+    let netidx_binary = std::env::current_exe()
+        .context("could not determine current netidx binary for the CA server unit")?;
+    let unit = netidx_conf::template::services::ca_server::unit(
+        &netidx_conf::template::services::ca_server::CaServerServiceParams {
+            netidx_binary,
+            config: cfg_path.clone(),
+        },
+    )?;
+    let dir = netidx_conf::activation::ActivationDir::open(Some(&units_dir))?;
+    dir.save("ca", &unit).context("writing the ca activation unit")?;
+
+    println!();
+    println!("CA server configured:");
+    println!("  config:   {}", cfg_path.display());
+    println!("  listen:   {listen}");
+    println!("  unit:     {}", netidx_conf::activation::unit_path_in(&units_dir, "ca").display());
+    // A CA server is a network daemon → system-scope service.
+    Ok(service::ServiceNeed::at(service::ScopeArg::System))
+}
+
+// -- ca serve -----------------------------------------------------------------
+
+fn serve(p: ServeArgs) -> Result<()> {
+    env_logger::init();
+    let cfg_path = match p.config {
+        Some(c) => c,
+        None => paths::user_ca_dir()?.join("server.json"),
+    };
+    let bytes = std::fs::read(&cfg_path)
+        .with_context(|| format!("reading CA server config {}", cfg_path.display()))?;
+    let cfg: CaServerConfig = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", cfg_path.display()))?;
+    let serving_cert_pem = std::fs::read(&cfg.serving_cert)
+        .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
+    let serving_key_pem = std::fs::read(&cfg.serving_key)
+        .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
+    let params = ca_server::ServeParams {
+        ca_dir: cfg.ca_dir,
+        listen: cfg.listen,
+        serving_cert_pem,
+        serving_key_pem,
+    };
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    rt.block_on(ca_server::serve(params))
+}
+
+// -- ca admin -----------------------------------------------------------------
+
+fn admin(cmd: AdminCmd) -> Result<()> {
+    match cmd {
+        AdminCmd::Add(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let name = prompt::required_string("new admin name", a.name)?;
+            let policy = prompt_policy(&a.allow_san, a.max_validity_days, "")?;
+            let existing =
+                collect_existing_password("an existing admin password (to authorize)")?;
+            let new_pw =
+                collect_required_password(&format!("password for new admin {name:?}"))?;
+            ca_vault::add_admin(&dir, &existing, &name, &new_pw, policy)?;
+            println!("added admin {name:?}");
+            Ok(())
+        }
+        AdminCmd::Remove(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let name = prompt::required_string("admin to revoke", a.name)?;
+            let auth = collect_existing_password("an admin password (to authorize)")?;
+            ca_vault::remove_admin(&dir, &auth, &name, a.force)?;
+            println!("revoked admin {name:?}");
+            Ok(())
+        }
+        AdminCmd::List(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let admins = ca_vault::list_admins(&dir)?;
+            if admins.is_empty() {
+                println!("(no admins — this CA is not vault-protected)");
+            }
+            for (name, pol) in admins {
+                println!(
+                    "{name}: allowed_san={:?} max_validity_days={}",
+                    pol.allowed_san, pol.max_validity_days
+                );
+            }
+            Ok(())
+        }
     }
+}
+
+// -- ca fingerprint -----------------------------------------------------------
+
+fn fingerprint(p: FingerprintArgs) -> Result<()> {
+    let dir = ca_dir_for(p.ca_dir)?;
+    show_ca_identity(&dir)
+}
+
+// -- ca join (the client) -----------------------------------------------------
+
+fn join(p: JoinArgs) -> Result<()> {
+    let server: SocketAddr = match p.server {
+        Some(s) => s,
+        None => prompt::required_parsed("CA server address (ip:port)", None)?,
+    };
+    let name = prompt::required_string("TLS identity name to request", p.name)?;
+    let admin = prompt::required_string("admin name", p.admin)?;
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let issued = rt.block_on(ca_join::request_cert(
+        server,
+        ca_proto::NodeKind::Client,
+        &name,
+        &admin,
+        password,
+        p.validity_days,
+        |fp| {
+            println!("The CA presented this identity:");
+            println!("  SHA256  {}", fp.text());
+            println!("{}", fp.identicon(ColorMode::detect()));
+            prompt::confirm("does this match what your CA admin gave you?", false)
+        },
+    ))?;
+    let dir = tls::identity_dir(&name)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    atomic::write_atomic(&dir.join("certificate.pem"), issued.cert_pem.as_bytes(), 0o644)?;
+    atomic::write_atomic(
+        &dir.join("private.key"),
+        issued.private_key_pem.as_bytes(),
+        0o600,
+    )?;
+    atomic::write_atomic(&dir.join("trusted.pem"), issued.trusted_pem.as_bytes(), 0o644)?;
+    println!("installed identity {name:?} in {}", dir.display());
     Ok(())
+}
+
+// -- shared helpers -----------------------------------------------------------
+
+fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
+    let cert = std::fs::read(ca_dir.join("certificate.pem"))
+        .with_context(|| format!("reading CA cert in {}", ca_dir.display()))?;
+    let fp = Fingerprint::of_pem(&cert)?;
+    println!("CA fingerprint:");
+    println!("  SHA256  {}", fp.text());
+    println!("{}", fp.identicon(ColorMode::detect()));
+    Ok(())
+}
+
+fn default_admin_name() -> Result<String> {
+    for var in ["USER", "LOGNAME"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    prompt::required_string("admin name", None)
+}
+
+fn prompt_policy(
+    allow_san: &[String],
+    max_validity_days: u32,
+    cn: &str,
+) -> Result<ca_vault::Policy> {
+    let allowed_san = if !allow_san.is_empty() {
+        allow_san.to_vec()
+    } else {
+        let suggestion = match cn.split_once('.') {
+            Some((_, domain)) if !domain.is_empty() => format!("*.{domain}"),
+            _ => "*".to_string(),
+        };
+        let entry = prompt::string_with_default(
+            "SAN names this admin may issue (glob, e.g. *.example.com)",
+            None,
+            &suggestion,
+        )?;
+        vec![entry]
+    };
+    Ok(ca_vault::Policy { allowed_san, max_validity_days })
+}
+
+/// Prompt twice for a new password (confirmed, non-empty). Bails on a
+/// non-TTY — a vaulted CA must have a real password.
+fn collect_required_password(label: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "{label}: a password is required but stdin is not a TTY"
+        ));
+    }
+    loop {
+        let pw = rpassword::prompt_password(format!("{label}: "))?;
+        if pw.is_empty() {
+            eprintln!("password must not be empty");
+            continue;
+        }
+        let again = rpassword::prompt_password("again: ")?;
+        if again != pw {
+            eprintln!("passwords did not match; try again");
+            continue;
+        }
+        return Ok(pw);
+    }
+}
+
+/// Prompt once for an existing password (no confirmation).
+fn collect_existing_password(label: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!("{label}: stdin is not a TTY"));
+    }
+    Ok(rpassword::prompt_password(format!("{label}: "))?)
 }
 
 fn issue(p: IssueArgs) -> Result<()> {

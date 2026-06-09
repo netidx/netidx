@@ -5,12 +5,15 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
 use netidx_conf::{
+    ca_join, ca_proto,
+    fingerprint::ColorMode,
     netshape::NetShape,
     paths,
     template::{
         self, AuthChoice, ParentRef, ReferralAuth, RenderedTemplate, TlsIdentitySpec,
     },
 };
+use zeroize::Zeroizing;
 // `tls::identity_dir` is referenced only by the unix-gated TLS cert
 // generation flows (`generate_and_wait_for_parent_cert`,
 // `resolver_tls_generate`); on Windows the import would be unused.
@@ -18,7 +21,7 @@ use netidx_conf::{
 use netidx_conf::tls;
 use std::{
     io::IsTerminal,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -592,7 +595,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let rt = template::workstation(&params)?;
     // A workstation runs in the operator's session; a user-scope
     // systemd / launchd service is the right level — no sudo needed.
-    finish(rt, &f.common, Some(service::ScopeArg::User))
+    finish(rt, &f.common, service::ServiceNeed::at(service::ScopeArg::User))
 }
 
 /// Interactive cascade for the workstation's optional parent
@@ -617,11 +620,14 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
 fn prompt_parent_referral(
     default_path: &str,
 ) -> Result<Option<(ParentRef, Option<TlsIdentitySpec>)>> {
-    let addr: SocketAddr = match prompt::optional_parsed::<SocketAddr>(
-        "network-wide resolver address (ip:port)",
+    // The upstream resolver IP is the one thing the operator has to
+    // know (blank ⇒ no parent); the port is prompted separately with
+    // the conventional 4564 default.
+    let addr = match prompt::optional_parsed::<std::net::IpAddr>(
+        "network-wide resolver IP (blank for none)",
         None,
     )? {
-        Some(a) => a,
+        Some(ip) => prompt_resolver_port(ip)?,
         None => return Ok(None),
     };
     let kind: AuthKind = prompt::choice_with_default(
@@ -651,7 +657,7 @@ fn prompt_parent_referral(
                 prompt::required_string("parent TLS server name", None)?;
             // identity is required for TLS — either bring one or
             // (the generate path diverges via `bail!`)
-            let ident = prompt_tls_client_identity()?;
+            let ident = prompt_tls_client_identity(Some(addr.ip()))?;
             (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(ident))
         }
     };
@@ -663,6 +669,118 @@ fn prompt_parent_referral(
         },
         identity,
     )))
+}
+
+/// Validity (days) requested from a CA server. The server caps it to
+/// the admin's policy, so this is just an upper bound.
+const JOIN_VALIDITY_DAYS: u32 = 730;
+
+/// A TLS identity obtained from a CA server and installed into the
+/// canonical `~/.config/netidx/tls/<name>/` layout.
+struct JoinedIdentity {
+    name: String,
+    certificate: PathBuf,
+    private_key: PathBuf,
+    trusted: PathBuf,
+}
+
+/// Offer to obtain a TLS identity from a CA server over the network
+/// instead of the local-CA / CSR flow. `default_ip` (the upstream
+/// resolver, usually co-located with the CA) seeds the address prompt.
+/// Returns the installed identity, or `None` if the operator has no CA
+/// server — the caller then runs the existing flow. Cross-platform:
+/// this is also how a node with no openssl (Windows) gets a TLS cert.
+fn maybe_join_ca_server(
+    default_ip: Option<IpAddr>,
+    kind: ca_proto::NodeKind,
+) -> Result<Option<JoinedIdentity>> {
+    if !prompt::confirm(
+        "get this TLS cert from a CA server over the network?",
+        default_ip.is_some(),
+    )? {
+        return Ok(None);
+    }
+    let ip = match default_ip {
+        Some(i) => {
+            prompt::parsed_with_default::<IpAddr>("CA server IP", None, &i.to_string())?
+        }
+        None => prompt::required_parsed::<IpAddr>("CA server IP", None)?,
+    };
+    let port = prompt::parsed_with_default::<u16>(
+        "CA server port",
+        None,
+        &ca_proto::DEFAULT_PORT.to_string(),
+    )?;
+    let addr = SocketAddr::new(ip, port);
+    let name =
+        prompt::required_string("TLS identity name to request (the cert's DNS SAN)", None)?;
+    let admin = prompt::required_string("CA admin name", None)?;
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "CA password for admin {admin}: "
+    ))?);
+
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let issued = rt.block_on(ca_join::request_cert(
+        addr,
+        kind,
+        &name,
+        &admin,
+        password,
+        JOIN_VALIDITY_DAYS,
+        |fp| {
+            println!("The CA presented this identity:");
+            println!("  SHA256  {}", fp.text());
+            println!("{}", fp.identicon(ColorMode::detect()));
+            prompt::confirm("does this match what your CA admin gave you?", false)
+        },
+    ))?;
+
+    let dir = netidx_conf::tls::identity_dir(&name)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let certificate = dir.join("certificate.pem");
+    let private_key = dir.join("private.key");
+    let trusted = dir.join("trusted.pem");
+    netidx_conf::atomic::write_atomic(&certificate, issued.cert_pem.as_bytes(), 0o644)?;
+    netidx_conf::atomic::write_atomic(
+        &private_key,
+        issued.private_key_pem.as_bytes(),
+        0o600,
+    )?;
+    netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    println!("installed TLS identity {name:?} from CA server {addr}");
+    Ok(Some(JoinedIdentity { name, certificate, private_key, trusted }))
+}
+
+/// Convert an installed [`JoinedIdentity`] into a client-side
+/// [`TlsIdentitySpec`]. The files are already at their canonical home,
+/// so `dest_dir` is `None` and the engine's install step is the
+/// harmless self-copy the `check_no_overwrite` guard already allows.
+fn joined_to_spec(j: JoinedIdentity) -> TlsIdentitySpec {
+    let server_pattern = netidx_conf::tls::domain_from_san(&j.name)
+        .map(|d| d.to_string())
+        .unwrap_or_else(|_| j.name.clone());
+    TlsIdentitySpec {
+        server_pattern: ArcStr::from(server_pattern.as_str()),
+        our_name: ArcStr::from(j.name.as_str()),
+        certificate: j.certificate,
+        private_key: j.private_key,
+        trusted: j.trusted,
+        dest_dir: None,
+        askpass: None,
+    }
+}
+
+/// Convert an installed [`JoinedIdentity`] into the resolver's own
+/// [`AuthChoice::Tls`].
+fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
+    AuthChoice::Tls {
+        name: ArcStr::from(j.name.as_str()),
+        certificate: j.certificate,
+        private_key: j.private_key,
+        trusted: j.trusted,
+        askpass: None,
+    }
 }
 
 /// Interactive cascade for a client-side TLS identity: a cert/key
@@ -683,7 +801,13 @@ fn prompt_parent_referral(
 /// CA's certs wouldn't be trusted there. Operators wanting to use
 /// their local CA can run `netidx conf ca issue` and then point
 /// `--tls-cert / --tls-key / --tls-trusted` at the result.
-fn prompt_tls_client_identity() -> Result<TlsIdentitySpec> {
+fn prompt_tls_client_identity(upstream_ip: Option<IpAddr>) -> Result<TlsIdentitySpec> {
+    // First offer the network path: a CA server signs our CSR on the
+    // spot, no files to shuttle. Works on every platform (rcgen, not
+    // openssl), so it's also how a Windows node gets a TLS identity.
+    if let Some(j) = maybe_join_ca_server(upstream_ip, ca_proto::NodeKind::Client)? {
+        return Ok(joined_to_spec(j));
+    }
     // On unix the operator can choose 'generate' and we'll make a
     // key + CSR for them via the openssl-backed `ca` module. On
     // non-unix that module isn't available, so the prompt only
@@ -1084,6 +1208,21 @@ fn check_cert_files_present(cert: &Path, trusted: &Path) -> Result<()> {
 /// suggests appended to the discovered address.
 const DEFAULT_RESOLVER_PORT: u16 = 4564;
 
+/// Prompt for a resolver-server port given an IP the operator already
+/// supplied, defaulting to the conventional 4564, and combine the two.
+/// Factors the "…and the port, which you can usually just accept" half
+/// shared by every resolver-address prompt across the templates — the
+/// IP is the one thing the operator has to know, the port is a
+/// keystroke.
+fn prompt_resolver_port(ip: std::net::IpAddr) -> Result<SocketAddr> {
+    let port = prompt::parsed_with_default::<u16>(
+        "resolver port",
+        None,
+        &DEFAULT_RESOLVER_PORT.to_string(),
+    )?;
+    Ok(SocketAddr::new(ip, port))
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct ResolverFlags {
     /// Auth scheme this resolver exposes (anonymous, local, krb5,
@@ -1227,19 +1366,23 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         if s.needs_operator_hint() {
             eprintln!(
                 "note: detected container environment with no NETIDX_PUBLIC_IP \
-                 env var and no reachable cloud metadata. The suggested listen \
-                 address below is the container's private IP — only useful for \
-                 internal traffic. Override with the externally-visible address \
-                 (or set NETIDX_PUBLIC_IP / pass --listen).",
+                 env var and no reachable cloud metadata. The suggested IP below \
+                 is the container's private IP — only useful for internal \
+                 traffic. Override with the externally-visible address (or set \
+                 NETIDX_PUBLIC_IP / pass --listen).",
             );
         }
-        let suggestion =
-            SocketAddr::new(s.advertised_ip().into(), DEFAULT_RESOLVER_PORT).to_string();
-        prompt::parsed_with_default(
-            "advertised address (what clients connect to)",
+        // Ask for the IP and port separately. The IP is the one thing
+        // the operator actually has to know; the port has a
+        // conventional default they can take with a keystroke. The IP
+        // is also what the CA-server prompt suggests as its default, so
+        // a whole TLS setup only needs the operator to type one address.
+        let ip = prompt::parsed_with_default::<std::net::IpAddr>(
+            "advertised IP (what clients connect to)",
             None,
-            &suggestion,
-        )?
+            &s.advertised_ip().to_string(),
+        )?;
+        prompt_resolver_port(ip)?
     };
     // Bind: silent in the normal case (defaults to listen.ip()), but
     // level-1 prompted in the cloud-elastic case where the resolver
@@ -1285,7 +1428,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // the issued cert/key survive until `apply()` copies them into the
     // canonical location — hence a named binding scoped to the whole
     // function, not a discard.
-    let (auth, _tls_staging) = resolver_self_auth(&f)?;
+    let (auth, _tls_staging) = resolver_self_auth(&f, Some(listen.ip()))?;
     let perms_seed = match &f.perms_seed {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
         None => None,
@@ -1319,7 +1462,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // A standalone resolver is a network-facing daemon — system-scope
     // is what makes it boot-triggered and visible to the OS. The
     // service-install flow will re-exec under sudo if needed.
-    finish(rt, &f.common, Some(service::ScopeArg::System))
+    finish(rt, &f.common, service::ServiceNeed::at(service::ScopeArg::System))
 }
 
 /// Decide whether to install the id-mapper daemon alongside the
@@ -1357,6 +1500,7 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
 /// schemes (and the BYO / wait-for-CSR TLS paths) return `None`.
 fn resolver_self_auth(
     f: &ResolverFlags,
+    default_ca_ip: Option<IpAddr>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
@@ -1383,19 +1527,20 @@ fn resolver_self_auth(
             },
             None,
         )),
-        AuthKind::Tls => resolver_tls_auth(f),
+        AuthKind::Tls => resolver_tls_auth(f, default_ca_ip),
     }
 }
 
 /// Resolve the resolver's TLS identity. The certificate is either an
 /// explicit path the operator supplies, or the literal `generate` —
-/// in which case we issue one from the local CA (creating that CA if
-/// none exists). The interactive prompt defaults to `generate`: for
-/// the common small-org case where the resolver host is also the CA
-/// host, hitting return through the prompts gets you a working
-/// self-signed setup.
+/// in which case we either request it from a CA server or issue one
+/// from the local CA (creating that CA if none exists). The interactive
+/// prompt defaults to `generate`: for the common small-org case where
+/// the resolver host is also the CA host, hitting return through the
+/// prompts gets you a working setup.
 fn resolver_tls_auth(
     f: &ResolverFlags,
+    default_ca_ip: Option<IpAddr>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     let name =
         prompt::required_string("resolver TLS name", f.tls_name.clone())?;
@@ -1423,10 +1568,11 @@ fn resolver_tls_auth(
     if is_generate {
         #[cfg(unix)]
         {
-            return resolver_tls_generate(f, &name);
+            return resolver_tls_generate(f, &name, default_ca_ip);
         }
         #[cfg(not(unix))]
         {
+            let _ = default_ca_ip;
             unreachable!("generate path is unix-only")
         }
     }
@@ -1485,7 +1631,15 @@ fn resolver_tls_auth(
 fn resolver_tls_generate(
     f: &ResolverFlags,
     name: &str,
+    default_ca_ip: Option<IpAddr>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+    // First offer the network path: a CA server signs our CSR on the
+    // spot (no staging dir needed — the join installs directly).
+    if !f.common.dry_run {
+        if let Some(j) = maybe_join_ca_server(default_ca_ip, ca_proto::NodeKind::Resolver)? {
+            return Ok((joined_to_auth(j), None));
+        }
+    }
     let ca_dir = paths::user_ca_dir()?;
     let ca_cert = ca_dir.join("certificate.pem");
     // `identity_dir` also validates `name` (no path separators) — do
@@ -1648,9 +1802,11 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     )?;
     f.auth = Some(kind);
     if f.addrs.is_empty() {
-        let addr: SocketAddr =
-            prompt::required_parsed("cluster address (e.g. 10.0.0.1:4564)", None)?;
-        f.addrs.push(addr);
+        let ip = prompt::required_parsed::<std::net::IpAddr>(
+            "cluster IP (the resolver to connect to, e.g. 10.0.0.1)",
+            None,
+        )?;
+        f.addrs.push(prompt_resolver_port(ip)?);
     }
     let per_addr_auth = publisher_per_addr_auth(&f)?;
     let addrs: Vec<(SocketAddr, ReferralAuth)> =
@@ -1665,8 +1821,10 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         // check. Mirror the workstation/resolver UX instead — walk
         // the operator through a cert-or-generate cascade so they
         // can either point at an existing cert or get a key+CSR
-        // produced on the spot.
-        tls_identities.push(prompt_tls_client_identity()?);
+        // produced on the spot. The cluster IP seeds the CA-server
+        // address default.
+        let upstream = f.addrs.first().map(|a| a.ip());
+        tls_identities.push(prompt_tls_client_identity(upstream)?);
     }
     let default_auth = f.default_auth.map(|k| k.default_mech());
     // Level-1 prompt: same loopback-mixing pitfall as the resolver
@@ -1723,7 +1881,7 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     let rt = template::publisher(&params)?;
     // No daemon to supervise on a client-only host — nothing to
     // install as an OS service.
-    finish(rt, &f.common, None)
+    finish(rt, &f.common, service::ServiceNeed::NONE)
 }
 
 fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
@@ -1756,65 +1914,22 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 fn finish(
     rt: RenderedTemplate,
     common: &CommonFlags,
-    service_scope: Option<service::ScopeArg>,
+    need: service::ServiceNeed,
 ) -> Result<()> {
     println!("{}", rt.describe());
-    if common.dry_run {
-        if let Some(scope) = service_scope {
-            let label = match scope {
-                service::ScopeArg::User => "user-scope",
-                service::ScopeArg::System => "system-scope (sudo)",
-            };
-            println!(
-                "[dry-run] would offer to install netidx as a {label} OS service"
-            );
-        }
-        return Ok(());
+    if !common.dry_run {
+        check_no_overwrite(&rt, common.force)?;
+        rt.apply().context("applying template")?;
+        println!("ok");
     }
-    check_no_overwrite(&rt, common.force)?;
-    rt.apply().context("applying template")?;
-    println!("ok");
-    if let Some(scope) = service_scope {
-        maybe_install_service(common, scope)?;
-    }
-    Ok(())
-}
-
-/// Post-install hook. Resolves the three input states for the
-/// service-install gate:
-/// - `--no-service` → skip silently (operator opted out explicitly).
-/// - `--with-service` → install unconditionally (no prompt).
-/// - otherwise: prompt on a TTY (default yes), or print a note on a
-///   non-TTY so the operator knows the flag exists.
-fn maybe_install_service(
-    common: &CommonFlags,
-    scope: service::ScopeArg,
-) -> Result<()> {
-    if common.no_service {
-        return Ok(());
-    }
-    let install_now = if common.with_service {
-        true
-    } else if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        let label = match scope {
-            service::ScopeArg::User => "user-scope (no sudo)",
-            service::ScopeArg::System => "system-scope (sudo required)",
-        };
-        prompt::confirm(
-            &format!("install netidx as an OS service now ({label})?"),
-            true,
-        )?
-    } else {
-        eprintln!(
-            "note: pass --with-service to register netidx as an OS service \
-             (run `netidx conf service install` later if you prefer)"
-        );
-        false
-    };
-    if install_now {
-        service::install_with_defaults(scope)?;
-    }
-    Ok(())
+    // Single end-of-process hook: offer the OS service (or print the
+    // dry-run note). Sub-steps with their own units merge their needs
+    // into `need` before we get here, so this fires exactly once.
+    service::offer(need, service::ServiceGate {
+        dry_run: common.dry_run,
+        no_service: common.no_service,
+        with_service: common.with_service,
+    })
 }
 
 #[cfg(test)]

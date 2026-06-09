@@ -23,7 +23,7 @@ use openssl::{
     asn1::Asn1Time,
     bn::BigNum,
     hash::MessageDigest,
-    pkey::{PKey, Private},
+    pkey::{Id, PKey, Private, Public},
     rsa::Rsa,
     symm::Cipher,
     x509::{
@@ -90,6 +90,27 @@ fn check_key_bits(bits: u32) -> Result<()> {
         bail!("RSA key size {bits} is below MIN_KEY_BITS ({MIN_KEY_BITS})");
     }
     Ok(())
+}
+
+/// Algorithm-aware strength check for an externally-supplied CSR public
+/// key. RSA must be ≥ [`MIN_KEY_BITS`]; elliptic-curve keys (P-256 and
+/// up) and the Edwards curves are fixed-strength and accepted; anything
+/// else is refused. A flat bit-count minimum would wrongly reject a
+/// perfectly strong 256-bit EC key, so the CA server's ECDSA join
+/// clients need this rather than [`check_key_bits`] alone.
+fn check_pubkey_strength(pubkey: &PKey<Public>) -> Result<()> {
+    match pubkey.id() {
+        Id::RSA => check_key_bits(pubkey.bits()),
+        Id::EC => {
+            let bits = pubkey.bits();
+            if bits < 256 {
+                bail!("EC key size {bits} is too small (need P-256 or stronger)");
+            }
+            Ok(())
+        }
+        Id::ED25519 | Id::ED448 => Ok(()),
+        other => bail!("unsupported CSR key algorithm: {other:?}"),
+    }
 }
 
 /// Verify a SAN list will satisfy `netidx::tls::get_names`: exactly
@@ -212,19 +233,71 @@ impl Ca {
     /// for a password and want "skip = no encryption" should pass
     /// `None` when the user enters nothing, not `Some("")`.
     pub fn init(params: &CaParams, password: Option<&str>) -> Result<Self> {
-        check_key_bits(params.key_bits)?;
-        std::fs::create_dir_all(&params.directory).with_context(|| {
-            format!("creating CA directory {:?}", params.directory)
-        })?;
+        let (key_path, cert_path) = Self::prepare_dir(params)?;
+        let (cert, pkey) = Self::generate(params)?;
+        let key_pem = match password {
+            Some(p) => pkey
+                .private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), p.as_bytes())
+                .context("encrypting CA private key")?,
+            None => pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?,
+        };
+        let cert_pem = cert.to_pem().context("encoding CA cert")?;
+        atomic::write_atomic(&key_path, &key_pem, 0o600)?;
+        atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
+        write_next_serial(&params.directory, 2)?;
+        Ok(Self {
+            directory: params.directory.clone(),
+            cert,
+            pkey,
+            serial_lock: Mutex::new(()),
+        })
+    }
+
+    /// Create a CA whose key goes into a [`crate::ca_vault`] rather than
+    /// an on-disk `private.key`: writes `certificate.pem` + the serial
+    /// counter, and **returns the unencrypted PKCS#8 key PEM** for the
+    /// caller to seal into the vault. The key never touches disk in
+    /// plaintext — that's the whole point of the vault — so callers must
+    /// vault it promptly and let the `Zeroizing` wrapper wipe it.
+    pub fn init_vaulted(
+        params: &CaParams,
+    ) -> Result<(Self, zeroize::Zeroizing<Vec<u8>>)> {
+        let (_key_path, cert_path) = Self::prepare_dir(params)?;
+        let (cert, pkey) = Self::generate(params)?;
+        let key_pem = pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?;
+        let cert_pem = cert.to_pem().context("encoding CA cert")?;
+        atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
+        write_next_serial(&params.directory, 2)?;
+        let ca = Self {
+            directory: params.directory.clone(),
+            cert,
+            pkey,
+            serial_lock: Mutex::new(()),
+        };
+        Ok((ca, zeroize::Zeroizing::new(key_pem)))
+    }
+
+    /// Create the CA directory and refuse if a CA (key, cert, or vault)
+    /// already lives there. Returns the `(key, cert)` paths.
+    fn prepare_dir(params: &CaParams) -> Result<(PathBuf, PathBuf)> {
+        std::fs::create_dir_all(&params.directory)
+            .with_context(|| format!("creating CA directory {:?}", params.directory))?;
         let key_path = params.directory.join("private.key");
         let cert_path = params.directory.join("certificate.pem");
-        if key_path.exists() || cert_path.exists() {
+        let vault_path = params.directory.join(crate::ca_vault::VAULT_FILE);
+        if key_path.exists() || cert_path.exists() || vault_path.exists() {
             bail!(
                 "CA appears to already exist at {:?}; use Ca::open instead",
                 params.directory
             );
         }
+        Ok((key_path, cert_path))
+    }
 
+    /// Generate the CA keypair + self-signed cert in memory — no disk
+    /// writes, so callers choose how to persist the key.
+    fn generate(params: &CaParams) -> Result<(X509, PKey<Private>)> {
+        check_key_bits(params.key_bits)?;
         let rsa = Rsa::generate(params.key_bits)
             .context("generating CA RSA key")?;
         let pkey = PKey::from_rsa(rsa).context("wrapping CA key")?;
@@ -277,30 +350,7 @@ impl Ca {
         cert.append_extension(san)?;
         cert.sign(&pkey, MessageDigest::sha512()).context("self-signing CA")?;
         let cert = cert.build();
-
-        let key_pem = match password {
-            Some(p) => pkey
-                .private_key_to_pem_pkcs8_passphrase(
-                    Cipher::aes_256_cbc(),
-                    p.as_bytes(),
-                )
-                .context("encrypting CA private key")?,
-            None => pkey
-                .private_key_to_pem_pkcs8()
-                .context("encoding CA private key")?,
-        };
-        let cert_pem = cert.to_pem().context("encoding CA cert")?;
-        atomic::write_atomic(&key_path, &key_pem, 0o600)?;
-        atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
-        // Initialize the serial counter: next-to-issue starts at 2
-        // (the CA cert itself is serial 1).
-        write_next_serial(&params.directory, 2)?;
-        Ok(Self {
-            directory: params.directory.clone(),
-            cert,
-            pkey,
-            serial_lock: Mutex::new(()),
-        })
+        Ok((cert, pkey))
     }
 
     /// Load an existing CA from `directory/private.key` +
@@ -331,6 +381,21 @@ impl Ca {
         Ok(Self { directory, cert, pkey, serial_lock: Mutex::new(()) })
     }
 
+    /// Build a CA from an in-memory **unencrypted** PKCS#8 key PEM and
+    /// cert PEM, with `directory` providing the serial counter. Used by
+    /// the CA server: [`crate::ca_vault::unlock`] hands back the
+    /// decrypted key per request, and this turns it into a transient
+    /// signer without the key ever touching disk in plaintext.
+    pub fn from_pem(
+        directory: PathBuf,
+        key_pem: &[u8],
+        cert_pem: &[u8],
+    ) -> Result<Self> {
+        let pkey = parse_key_pem(key_pem, None).context("parsing CA key PEM")?;
+        let cert = X509::from_pem(cert_pem).context("parsing CA cert PEM")?;
+        Ok(Self { directory, cert, pkey, serial_lock: Mutex::new(()) })
+    }
+
     /// The CA cert in PEM form (the trust anchor consumers pin).
     pub fn certificate_pem(&self) -> Result<Vec<u8>> {
         Ok(self.cert.to_pem()?)
@@ -358,13 +423,13 @@ impl Ca {
             bail!("CSR signature does not match its embedded public key");
         }
         // Enforce key strength on externally-supplied CSRs too. The
-        // entry-point check in `generate_csr` / `init` / `issue`
-        // guards keys we generate; this guards keys submitted to us
-        // by something else (e.g. a future conf-server flow). RSA
-        // is the only supported algorithm at the moment; for other
-        // algorithms `bits()` still returns a meaningful value and
-        // the same minimum applies.
-        check_key_bits(req_pubkey.bits())?;
+        // entry-point check in `generate_csr` / `init` / `issue` guards
+        // keys we generate (always RSA); this guards keys submitted to
+        // us — notably by the CA server's join clients, which build
+        // their CSRs with rcgen whose only practical keygen is ECDSA.
+        // So the check is algorithm-aware: RSA ≥ MIN_KEY_BITS, EC
+        // P-256+, Edwards curves accepted.
+        check_pubkey_strength(&req_pubkey)?;
 
         let serial_n = {
             // Brief read-modify-write of the on-disk counter; held

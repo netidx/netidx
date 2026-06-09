@@ -24,10 +24,32 @@ pub mod atomic;
 /// them from elsewhere.
 #[cfg(unix)]
 pub mod ca;
+/// LUKS-style keyslot vault protecting the CA private key (multiple
+/// revocable admin passwords). Unix-only — it only ever guards a CA
+/// key, and the CA module is unix-only. See [`design/ca-server.md`].
+#[cfg(unix)]
+pub mod ca_vault;
+/// Wire protocol (message types + framing) shared by the CA server and
+/// the join client. Cross-platform — a Windows node speaks it to a unix
+/// CA. See [`design/ca-server.md`].
+pub mod ca_proto;
+/// CA join client: generate a key + CSR and request a signature over
+/// TLS, verifying the CA identity by fingerprint first. Cross-platform
+/// (rcgen + rustls, no openssl).
+pub mod ca_join;
+/// CA server: validates a sign request against per-admin policy and
+/// signs it. Unix-only (openssl signer). See [`design/ca-server.md`].
+#[cfg(unix)]
+pub mod ca_server;
 pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]
 mod cloud;
+/// Human-comparable CA-cert fingerprint (base32 text + colored
+/// identicon) for out-of-band CA identity verification. Cross-platform
+/// and openssl-free so the join client renders the same artifact
+/// everywhere — see [`design/ca-server.md`].
+pub mod fingerprint;
 pub mod id_map;
 /// Deployment-environment network-shape detection (`--listen` /
 /// `--bind` suggestions) for the `conf install` flow. Behind the
