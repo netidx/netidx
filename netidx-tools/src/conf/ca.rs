@@ -769,12 +769,23 @@ fn join(p: JoinArgs) -> Result<()> {
         Some(s) => s,
         None => prompt::required_parsed("CA server address (ip:port)", None)?,
     };
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Confirm WHO we've reached before any credential is entered.
+    // `fetch_ca_identity` sends nothing and closes before returning.
+    let identity = rt
+        .block_on(ca_join::fetch_ca_identity(server))
+        .with_context(|| format!("contacting CA server {server}"))?;
+    println!("The CA server at {server} presented this identity:");
+    println!("  SHA256  {}", identity.fingerprint.text());
+    println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
+    if !prompt::confirm("does this match what your CA admin gave you?", false)? {
+        bail!("CA identity was not confirmed; nothing was sent");
+    }
     let name = prompt::required_string("TLS identity name to request", p.name)?;
     let admin = prompt::required_string("admin name", p.admin)?;
     let password = Zeroizing::new(collect_existing_password(&format!(
         "CA password for admin {admin:?}"
     ))?);
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let issued = rt.block_on(ca_join::request_cert(
         server,
         ca_proto::NodeKind::Client,
@@ -782,12 +793,7 @@ fn join(p: JoinArgs) -> Result<()> {
         &admin,
         password,
         p.validity_days,
-        |fp| {
-            println!("The CA presented this identity:");
-            println!("  SHA256  {}", fp.text());
-            println!("{}", fp.identicon(ColorMode::detect()));
-            prompt::confirm("does this match what your CA admin gave you?", false)
-        },
+        &identity,
     ))?;
     let dir = tls::identity_dir(&name)?;
     std::fs::create_dir_all(&dir)

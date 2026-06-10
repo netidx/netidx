@@ -733,6 +733,25 @@ fn maybe_join_ca_server(
         &ca_proto::DEFAULT_PORT.to_string(),
     )?;
     let addr = SocketAddr::new(ip, port);
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+
+    // Establish trust FIRST: connect, show the CA's fingerprint, and get
+    // the operator's confirmation — all before any credential is typed.
+    // `fetch_ca_identity` sends nothing and closes its connection before
+    // returning, so this prompt isn't racing the server's request
+    // timeout.
+    let identity = rt
+        .block_on(ca_join::fetch_ca_identity(addr))
+        .with_context(|| format!("contacting CA server {addr}"))?;
+    println!("The CA server at {addr} presented this identity:");
+    println!("  SHA256  {}", identity.fingerprint.text());
+    println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
+    if !prompt::confirm("does this match what your CA admin gave you?", false)? {
+        bail!("CA identity was not confirmed; nothing was sent");
+    }
+
+    // Trust established — now collect what we want and authenticate. The
+    // signing connection pins to the identity just confirmed.
     let name_label = "TLS identity name to request (the cert's DNS SAN)";
     let name = match suggested_name {
         Some(s) => prompt::string_with_default(name_label, None, s)?,
@@ -742,8 +761,6 @@ fn maybe_join_ca_server(
     let password = Zeroizing::new(rpassword::prompt_password(format!(
         "CA password for admin {admin}: "
     ))?);
-
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let issued = rt.block_on(ca_join::request_cert(
         addr,
         kind,
@@ -751,12 +768,7 @@ fn maybe_join_ca_server(
         &admin,
         password,
         JOIN_VALIDITY_DAYS,
-        |fp| {
-            println!("The CA presented this identity:");
-            println!("  SHA256  {}", fp.text());
-            println!("{}", fp.identicon(ColorMode::detect()));
-            prompt::confirm("does this match what your CA admin gave you?", false)
-        },
+        &identity,
     ))?;
 
     // Stage the issued files in a tempdir; the template's `apply()` does

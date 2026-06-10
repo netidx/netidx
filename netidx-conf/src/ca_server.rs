@@ -311,6 +311,7 @@ mod tests {
     use crate::{
         ca::{Ca, CaParams, Subject, MIN_KEY_BITS},
         ca_join, ca_proto::{Secret, NodeKind, SERVING_SAN}, ca_vault, ca_vault::Policy,
+        fingerprint::Fingerprint,
     };
     use zeroize::Zeroizing;
 
@@ -468,7 +469,10 @@ mod tests {
         setup_ca(dir.path());
         let addr = spawn_server(dir.path()).await;
 
-        let mut shown = false;
+        // Inspect first — the operator is shown the CA fingerprint.
+        let identity = ca_join::fetch_ca_identity(addr).await.unwrap();
+        assert!(!identity.fingerprint.text().is_empty());
+        // Then sign, pinned to the confirmed identity.
         let issued = ca_join::request_cert(
             addr,
             NodeKind::Resolver,
@@ -476,17 +480,11 @@ mod tests {
             "alice",
             Zeroizing::new("apw".to_string()),
             30,
-            |fp| {
-                // The operator is shown the CA fingerprint and confirms.
-                assert!(!fp.text().is_empty());
-                shown = true;
-                Ok(true)
-            },
+            &identity,
         )
         .await
         .unwrap();
 
-        assert!(shown, "confirm callback should have been invoked");
         // The signed leaf parses and is for our name.
         let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
         let san = cert.subject_alt_names().unwrap();
@@ -497,10 +495,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn declining_the_fingerprint_aborts_before_the_password() {
+    async fn mismatched_ca_identity_aborts_before_the_password() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let addr = spawn_server(dir.path()).await;
+        // Inspect, then tamper the confirmed fingerprint to simulate a CA
+        // that swapped its cert between inspection and signing. The pin in
+        // `request_cert` must reject it before the password is sent.
+        let mut identity = ca_join::fetch_ca_identity(addr).await.unwrap();
+        identity.fingerprint = Fingerprint::of_der(b"not the real CA cert");
         let err = ca_join::request_cert(
             addr,
             NodeKind::Resolver,
@@ -508,12 +511,12 @@ mod tests {
             "alice",
             Zeroizing::new("apw".to_string()),
             30,
-            |_fp| Ok(false), // operator says "doesn't match"
+            &identity,
         )
         .await
         .map(|_| ())
         .unwrap_err();
-        assert!(format!("{err:#}").contains("not confirmed"));
+        assert!(format!("{err:#}").contains("fingerprint mismatch"));
     }
 
     #[tokio::test]
@@ -521,6 +524,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let addr = spawn_server(dir.path()).await;
+        let identity = ca_join::fetch_ca_identity(addr).await.unwrap();
         let err = ca_join::request_cert(
             addr,
             NodeKind::Resolver,
@@ -528,7 +532,7 @@ mod tests {
             "alice",
             Zeroizing::new("WRONG".to_string()),
             30,
-            |_fp| Ok(true),
+            &identity,
         )
         .await
         .map(|_| ())
