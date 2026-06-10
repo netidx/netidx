@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     net::{IpAddr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
@@ -42,7 +42,7 @@ pub(crate) enum Cmd {
     List,
     /// run the CA server (signs CSRs received over TLS)
     Serve(ServeArgs),
-    /// manage CA admin keyslots (add / revoke / list)
+    /// manage CA admin keyslots (add / revoke / set-policy / list)
     Admin {
         #[command(subcommand)]
         cmd: AdminCmd,
@@ -59,6 +59,8 @@ pub(crate) enum AdminCmd {
     Add(AdminAddArgs),
     /// revoke an admin keyslot
     Remove(AdminRemoveArgs),
+    /// replace an admin's issuance policy (allowed SANs / max validity)
+    SetPolicy(AdminSetPolicyArgs),
     /// list admin keyslots and their issuance policy
     List(AdminScopeArgs),
 }
@@ -76,6 +78,22 @@ pub(crate) struct AdminAddArgs {
     #[arg(long)]
     pub name: Option<String>,
     /// SAN glob this admin may issue (repeatable). Prompted when omitted.
+    #[arg(long = "allow-san", num_args = 1)]
+    pub allow_san: Vec<String>,
+    /// Max validity (days) this admin may issue. Default 730.
+    #[arg(long, default_value = "730")]
+    pub max_validity_days: u32,
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminSetPolicyArgs {
+    /// Name of the admin whose policy to replace. Prompted when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// SAN glob this admin may issue (repeatable). Replaces the existing
+    /// list. Prompted when omitted, defaulting to `*.<ca-domain>`.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
     /// Max validity (days) this admin may issue. Default 730.
@@ -134,9 +152,16 @@ pub(crate) struct JoinArgs {
 #[derive(Args, Debug)]
 pub(crate) struct InitParams {
     /// Common Name on the CA cert. Prompted for when stdin is a TTY
-    /// and this flag is omitted.
+    /// and this flag is omitted; the prompt defaults to `ca.<domain>`
+    /// when `--domain` is given.
     #[arg(long)]
     pub cn: Option<String>,
+    /// TLS domain this CA serves (e.g. `ryu-oh.org`). Seeds the CN
+    /// default (`ca.<domain>`) and the first admin's issuance policy
+    /// suggestion (`*.<domain>`). Optional — a bare CA without it is
+    /// unchanged.
+    #[arg(long)]
+    pub domain: Option<String>,
     #[arg(long)]
     pub country: Option<String>,
     #[arg(long)]
@@ -318,7 +343,15 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
 /// types — `create_vaulted_ca` builds those internally.
 pub(super) struct NewCaOpts {
     pub dir: PathBuf,
-    pub common_name: String,
+    /// CA cert CN. `None` ⇒ prompt, defaulting to `ca.<domain>` when
+    /// `domain` is set (see [`default_ca_cn`]).
+    pub common_name: Option<String>,
+    /// The TLS domain this CA serves (e.g. `ryu-oh.org`), when known —
+    /// threaded from the resolver install, which already asks for it.
+    /// Seeds the CN default (`ca.<domain>`) and the admin policy
+    /// suggestion (`*.<domain>`). `None` for a bare `ca init` with no
+    /// `--domain`.
+    pub domain: Option<String>,
     pub country: Option<String>,
     pub state: Option<String>,
     pub locality: Option<String>,
@@ -331,7 +364,7 @@ pub(super) struct NewCaOpts {
     /// unix user.
     pub admin: Option<String>,
     /// First admin's issuance policy globs; empty ⇒ prompt (default
-    /// derived from the CA CN's domain).
+    /// `*.<domain>` when `domain` is set, else derived from the CN).
     pub allowed_san: Vec<String>,
     pub max_validity_days: u32,
     /// `None` ⇒ prompt "set up the CA server?"; `Some(b)` ⇒ forced.
@@ -361,6 +394,11 @@ pub(super) struct NewCaOpts {
 /// that's the caller's end-of-process step, so a resolver install can
 /// merge this need with its own and offer once.
 pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::ServiceNeed)> {
+    // CN first (matching the prompt order `ca init` had before this was
+    // centralized here): an explicit `--cn` / threaded value wins,
+    // otherwise prompt with the `ca.<domain>` default when we know the
+    // domain.
+    let common_name = resolve_ca_cn(opts.common_name, opts.domain.as_deref())?;
     // `--admin` short-circuits the prompt; otherwise ask, seeding the
     // default with the current unix user. On a non-TTY (automation) the
     // default is taken silently, preserving the old auto-name behavior.
@@ -377,18 +415,23 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     if admin.trim().is_empty() {
         bail!("admin name must not be empty");
     }
-    let san = parse_sans(&opts.san, &opts.common_name)?;
+    let san = parse_sans(&opts.san, &common_name)?;
     let password = collect_required_password(&format!(
         "set a CA password for admin {admin:?} (this signs certs)"
     ))?;
-    let policy = prompt_policy(&opts.allowed_san, opts.max_validity_days, &opts.common_name)?;
+    let policy = prompt_policy(
+        &opts.allowed_san,
+        opts.max_validity_days,
+        &common_name,
+        opts.domain.as_deref(),
+    )?;
 
     // Generate the CA with its key returned (never written to disk in
     // plaintext) and seal it into the vault under the first admin.
     let (ca, key_pem) = Ca::init_vaulted(&CaParams {
         directory: opts.dir.clone(),
         subject: Subject {
-            common_name: opts.common_name.clone(),
+            common_name,
             country: opts.country,
             state: opts.state,
             locality: opts.locality,
@@ -442,7 +485,6 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
 
 fn init(p: InitParams) -> Result<()> {
     let directory = ca_dir_for(p.dir)?;
-    let common_name = prompt::required_string("CA common name", p.cn)?;
     // `ca init` always wants the unit when a server is set up (it has no
     // `--no-units`); default the dir so the activation supervisor finds
     // it.
@@ -459,7 +501,8 @@ fn init(p: InitParams) -> Result<()> {
     };
     let (_ca, need) = create_vaulted_ca(NewCaOpts {
         dir: directory,
-        common_name,
+        common_name: p.cn,
+        domain: p.domain,
         country: p.country,
         state: p.state,
         locality: p.locality,
@@ -641,7 +684,14 @@ fn admin(cmd: AdminCmd) -> Result<()> {
         AdminCmd::Add(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("new admin name", a.name)?;
-            let policy = prompt_policy(&a.allow_san, a.max_validity_days, "")?;
+            // Seed the policy suggestion from the CA's own cert domain
+            // (e.g. `ca.ryu-oh.org` → `*.ryu-oh.org`).
+            let policy = prompt_policy(
+                &a.allow_san,
+                a.max_validity_days,
+                &existing_ca_cn(&dir),
+                None,
+            )?;
             let existing = collect_existing_password(
                 "your own (existing) admin password — unlocks the CA key to enroll the new admin",
             )?;
@@ -649,6 +699,30 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 collect_required_password(&format!("password for new admin {name:?}"))?;
             ca_vault::add_admin(&dir, &existing, &name, &new_pw, policy)?;
             println!("added admin {name:?}");
+            Ok(())
+        }
+        AdminCmd::SetPolicy(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let name = prompt::required_string("admin whose policy to set", a.name)?;
+            let policy = prompt_policy(
+                &a.allow_san,
+                a.max_validity_days,
+                &existing_ca_cn(&dir),
+                None,
+            )?;
+            // Report the resolved policy (the prompt may have filled it),
+            // not the raw flag.
+            let summary = format!(
+                "allowed_san={:?} max_validity_days={}",
+                policy.allowed_san, policy.max_validity_days
+            );
+            // Authority: any current admin's password (the same flat
+            // model as add/remove). You don't need the target's.
+            let auth = collect_existing_password(&format!(
+                "your own admin password (authorizes setting policy for {name:?})"
+            ))?;
+            ca_vault::set_policy(&dir, &auth, &name, policy)?;
+            println!("updated policy for admin {name:?}: {summary}");
             Ok(())
         }
         AdminCmd::Remove(a) => {
@@ -759,13 +833,22 @@ fn prompt_policy(
     allow_san: &[String],
     max_validity_days: u32,
     cn: &str,
+    domain: Option<&str>,
 ) -> Result<ca_vault::Policy> {
     let allowed_san = if !allow_san.is_empty() {
         allow_san.to_vec()
     } else {
-        let suggestion = match cn.split_once('.') {
-            Some((_, domain)) if !domain.is_empty() => format!("*.{domain}"),
-            _ => "*".to_string(),
+        // Prefer an explicit domain (e.g. threaded from the resolver
+        // install, which already asked for it) — `*.<domain>` matches the
+        // `<user>.<domain>` SAN convention exactly. With no domain, fall
+        // back to stripping the CN's leftmost label, which is right when
+        // the CN is `<host>.<domain>` but only a guess otherwise.
+        let suggestion = match domain {
+            Some(d) if !d.is_empty() => format!("*.{d}"),
+            _ => match cn.split_once('.') {
+                Some((_, domain)) if !domain.is_empty() => format!("*.{domain}"),
+                _ => "*".to_string(),
+            },
         };
         let entry = prompt::string_with_default(
             "SAN names this admin may issue (glob, e.g. *.example.com)",
@@ -775,6 +858,37 @@ fn prompt_policy(
         vec![entry]
     };
     Ok(ca_vault::Policy { allowed_san, max_validity_days })
+}
+
+/// The default CA common name for a domain, following the same
+/// `<name>.<domain>` convention as every other netidx identity — the CA
+/// is just the `ca` node (e.g. `ryu-oh.org` → `ca.ryu-oh.org`).
+pub(super) fn default_ca_cn(domain: &str) -> String {
+    format!("ca.{domain}")
+}
+
+/// Resolve the CA common name: an explicit value wins; otherwise prompt,
+/// defaulting to `ca.<domain>` when a domain is known (non-TTY then takes
+/// that default), or requiring an explicit answer when it isn't.
+fn resolve_ca_cn(provided: Option<String>, domain: Option<&str>) -> Result<String> {
+    if let Some(cn) = provided {
+        return Ok(cn);
+    }
+    match domain {
+        Some(d) if !d.is_empty() => {
+            prompt::string_with_default("CA common name", None, &default_ca_cn(d))
+        }
+        _ => prompt::required_string("CA common name", None),
+    }
+}
+
+/// The DNS SAN on an existing CA's own cert, used to seed the policy
+/// suggestion when scoping admins on an already-built CA (`admin add` /
+/// `admin set-policy`). Empty if it can't be read — the prompt then has
+/// no domain to suggest.
+fn existing_ca_cn(dir: &Path) -> String {
+    netidx_conf::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
+        .unwrap_or_default()
 }
 
 /// Prompt twice for a new password (confirmed, non-empty). Bails on a

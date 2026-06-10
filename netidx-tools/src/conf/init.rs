@@ -1899,16 +1899,19 @@ fn resolver_tls_generate(
         }
         // Create the CA via the SAME entry point as `netidx conf ca
         // init` — admin/policy, identicon, and the "set up the CA
-        // server?" question all included. The CA CN defaults to the
-        // domain of the resolver's TLS name (e.g. `resolver.ryu-oh.org`
-        // → `ryu-oh.org`), so a fresh deployment gets a sensibly-named
-        // CA without extra typing.
-        let ca_cn = netidx_conf::tls::domain_from_san(name)
+        // server?" question all included. We already know the domain
+        // from the resolver's TLS name (e.g. `resolver.ryu-oh.org` →
+        // `ryu-oh.org`), so name the CA `ca.<domain>` per the
+        // `<name>.<domain>` convention and pass the domain through so the
+        // first admin's policy defaults to `*.<domain>` — no extra typing
+        // and no mismatch with the names this deployment will issue.
+        let domain = netidx_conf::tls::domain_from_san(name)
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
         let (created, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
             dir: ca_dir.clone(),
-            common_name: ca_cn,
+            common_name: Some(ca::default_ca_cn(&domain)),
+            domain: Some(domain),
             country: None,
             state: None,
             locality: None,

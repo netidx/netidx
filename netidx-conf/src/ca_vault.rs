@@ -197,6 +197,30 @@ pub fn remove_admin(
     write_vault(&path, &vault)
 }
 
+/// Replace the issuance [`Policy`] on `target_admin`'s slot.
+/// `authorizing_password` must unlock some slot (proof of authority — the
+/// same flat model as [`add_admin`]/[`remove_admin`]: any admin may
+/// re-scope any admin). The CA key, master-key wrap, and KDF params are
+/// untouched; only the (plaintext) policy field is rewritten.
+pub fn set_policy(
+    ca_dir: &Path,
+    authorizing_password: &str,
+    target_admin: &str,
+    policy: Policy,
+) -> Result<()> {
+    let path = vault_path(ca_dir);
+    let mut vault = read_vault(&path)?;
+    let idx = vault
+        .slots
+        .iter()
+        .position(|s| s.admin == target_admin)
+        .ok_or_else(|| anyhow!("no admin named {target_admin:?}"))?;
+    recover_mk(&vault, authorizing_password)
+        .context("authorizing password does not unlock any slot")?;
+    vault.slots[idx].policy = policy;
+    write_vault(&path, &vault)
+}
+
 /// List the admins and their policies (no secrets).
 pub fn list_admins(ca_dir: &Path) -> Result<Vec<(String, Policy)>> {
     let vault = read_vault(&vault_path(ca_dir))?;
@@ -403,6 +427,29 @@ mod tests {
         assert!(remove_admin(dir.path(), "apw", "alice", false).is_err());
         remove_admin(dir.path(), "apw", "alice", true).unwrap();
         assert!(unlock(dir.path(), "apw").is_err());
+    }
+
+    #[test]
+    fn set_policy_rescopes_a_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
+        add_admin(dir.path(), "apw", "bob", "bpw", pol("ryu-oh.org")).unwrap();
+
+        // Authority is required: a password that unlocks no slot can't
+        // change a policy.
+        assert!(set_policy(dir.path(), "nope", "bob", pol("*.ryu-oh.org")).is_err());
+        // Unknown target admin is an error.
+        assert!(set_policy(dir.path(), "apw", "carol", pol("*")).is_err());
+
+        // Alice (any admin) re-scopes bob from the literal `ryu-oh.org`
+        // to `*.ryu-oh.org`. Bob's password and the CA key are untouched.
+        set_policy(dir.path(), "apw", "bob", pol("*.ryu-oh.org")).unwrap();
+        let b = unlock(dir.path(), "bpw").unwrap();
+        assert_eq!(b.admin, "bob");
+        assert_eq!(b.policy, pol("*.ryu-oh.org"));
+        assert_eq!(&b.ca_key_pem[..], KEY);
+        // Alice's own slot is unaffected.
+        assert_eq!(unlock(dir.path(), "apw").unwrap().policy, pol("*.a"));
     }
 
     #[test]
