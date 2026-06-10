@@ -61,6 +61,13 @@ pub mod paths;
 pub mod service;
 pub mod perms;
 pub mod resolver;
+/// Probe a running resolver's served TLS name (its cert's DNS SAN) to
+/// prefill the "resolver TLS name" setup prompt. Cross-platform (rustls,
+/// no openssl).
+pub mod resolver_probe;
 pub mod template;
 pub mod tls;
+/// Shared trust-on-first-use rustls verifier for [`ca_join`] and
+/// [`resolver_probe`].
+mod tls_tofu;
 pub mod uninstall;

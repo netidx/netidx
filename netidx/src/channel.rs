@@ -60,7 +60,12 @@ impl<C: K5Ctx + Debug + Send + 'static> Deref for K5CtxWrap<C> {
 /// Send a single unencrypted message directly to the specified
 /// socket. This is intended to be used to do some initialization
 /// before the proper channel can be created.
-pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
+/// Write a single, small, unencrypted message to the specified socket,
+/// length-prefixed (4-byte big-endian). Intended for connection
+/// initialization before the encrypted [`Channel`] is established — e.g.
+/// the resolver's plaintext version/hello preamble. Pairs with
+/// [`read_raw`].
+pub async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
     socket: &mut S,
     msg: &T,
 ) -> Result<()> {
@@ -81,8 +86,10 @@ pub(crate) async fn write_raw<T: Pack, S: AsyncWrite + Unpin>(
 
 /// Read a single, small, unencrypted message from the specified
 /// socket. This is intended to be used to do some initialization
-/// before the proper channel can be created.
-pub(crate) async fn read_raw<T: Pack, S: AsyncRead + Unpin, const MAX: usize>(
+/// before the proper channel can be created. Rejects a frame with the
+/// encrypted-flag bit set (the MSB of the length). Pairs with
+/// [`write_raw`].
+pub async fn read_raw<T: Pack, S: AsyncRead + Unpin, const MAX: usize>(
     socket: &mut S,
 ) -> Result<T> {
     let mut buf = [0u8; MAX];

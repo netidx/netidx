@@ -144,6 +144,11 @@ pub use poolshark as pool;
 
 mod batch_channel;
 mod channel;
+/// Low-level length-prefixed framing for unencrypted connection
+/// preambles (before the encrypted `Channel` is established). Used by
+/// the resolver client/server handshake and by `netidx-conf`'s
+/// resolver-name probe.
+pub use channel::{read_raw, write_raw};
 pub mod config;
 mod os;
 pub mod publisher;

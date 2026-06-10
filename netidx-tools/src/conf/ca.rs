@@ -154,8 +154,8 @@ pub(crate) struct InitParams {
     pub key_bits: u32,
     #[arg(long, default_value = "7300")]
     pub validity_days: u32,
-    /// The first admin's name (keyslot label). Defaults to the current
-    /// unix user; prompted only if that can't be determined.
+    /// The first admin's name (keyslot label). Prompted when omitted,
+    /// defaulting to the current unix user.
     #[arg(long)]
     pub admin: Option<String>,
     /// SAN glob the first admin may issue (repeatable). Prompted when
@@ -213,8 +213,6 @@ pub(crate) struct IssueArgs {
     pub key_bits: u32,
     #[arg(long, default_value = "730")]
     pub validity_days: u32,
-    #[arg(long)]
-    pub no_password: bool,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -274,8 +272,6 @@ pub(crate) struct SignArgs {
     pub accept_csr_san: bool,
     #[arg(long, default_value = "730")]
     pub validity_days: u32,
-    #[arg(long)]
-    pub no_password: bool,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -331,7 +327,8 @@ pub(super) struct NewCaOpts {
     pub san: Vec<String>,
     pub key_bits: u32,
     pub validity_days: u32,
-    /// First admin name; `None` ⇒ the current unix user.
+    /// First admin name; `None` ⇒ prompt, defaulting to the current
+    /// unix user.
     pub admin: Option<String>,
     /// First admin's issuance policy globs; empty ⇒ prompt (default
     /// derived from the CA CN's domain).
@@ -364,10 +361,22 @@ pub(super) struct NewCaOpts {
 /// that's the caller's end-of-process step, so a resolver install can
 /// merge this need with its own and offer once.
 pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::ServiceNeed)> {
-    let admin = match opts.admin {
-        Some(a) => a,
-        None => default_admin_name()?,
+    // `--admin` short-circuits the prompt; otherwise ask, seeding the
+    // default with the current unix user. On a non-TTY (automation) the
+    // default is taken silently, preserving the old auto-name behavior.
+    let admin = match env_user_name() {
+        Some(user) => prompt::string_with_default("CA admin name", opts.admin, &user)?,
+        None => prompt::required_string("CA admin name", opts.admin)?,
     };
+    // Validate the vault inputs *before* anything is written to disk:
+    // `Ca::init_vaulted` commits `certificate.pem` + `serial`, and only
+    // then does `ca_vault::create` run — so a bad input rejected there
+    // (e.g. an empty admin name slipping past the CLI as `--admin ''`)
+    // would leave a half-built CA with no signing key that also blocks a
+    // retry (the dir then looks like an existing CA).
+    if admin.trim().is_empty() {
+        bail!("admin name must not be empty");
+    }
     let san = parse_sans(&opts.san, &opts.common_name)?;
     let password = collect_required_password(&format!(
         "set a CA password for admin {admin:?} (this signs certs)"
@@ -389,8 +398,16 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         key_bits: opts.key_bits,
         validity_days: opts.validity_days,
     })?;
-    ca_vault::create(&opts.dir, &key_pem, &admin, &password, policy)
-        .context("sealing CA key into the vault")?;
+    // Belt and suspenders: should sealing still fail (e.g. an I/O error
+    // mid-write), roll back the cert + serial that `init_vaulted`
+    // committed so the directory isn't a keyless half-CA that blocks a
+    // clean retry. The in-memory key is dropped (zeroized) on the way
+    // out, so nothing sensitive is left behind.
+    if let Err(e) = ca_vault::create(&opts.dir, &key_pem, &admin, &password, policy) {
+        let _ = std::fs::remove_file(opts.dir.join("certificate.pem"));
+        let _ = std::fs::remove_file(opts.dir.join("serial"));
+        return Err(e).context("sealing CA key into the vault");
+    }
 
     println!("created a new CA at {}", opts.dir.display());
     println!("  admin {admin:?} can sign; the CA key is encrypted at rest (keyslot vault)");
@@ -724,15 +741,18 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn default_admin_name() -> Result<String> {
+/// The current unix user, if discoverable, to seed the admin-name
+/// prompt's default. `None` when neither env var is set (e.g. a daemon
+/// context), in which case the caller prompts with no default.
+fn env_user_name() -> Option<String> {
     for var in ["USER", "LOGNAME"] {
         if let Ok(v) = std::env::var(var) {
             if !v.is_empty() {
-                return Ok(v);
+                return Some(v);
             }
         }
     }
-    prompt::required_string("admin name", None)
+    None
 }
 
 fn prompt_policy(
@@ -794,10 +814,9 @@ fn issue(p: IssueArgs) -> Result<()> {
     let directory = ca_dir_for(p.ca_dir)?;
     let cn = prompt::required_string("certificate common name", p.cn)?;
     let out_dir = prompt::required_path("output directory for key + cert", p.out_dir)?;
-    let password = collect_password(p.no_password, false)?;
-    let ca = Ca::open(&directory, password.as_deref())
-        .with_context(|| format!("opening CA at {}", directory.display()))?;
+    let ca = open_ca(&directory)?;
     let san = parse_sans(&p.san, &cn)?;
+    ensure_san_not_reserved(&san)?;
     let issued = ca.issue(&IssueParams {
         subject: Subject {
             common_name: cn.clone(),
@@ -882,9 +901,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
     let csr_path =
         prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
     let directory = ca_dir_for(p.ca_dir.take())?;
-    let password = collect_password(p.no_password, false)?;
-    let ca = Ca::open(&directory, password.as_deref())
-        .with_context(|| format!("opening CA at {}", directory.display()))?;
+    let ca = open_ca(&directory)?;
     let csr_pem = std::fs::read(&csr_path)
         .with_context(|| format!("reading CSR {}", csr_path.display()))?;
     let summary = ca::inspect_csr(&csr_pem).context("inspecting CSR")?;
@@ -909,6 +926,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
         .take()
         .unwrap_or_else(|| default_cert_filename(summary.common_name.as_deref()));
     let san = resolve_sign_san(&p, &summary)?;
+    ensure_san_not_reserved(&san)?;
     println!("  signing SAN:");
     for entry in &san {
         println!("    - {}", san_display(entry));
@@ -1142,10 +1160,44 @@ fn list() -> Result<()> {
         return Ok(());
     }
     println!("CA at {}", dir.display());
-    if dir.join("private.key").is_file() {
-        println!("  private key: present");
+    if let Ok(cert) = std::fs::read(dir.join("certificate.pem")) {
+        if let Ok(fp) = Fingerprint::of_pem(&cert) {
+            println!(
+                "  fingerprint: {} … (`netidx conf ca fingerprint` for the full id)",
+                fp.short()
+            );
+        }
+    }
+    // Key storage: the current format is the keyslot vault (key in
+    // `vault.json`, not `private.key`), so detect that before falling
+    // back to the legacy single-key format.
+    if ca_vault::exists(&dir) {
+        let admins = ca_vault::list_admins(&dir)
+            .map(|a| a.into_iter().map(|(n, _)| n).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if admins.is_empty() {
+            println!("  key:    keyslot vault");
+        } else {
+            println!("  key:    keyslot vault — admins: {}", admins.join(", "));
+        }
+    } else if dir.join("private.key").is_file() {
+        println!("  key:    private.key (legacy single-key format)");
     } else {
-        println!("  private key: MISSING — CA cannot sign");
+        println!("  key:    MISSING — CA cannot sign");
+    }
+    // CA server.
+    let server_json = dir.join("server.json");
+    if server_json.is_file() {
+        let listen = std::fs::read(&server_json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<CaServerConfig>(&b).ok())
+            .map(|c| c.listen.to_string());
+        match listen {
+            Some(l) => println!("  server: configured (listen {l})"),
+            None => println!("  server: configured"),
+        }
+    } else {
+        println!("  server: not configured");
     }
     Ok(())
 }
@@ -1173,18 +1225,18 @@ pub(super) fn default_ca_present() -> bool {
     }
 }
 
-/// Open the CA at the default location as a signer. Handles both
-/// formats:
+/// Open the CA at `dir` as a signer. Handles both formats:
 /// - **vaulted** (current): prompt for an admin password and unlock the
 ///   keyslot vault to recover the signing key.
 /// - **legacy** `private.key`: unencrypted open, prompting only if the
 ///   key turns out to be encrypted.
 ///
 /// A non-TTY caller that would need a password bails rather than
-/// hanging.
-pub(super) fn open_default_ca() -> Result<Ca> {
-    let dir = paths::user_ca_dir()?;
-    if ca_vault::exists(&dir) {
+/// hanging. This is the single CA-open entry point — every command that
+/// signs (`issue`, `sign`, the resolver's local-CA issuance) goes
+/// through it, so they all transparently handle vaulted CAs.
+pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
+    if ca_vault::exists(dir) {
         if !prompt::stdin_is_tty() {
             bail!(
                 "the CA at {} is vault-protected and needs an admin password, \
@@ -1193,15 +1245,15 @@ pub(super) fn open_default_ca() -> Result<Ca> {
             );
         }
         let pw = collect_existing_password("your CA admin password")?;
-        let unlocked = ca_vault::unlock(&dir, &pw)
+        let unlocked = ca_vault::unlock(dir, &pw)
             .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?;
         let cert = std::fs::read(dir.join("certificate.pem"))
             .with_context(|| format!("reading CA cert in {}", dir.display()))?;
-        return Ca::from_pem(dir.clone(), &unlocked.ca_key_pem, &cert)
+        return Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
             .with_context(|| format!("loading CA at {}", dir.display()));
     }
     // Legacy `private.key` CA.
-    match Ca::open(&dir, None) {
+    match Ca::open(dir, None) {
         Ok(ca) => Ok(ca),
         Err(e) if format!("{e:#}").contains("encrypted") => {
             if !prompt::stdin_is_tty() {
@@ -1213,11 +1265,35 @@ pub(super) fn open_default_ca() -> Result<Ca> {
             }
             let pw = rpassword::prompt_password("CA password: ")
                 .context("reading CA password")?;
-            Ca::open(&dir, Some(&pw))
+            Ca::open(dir, Some(&pw))
                 .with_context(|| format!("opening CA at {}", dir.display()))
         }
         Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
     }
+}
+
+/// [`open_ca`] at the conventional `${basedir}/ca/` location.
+pub(super) fn open_default_ca() -> Result<Ca> {
+    open_ca(&paths::user_ca_dir()?)
+}
+
+/// Refuse to mint the CA server's reserved serving name from the local
+/// CLI, mirroring the network sign path's refusal. The reserved name is
+/// the linchpin of the join trust model; only the CA-server setup flow
+/// (which signs it directly) may issue it.
+fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
+    for s in san {
+        if let SanEntry::Dns(d) = s {
+            if d.eq_ignore_ascii_case(ca_proto::SERVING_SAN) {
+                bail!(
+                    "{:?} is reserved for the CA server's serving certificate and \
+                     can't be issued here",
+                    ca_proto::SERVING_SAN
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Issue an identity (CN = SAN-DNS = `name`) from `ca` into `out_dir`.
@@ -1289,49 +1365,23 @@ fn parse_san_one(s: &str) -> Result<SanEntry> {
     })
 }
 
-/// Collect a CA password.
-///
-/// - `--no-password` ⇒ `None` (the on-disk key is unencrypted). This
-///   is the scripted / non-interactive path: operators who want to
-///   drive the CLI without a TTY just pass `--no-password`.
-/// - else: prompt with `rpassword::prompt_password` (masked echo). On
-///   `init` (`confirm: true`) the prompt fires twice to catch typos.
-///
-/// The engine never sees a passphrase from any source other than the
-/// terminal. There is no environment-variable path — that would
-/// expose the secret to anything that can read `/proc/<pid>/environ`,
-/// which is a footgun. Use `--no-password` for scripts.
-///
-/// `pub(super)` so the standalone-resolver init flow can reuse it
-/// when it creates a CA on the operator's behalf.
-pub(super) fn collect_password(
-    no_password: bool,
-    confirm: bool,
-) -> Result<Option<String>> {
-    if no_password {
-        return Ok(None);
-    }
-    if !prompt::stdin_is_tty() {
-        bail!(
-            "stdin is not a TTY and no password was supplied. Pass --no-password to write an unencrypted key, or run with a TTY attached to be prompted."
-        );
-    }
-    let pw = rpassword::prompt_password("CA password (blank for no encryption): ")?;
-    if pw.is_empty() {
-        return Ok(None);
-    }
-    if confirm {
-        let again = rpassword::prompt_password("CA password (again): ")?;
-        if again != pw {
-            bail!("passwords did not match");
-        }
-    }
-    Ok(Some(pw))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_serving_san_is_refused() {
+        let reserved = ca_proto::SERVING_SAN;
+        assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_string())]).is_err());
+        // DNS is case-insensitive — an upper/mixed-case variant is the
+        // same reserved name and must also be refused.
+        assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_uppercase())]).is_err());
+        // A normal name (and a non-DNS SAN type) is fine.
+        assert!(
+            ensure_san_not_reserved(&[SanEntry::Dns("resolver.example.com".to_string())])
+                .is_ok()
+        );
+    }
 
     #[test]
     fn san_parser() {
@@ -1416,9 +1466,7 @@ mod tests {
             // Explicit accept: the round trip flow simulates the admin
             // who has looked at the CSR and is happy to sign as-is.
             accept_csr_san: true,
-            validity_days: 30,
-            no_password: true,
-            ca_dir: Some(ca_dir.clone()),
+            validity_days: 30,            ca_dir: Some(ca_dir.clone()),
             out: Some(cert_path.clone()),
             no_id_map: true,
         })
@@ -1472,9 +1520,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity_days: 30,
-            no_password: true,
-            ca_dir: Some(ca_dir),
+            validity_days: 30,            ca_dir: Some(ca_dir),
             out: Some(out_cert.clone()),
             no_id_map: true,
         })
@@ -1519,9 +1565,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity_days: 30,
-            no_password: true,
-            ca_dir: Some(ca_dir),
+            validity_days: 30,            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })
@@ -1563,9 +1607,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec!["dns:x.example.com".into()],
             accept_csr_san: true,
-            validity_days: 30,
-            no_password: true,
-            ca_dir: Some(ca_dir),
+            validity_days: 30,            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })

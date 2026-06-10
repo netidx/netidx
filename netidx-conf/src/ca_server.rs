@@ -26,7 +26,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -34,10 +34,23 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-/// Concurrent in-flight handlers. Each `SignRequest` runs an Argon2id
-/// derivation per slot, so this caps the memory/CPU an attacker can
-/// induce by flooding wrong-password requests.
-const MAX_CONCURRENT: usize = 4;
+/// Max simultaneous connections. These are cheap (a TLS handshake and a
+/// few small messages), so this can be generous — it just bounds socket
+/// / task fan-out.
+const MAX_CONNECTIONS: usize = 768;
+
+/// Max simultaneous *signs*. Each sign runs an Argon2id derivation
+/// (~64 MiB) to unlock the vault, so this — not `MAX_CONNECTIONS` — is
+/// what bounds the memory a flood of (even wrong-password) requests can
+/// pin: roughly `MAX_CONCURRENT_SIGNS × 64 MiB`. Tune for the CA box's
+/// RAM (e.g. 64 ≈ 4 GiB). Signing runs on `spawn_blocking`, so this also
+/// keeps Argon2/openssl off the async worker threads.
+const MAX_CONCURRENT_SIGNS: usize = 64;
+
+/// Upper bound on a single connection's whole lifetime (handshake +
+/// request + sign + response). Without it a client that connects and
+/// stalls holds a connection slot indefinitely.
+const CONN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Inputs to run the CA server daemon.
 pub struct ServeParams {
@@ -70,7 +83,8 @@ async fn serve_on(
     acceptor: TlsAcceptor,
     ca_dir: Arc<PathBuf>,
 ) -> Result<()> {
-    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -79,21 +93,33 @@ async fn serve_on(
                 continue;
             }
         };
+        // Gate the connection count at the door, so we don't even spawn
+        // a task for one we'd immediately have to drop.
+        let conn_permit = match conns.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!("ca-server: at connection limit, dropping {peer}");
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let ca_dir = ca_dir.clone();
-        let sem = sem.clone();
+        let signs = signs.clone();
         tokio::spawn(async move {
-            let permit = match sem.try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    warn!("ca-server: too many concurrent requests, dropping {peer}");
-                    return;
-                }
-            };
-            let r = handle_conn(&acceptor, tcp, &ca_dir).await;
-            drop(permit);
-            if let Err(e) = r {
-                debug!("ca-server: connection from {peer} ended: {e:#}");
+            let _conn_permit = conn_permit; // released when the task ends
+            // Bound the whole connection so a stalled peer can't hold a
+            // connection slot (the handshake and every read are
+            // otherwise deadline-less). The sign permit is *not* tied to
+            // this cancellable future — see `handle_conn`.
+            match tokio::time::timeout(
+                CONN_TIMEOUT,
+                handle_conn(&acceptor, tcp, &ca_dir, signs),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => debug!("ca-server: connection from {peer} ended: {e:#}"),
+                Err(_) => debug!("ca-server: connection from {peer} timed out"),
             }
         });
     }
@@ -103,6 +129,7 @@ async fn handle_conn(
     acceptor: &TlsAcceptor,
     tcp: TcpStream,
     ca_dir: &Path,
+    signs: Arc<Semaphore>,
 ) -> Result<()> {
     let mut tls = acceptor.accept(tcp).await.context("TLS handshake")?;
     let _hello: ClientHello = ca_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
@@ -110,7 +137,26 @@ async fn handle_conn(
         .await
         .context("writing ServerHello")?;
     let req: SignRequest = ca_proto::read_msg(&mut tls).await.context("reading SignRequest")?;
-    let resp = handle_sign_request(ca_dir, &req);
+    // The sign is the expensive, blocking part (Argon2 vault unlock +
+    // openssl). Run it on `spawn_blocking`, off the async worker
+    // threads, bounded by the sign semaphore.
+    //
+    // The permit is moved *into* the blocking task and held for its
+    // whole duration. A `spawn_blocking` task can't be cancelled, so if
+    // this connection times out, the `JoinHandle` await below is dropped
+    // while the task keeps running — releasing the permit there (not in
+    // this cancellable future) is what keeps `MAX_CONCURRENT_SIGNS`
+    // honest: otherwise a timeout would free the permit while the 64 MiB
+    // Argon2 is still live, and repeated timeouts would exceed the bound.
+    let permit =
+        signs.acquire_owned().await.expect("sign semaphore is never closed");
+    let ca_dir = ca_dir.to_path_buf();
+    let resp = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle_sign_request(&ca_dir, &req)
+    })
+    .await
+    .context("CA signing task panicked")?;
     ca_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")?;
     Ok(())
 }
@@ -162,6 +208,18 @@ fn try_handle(ca_dir: &Path, req: &SignRequest) -> Result<SignResponse> {
     if name.is_empty() {
         return Ok(reject("requested name is empty"));
     }
+    // The CA server's own serving name is reserved: the join trust model
+    // hinges on *only* the genuine daemon holding a CA-signed cert with
+    // it. Issuing it over the wire — even to an admin whose policy glob
+    // (e.g. "*") happens to match — would let that admin stand up an
+    // impostor daemon that passes the client's serving-cert check,
+    // present the genuine CA fingerprint, and harvest other admins'
+    // passwords. Refuse it unconditionally; the local setup path issues
+    // the serving cert directly (via `Ca::sign_request`), bypassing this
+    // handler.
+    if name.eq_ignore_ascii_case(ca_proto::SERVING_SAN) {
+        return Ok(reject("that name is reserved for the CA server and cannot be issued"));
+    }
     if !name_permitted(name, &unlocked.policy.allowed_san)? {
         return Ok(reject(&format!(
             "name {name:?} is not permitted for admin {}",
@@ -177,6 +235,10 @@ fn try_handle(ca_dir: &Path, req: &SignRequest) -> Result<SignResponse> {
     //    is dropped (and the key zeroized) as soon as this returns.
     let cert_pem =
         std::fs::read(ca_dir.join("certificate.pem")).context("reading CA certificate")?;
+    // Each request builds a transient `Ca`, so its per-instance
+    // `serial_lock` doesn't serialize across handlers — concurrent signs
+    // are kept from minting duplicate serials by the OS file lock inside
+    // `next_serial` (see `ca::next_serial`).
     let ca = Ca::from_pem(ca_dir.to_path_buf(), &unlocked.ca_key_pem, &cert_pem)
         .context("loading CA from vault")?;
     let san = [SanEntry::Dns(name.to_string())];
@@ -285,6 +347,10 @@ mod tests {
     /// Build a vault-protected CA in `dir`: a real (RSA) CA whose key is
     /// moved into a 1-admin vault, no `private.key` left behind.
     fn setup_ca(dir: &Path) {
+        setup_ca_with_policy(dir, policy());
+    }
+
+    fn setup_ca_with_policy(dir: &Path, policy: Policy) {
         let params = CaParams {
             directory: dir.to_path_buf(),
             subject: Subject::cn("Test CA".to_string()),
@@ -294,7 +360,7 @@ mod tests {
         };
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
-        ca_vault::create(dir, &key, "alice", "apw", policy()).unwrap();
+        ca_vault::create(dir, &key, "alice", "apw", policy).unwrap();
         std::fs::remove_file(dir.join("private.key")).unwrap();
     }
 
@@ -365,6 +431,23 @@ mod tests {
         // notAfter should be ~30 days out, well under the 9999 requested.
         let in_60_days = openssl::asn1::Asn1Time::days_from_now(60).unwrap();
         assert!(cert.not_after() < in_60_days);
+    }
+
+    #[test]
+    fn refuses_to_issue_the_reserved_serving_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // A wide-open "*" policy — which WOULD match the reserved name —
+        // must still not be able to mint the CA server's own serving
+        // cert (that would enable impersonating the daemon).
+        setup_ca_with_policy(
+            dir.path(),
+            Policy { allowed_san: vec!["*".to_string()], max_validity_days: 30 },
+        );
+        let req = request(SERVING_SAN, "alice", "apw", 30);
+        match handle_sign_request(dir.path(), &req) {
+            SignResponse::Err { reason } => assert!(reason.contains("reserved")),
+            SignResponse::Ok { .. } => panic!("issued the reserved serving name"),
+        }
     }
 
     #[test]

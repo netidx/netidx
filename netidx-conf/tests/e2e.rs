@@ -401,7 +401,18 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         .await?;
 
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
-    let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
+    let server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
+
+    // Probe the running resolver for its served TLS name — the discovery
+    // the setup flow uses to prefill the "resolver TLS name" prompt. This
+    // exercises the whole probe path against a real *mutual*-TLS resolver:
+    // the handshake is rejected (the probe sends no client cert), so the
+    // result depends on the TOFU verifier capturing the leaf before that
+    // rejection and reading its DNS SAN.
+    let probed =
+        netidx_conf::resolver_probe::probe_resolver_tls_name(*server.local_addr())
+            .await?;
+    assert_eq!(probed.as_deref(), Some("resolver.example.com"));
 
     // Path under `/users/resolver.example.com/` matches the auto-seed
     // `/users/$[user]` dynamic entry with $[user]=resolver.example.com

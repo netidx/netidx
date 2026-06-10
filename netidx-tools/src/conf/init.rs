@@ -536,6 +536,9 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     if let Some(spec) = cli_tls_id {
         tls_identities.push(spec);
     }
+    // Holds the staging tempdirs for any CA-server-joined identity until
+    // `finish()` (apply) installs them; must outlive the whole flow.
+    let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     // Parent: CLI flags fully populate it when `--parent-addr` is
     // given; otherwise walk the operator through the cascade ("is
     // there a network-wide resolver? if so, what auth? if TLS, do
@@ -560,8 +563,9 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
         match prompt_parent_referral(parent_default_path)? {
             None => None,
             Some((parent_ref, maybe_ident)) => {
-                if let Some(ident) = maybe_ident {
-                    tls_identities.push(ident);
+                if let Some(si) = maybe_ident {
+                    tls_identities.push(si.spec);
+                    tls_staging.extend(si.staging);
                 }
                 Some(parent_ref)
             }
@@ -619,7 +623,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
 /// is always available for the non-interactive case.
 fn prompt_parent_referral(
     default_path: &str,
-) -> Result<Option<(ParentRef, Option<TlsIdentitySpec>)>> {
+) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
     // The upstream resolver IP is the one thing the operator has to
     // know (blank ⇒ no parent); the port is prompted separately with
     // the conventional 4564 default.
@@ -653,12 +657,19 @@ fn prompt_parent_referral(
             (ReferralAuth::Krb5(ArcStr::from(spn.as_str())), None)
         }
         AuthKind::Tls => {
-            let server_name =
-                prompt::required_string("parent TLS server name", None)?;
+            let server_name = prompt_resolver_tls_name(
+                Some(addr),
+                "parent TLS server name",
+                None,
+            )?;
             // identity is required for TLS — either bring one or
-            // (the generate path diverges via `bail!`)
-            let ident = prompt_tls_client_identity(Some(addr.ip()))?;
-            (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(ident))
+            // (the generate path diverges via `bail!`). Suggest our own
+            // SAN as `<user>.<domain>`, the domain taken from the
+            // resolver's SAN we just resolved.
+            let suggested = suggest_client_san(&server_name);
+            let staged =
+                prompt_tls_client_identity(Some(addr.ip()), suggested.as_deref())?;
+            (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(staged))
         }
     };
     Ok(Some((
@@ -675,13 +686,22 @@ fn prompt_parent_referral(
 /// the admin's policy, so this is just an upper bound.
 const JOIN_VALIDITY_DAYS: u32 = 730;
 
-/// A TLS identity obtained from a CA server and installed into the
+/// A TLS identity obtained from a CA server, with its files **staged**
+/// in a tempdir. `apply()` performs the (force-gated) install into the
 /// canonical `~/.config/netidx/tls/<name>/` layout.
 struct JoinedIdentity {
     name: String,
     certificate: PathBuf,
     private_key: PathBuf,
     trusted: PathBuf,
+}
+
+/// A client TLS identity plus the tempdir its files are staged in until
+/// `apply()` installs them. `staging` is `None` for the BYO-cert /
+/// wait-for-CSR paths, whose files already sit at their canonical home.
+struct StagedIdentity {
+    spec: TlsIdentitySpec,
+    staging: Option<tempfile::TempDir>,
 }
 
 /// Offer to obtain a TLS identity from a CA server over the network
@@ -693,7 +713,8 @@ struct JoinedIdentity {
 fn maybe_join_ca_server(
     default_ip: Option<IpAddr>,
     kind: ca_proto::NodeKind,
-) -> Result<Option<JoinedIdentity>> {
+    suggested_name: Option<&str>,
+) -> Result<Option<(JoinedIdentity, tempfile::TempDir)>> {
     if !prompt::confirm(
         "get this TLS cert from a CA server over the network?",
         default_ip.is_some(),
@@ -712,8 +733,11 @@ fn maybe_join_ca_server(
         &ca_proto::DEFAULT_PORT.to_string(),
     )?;
     let addr = SocketAddr::new(ip, port);
-    let name =
-        prompt::required_string("TLS identity name to request (the cert's DNS SAN)", None)?;
+    let name_label = "TLS identity name to request (the cert's DNS SAN)";
+    let name = match suggested_name {
+        Some(s) => prompt::string_with_default(name_label, None, s)?,
+        None => prompt::required_string(name_label, None)?,
+    };
     let admin = prompt::required_string("CA admin name", None)?;
     let password = Zeroizing::new(rpassword::prompt_password(format!(
         "CA password for admin {admin}: "
@@ -735,12 +759,17 @@ fn maybe_join_ca_server(
         },
     ))?;
 
-    let dir = netidx_conf::tls::identity_dir(&name)?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    let certificate = dir.join("certificate.pem");
-    let private_key = dir.join("private.key");
-    let trusted = dir.join("trusted.pem");
+    // Stage the issued files in a tempdir; the template's `apply()` does
+    // the real install into the canonical identity dir, gated by
+    // `check_no_overwrite` (`--force`). Writing straight to the
+    // canonical dir here would bypass that guard — silently clobbering
+    // an existing private key — and would leave the identity installed
+    // even if a later install step failed. The returned tempdir must
+    // outlive `finish()`; the caller keeps it alive.
+    let staging = tempfile::TempDir::new().context("creating tls staging dir")?;
+    let certificate = staging.path().join("certificate.pem");
+    let private_key = staging.path().join("private.key");
+    let trusted = staging.path().join("trusted.pem");
     netidx_conf::atomic::write_atomic(&certificate, issued.cert_pem.as_bytes(), 0o644)?;
     netidx_conf::atomic::write_atomic(
         &private_key,
@@ -748,8 +777,8 @@ fn maybe_join_ca_server(
         0o600,
     )?;
     netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
-    println!("installed TLS identity {name:?} from CA server {addr}");
-    Ok(Some(JoinedIdentity { name, certificate, private_key, trusted }))
+    println!("got TLS identity {name:?} from CA server {addr}");
+    Ok(Some((JoinedIdentity { name, certificate, private_key, trusted }, staging)))
 }
 
 /// Convert an installed [`JoinedIdentity`] into a client-side
@@ -801,12 +830,17 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
 /// CA's certs wouldn't be trusted there. Operators wanting to use
 /// their local CA can run `netidx conf ca issue` and then point
 /// `--tls-cert / --tls-key / --tls-trusted` at the result.
-fn prompt_tls_client_identity(upstream_ip: Option<IpAddr>) -> Result<TlsIdentitySpec> {
+fn prompt_tls_client_identity(
+    upstream_ip: Option<IpAddr>,
+    suggested_name: Option<&str>,
+) -> Result<StagedIdentity> {
     // First offer the network path: a CA server signs our CSR on the
     // spot, no files to shuttle. Works on every platform (rcgen, not
     // openssl), so it's also how a Windows node gets a TLS identity.
-    if let Some(j) = maybe_join_ca_server(upstream_ip, ca_proto::NodeKind::Client)? {
-        return Ok(joined_to_spec(j));
+    if let Some((j, staging)) =
+        maybe_join_ca_server(upstream_ip, ca_proto::NodeKind::Client, suggested_name)?
+    {
+        return Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) });
     }
     // On unix the operator can choose 'generate' and we'll make a
     // key + CSR for them via the openssl-backed `ca` module. On
@@ -829,7 +863,7 @@ fn prompt_tls_client_identity(upstream_ip: Option<IpAddr>) -> Result<TlsIdentity
     let (our_name, certificate, private_key, trusted, askpass) = if is_generate {
         #[cfg(unix)]
         {
-            generate_and_wait_for_parent_cert()?
+            generate_and_wait_for_parent_cert(suggested_name)?
         }
         #[cfg(not(unix))]
         {
@@ -891,20 +925,25 @@ fn prompt_tls_client_identity(upstream_ip: Option<IpAddr>) -> Result<TlsIdentity
                 our_name
             )
         })?;
-    Ok(TlsIdentitySpec {
-        server_pattern: ArcStr::from(server_pattern),
-        our_name: ArcStr::from(our_name.as_str()),
-        certificate,
-        private_key,
-        trusted,
-        // dest_dir = None resolves to the canonical
-        // `~/.config/netidx/tls/<our-name>/`. For the generate path
-        // the cert and trusted are already at exactly those paths,
-        // so the engine's "install" step ends up reading each file
-        // and writing it back — a no-op-ish round-trip. For the
-        // explicit-path case it's a real copy as before.
-        dest_dir: None,
-        askpass,
+    // These paths are already at (or, for BYO, point directly at) their
+    // final home, so no staging tempdir is needed.
+    Ok(StagedIdentity {
+        spec: TlsIdentitySpec {
+            server_pattern: ArcStr::from(server_pattern),
+            our_name: ArcStr::from(our_name.as_str()),
+            certificate,
+            private_key,
+            trusted,
+            // dest_dir = None resolves to the canonical
+            // `~/.config/netidx/tls/<our-name>/`. For the generate path
+            // the cert and trusted are already at exactly those paths,
+            // so the engine's "install" step ends up reading each file
+            // and writing it back — a no-op-ish round-trip. For the
+            // explicit-path case it's a real copy as before.
+            dest_dir: None,
+            askpass,
+        },
+        staging: None,
     })
 }
 
@@ -927,11 +966,13 @@ fn prompt_tls_client_identity(upstream_ip: Option<IpAddr>) -> Result<TlsIdentity
 /// directly.
 #[cfg(unix)]
 fn generate_and_wait_for_parent_cert(
+    suggested_name: Option<&str>,
 ) -> Result<(String, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
-    let our_name = prompt::required_string(
-        "your TLS identity name (CN for the CSR; cert SAN)",
-        None,
-    )?;
+    let name_label = "your TLS identity name (CN for the CSR; cert SAN)";
+    let our_name = match suggested_name {
+        Some(s) => prompt::string_with_default(name_label, None, s)?,
+        None => prompt::required_string(name_label, None)?,
+    };
     let (cert_path, key_path, trusted_path, askpass) =
         generate_csr_and_wait_for_cert(&our_name)?;
     Ok((our_name, cert_path, key_path, trusted_path, askpass))
@@ -1227,6 +1268,130 @@ fn prompt_resolver_port(ip: std::net::IpAddr) -> Result<SocketAddr> {
     Ok(SocketAddr::new(ip, port))
 }
 
+/// The conventional leftmost label of a resolver's TLS SAN, and the
+/// default TLS domain. netidx keys a TLS identity by its domain (the SAN
+/// is `<name>.<domain>`, e.g. `resolver.ryu-oh.org`), so `local` covers
+/// the single-host / no-DNS case the way `BindCfg::Local` does for binds.
+const DEFAULT_RESOLVER_NAME: &str = "resolver";
+const DEFAULT_TLS_DOMAIN: &str = "local";
+
+/// Best-effort default for the TLS name a resolver presents. Probes the
+/// resolver itself — the authoritative source, since it's the exact SAN a
+/// client must match — and falls back to the `resolver.local` convention
+/// when the probe can't reach or read it. Either way the value is only a
+/// default the operator confirms; correctness is enforced later by the
+/// trusted-CA bundle, so a wrong guess fails closed at connect time.
+fn resolver_tls_name_default(addr: SocketAddr) -> String {
+    let convention = format!("{DEFAULT_RESOLVER_NAME}.{DEFAULT_TLS_DOMAIN}");
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return convention,
+    };
+    match rt.block_on(netidx_conf::resolver_probe::probe_resolver_tls_name(addr)) {
+        Ok(Some(name)) => {
+            println!("probed resolver {addr}: it serves TLS name {name:?}");
+            name
+        }
+        Ok(None) => {
+            println!(
+                "note: resolver {addr} served a cert with no DNS SAN; \
+                 defaulting to the {convention:?} convention"
+            );
+            convention
+        }
+        Err(e) => {
+            println!(
+                "note: could not probe resolver {addr} for its TLS name \
+                 ({e}); defaulting to the {convention:?} convention"
+            );
+            convention
+        }
+    }
+}
+
+/// Prompt for the TLS name a resolver serves (the client's
+/// `Auth::Tls { name }`). A CLI-provided value short-circuits; otherwise,
+/// when we know the resolver's address, prefill the default by probing it
+/// (convention fallback). With no address to probe, prompt with no
+/// default.
+fn prompt_resolver_tls_name(
+    addr: Option<SocketAddr>,
+    label: &str,
+    provided: Option<String>,
+) -> Result<String> {
+    if let Some(p) = provided {
+        return Ok(p);
+    }
+    match addr {
+        Some(addr) => {
+            let default = resolver_tls_name_default(addr);
+            prompt::string_with_default(label, None, &default)
+        }
+        None => prompt::required_string(label, None),
+    }
+}
+
+/// Prompt for a resolver's *own* TLS SAN in two parts — a domain (default
+/// `local`, e.g. `ryu-oh.org`) and the leftmost name (default `resolver`)
+/// — and join them into `<name>.<domain>`. A `--tls-name` value
+/// short-circuits both prompts with the full SAN.
+fn prompt_resolver_own_tls_name(provided: Option<String>) -> Result<String> {
+    if let Some(full) = provided {
+        return Ok(full);
+    }
+    let domain = prompt::string_with_default(
+        "TLS domain (e.g. ryu-oh.org)",
+        None,
+        DEFAULT_TLS_DOMAIN,
+    )?;
+    let name = prompt::string_with_default(
+        "resolver name (the leftmost label of its cert SAN)",
+        None,
+        DEFAULT_RESOLVER_NAME,
+    )?;
+    let (name, domain) = (name.trim(), domain.trim());
+    if name.is_empty() {
+        bail!("resolver name must not be empty");
+    }
+    if domain.is_empty() {
+        bail!("TLS domain must not be empty");
+    }
+    Ok(format!("{name}.{domain}"))
+}
+
+/// Best-effort current username, for prompt defaults only — a
+/// *suggestion*, so it never fails (returns `None` if it can't tell).
+/// Prefers the passwd entry on unix so it agrees with the workstation
+/// owner [`resolve_workstation_owner`] derives the same way.
+fn current_username() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let uid = nix::unistd::Uid::current();
+        if let Ok(Some(u)) = nix::unistd::User::from_uid(uid) {
+            return Some(u.name);
+        }
+    }
+    for var in ["USER", "LOGNAME", "USERNAME"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Suggest a client TLS SAN of the form `<user>.<domain>`, taking the
+/// domain from the resolver's own SAN — netidx's `<user>.<domain>`
+/// identity convention (resolver `resolver.ryu-oh.org` + user `eric` →
+/// `eric.ryu-oh.org`). `None` if the user can't be determined or the
+/// resolver SAN carries no domain (e.g. a single-label name).
+fn suggest_client_san(resolver_san: &str) -> Option<String> {
+    let user = current_username()?;
+    let domain = netidx_conf::tls::domain_from_san(resolver_san).ok()?;
+    Some(format!("{user}.{domain}"))
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct ResolverFlags {
     /// Auth scheme this resolver exposes (anonymous, local, krb5,
@@ -1239,7 +1404,9 @@ pub(crate) struct ResolverFlags {
     /// Local-auth socket path (with `--auth local`).
     #[arg(long = "socket")]
     socket: Option<PathBuf>,
-    /// Resolver's own TLS name (with `--auth tls`).
+    /// Resolver's own TLS name — the full cert SAN, e.g.
+    /// `resolver.ryu-oh.org` (with `--auth tls`). Prompted in two parts
+    /// (domain, then name) when omitted, defaulting to `resolver.local`.
     #[arg(long = "tls-name")]
     tls_name: Option<String>,
     /// Source path of the resolver's certificate, or the literal
@@ -1554,8 +1721,7 @@ fn resolver_tls_auth(
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
-    let name =
-        prompt::required_string("resolver TLS name", f.tls_name.clone())?;
+    let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
     // 'generate' (issue from local CA) is unix-only — the CA module
     // depends on openssl which we don't ship to Windows.
     #[cfg(unix)]
@@ -1647,10 +1813,18 @@ fn resolver_tls_generate(
     units_dir: Option<&Path>,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // First offer the network path: a CA server signs our CSR on the
-    // spot (no staging dir needed — the join installs directly).
+    // spot. The issued files are written to a staging tempdir; we hand
+    // it back so the caller can hold it across the template install,
+    // which does the --force-gated copy to the canonical location.
     if !f.common.dry_run {
-        if let Some(j) = maybe_join_ca_server(default_ca_ip, ca_proto::NodeKind::Resolver)? {
-            return Ok((joined_to_auth(j), None));
+        // The resolver requests its own already-decided SAN, so default
+        // the join's name prompt to it.
+        if let Some((j, staging)) = maybe_join_ca_server(
+            default_ca_ip,
+            ca_proto::NodeKind::Resolver,
+            Some(name),
+        )? {
+            return Ok((joined_to_auth(j), Some(staging)));
         }
     }
     let ca_dir = paths::user_ca_dir()?;
@@ -1859,6 +2033,11 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     let addrs: Vec<(SocketAddr, ReferralAuth)> =
         f.addrs.iter().map(|a| (*a, per_addr_auth.clone())).collect();
     let mut tls_identities = vec![];
+    // Holds the staging tempdir(s) for any CA-server-joined identity
+    // until `finish` (which runs the template's --force-gated install)
+    // returns. Dropping a TempDir deletes its contents, so this must
+    // outlive the `finish` call below.
+    let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     if let Some(spec) = f.tls.to_spec()? {
         tls_identities.push(spec);
     } else if matches!(f.auth, Some(AuthKind::Tls)) {
@@ -1871,7 +2050,15 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         // produced on the spot. The cluster IP seeds the CA-server
         // address default.
         let upstream = f.addrs.first().map(|a| a.ip());
-        tls_identities.push(prompt_tls_client_identity(upstream)?);
+        // Suggest our SAN as `<user>.<domain>`, the domain coming from
+        // the resolver's TLS name the operator just gave.
+        let suggested = match &per_addr_auth {
+            ReferralAuth::Tls(san) => suggest_client_san(san),
+            _ => None,
+        };
+        let si = prompt_tls_client_identity(upstream, suggested.as_deref())?;
+        tls_identities.push(si.spec);
+        tls_staging.extend(si.staging);
     }
     let default_auth = f.default_auth.map(|k| k.default_mech());
     // Level-1 prompt: same loopback-mixing pitfall as the resolver
@@ -1947,7 +2134,8 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
             prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
         )),
         AuthKind::Tls => ReferralAuth::Tls(ArcStr::from(
-            prompt::required_string(
+            prompt_resolver_tls_name(
+                f.addrs.first().copied(),
                 "server TLS name",
                 f.tls_server_name.clone(),
             )?
@@ -1984,6 +2172,32 @@ mod tests {
     use super::*;
     use netidx_conf::template::TlsCopyJob;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn suggest_client_san_uses_resolver_domain() {
+        // A single-label resolver SAN has no domain to borrow → no
+        // suggestion (regardless of whether a username is found).
+        assert_eq!(suggest_client_san("localhost"), None);
+        // Multi-label resolver SAN → `<user>.<domain>` with the
+        // resolver's leftmost label stripped. Oracle the username off
+        // the same source the implementation uses so the test can't
+        // disagree with it across environments.
+        match current_username() {
+            Some(user) => {
+                assert_eq!(
+                    suggest_client_san("resolver.ryu-oh.org"),
+                    Some(format!("{user}.ryu-oh.org"))
+                );
+                assert_eq!(
+                    suggest_client_san("resolver.local"),
+                    Some(format!("{user}.local"))
+                );
+            }
+            None => {
+                assert_eq!(suggest_client_san("resolver.ryu-oh.org"), None);
+            }
+        }
+    }
 
     fn empty_rt() -> RenderedTemplate {
         RenderedTemplate {

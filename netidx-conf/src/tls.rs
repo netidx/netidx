@@ -171,7 +171,6 @@ pub fn validate_pem_cert_file(path: &Path) -> Result<()> {
 /// DNS name).
 pub fn extract_dns_san_from_pem(path: &Path) -> Result<String> {
     use std::io::BufReader;
-    use x509_parser::prelude::FromDer;
     let f = std::fs::File::open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     let mut reader = BufReader::new(f);
@@ -179,20 +178,28 @@ pub fn extract_dns_san_from_pem(path: &Path) -> Result<String> {
         .next()
         .ok_or_else(|| anyhow!("{} contains no PEM certificates", path.display()))?
         .with_context(|| format!("parsing PEM in {}", path.display()))?;
-    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der.as_ref())
-        .with_context(|| format!("parsing DER X.509 in {}", path.display()))?;
-    let ext = cert
-        .subject_alternative_name()
-        .with_context(|| format!("reading SAN extension from {}", path.display()))?
-        .ok_or_else(|| {
-            anyhow!("{} has no SubjectAlternativeName extension", path.display())
-        })?;
-    for name in &ext.value.general_names {
-        if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
-            return Ok(dns.to_string());
-        }
-    }
-    bail!("{} has no DNS SubjectAlternativeName entry", path.display())
+    first_dns_san_from_der(der.as_ref()).ok_or_else(|| {
+        anyhow!(
+            "{} has no DNS SubjectAlternativeName entry (or is not a \
+             parseable X.509 certificate)",
+            path.display()
+        )
+    })
+}
+
+/// The first DNS SAN on a DER-encoded X.509 cert, or `None` if it can't
+/// be parsed or carries no DNS SAN. Used by the resolver-name probe to
+/// read the name off the cert a resolver presents during a TOFU
+/// handshake — the same "pin TLS identities by DNS name" rule as
+/// [`extract_dns_san_from_pem`], over raw DER instead of a PEM file.
+pub fn first_dns_san_from_der(der: &[u8]) -> Option<String> {
+    use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    let ext = cert.subject_alternative_name().ok().flatten()?;
+    ext.value.general_names.iter().find_map(|gn| match gn {
+        GeneralName::DNSName(dns) => Some(dns.to_string()),
+        _ => None,
+    })
 }
 
 /// Strip the leftmost DNS label off a SAN to get the *domain* that

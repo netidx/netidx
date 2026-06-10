@@ -741,6 +741,25 @@ fn serial_path(dir: &Path) -> PathBuf {
 }
 
 fn next_serial(dir: &Path) -> Result<u64> {
+    use fs3::FileExt;
+    // Serialize the counter read-modify-write with an exclusive OS file
+    // lock. The per-`Ca` `serial_lock` only covers one instance, but the
+    // CA server builds a fresh `Ca` per request and a `ca issue` may run
+    // alongside the daemon — without a shared (and inter-process) lock,
+    // concurrent signers race the counter and mint duplicate X.509
+    // serials. We lock a dedicated `serial.lock` rather than the serial
+    // file itself, which `write_next_serial` replaces by atomic rename
+    // (that would drop a lock held on the old inode). The lock releases
+    // when `_lock` drops at end of scope (including on early return).
+    let lock_path = dir.join("serial.lock");
+    let _lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening serial lock {lock_path:?}"))?;
+    _lock
+        .lock_exclusive()
+        .with_context(|| format!("locking serial counter {lock_path:?}"))?;
     let p = serial_path(dir);
     let cur = match std::fs::read_to_string(&p) {
         Ok(s) => s.trim().parse::<u64>().with_context(|| {

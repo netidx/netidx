@@ -569,6 +569,27 @@ impl Value {
         self.discriminant() <= COPY_MAX
     }
 
+    /// Bitwise copy this value without touching refcounts. Sound ONLY
+    /// when the caller has proven the value is a copy variant
+    /// ([`is_copy`](Value::is_copy) — every scalar plus `Null`); for a
+    /// refcounted variant (String/Bytes/Error/Array/Map/Decimal/
+    /// DateTime/Duration/Abstract) this produces a second owner that
+    /// shares the allocation without incrementing the count, so the
+    /// allocation is freed once while two `Value`s still reference it —
+    /// a use-after-free. Use where the shape is already statically
+    /// known to be scalar (the JIT/interp prims paths), as the
+    /// branch-free counterpart to `clone()`. Mirrors the existing
+    /// `get_as_unchecked` "shape already proven, skip the check"
+    /// precedent.
+    #[inline]
+    pub unsafe fn copy_unchecked(&self) -> Value {
+        debug_assert!(
+            self.is_copy(),
+            "copy_unchecked on a refcounted Value variant — would UAF"
+        );
+        unsafe { ptr::read(self) }
+    }
+
     /// Whatever value is attempt to turn it into the type specified
     pub fn cast(self, typ: Typ) -> Option<Value> {
         macro_rules! cast_number {

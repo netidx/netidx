@@ -280,10 +280,15 @@ fn arith_no_panics() {
     let d = Value::Duration(Arc::new(Duration::from_secs(10)));
     assert!(matches!(d.clone() / Value::U32(0), Value::Error(_)));
     assert!(matches!(d.clone() * Value::I64(-1), Value::Error(_)));
-    assert!(matches!(
+    // Unchecked duration subtraction SATURATES to zero on underflow:
+    // durations are unsigned, so a negative result isn't representable,
+    // and erroring here diverged between the node-walk and cranelift
+    // backends (graphix #176). The checked form (`checked_sub` / `-?`)
+    // still reports the underflow — see `checked_methods`.
+    assert_eq!(
         d.clone() - d.clone() - d.clone(),
-        Value::Error(_)
-    ));
+        Value::Duration(Arc::new(Duration::from_secs(0)))
+    );
     let big = Value::Duration(Arc::new(Duration::MAX));
     assert!(matches!(big.clone() + big.clone(), Value::Error(_)));
 }
@@ -313,6 +318,16 @@ fn checked_methods() {
     let d0 = Value::Decimal(Arc::new(Decimal::from(1)));
     let d1 = Value::Decimal(Arc::new(Decimal::from(0)));
     assert!(matches!(d0.checked_div(d1), Value::Error(_)));
+
+    // checked duration subtraction REPORTS underflow as an Error —
+    // unlike unchecked `-`, which saturates to zero (see
+    // `arith_no_panics`). This is the distinction the `-?` operator
+    // gives you.
+    let dur = Value::Duration(Arc::new(Duration::from_secs(10)));
+    assert!(matches!(
+        dur.clone().checked_sub(dur.clone()).checked_sub(dur.clone()),
+        Value::Error(_)
+    ));
 
     // cross-type checked
     assert!(matches!(Value::I64(i64::MAX).checked_add(Value::I32(1)), Value::Error(_)));

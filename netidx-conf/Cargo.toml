@@ -83,6 +83,10 @@ openssl = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
+# OS file lock around the CA serial counter so concurrent signers (the
+# CA server builds a fresh `Ca` per request, and `ca issue` may run
+# while the daemon is up) can't allocate duplicate X.509 serials.
+fs3 = { workspace = true }
 
 [dev-dependencies]
 # `tokio::test` + multi-thread runtime for the e2e harness in
