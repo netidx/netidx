@@ -241,6 +241,14 @@ pub struct EnqueueRequest {
     /// approving admin's policy at approval time).
     pub requested_name: String,
     pub requested_validity_days: u32,
+    /// `Some` ⇒ this queues a **conf-server enrollment**: the cert is
+    /// the reserved [`SERVING_SAN`] (whatever `requested_name` says)
+    /// and the value is where the new conf server will listen — the CA
+    /// records it as a peer at approval. Approval requires an admin
+    /// whose policy grants `may_enroll_servers`; the request code
+    /// ceremony is the same as any queued request.
+    #[serde(default)]
+    pub enroll_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +310,12 @@ pub struct QueueEntry {
     /// `autorenew` approves).
     #[serde(default)]
     pub verified_renewal: bool,
+    /// `Some` ⇒ a conf-server enrollment (see
+    /// [`EnqueueRequest::enroll_listen`]): approval signs the reserved
+    /// [`SERVING_SAN`] and requires `may_enroll_servers`; id-map groups
+    /// don't apply.
+    #[serde(default)]
+    pub enroll_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

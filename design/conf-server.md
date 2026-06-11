@@ -140,6 +140,18 @@ finds the conf server via `--server`, the host's own
 `conf-server.json`, or discovery — an enrollment admin needs no shell
 access to the CA host, just an admin keyslot.
 
+**Conf-server enrollment queues too** (`EnqueueRequest.enroll_listen =
+Some(addr)`): a second resolver's install enqueues its reserved-SAN
+serving-cert request under the same code ceremony instead of demanding
+an admin password at its keyboard. The entry lists as `CONF-SERVER
+ENROLLMENT at <addr>` — a bigger trust decision than a user cert, and
+labelled as one. Approval requires the **approving** admin's
+`may_enroll_servers` (the same gate the synchronous `Enroll` applies),
+signs the reserved serving SAN at the standard validity, never touches
+the id-map, records the new server as a peer, and audits `op=enroll`.
+A denied or expired enrollment is a note on the enrollee, not a failed
+install — its resolver works, it just isn't advertised to discovery.
+
 ## Revocation
 
 The CA keeps an append-only index of everything it has ever signed
@@ -346,12 +358,15 @@ broken network. The matrix is `conf_plane_decision` +
 exhaustively tested there); this table mirrors them — change all three
 together.
 
+The conf-server column applies to fresh networks and joins alike:
+enrolling on an existing network queues for remote approval (the
+approving admin's `may_enroll_servers` is the gate), so no admin needs
+to be at the keyboard and the join side has no reason to differ.
+
 | data plane         | CA               | conf server      | id-mapper        | renew daemon |
 |--------------------|------------------|------------------|------------------|--------------|
-| TLS, fresh network | always (signs the data plane) | always | always | always |
-| TLS, joining       | exists upstream  | asked (default yes — enrolling needs an admin password on the spot, and the admin may be remote) | always | always |
-| krb5, fresh        | always (conf plane only) | always   | asked (default no: krb5 sites have a system IdM) | with the conf server |
-| krb5, joining      | exists upstream  | asked (default yes) | asked (default no) | with the conf server |
+| TLS                | always (fresh: signs the data plane; joining: exists upstream) | always | always | always |
+| krb5               | always (conf plane only; joining: exists upstream) | always | asked (default no: krb5 sites have a system IdM) | with the conf server |
 | anonymous          | with the conf server | asked (default yes — labs may not want the machinery) | never | with the conf server |
 | local (workstation)| —                | —                | never            | only with TLS parent identities |
 

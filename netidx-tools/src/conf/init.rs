@@ -2072,7 +2072,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         && !f.common.dry_run
         && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
         && !ca::default_ca_present()
-        && match conf_plane_decision(kind, false, f.no_conf_server) {
+        && match conf_plane_decision(kind, f.no_conf_server) {
             ConfPlane::Mandatory => {
                 println!(
                     "setting up the conf server for this network. The conf \
@@ -2225,13 +2225,7 @@ enum ConfPlane {
     Skip,
 }
 
-/// `joining` ⇒ a discovered network already anchors the conf plane and
-/// this host would *enroll* a conf server — which requires an admin
-/// password on the spot (Enroll is synchronous). When the admin is
-/// remote (the queued-approval install) the operator must be able to
-/// decline, so joining is always a question, never mandatory.
-///
-/// On a fresh network: TLS already creates the CA (it signs the data
+/// TLS already creates the CA on a fresh network (it signs the data
 /// plane), and krb5/anonymous still need the conf plane's TLS trust
 /// root for discovery, enrollment, and renewal — declining it on a TLS
 /// or krb5 network produces a network where certificate renewal and
@@ -2239,12 +2233,15 @@ enum ConfPlane {
 /// question. Anonymous networks may genuinely not want the machinery
 /// (lab/dev setups), so they're asked. Local auth is host-local by
 /// definition: nothing to discover, nothing to enroll.
-fn conf_plane_decision(kind: AuthKind, joining: bool, no_conf_server: bool) -> ConfPlane {
+///
+/// The same rule covers joining an existing network: enrolling a conf
+/// server queues for remote approval like any other request (the
+/// admin's `may_enroll_servers` gate runs at approval), so no admin
+/// needs to be at this keyboard and there is no reason for the join
+/// side of the matrix to differ.
+fn conf_plane_decision(kind: AuthKind, no_conf_server: bool) -> ConfPlane {
     if no_conf_server {
         return ConfPlane::Skip;
-    }
-    if joining {
-        return ConfPlane::Ask;
     }
     match kind {
         AuthKind::Tls | AuthKind::Krb5 => ConfPlane::Mandatory,
@@ -2538,12 +2535,11 @@ fn resolver_tls_generate(
         let domain = netidx_conf::tls::domain_from_san(name)
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
-        let setup_server = match conf_plane_decision(AuthKind::Tls, false, f.no_conf_server)
-        {
+        let setup_server = match conf_plane_decision(AuthKind::Tls, f.no_conf_server) {
             ConfPlane::Mandatory => Some(true),
             ConfPlane::Skip => Some(false),
-            // TLS + fresh network is never a question — see the matrix.
-            ConfPlane::Ask => unreachable!("tls fresh-network conf plane is not Ask"),
+            // TLS is never a question — see the matrix.
+            ConfPlane::Ask => unreachable!("tls conf plane is not Ask"),
         };
         let (created, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
             dir: ca_dir.clone(),
@@ -2741,9 +2737,12 @@ fn post_apply_conf_server(
 /// roles, and drop the activation unit. The CA records us as a peer as
 /// a side effect of the enrollment.
 ///
-/// This is the join side of the [`conf_plane_decision`] matrix: always
-/// a question, because enrollment needs a CA admin's password right
-/// here and the admin may be remote (the queued-approval install).
+/// An admin at this machine authorizes synchronously with their
+/// password; otherwise the enrollment **queues** for remote approval
+/// under the same request-code ceremony as a cert join (the approving
+/// admin needs `may_enroll_servers`). A denied or expired enrollment
+/// is a note, not a failure — the resolver this install produced
+/// works; it just isn't advertised to discovery from this host.
 #[cfg(unix)]
 fn enroll_conf_server(
     net: &DiscoveredNetwork,
@@ -2765,21 +2764,27 @@ fn enroll_conf_server(
         );
         return Ok(());
     };
-    match conf_plane_decision(kind, true, no_conf_server) {
+    match conf_plane_decision(kind, no_conf_server) {
         ConfPlane::Skip => return Ok(()),
-        ConfPlane::Ask | ConfPlane::Mandatory => (),
-    }
-    if !prompt::confirm(
-        "set up a conf server on this host (advertises this resolver to \
-         future installs; needs a CA admin's password now)?",
-        true,
-    )? {
-        println!(
-            "note: skipped — discovery only sees hosts running a conf \
-             server, so future installs won't learn about this resolver \
-             from this host"
-        );
-        return Ok(());
+        ConfPlane::Mandatory => println!(
+            "enrolling a conf server on this host — it advertises this \
+             resolver to future installs and renews its certificates. \
+             (expert opt-out: --no-conf-server)"
+        ),
+        ConfPlane::Ask => {
+            if !prompt::confirm(
+                "set up a conf server on this host (advertises this resolver \
+                 to future installs)?",
+                true,
+            )? {
+                println!(
+                    "note: skipped — discovery only sees hosts running a conf \
+                     server, so future installs won't learn about this resolver \
+                     from this host"
+                );
+                return Ok(());
+            }
+        }
     }
     let ip = prompt::parsed_with_default::<IpAddr>(
         "conf server listen IP",
@@ -2792,16 +2797,63 @@ fn enroll_conf_server(
         &conf_proto::DEFAULT_PORT.to_string(),
     )?;
     let listen = SocketAddr::new(ip, port);
-    let admin = prompt::required_string(
-        "CA admin name (authorizes enrolling this conf server)",
-        None,
-    )?;
-    let password = Zeroizing::new(rpassword::prompt_password(format!(
-        "CA password for admin {admin}: "
-    ))?);
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let issued =
-        rt.block_on(conf_client::enroll(ca_addr, &admin, password, listen, &net.identity))?;
+    let admin_here = prompt::confirm(
+        "is a CA admin at this machine to enter their password now? \
+         (No: queue the enrollment for remote approval)",
+        false,
+    )?;
+    let issued = if admin_here {
+        let admin = prompt::required_string(
+            "CA admin name (authorizes enrolling this conf server)",
+            None,
+        )?;
+        let password = Zeroizing::new(rpassword::prompt_password(format!(
+            "CA password for admin {admin}: "
+        ))?);
+        rt.block_on(conf_client::enroll(ca_addr, &admin, password, listen, &net.identity))?
+    } else {
+        let pending =
+            rt.block_on(conf_client::enqueue_enroll(ca_addr, listen, &net.identity))?;
+        println!("enrollment queued. Your request code is:");
+        println!("  SHA256  {}", pending.fingerprint.text());
+        println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
+        println!(
+            "send this code to your CA admin (chat, phone — any channel you \
+             trust); they approve with `netidx conf ca sign` (their policy \
+             must grant may_enroll_servers). Waiting for approval (Ctrl-C to \
+             abort; the request expires on its own)..."
+        );
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+            match rt.block_on(conf_client::poll(
+                ca_addr,
+                NodeKind::ConfServer,
+                &pending,
+                &net.identity,
+            ))? {
+                conf_client::PollOutcome::Pending => continue,
+                conf_client::PollOutcome::Issued(issued) => break issued,
+                conf_client::PollOutcome::Denied(reason) => {
+                    println!(
+                        "note: the CA admin denied the enrollment ({reason}); \
+                         this resolver works, but won't be advertised to \
+                         future installs from this host"
+                    );
+                    return Ok(());
+                }
+                conf_client::PollOutcome::Expired => {
+                    println!(
+                        "note: the enrollment request expired before an admin \
+                         approved it; this resolver works, but won't be \
+                         advertised to future installs from this host. Re-run \
+                         the install to queue a new enrollment."
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    };
     for w in &issued.warnings {
         println!("  warning: {w}");
     }
@@ -3151,25 +3203,20 @@ mod tests {
     fn the_conf_plane_matrix() {
         use AuthKind::*;
         use ConfPlane::*;
-        // Fresh network: declining the conf plane on a TLS or krb5
-        // network breaks renewal + zero-touch installs forever, so
-        // neither is a question. Anonymous networks may not want the
-        // machinery; local auth has nothing to discover.
+        // Declining the conf plane on a TLS or krb5 network breaks
+        // renewal + zero-touch installs forever, so neither is a
+        // question — fresh network or joining one (enrollment queues
+        // for remote approval, so no admin is needed at this
+        // keyboard). Anonymous networks may not want the machinery;
+        // local auth has nothing to discover.
         for (kind, want) in
             [(Tls, Mandatory), (Krb5, Mandatory), (Anonymous, Ask), (Local, Skip)]
         {
-            assert_eq!(conf_plane_decision(kind, false, false), want, "{kind:?} fresh");
-        }
-        // Joining: enrollment needs an admin password on the spot, and
-        // the admin may be remote — always a question.
-        for kind in [Tls, Krb5, Anonymous, Local] {
-            assert_eq!(conf_plane_decision(kind, true, false), Ask, "{kind:?} join");
+            assert_eq!(conf_plane_decision(kind, false), want, "{kind:?}");
         }
         // The expert opt-out beats everything.
         for kind in [Tls, Krb5, Anonymous, Local] {
-            for joining in [false, true] {
-                assert_eq!(conf_plane_decision(kind, joining, true), Skip);
-            }
+            assert_eq!(conf_plane_decision(kind, true), Skip);
         }
     }
 

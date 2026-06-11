@@ -420,20 +420,27 @@ async fn handle_conn(
                     .await?;
                     match signed {
                         Err(reason) => ApproveResponse::Err { reason },
-                        Ok((id, SignResponse::Err { reason }, _)) => {
+                        Ok(Approved { resp: SignResponse::Err { reason }, .. }) => {
                             // The sign itself failed (policy etc.) —
                             // the request stays pending; the admin can
                             // retry with different groups or deny it.
-                            let _ = id;
                             ApproveResponse::Err { reason }
                         }
-                        Ok((
+                        Ok(Approved {
                             id,
-                            SignResponse::Ok { signed_cert_pem, trusted_pem, mut warnings },
+                            resp:
+                                SignResponse::Ok { signed_cert_pem, trusted_pem, mut warnings },
                             push,
-                        )) => {
+                            enroll_listen,
+                        }) => {
                             if let Some(plan) = push {
                                 warnings.extend(push_registrations(state, &plan).await);
+                            }
+                            // An approved enrollment makes the new conf
+                            // server a peer — same side effect as the
+                            // synchronous Enroll, deferred to approval.
+                            if let Some(listen) = enroll_listen {
+                                record_peer(state, listen);
                             }
                             let outcome = ca_queue::SignedOutcome {
                                 signed_cert_pem,
@@ -1000,6 +1007,34 @@ fn handle_enqueue(
     peer: SocketAddr,
     peer_ident: Option<&(String, Option<u64>)>,
 ) -> EnqueueResponse {
+    // Conf-server enrollment: the name is the reserved serving SAN by
+    // definition, so none of the name rules below apply — not the
+    // reserved-name refusal (this is the sanctioned way to request it)
+    // and not one-live-cert (every conf server on the network holds the
+    // same name). The real gate — the approving admin's
+    // `may_enroll_servers` — runs at approval; this entry just waits in
+    // the queue under the same code-matching ceremony as any other.
+    if let Some(listen) = req.enroll_listen {
+        let queued = ca_queue::QueuedReq::new(
+            req.kind,
+            req.csr_pem.clone(),
+            SERVING_SAN.to_string(),
+            req.requested_validity_days,
+            peer.to_string(),
+            false,
+            Some(listen),
+        );
+        return match ca_queue::enqueue(ca_dir, &queued) {
+            Ok(()) => {
+                info!(
+                    "conf-server: queued enrollment {} (listen {listen}) from {peer}",
+                    queued.id
+                );
+                EnqueueResponse::Ok { request_id: queued.id }
+            }
+            Err(e) => EnqueueResponse::Err { reason: format!("{e:#}") },
+        };
+    }
     let name = req.requested_name.trim();
     if name.is_empty() {
         return EnqueueResponse::Err { reason: "requested name is empty".to_string() };
@@ -1061,6 +1096,7 @@ fn handle_enqueue(
         req.requested_validity_days,
         peer.to_string(),
         verified_renewal,
+        None,
     );
     match ca_queue::enqueue(ca_dir, &queued) {
         Ok(()) => {
@@ -1093,11 +1129,23 @@ fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse
                     peer: q.peer,
                     csr_pem: q.csr_pem,
                     verified_renewal: q.verified_renewal,
+                    enroll_listen: q.enroll_listen,
                 })
                 .collect(),
         },
         Err(e) => ListQueueResponse::Err { reason: format!("listing the queue: {e:#}") },
     }
+}
+
+/// A successful [`handle_approve`]: the signed outcome plus what the
+/// dispatch arm needs to finish the job — the push plan for id-map
+/// registration, and the peer address to record when the approved
+/// entry was a conf-server enrollment.
+struct Approved {
+    id: String,
+    resp: SignResponse,
+    push: Option<PushPlan>,
+    enroll_listen: Option<SocketAddr>,
 }
 
 /// Approve a queued request: look it up, then sign it through the
@@ -1108,7 +1156,7 @@ fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse
 fn handle_approve(
     ca_dir: &Path,
     req: &ApproveRequest,
-) -> std::result::Result<(String, SignResponse, Option<PushPlan>), String> {
+) -> std::result::Result<Approved, String> {
     let queued = match ca_queue::status(ca_dir, &req.request_id) {
         Ok(ca_queue::Status::Pending(q)) => q,
         Ok(ca_queue::Status::Signed(_)) => {
@@ -1122,6 +1170,31 @@ fn handle_approve(
         }
         Err(e) => return Err(format!("reading the queue: {e:#}")),
     };
+    // A queued conf-server enrollment: the same gate as the synchronous
+    // [`Request::Enroll`] — the *approving* admin's `may_enroll_servers`
+    // — applied here, where the admin actually is. Signs the reserved
+    // serving SAN at the standard validity; id-map groups don't apply
+    // (a conf server isn't a user).
+    if let Some(listen) = queued.enroll_listen {
+        let unlocked = authenticate(ca_dir, &req.admin, &req.password.0)?;
+        if !unlocked.policy.may_enroll_servers {
+            return Err(format!("admin {} may not enroll conf servers", unlocked.admin));
+        }
+        let validity = crate::ca::DEFAULT_LEAF_VALIDITY_DAYS;
+        let resp =
+            match sign_csr(ca_dir, &unlocked.ca_key_pem, &queued.csr_pem, SERVING_SAN, validity)
+            {
+                Ok(resp) => resp,
+                Err(e) => return Err(format!("internal error: {e:#}")),
+            };
+        audit(ca_dir, &unlocked.admin, "enroll", SERVING_SAN, validity);
+        return Ok(Approved {
+            id: req.request_id.clone(),
+            resp,
+            push: None,
+            enroll_listen: Some(listen),
+        });
+    }
     if queued.verified_renewal {
         // Continuation, not a new trust decision: possession of the
         // live key for this exact name was proven at enqueue. Any
@@ -1147,7 +1220,12 @@ fn handle_approve(
             Err(e) => return Err(format!("internal error: {e:#}")),
         };
         audit(ca_dir, &unlocked.admin, "renew", &queued.requested_name, validity);
-        return Ok((req.request_id.clone(), resp, None));
+        return Ok(Approved {
+            id: req.request_id.clone(),
+            resp,
+            push: None,
+            enroll_listen: None,
+        });
     }
     let sign_req = SignRequest {
         admin: req.admin.clone(),
@@ -1158,7 +1236,12 @@ fn handle_approve(
         id_map_groups: req.id_map_groups.clone(),
     };
     let signed = handle_sign_request_op(ca_dir, &sign_req, "approve");
-    Ok((req.request_id.clone(), signed.resp, signed.push))
+    Ok(Approved {
+        id: req.request_id.clone(),
+        resp: signed.resp,
+        push: signed.push,
+        enroll_listen: None,
+    })
 }
 
 /// Deny a queued request (any authenticated admin).
@@ -2009,6 +2092,106 @@ mod tests {
         // The audit trail says approve, not sign.
         let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
         assert!(log.contains("op=approve"));
+    }
+
+    /// A second conf server enrolls with no admin at its keyboard: the
+    /// enrollment queues, the admin approves remotely (their
+    /// `may_enroll_servers` is the gate), the poll delivers a
+    /// reserved-SAN serving cert, and the CA records the new server as
+    /// a peer — everything the synchronous Enroll does, minus the
+    /// password-at-the-keyboard requirement.
+    #[tokio::test]
+    async fn queued_server_enrollment_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+        let listen: SocketAddr = "10.0.0.9:4565".parse().unwrap();
+        let pending =
+            conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        assert!(matches!(
+            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+                .await
+                .unwrap(),
+            conf_client::PollOutcome::Pending
+        ));
+        // The admin's list shows what this really is — an enrollment at
+        // a stated address, not a user cert — and the request code
+        // matches the enrollee's.
+        let queue =
+            conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].requested_name, SERVING_SAN);
+        assert_eq!(queue[0].enroll_listen, Some(listen));
+        assert_eq!(
+            conf_client::csr_fingerprint(&queue[0].csr_pem).unwrap(),
+            pending.fingerprint,
+        );
+        conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
+            .await
+            .unwrap();
+        let issued = match conf_client::poll(
+            addr,
+            NodeKind::ConfServer,
+            &pending,
+            &identity,
+        )
+        .await
+        .unwrap()
+        {
+            conf_client::PollOutcome::Issued(i) => i,
+            _ => panic!("expected Issued after approval"),
+        };
+        let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
+        let san = cert.subject_alt_names().unwrap();
+        assert!(san.iter().any(|n| n.dnsname() == Some(SERVING_SAN)));
+        // The CA now knows the new conf server as a peer (the start of
+        // future installs' peer walks).
+        assert!(state.cfg.lock().peers.contains(&listen));
+        let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(log.contains("op=enroll"));
+    }
+
+    /// The `may_enroll_servers` gate binds to the *approving* admin: an
+    /// admin without it can approve user certs all day but cannot mint
+    /// a conf server; the entry stays pending for someone who can.
+    #[tokio::test]
+    async fn enrollment_approval_requires_the_policy_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let restricted = Policy { may_enroll_servers: false, ..policy() };
+        ca_vault::add_admin(dir.path(), "apw", "bob", "bpw", restricted).unwrap();
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+        let listen: SocketAddr = "10.0.0.10:4565".parse().unwrap();
+        let pending =
+            conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        let queue =
+            conf_client::list_queue(addr, "bob", "bpw", &identity).await.unwrap();
+        let err =
+            conf_client::approve(addr, "bob", "bpw", &queue[0].id, vec![], &identity)
+                .await
+                .map(|_| ())
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("may not enroll"));
+        // Still pending — bob's failed approval consumed nothing.
+        assert!(matches!(
+            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+                .await
+                .unwrap(),
+            conf_client::PollOutcome::Pending
+        ));
+        conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
+            .await
+            .unwrap();
+        assert!(matches!(
+            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+                .await
+                .unwrap(),
+            conf_client::PollOutcome::Issued(_)
+        ));
     }
 
     #[tokio::test]

@@ -524,6 +524,34 @@ pub async fn enqueue(
     validity_days: u32,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
+    enqueue_inner(addr, kind, name, validity_days, None, expected).await
+}
+
+/// Queue a **conf-server enrollment** for asynchronous admin approval:
+/// the reserved [`SERVING_SAN`] serving cert, approvable only by an
+/// admin whose policy grants `may_enroll_servers`. Same request-code
+/// ceremony and [`poll`] loop as a queued sign; `listen` is where the
+/// new conf server will serve (recorded as a peer at approval).
+pub async fn enqueue_enroll(
+    addr: SocketAddr,
+    listen: SocketAddr,
+    expected: &CaIdentity,
+) -> Result<PendingEnrollment> {
+    // The validity is decided server-side at approval (the standard
+    // serving-cert validity); the value here is a well-formedness
+    // placeholder.
+    enqueue_inner(addr, NodeKind::ConfServer, SERVING_SAN, 1, Some(listen), expected)
+        .await
+}
+
+async fn enqueue_inner(
+    addr: SocketAddr,
+    kind: NodeKind,
+    name: &str,
+    validity_days: u32,
+    enroll_listen: Option<SocketAddr>,
+    expected: &CaIdentity,
+) -> Result<PendingEnrollment> {
     let kc = generate_key_and_csr(name)?;
     let our_spki = csr_spki(&kc.csr_pem)?;
     let fingerprint = Fingerprint::of_der(&our_spki);
@@ -535,6 +563,7 @@ pub async fn enqueue(
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
             requested_validity_days: validity_days,
+            enroll_listen,
         }),
     )
     .await?;
@@ -795,6 +824,7 @@ pub async fn enqueue_renewal(
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
             requested_validity_days: validity_days,
+            enroll_listen: None,
         }),
     )
     .await?;

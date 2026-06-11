@@ -1803,10 +1803,16 @@ fn sign_queue(p: SignArgs) -> Result<()> {
             let code = conf_client::csr_fingerprint(&e.csr_pem)
                 .map(|f| f.short())
                 .unwrap_or_else(|_| "????????".to_string());
+            // A conf-server enrollment is a bigger trust decision than
+            // a user cert — say so in the list, not just the detail.
+            let what = match e.enroll_listen {
+                Some(listen) => format!("CONF-SERVER ENROLLMENT at {listen}"),
+                None => e.requested_name.clone(),
+            };
             println!(
                 "  {}) {}  code {}  kind {:?}  age {}  from {}",
                 i + 1,
-                e.requested_name,
+                what,
                 code,
                 e.kind,
                 fmt_age(e.age_secs),
@@ -1828,9 +1834,26 @@ fn sign_queue(p: SignArgs) -> Result<()> {
         let fp = conf_client::csr_fingerprint(&entry.csr_pem)
             .context("the queued CSR does not parse — deny it")?;
         println!();
-        println!("  name:     {}", entry.requested_name);
+        match entry.enroll_listen {
+            Some(listen) => {
+                println!("  CONF-SERVER ENROLLMENT — approving signs the reserved");
+                println!(
+                    "  serving name {:?} and registers the new",
+                    conf_proto::SERVING_SAN
+                );
+                println!("  conf server at {listen} as a peer. It will answer");
+                println!("  discovery and present the network identity to joiners.");
+                println!("  (requires your policy's may_enroll_servers)");
+            }
+            None => {
+                println!("  name:     {}", entry.requested_name);
+                println!(
+                    "  validity: {} days (capped by your policy)",
+                    entry.requested_validity_days
+                );
+            }
+        }
         println!("  kind:     {:?}", entry.kind);
-        println!("  validity: {} days (capped by your policy)", entry.requested_validity_days);
         println!("  from:     {}", entry.peer);
         println!("  request code:");
         println!("  SHA256  {}", fp.text());
@@ -1868,11 +1891,17 @@ fn sign_queue(p: SignArgs) -> Result<()> {
         match action.as_str() {
             "approve" => {
                 // The admin knows who they're enrolling — the groups
-                // are chosen here, bounded by this admin's policy.
-                let groups = init::prompt_id_map_groups(
-                    &[],
-                    init::default_id_map_groups(entry.kind),
-                )?;
+                // are chosen here, bounded by this admin's policy. A
+                // conf server isn't a user: enrollments never register
+                // in the id-map, so there is nothing to ask.
+                let groups = if entry.enroll_listen.is_some() {
+                    vec![]
+                } else {
+                    init::prompt_id_map_groups(
+                        &[],
+                        init::default_id_map_groups(entry.kind),
+                    )?
+                };
                 let warnings = rt.block_on(conf_client::approve(
                     server,
                     &admin,

@@ -15,6 +15,7 @@ use crate::{atomic, conf_proto::NodeKind};
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
 use std::{
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -47,6 +48,11 @@ pub struct QueuedReq {
     /// never touches the id-map.
     #[serde(default)]
     pub verified_renewal: bool,
+    /// `Some` ⇒ a conf-server enrollment: approval signs the reserved
+    /// serving SAN, requires the approving admin's
+    /// `may_enroll_servers`, and records this address as a peer.
+    #[serde(default)]
+    pub enroll_listen: Option<SocketAddr>,
 }
 
 impl QueuedReq {
@@ -58,6 +64,7 @@ impl QueuedReq {
         requested_validity_days: u32,
         peer: String,
         verified_renewal: bool,
+        enroll_listen: Option<SocketAddr>,
     ) -> Self {
         QueuedReq {
             id: new_id(),
@@ -68,6 +75,7 @@ impl QueuedReq {
             received_unix: now_unix(),
             peer,
             verified_renewal,
+            enroll_listen,
         }
     }
 
@@ -276,6 +284,7 @@ mod tests {
             received_unix,
             peer: "10.0.0.7:51000".to_string(),
             verified_renewal: false,
+            enroll_listen: None,
         }
     }
 
