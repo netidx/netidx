@@ -20,9 +20,9 @@ use crate::{
     conf_proto::{
         self, AddIdentityRequest, AddIdentityResponse, ApproveRequest, ApproveResponse,
         ClientHello, DenyRequest, DenyResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetInfoResponse, InfoAuth, ListQueueRequest, ListQueueResponse,
-        PollResponse, QueueEntry, Request, ResolverAddr, Role, ServerHello, SignRequest,
-        SignResponse, PROTOCOL_VERSION, SERVING_SAN,
+        EnrollRequest, GetCrlResponse, GetInfoResponse, InfoAuth, ListQueueRequest,
+        ListQueueResponse, PollResponse, QueueEntry, Request, ResolverAddr, Role,
+        ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION, SERVING_SAN,
     },
     conf_server_config::ConfServerConfig,
     discovery, id_map,
@@ -244,17 +244,23 @@ async fn handle_conn(
 ) -> Result<()> {
     let mut tls = acceptor.accept(tcp).await.context("TLS handshake")?;
     // If the client presented a cert, the verifier already validated it
-    // against our roots — all that's left is checking it's a peer conf
-    // server (carries the reserved SAN), which is what authorizes
-    // server-to-server requests.
-    let peer_is_conf_server = {
+    // against our roots. What remains is identifying *who*: the SAN
+    // authorizes server-to-server requests (the reserved name) and
+    // marks renewals (SAN == requested name); the serial lets the
+    // enqueue path confirm the presented cert is the live one in our
+    // own index — stronger than a CRL check, since the index is the
+    // source of truth on the CA host.
+    let peer_ident: Option<(String, Option<u64>)> = {
         let (_io, conn) = tls.get_ref();
-        conn.peer_certificates()
-            .and_then(|certs| certs.first())
-            .and_then(|leaf| crate::tls::first_dns_san_from_der(leaf.as_ref()))
-            .map(|san| san.eq_ignore_ascii_case(SERVING_SAN))
-            .unwrap_or(false)
+        conn.peer_certificates().and_then(|certs| certs.first()).and_then(|leaf| {
+            let san = crate::tls::first_dns_san_from_der(leaf.as_ref())?;
+            Some((san, leaf_serial(leaf.as_ref())))
+        })
     };
+    let peer_is_conf_server = peer_ident
+        .as_ref()
+        .map(|(san, _)| san.eq_ignore_ascii_case(SERVING_SAN))
+        .unwrap_or(false);
     let _hello: ClientHello =
         conf_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
     let domain = state.cfg.lock().domain.clone();
@@ -350,9 +356,11 @@ async fn handle_conn(
                     reason: "this host does not hold the CA".to_string(),
                 },
                 Some(dir) => {
-                    tokio::task::spawn_blocking(move || handle_enqueue(&dir, &req, peer))
-                        .await
-                        .context("enqueue task panicked")?
+                    tokio::task::spawn_blocking(move || {
+                        handle_enqueue(&dir, &req, peer, peer_ident.as_ref())
+                    })
+                    .await
+                    .context("enqueue task panicked")?
                 }
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing EnqueueResponse")
@@ -457,6 +465,26 @@ async fn handle_conn(
                 Some(dir) => run_signing(&signs, move || handle_deny(&dir, &req)).await?,
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing DenyResponse")
+        }
+        Request::GetCrl => {
+            let resp = match ca_dir(state) {
+                None => GetCrlResponse { crl_pem: None },
+                Some(dir) => tokio::task::spawn_blocking(move || {
+                    match std::fs::read_to_string(crate::ca_index::crl_path(&dir)) {
+                        Ok(pem) => GetCrlResponse { crl_pem: Some(pem) },
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            GetCrlResponse { crl_pem: None }
+                        }
+                        Err(e) => {
+                            warn!("conf-server: reading the CRL failed: {e:#}");
+                            GetCrlResponse { crl_pem: None }
+                        }
+                    }
+                })
+                .await
+                .context("CRL read task panicked")?,
+            };
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
         }
     }
 }
@@ -719,6 +747,23 @@ fn authenticate(
     if admin != unlocked.admin {
         return Err("admin name does not match the password".to_string());
     }
+    // Opportunistic maintenance: re-signing the CRL — and re-signing
+    // the CA certificate itself near the end of its life — both need
+    // the CA key, and an unlocked vault is the only time we hold it.
+    // Best-effort: a failure here must not fail the request the admin
+    // actually made.
+    match crate::ca::maybe_renew_ca_cert(ca_dir, &unlocked.ca_key_pem) {
+        Ok(true) => {
+            info!("conf-server: renewed the CA certificate (same key; glyph unchanged)")
+        }
+        Ok(false) => (),
+        Err(e) => warn!("conf-server: CA renewal check failed: {e:#}"),
+    }
+    match crate::ca_index::refresh_crl_if_stale(ca_dir, &unlocked.ca_key_pem) {
+        Ok(true) => info!("conf-server: re-signed the CRL (was nearing nextUpdate)"),
+        Ok(false) => (),
+        Err(e) => warn!("conf-server: opportunistic CRL refresh failed: {e:#}"),
+    }
     Ok(unlocked)
 }
 
@@ -775,6 +820,22 @@ fn try_handle(ca_dir: &Path, req: &SignRequest, op: &str) -> Result<Signed> {
         return Ok(failed(reject(&format!(
             "name {name:?} is not permitted for admin {}",
             unlocked.admin
+        ))));
+    }
+    // One live certificate per name: a sign request for a name that
+    // already has an unexpired, unrevoked cert is refused. This closes
+    // the impostor race on existing identities — nobody can be issued
+    // `eric.ryu-oh.org` while eric holds it — and makes the
+    // rebuilt-laptop flow explicit: the admin revokes the old cert
+    // first, with their eyes open. (Verified renewals, which prove
+    // possession of the live cert's key, are the exception — they
+    // arrive via the renewal path, not here.)
+    let live = crate::ca_index::live_for_name(ca_dir, name)
+        .context("checking the issuance index")?;
+    if !live.is_empty() {
+        return Ok(failed(reject(&format!(
+            "an unexpired certificate already exists for {name:?}; an admin must \
+             revoke it first (`netidx conf ca revoke`)"
         ))));
     }
     let validity = req.requested_validity_days.min(unlocked.policy.max_validity_days);
@@ -910,34 +971,88 @@ pub fn handle_add_identity(map_path: &Path, req: &AddIdentityRequest) -> AddIden
     }
 }
 
+/// Extract an X.509 certificate's serial as u64 (this CA issues from a
+/// u64 counter; foreign certs with big serials yield `None`, which
+/// simply never matches the index).
+fn leaf_serial(der: &[u8]) -> Option<u64> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    cert.tbs_certificate.serial.to_string().parse().ok()
+}
+
 /// Queue a signing request for later admin approval. Unauthenticated
 /// by design — the requester has no credentials yet; trust is
 /// established when the admin matches the request's CSR-key
 /// fingerprint before approving. Only cheap structural checks happen
 /// here (the policy checks run at approval, under the approving
 /// admin's slot).
+///
+/// The exception is a **verified renewal**: the connection presented a
+/// valid client cert whose SAN is exactly the requested name and whose
+/// serial is live in our own index. That's cryptographic continuation
+/// of an identity the admin already approved once — it bypasses the
+/// reserved-name and one-live-cert rules (a renewal's name *does* have
+/// a live cert; that's the point) and is flagged for glyph-free,
+/// batchable (or automatic) approval.
 fn handle_enqueue(
     ca_dir: &Path,
     req: &EnqueueRequest,
     peer: SocketAddr,
+    peer_ident: Option<&(String, Option<u64>)>,
 ) -> EnqueueResponse {
     let name = req.requested_name.trim();
     if name.is_empty() {
         return EnqueueResponse::Err { reason: "requested name is empty".to_string() };
     }
-    // Fail fast on the reserved name — approval would refuse it anyway,
-    // but the enrollee should hear it now, not after the admin clicked
-    // through.
-    if name.eq_ignore_ascii_case(SERVING_SAN) {
-        return EnqueueResponse::Err {
-            reason: "that name is reserved for the conf server and cannot be issued"
-                .to_string(),
-        };
-    }
     if req.requested_validity_days == 0 {
         return EnqueueResponse::Err {
             reason: "validity_days must be > 0".to_string(),
         };
+    }
+    let verified_renewal = match peer_ident {
+        Some((san, Some(serial))) if san.eq_ignore_ascii_case(name) => {
+            match crate::ca_index::live_for_name(ca_dir, name) {
+                Ok(live) => live.iter().any(|s| s.cert.serial == *serial),
+                Err(e) => {
+                    warn!("conf-server: index lookup during enqueue failed: {e:#}");
+                    false
+                }
+            }
+        }
+        _ => false,
+    };
+    if !verified_renewal {
+        // Fail fast on the reserved name — approval would refuse it
+        // anyway, but the enrollee should hear it now, not after the
+        // admin clicked through. (A conf server renewing its own
+        // serving cert is the legitimate exception above.)
+        if name.eq_ignore_ascii_case(SERVING_SAN) {
+            return EnqueueResponse::Err {
+                reason: "that name is reserved for the conf server and cannot be \
+                         issued"
+                    .to_string(),
+            };
+        }
+        // Same one-live-cert-per-name rule as the sign path, checked
+        // here too so the enrollee hears it immediately instead of
+        // after the admin clicked through an approval that would only
+        // be refused.
+        match crate::ca_index::live_for_name(ca_dir, name) {
+            Ok(live) if !live.is_empty() => {
+                return EnqueueResponse::Err {
+                    reason: format!(
+                        "an unexpired certificate already exists for {name:?}; an \
+                         admin must revoke it first (`netidx conf ca revoke`)"
+                    ),
+                }
+            }
+            Ok(_) => (),
+            Err(e) => {
+                return EnqueueResponse::Err {
+                    reason: format!("checking the issuance index: {e:#}"),
+                }
+            }
+        }
     }
     let queued = ca_queue::QueuedReq::new(
         req.kind,
@@ -945,11 +1060,13 @@ fn handle_enqueue(
         name.to_string(),
         req.requested_validity_days,
         peer.to_string(),
+        verified_renewal,
     );
     match ca_queue::enqueue(ca_dir, &queued) {
         Ok(()) => {
             info!(
-                "conf-server: queued signing request {} for {name:?} from {peer}",
+                "conf-server: queued {} {} for {name:?} from {peer}",
+                if verified_renewal { "verified renewal" } else { "signing request" },
                 queued.id
             );
             EnqueueResponse::Ok { request_id: queued.id }
@@ -975,6 +1092,7 @@ fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse
                     requested_validity_days: q.requested_validity_days,
                     peer: q.peer,
                     csr_pem: q.csr_pem,
+                    verified_renewal: q.verified_renewal,
                 })
                 .collect(),
         },
@@ -1004,6 +1122,33 @@ fn handle_approve(
         }
         Err(e) => return Err(format!("reading the queue: {e:#}")),
     };
+    if queued.verified_renewal {
+        // Continuation, not a new trust decision: possession of the
+        // live key for this exact name was proven at enqueue. Any
+        // authenticated admin may confirm it — the SAN-scope and
+        // one-live-cert checks don't apply (the original enrollment
+        // already passed them), the reserved serving name is allowed
+        // (conf servers renew themselves), and the id-map is never
+        // touched (the identity already exists; requested groups are
+        // ignored).
+        let unlocked = authenticate(ca_dir, &req.admin, &req.password.0)?;
+        let validity = queued
+            .requested_validity_days
+            .min(unlocked.policy.max_validity_days)
+            .max(1);
+        let resp = match sign_csr(
+            ca_dir,
+            &unlocked.ca_key_pem,
+            &queued.csr_pem,
+            &queued.requested_name,
+            validity,
+        ) {
+            Ok(resp) => resp,
+            Err(e) => return Err(format!("internal error: {e:#}")),
+        };
+        audit(ca_dir, &unlocked.admin, "renew", &queued.requested_name, validity);
+        return Ok((req.request_id.clone(), resp, None));
+    }
     let sign_req = SignRequest {
         admin: req.admin.clone(),
         password: req.password.clone(),
@@ -1082,7 +1227,10 @@ fn reject(reason: &str) -> SignResponse {
     SignResponse::Err { reason: reason.to_string() }
 }
 
-fn audit(ca_dir: &Path, admin: &str, op: &str, name: &str, validity: u32) {
+/// Append a line to the CA's audit log (best-effort — a failed write
+/// must not fail the operation it records). Public because the CLI's
+/// revoke writes the same trail the daemon's sign/approve/deny do.
+pub fn audit(ca_dir: &Path, admin: &str, op: &str, name: &str, validity: u32) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1987,6 +2135,375 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err();
         assert!(format!("{err:#}").contains("reserved"));
+    }
+
+    #[test]
+    fn one_live_certificate_per_name() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let req = request("eric.ryu-oh.org", "alice", "apw", 30);
+        assert!(matches!(
+            handle_sign_request(dir.path(), &req).resp,
+            SignResponse::Ok { .. }
+        ));
+        // Same name again: refused while the first cert lives — the
+        // impostor race on an existing identity is closed.
+        let req2 = request("eric.ryu-oh.org", "alice", "apw", 30);
+        match handle_sign_request(dir.path(), &req2).resp {
+            SignResponse::Err { reason } => {
+                assert!(reason.contains("already exists"), "got: {reason}")
+            }
+            SignResponse::Ok { .. } => panic!("duplicate name was signed"),
+        }
+        // Revoking clears the way — the rebuilt-laptop flow.
+        let serial = crate::ca_index::live_for_name(dir.path(), "eric.ryu-oh.org")
+            .unwrap()[0]
+            .cert
+            .serial;
+        crate::ca_index::append(
+            dir.path(),
+            &crate::ca_index::Event::Revoked(crate::ca_index::Revocation {
+                serial,
+                revoked_unix: crate::ca_index::now_unix(),
+                reason: "laptop rebuilt".into(),
+            }),
+        )
+        .unwrap();
+        let req3 = request("eric.ryu-oh.org", "alice", "apw", 30);
+        assert!(matches!(
+            handle_sign_request(dir.path(), &req3).resp,
+            SignResponse::Ok { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn enqueue_refuses_a_live_name() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let req = request("eric.ryu-oh.org", "alice", "apw", 30);
+        assert!(matches!(
+            handle_sign_request(dir.path(), &req).resp,
+            SignResponse::Ok { .. }
+        ));
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let err = conf_client::enqueue(
+            addr,
+            NodeKind::Workstation,
+            "eric.ryu-oh.org",
+            30,
+            &identity,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn crl_round_trips_over_the_wire() {
+        use x509_parser::prelude::{CertificateRevocationList, FromDer};
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        // Nothing revoked yet ⇒ no CRL.
+        assert!(conf_client::get_crl(addr, NodeKind::Client, &identity)
+            .await
+            .unwrap()
+            .is_none());
+        // Sign a victim, revoke it, sign the CRL with the vault key.
+        let req = request("victim.ryu-oh.org", "alice", "apw", 30);
+        assert!(matches!(
+            handle_sign_request(dir.path(), &req).resp,
+            SignResponse::Ok { .. }
+        ));
+        let serial = crate::ca_index::live_for_name(dir.path(), "victim.ryu-oh.org")
+            .unwrap()[0]
+            .cert
+            .serial;
+        crate::ca_index::append(
+            dir.path(),
+            &crate::ca_index::Event::Revoked(crate::ca_index::Revocation {
+                serial,
+                revoked_unix: crate::ca_index::now_unix(),
+                reason: "test".into(),
+            }),
+        )
+        .unwrap();
+        let unlocked = ca_vault::unlock(dir.path(), "apw").unwrap();
+        crate::ca_index::write_crl(dir.path(), &unlocked.ca_key_pem).unwrap();
+        // The daemon serves it; it parses; the revoked serial is on it;
+        // and it is genuinely signed by the CA.
+        let pem = conf_client::get_crl(addr, NodeKind::Client, &identity)
+            .await
+            .unwrap()
+            .expect("a CRL after the first revocation");
+        let der = rustls_pemfile::crls(&mut std::io::Cursor::new(pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, crl) = CertificateRevocationList::from_der(der.as_ref()).unwrap();
+        let serials: Vec<u64> = crl
+            .iter_revoked_certificates()
+            .map(|rc| {
+                rc.user_certificate
+                    .to_string()
+                    .parse::<u64>()
+                    .expect("small test serials fit in u64")
+            })
+            .collect();
+        assert_eq!(serials, vec![serial]);
+        let ca_pem = std::fs::read(dir.path().join("certificate.pem")).unwrap();
+        let ca_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem))
+            .next()
+            .unwrap()
+            .unwrap();
+        let (_, ca_cert) =
+            x509_parser::prelude::X509Certificate::from_der(ca_der.as_ref()).unwrap();
+        crl.verify_signature(ca_cert.public_key())
+            .expect("CRL must verify against the CA");
+        // nextUpdate is ~CRL_VALIDITY out.
+        let nu = crate::ca_index::crl_next_update(&crate::ca_index::crl_path(dir.path()))
+            .unwrap()
+            .unwrap();
+        let expect = crate::ca_index::now_unix() + crate::ca_index::CRL_VALIDITY.as_secs();
+        assert!(nu.abs_diff(expect) < 3600, "nextUpdate {nu} vs expected {expect}");
+    }
+
+    #[tokio::test]
+    async fn verified_renewal_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        // An autorenew-shaped admin: empty issuance scope. It must be
+        // able to approve *renewals* and nothing else.
+        ca_vault::add_admin(
+            dir.path(),
+            "apw",
+            "bot",
+            "botpw",
+            Policy {
+                allowed_san: vec![],
+                max_validity_days: 730,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+            },
+        )
+        .unwrap();
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        // 1. Initial enrollment (the trust ceremony happened here).
+        let issued = conf_client::request_cert(
+            addr,
+            NodeKind::Workstation,
+            "eric.ryu-oh.org",
+            "alice",
+            Zeroizing::new("apw".to_string()),
+            30,
+            vec![],
+            &identity,
+        )
+        .await
+        .unwrap();
+        // 2. Renewal: enqueue over a connection authenticated by the
+        //    live cert — fully unattended, PKI-verified, no TOFU.
+        let mut roots = RootCertStore::empty();
+        for der in
+            rustls_pemfile::certs(&mut std::io::Cursor::new(issued.trusted_pem.as_bytes()))
+        {
+            roots.add(der.unwrap()).unwrap();
+        }
+        let pending = conf_client::enqueue_renewal(
+            addr,
+            NodeKind::Client,
+            "eric.ryu-oh.org",
+            30,
+            issued.cert_pem.as_bytes(),
+            issued.private_key_pem.as_bytes(),
+            roots.clone(),
+        )
+        .await
+        .unwrap();
+        // 3. The server marked it verified — proof of possession of the
+        //    live key, checked against the issuance index.
+        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        assert_eq!(q.len(), 1);
+        assert!(q[0].verified_renewal, "renewal must be marked verified");
+        // 4. The empty-scope bot approves it — renewals skip the SAN
+        //    globs (the name was approved at enrollment; this is
+        //    continuation).
+        conf_client::approve(addr, "bot", "botpw", &pending.request_id, vec![], &identity)
+            .await
+            .unwrap();
+        let renewed = match conf_client::poll_renewal(
+            addr,
+            NodeKind::Client,
+            &pending,
+            roots.clone(),
+        )
+        .await
+        .unwrap()
+        {
+            conf_client::PollOutcome::Issued(i) => i,
+            _ => panic!("expected the renewed cert"),
+        };
+        assert_ne!(renewed.cert_pem, issued.cert_pem, "fresh cert (and fresh key)");
+        let cert = openssl::x509::X509::from_pem(renewed.cert_pem.as_bytes()).unwrap();
+        let san = cert.subject_alt_names().unwrap();
+        assert!(san.iter().any(|n| n.dnsname() == Some("eric.ryu-oh.org")));
+        // Both generations are live in the index until revoked/expired.
+        assert_eq!(
+            crate::ca_index::live_for_name(dir.path(), "eric.ryu-oh.org").unwrap().len(),
+            2
+        );
+        // The audit trail distinguishes renewals.
+        let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(log.contains("op=renew"));
+        // 5. The bot CANNOT approve a *new* identity: queue one without
+        //    a client cert and watch the empty SAN scope refuse it.
+        let new_req = conf_client::enqueue(
+            addr,
+            NodeKind::Workstation,
+            "bob.ryu-oh.org",
+            30,
+            &identity,
+        )
+        .await
+        .unwrap();
+        let err = conf_client::approve(
+            addr,
+            "bot",
+            "botpw",
+            &new_req.request_id,
+            vec![],
+            &identity,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not permitted"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    async fn the_serving_cert_renews_itself_and_the_chain_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+        // Renew the daemon's own serving identity, authenticated by the
+        // serving chain itself. The reserved name is legitimate here —
+        // possession of the live serving key IS the authority.
+        let mut roots = RootCertStore::empty();
+        let ca_pem = std::fs::read(dir.path().join("certificate.pem")).unwrap();
+        for der in rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem)) {
+            roots.add(der.unwrap()).unwrap();
+        }
+        let pending = conf_client::enqueue_renewal(
+            addr,
+            NodeKind::ConfServer,
+            SERVING_SAN,
+            365,
+            &state.serving_cert_pem,
+            &state.serving_key_pem,
+            roots.clone(),
+        )
+        .await
+        .unwrap();
+        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        assert!(q[0].verified_renewal, "serving-cert renewal must verify");
+        conf_client::approve(addr, "alice", "apw", &pending.request_id, vec![], &identity)
+            .await
+            .unwrap();
+        let renewed = match conf_client::poll_renewal(
+            addr,
+            NodeKind::ConfServer,
+            &pending,
+            roots,
+        )
+        .await
+        .unwrap()
+        {
+            conf_client::PollOutcome::Issued(i) => i,
+            _ => panic!("expected the renewed serving cert"),
+        };
+        // The chain rebuild: leaf + the issuing CA from the returned
+        // bundle parses back as a ≥2-cert chain — what `split_chain`
+        // on every future enrollee requires.
+        let ca = conf_client::issuing_ca_pem(&renewed.trusted_pem, &renewed.cert_pem)
+            .unwrap();
+        let chain = format!("{}{}", renewed.cert_pem, ca);
+        let n = rustls_pemfile::certs(&mut std::io::Cursor::new(chain.as_bytes()))
+            .flatten()
+            .count();
+        assert_eq!(n, 2, "serving chain must be [leaf, ca]");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_certificate_cannot_self_renew() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let issued = conf_client::request_cert(
+            addr,
+            NodeKind::Workstation,
+            "eric.ryu-oh.org",
+            "alice",
+            Zeroizing::new("apw".to_string()),
+            30,
+            vec![],
+            &identity,
+        )
+        .await
+        .unwrap();
+        // Revoke it (e.g. the laptop was stolen).
+        let serial = crate::ca_index::live_for_name(dir.path(), "eric.ryu-oh.org")
+            .unwrap()[0]
+            .cert
+            .serial;
+        crate::ca_index::append(
+            dir.path(),
+            &crate::ca_index::Event::Revoked(crate::ca_index::Revocation {
+                serial,
+                revoked_unix: crate::ca_index::now_unix(),
+                reason: "stolen".into(),
+            }),
+        )
+        .unwrap();
+        // The thief still holds cert+key; the TLS handshake may even
+        // succeed (this test installs no CRL beside the server's trust
+        // bundle) — but the index says the serial is dead, so the
+        // request is NOT a verified renewal, and with no live cert for
+        // the name it falls through to the normal queue: glyph-gated,
+        // admin's eyes open.
+        let mut roots = RootCertStore::empty();
+        for der in
+            rustls_pemfile::certs(&mut std::io::Cursor::new(issued.trusted_pem.as_bytes()))
+        {
+            roots.add(der.unwrap()).unwrap();
+        }
+        conf_client::enqueue_renewal(
+            addr,
+            NodeKind::Client,
+            "eric.ryu-oh.org",
+            30,
+            issued.cert_pem.as_bytes(),
+            issued.private_key_pem.as_bytes(),
+            roots,
+        )
+        .await
+        .unwrap();
+        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        assert_eq!(q.len(), 1);
+        assert!(
+            !q[0].verified_renewal,
+            "a revoked serial must not produce a verified renewal"
+        );
     }
 
     #[test]

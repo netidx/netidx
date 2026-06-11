@@ -208,6 +208,27 @@ pub(crate) fn create_tls_connector(
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
+/// The CRL that applies to the trust bundle at `root_certificates`, by
+/// convention `crl.pem` in the same directory. Distributed there by the
+/// conf plane; absence simply means no revocation checking.
+fn crl_path_for(root_certificates: &str) -> std::path::PathBuf {
+    std::path::Path::new(root_certificates).with_file_name("crl.pem")
+}
+
+fn load_crls(
+    root_certificates: &str,
+) -> Result<Vec<rustls_pki_types::CertificateRevocationListDer<'static>>> {
+    let path = crl_path_for(root_certificates);
+    let pem = match std::fs::read(&path) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).context(format!("reading CRL {path:?}")),
+    };
+    rustls_pemfile::crls(&mut std::io::Cursor::new(pem))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context(format!("parsing CRL {path:?}"))
+}
+
 pub(crate) fn create_tls_acceptor(
     askpass: Option<&str>,
     root_certificates: &str,
@@ -221,7 +242,20 @@ pub(crate) fn create_tls_acceptor(
         for cert in load_certs(root_certificates)? {
             root_store.add(cert)?;
         }
-        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store)).build()?
+        let builder =
+            rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store));
+        // A `crl.pem` beside the trust bundle turns on revocation
+        // checking: a serial on the list is refused at the handshake.
+        // Unknown status stays permitted — a federated bundle may
+        // contain CAs whose CRLs we don't hold, and absence of a CRL
+        // must not lock everyone out; presence on one must.
+        let crls = load_crls(root_certificates)?;
+        if crls.is_empty() {
+            builder.build()?
+        } else {
+            debug!("loading certificate revocation list");
+            builder.with_crls(crls).allow_unknown_revocation_status().build()?
+        }
     };
     debug!("loading server certificate");
     let certs = load_certs(certificate)?;
@@ -233,6 +267,84 @@ pub(crate) fn create_tls_acceptor(
         .with_single_cert(certs, private_key)?;
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+
+/// A TLS acceptor that rebuilds itself when the CRL beside its trust
+/// bundle changes (appears, disappears, or is rewritten), so a
+/// revocation distributed by the conf plane takes effect on the next
+/// accepted connection — no daemon restart. One `stat` per accept;
+/// rebuilds are rare (revocations) and a failed rebuild keeps serving
+/// with the previous acceptor rather than going dark.
+///
+/// Used by the resolver server — the enforcement choke point: a
+/// revoked cert that can't authenticate to the resolver gets no
+/// subscription tokens, so publishers never see it.
+#[derive(Clone)]
+pub(crate) struct CrlWatchingAcceptor(Arc<CrlWatchingInner>);
+
+struct CrlWatchingInner {
+    askpass: Option<String>,
+    root_certificates: String,
+    certificate: String,
+    private_key: String,
+    state: Mutex<(Option<std::time::SystemTime>, tokio_rustls::TlsAcceptor)>,
+}
+
+impl fmt::Debug for CrlWatchingAcceptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CrlWatchingAcceptor")
+    }
+}
+
+fn crl_mtime(root_certificates: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(crl_path_for(root_certificates)).and_then(|m| m.modified()).ok()
+}
+
+impl CrlWatchingAcceptor {
+    pub(crate) fn new(
+        askpass: Option<&str>,
+        root_certificates: &str,
+        certificate: &str,
+        private_key: &str,
+    ) -> Result<Self> {
+        let acceptor =
+            create_tls_acceptor(askpass, root_certificates, certificate, private_key)?;
+        Ok(Self(Arc::new(CrlWatchingInner {
+            askpass: askpass.map(String::from),
+            root_certificates: String::from(root_certificates),
+            certificate: String::from(certificate),
+            private_key: String::from(private_key),
+            state: Mutex::new((crl_mtime(root_certificates), acceptor)),
+        })))
+    }
+
+    /// The current acceptor, rebuilt first if the CRL changed.
+    pub(crate) fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
+        let t = &*self.0;
+        let mtime = crl_mtime(&t.root_certificates);
+        let mut state = t.state.lock();
+        if mtime != state.0 {
+            match create_tls_acceptor(
+                t.askpass.as_deref(),
+                &t.root_certificates,
+                &t.certificate,
+                &t.private_key,
+            ) {
+                Ok(acceptor) => {
+                    info!("reloaded TLS acceptor (CRL changed)");
+                    *state = (mtime, acceptor);
+                }
+                Err(e) => {
+                    // Keep serving with the previous acceptor; don't
+                    // re-attempt on every connection while the file is
+                    // broken — wait for the next change.
+                    warn!("failed to reload TLS acceptor after CRL change: {e:#}");
+                    state.0 = mtime;
+                }
+            }
+        }
+        state.1.clone()
+    }
 }
 
 pub(crate) fn get_match<'a: 'b, 'b, U>(

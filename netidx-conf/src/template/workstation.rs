@@ -352,6 +352,7 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
         units,
         units_dir,
         tls_install,
+        warnings: Vec::new(),
     })
 }
 

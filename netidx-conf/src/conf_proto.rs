@@ -137,6 +137,17 @@ pub enum Request {
     /// Deny a queued request (admin-authenticated). Answered with
     /// [`DenyResponse`].
     Deny(DenyRequest),
+    /// Fetch the network's current CRL (no credentials — a CRL is
+    /// public). Answered with [`GetCrlResponse`]. The renewal daemon
+    /// pulls this and drops `crl.pem` beside each resolver's trusted
+    /// bundle, where netidx's TLS acceptor enforces it.
+    GetCrl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCrlResponse {
+    /// `None` — no certificate has ever been revoked on this network.
+    pub crl_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +295,13 @@ pub struct QueueEntry {
     /// admin, not a security signal.
     pub peer: String,
     pub csr_pem: String,
+    /// The server verified this is a *renewal*: the request arrived on
+    /// a connection authenticated by a live (unexpired, unrevoked)
+    /// certificate for exactly this name. Cryptographic continuation —
+    /// no glyph matching needed; safe to batch-approve (and what
+    /// `autorenew` approves).
+    #[serde(default)]
+    pub verified_renewal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

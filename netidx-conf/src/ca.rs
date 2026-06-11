@@ -11,11 +11,9 @@
 //! extensions so the resulting certs validate through netidx's
 //! existing `tls::load_certs` / `tls::get_names`.
 //!
-//! Deferred to design/netidx-conf-future.md: CRL generation,
-//! revocation, encrypted CA
-//! keys, hardware-token backing, `Ca::trust_into_*` config-wiring
-//! helpers, CA inventory / index files, the `--tls-auto` template
-//! integration.
+//! Revocation + CRLs live in [`crate::ca_index`]; the issuance index
+//! is appended by [`Ca::sign_request`] itself. Still deferred:
+//! hardware-token backing, `Ca::trust_into_*` config-wiring helpers.
 
 use crate::atomic;
 use anyhow::{Context, Result};
@@ -343,7 +341,6 @@ impl Ca {
             params.san.clone()
         };
         let san = build_san(&san_entries, &ctx)?;
-        drop(ctx);
         cert.append_extension(bc)?;
         cert.append_extension(ku)?;
         cert.append_extension(ski)?;
@@ -430,6 +427,22 @@ impl Ca {
         // So the check is algorithm-aware: RSA ≥ MIN_KEY_BITS, EC
         // P-256+, Edwards curves accepted.
         check_pubkey_strength(&req_pubkey)?;
+        // A leaf must not outlive its CA — clamp to the CA's remaining
+        // lifetime (less a day of slack), and refuse outright when the
+        // CA itself is at death's door: the answer there is renewing
+        // the CA (automatic during admin sessions), not minting doomed
+        // leaves.
+        let validity_days = {
+            let now = Asn1Time::days_from_now(0)?;
+            let remaining = now.diff(self.cert.not_after())?.days;
+            if remaining < 2 {
+                bail!(
+                    "the CA certificate expires in {remaining} day(s); renew it \
+                     before issuing leaves"
+                );
+            }
+            validity_days.min((remaining - 1) as u32)
+        };
 
         let serial_n = {
             // Brief read-modify-write of the on-disk counter; held
@@ -464,7 +477,6 @@ impl Ca {
             .issuer(true)
             .build(&ctx)?;
         let san_ext = build_san(san, &ctx)?;
-        drop(ctx);
         cert.append_extension(bc)?;
         cert.append_extension(ku)?;
         cert.append_extension(ski)?;
@@ -534,6 +546,109 @@ impl Ca {
     }
 }
 
+/// Renew the CA when its remaining lifetime can no longer cover a full
+/// default leaf validity plus a grace quarter — past this point
+/// `sign_request`'s clamp starts shortening leaves.
+pub const CA_RENEW_THRESHOLD_DAYS: u32 = DEFAULT_LEAF_VALIDITY_DAYS + 90;
+
+/// Re-sign the CA certificate **with the same key** if it is inside
+/// [`CA_RENEW_THRESHOLD_DAYS`]. Same key + same subject + same SAN
+/// means: existing leaves still chain, serving chains keep verifying,
+/// and the network glyph (a hash of the key) is unchanged — only the
+/// validity window moves. Called opportunistically wherever the vault
+/// is unlocked, because that's the only time the key exists.
+///
+/// `trusted.pem` (the served federation bundle, when maintained) has
+/// our old certificate replaced by the new one, matched by public key;
+/// the bundle then propagates to the fleet through every sign and
+/// renewal response.
+pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8]) -> Result<bool> {
+    let cert_pem = std::fs::read(ca_dir.join("certificate.pem"))
+        .context("reading CA certificate")?;
+    let old = X509::from_pem(&cert_pem).context("parsing CA certificate")?;
+    let now = Asn1Time::days_from_now(0)?;
+    let remaining = now.diff(old.not_after())?.days;
+    if remaining > CA_RENEW_THRESHOLD_DAYS as i32 {
+        return Ok(false);
+    }
+    let pkey =
+        PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
+    // Rebuild: subject, SAN, and profile identical to `Ca::generate`;
+    // fresh serial (the counter is shared with leaf issuance — fine,
+    // serials just need uniqueness per issuer) and a fresh validity
+    // window.
+    let mut cert = X509Builder::new()?;
+    cert.set_version(2)?;
+    let serial_n = next_serial(ca_dir)?;
+    let serial = BigNum::from_dec_str(&serial_n.to_string())?.to_asn1_integer()?;
+    cert.set_serial_number(&serial)?;
+    cert.set_subject_name(old.subject_name())?;
+    cert.set_issuer_name(old.subject_name())?;
+    cert.set_pubkey(&pkey)?;
+    let not_before = Asn1Time::days_from_now(0)?;
+    let not_after = Asn1Time::days_from_now(DEFAULT_CA_VALIDITY_DAYS)?;
+    cert.set_not_before(&not_before)?;
+    cert.set_not_after(&not_after)?;
+    let ctx = cert.x509v3_context(None, None);
+    let bc = BasicConstraints::new().critical().ca().build()?;
+    let ku = KeyUsage::new()
+        .critical()
+        .crl_sign()
+        .digital_signature()
+        .key_cert_sign()
+        .build()?;
+    let ski = SubjectKeyIdentifier::new().build(&ctx)?;
+    // Copy the old cert's SANs verbatim.
+    let mut san_entries: Vec<SanEntry> = Vec::new();
+    if let Some(names) = old.subject_alt_names() {
+        for name in names.iter() {
+            if let Some(d) = name.dnsname() {
+                san_entries.push(SanEntry::Dns(d.to_string()));
+            } else if let Some(u) = name.uri() {
+                san_entries.push(SanEntry::Uri(u.to_string()));
+            } else if let Some(e) = name.email() {
+                san_entries.push(SanEntry::Email(e.to_string()));
+            } else if let Some(b) = name.ipaddress()
+                && let Some(ip) = parse_ip_octets(b)
+            {
+                san_entries.push(SanEntry::Ip(ip));
+            }
+        }
+    }
+    let san = build_san(&san_entries, &ctx)?;
+    cert.append_extension(bc)?;
+    cert.append_extension(ku)?;
+    cert.append_extension(ski)?;
+    cert.append_extension(san)?;
+    cert.sign(&pkey, MessageDigest::sha512()).context("self-signing renewed CA")?;
+    let new_pem = cert.build().to_pem()?;
+    atomic::write_atomic(&ca_dir.join("certificate.pem"), &new_pem, 0o644)?;
+    // Maintain the federation bundle: drop entries carrying our key,
+    // append the renewed cert.
+    let bundle_path = ca_dir.join("trusted.pem");
+    if bundle_path.exists() {
+        let our_spki = pkey.public_key_to_der().context("encoding CA SPKI")?;
+        let bundle = std::fs::read(&bundle_path)
+            .with_context(|| format!("reading {}", bundle_path.display()))?;
+        let mut out: Vec<u8> = Vec::new();
+        for der in rustls_pemfile::certs(&mut std::io::Cursor::new(&bundle)) {
+            let der = der.context("parsing trusted.pem")?;
+            let theirs = X509::from_der(der.as_ref())
+                .ok()
+                .and_then(|c| c.public_key().ok())
+                .and_then(|k| k.public_key_to_der().ok());
+            if theirs.as_deref() != Some(our_spki.as_slice()) {
+                out.extend_from_slice(
+                    &X509::from_der(der.as_ref())?.to_pem().context("re-encoding")?,
+                );
+            }
+        }
+        out.extend_from_slice(&new_pem);
+        atomic::write_atomic(&bundle_path, &out, 0o644)?;
+    }
+    Ok(true)
+}
+
 /// Inspect a PEM-encoded CSR — the engine half of `netidx conf ca sign`'s
 /// pre-flight confirmation. Returns the requested subject CN and the
 /// embedded SAN list. The CA admin is expected to look at this before
@@ -570,10 +685,10 @@ pub fn inspect_csr(csr_pem: &[u8]) -> Result<CsrSummary> {
                 san.push(SanEntry::Uri(u.to_string()));
             } else if let Some(e) = name.email() {
                 san.push(SanEntry::Email(e.to_string()));
-            } else if let Some(b) = name.ipaddress() {
-                if let Some(ip) = parse_ip_octets(b) {
-                    san.push(SanEntry::Ip(ip));
-                }
+            } else if let Some(b) = name.ipaddress()
+                && let Some(ip) = parse_ip_octets(b)
+            {
+                san.push(SanEntry::Ip(ip));
             }
         }
     }
@@ -671,7 +786,6 @@ pub fn generate_csr(
     if !san.is_empty() {
         let ctx = req.x509v3_context(None);
         let san_ext = build_san(san, &ctx)?;
-        drop(ctx);
         let mut stack = openssl::stack::Stack::new()?;
         stack.push(san_ext)?;
         req.add_extensions(&stack)?;
@@ -768,7 +882,6 @@ fn serial_path(dir: &Path) -> PathBuf {
 }
 
 fn next_serial(dir: &Path) -> Result<u64> {
-    use fs3::FileExt;
     // Serialize the counter read-modify-write with an exclusive OS file
     // lock. The per-`Ca` `serial_lock` only covers one instance, but the
     // CA server builds a fresh `Ca` per request and a `ca issue` may run
@@ -781,11 +894,12 @@ fn next_serial(dir: &Path) -> Result<u64> {
     let lock_path = dir.join("serial.lock");
     let _lock = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("opening serial lock {lock_path:?}"))?;
     _lock
-        .lock_exclusive()
+        .lock()
         .with_context(|| format!("locking serial counter {lock_path:?}"))?;
     let p = serial_path(dir);
     let cur = match std::fs::read_to_string(&p) {

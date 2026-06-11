@@ -614,7 +614,7 @@ async fn write_client_reuse_krb5(
 async fn get_tls_uifo(
     id: SocketAddr,
     tls: &tokio_rustls::server::TlsStream<TcpStream>,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(tls::CrlWatchingAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
 ) -> Result<Arc<UserInfo>> {
     let (_, server_con) = tls.get_ref();
     match server_con.peer_certificates() {
@@ -635,10 +635,10 @@ async fn get_tls_uifo(
 async fn write_client_tls_auth(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(tls::CrlWatchingAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
-    let tls = a.0.accept(con).await?;
+    let tls = a.0.acceptor().accept(con).await?;
     let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
@@ -663,10 +663,10 @@ async fn write_client_tls_auth(
 async fn write_client_reuse_tls(
     ctx: &Arc<Ctx>,
     con: TcpStream,
-    a: &Arc<(tokio_rustls::TlsAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
+    a: &Arc<(tls::CrlWatchingAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
 ) -> AuthResult {
-    let tls = a.0.accept(con).await?;
+    let tls = a.0.acceptor().accept(con).await?;
     let wa = &hello.write_addr;
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
@@ -808,7 +808,8 @@ async fn hello_client_read(
         },
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
-                let tls = a.0.accept(con).await.context("accepting tls connection")?;
+                let tls =
+                    a.0.acceptor().accept(con).await.context("accepting tls connection")?;
                 let uifo =
                     get_tls_uifo(ctx.id, &tls, a).await.context("getting tls info")?;
                 let mut con = Channel::new::<

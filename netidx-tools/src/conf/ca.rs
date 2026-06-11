@@ -11,6 +11,7 @@ use clap::{Args, Subcommand};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use zeroize::Zeroizing;
 
@@ -37,6 +38,49 @@ pub(crate) enum Cmd {
     Fingerprint(FingerprintArgs),
     /// request a certificate from a conf server and install it
     Join(JoinArgs),
+    /// revoke certificates by name (or serial) and re-sign the CRL
+    Revoke(RevokeArgs),
+    /// automatically approve verified renewals (daemon)
+    Autorenew(AutorenewArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AutorenewArgs {
+    /// File holding the autorenew admin slot's password. Without it,
+    /// an admin name + password are prompted and held in memory.
+    #[arg(long)]
+    pub keytab: Option<PathBuf>,
+    /// Conf server to watch. Defaults to this host's own conf server.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
+    /// Seconds between queue checks. Default 30.
+    #[arg(long, default_value = "30")]
+    pub interval: u64,
+    /// Rotate the autorenew slot: revoke the old keyslot, mint a new
+    /// long random password, write the keytab, exit. The one-command
+    /// response to a leaked keytab.
+    #[arg(long)]
+    pub rotate: bool,
+    /// Don't daemonize (run in the foreground).
+    #[arg(short, long)]
+    #[allow(dead_code)]
+    pub foreground: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RevokeArgs {
+    /// The identity to revoke — every live certificate carrying this
+    /// name. Interactive list when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Revoke a single certificate by serial number instead.
+    #[arg(long, conflicts_with = "name")]
+    pub serial: Option<u64>,
+    /// Revocation reason, recorded in the index. Prompted when omitted.
+    #[arg(long)]
+    pub reason: Option<String>,
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -203,6 +247,12 @@ pub(crate) struct InitParams {
     /// Skip the CA-server setup entirely (offline CA only).
     #[arg(long, conflicts_with = "with_server")]
     pub no_server: bool,
+    /// Enable automatic renewal approval without prompting.
+    #[arg(long)]
+    pub with_autorenew: bool,
+    /// Skip automatic renewal approval (renewals wait for a human).
+    #[arg(long, conflicts_with = "with_autorenew")]
+    pub no_autorenew: bool,
     /// Address the CA server should listen on when set up. Default
     /// `0.0.0.0:<ca-port>`.
     #[arg(long)]
@@ -340,7 +390,371 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
         Cmd::Join(p) => join(p),
+        Cmd::Revoke(p) => revoke(p),
+        Cmd::Autorenew(p) => autorenew(p),
     }
+}
+
+// -- ca autorenew -------------------------------------------------------------
+
+/// The dedicated autorenew slot: a name nobody types and an
+/// empty-scope policy — over the wire its password can approve
+/// verified renewals and *nothing else* (no SANs, no groups, no
+/// enrollment). The narrow slot, not the daemon, is what bounds the
+/// blast radius of a leaked keytab; the keytab itself lives outside
+/// the CA dir so CA-dir backups stay harmless on their own, and
+/// `--rotate` is the one-command kill-and-replace.
+pub(super) const AUTORENEW_ADMIN: &str = "autorenew";
+
+fn autorenew_policy() -> ca_vault::Policy {
+    ca_vault::Policy {
+        allowed_san: vec![],
+        max_validity_days: 730,
+        id_map_groups: vec![],
+        may_enroll_servers: false,
+    }
+}
+
+/// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
+/// dir: never back this file up; recreating it is one `--rotate`.
+fn autorenew_keytab_path() -> Result<PathBuf> {
+    Ok(paths::user_config_root()?.join("autorenew.keytab"))
+}
+
+/// A long random password for the autorenew slot (256 bits, hex).
+fn random_password() -> String {
+    format!(
+        "{}{}",
+        netidx_conf::ca_queue::new_id(),
+        netidx_conf::ca_queue::new_id()
+    )
+}
+
+/// Create (or replace) the autorenew slot + keytab. `authorizing` is
+/// any current admin's password. Returns the keytab path.
+pub(super) fn setup_autorenew_slot(
+    ca_dir: &Path,
+    authorizing: &str,
+) -> Result<PathBuf> {
+    // Replace-not-fail: rotation and re-runs both land here.
+    let exists = ca_vault::list_admins(ca_dir)?
+        .iter()
+        .any(|(name, _)| name == AUTORENEW_ADMIN);
+    if exists {
+        ca_vault::remove_admin(ca_dir, authorizing, AUTORENEW_ADMIN, false)?;
+    }
+    let password = random_password();
+    ca_vault::add_admin(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
+    let keytab = autorenew_keytab_path()?;
+    atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
+    Ok(keytab)
+}
+
+fn autorenew(p: AutorenewArgs) -> Result<()> {
+    env_logger::init();
+    if p.rotate {
+        let dir = ca_dir_for(None)?;
+        let authorizing = collect_existing_password(
+            "your admin password (authorizes rotating the autorenew slot)",
+        )?;
+        let keytab = setup_autorenew_slot(&dir, &authorizing)?;
+        println!(
+            "rotated the autorenew slot; new keytab at {} (restart the \
+             autorenew service to pick it up)",
+            keytab.display()
+        );
+        return Ok(());
+    }
+    let (admin, password) = match &p.keytab {
+        Some(path) => {
+            let pw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading keytab {}", path.display()))?;
+            (AUTORENEW_ADMIN.to_string(), Zeroizing::new(pw.trim().to_string()))
+        }
+        None => {
+            let admin = match env_user_name() {
+                Some(user) => prompt::string_with_default("admin name", None, &user)?,
+                None => prompt::required_string("admin name", None)?,
+            };
+            let pw = Zeroizing::new(collect_existing_password(&format!(
+                "CA password for admin {admin:?}"
+            ))?);
+            (admin, pw)
+        }
+    };
+    let server = match p.server.or_else(local_conf_server_listen) {
+        Some(s) => s,
+        None => bail!("no conf server on this host; pass --server"),
+    };
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Unattended trust: verify the conf server against the local CA
+    // cert — the daemon runs on (or adjacent to) the CA host and must
+    // never approve against an impostor.
+    let identity = rt
+        .block_on(conf_client::fetch_identity(server, NodeKind::Client))
+        .with_context(|| format!("contacting conf server {server}"))?;
+    let local_fp = std::fs::read(ca_dir_for(None)?.join("certificate.pem"))
+        .ok()
+        .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
+    match local_fp {
+        Some(fp) if fp == identity.fingerprint => {}
+        Some(_) => bail!(
+            "the conf server at {server} does not match the local CA — refusing \
+             to approve renewals against an unverified server"
+        ),
+        None => bail!(
+            "no local CA certificate to verify {server} against; autorenew must \
+             run where the CA cert is available"
+        ),
+    }
+    log::info!("autorenew: watching the queue at {server} as {admin:?}");
+    let interval = Duration::from_secs(p.interval.max(5));
+    loop {
+        match rt.block_on(conf_client::list_queue(
+            server,
+            &admin,
+            password.as_str(),
+            &identity,
+        )) {
+            Err(e) => log::warn!("autorenew: listing the queue failed: {e:#}"),
+            Ok(queue) => {
+                for entry in queue.iter().filter(|e| e.verified_renewal) {
+                    match rt.block_on(conf_client::approve(
+                        server,
+                        &admin,
+                        password.as_str(),
+                        &entry.id,
+                        vec![],
+                        &identity,
+                    )) {
+                        Ok(warnings) => {
+                            log::info!(
+                                "autorenew: approved renewal of {:?}",
+                                entry.requested_name
+                            );
+                            for w in warnings {
+                                log::warn!("autorenew: server warning: {w}");
+                            }
+                        }
+                        Err(e) => log::warn!(
+                            "autorenew: approving renewal of {:?} failed: {e:#}",
+                            entry.requested_name
+                        ),
+                    }
+                }
+            }
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+// -- ca revoke ----------------------------------------------------------------
+
+/// Revoke certificates and re-sign the CRL. By name (the common case —
+/// the index maps names to serials, so the admin never hunts serial
+/// numbers), by serial, or interactively from the list of live
+/// identities. The admin's password both proves authority and signs
+/// the updated CRL; the new CRL is copied beside the local resolver's
+/// trust bundle immediately when this host runs one, so enforcement on
+/// the CA host doesn't wait for distribution.
+fn revoke(p: RevokeArgs) -> Result<()> {
+    use netidx_conf::ca_index;
+    let dir = ca_dir_for(p.ca_dir)?;
+    let now = ca_index::now_unix();
+    let live: Vec<ca_index::CertState> =
+        ca_index::all(&dir)?.into_iter().filter(|s| s.live(now)).collect();
+    if live.is_empty() {
+        println!("no live certificates in the index — nothing to revoke");
+        return Ok(());
+    }
+    let targets: Vec<ca_index::CertState> = if let Some(serial) = p.serial {
+        let t: Vec<_> = live.into_iter().filter(|s| s.cert.serial == serial).collect();
+        if t.is_empty() {
+            bail!("no live certificate with serial {serial}");
+        }
+        t
+    } else {
+        let name = match p.name {
+            Some(n) => n,
+            None => {
+                // Distinct names, most recently issued first.
+                let mut names: Vec<&str> = Vec::new();
+                for s in live.iter().rev() {
+                    if !s.cert.name.is_empty()
+                        && !names.iter().any(|n| n.eq_ignore_ascii_case(&s.cert.name))
+                    {
+                        names.push(&s.cert.name);
+                    }
+                }
+                if names.is_empty() {
+                    bail!(
+                        "live certificates exist but none carry a DNS name; \
+                         revoke by --serial"
+                    );
+                }
+                println!("live identities:");
+                for (i, n) in names.iter().enumerate() {
+                    let certs: Vec<_> = live
+                        .iter()
+                        .filter(|s| s.cert.name.eq_ignore_ascii_case(n))
+                        .collect();
+                    let soonest =
+                        certs.iter().map(|s| s.cert.not_after_unix).min().unwrap_or(0);
+                    let days = soonest.saturating_sub(now) / 86_400;
+                    println!(
+                        "  {}) {n}  ({} cert(s), expires in {days}d)",
+                        i + 1,
+                        certs.len(),
+                    );
+                }
+                let answer = prompt::required_string(
+                    "identity # to revoke (or 'q' to quit)",
+                    None,
+                )?;
+                if answer.eq_ignore_ascii_case("q") {
+                    return Ok(());
+                }
+                match answer.parse::<usize>() {
+                    Ok(i) if (1..=names.len()).contains(&i) => names[i - 1].to_string(),
+                    _ => bail!("enter a number between 1 and {}", names.len()),
+                }
+            }
+        };
+        let t: Vec<_> = live
+            .into_iter()
+            .filter(|s| s.cert.name.eq_ignore_ascii_case(&name))
+            .collect();
+        if t.is_empty() {
+            bail!("no live certificate for {name:?}");
+        }
+        t
+    };
+    // Show what's about to die — including the identity glyph the
+    // enrollment showed, so the admin can sanity-check it's the right
+    // entity.
+    println!();
+    for t in &targets {
+        println!(
+            "  serial {}  {}  issued {}d ago, expires in {}d",
+            t.cert.serial,
+            if t.cert.name.is_empty() { "(no name)" } else { &t.cert.name },
+            now.saturating_sub(t.cert.issued_unix) / 86_400,
+            t.cert.not_after_unix.saturating_sub(now) / 86_400,
+        );
+        if let Ok(fp) = Fingerprint::parse_text(&t.cert.spki_fp) {
+            println!("  SHA256  {}", fp.text());
+            println!("{}", fp.identicon(ColorMode::detect()));
+        }
+    }
+    if !prompt::confirm(
+        &format!("revoke {} certificate(s)? This cannot be undone", targets.len()),
+        false,
+    )? {
+        bail!("revocation aborted; nothing was changed");
+    }
+    let reason = match p.reason {
+        Some(r) => r,
+        None => prompt::string_with_default(
+            "revocation reason (recorded in the index)",
+            None,
+            "unspecified",
+        )?,
+    };
+    // The password proves authority and unlocks the CA key to sign the
+    // updated CRL — revocation without a fresh CRL is just a wish.
+    let password = collect_existing_password(
+        "your admin password (authorizes revocation and signs the new CRL)",
+    )?;
+    let unlocked = ca_vault::unlock(&dir, &password)
+        .context("no admin slot accepts that password")?;
+    for t in &targets {
+        ca_index::append(
+            &dir,
+            &ca_index::Event::Revoked(ca_index::Revocation {
+                serial: t.cert.serial,
+                revoked_unix: now,
+                reason: reason.clone(),
+            }),
+        )?;
+        netidx_conf::conf_server::audit(
+            &dir,
+            &unlocked.admin,
+            "revoke",
+            if t.cert.name.is_empty() { "(no name)" } else { &t.cert.name },
+            0,
+        );
+    }
+    ca_index::write_crl(&dir, &unlocked.ca_key_pem)?;
+    println!(
+        "revoked {} certificate(s); CRL re-signed at {}",
+        targets.len(),
+        ca_index::crl_path(&dir).display(),
+    );
+    // Local enforcement now: when this host runs a resolver, drop the
+    // fresh CRL beside its trust bundle — the resolver's CRL-watching
+    // acceptor picks it up on the next connection. Other hosts get it
+    // from the conf plane.
+    if let Err(e) = install_crl_beside_local_resolver(&dir) {
+        println!("note: could not install the CRL for the local resolver: {e:#}");
+    }
+    // The revoked identity usually shouldn't keep its id-map entry.
+    let revoked_name =
+        targets.iter().find(|t| !t.cert.name.is_empty()).map(|t| t.cert.name.clone());
+    if let Some(name) = revoked_name {
+        offer_id_map_removal(&name)?;
+    }
+    Ok(())
+}
+
+/// Copy the CA's CRL beside the local resolver's trusted bundle (the
+/// convention netidx's acceptor watches), if this host runs one.
+fn install_crl_beside_local_resolver(ca_dir: &Path) -> Result<()> {
+    use netidx::resolver_server::config::file as rfile;
+    let crl = std::fs::read(netidx_conf::ca_index::crl_path(ca_dir))
+        .context("reading the freshly signed CRL")?;
+    let rcfg_path = match paths::discover_resolver_config() {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // no resolver on this host
+    };
+    let rcfg = netidx_conf::resolver::ResolverConfig::load(&rcfg_path)?;
+    for member in &rcfg.0.member_servers {
+        if let rfile::Auth::Tls { trusted, .. } = &member.auth {
+            let dest = Path::new(trusted.as_str()).with_file_name("crl.pem");
+            atomic::write_atomic(&dest, &crl, 0o644)?;
+            println!("installed CRL for the local resolver at {}", dest.display());
+        }
+    }
+    Ok(())
+}
+
+/// Offer to drop a revoked identity from the local id-map (best-effort
+/// — id-map hosts elsewhere keep their entries until the operator
+/// cleans them; a revoked cert can't authenticate regardless).
+fn offer_id_map_removal(name: &str) -> Result<()> {
+    use netidx_conf::id_map;
+    if !prompt::stdin_is_tty() {
+        return Ok(());
+    }
+    let map_path = match id_map::user_id_map_path() {
+        Ok(p) if p.exists() => p,
+        _ => return Ok(()),
+    };
+    let mut map = match id_map::load(&map_path) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if map.lookup_by_name(name).is_none() {
+        return Ok(());
+    }
+    if prompt::confirm(
+        &format!("remove {name:?} from the local id-map as well?"),
+        true,
+    )? {
+        id_map::remove_identity(&mut map, name);
+        id_map::save(&map_path, &map)?;
+        println!("removed {name:?} from {}", map_path.display());
+    }
+    Ok(())
 }
 
 fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
@@ -388,6 +802,10 @@ pub(super) struct NewCaOpts {
     pub may_enroll_servers: Option<bool>,
     /// `None` ⇒ prompt "set up the conf server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
+    /// Automatic renewal approval (the scoped autorenew slot, keytab,
+    /// and unit). `None` ⇒ prompt (default yes); only takes effect
+    /// when the conf server is set up — renewals flow through it.
+    pub autorenew: Option<bool>,
     /// Explicit `--listen` for the CA server (skips the prompt).
     pub listen: Option<SocketAddr>,
     /// IP to suggest for the CA server's listen address when prompting
@@ -519,6 +937,50 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     } else {
         service::ServiceNeed::NONE
     };
+    // Automatic renewal approval: people are lazy, and a network where
+    // renewals rot in the queue becomes a network of 10-year certs.
+    // The slot is scoped to nothing but renewals; the trust ceremony
+    // stays human for new identities.
+    if set_up_server {
+        let auto = match opts.autorenew {
+            Some(b) => b,
+            None => prompt::confirm(
+                "approve certificate renewals automatically? (a dedicated keyslot \
+                 that can approve renewals and nothing else; new identities always \
+                 need a human)",
+                true,
+            )?,
+        };
+        if auto {
+            let keytab = setup_autorenew_slot(&opts.dir, &password)?;
+            println!("automatic renewal approval enabled:");
+            println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
+            println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
+            println!("          rotate anytime with `netidx conf ca autorenew --rotate`)");
+            if let Some(units_dir) = opts.units_dir.as_deref() {
+                std::fs::create_dir_all(units_dir).with_context(|| {
+                    format!("creating activation dir {}", units_dir.display())
+                })?;
+                let netidx_binary = std::env::current_exe().context(
+                    "could not determine current netidx binary for the autorenew unit",
+                )?;
+                let unit = netidx_conf::template::services::autorenew::unit(
+                    &netidx_conf::template::services::autorenew::AutorenewServiceParams {
+                        netidx_binary,
+                        keytab,
+                    },
+                )?;
+                let adir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
+                adir.save("autorenew", &unit)
+                    .context("writing the autorenew activation unit")?;
+                println!(
+                    "  unit:   {}",
+                    netidx_conf::activation::unit_path_in(units_dir, "autorenew")
+                        .display()
+                );
+            }
+        }
+    }
     Ok((ca, need))
 }
 
@@ -534,6 +996,13 @@ fn init(p: InitParams) -> Result<()> {
     let setup_server = if p.no_server {
         Some(false)
     } else if p.with_server {
+        Some(true)
+    } else {
+        None
+    };
+    let autorenew = if p.no_autorenew {
+        Some(false)
+    } else if p.with_autorenew {
         Some(true)
     } else {
         None
@@ -555,6 +1024,7 @@ fn init(p: InitParams) -> Result<()> {
         id_map_groups: p.id_map_groups,
         may_enroll_servers: p.may_enroll_servers,
         setup_server,
+        autorenew,
         listen: p.listen,
         // No resolver in this flow; default_ca_listen_ip falls back to
         // an existing resolver's IP, then the public IP.
@@ -768,10 +1238,10 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
 /// context), in which case the caller prompts with no default.
 fn env_user_name() -> Option<String> {
     for var in ["USER", "LOGNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                return Some(v);
-            }
+        if let Ok(v) = std::env::var(var)
+            && !v.is_empty()
+        {
+            return Some(v);
         }
     }
     None
@@ -1236,9 +1706,55 @@ fn sign_queue(p: SignArgs) -> Result<()> {
             println!("the signing queue is empty (pass a CSR path to sign a file)");
             return Ok(());
         }
+        // Verified renewals first, as a batch: the server proved
+        // possession of the live key for the same name, so there is no
+        // code to match and no groups to choose — approving them all is
+        // honest, not careless. The ceremony stays for new identities.
+        let renewals: Vec<&netidx_conf::conf_proto::QueueEntry> =
+            queue.iter().filter(|e| e.verified_renewal).collect();
+        if !renewals.is_empty() {
+            println!();
+            println!("verified renewals (proof of possession; no code to match):");
+            for e in &renewals {
+                println!(
+                    "  {}  kind {:?}  age {}  from {}",
+                    e.requested_name,
+                    e.kind,
+                    fmt_age(e.age_secs),
+                    e.peer,
+                );
+            }
+            if prompt::confirm(
+                &format!("approve all {} verified renewal(s)?", renewals.len()),
+                true,
+            )? {
+                for e in &renewals {
+                    match rt.block_on(conf_client::approve(
+                        server,
+                        &admin,
+                        password.as_str(),
+                        &e.id,
+                        vec![],
+                        &identity,
+                    )) {
+                        Ok(_) => println!("  renewed {:?}", e.requested_name),
+                        Err(err) => {
+                            println!("  renewing {:?} failed: {err:#}", e.requested_name)
+                        }
+                    }
+                }
+                continue; // re-list
+            }
+        }
+        let new_requests: Vec<&netidx_conf::conf_proto::QueueEntry> =
+            queue.iter().filter(|e| !e.verified_renewal).collect();
+        if new_requests.is_empty() {
+            println!("(only unapproved renewals remain)");
+            return Ok(());
+        }
         println!();
         println!("pending signing requests:");
-        for (i, e) in queue.iter().enumerate() {
+        for (i, e) in new_requests.iter().enumerate() {
             let code = conf_client::csr_fingerprint(&e.csr_pem)
                 .map(|f| f.short())
                 .unwrap_or_else(|_| "????????".to_string());
@@ -1258,9 +1774,9 @@ fn sign_queue(p: SignArgs) -> Result<()> {
             return Ok(());
         }
         let entry = match answer.parse::<usize>() {
-            Ok(n) if (1..=queue.len()).contains(&n) => &queue[n - 1],
+            Ok(n) if (1..=new_requests.len()).contains(&n) => new_requests[n - 1],
             _ => {
-                eprintln!("enter a number between 1 and {}, or 'q'", queue.len());
+                eprintln!("enter a number between 1 and {}, or 'q'", new_requests.len());
                 continue;
             }
         };
@@ -1478,13 +1994,13 @@ fn list() -> Result<()> {
         return Ok(());
     }
     println!("CA at {}", dir.display());
-    if let Ok(cert) = std::fs::read(dir.join("certificate.pem")) {
-        if let Ok(fp) = Fingerprint::of_cert_pem(&cert) {
-            println!(
-                "  fingerprint: {} … (`netidx conf ca fingerprint` for the full id)",
-                fp.short()
-            );
-        }
+    if let Ok(cert) = std::fs::read(dir.join("certificate.pem"))
+        && let Ok(fp) = Fingerprint::of_cert_pem(&cert)
+    {
+        println!(
+            "  fingerprint: {} … (`netidx conf ca fingerprint` for the full id)",
+            fp.short()
+        );
     }
     // Key storage: the current format is the keyslot vault (key in
     // `vault.json`, not `private.key`), so detect that before falling
@@ -1596,14 +2112,14 @@ pub(super) fn open_default_ca() -> Result<Ca> {
 /// may issue it.
 fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
     for s in san {
-        if let SanEntry::Dns(d) = s {
-            if d.eq_ignore_ascii_case(conf_proto::SERVING_SAN) {
-                bail!(
-                    "{:?} is reserved for the conf server's serving certificate and \
-                     can't be issued here",
-                    conf_proto::SERVING_SAN
-                );
-            }
+        if let SanEntry::Dns(d) = s
+            && d.eq_ignore_ascii_case(conf_proto::SERVING_SAN)
+        {
+            bail!(
+                "{:?} is reserved for the conf server's serving certificate and \
+                 can't be issued here",
+                conf_proto::SERVING_SAN
+            );
         }
     }
     Ok(())

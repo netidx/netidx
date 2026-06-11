@@ -160,10 +160,10 @@ pub fn discover_client_config() -> Result<PathBuf> {
 /// `${dirs::config_dir}/netidx/resolver.json` then the system path.
 /// Errors if none exists.
 pub fn discover_resolver_config() -> Result<PathBuf> {
-    if let Ok(p) = user_resolver_config() {
-        if p.is_file() {
-            return Ok(p);
-        }
+    if let Ok(p) = user_resolver_config()
+        && p.is_file()
+    {
+        return Ok(p);
     }
     let sys = system_resolver_config();
     if sys.is_file() {

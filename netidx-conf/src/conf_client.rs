@@ -110,17 +110,40 @@ impl CaIdentity {
     /// The confirmed CA certificate as PEM — for building serving-cert
     /// chains (`[leaf, ca]`) after an [`enroll`].
     pub fn ca_pem(&self) -> String {
-        use base64::Engine;
-        let b64 =
-            base64::engine::general_purpose::STANDARD.encode(self.ca_der.as_ref());
-        let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
-        for chunk in b64.as_bytes().chunks(64) {
-            out.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
-            out.push('\n');
-        }
-        out.push_str("-----END CERTIFICATE-----\n");
-        out
+        der_to_pem(self.ca_der.as_ref())
     }
+}
+
+fn der_to_pem(der: &[u8]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).expect("base64 is ascii"));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
+}
+
+/// The certificate in `bundle` that actually signed `leaf_pem`, as PEM
+/// — for rebuilding serving-style chains (`[leaf, ca]`) after a
+/// renewal: the renewal response carries the bare leaf plus the trust
+/// bundle, and a federated bundle may hold several CAs.
+pub fn issuing_ca_pem(bundle: &str, leaf_pem: &str) -> Result<String> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let leaf_der = pem_to_der(leaf_pem, "CERTIFICATE")?;
+    let (_, leaf) = X509Certificate::from_der(&leaf_der)
+        .map_err(|e| anyhow!("parsing leaf: {e}"))?;
+    let mut rd = std::io::Cursor::new(bundle.as_bytes());
+    for der in rustls_pemfile::certs(&mut rd).flatten() {
+        if let Ok((_, ca)) = X509Certificate::from_der(der.as_ref())
+            && leaf.verify_signature(Some(ca.public_key())).is_ok()
+        {
+            return Ok(der_to_pem(der.as_ref()));
+        }
+    }
+    bail!("no certificate in the bundle signed this leaf")
 }
 
 /// TOFU-handshake to the conf server at `addr`; return the live TLS
@@ -620,6 +643,19 @@ pub async fn approve(
     }
 }
 
+/// Fetch the network's current CRL (pinned). `None` — nothing has ever
+/// been revoked.
+pub async fn get_crl(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+) -> Result<Option<String>> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetCrl).await?;
+    let resp: conf_proto::GetCrlResponse = conf_proto::read_msg(&mut tls).await?;
+    Ok(resp.crl_pem)
+}
+
 /// Deny a queued request with a reason shown to the waiting enrollee.
 pub async fn deny(
     addr: SocketAddr,
@@ -662,30 +698,13 @@ pub async fn push_identity(
     roots: rustls::RootCertStore,
     req: &AddIdentityRequest,
 ) -> Result<Option<u32>> {
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut std::io::Cursor::new(client_cert_pem))
-            .collect::<std::result::Result<_, _>>()
-            .context("parsing client certificate chain")?;
-    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
-        .context("parsing client key")?
-        .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .context("selecting TLS versions")?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)
-        .context("building client TLS config")?;
-    let connector = TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect(addr)
-        .await
-        .with_context(|| format!("connecting to conf server {addr}"))?;
-    let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
-    let mut tls = connector
-        .connect(server_name, tcp)
-        .await
-        .context("TLS handshake with conf server")?;
-    let hello = exchange_hello(&mut tls, NodeKind::ConfServer).await?;
+    let (mut tls, hello) = connect_pki(
+        addr,
+        roots,
+        Some((client_cert_pem, client_key_pem)),
+        NodeKind::ConfServer,
+    )
+    .await?;
     if !hello.roles.contains(&Role::IdMap) {
         return Ok(None);
     }
@@ -696,6 +715,189 @@ pub async fn push_identity(
             bail!("conf server refused the identity: {reason}")
         }
     }
+}
+
+/// Connect to a conf server with **real PKI** (webpki against `roots`,
+/// `ServerName = SERVING_SAN`) — for callers that already hold the
+/// trust bundle (peer conf servers, the renewal daemon). No TOFU, no
+/// pinning, no human. Presents `client_identity` (cert chain + key
+/// PEM) when given — that's what authenticates a verified renewal.
+async fn connect_pki(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    client_identity: Option<(&[u8], &[u8])>,
+    kind: NodeKind,
+) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("selecting TLS versions")?
+        .with_root_certificates(roots);
+    let config = match client_identity {
+        Some((cert_pem, key_pem)) => {
+            let certs: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
+                    .collect::<std::result::Result<_, _>>()
+                    .context("parsing client certificate chain")?;
+            let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))
+                .context("parsing client key")?
+                .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .context("building client TLS config")?
+        }
+        None => builder.with_no_client_auth(),
+    };
+    let connector = TlsConnector::from(Arc::new(config));
+    let tcp = TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("connecting to conf server {addr}"))?;
+    let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
+    let mut tls = connector
+        .connect(server_name, tcp)
+        .await
+        .context("TLS handshake with conf server")?;
+    let hello = exchange_hello(&mut tls, kind).await?;
+    Ok((tls, hello))
+}
+
+/// A queued renewal awaiting (possibly automatic) approval.
+pub struct PendingRenewal {
+    pub request_id: String,
+    name: String,
+    our_spki: Vec<u8>,
+    kc: KeyAndCsr,
+}
+
+/// Queue a **verified renewal**: generate a fresh key + CSR for `name`
+/// and enqueue it over a connection authenticated by the *current*
+/// cert + key — the proof of possession that marks the request
+/// renewable without a glyph. Fully unattended: the server is verified
+/// with real PKI against the installed `roots`.
+pub async fn enqueue_renewal(
+    addr: SocketAddr,
+    kind: NodeKind,
+    name: &str,
+    validity_days: u32,
+    current_cert_pem: &[u8],
+    current_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+) -> Result<PendingRenewal> {
+    let kc = generate_key_and_csr(name)?;
+    let our_spki = csr_spki(&kc.csr_pem)?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((current_cert_pem, current_key_pem)), kind)
+            .await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::Enqueue(EnqueueRequest {
+            kind,
+            csr_pem: kc.csr_pem.clone(),
+            requested_name: name.to_string(),
+            requested_validity_days: validity_days,
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
+        EnqueueResponse::Ok { request_id } => Ok(PendingRenewal {
+            request_id,
+            name: name.to_string(),
+            our_spki,
+            kc,
+        }),
+        EnqueueResponse::Err { reason } => {
+            bail!("conf server refused to queue the renewal: {reason}")
+        }
+    }
+}
+
+/// Check on a queued renewal. On `Signed`, the returned leaf must
+/// contain our fresh key and exact name, and be signed by a CA in the
+/// *returned* bundle — which is itself trusted because it arrived over
+/// a channel verified against the installed roots. (Accepting the
+/// returned bundle is deliberate: it's how a renewed CA certificate
+/// propagates to the fleet.)
+pub async fn poll_renewal(
+    addr: SocketAddr,
+    kind: NodeKind,
+    pending: &PendingRenewal,
+    roots: rustls::RootCertStore,
+) -> Result<PollOutcome> {
+    let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::Poll(PollRequest { request_id: pending.request_id.clone() }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, PollResponse>(&mut tls).await? {
+        PollResponse::Pending => Ok(PollOutcome::Pending),
+        PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
+        PollResponse::Unknown => Ok(PollOutcome::Expired),
+        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings } => {
+            verify_issued_any(
+                &trusted_pem,
+                &pending.name,
+                &pending.our_spki,
+                &signed_cert_pem,
+            )?;
+            Ok(PollOutcome::Issued(Issued {
+                cert_pem: signed_cert_pem,
+                private_key_pem: pending.kc.private_key_pem.clone(),
+                trusted_pem,
+                warnings,
+            }))
+        }
+    }
+}
+
+/// [`get_info`] over real PKI (webpki against `roots`) — for unattended
+/// callers that hold the trust bundle, e.g. the renewal daemon mapping
+/// the network to find the CA. Only genuine members of the network can
+/// answer; no human confirmation involved.
+pub async fn get_info_pki(
+    addr: SocketAddr,
+    kind: NodeKind,
+    roots: rustls::RootCertStore,
+) -> Result<GetInfoResponse> {
+    let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetInfo).await?;
+    conf_proto::read_msg(&mut tls).await
+}
+
+/// [`get_crl`] over real PKI — the renewal daemon's CRL pull.
+pub async fn get_crl_pki(
+    addr: SocketAddr,
+    kind: NodeKind,
+    roots: rustls::RootCertStore,
+) -> Result<Option<String>> {
+    let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetCrl).await?;
+    let resp: conf_proto::GetCrlResponse = conf_proto::read_msg(&mut tls).await?;
+    Ok(resp.crl_pem)
+}
+
+/// Verify a leaf binds to our key + name and is signed by *some* CA in
+/// `bundle` — the renewal-path counterpart of [`verify_issued`], where
+/// the trust anchor is the returned bundle rather than one pinned cert
+/// (federated bundles carry several CAs; any of them may have signed).
+fn verify_issued_any(
+    bundle: &str,
+    name: &str,
+    our_spki: &[u8],
+    signed_cert_pem: &str,
+) -> Result<()> {
+    let mut rd = std::io::Cursor::new(bundle.as_bytes());
+    let mut last_err = anyhow!("the returned trust bundle contains no certificates");
+    for der in rustls_pemfile::certs(&mut rd).flatten() {
+        match verify_issued_leaf(signed_cert_pem, &der, name, our_spki) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err.context(
+        "the renewed certificate failed verification against every CA in the \
+         returned bundle",
+    ))
 }
 
 /// True if `fp` is the identity (SPKI) fingerprint of any certificate

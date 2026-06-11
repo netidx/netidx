@@ -16,6 +16,7 @@ mod id_map;
 mod init;
 mod perms;
 mod prompt;
+mod renew;
 mod resolver;
 // `server` (the conf-server daemon CLI) depends on the
 // `netidx_conf::conf_server` engine module, which is unix-only (the
@@ -26,6 +27,9 @@ mod server;
 mod service;
 mod uninstall;
 
+// One-shot CLI argument value on the stack; boxing the big variant
+// would trade nothing for an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub(crate) enum Params {
     /// install a templated netidx setup
@@ -69,6 +73,11 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: server::Cmd,
     },
+    /// certificate renewal daemon (renew this host's TLS identities)
+    Renew {
+        #[command(subcommand)]
+        cmd: renew::Cmd,
+    },
     /// edit the netidx id-map (TLS uid/group lookups)
     IdMap {
         #[command(subcommand)]
@@ -93,6 +102,7 @@ pub(crate) fn run(p: Params) -> Result<()> {
         Params::Ca { cmd } => ca::run(cmd),
         #[cfg(unix)]
         Params::Server { cmd } => server::run(cmd),
+        Params::Renew { cmd } => renew::run(cmd),
         Params::IdMap { cmd } => id_map::run(cmd),
         Params::Service { cmd } => service::run(cmd),
     }

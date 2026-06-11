@@ -423,6 +423,128 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     Ok(())
 }
 
+/// Revocation, end-to-end at the enforcement choke point: a client
+/// whose certificate lands on the CRL is refused by the resolver — and
+/// the CRL takes effect on a *running* resolver (the CRL-watching
+/// acceptor reloads when `crl.pem` appears beside the trust bundle; no
+/// restart).
+///
+/// Shape: same TLS install as `resolver_template_tls_round_trip`, then
+/// (1) baseline round-trip succeeds; (2) the client's serial is revoked
+/// in the CA index, the CRL is signed and dropped beside the resolver's
+/// trusted bundle; (3) a fresh publisher/subscriber pair — forced into
+/// new TLS handshakes — can no longer get anything registered, observed
+/// as a bounded timeout where the baseline succeeded in milliseconds.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
+    use netidx_conf::ca_index;
+    let _ = env_logger::try_init();
+    ensure_xdg_redirect();
+    let dir = TempDir::new()?;
+    let port = pick_port();
+
+    let ca_dir = dir.path().join("ca");
+    let ca = ca::Ca::init(
+        &ca::CaParams {
+            directory: ca_dir.clone(),
+            subject: ca::Subject::cn("e2e-revocation-ca"),
+            san: vec![],
+            key_bits: 2048,
+            validity_days: 30,
+        },
+        None,
+    )?;
+    // A SAN distinct from every other test's: identities install at the
+    // canonical (shared, XDG-redirected) tls dir keyed by SAN, and the
+    // TLS tests run concurrently — two tests writing the same identity
+    // dir from different CAs race each other into handshake failures.
+    let resolver_id_src = dir.path().join("resolver-id-src");
+    let resolver_issued = ca.issue(&ca::IssueParams {
+        subject: ca::Subject::cn("resolver.revoked.example"),
+        san: vec![ca::SanEntry::Dns("resolver.revoked.example".into())],
+        key_bits: 2048,
+        validity_days: 30,
+        out_dir: resolver_id_src.clone(),
+        password: None,
+    })?;
+
+    let id_map_sock = dir.path().join("id-map.sock");
+    let id_map_json = dir.path().join("id-map.json");
+    let mut params = anon_params(&dir, port);
+    params.auth = AuthChoice::Tls {
+        name: ArcStr::from("resolver.revoked.example"),
+        certificate: resolver_issued.certificate.clone(),
+        private_key: resolver_issued.private_key.clone(),
+        trusted: ca_dir.join("certificate.pem"),
+        askpass: None,
+    };
+    params.with_perms_file = true;
+    params.perms_path = Some(dir.path().join("perms.json"));
+    params.with_id_map = true;
+    params.id_map_socket = Some(id_map_sock.clone());
+    params.id_map_path = Some(id_map_json.clone());
+    let rt = template::resolver::resolver(&params)?;
+    rt.apply()?;
+
+    let mut map = id_map_engine::empty();
+    id_map_engine::upsert_identity(&mut map, "resolver.revoked.example", 1000, "users", &[])?;
+    id_map_engine::save(&id_map_json, &map)?;
+    let _id_map_daemon =
+        IdMapServer::start(IdMapParams::new(id_map_sock, id_map_json)).await?;
+
+    let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
+    let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
+
+    // 1. Baseline: the certificate works.
+    let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
+    round_trip(client_cfg.clone(), "/users/resolver.revoked.example/pre", Value::I64(1))
+        .await?;
+
+    // 2. Revoke the client identity's serial (the index recorded it at
+    //    issuance) and sign + install the CRL beside the resolver's
+    //    trusted bundle — the convention the acceptor watches. The
+    //    resolver keeps running throughout.
+    let live = ca_index::live_for_name(&ca_dir, "resolver.revoked.example")?;
+    assert_eq!(live.len(), 1, "issuance index should hold the one client cert");
+    ca_index::append(
+        &ca_dir,
+        &ca_index::Event::Revoked(ca_index::Revocation {
+            serial: live[0].cert.serial,
+            revoked_unix: ca_index::now_unix(),
+            reason: "e2e test".into(),
+        }),
+    )?;
+    let ca_key = std::fs::read(ca_dir.join("private.key"))?;
+    ca_index::write_crl(&ca_dir, &ca_key)?;
+    let rcfg = netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
+    let mut installed = false;
+    for member in &rcfg.0.member_servers {
+        if let cfg_resolver::file::Auth::Tls { trusted, .. } = &member.auth {
+            let dest = std::path::Path::new(trusted.as_str()).with_file_name("crl.pem");
+            std::fs::copy(ca_index::crl_path(&ca_dir), &dest)?;
+            installed = true;
+        }
+    }
+    assert!(installed, "resolver config should carry a TLS trusted path");
+
+    // 3. A fresh publisher must fail to register: its TLS handshake is
+    //    now refused at the resolver. The publisher layer retries
+    //    forever by design, so refusal manifests as a bounded timeout
+    //    where the baseline took milliseconds.
+    let denied = tokio::time::timeout(
+        Duration::from_secs(15),
+        round_trip(client_cfg, "/users/resolver.revoked.example/post", Value::I64(2)),
+    )
+    .await;
+    match denied {
+        Err(_elapsed) => (), // timed out: never registered — revoked
+        Ok(Err(_)) => (),    // or failed outright — also revoked
+        Ok(Ok(())) => panic!("revoked certificate completed a round trip"),
+    }
+    Ok(())
+}
+
 /// Publisher-template end-to-end: stand up an in-process anonymous
 /// resolver (built directly, NOT via the resolver template — we
 /// want to isolate this test to the *publisher* template's output),

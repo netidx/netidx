@@ -66,7 +66,9 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-rcgen = { workspace = true }
+# `x509-parser` enables Issuer::from_ca_cert_pem, which signs CRLs with
+# the existing (openssl-generated) CA — see `ca_index::write_crl`.
+rcgen = { workspace = true, features = ["x509-parser"] }
 # Optional — only compiled with the `cloud-detect` feature (the
 # `netshape` / cloud-metadata detection used by `conf install`).
 reqwest = { workspace = true, optional = true }
@@ -88,10 +90,8 @@ openssl = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
-# OS file lock around the CA serial counter so concurrent signers (the
-# CA server builds a fresh `Ca` per request, and `ca issue` may run
-# while the daemon is up) can't allocate duplicate X.509 serials.
-fs3 = { workspace = true }
+# Timestamp type rcgen's CRL builder takes (`ca_index::write_crl`).
+time = { workspace = true }
 
 [dev-dependencies]
 # `tokio::test` + multi-thread runtime for the e2e harness in

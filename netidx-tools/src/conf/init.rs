@@ -606,6 +606,9 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     // Struct-literal construction so adding a field to
     // WorkstationParams forces a compile error here rather than
     // silently leaving the new field defaulted (14th commandment).
+    let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
+    let has_tls = !tls_identities.is_empty();
+    let post_apply_units_dir = units_dir.clone();
     let params = netidx_conf::template::workstation::WorkstationParams {
         parent,
         tls_identities,
@@ -619,14 +622,23 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
         perms_seed: None,
         with_perms_file: !f.no_perms,
         perms_path: f.perms_path,
-        units_dir: resolve_units_dir(&f.common, f.units_dir.as_deref())?,
+        units_dir,
         netidx_binary: resolve_netidx_binary(f.netidx_binary)?,
         with_container: !f.no_container,
     };
     let rt = template::workstation(&params)?;
     // A workstation runs in the operator's session; a user-scope
     // systemd / launchd service is the right level — no sudo needed.
-    finish(rt, &f.common, service::ServiceNeed::at(service::ScopeArg::User))
+    finish_with(
+        rt,
+        &f.common,
+        service::ServiceNeed::at(service::ScopeArg::User),
+        // TLS identities expire: install the renewal daemon alongside.
+        move || match (&post_apply_units_dir, has_tls) {
+            (Some(d), true) => install_renew_unit(d),
+            _ => Ok(()),
+        },
+    )
 }
 
 /// Interactive cascade for the workstation's optional parent
@@ -911,6 +923,26 @@ fn join_network(
         println!("  warning: {w}");
     }
     Ok((JoinedIdentity { name, certificate, private_key, trusted }, staging))
+}
+
+/// Install the renewal-daemon activation unit — every host with TLS
+/// identities gets one, so certificate lifecycle is nobody's chore.
+/// Idempotent overwrite.
+fn install_renew_unit(units_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(units_dir)
+        .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
+    let netidx_binary = std::env::current_exe()
+        .context("could not determine current netidx binary for the renew unit")?;
+    let unit = netidx_conf::template::services::renew::unit(
+        &netidx_conf::template::services::renew::RenewServiceParams { netidx_binary },
+    )?;
+    let dir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
+    dir.save("renew", &unit).context("writing the renew activation unit")?;
+    println!(
+        "activation unit → {}",
+        netidx_conf::activation::unit_path_in(units_dir, "renew").display()
+    );
+    Ok(())
 }
 
 /// The id-map group default suggested at enrollment, by node kind:
@@ -1754,10 +1786,10 @@ fn current_username() -> Option<String> {
         }
     }
     for var in ["USER", "LOGNAME", "USERNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                return Some(v);
-            }
+        if let Ok(v) = std::env::var(var)
+            && !v.is_empty()
+        {
+            return Some(v);
         }
     }
     None
@@ -1866,6 +1898,13 @@ pub(crate) struct ResolverFlags {
     /// kerberos principal including realm (e.g. `eric@RYU-OH.ORG`).
     #[arg(long = "no-id-map")]
     no_id_map: bool,
+    /// Skip conf-server setup entirely (expert). On a fresh krb5 /
+    /// anonymous network this also skips the conf-plane CA. A host
+    /// without a conf server is invisible to discovery, and if no conf
+    /// server exists anywhere on the network, certificate renewal and
+    /// future zero-touch installs don't work at all.
+    #[arg(long = "no-conf-server")]
+    no_conf_server: bool,
     /// Override the id-map socket path (default
     /// `${dirs::config_dir}/netidx/id-map.sock`).
     #[arg(long = "id-map-socket")]
@@ -2014,28 +2053,42 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // resolver/id-map units so the one supervisor (and the one system
     // service we offer below) runs them all.
     let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
-    let (auth, _tls_staging) = match probe.have() {
-        Some(net) => resolver_auth_from_network(&f, net, kind)?,
-        None => {
-            resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?
-        }
-    };
+    let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } =
+        match probe.have() {
+            Some(net) => resolver_auth_from_network(&f, net, kind)?,
+            None => {
+                resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?
+            }
+        };
     // First server of a new network with a non-TLS data plane: the
     // conf plane still needs its trust root (it is always TLS — the
     // glyph confirm, enrollment, and server-to-server pushes all hang
-    // off the CA), so offer to create one even though the data plane
-    // is krb5/anonymous. The TLS path gets its CA inside
+    // off the CA), so create one even though the data plane is
+    // krb5/anonymous. Mandatory on krb5, a question on anonymous —
+    // see [`conf_plane_decision`]. The TLS path gets its CA inside
     // `resolver_tls_generate`.
     #[cfg(unix)]
     if probe.have().is_none()
         && !f.common.dry_run
         && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
         && !ca::default_ca_present()
-        && prompt::confirm(
-            "set up a conf server for this network? (creates a CA used only \
-             to secure the conf plane — data-plane auth stays as chosen)",
-            true,
-        )?
+        && match conf_plane_decision(kind, false, f.no_conf_server) {
+            ConfPlane::Mandatory => {
+                println!(
+                    "setting up the conf server for this network. The conf \
+                     plane is TLS even on a krb5 data plane — it anchors \
+                     discovery, enrollment, and certificate renewal. \
+                     (expert opt-out: --no-conf-server)"
+                );
+                true
+            }
+            ConfPlane::Ask => prompt::confirm(
+                "set up a conf server for this network? (creates a CA used only \
+                 to secure the conf plane — data-plane auth stays as chosen)",
+                true,
+            )?,
+            ConfPlane::Skip => false,
+        }
     {
         let domain = prompt::string_with_default(
             "network domain (groups this network in discovery, e.g. ryu-oh.org)",
@@ -2063,6 +2116,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             id_map_groups: vec![],
             may_enroll_servers: None,
             setup_server: Some(true),
+            autorenew: None,
             listen: None,
             listen_hint: Some(listen.ip()),
             units_dir: units_dir.clone(),
@@ -2078,6 +2132,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // wherever this resolver hosts its own tree.
     let parent_default_path = f.base.clone();
     let with_id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
+    let no_conf_server = f.no_conf_server;
     // The conf-server step after apply() needs the *actual* config
     // paths this install produces — resolve the template's defaults
     // the same way it will.
@@ -2124,46 +2179,102 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         // Conf-server step, after the configs it points at exist: a
         // discovered network ⇒ enroll a new conf server here; a fresh
         // network ⇒ add this host's roles to the config the CA setup
-        // wrote (no conf server here ⇒ nothing to do).
+        // wrote (no conf server here ⇒ nothing to do). Then the
+        // renewal daemon, on any host with certificates our CA can
+        // renew (a netidx-CA-issued resolver identity, or a
+        // conf-server serving cert) — an external-PKI identity renews
+        // through that PKI, so the daemon would only log failures.
         move || {
             #[cfg(unix)]
-            {
-                post_apply_conf_server(
-                    probe.have(),
-                    listen,
-                    post_apply_units_dir.as_deref(),
-                    resolver_config_actual,
-                    id_map_actual,
-                )
-            }
+            post_apply_conf_server(
+                probe.have(),
+                kind,
+                no_conf_server,
+                listen,
+                post_apply_units_dir.as_deref(),
+                resolver_config_actual,
+                id_map_actual,
+            )?;
             #[cfg(not(unix))]
             {
-                let _ = (&probe, listen, post_apply_units_dir);
+                let _ = (&probe, kind, no_conf_server, listen);
                 let _ = (resolver_config_actual, id_map_actual);
-                Ok(())
             }
+            if let Some(d) = post_apply_units_dir.as_deref()
+                && (netidx_ca || paths::discover_conf_server_config().is_ok())
+            {
+                install_renew_unit(d)?;
+            }
+            Ok(())
         },
     )
 }
 
+/// What the resolver install does about the conf plane (the conf
+/// server, and on non-TLS networks the conf-plane CA that anchors it).
+/// This function IS the install-profile matrix — documented in
+/// design/conf-server.md (Install profiles) and exhaustively tested
+/// below; change all three together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfPlane {
+    /// Set it up. Announce what's happening; don't ask.
+    Mandatory,
+    /// Default-yes question.
+    Ask,
+    /// Never offer (host-local auth), or the operator opted out.
+    Skip,
+}
+
+/// `joining` ⇒ a discovered network already anchors the conf plane and
+/// this host would *enroll* a conf server — which requires an admin
+/// password on the spot (Enroll is synchronous). When the admin is
+/// remote (the queued-approval install) the operator must be able to
+/// decline, so joining is always a question, never mandatory.
+///
+/// On a fresh network: TLS already creates the CA (it signs the data
+/// plane), and krb5/anonymous still need the conf plane's TLS trust
+/// root for discovery, enrollment, and renewal — declining it on a TLS
+/// or krb5 network produces a network where certificate renewal and
+/// zero-touch installs can never work, so neither is offered as a
+/// question. Anonymous networks may genuinely not want the machinery
+/// (lab/dev setups), so they're asked. Local auth is host-local by
+/// definition: nothing to discover, nothing to enroll.
+fn conf_plane_decision(kind: AuthKind, joining: bool, no_conf_server: bool) -> ConfPlane {
+    if no_conf_server {
+        return ConfPlane::Skip;
+    }
+    if joining {
+        return ConfPlane::Ask;
+    }
+    match kind {
+        AuthKind::Tls | AuthKind::Krb5 => ConfPlane::Mandatory,
+        AuthKind::Anonymous => ConfPlane::Ask,
+        AuthKind::Local => ConfPlane::Skip,
+    }
+}
+
 /// Decide whether to install the id-mapper daemon alongside the
-/// resolver. `--no-id-map` is always honoured (skip). Otherwise the
-/// default depends on auth: TLS gets the daemon (cert SANs have no
-/// other lookup path through `id`), Krb5 defaults to NO on the
-/// assumption that most kerberos sites already have a system-level
-/// IdM (FreeIPA, AD, OpenIDM) handling principal → uid via SSSD /
-/// nsswitch — `prompt::confirm` flips silently to the default on
-/// a non-TTY. Anonymous and Local don't use the daemon.
+/// resolver. `--no-id-map` is always honoured (skip — the template
+/// layer emits a coherence warning for TLS). Otherwise: TLS gets the
+/// daemon unconditionally — cert SANs have no `/bin/id` translation,
+/// so a TLS resolver without it denies every non-anonymous operation;
+/// that's not a choice, it's a trap. Krb5 stays a question defaulting
+/// to NO on the assumption that most kerberos sites already have a
+/// system-level IdM (FreeIPA, AD, OpenIDM) handling principal → uid
+/// via SSSD / nsswitch — `prompt::confirm` flips silently to the
+/// default on a non-TTY. Anonymous and Local don't use the daemon.
 fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
     if no_id_map {
         return Ok(false);
     }
     match auth {
-        AuthChoice::Tls { .. } => prompt::confirm(
-            "install the netidx id-mapper daemon (maps TLS cert identities \
-             to unix uids)?",
-            true,
-        ),
+        AuthChoice::Tls { .. } => {
+            println!(
+                "installing the netidx id-mapper daemon (maps TLS cert \
+                 identities to unix uids; skip with --no-id-map)"
+            );
+            Ok(true)
+        }
         AuthChoice::Krb5 { .. } => prompt::confirm(
             "install the netidx id-mapper daemon? Most kerberos sites use a \
              system-level IdM (FreeIPA, AD, OpenIDM) and answer N here; \
@@ -2175,16 +2286,32 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
     }
 }
 
-/// Resolve the resolver's own auth choice. The optional `TempDir` is
-/// the TLS-issuance staging guard (see [`resolver_tls_generate`]); the
-/// caller must keep it alive until `apply()` has run. All non-TLS
-/// schemes (and the BYO / wait-for-CSR TLS paths) return `None`.
+/// The resolver's resolved auth identity. `staging` is the
+/// TLS-issuance staging guard (see [`resolver_tls_generate`]); the
+/// caller must keep it alive until `apply()` has run. `netidx_ca` ⇒
+/// the TLS identity chains to this network's netidx CA (issued locally
+/// or network-joined), so the renewal daemon can renew it; false for
+/// external-PKI identities — their renewal belongs to that PKI — and
+/// for all non-TLS schemes.
+struct ResolvedAuth {
+    choice: AuthChoice,
+    staging: Option<tempfile::TempDir>,
+    netidx_ca: bool,
+}
+
+impl ResolvedAuth {
+    fn external(choice: AuthChoice) -> Self {
+        ResolvedAuth { choice, staging: None, netidx_ca: false }
+    }
+}
+
+/// Resolve the resolver's own auth choice.
 fn resolver_self_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
     probe: &ConfServers,
-) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+) -> Result<ResolvedAuth> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
     // per-scheme sub-args are level-2 prompts — once the operator
@@ -2192,47 +2319,55 @@ fn resolver_self_auth(
     // optional.
     let auth = f.auth.expect("auth resolved before resolver_self_auth");
     match auth {
-        AuthKind::Anonymous => Ok((AuthChoice::Anonymous, None)),
-        AuthKind::Local => Ok((
-            AuthChoice::Local {
-                path: prompt::required_path(
-                    "local-auth socket path",
-                    f.socket.clone(),
-                )?,
-            },
-            None,
-        )),
-        AuthKind::Krb5 => Ok((
-            AuthChoice::Krb5 {
-                spn: ArcStr::from(
-                    prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
-                ),
-            },
-            None,
-        )),
+        AuthKind::Anonymous => Ok(ResolvedAuth::external(AuthChoice::Anonymous)),
+        AuthKind::Local => Ok(ResolvedAuth::external(AuthChoice::Local {
+            path: prompt::required_path("local-auth socket path", f.socket.clone())?,
+        })),
+        AuthKind::Krb5 => Ok(ResolvedAuth::external(AuthChoice::Krb5 {
+            spn: ArcStr::from(
+                prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
+            ),
+        })),
         AuthKind::Tls => resolver_tls_auth(f, default_ca_ip, units_dir, probe),
     }
 }
 
-/// Resolve the resolver's TLS identity. The certificate is either an
-/// explicit path the operator supplies, or the literal `generate` —
-/// in which case we either request it from a CA server or issue one
-/// from the local CA (creating that CA if none exists). The interactive
-/// prompt defaults to `generate`: for the common small-org case where
-/// the resolver host is also the CA host, hitting return through the
-/// prompts gets you a working setup.
+/// Printed on the external-PKI resolver paths ('csr' and BYO cert):
+/// without a netidx CA there is no conf plane on this network — the
+/// capabilities lost are worth a sentence before the operator commits.
+fn note_external_pki(name: &str) {
+    println!(
+        "note: external-PKI identity {name:?} — without a netidx CA this \
+         network has no conf plane: no discovery for future installs, no \
+         queued enrollment, and certificate renewal stays with your PKI \
+         (the netidx renewal daemon is not installed)."
+    );
+}
+
+/// Resolve the resolver's TLS identity. The certificate is an explicit
+/// path the operator supplies, the literal `generate` (request it from
+/// a discovered conf server, or issue from the local CA — creating
+/// that CA if none exists), or the literal `csr` (external PKI:
+/// generate a key + CSR here, the operator gets it signed elsewhere).
+/// The interactive prompt defaults to `generate`: for the common
+/// small-org case where the resolver host is also the CA host, hitting
+/// return through the prompts gets you a working setup. The `csr` and
+/// path forms are the expert escape into a foreign PKI — they carry no
+/// conf plane, and say so.
 fn resolver_tls_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
     probe: &ConfServers,
-) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+) -> Result<ResolvedAuth> {
     let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
-    // 'generate' (issue from local CA) is unix-only — the CA module
-    // depends on openssl which we don't ship to Windows.
+    // 'generate' / 'csr' (local key + CSR via openssl) are unix-only —
+    // the CA module depends on openssl which we don't ship to Windows.
     #[cfg(unix)]
     let (label, default) = (
-        "resolver certificate (a path, or 'generate' to issue one from a local CA)",
+        "resolver certificate (a path; 'generate' to issue from the local \
+         CA; 'csr' for an external PKI — make a key + CSR here, you get it \
+         signed)",
         "generate",
     );
     #[cfg(not(unix))]
@@ -2246,20 +2381,25 @@ fn resolver_tls_auth(
         default,
     )?;
     #[cfg(unix)]
-    let is_generate = cert_choice == "generate";
-    #[cfg(not(unix))]
-    let is_generate = false;
-    if is_generate {
-        #[cfg(unix)]
-        {
+    {
+        if cert_choice == "generate" {
             return resolver_tls_generate(f, &name, default_ca_ip, units_dir, probe);
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (default_ca_ip, units_dir, probe);
-            unreachable!("generate path is unix-only")
+        if cert_choice == "csr" {
+            note_external_pki(&name);
+            let (certificate, private_key, trusted, askpass) =
+                generate_csr_and_wait_for_cert(&name)?;
+            return Ok(ResolvedAuth::external(AuthChoice::Tls {
+                name: ArcStr::from(name.as_str()),
+                certificate,
+                private_key,
+                trusted,
+                askpass,
+            }));
         }
     }
+    #[cfg(not(unix))]
+    let _ = (default_ca_ip, units_dir, probe);
     if cert_choice.is_empty() {
         bail!(
             "resolver certificate path required (local issuance is \
@@ -2270,27 +2410,25 @@ fn resolver_tls_auth(
     // identity, so the key and trusted-CA bundle are required too.
     // No staging dir: the sources are wherever the operator put them,
     // and the copy into the canonical dir happens in `apply()`.
-    Ok((
-        AuthChoice::Tls {
-            name: ArcStr::from(name.as_str()),
-            certificate: PathBuf::from(cert_choice),
-            private_key: prompt::required_path(
-                "path to the resolver private key",
-                f.tls_key.clone(),
-            )?,
-            trusted: prompt::required_path(
-                "path to the trusted CA bundle",
-                f.tls_trusted.clone(),
-            )?,
-            // BYO-cert path: the key already exists. We don't know
-            // whether it's encrypted, and guessing wrong either buries
-            // an extraneous askpass in the config or skips a needed
-            // one — same trade-off as the parent-referral BYO branch.
-            // Operators can edit `tls.askpass` post-install.
-            askpass: None,
-        },
-        None,
-    ))
+    note_external_pki(&name);
+    Ok(ResolvedAuth::external(AuthChoice::Tls {
+        name: ArcStr::from(name.as_str()),
+        certificate: PathBuf::from(cert_choice),
+        private_key: prompt::required_path(
+            "path to the resolver private key",
+            f.tls_key.clone(),
+        )?,
+        trusted: prompt::required_path(
+            "path to the trusted CA bundle",
+            f.tls_trusted.clone(),
+        )?,
+        // BYO-cert path: the key already exists. We don't know
+        // whether it's encrypted, and guessing wrong either buries
+        // an extraneous askpass in the config or skips a needed
+        // one — same trade-off as the parent-referral BYO branch.
+        // Operators can edit `tls.askpass` post-install.
+        askpass: None,
+    }))
 }
 
 /// Issue a resolver certificate from the local CA, creating the CA
@@ -2303,9 +2441,7 @@ fn resolver_tls_auth(
 /// into place. This keeps the prompt phase side-effect-free under the
 /// config tree: `check_no_overwrite` sees a pristine destination, so a
 /// re-install without `--force` is caught *before* the issued cert/key
-/// could clobber an existing identity. The BYO-CSR fallthrough
-/// (`generate_csr_and_wait_for_cert`) returns `None` — it must use the
-/// canonical dir as the operator's cert-drop rendezvous.
+/// could clobber an existing identity.
 ///
 /// Under `--dry-run` this issues nothing — it prints what it would
 /// do and returns the *intended* canonical paths (and no staging dir).
@@ -2318,7 +2454,7 @@ fn resolver_tls_generate(
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
     probe: &ConfServers,
-) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+) -> Result<ResolvedAuth> {
     // First the network path: a conf server signs our CSR on the
     // spot. Whether this asks anything is decided by `probe` — in
     // particular, an operator who already said "no conf server" at the
@@ -2332,7 +2468,11 @@ fn resolver_tls_generate(
         if let Some((j, staging)) =
             maybe_join_ca_server(probe, NodeKind::Resolver, Some(name))?
         {
-            return Ok((joined_to_auth(j), Some(staging)));
+            return Ok(ResolvedAuth {
+                choice: joined_to_auth(j),
+                staging: Some(staging),
+                netidx_ca: true,
+            });
         }
     }
     let ca_dir = paths::user_ca_dir()?;
@@ -2358,64 +2498,53 @@ fn resolver_tls_generate(
                 ca_dir.display(),
             );
         }
-        return Ok((
-            AuthChoice::Tls {
+        return Ok(ResolvedAuth {
+            choice: AuthChoice::Tls {
                 name: ArcStr::from(name),
                 certificate: identity_dir.join("certificate.pem"),
                 private_key: identity_dir.join("private.key"),
                 trusted: ca_cert,
                 askpass: None,
             },
-            None,
-        ));
+            staging: None,
+            netidx_ca: true,
+        });
     }
 
-    // Resolve the CA (open existing, create new, or fall through to
-    // BYO-CSR) before collecting the password — that way an operator
-    // who abandons CA creation doesn't have to type a password they
-    // won't end up using. The BYO-CSR branch collects its own
-    // password inside `generate_csr_and_wait_for_cert`.
     let ca = if ca::default_ca_present() {
         println!("issuing from the local CA at {}", ca_dir.display());
         ca::open_default_ca()?
     } else {
-        // No CA — offer to create one. Declining falls through to
-        // the same "generate a key + CSR locally and wait for the
-        // operator to drop in a signed cert" flow the parent-cert
-        // prompt uses for the same situation: the operator has
-        // their own CA (corporate PKI, etc.) and wants to take the
-        // CSR there rather than spinning up a local one.
-        if !prompt::confirm(
-            &format!(
-                "no CA found at {} — create a new local CA now?",
-                ca_dir.display()
-            ),
-            true,
-        )? {
-            let (certificate, private_key, trusted, askpass) =
-                generate_csr_and_wait_for_cert(name)?;
-            return Ok((
-                AuthChoice::Tls {
-                    name: ArcStr::from(name),
-                    certificate,
-                    private_key,
-                    trusted,
-                    askpass,
-                },
-                None,
-            ));
-        }
-        // Create the CA via the SAME entry point as `netidx conf ca
-        // init` — admin/policy, identicon, and the "set up the CA
-        // server?" question all included. We already know the domain
-        // from the resolver's TLS name (e.g. `resolver.ryu-oh.org` →
-        // `ryu-oh.org`), so name the CA `ca.<domain>` per the
-        // `<name>.<domain>` convention and pass the domain through so the
-        // first admin's policy defaults to `*.<domain>` — no extra typing
-        // and no mismatch with the names this deployment will issue.
+        // No CA — this is the first resolver of a new TLS network, so
+        // the CA is created right here, no question asked: it signs
+        // the data plane *and* anchors the conf plane (discovery,
+        // enrollment, renewal). The operator who wants an external PKI
+        // instead chose 'csr' or a cert path one prompt ago.
+        //
+        // Created via the SAME entry point as `netidx conf ca init` —
+        // admin/policy and identicon included. We already know the
+        // domain from the resolver's TLS name (e.g.
+        // `resolver.ryu-oh.org` → `ryu-oh.org`), so name the CA
+        // `ca.<domain>` per the `<name>.<domain>` convention and pass
+        // the domain through so the first admin's policy defaults to
+        // `*.<domain>` — no extra typing and no mismatch with the
+        // names this deployment will issue.
+        println!(
+            "no CA found at {} — creating the network's CA (it signs this \
+             resolver's certificate and anchors discovery, enrollment, and \
+             renewal)",
+            ca_dir.display()
+        );
         let domain = netidx_conf::tls::domain_from_san(name)
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
+        let setup_server = match conf_plane_decision(AuthKind::Tls, false, f.no_conf_server)
+        {
+            ConfPlane::Mandatory => Some(true),
+            ConfPlane::Skip => Some(false),
+            // TLS + fresh network is never a question — see the matrix.
+            ConfPlane::Ask => unreachable!("tls fresh-network conf plane is not Ask"),
+        };
         let (created, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
             dir: ca_dir.clone(),
             common_name: Some(ca::default_ca_cn(&domain)),
@@ -2432,7 +2561,8 @@ fn resolver_tls_generate(
             max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
             id_map_groups: vec![],
             may_enroll_servers: None,
-            setup_server: None,
+            setup_server,
+            autorenew: None,
             listen: None,
             // The CA co-locates with this resolver — suggest its IP for
             // the conf server's listen address.
@@ -2473,16 +2603,17 @@ fn resolver_tls_generate(
     if password.is_some() {
         println!("  private key is encrypted; password saved to the system keychain.");
     }
-    Ok((
-        AuthChoice::Tls {
+    Ok(ResolvedAuth {
+        choice: AuthChoice::Tls {
             name: ArcStr::from(name),
             certificate: issued.certificate,
             private_key: issued.private_key,
             trusted: ca_cert,
             askpass,
         },
-        Some(staging),
-    ))
+        staging: Some(staging),
+        netidx_ca: true,
+    })
 }
 
 /// The auth scheme a discovered network's resolvers use (the first
@@ -2506,9 +2637,9 @@ fn resolver_auth_from_network(
     f: &ResolverFlags,
     net: &DiscoveredNetwork,
     kind: AuthKind,
-) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+) -> Result<ResolvedAuth> {
     match kind {
-        AuthKind::Anonymous => Ok((AuthChoice::Anonymous, None)),
+        AuthKind::Anonymous => Ok(ResolvedAuth::external(AuthChoice::Anonymous)),
         AuthKind::Local => bail!(
             "a network-discovered resolver cannot use local auth (it is \
              host-local by definition)"
@@ -2521,18 +2652,15 @@ fn resolver_auth_from_network(
             }) {
                 println!("note: an existing resolver on this network uses SPN {example:?}");
             }
-            Ok((
-                AuthChoice::Krb5 {
-                    spn: ArcStr::from(
-                        prompt::required_string(
-                            "kerberos SPN for this resolver",
-                            f.spn.clone(),
-                        )?
-                        .as_str(),
-                    ),
-                },
-                None,
-            ))
+            Ok(ResolvedAuth::external(AuthChoice::Krb5 {
+                spn: ArcStr::from(
+                    prompt::required_string(
+                        "kerberos SPN for this resolver",
+                        f.spn.clone(),
+                    )?
+                    .as_str(),
+                ),
+            }))
         }
         AuthKind::Tls => {
             let Some(ca_addr) = net.info.ca_addr else {
@@ -2555,7 +2683,11 @@ fn resolver_auth_from_network(
                 Some(&suggested),
                 &net.identity,
             )?;
-            Ok((joined_to_auth(j), Some(staging)))
+            Ok(ResolvedAuth {
+                choice: joined_to_auth(j),
+                staging: Some(staging),
+                netidx_ca: true,
+            })
         }
     }
 }
@@ -2569,6 +2701,8 @@ fn resolver_auth_from_network(
 #[cfg(unix)]
 fn post_apply_conf_server(
     discovered: Option<&DiscoveredNetwork>,
+    kind: AuthKind,
+    no_conf_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
@@ -2576,9 +2710,15 @@ fn post_apply_conf_server(
 ) -> Result<()> {
     use netidx_conf::conf_server_config::{IdMapRole, ResolverRole};
     match discovered {
-        Some(net) => {
-            enroll_conf_server(net, resolver_listen, units_dir, resolver_config, id_map)
-        }
+        Some(net) => enroll_conf_server(
+            net,
+            kind,
+            no_conf_server,
+            resolver_listen,
+            units_dir,
+            resolver_config,
+            id_map,
+        ),
         None => {
             if paths::discover_conf_server_config().is_err() {
                 return Ok(());
@@ -2600,9 +2740,15 @@ fn post_apply_conf_server(
 /// install the serving identity + `conf-server.json` with this host's
 /// roles, and drop the activation unit. The CA records us as a peer as
 /// a side effect of the enrollment.
+///
+/// This is the join side of the [`conf_plane_decision`] matrix: always
+/// a question, because enrollment needs a CA admin's password right
+/// here and the admin may be remote (the queued-approval install).
 #[cfg(unix)]
 fn enroll_conf_server(
     net: &DiscoveredNetwork,
+    kind: AuthKind,
+    no_conf_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
@@ -2619,11 +2765,20 @@ fn enroll_conf_server(
         );
         return Ok(());
     };
+    match conf_plane_decision(kind, true, no_conf_server) {
+        ConfPlane::Skip => return Ok(()),
+        ConfPlane::Ask | ConfPlane::Mandatory => (),
+    }
     if !prompt::confirm(
         "set up a conf server on this host (advertises this resolver to \
-         future installs)?",
+         future installs; needs a CA admin's password now)?",
         true,
     )? {
+        println!(
+            "note: skipped — discovery only sees hosts running a conf \
+             server, so future installs won't learn about this resolver \
+             from this host"
+        );
         return Ok(());
     }
     let ip = prompt::parsed_with_default::<IpAddr>(
@@ -2736,6 +2891,11 @@ pub(crate) struct PublisherFlags {
     /// the resolver is also on loopback).
     #[arg(long = "bind")]
     bind: Option<String>,
+    /// Where to drop the renewal-daemon activation unit (installed for
+    /// TLS setups — certificates expire and nobody should have to
+    /// remember that). Defaults to the user activation dir.
+    #[arg(long = "units-dir")]
+    units_dir: Option<PathBuf>,
     #[command(flatten)]
     common: CommonFlags,
 }
@@ -2854,6 +3014,20 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         answer
     };
     let default_bind_config = Some(bind);
+    // TLS publishers get the renewal daemon (the one daemon a
+    // "client-only" host runs — certificates expire); everything else
+    // stays service-free.
+    let has_tls = !tls_identities.is_empty();
+    let units_dir = if has_tls {
+        resolve_units_dir(&f.common, f.units_dir.as_deref())?
+    } else {
+        None
+    };
+    let need = if units_dir.is_some() {
+        service::ServiceNeed::at(service::ScopeArg::User)
+    } else {
+        service::ServiceNeed::NONE
+    };
     let params = netidx_conf::template::publisher::PublisherParams {
         addrs,
         default_auth,
@@ -2863,9 +3037,10 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         default_bind_config,
     };
     let rt = template::publisher(&params)?;
-    // No daemon to supervise on a client-only host — nothing to
-    // install as an OS service.
-    finish(rt, &f.common, service::ServiceNeed::NONE)
+    finish_with(rt, &f.common, need, move || match &units_dir {
+        Some(d) => install_renew_unit(d),
+        None => Ok(()),
+    })
 }
 
 fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
@@ -2896,18 +3071,11 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 
 // -- Apply / dry-run ----------------------------------------------------------
 
-fn finish(
-    rt: RenderedTemplate,
-    common: &CommonFlags,
-    need: service::ServiceNeed,
-) -> Result<()> {
-    finish_with(rt, common, need, || Ok(()))
-}
-
-/// [`finish`] with a post-apply step that runs after the template has
-/// been installed (and never on `--dry-run`). The resolver install
-/// uses it to stand up / update this host's conf server, which points
-/// at config files that only exist once `apply()` has run.
+/// Describe + apply the rendered template, with a post-apply step that
+/// runs after it has been installed (and never on `--dry-run`). The
+/// resolver install uses the step to stand up / update this host's
+/// conf server, which points at config files that only exist once
+/// `apply()` has run.
 fn finish_with(
     rt: RenderedTemplate,
     common: &CommonFlags,
@@ -2972,7 +3140,60 @@ mod tests {
             units: BTreeMap::new(),
             units_dir: None,
             tls_install: Vec::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    // The install-profile matrix, exhaustively. This test and
+    // design/conf-server.md (Install profiles) mirror
+    // `conf_plane_decision`; change all three together.
+    #[test]
+    fn the_conf_plane_matrix() {
+        use AuthKind::*;
+        use ConfPlane::*;
+        // Fresh network: declining the conf plane on a TLS or krb5
+        // network breaks renewal + zero-touch installs forever, so
+        // neither is a question. Anonymous networks may not want the
+        // machinery; local auth has nothing to discover.
+        for (kind, want) in
+            [(Tls, Mandatory), (Krb5, Mandatory), (Anonymous, Ask), (Local, Skip)]
+        {
+            assert_eq!(conf_plane_decision(kind, false, false), want, "{kind:?} fresh");
+        }
+        // Joining: enrollment needs an admin password on the spot, and
+        // the admin may be remote — always a question.
+        for kind in [Tls, Krb5, Anonymous, Local] {
+            assert_eq!(conf_plane_decision(kind, true, false), Ask, "{kind:?} join");
+        }
+        // The expert opt-out beats everything.
+        for kind in [Tls, Krb5, Anonymous, Local] {
+            for joining in [false, true] {
+                assert_eq!(conf_plane_decision(kind, joining, true), Skip);
+            }
+        }
+    }
+
+    // TLS gets the id-mapper unconditionally (no prompt — in test
+    // builds stdin_is_tty() is pinned false, so a prompt would flip to
+    // its default and hide a regression here); krb5 falls to its
+    // default-N prompt; anonymous and local never use the daemon.
+    // `--no-id-map` always wins.
+    #[test]
+    fn id_map_choice_per_profile() {
+        let tls = AuthChoice::Tls {
+            name: ArcStr::from("resolver.example.com"),
+            certificate: PathBuf::from("/x/cert.pem"),
+            private_key: PathBuf::from("/x/key.pem"),
+            trusted: PathBuf::from("/x/ca.pem"),
+            askpass: None,
+        };
+        let krb5 = AuthChoice::Krb5 { spn: ArcStr::from("host/x@REALM") };
+        let local = AuthChoice::Local { path: PathBuf::from("/x/sock") };
+        assert!(resolve_id_map_choice(&tls, false).unwrap());
+        assert!(!resolve_id_map_choice(&tls, true).unwrap());
+        assert!(!resolve_id_map_choice(&krb5, false).unwrap());
+        assert!(!resolve_id_map_choice(&AuthChoice::Anonymous, false).unwrap());
+        assert!(!resolve_id_map_choice(&local, false).unwrap());
     }
 
     // The BYO-CSR generate flows (resolver-declines-local-CA, and the

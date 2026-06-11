@@ -22,7 +22,7 @@
 //! computes the identical fingerprint on every platform — Windows
 //! included, where the openssl-backed `ca` module isn't available.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use sha2::{Digest, Sha256};
 
 /// A SHA-256 digest rendered for human comparison.
@@ -103,6 +103,40 @@ impl Fingerprint {
     // constructor — hashing the certificate instead of its key is
     // exactly the mistake that would break every printed glyph at the
     // first CA renewal.
+
+    /// Parse the grouped-base32 form [`text`](Self::text) produces
+    /// (spaces and case ignored) back into a fingerprint — used to
+    /// re-render glyphs stored as text, e.g. in the issuance index.
+    pub fn parse_text(s: &str) -> Result<Self> {
+        let mut bytes = [0u8; 32];
+        let mut acc: u32 = 0;
+        let mut bits: u32 = 0;
+        let mut i = 0;
+        for c in s.chars() {
+            if c == ' ' {
+                continue;
+            }
+            let v = B32
+                .iter()
+                .position(|&b| b as char == c.to_ascii_uppercase())
+                .ok_or_else(|| anyhow!("invalid base32 character {c:?}"))?;
+            acc = (acc << 5) | v as u32;
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                if i >= 32 {
+                    bail!("fingerprint text too long");
+                }
+                bytes[i] = ((acc >> bits) & 0xff) as u8;
+                i += 1;
+                acc &= (1 << bits) - 1;
+            }
+        }
+        if i != 32 {
+            bail!("fingerprint text too short ({i} of 32 bytes)");
+        }
+        Ok(Self(bytes))
+    }
 
     /// The raw 32-byte digest.
     pub fn bytes(&self) -> &[u8; 32] {
@@ -196,6 +230,20 @@ fn ansi256(r: u8, g: u8, b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_round_trips_through_parse() {
+        let f = Fingerprint::of_der(b"round trip me");
+        assert_eq!(Fingerprint::parse_text(&f.text()).unwrap(), f);
+        // Case and spacing are display artifacts, not content.
+        assert_eq!(
+            Fingerprint::parse_text(&f.text().to_lowercase().replace(' ', "")).unwrap(),
+            f
+        );
+        assert!(Fingerprint::parse_text("TOO SHORT").is_err());
+        assert!(Fingerprint::parse_text(&format!("{}AAAAAAAA", f.text())).is_err());
+        assert!(Fingerprint::parse_text("0!@#").is_err());
+    }
 
     #[test]
     fn base32_is_rfc4648() {

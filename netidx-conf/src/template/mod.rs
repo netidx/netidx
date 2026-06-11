@@ -207,6 +207,11 @@ pub struct RenderedTemplate {
     /// (e.g. `--no-units`).
     pub units_dir: Option<PathBuf>,
     pub tls_install: Vec<TlsCopyJob>,
+    /// Coherence warnings: the plan is valid but the parameter
+    /// combination is one only an expert should want (e.g. a TLS
+    /// resolver with no id-mapper). Rendered by `describe()`, so they
+    /// surface on dry runs too.
+    pub warnings: Vec<ArcStr>,
 }
 
 impl RenderedTemplate {
@@ -325,6 +330,9 @@ impl RenderedTemplate {
                 job.private_key_src,
                 job.trusted_src,
             );
+        }
+        for w in &self.warnings {
+            let _ = writeln!(out, "warning: {w}");
         }
         if out.is_empty() {
             out.push_str("(empty plan)");

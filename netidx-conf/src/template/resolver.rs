@@ -156,6 +156,20 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // doesn't benefit from the daemon.
     let id_map_active = p.with_id_map
         && matches!(p.auth, AuthChoice::Tls { .. } | AuthChoice::Krb5 { .. });
+    let mut warnings = Vec::new();
+    // A TLS resolver without the id-mapper falls back to `/bin/id
+    // <cert-SAN>`, which resolves no SAN-shaped name — every identity
+    // maps to nobody and perms deny all non-anonymous operations. Krb5
+    // without it is fine (principals resolve through the system IdM via
+    // nsswitch), so only TLS is incoherent.
+    if matches!(p.auth, AuthChoice::Tls { .. }) && !p.with_id_map {
+        warnings.push(arcstr::literal!(
+            "TLS auth without the id-mapper daemon: certificate identities \
+             (e.g. user.domain) have no /bin/id translation, so they map to \
+             no unix user and perms will deny every non-anonymous operation. \
+             Expert setups only (--no-id-map)."
+        ));
+    }
     let id_map_socket_path = if id_map_active {
         Some(match &p.id_map_socket {
             Some(p) => p.clone(),
@@ -305,6 +319,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         units,
         units_dir,
         tls_install: tls_job.into_iter().collect(),
+        warnings,
     })
 }
 
@@ -785,6 +800,10 @@ mod tests {
         assert_eq!(rt.tls_install[0].cn, "resolver");
         let (_, r) = rt.resolver_config.as_ref().unwrap();
         assert!(matches!(r.0.member_servers[0].auth, rfile::Auth::Tls { .. }));
+        // TLS without the id-mapper is the incoherent expert combo —
+        // the plan must say so (and `describe()` must surface it).
+        assert_eq!(rt.warnings.len(), 1);
+        assert!(rt.describe().contains("warning:"));
     }
 
     /// Stand up a TLS-auth resolver template that requests id-map
@@ -851,6 +870,8 @@ mod tests {
         let (file_path, starter) = rt.id_map_file.as_ref().unwrap();
         assert_eq!(file_path, &id_map_path);
         assert!(starter.identities.is_empty());
+        // TLS *with* the id-mapper is the coherent profile — no warning.
+        assert!(rt.warnings.is_empty());
 
         rt.apply().unwrap();
         // Starter is on disk, both unit files dropped.
@@ -983,6 +1004,17 @@ mod tests {
         assert!(id_map_path.exists());
         assert!(out.path().join("activation/id-map.unit").exists());
         assert!(out.path().join("activation/resolver.unit").exists());
+    }
+
+    /// Krb5 without the id-mapper is the *normal* profile (system IdM
+    /// via SSSD/nsswitch) — it must not warn the way TLS does.
+    #[test]
+    fn krb5_without_id_map_is_coherent() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.auth = AuthChoice::Krb5 { spn: ArcStr::from("netidx/resolver@RYU-OH.ORG") };
+        let rt = resolver(&p).unwrap();
+        assert!(rt.warnings.is_empty());
     }
 
     /// Krb5 resolver must grant its own SPN full rights at the base —

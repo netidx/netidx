@@ -63,6 +63,10 @@ pub mod conf_server_config;
 /// security-relevant is decided from it. Cross-platform: a Windows
 /// workstation browses; the unix daemon advertises.
 pub mod discovery;
+/// The certificate renewal daemon: queues verified renewals for this
+/// host's TLS identities and distributes the CRL. Cross-platform —
+/// Windows workstations renew too.
+pub mod renewd;
 pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]

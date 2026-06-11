@@ -18,6 +18,9 @@ use super::prompt;
 use clap::{Args, Subcommand};
 use std::{collections::BTreeSet, path::PathBuf};
 
+// One-shot CLI argument value on the stack; boxing the big variant
+// would trade nothing for an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// list installed activation units

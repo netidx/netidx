@@ -40,6 +40,13 @@ pub struct QueuedReq {
     pub received_unix: u64,
     /// Socket address the request arrived from (display context).
     pub peer: String,
+    /// The enqueue connection was authenticated by a live certificate
+    /// for exactly `requested_name` — a proof-of-possession renewal.
+    /// Approval skips the SAN-scope and one-live-cert checks (the name
+    /// was admin-approved at enrollment; this is continuation) and
+    /// never touches the id-map.
+    #[serde(default)]
+    pub verified_renewal: bool,
 }
 
 impl QueuedReq {
@@ -50,6 +57,7 @@ impl QueuedReq {
         requested_name: String,
         requested_validity_days: u32,
         peer: String,
+        verified_renewal: bool,
     ) -> Self {
         QueuedReq {
             id: new_id(),
@@ -59,6 +67,7 @@ impl QueuedReq {
             requested_validity_days,
             received_unix: now_unix(),
             peer,
+            verified_renewal,
         }
     }
 
@@ -266,6 +275,7 @@ mod tests {
             requested_validity_days: 30,
             received_unix,
             peer: "10.0.0.7:51000".to_string(),
+            verified_renewal: false,
         }
     }
 

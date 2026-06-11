@@ -312,12 +312,11 @@ pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
     if let Some(u) = provided {
         return Ok(u);
     }
-    if let Some(s) = std::env::var_os("SUDO_USER") {
-        if let Some(s) = s.to_str() {
-            if !s.is_empty() {
-                return Ok(s.to_string());
-            }
-        }
+    if let Some(s) = std::env::var_os("SUDO_USER")
+        && let Some(s) = s.to_str()
+        && !s.is_empty()
+    {
+        return Ok(s.to_string());
     }
     let uid = nix::unistd::geteuid();
     let user = nix::unistd::User::from_uid(uid)

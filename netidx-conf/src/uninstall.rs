@@ -114,12 +114,13 @@ pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
     };
     let pre = service::status(&sparams).unwrap_or(ServiceStatus::NotInstalled);
     report.service_was_installed = pre != ServiceStatus::NotInstalled;
-    if !p.dry_run && report.service_was_installed {
-        if let Err(e) = service::uninstall(&sparams) {
-            // Best-effort: don't block the config wipe. The CLI
-            // surfaces this in the printed outcome.
-            report.service_error = Some(format!("{e:#}"));
-        }
+    if !p.dry_run
+        && report.service_was_installed
+        && let Err(e) = service::uninstall(&sparams)
+    {
+        // Best-effort: don't block the config wipe. The CLI
+        // surfaces this in the printed outcome.
+        report.service_error = Some(format!("{e:#}"));
     }
 
     // 2. Config-root cleanup.

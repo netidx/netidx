@@ -97,6 +97,8 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 syn = "2"
 tempdir = "0.3.7"
 tempfile = "3"
+# Timestamp type rcgen's CRL builder takes (netidx-conf revocation).
+time = "0.3"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = [
     "rt-multi-thread",

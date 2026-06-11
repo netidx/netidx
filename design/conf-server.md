@@ -140,6 +140,90 @@ finds the conf server via `--server`, the host's own
 `conf-server.json`, or discovery — an enrollment admin needs no shell
 access to the CA host, just an admin keyslot.
 
+## Revocation
+
+The CA keeps an append-only index of everything it has ever signed
+(`<ca-dir>/issued.jsonl`: serial, name, SPKI glyph, expiry — written
+inside `Ca::sign_request`, so it is complete by construction). The
+index is what makes certificates manageable by *name*:
+
+- **`netidx conf ca revoke`** lists live identities, shows the glyph
+  the enrollment showed, revokes every live serial for the chosen name
+  (or `--serial` for one cert), records the reason, re-signs the CRL
+  with the admin's password, installs it beside the local resolver's
+  trust bundle immediately, and offers to drop the id-map entry.
+- **One live certificate per name**: `Sign` and `Enqueue` refuse a name
+  that already has an unexpired, unrevoked cert — which closes the
+  impostor race on existing identities outright, and makes the
+  rebuilt-laptop flow explicit (revoke first, eyes open). Verified
+  renewals are the exception (they prove possession of the live key).
+- **CRL lifecycle under the vault**: signing needs a password, so the
+  CRL is (re-)signed at every revocation and *opportunistically in
+  every authenticated admin session* (sign/approve/deny/list all
+  refresh a CRL nearing its `nextUpdate` — 90d validity, 30d refresh
+  window). A network where literally nothing is signed for months gets
+  staleness warnings.
+- **Distribution**: `Request::GetCrl` (public — a CRL is a public
+  document); the renewal daemon drops `crl.pem` beside each resolver's
+  trusted bundle.
+- **Enforcement** is by convention at the choke point: netidx's TLS
+  acceptor loads `crl.pem` from beside the trust-bundle path, and the
+  resolver uses a CRL-*watching* acceptor that rebuilds when the file
+  changes — a revocation takes effect on the next accepted connection,
+  no restart. A revoked cert can't authenticate to the resolver, so it
+  gets no tokens and publishers never see it. Revoked-on-CRL fails
+  closed; unknown status stays permitted (federated bundles may carry
+  CAs whose CRLs we don't hold; an absent CRL must not lock the
+  network out).
+
+## Renewal (the moving part that removes the moving parts)
+
+Renewal is **silent request, human-or-bot approval** — the only shape
+the vault permits (no signing capability at rest) and the right one
+anyway. The pieces:
+
+- **Verified renewals**: a renewal `Enqueue` arrives on a connection
+  authenticated by the node's *current* certificate; the server checks
+  the SAN equals the requested name **and the serial is live in its
+  own issuance index** (stronger than a CRL lookup). Such entries are
+  `verified_renewal`: cryptographic continuation, no glyph. Approval
+  skips the SAN globs and the one-live-cert rule, ignores groups
+  (the identity already exists in the id-map), allows the reserved
+  serving SAN (conf servers renew themselves), and audits `op=renew`.
+  A revoked serial never verifies — a thief with stolen cert+key falls
+  through to the glyph-gated queue, in front of an admin's eyes.
+- **The renewal daemon** (`netidx conf renew run`, installed by every
+  TLS install — workstation, publisher, resolver, CA host): scans this
+  host's identities (client config, resolver config, conf-server
+  serving cert), and inside the window — `min(30d, validity/3)` —
+  queues a renewal with a **fresh key**, polls, and installs
+  atomically. Request ids persist beside the cert (`renewal.id`) so
+  restarts resume rather than duplicate. The daemon also pulls the CRL
+  and installs it beside every trust bundle (on change only). All of
+  it over real PKI against the installed bundle — no TOFU, no human.
+  Applications stay completely oblivious: netidx proper knows nothing
+  about renewal; only the daemon writes key material.
+- **CA rollover rides the same rails**: accepting the *returned* trust
+  bundle on a renewal (over the PKI-verified channel) is how a renewed
+  CA certificate reaches the fleet. The CA renews **itself, same key**,
+  automatically during any admin session once its remaining life drops
+  below a leaf validity + grace — same key + subject means existing
+  leaves still chain and the network glyph (a key hash) is unchanged.
+  Leaf validity is clamped to the CA's remaining life, so nothing the
+  CA signs ever outlives it.
+- **`ca sign` queue UI**: verified renewals list separately with a
+  one-keystroke "approve all"; new identities keep the full per-entry
+  code-matching ceremony.
+- **`ca autorenew`** (the lazy-correct default, asked at CA creation,
+  default yes): a daemon that approves *verified renewals only*,
+  authorized by a dedicated `autorenew` keyslot with an **empty
+  policy** — over the wire its password can approve continuations and
+  nothing else (no SANs, no groups, no enrollment). The password lives
+  in `${config}/netidx/autorenew.keytab` (0600, deliberately outside
+  the CA dir — never back it up), and `--rotate` is the one-command
+  kill-and-replace. Invariant: **no new identity without a human;
+  continuations are automatic.**
+
 ## Per-admin policy (vault slots)
 
 `Policy` gained two fields:
@@ -214,10 +298,10 @@ operator answers the conf-server question at most once per install.
   members list remains a hand-managed central-config convenience; the
   conf-server flows never produce multi-member configs, and peer
   resolvers stay mutually unaware). The CA is created for TLS networks
-  as before — and offered for krb5/anonymous networks too, scoped to
-  the conf plane. `setup_server` writes a ca-role `conf-server.json`;
-  after the template applies, the install adds the resolver / id-map
-  roles to it.
+  without asking — it signs the data plane anyway — and for krb5
+  networks too, scoped to the conf plane. `setup_server` writes a
+  ca-role `conf-server.json`; after the template applies, the install
+  adds the resolver / id-map roles to it.
 - **Second resolver**: discovers the network, imports its settings
   (auth scheme, domain), CA-joins for its resolver identity (suggested
   `resolver.<domain>`), prompts for an SPN on krb5 networks, then
@@ -225,6 +309,37 @@ operator answers the conf-server question at most once per install.
   serving cert over the wire, the host writes `conf-server.json` with
   its roles + the conf servers it found as peers, and drops the
   activation unit. Nothing is pushed to existing resolvers.
+
+### Install profiles
+
+The installer asks for *intent* (what auth scheme, what network) and
+derives the components; it never offers a choice whose "no" produces a
+broken network. The matrix is `conf_plane_decision` +
+`resolve_id_map_choice` in `netidx-tools/src/conf/init.rs` (both
+exhaustively tested there); this table mirrors them — change all three
+together.
+
+| data plane         | CA               | conf server      | id-mapper        | renew daemon |
+|--------------------|------------------|------------------|------------------|--------------|
+| TLS, fresh network | always (signs the data plane) | always | always | always |
+| TLS, joining       | exists upstream  | asked (default yes — enrolling needs an admin password on the spot, and the admin may be remote) | always | always |
+| krb5, fresh        | always (conf plane only) | always   | asked (default no: krb5 sites have a system IdM) | with the conf server |
+| krb5, joining      | exists upstream  | asked (default yes) | asked (default no) | with the conf server |
+| anonymous          | with the conf server | asked (default yes — labs may not want the machinery) | never | with the conf server |
+| local (workstation)| —                | —                | never            | only with TLS parent identities |
+
+Expert escapes, all warned about where they're used:
+
+- `--no-id-map` — a TLS resolver without it maps every cert SAN to
+  nobody and perms deny everything; the template emits a render-time
+  coherence warning (visible on `--dry-run` too).
+- `--no-conf-server` — skips the conf plane entirely; the host is
+  invisible to discovery, and a network with no conf server anywhere
+  has no enrollment and no certificate renewal.
+- External PKI — answering the resolver-certificate prompt with `csr`
+  (generate a key + CSR here, get it signed by your PKI) or a cert
+  path. No netidx CA means no conf plane; renewal stays with that PKI,
+  so the renew daemon is not installed for those identities.
 
 ## Future capabilities (out of v1, design kept compatible)
 

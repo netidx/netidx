@@ -115,6 +115,7 @@ pub fn publisher(p: &PublisherParams) -> Result<RenderedTemplate> {
         units: BTreeMap::new(),
         units_dir: None,
         tls_install,
+        warnings: Vec::new(),
     })
 }
 

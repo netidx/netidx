@@ -171,7 +171,7 @@ pub(super) enum SecCtx {
     Anonymous,
     Krb5(Arc<(ArcStr, RwLock<SecCtxData<K5SecData>>)>),
     Local(Arc<(LocalAuth, RwLock<SecCtxData<LocalSecData>>)>),
-    Tls(Arc<(tokio_rustls::TlsAcceptor, RwLock<SecCtxData<TlsSecData>>)>),
+    Tls(Arc<(tls::CrlWatchingAcceptor, RwLock<SecCtxData<TlsSecData>>)>),
 }
 
 impl SecCtx {
@@ -211,8 +211,11 @@ impl SecCtx {
             }
             Auth::Tls { name: _, trusted, certificate, private_key } => {
                 debug!("creating tls acceptor");
+                // CRL-watching: a `crl.pem` dropped beside the trusted
+                // bundle (by the conf plane) takes effect on the next
+                // accept — the resolver is the revocation choke point.
                 let auth =
-                    tls::create_tls_acceptor(None, trusted, certificate, private_key)?;
+                    tls::CrlWatchingAcceptor::new(None, trusted, certificate, private_key)?;
                 let store = RwLock::new(SecCtxData::new(cfg, member).await?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }
