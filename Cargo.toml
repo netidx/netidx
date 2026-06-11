@@ -99,6 +99,11 @@ tempdir = "0.3.7"
 tempfile = "3"
 # Timestamp type rcgen's CRL builder takes (netidx-conf revocation).
 time = "0.3"
+# Pure-Rust TPM 2.0 stack (Jarkko Sakkinen, the kernel TPM subsystem
+# maintainer) used to seal the autorenew credential to the CA host's
+# TPM (netidx-conf). Pinned exactly: pre-1.0, the API still moves.
+tpm2-protocol = "=0.19.0"
+tpm2-device = "=0.6.1"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = [
     "rt-multi-thread",

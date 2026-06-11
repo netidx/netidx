@@ -93,6 +93,14 @@ rand = { workspace = true }
 # Timestamp type rcgen's CRL builder takes (`ca_index::write_crl`).
 time = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure-Rust TPM 2.0 stack: seal the autorenew credential to the CA
+# host's TPM (`tpm` module) so a stolen disk / backup can't recover
+# it. Linux-only: the kernel resource manager (/dev/tpmrm0) is the
+# only transport we speak, and the CA host is unix anyway.
+tpm2-protocol = { workspace = true }
+tpm2-device = { workspace = true }
+
 [dev-dependencies]
 # `tokio::test` + multi-thread runtime for the e2e harness in
 # `tests/e2e.rs`. The Publisher / Subscriber background tasks expect

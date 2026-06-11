@@ -224,6 +224,33 @@ anyway. The pieces:
   kill-and-replace. Invariant: **no new identity without a human;
   continuations are automatic.**
 
+### The keytab at rest (TPM sealing)
+
+The empty policy bounds what the keytab can do *over the wire*; it
+does nothing at rest — the vault is flat, so any slot password
+recovers the master key, making the keytab plus a copy of the CA dir
+an offline CA-key compromise. So `setup_autorenew_slot` seals the
+password to the host's TPM 2.0 when one is usable (`netidx-conf`'s
+`tpm` module): the keytab file becomes a sealed blob that only this
+machine's TPM will open, and a stolen disk, leaked backup, or
+decommissioned drive recovers nothing. No TPM ⇒ plaintext fallback
+with a printed note about what that costs.
+
+Mechanics: pure Rust over `/dev/tpmrm0` (`tpm2-protocol`, pinned —
+no C tss stack, so sealing exists in every build and is detected at
+runtime). The secret is a `KeyedHash` sealed-data object under the
+TCG-standard ECC P-256 SRK template on the owner hierarchy;
+`CreatePrimary` deterministically re-derives the SRK each time, so
+the TPM holds no persistent state. Deliberately **no PCR binding**:
+a firmware update must not silently stop renewal (an outage on a
+delay timer); the honest threat model is at-rest/offline theft, not
+live-host compromise — root on the running box can unseal, exactly
+as it could have read the plaintext. Unseal failure (TPM cleared,
+board swapped) is a screaming error whose message names the fix:
+`netidx conf ca autorenew --rotate`. Operational note: the device
+node is root:tss, so the CA user needs `tss` group membership —
+without it, setup falls back to plaintext and says so.
+
 ## Per-admin policy (vault slots)
 
 `Policy` gained two fields:

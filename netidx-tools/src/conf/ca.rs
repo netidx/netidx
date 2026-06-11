@@ -432,6 +432,14 @@ fn random_password() -> String {
 
 /// Create (or replace) the autorenew slot + keytab. `authorizing` is
 /// any current admin's password. Returns the keytab path.
+///
+/// The keytab is TPM-sealed when the host has a usable TPM 2.0: at
+/// rest the slot password is a CA-key-decryption credential (any slot
+/// password unlocks the vault's master key), so a plaintext keytab
+/// makes every disk image and backup of this host a CA compromise.
+/// Sealed, the file is inert anywhere but this machine. A host with no
+/// TPM (or a flaky one — setup must not dead-end) falls back to the
+/// plaintext keytab with a note saying what that costs.
 pub(super) fn setup_autorenew_slot(
     ca_dir: &Path,
     authorizing: &str,
@@ -446,7 +454,23 @@ pub(super) fn setup_autorenew_slot(
     let password = random_password();
     ca_vault::add_admin(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
     let keytab = autorenew_keytab_path()?;
-    atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
+    match netidx_conf::tpm::seal(password.as_bytes()) {
+        Ok(blob) => {
+            atomic::write_atomic(&keytab, &blob, 0o600)?;
+            println!(
+                "  the keytab is sealed to this machine's TPM — copied \
+                 anywhere else (disk image, backup) it is useless"
+            );
+        }
+        Err(e) => {
+            atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
+            println!(
+                "  note: the keytab is plaintext (TPM sealing unavailable: \
+                 {e:#}). It still works, but treat any copy of it as a copy \
+                 of the CA key."
+            );
+        }
+    }
     Ok(keytab)
 }
 
@@ -467,9 +491,30 @@ fn autorenew(p: AutorenewArgs) -> Result<()> {
     }
     let (admin, password) = match &p.keytab {
         Some(path) => {
-            let pw = std::fs::read_to_string(path)
+            let raw = std::fs::read(path)
                 .with_context(|| format!("reading keytab {}", path.display()))?;
-            (AUTORENEW_ADMIN.to_string(), Zeroizing::new(pw.trim().to_string()))
+            let pw = if netidx_conf::tpm::is_sealed(&raw) {
+                // A sealed keytab that won't unseal must scream, not
+                // skip: a renewal daemon that silently stops is a
+                // certificate outage on a delay timer.
+                let secret = netidx_conf::tpm::unseal(&raw).with_context(|| {
+                    format!(
+                        "unsealing keytab {} — if this host's TPM was cleared \
+                         or the board was replaced, mint a fresh keytab with \
+                         `netidx conf ca autorenew --rotate`",
+                        path.display()
+                    )
+                })?;
+                Zeroizing::new(
+                    String::from_utf8(secret.to_vec())
+                        .context("sealed keytab payload is not utf8")?,
+                )
+            } else {
+                let pw = String::from_utf8(raw)
+                    .with_context(|| format!("keytab {} is not utf8", path.display()))?;
+                Zeroizing::new(pw.trim().to_string())
+            };
+            (AUTORENEW_ADMIN.to_string(), pw)
         }
         None => {
             let admin = match env_user_name() {
