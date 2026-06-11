@@ -181,7 +181,9 @@ fn ca_fingerprint_short(serving_cert_pem: &[u8]) -> Result<String> {
             .collect::<std::result::Result<_, _>>()
             .context("parsing serving certificate chain")?;
     let ca = certs.last().ok_or_else(|| anyhow!("serving chain is empty"))?;
-    Ok(crate::fingerprint::Fingerprint::of_der(ca.as_ref()).short())
+    Ok(crate::fingerprint::Fingerprint::of_cert_der(ca.as_ref())
+        .context("fingerprinting the CA certificate")?
+        .short())
 }
 
 /// The accept loop, split out so tests can drive it on an ephemeral
@@ -1235,6 +1237,15 @@ mod tests {
                 assert!(log.contains("admin=alice"));
                 assert!(log.contains("op=sign"));
                 assert!(log.contains("name=resolver.ryu-oh.org"));
+                // And the issuance landed in the index (revoke-by-name /
+                // duplicate-refusal source of truth).
+                let live = crate::ca_index::live_for_name(
+                    dir.path(),
+                    "resolver.ryu-oh.org",
+                )
+                .unwrap();
+                assert_eq!(live.len(), 1);
+                assert!(!live[0].cert.spki_fp.is_empty());
             }
             SignResponse::Err { reason } => panic!("expected Ok, got: {reason}"),
         }

@@ -214,7 +214,10 @@ pub async fn fetch_identity(addr: SocketAddr, kind: NodeKind) -> Result<CaIdenti
     let hello = exchange_hello(&mut tls, kind).await?;
     drop(tls);
     Ok(CaIdentity {
-        fingerprint: Fingerprint::of_der(ca_der.as_ref()),
+        // The glyph is of the CA's *key* (SPKI), not the cert — stable
+        // across same-key CA renewals.
+        fingerprint: Fingerprint::of_cert_der(ca_der.as_ref())
+            .context("fingerprinting the presented CA certificate")?,
         domain: hello.domain,
         roles: hello.roles,
         ca_der: ca_der.clone(),
@@ -233,7 +236,9 @@ async fn connect_pinned(
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let (mut tls, chain) = connect_tofu(addr).await?;
     let (serving_der, presented_ca) = split_chain(&chain)?;
-    if Fingerprint::of_der(presented_ca.as_ref()) != expected.fingerprint {
+    // An unparseable CA cert is treated as a mismatch — fail closed.
+    let presented_fp = Fingerprint::of_cert_der(presented_ca.as_ref()).ok();
+    if presented_fp != Some(expected.fingerprint) {
         bail!(
             "the conf server's identity changed since you confirmed it \
              (fingerprint mismatch); aborted before sending anything"
@@ -693,13 +698,13 @@ pub async fn push_identity(
     }
 }
 
-/// True if `fp` is the fingerprint of any certificate in the PEM
-/// `bundle`.
+/// True if `fp` is the identity (SPKI) fingerprint of any certificate
+/// in the PEM `bundle`.
 fn bundle_contains(bundle: &str, fp: &Fingerprint) -> bool {
     let mut rd = std::io::Cursor::new(bundle.as_bytes());
-    rustls_pemfile::certs(&mut rd)
-        .flatten()
-        .any(|der| Fingerprint::of_der(der.as_ref()) == *fp)
+    rustls_pemfile::certs(&mut rd).flatten().any(|der| {
+        Fingerprint::of_cert_der(der.as_ref()).map(|f| f == *fp).unwrap_or(false)
+    })
 }
 
 /// Verify the conf server's issued leaf binds to what the operator

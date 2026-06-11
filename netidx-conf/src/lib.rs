@@ -34,6 +34,11 @@ pub mod ca_vault;
 /// Approve / Deny. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod ca_queue;
+/// Append-only index of issued/revoked certificates
+/// (`<ca-dir>/issued.jsonl`) — backs revoke-by-name, duplicate-name
+/// refusal, and CRL construction. Unix-only — it lives in the CA dir.
+#[cfg(unix)]
+pub mod ca_index;
 /// Wire protocol (message types + framing) shared by the conf server
 /// and its clients. Cross-platform — a Windows node speaks it to a unix
 /// conf server. See [`design/ca-server.md`].

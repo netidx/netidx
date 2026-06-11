@@ -756,7 +756,7 @@ fn join(p: JoinArgs) -> Result<()> {
 fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
     let cert = std::fs::read(ca_dir.join("certificate.pem"))
         .with_context(|| format!("reading CA cert in {}", ca_dir.display()))?;
-    let fp = Fingerprint::of_pem(&cert)?;
+    let fp = Fingerprint::of_cert_pem(&cert)?;
     println!("CA fingerprint:");
     println!("  SHA256  {}", fp.text());
     println!("{}", fp.identicon(ColorMode::detect()));
@@ -1200,7 +1200,7 @@ fn sign_queue(p: SignArgs) -> Result<()> {
             let local_fp = ca_dir_for(p.ca_dir.clone())
                 .ok()
                 .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
-                .and_then(|pem| Fingerprint::of_pem(&pem).ok());
+                .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
             match local_fp {
                 Some(fp) if fp == identity.fingerprint => {
                     println!("verified {server} against the local CA");
@@ -1479,7 +1479,7 @@ fn list() -> Result<()> {
     }
     println!("CA at {}", dir.display());
     if let Ok(cert) = std::fs::read(dir.join("certificate.pem")) {
-        if let Ok(fp) = Fingerprint::of_pem(&cert) {
+        if let Ok(fp) = Fingerprint::of_cert_pem(&cert) {
             println!(
                 "  fingerprint: {} … (`netidx conf ca fingerprint` for the full id)",
                 fp.short()

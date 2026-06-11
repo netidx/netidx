@@ -472,6 +472,33 @@ impl Ca {
         cert.append_extension(san_ext)?;
         cert.sign(&self.pkey, MessageDigest::sha512()).context("signing leaf")?;
         let cert = cert.build();
+        // Record the issuance before the cert leaves this function —
+        // every signing path (network sign/approve/enroll, CLI issue
+        // and sign, serving certs) flows through here, so the index is
+        // complete by construction. An index write failure fails the
+        // sign: an unrecorded certificate would be invisible to
+        // revoke-by-name and duplicate-name refusal, which is worse
+        // than asking the operator to retry.
+        let name = san
+            .iter()
+            .find_map(|s| match s {
+                SanEntry::Dns(d) => Some(d.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let spki = req_pubkey.public_key_to_der().context("encoding leaf SPKI")?;
+        let now = crate::ca_index::now_unix();
+        crate::ca_index::append(
+            &self.directory,
+            &crate::ca_index::Event::Issued(crate::ca_index::IssuedCert {
+                serial: serial_n,
+                name,
+                spki_fp: crate::fingerprint::Fingerprint::of_der(&spki).text(),
+                not_after_unix: now + validity_days as u64 * 86_400,
+                issued_unix: now,
+            }),
+        )
+        .context("recording the issuance in the index")?;
         Ok(cert.to_pem()?)
     }
 

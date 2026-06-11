@@ -1,23 +1,31 @@
-//! Human-comparable fingerprint of a CA certificate: a SHA-256 over the
-//! cert's DER encoding, rendered both as grouped base32 text and as a
-//! colored 8×8 identicon.
+//! Human-comparable fingerprint, rendered both as grouped base32 text
+//! and as a colored 8×8 identicon.
 //!
-//! The point is syncthing's trick — distinct CAs look obviously
+//! The point is syncthing's trick — distinct identities look obviously
 //! different at a glance, so the operator joining a deployment can
-//! verify out of band that they're talking to the real CA *before*
-//! sending the admin password. The CA admin sees this same artifact at
-//! `ca init` and communicates it (in person, Signal, …); the join CLI
-//! shows the artifact of whatever cert the daemon actually presented,
-//! and the two are eyeball-compared.
+//! verify out of band that they're talking to the real network
+//! *before* sending the admin password. The CA admin sees this same
+//! artifact at `ca init` and communicates it (in person, Signal, …);
+//! the join CLI shows the artifact of whatever the daemon actually
+//! presented, and the two are eyeball-compared.
 //!
-//! Pure Rust (sha2, no openssl), so the join client computes the
-//! identical fingerprint on every platform — Windows included, where
-//! the openssl-backed `ca` module isn't available.
+//! **What gets hashed**: for a network/CA identity, the CA
+//! certificate's *public key* (its SubjectPublicKeyInfo DER, via
+//! [`Fingerprint::of_cert_der`]) — NOT the certificate itself. The key
+//! is the thing that's unique to the network: a same-key certificate
+//! renewal leaves the glyph on the office wiki valid, while a key
+//! rotation (a new controller) changes it, as it must. Request codes
+//! in queued enrollment hash the CSR's SPKI for the same reason, so
+//! both glyphs in the system are fingerprints of keys.
+//!
+//! Pure Rust (sha2 + x509-parser, no openssl), so the join client
+//! computes the identical fingerprint on every platform — Windows
+//! included, where the openssl-backed `ca` module isn't available.
 
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 
-/// SHA-256 of a certificate's DER encoding.
+/// A SHA-256 digest rendered for human comparison.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Fingerprint([u8; 32]);
 
@@ -56,7 +64,10 @@ impl ColorMode {
 const B32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 impl Fingerprint {
-    /// Fingerprint a certificate from its DER bytes.
+    /// Hash raw bytes. Use the semantic constructors where one exists —
+    /// [`of_cert_der`](Self::of_cert_der) for an identity glyph; this
+    /// is the building block (and hashes an already-extracted SPKI,
+    /// e.g. a CSR's, directly).
     pub fn of_der(der: &[u8]) -> Self {
         let mut h = Sha256::new();
         h.update(der);
@@ -66,17 +77,32 @@ impl Fingerprint {
         Self(bytes)
     }
 
-    /// Fingerprint the first certificate in a PEM bundle. Parses to DER
-    /// first so the result is independent of PEM whitespace/line-ending
-    /// quirks — the DER is the canonical thing both ends hash.
-    pub fn of_pem(pem: &[u8]) -> Result<Self> {
+    /// The identity fingerprint of an X.509 certificate: a hash of its
+    /// *public key* (SubjectPublicKeyInfo DER), not of the certificate.
+    /// Stable across same-key certificate renewals; changes iff the key
+    /// — the actual controller of the identity — changes.
+    pub fn of_cert_der(der: &[u8]) -> Result<Self> {
+        use x509_parser::prelude::{FromDer, X509Certificate};
+        let (_, cert) = X509Certificate::from_der(der)
+            .map_err(|e| anyhow!("parsing certificate: {e}"))?;
+        Ok(Self::of_der(cert.public_key().raw))
+    }
+
+    /// [`of_cert_der`](Self::of_cert_der) for the first certificate in
+    /// a PEM bundle.
+    pub fn of_cert_pem(pem: &[u8]) -> Result<Self> {
         let mut rd = std::io::Cursor::new(pem);
         let der = rustls_pemfile::certs(&mut rd)
             .next()
             .ok_or_else(|| anyhow!("no certificate found in PEM"))?
             .map_err(|e| anyhow!("parsing PEM certificate: {e}"))?;
-        Ok(Self::of_der(&der))
+        Self::of_cert_der(&der)
     }
+
+    // NB: there is deliberately no `of_pem`/of-the-cert-bytes identity
+    // constructor — hashing the certificate instead of its key is
+    // exactly the mistake that would break every printed glyph at the
+    // first CA renewal.
 
     /// The raw 32-byte digest.
     pub fn bytes(&self) -> &[u8; 32] {
@@ -227,18 +253,35 @@ mod tests {
     }
 
     #[test]
-    fn of_pem_matches_of_der() {
-        // A syntactically valid PEM cert block (framing only; the bytes
-        // inside need not be a real X.509 — rustls-pemfile decodes the
-        // base64 to DER and we hash that).
-        let der = b"\x30\x03\x02\x01\x05"; // tiny DER-ish blob
-        let b64 = {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(der)
-        };
-        let pem =
-            format!("-----BEGIN CERTIFICATE-----\n{b64}\n-----END CERTIFICATE-----\n");
-        let from_pem = Fingerprint::of_pem(pem.as_bytes()).unwrap();
-        assert_eq!(from_pem, Fingerprint::of_der(der));
+    fn cert_fingerprint_is_of_the_key_not_the_cert() {
+        use rcgen::{CertificateParams, KeyPair, SerialNumber};
+        // Two different certificates over the SAME key — a same-key
+        // renewal. The certs differ on the wire (serials), but the
+        // identity glyph must not change: it's printed on the office
+        // wiki and must outlive any one cert's validity window.
+        let key = KeyPair::generate().unwrap();
+        let mut p1 = CertificateParams::new(vec!["a.example.com".to_string()]).unwrap();
+        p1.serial_number = Some(SerialNumber::from(vec![1u8]));
+        let c1 = p1.self_signed(&key).unwrap();
+        let mut p2 = CertificateParams::new(vec!["a.example.com".to_string()]).unwrap();
+        p2.serial_number = Some(SerialNumber::from(vec![2u8]));
+        let c2 = p2.self_signed(&key).unwrap();
+        assert_ne!(c1.der().as_ref(), c2.der().as_ref(), "renewal produced a new cert");
+        let f1 = Fingerprint::of_cert_der(c1.der().as_ref()).unwrap();
+        let f2 = Fingerprint::of_cert_der(c2.der().as_ref()).unwrap();
+        assert_eq!(f1, f2, "same key ⇒ same glyph across renewal");
+        // PEM and DER forms agree.
+        assert_eq!(Fingerprint::of_cert_pem(c1.pem().as_bytes()).unwrap(), f1);
+        // A different key is a different identity.
+        let other = KeyPair::generate().unwrap();
+        let c3 = CertificateParams::new(vec!["a.example.com".to_string()])
+            .unwrap()
+            .self_signed(&other)
+            .unwrap();
+        assert_ne!(
+            Fingerprint::of_cert_der(c3.der().as_ref()).unwrap(),
+            f1,
+            "new key ⇒ new glyph"
+        );
     }
 }
