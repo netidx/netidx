@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
 use netidx_conf::{
-    ca_join, ca_proto,
+    conf_client, discovery,
+    conf_proto::{self, InfoAuth, NodeKind, Role},
     fingerprint::ColorMode,
     netshape::NetShape,
     paths,
@@ -20,10 +21,12 @@ use zeroize::Zeroizing;
 #[cfg(unix)]
 use netidx_conf::tls;
 use std::{
+    collections::BTreeMap,
     io::IsTerminal,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 use clap::{Args, Subcommand};
 
@@ -560,15 +563,39 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let parent = if f.parent.any_set() {
         f.parent.to_parent_ref(parent_default_path)?
     } else {
-        match prompt_parent_referral(parent_default_path)? {
-            None => None,
-            Some((parent_ref, maybe_ident)) => {
-                if let Some(si) = maybe_ident {
-                    tls_identities.push(si.spec);
-                    tls_staging.extend(si.staging);
-                }
-                Some(parent_ref)
+        // Ask the network before asking the human: a discovered (and
+        // glyph-confirmed) conf server answers everything the prompt
+        // cascade would have asked — every resolver address with its
+        // auth, and (TLS networks) where to get our client cert. The
+        // probe outcome rides into the manual cascade so a declined
+        // discovery is never re-offered.
+        let probe = discover_network(NodeKind::Workstation)?;
+        match probe.have() {
+            Some(net) => {
+                let have_identity = !tls_identities.is_empty();
+                let addrs = network_addrs_and_identity(
+                    net,
+                    NodeKind::Workstation,
+                    have_identity,
+                    &mut tls_identities,
+                    &mut tls_staging,
+                )?;
+                Some(ParentRef {
+                    path: ArcStr::from(parent_default_path),
+                    ttl: None,
+                    addrs,
+                })
             }
+            None => match prompt_parent_referral(parent_default_path, &probe)? {
+                None => None,
+                Some((parent_ref, maybe_ident)) => {
+                    if let Some(si) = maybe_ident {
+                        tls_identities.push(si.spec);
+                        tls_staging.extend(si.staging);
+                    }
+                    Some(parent_ref)
+                }
+            },
         }
     };
     let owner = if f.no_perms {
@@ -623,6 +650,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
 /// is always available for the non-interactive case.
 fn prompt_parent_referral(
     default_path: &str,
+    probe: &ConfServers,
 ) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
     // The upstream resolver IP is the one thing the operator has to
     // know (blank ⇒ no parent); the port is prompted separately with
@@ -667,8 +695,7 @@ fn prompt_parent_referral(
             // SAN as `<user>.<domain>`, the domain taken from the
             // resolver's SAN we just resolved.
             let suggested = suggest_client_san(&server_name);
-            let staged =
-                prompt_tls_client_identity(Some(addr.ip()), suggested.as_deref())?;
+            let staged = prompt_tls_client_identity(suggested.as_deref(), probe)?;
             (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(staged))
         }
     };
@@ -704,72 +731,162 @@ struct StagedIdentity {
     staging: Option<tempfile::TempDir>,
 }
 
-/// Offer to obtain a TLS identity from a CA server over the network
-/// instead of the local-CA / CSR flow. `default_ip` (the upstream
-/// resolver, usually co-located with the CA) seeds the address prompt.
-/// Returns the installed identity, or `None` if the operator has no CA
-/// server — the caller then runs the existing flow. Cross-platform:
-/// this is also how a node with no openssl (Windows) gets a TLS cert.
+/// Obtain a TLS identity from the network's conf server when one is
+/// known (or discoverable), instead of the local-CA / CSR flow.
+///
+/// Keyed on what the calling flow already knows ([`ConfServers`]):
+/// `Have` joins with no further questions (the identity was already
+/// glyph-confirmed); `DontHave` returns `None` silently — the operator
+/// already said there is no conf server, asking again would be
+/// nagging; `NotProbed` runs discovery right here (browse → confirm →
+/// aggregate, with its manual-address fallback). Cross-platform: this
+/// is also how a node with no openssl (Windows) gets a TLS cert.
 fn maybe_join_ca_server(
-    default_ip: Option<IpAddr>,
-    kind: ca_proto::NodeKind,
+    probe: &ConfServers,
+    kind: NodeKind,
     suggested_name: Option<&str>,
 ) -> Result<Option<(JoinedIdentity, tempfile::TempDir)>> {
-    if !prompt::confirm(
-        "get this TLS cert from a CA server over the network?",
-        default_ip.is_some(),
-    )? {
-        return Ok(None);
-    }
-    let ip = match default_ip {
-        Some(i) => {
-            prompt::parsed_with_default::<IpAddr>("CA server IP", None, &i.to_string())?
-        }
-        None => prompt::required_parsed::<IpAddr>("CA server IP", None)?,
+    let probed_here;
+    let net = match probe {
+        ConfServers::DontHave => return Ok(None),
+        ConfServers::Have(net) => net,
+        ConfServers::NotProbed => match discover_network(kind)? {
+            ConfServers::Have(net) => {
+                probed_here = net;
+                &probed_here
+            }
+            ConfServers::DontHave | ConfServers::NotProbed => return Ok(None),
+        },
     };
-    let port = prompt::parsed_with_default::<u16>(
-        "CA server port",
-        None,
-        &ca_proto::DEFAULT_PORT.to_string(),
-    )?;
-    let addr = SocketAddr::new(ip, port);
+    let Some(ca_addr) = net.info.ca_addr else {
+        println!(
+            "note: network {:?} reported no CA; falling back to local \
+             certificate setup",
+            net.identity.domain,
+        );
+        return Ok(None);
+    };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let (j, staging) = join_network(&rt, ca_addr, kind, suggested_name, &net.identity)?;
+    Ok(Some((j, staging)))
+}
 
-    // Establish trust FIRST: connect, show the CA's fingerprint, and get
-    // the operator's confirmation — all before any credential is typed.
-    // `fetch_ca_identity` sends nothing and closes its connection before
-    // returning, so this prompt isn't racing the server's request
-    // timeout.
-    let identity = rt
-        .block_on(ca_join::fetch_ca_identity(addr))
-        .with_context(|| format!("contacting CA server {addr}"))?;
-    println!("The CA server at {addr} presented this identity:");
+/// Print a confirmed-or-not network identity: domain, claimed roles,
+/// fingerprint text + identicon.
+pub(super) fn show_network_identity(addr: SocketAddr, identity: &conf_client::CaIdentity) {
+    println!(
+        "The conf server at {addr} serves network {:?} (roles: {}) and presented \
+         this identity:",
+        identity.domain,
+        describe_roles(&identity.roles),
+    );
     println!("  SHA256  {}", identity.fingerprint.text());
     println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
-    if !prompt::confirm("does this match what your CA admin gave you?", false)? {
-        bail!("CA identity was not confirmed; nothing was sent");
-    }
+}
 
-    // Trust established — now collect what we want and authenticate. The
-    // signing connection pins to the identity just confirmed.
+fn describe_roles(roles: &[Role]) -> String {
+    if roles.is_empty() {
+        return "none".to_string();
+    }
+    roles
+        .iter()
+        .map(|r| match r {
+            Role::Ca => "ca",
+            Role::Resolver => "resolver",
+            Role::IdMap => "id-map",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// How often a waiting enrollee checks on its queued request. Each
+/// poll is one short pinned connection, so waiting holds nothing open.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Obtain a cert from an **already confirmed** network — every
+/// connection pins to `identity`, aborting before sending anything
+/// secret if the server changed underneath us. Returns the issued
+/// identity staged in a tempdir (the template's `--force`-gated
+/// `apply()` installs it).
+///
+/// The default path queues a signing request and waits for an admin to
+/// approve it remotely (`netidx conf ca sign`): the enrollee shows a
+/// request code (the CSR key's fingerprint) the admin matches out of
+/// band, and the admin — who knows who they're enrolling — chooses the
+/// id-map groups at approval. The synchronous path (an admin present
+/// at this machine types their password) remains one answer away; it's
+/// the only path where the groups are chosen here.
+fn join_network(
+    rt: &tokio::runtime::Runtime,
+    addr: SocketAddr,
+    kind: NodeKind,
+    suggested_name: Option<&str>,
+    identity: &conf_client::CaIdentity,
+) -> Result<(JoinedIdentity, tempfile::TempDir)> {
     let name_label = "TLS identity name to request (the cert's DNS SAN)";
     let name = match suggested_name {
         Some(s) => prompt::string_with_default(name_label, None, s)?,
         None => prompt::required_string(name_label, None)?,
     };
-    let admin = prompt::required_string("CA admin name", None)?;
-    let password = Zeroizing::new(rpassword::prompt_password(format!(
-        "CA password for admin {admin}: "
-    ))?);
-    let issued = rt.block_on(ca_join::request_cert(
-        addr,
-        kind,
-        &name,
-        &admin,
-        password,
-        JOIN_VALIDITY_DAYS,
-        &identity,
-    ))?;
+    let admin_here = prompt::confirm(
+        "is a CA admin at this machine to enter their password now? \
+         (No: queue the request for remote approval)",
+        false,
+    )?;
+    let issued = if admin_here {
+        // The admin chooses the new identity's id-map groups here, at
+        // enrollment — the per-admin policy is the *allowed set* the
+        // server validates this choice against. Infrastructure
+        // identities (resolvers, conf servers) don't act as users, so
+        // they default to no registration; everything else defaults to
+        // `users`.
+        let groups = prompt_id_map_groups(&[], default_id_map_groups(kind))?;
+        let admin = prompt::required_string("CA admin name", None)?;
+        let password = Zeroizing::new(rpassword::prompt_password(format!(
+            "CA password for admin {admin}: "
+        ))?);
+        rt.block_on(conf_client::request_cert(
+            addr,
+            kind,
+            &name,
+            &admin,
+            password,
+            JOIN_VALIDITY_DAYS,
+            groups,
+            identity,
+        ))?
+    } else {
+        let pending = rt.block_on(conf_client::enqueue(
+            addr,
+            kind,
+            &name,
+            JOIN_VALIDITY_DAYS,
+            identity,
+        ))?;
+        println!("request queued. Your request code is:");
+        println!("  SHA256  {}", pending.fingerprint.text());
+        println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
+        println!(
+            "send this code to your CA admin (chat, phone — any channel you \
+             trust); they approve with `netidx conf ca sign` after matching \
+             it. Waiting for approval (Ctrl-C to abort; the request expires \
+             on its own)..."
+        );
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+            match rt.block_on(conf_client::poll(addr, kind, &pending, identity))? {
+                conf_client::PollOutcome::Pending => continue,
+                conf_client::PollOutcome::Issued(issued) => break issued,
+                conf_client::PollOutcome::Denied(reason) => {
+                    bail!("the CA admin denied this request: {reason}")
+                }
+                conf_client::PollOutcome::Expired => bail!(
+                    "the request expired before an admin approved it; re-run \
+                     to queue a new one"
+                ),
+            }
+        }
+    };
 
     // Stage the issued files in a tempdir; the template's `apply()` does
     // the real install into the canonical identity dir, gated by
@@ -789,8 +906,259 @@ fn maybe_join_ca_server(
         0o600,
     )?;
     netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
-    println!("got TLS identity {name:?} from CA server {addr}");
-    Ok(Some((JoinedIdentity { name, certificate, private_key, trusted }, staging)))
+    println!("got TLS identity {name:?} from conf server {addr}");
+    for w in &issued.warnings {
+        println!("  warning: {w}");
+    }
+    Ok((JoinedIdentity { name, certificate, private_key, trusted }, staging))
+}
+
+/// The id-map group default suggested at enrollment, by node kind:
+/// infrastructure identities (resolvers, conf servers) don't act as
+/// users, so they default to no registration.
+pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Resolver | NodeKind::ConfServer => "",
+        NodeKind::Publisher | NodeKind::Client | NodeKind::Workstation => "users",
+    }
+}
+
+/// Prompt for the id-map groups to assign a new identity
+/// (comma-separated, first is primary). CLI-`provided` values
+/// short-circuit (`--id-map-group ''` is the explicit "none"); an
+/// empty answer means no registration.
+pub(super) fn prompt_id_map_groups(
+    provided: &[String],
+    default: &str,
+) -> Result<Vec<String>> {
+    let raw: Vec<String> = if !provided.is_empty() {
+        provided.to_vec()
+    } else {
+        prompt::string_with_default(
+            "id-map groups for this identity (comma-separated, first is \
+             primary; empty for none)",
+            None,
+            default,
+        )?
+        .split(',')
+        .map(|s| s.to_string())
+        .collect()
+    };
+    Ok(raw
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// How long the install flows browse mDNS for conf servers.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A discovered-and-confirmed netidx network: the operator-confirmed
+/// conf-plane identity plus the aggregated picture of the network
+/// (every connection behind `info` was pinned to that identity).
+pub(super) struct DiscoveredNetwork {
+    pub(super) identity: conf_client::CaIdentity,
+    pub(super) info: conf_client::NetworkInfo,
+}
+
+/// What the calling flow knows about conf servers on this network.
+/// Threaded into every sub-flow that could otherwise offer a network
+/// join, so the operator is asked at most once.
+// `Have` is ~200 bytes vs the dataless variants; this is a one-shot
+// value on an interactive CLI's stack — boxing it would trade nothing
+// for an allocation.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ConfServers {
+    /// A network was discovered and its identity glyph-confirmed: use
+    /// it, ask nothing further.
+    Have(DiscoveredNetwork),
+    /// We probed (and/or the operator declined): there is none. Never
+    /// offer a network join again in this run.
+    DontHave,
+    /// Nobody has checked (CLI-flag path, dry-run, non-TTY). A
+    /// sub-flow that wants a conf server may probe itself.
+    NotProbed,
+}
+
+impl ConfServers {
+    pub(super) fn have(&self) -> Option<&DiscoveredNetwork> {
+        match self {
+            ConfServers::Have(net) => Some(net),
+            ConfServers::DontHave | ConfServers::NotProbed => None,
+        }
+    }
+}
+
+/// Find the network this node should join: browse mDNS, group what's
+/// found by domain, let the operator pick (falling back to a manual
+/// conf-server address when discovery finds nothing), then fetch and
+/// glyph-confirm the network's identity and aggregate `GetInfo` across
+/// its conf servers (peer walk — one reachable server is enough).
+///
+/// [`ConfServers::DontHave`] ⇒ the operator concluded there is no conf
+/// server (nothing found / declined); callers continue with the manual
+/// prompt cascade and never re-offer a network join.
+/// [`ConfServers::NotProbed`] is returned only on a non-TTY — scripted
+/// installs use CLI flags.
+pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
+    if !prompt::stdin_is_tty() {
+        return Ok(ConfServers::NotProbed);
+    }
+    println!(
+        "searching for netidx conf servers on the local network \
+         ({}s)...",
+        DISCOVERY_TIMEOUT.as_secs()
+    );
+    let found = discovery::browse_or_empty(DISCOVERY_TIMEOUT);
+    // Group the (unauthenticated, hint-only) beacons by domain.
+    let mut domains: BTreeMap<String, Vec<discovery::Discovered>> = BTreeMap::new();
+    for d in found {
+        domains.entry(d.domain.clone()).or_default().push(d);
+    }
+    let manual_fallback = || -> Result<Option<Vec<SocketAddr>>> {
+        Ok(prompt::optional_parsed::<SocketAddr>(
+            "conf server address (ip:port, blank for manual setup)",
+            None,
+        )?
+        .map(|a| vec![a]))
+    };
+    let seeds: Vec<SocketAddr> = if domains.is_empty() {
+        println!("no conf servers found.");
+        match manual_fallback()? {
+            Some(s) => s,
+            None => return Ok(ConfServers::DontHave),
+        }
+    } else {
+        let chosen: Option<String> = if domains.len() == 1 {
+            let (domain, servers) = domains.iter().next().unwrap();
+            let use_it = prompt::confirm(
+                &format!(
+                    "found netidx network {domain:?} ({} conf server(s)) — join it?",
+                    servers.len()
+                ),
+                true,
+            )?;
+            use_it.then(|| domain.clone())
+        } else {
+            let names: Vec<String> = domains.keys().cloned().collect();
+            let opts: Vec<&str> =
+                names.iter().map(|s| s.as_str()).chain(["none"]).collect();
+            let choice: String = prompt::choice_with_default(
+                "multiple netidx networks found — which to join ('none' for \
+                 manual setup)",
+                None,
+                &opts,
+                opts[0],
+            )?;
+            (choice != "none").then_some(choice)
+        };
+        match chosen {
+            Some(domain) => {
+                let servers =
+                    domains.remove(&domain).expect("chosen domain came from the map");
+                servers.iter().flat_map(|d| d.socket_addrs()).collect()
+            }
+            None => match manual_fallback()? {
+                Some(s) => s,
+                None => return Ok(ConfServers::DontHave),
+            },
+        }
+    };
+    // Fetch the network identity from the first reachable seed and have
+    // the operator confirm it — the single human trust decision.
+    // Everything after this is pinned to the confirmed fingerprint.
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let mut fetched = None;
+    for addr in &seeds {
+        match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
+            Ok(id) => {
+                fetched = Some((*addr, id));
+                break;
+            }
+            Err(e) => println!("note: conf server {addr} could not be queried: {e:#}"),
+        }
+    }
+    let Some((addr, identity)) = fetched else {
+        bail!("no conf server could be reached")
+    };
+    show_network_identity(addr, &identity);
+    if !prompt::confirm("does this match what your network admin gave you?", false)? {
+        bail!("the network identity was not confirmed; nothing was sent");
+    }
+    let info = rt
+        .block_on(conf_client::aggregate(&seeds, kind, &identity))
+        .context("mapping the network (GetInfo peer walk)")?;
+    Ok(ConfServers::Have(DiscoveredNetwork { identity, info }))
+}
+
+/// Map a confirmed network's resolvers into per-address referral auth,
+/// obtaining a client TLS identity from the network's CA when the
+/// network runs TLS and the caller doesn't already have one
+/// (`have_identity`). The identity was already glyph-confirmed in
+/// [`discover_network`] — no second confirmation; the signing
+/// connection still pins to it.
+fn network_addrs_and_identity(
+    net: &DiscoveredNetwork,
+    kind: NodeKind,
+    have_identity: bool,
+    tls_identities: &mut Vec<TlsIdentitySpec>,
+    tls_staging: &mut Vec<tempfile::TempDir>,
+) -> Result<Vec<(SocketAddr, ReferralAuth)>> {
+    if net.info.resolvers.is_empty() {
+        bail!(
+            "the conf servers of network {:?} reported no resolvers — is the \
+             resolver host's conf server down? (manual setup: re-run and \
+             leave the conf-server prompts blank)",
+            net.identity.domain,
+        );
+    }
+    println!(
+        "network {:?}: {} resolver(s)",
+        net.identity.domain,
+        net.info.resolvers.len()
+    );
+    let mut addrs = Vec::new();
+    let mut needs_tls = false;
+    for r in &net.info.resolvers {
+        let auth = match &r.auth {
+            InfoAuth::Anonymous => ReferralAuth::Anonymous,
+            InfoAuth::Krb5 { spn } => ReferralAuth::Krb5(ArcStr::from(spn.as_str())),
+            InfoAuth::Tls { name } => {
+                needs_tls = true;
+                ReferralAuth::Tls(ArcStr::from(name.as_str()))
+            }
+        };
+        println!("  {} ({})", r.addr, describe_info_auth(&r.auth));
+        addrs.push((r.addr, auth));
+    }
+    if needs_tls && !have_identity {
+        let Some(ca_addr) = net.info.ca_addr else {
+            bail!(
+                "network {:?} uses TLS but none of its conf servers reported \
+                 a CA — cannot obtain a client certificate",
+                net.identity.domain,
+            )
+        };
+        // `<user>.<domain>` per the netidx identity convention; the
+        // domain here is the TLS-attested one from the server hello.
+        let suggested =
+            current_username().map(|u| format!("{u}.{}", net.identity.domain));
+        let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+        let (j, staging) =
+            join_network(&rt, ca_addr, kind, suggested.as_deref(), &net.identity)?;
+        tls_identities.push(joined_to_spec(j));
+        tls_staging.push(staging);
+    }
+    Ok(addrs)
+}
+
+fn describe_info_auth(a: &InfoAuth) -> String {
+    match a {
+        InfoAuth::Anonymous => "anonymous".to_string(),
+        InfoAuth::Krb5 { spn } => format!("krb5, spn {spn}"),
+        InfoAuth::Tls { name } => format!("tls, name {name}"),
+    }
 }
 
 /// Convert an installed [`JoinedIdentity`] into a client-side
@@ -843,14 +1211,16 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
 /// their local CA can run `netidx conf ca issue` and then point
 /// `--tls-cert / --tls-key / --tls-trusted` at the result.
 fn prompt_tls_client_identity(
-    upstream_ip: Option<IpAddr>,
     suggested_name: Option<&str>,
+    probe: &ConfServers,
 ) -> Result<StagedIdentity> {
-    // First offer the network path: a CA server signs our CSR on the
+    // First the network path: a conf server signs our CSR on the
     // spot, no files to shuttle. Works on every platform (rcgen, not
     // openssl), so it's also how a Windows node gets a TLS identity.
+    // What we already know about conf servers (`probe`) decides
+    // whether this asks anything at all.
     if let Some((j, staging)) =
-        maybe_join_ca_server(upstream_ip, ca_proto::NodeKind::Client, suggested_name)?
+        maybe_join_ca_server(probe, NodeKind::Client, suggested_name)?
     {
         return Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) });
     }
@@ -1523,16 +1893,44 @@ pub(crate) struct ResolverFlags {
 }
 
 fn run_resolver(mut f: ResolverFlags) -> Result<()> {
+    // Ask the network before asking the human: a second (or third…)
+    // resolver discovers the existing network and imports its settings
+    // — auth scheme, domain, where the CA is. Peer resolvers stay
+    // mutually unaware; only installers aggregate the full picture.
+    // The probe outcome rides through the whole install: once the
+    // operator has said "no conf server", nothing downstream offers a
+    // network join again.
+    let probe = if f.auth.is_none() && !f.common.dry_run {
+        discover_network(NodeKind::Resolver)?
+    } else {
+        ConfServers::NotProbed
+    };
     // Resolve required args with interactive prompting before we
     // start building the params struct. `--auth` and `--listen` are
     // level-1 prompts: they have sensible defaults (tls, the
-    // conventional resolver port), so a blank answer is fine.
-    let kind: AuthKind = prompt::choice_with_default(
-        "auth scheme",
-        f.auth,
-        &["anonymous", "local", "krb5", "tls"],
-        "tls",
-    )?;
+    // conventional resolver port), so a blank answer is fine. A
+    // discovered network's auth scheme wins — a resolver joining a
+    // network must speak what its peers speak.
+    let kind: AuthKind = match probe.have().and_then(network_auth_kind) {
+        Some(k) => {
+            println!(
+                "importing auth scheme from the network: {}",
+                match k {
+                    AuthKind::Anonymous => "anonymous",
+                    AuthKind::Local => "local",
+                    AuthKind::Krb5 => "krb5",
+                    AuthKind::Tls => "tls",
+                }
+            );
+            k
+        }
+        None => prompt::choice_with_default(
+            "auth scheme",
+            f.auth,
+            &["anonymous", "local", "krb5", "tls"],
+            "tls",
+        )?,
+    };
     f.auth = Some(kind);
     // Shape detection (incl. cloud-metadata probe) only fires when
     // we actually need a default — i.e. when `--listen` or `--bind`
@@ -1616,8 +2014,60 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // resolver/id-map units so the one supervisor (and the one system
     // service we offer below) runs them all.
     let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
-    let (auth, _tls_staging) =
-        resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref())?;
+    let (auth, _tls_staging) = match probe.have() {
+        Some(net) => resolver_auth_from_network(&f, net, kind)?,
+        None => {
+            resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?
+        }
+    };
+    // First server of a new network with a non-TLS data plane: the
+    // conf plane still needs its trust root (it is always TLS — the
+    // glyph confirm, enrollment, and server-to-server pushes all hang
+    // off the CA), so offer to create one even though the data plane
+    // is krb5/anonymous. The TLS path gets its CA inside
+    // `resolver_tls_generate`.
+    #[cfg(unix)]
+    if probe.have().is_none()
+        && !f.common.dry_run
+        && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
+        && !ca::default_ca_present()
+        && prompt::confirm(
+            "set up a conf server for this network? (creates a CA used only \
+             to secure the conf plane — data-plane auth stays as chosen)",
+            true,
+        )?
+    {
+        let domain = prompt::string_with_default(
+            "network domain (groups this network in discovery, e.g. ryu-oh.org)",
+            None,
+            DEFAULT_TLS_DOMAIN,
+        )?;
+        // The returned `ServiceNeed` is intentionally dropped: this
+        // resolver install always ends with a single system-service
+        // offer, and the conf-server unit lands in the resolver's own
+        // units dir, so that one service supervises it.
+        let (_ca, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
+            dir: paths::user_ca_dir()?,
+            common_name: Some(ca::default_ca_cn(&domain)),
+            domain: Some(domain),
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec![],
+            key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
+            validity_days: netidx_conf::ca::DEFAULT_CA_VALIDITY_DAYS,
+            admin: None,
+            allowed_san: vec![],
+            max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            id_map_groups: vec![],
+            may_enroll_servers: None,
+            setup_server: Some(true),
+            listen: None,
+            listen_hint: Some(listen.ip()),
+            units_dir: units_dir.clone(),
+        })?;
+    }
     let perms_seed = match &f.perms_seed {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
         None => None,
@@ -1628,6 +2078,22 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // wherever this resolver hosts its own tree.
     let parent_default_path = f.base.clone();
     let with_id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
+    // The conf-server step after apply() needs the *actual* config
+    // paths this install produces — resolve the template's defaults
+    // the same way it will.
+    let resolver_config_actual = match &f.resolver_config_path {
+        Some(p) => p.clone(),
+        None => netidx_conf::resolver::default_save_path()?,
+    };
+    let id_map_actual = if with_id_map {
+        Some(match &f.id_map_path {
+            Some(p) => p.clone(),
+            None => netidx_conf::id_map::user_id_map_path()?,
+        })
+    } else {
+        None
+    };
+    let post_apply_units_dir = units_dir.clone();
     let params = netidx_conf::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
@@ -1651,7 +2117,33 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // A standalone resolver is a network-facing daemon — system-scope
     // is what makes it boot-triggered and visible to the OS. The
     // service-install flow will re-exec under sudo if needed.
-    finish(rt, &f.common, service::ServiceNeed::at(service::ScopeArg::System))
+    finish_with(
+        rt,
+        &f.common,
+        service::ServiceNeed::at(service::ScopeArg::System),
+        // Conf-server step, after the configs it points at exist: a
+        // discovered network ⇒ enroll a new conf server here; a fresh
+        // network ⇒ add this host's roles to the config the CA setup
+        // wrote (no conf server here ⇒ nothing to do).
+        move || {
+            #[cfg(unix)]
+            {
+                post_apply_conf_server(
+                    probe.have(),
+                    listen,
+                    post_apply_units_dir.as_deref(),
+                    resolver_config_actual,
+                    id_map_actual,
+                )
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (&probe, listen, post_apply_units_dir);
+                let _ = (resolver_config_actual, id_map_actual);
+                Ok(())
+            }
+        },
+    )
 }
 
 /// Decide whether to install the id-mapper daemon alongside the
@@ -1691,6 +2183,7 @@ fn resolver_self_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
+    probe: &ConfServers,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
@@ -1717,7 +2210,7 @@ fn resolver_self_auth(
             },
             None,
         )),
-        AuthKind::Tls => resolver_tls_auth(f, default_ca_ip, units_dir),
+        AuthKind::Tls => resolver_tls_auth(f, default_ca_ip, units_dir, probe),
     }
 }
 
@@ -1732,6 +2225,7 @@ fn resolver_tls_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
+    probe: &ConfServers,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
     let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
     // 'generate' (issue from local CA) is unix-only — the CA module
@@ -1758,11 +2252,11 @@ fn resolver_tls_auth(
     if is_generate {
         #[cfg(unix)]
         {
-            return resolver_tls_generate(f, &name, default_ca_ip, units_dir);
+            return resolver_tls_generate(f, &name, default_ca_ip, units_dir, probe);
         }
         #[cfg(not(unix))]
         {
-            let _ = (default_ca_ip, units_dir);
+            let _ = (default_ca_ip, units_dir, probe);
             unreachable!("generate path is unix-only")
         }
     }
@@ -1823,19 +2317,21 @@ fn resolver_tls_generate(
     name: &str,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
+    probe: &ConfServers,
 ) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
-    // First offer the network path: a CA server signs our CSR on the
-    // spot. The issued files are written to a staging tempdir; we hand
-    // it back so the caller can hold it across the template install,
-    // which does the --force-gated copy to the canonical location.
+    // First the network path: a conf server signs our CSR on the
+    // spot. Whether this asks anything is decided by `probe` — in
+    // particular, an operator who already said "no conf server" at the
+    // discovery phase is not asked again. The issued files are written
+    // to a staging tempdir; we hand it back so the caller can hold it
+    // across the template install, which does the --force-gated copy
+    // to the canonical location.
     if !f.common.dry_run {
         // The resolver requests its own already-decided SAN, so default
         // the join's name prompt to it.
-        if let Some((j, staging)) = maybe_join_ca_server(
-            default_ca_ip,
-            ca_proto::NodeKind::Resolver,
-            Some(name),
-        )? {
+        if let Some((j, staging)) =
+            maybe_join_ca_server(probe, NodeKind::Resolver, Some(name))?
+        {
             return Ok((joined_to_auth(j), Some(staging)));
         }
     }
@@ -1934,10 +2430,12 @@ fn resolver_tls_generate(
             admin: None,
             allowed_san: vec![],
             max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            id_map_groups: vec![],
+            may_enroll_servers: None,
             setup_server: None,
             listen: None,
             // The CA co-locates with this resolver — suggest its IP for
-            // the CA server's listen address.
+            // the conf server's listen address.
             listen_hint: default_ca_ip,
             units_dir: units_dir.map(|p| p.to_path_buf()),
         })?;
@@ -1987,6 +2485,221 @@ fn resolver_tls_generate(
     ))
 }
 
+/// The auth scheme a discovered network's resolvers use (the first
+/// resolver's — netidx allows per-member schemes but mixed clusters
+/// are vanishingly rare). `None` when the network reported no
+/// resolvers; the caller falls back to prompting.
+fn network_auth_kind(net: &DiscoveredNetwork) -> Option<AuthKind> {
+    net.info.resolvers.first().map(|r| match &r.auth {
+        InfoAuth::Anonymous => AuthKind::Anonymous,
+        InfoAuth::Krb5 { .. } => AuthKind::Krb5,
+        InfoAuth::Tls { .. } => AuthKind::Tls,
+    })
+}
+
+/// Resolve this resolver's own auth by importing from a confirmed
+/// network: TLS ⇒ request our resolver cert from the network's CA
+/// (suggested `resolver.<domain>`, identity already glyph-confirmed);
+/// krb5 ⇒ prompt for this host's SPN (a peer's is shown as the shape
+/// to follow); anonymous ⇒ anonymous.
+fn resolver_auth_from_network(
+    f: &ResolverFlags,
+    net: &DiscoveredNetwork,
+    kind: AuthKind,
+) -> Result<(AuthChoice, Option<tempfile::TempDir>)> {
+    match kind {
+        AuthKind::Anonymous => Ok((AuthChoice::Anonymous, None)),
+        AuthKind::Local => bail!(
+            "a network-discovered resolver cannot use local auth (it is \
+             host-local by definition)"
+        ),
+        AuthKind::Krb5 => {
+            if let Some(example) = net.info.resolvers.iter().find_map(|r| match &r.auth
+            {
+                InfoAuth::Krb5 { spn } => Some(spn.as_str()),
+                _ => None,
+            }) {
+                println!("note: an existing resolver on this network uses SPN {example:?}");
+            }
+            Ok((
+                AuthChoice::Krb5 {
+                    spn: ArcStr::from(
+                        prompt::required_string(
+                            "kerberos SPN for this resolver",
+                            f.spn.clone(),
+                        )?
+                        .as_str(),
+                    ),
+                },
+                None,
+            ))
+        }
+        AuthKind::Tls => {
+            let Some(ca_addr) = net.info.ca_addr else {
+                bail!(
+                    "network {:?} uses TLS but none of its conf servers \
+                     reported a CA — cannot obtain the resolver certificate",
+                    net.identity.domain,
+                )
+            };
+            let suggested = match &f.tls_name {
+                Some(n) => n.clone(),
+                None => format!("{DEFAULT_RESOLVER_NAME}.{}", net.identity.domain),
+            };
+            let rt =
+                tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let (j, staging) = join_network(
+                &rt,
+                ca_addr,
+                NodeKind::Resolver,
+                Some(&suggested),
+                &net.identity,
+            )?;
+            Ok((joined_to_auth(j), Some(staging)))
+        }
+    }
+}
+
+/// The resolver install's post-apply conf-server step. Joining an
+/// existing network ⇒ [`enroll_conf_server`] (a brand new conf server
+/// here, serving cert minted by the network's CA). A fresh network ⇒
+/// the CA-creation path already wrote a ca-role `conf-server.json` via
+/// `setup_server`; add this host's resolver / id-map roles to it. No
+/// config at all ⇒ the operator declined a conf server — nothing to do.
+#[cfg(unix)]
+fn post_apply_conf_server(
+    discovered: Option<&DiscoveredNetwork>,
+    resolver_listen: SocketAddr,
+    units_dir: Option<&Path>,
+    resolver_config: PathBuf,
+    id_map: Option<PathBuf>,
+) -> Result<()> {
+    use netidx_conf::conf_server_config::{IdMapRole, ResolverRole};
+    match discovered {
+        Some(net) => {
+            enroll_conf_server(net, resolver_listen, units_dir, resolver_config, id_map)
+        }
+        None => {
+            if paths::discover_conf_server_config().is_err() {
+                return Ok(());
+            }
+            let path = super::server::update_roles(|roles| {
+                roles.resolver = Some(ResolverRole { config: resolver_config });
+                if let Some(map) = id_map {
+                    roles.id_map = Some(IdMapRole { map });
+                }
+            })?;
+            println!("updated conf-server roles in {}", path.display());
+            Ok(())
+        }
+    }
+}
+
+/// Enroll a conf server on this (non-CA) host: the network's CA signs
+/// our reserved-SAN serving cert (admin-authorized, policy-gated), we
+/// install the serving identity + `conf-server.json` with this host's
+/// roles, and drop the activation unit. The CA records us as a peer as
+/// a side effect of the enrollment.
+#[cfg(unix)]
+fn enroll_conf_server(
+    net: &DiscoveredNetwork,
+    resolver_listen: SocketAddr,
+    units_dir: Option<&Path>,
+    resolver_config: PathBuf,
+    id_map: Option<PathBuf>,
+) -> Result<()> {
+    use netidx_conf::conf_server_config::{
+        ConfServerConfig, IdMapRole, ResolverRole, Roles,
+    };
+    let Some(ca_addr) = net.info.ca_addr else {
+        println!(
+            "note: network {:?} reported no CA; skipping conf-server setup on \
+             this host",
+            net.identity.domain,
+        );
+        return Ok(());
+    };
+    if !prompt::confirm(
+        "set up a conf server on this host (advertises this resolver to \
+         future installs)?",
+        true,
+    )? {
+        return Ok(());
+    }
+    let ip = prompt::parsed_with_default::<IpAddr>(
+        "conf server listen IP",
+        None,
+        &resolver_listen.ip().to_string(),
+    )?;
+    let port = prompt::parsed_with_default::<u16>(
+        "conf server listen port",
+        None,
+        &conf_proto::DEFAULT_PORT.to_string(),
+    )?;
+    let listen = SocketAddr::new(ip, port);
+    let admin = prompt::required_string(
+        "CA admin name (authorizes enrolling this conf server)",
+        None,
+    )?;
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "CA password for admin {admin}: "
+    ))?);
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let issued =
+        rt.block_on(conf_client::enroll(ca_addr, &admin, password, listen, &net.identity))?;
+    for w in &issued.warnings {
+        println!("  warning: {w}");
+    }
+    // Serving identity: chain = [issued leaf, confirmed CA] so clients
+    // receive the CA cert at the end of the chain, exactly like the CA
+    // host's own conf server.
+    let dir = paths::user_config_root()?.join("conf-server");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut chain = issued.cert_pem.clone().into_bytes();
+    chain.extend_from_slice(net.identity.ca_pem().as_bytes());
+    let serving_cert = dir.join("cert.pem");
+    let serving_key = dir.join("key.pem");
+    let trusted = dir.join("trusted.pem");
+    netidx_conf::atomic::write_atomic(&serving_cert, &chain, 0o644)?;
+    netidx_conf::atomic::write_atomic(
+        &serving_key,
+        issued.private_key_pem.as_bytes(),
+        0o600,
+    )?;
+    netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    let cfg = ConfServerConfig {
+        domain: net.identity.domain.clone(),
+        listen,
+        serving_cert,
+        serving_key,
+        trusted,
+        roles: Roles {
+            ca: None,
+            resolver: Some(ResolverRole { config: resolver_config }),
+            id_map: id_map.map(|map| IdMapRole { map }),
+        },
+        ca_addr: Some(ca_addr),
+        peers: net.info.reached.clone(),
+        mdns: true,
+    };
+    let cfg_path = paths::user_conf_server_config()?;
+    cfg.save(&cfg_path)?;
+    println!("conf server configured:");
+    println!("  config:   {}", cfg_path.display());
+    println!("  listen:   {listen}");
+    println!("  domain:   {}", net.identity.domain);
+    if let Some(units_dir) = units_dir {
+        super::server::install_unit(units_dir, &cfg_path)?;
+    } else {
+        println!(
+            "  (--no-units: no activation unit written; run it yourself with\n\
+             \x20  netidx conf server run -c {})",
+            cfg_path.display()
+        );
+    }
+    Ok(())
+}
+
 // -- client-only --------------------------------------------------------------
 
 #[derive(Args, Debug)]
@@ -2028,53 +2741,75 @@ pub(crate) struct PublisherFlags {
 }
 
 fn run_publisher(mut f: PublisherFlags) -> Result<()> {
-    // `--auth` is a level-1 prompt (default tls); the cluster
-    // address has no universal default, so it stays level 2.
-    let kind: AuthKind = prompt::choice_with_default(
-        "auth scheme",
-        f.auth,
-        &["anonymous", "local", "krb5", "tls"],
-        "tls",
-    )?;
-    f.auth = Some(kind);
-    if f.addrs.is_empty() {
-        let ip = prompt::required_parsed::<std::net::IpAddr>(
-            "cluster IP (the resolver to connect to, e.g. 10.0.0.1)",
-            None,
-        )?;
-        f.addrs.push(prompt_resolver_port(ip)?);
-    }
-    let per_addr_auth = publisher_per_addr_auth(&f)?;
-    let addrs: Vec<(SocketAddr, ReferralAuth)> =
-        f.addrs.iter().map(|a| (*a, per_addr_auth.clone())).collect();
     let mut tls_identities = vec![];
-    // Holds the staging tempdir(s) for any CA-server-joined identity
+    // Holds the staging tempdir(s) for any conf-server-joined identity
     // until `finish` (which runs the template's --force-gated install)
     // returns. Dropping a TempDir deletes its contents, so this must
     // outlive the `finish` call below.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     if let Some(spec) = f.tls.to_spec()? {
         tls_identities.push(spec);
-    } else if matches!(f.auth, Some(AuthKind::Tls)) {
-        // Interactive TLS path: `--auth tls` without `--tls-cert`
-        // (etc.) used to dead-end at the template's
-        // "default_auth=Tls requires at least one tls_identity"
-        // check. Mirror the workstation/resolver UX instead — walk
-        // the operator through a cert-or-generate cascade so they
-        // can either point at an existing cert or get a key+CSR
-        // produced on the spot. The cluster IP seeds the CA-server
-        // address default.
-        let upstream = f.addrs.first().map(|a| a.ip());
-        // Suggest our SAN as `<user>.<domain>`, the domain coming from
-        // the resolver's TLS name the operator just gave.
-        let suggested = match &per_addr_auth {
-            ReferralAuth::Tls(san) => suggest_client_san(san),
-            _ => None,
-        };
-        let si = prompt_tls_client_identity(upstream, suggested.as_deref())?;
-        tls_identities.push(si.spec);
-        tls_staging.extend(si.staging);
     }
+    // Ask the network before asking the human: with no `--addr` /
+    // `--auth`, a discovered (and glyph-confirmed) conf server yields
+    // every resolver address with its auth — and, on TLS networks, our
+    // client cert. The probe outcome rides into the manual cascade so
+    // a declined discovery is never re-offered.
+    let probe = if f.addrs.is_empty() && f.auth.is_none() {
+        discover_network(NodeKind::Publisher)?
+    } else {
+        ConfServers::NotProbed
+    };
+    let addrs: Vec<(SocketAddr, ReferralAuth)> = match probe.have() {
+        Some(net) => {
+            let have_identity = !tls_identities.is_empty();
+            network_addrs_and_identity(
+                net,
+                NodeKind::Publisher,
+                have_identity,
+                &mut tls_identities,
+                &mut tls_staging,
+            )?
+        }
+        None => {
+            // `--auth` is a level-1 prompt (default tls); the cluster
+            // address has no universal default, so it stays level 2.
+            let kind: AuthKind = prompt::choice_with_default(
+                "auth scheme",
+                f.auth,
+                &["anonymous", "local", "krb5", "tls"],
+                "tls",
+            )?;
+            f.auth = Some(kind);
+            if f.addrs.is_empty() {
+                let ip = prompt::required_parsed::<std::net::IpAddr>(
+                    "cluster IP (the resolver to connect to, e.g. 10.0.0.1)",
+                    None,
+                )?;
+                f.addrs.push(prompt_resolver_port(ip)?);
+            }
+            let per_addr_auth = publisher_per_addr_auth(&f)?;
+            if tls_identities.is_empty() && matches!(f.auth, Some(AuthKind::Tls)) {
+                // Interactive TLS path: `--auth tls` without `--tls-cert`
+                // (etc.) used to dead-end at the template's
+                // "default_auth=Tls requires at least one tls_identity"
+                // check. Mirror the workstation/resolver UX instead — walk
+                // the operator through a cert-or-generate cascade so they
+                // can either point at an existing cert or get a key+CSR
+                // produced on the spot.
+                // Suggest our SAN as `<user>.<domain>`, the domain coming
+                // from the resolver's TLS name the operator just gave.
+                let suggested = match &per_addr_auth {
+                    ReferralAuth::Tls(san) => suggest_client_san(san),
+                    _ => None,
+                };
+                let si = prompt_tls_client_identity(suggested.as_deref(), &probe)?;
+                tls_identities.push(si.spec);
+                tls_staging.extend(si.staging);
+            }
+            f.addrs.iter().map(|a| (*a, per_addr_auth.clone())).collect()
+        }
+    };
     let default_auth = f.default_auth.map(|k| k.default_mech());
     // Level-1 prompt: same loopback-mixing pitfall as the resolver
     // template (leaving this unset lands the publisher on
@@ -2166,11 +2901,25 @@ fn finish(
     common: &CommonFlags,
     need: service::ServiceNeed,
 ) -> Result<()> {
+    finish_with(rt, common, need, || Ok(()))
+}
+
+/// [`finish`] with a post-apply step that runs after the template has
+/// been installed (and never on `--dry-run`). The resolver install
+/// uses it to stand up / update this host's conf server, which points
+/// at config files that only exist once `apply()` has run.
+fn finish_with(
+    rt: RenderedTemplate,
+    common: &CommonFlags,
+    need: service::ServiceNeed,
+    post_apply: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     println!("{}", rt.describe());
     if !common.dry_run {
         check_no_overwrite(&rt, common.force)?;
         rt.apply().context("applying template")?;
         println!("ok");
+        post_apply()?;
     }
     // Single end-of-process hook: offer the OS service (or print the
     // dry-run note). Sub-steps with their own units merge their needs

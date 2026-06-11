@@ -2,13 +2,12 @@ use anyhow::{anyhow, Context, Result};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    ca_join, ca_proto, ca_server, ca_vault,
+    ca_vault, conf_client,
+    conf_proto::{self, NodeKind},
     fingerprint::{ColorMode, Fingerprint},
-    netshape::NetShape,
     paths, tls,
 };
 use clap::{Args, Subcommand};
-use serde_derive::{Deserialize, Serialize};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -17,20 +16,9 @@ use zeroize::Zeroizing;
 
 use super::{prompt, service};
 
-/// CA-server daemon config (`<ca-dir>/server.json`): everything `ca
-/// serve` needs. Issuance policy lives per-admin in the vault, so this
-/// is transport-only.
-#[derive(Debug, Serialize, Deserialize)]
-struct CaServerConfig {
-    ca_dir: PathBuf,
-    listen: SocketAddr,
-    serving_cert: PathBuf,
-    serving_key: PathBuf,
-}
-
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// create a new local CA (keyslot vault; can run as a server)
+    /// create a new local CA (keyslot vault; can serve via `conf server`)
     Init(InitParams),
     /// issue a leaf certificate from a CA
     Issue(IssueArgs),
@@ -40,8 +28,6 @@ pub(crate) enum Cmd {
     Sign(SignArgs),
     /// list local CAs
     List,
-    /// run the CA server (signs CSRs received over TLS)
-    Serve(ServeArgs),
     /// manage CA admin keyslots (add / revoke / set-policy / list)
     Admin {
         #[command(subcommand)]
@@ -49,7 +35,7 @@ pub(crate) enum Cmd {
     },
     /// show the CA's fingerprint + identicon for out-of-band verification
     Fingerprint(FingerprintArgs),
-    /// request a certificate from a CA server and install it
+    /// request a certificate from a conf server and install it
     Join(JoinArgs),
 }
 
@@ -83,6 +69,15 @@ pub(crate) struct AdminAddArgs {
     /// Max validity (days) this admin may issue. Default 730.
     #[arg(long, default_value = "730")]
     pub max_validity_days: u32,
+    /// id-map groups for identities signed by this admin (repeatable;
+    /// first is primary). Prompted when omitted; an explicit empty
+    /// string disables registration.
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_groups: Vec<String>,
+    /// Whether this admin may enroll new conf servers. Prompted when
+    /// omitted (default no for added admins).
+    #[arg(long)]
+    pub may_enroll_servers: Option<bool>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -99,6 +94,15 @@ pub(crate) struct AdminSetPolicyArgs {
     /// Max validity (days) this admin may issue. Default 730.
     #[arg(long, default_value = "730")]
     pub max_validity_days: u32,
+    /// id-map groups for identities signed by this admin (repeatable;
+    /// first is primary). Prompted when omitted; an explicit empty
+    /// string disables registration.
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_groups: Vec<String>,
+    /// Whether this admin may enroll new conf servers. Prompted when
+    /// omitted.
+    #[arg(long)]
+    pub may_enroll_servers: Option<bool>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -122,20 +126,9 @@ pub(crate) struct FingerprintArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct ServeArgs {
-    /// Path to the server config (`<ca-dir>/server.json`). Defaults to
-    /// the default CA dir's `server.json`.
-    #[arg(short, long)]
-    pub config: Option<PathBuf>,
-    /// Don't daemonize (run in the foreground).
-    #[arg(short, long)]
-    #[allow(dead_code)]
-    pub foreground: bool,
-}
-
-#[derive(Args, Debug)]
 pub(crate) struct JoinArgs {
-    /// CA server address (`ip:port`). Prompted when omitted.
+    /// Conf server address (`ip:port`). When omitted, discovered over
+    /// mDNS (with a manual-address fallback prompt).
     #[arg(long)]
     pub server: Option<SocketAddr>,
     /// The TLS identity name to request (one DNS SAN). Prompted when omitted.
@@ -147,6 +140,11 @@ pub(crate) struct JoinArgs {
     /// Validity (days) to request. Default 730 (capped by server policy).
     #[arg(long, default_value = "730")]
     pub validity_days: u32,
+    /// id-map groups to register the identity with (repeatable; first
+    /// is primary). Prompted when omitted; an explicit empty string
+    /// skips registration.
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_groups: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -190,6 +188,14 @@ pub(crate) struct InitParams {
     /// Max validity (days) the first admin may issue. Default 730.
     #[arg(long, default_value = "730")]
     pub max_validity_days: u32,
+    /// id-map groups for identities signed by the first admin
+    /// (repeatable; first is primary). Prompted when omitted.
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_groups: Vec<String>,
+    /// Whether the first admin may enroll new conf servers. Prompted
+    /// when omitted (default yes for the founding admin).
+    #[arg(long)]
+    pub may_enroll_servers: Option<bool>,
     /// Set up the CA server (issue a serving cert + write server.json)
     /// without prompting. By default `ca init` asks.
     #[arg(long)]
@@ -280,8 +286,16 @@ pub(crate) struct RequestArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct SignArgs {
-    /// Path to the CSR (PEM-encoded) to sign. Prompted when omitted.
+    /// Path to the CSR (PEM-encoded) to sign. When omitted, `sign`
+    /// runs in queue mode: list the pending signing requests on the
+    /// conf server and approve/deny them interactively.
     pub csr_path: Option<PathBuf>,
+    /// Conf server to work the queue on (queue mode). Defaults to
+    /// this host's own conf server, then mDNS discovery — so an
+    /// enrollment admin can approve from their workstation without
+    /// shell access to the CA host.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
     /// SubjectAltName entry to embed in the signed cert. Repeatable.
     /// The CA is authoritative — these override whatever the CSR
     /// claims. One of `--san` or `--accept-csr-san` must be passed:
@@ -323,7 +337,6 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Request(p) => request(p),
         Cmd::Sign(p) => sign(p),
         Cmd::List => list(),
-        Cmd::Serve(p) => serve(p),
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
         Cmd::Join(p) => join(p),
@@ -367,7 +380,13 @@ pub(super) struct NewCaOpts {
     /// `*.<domain>` when `domain` is set, else derived from the CN).
     pub allowed_san: Vec<String>,
     pub max_validity_days: u32,
-    /// `None` ⇒ prompt "set up the CA server?"; `Some(b)` ⇒ forced.
+    /// First admin's id-map groups; empty ⇒ prompt (default `users`).
+    pub id_map_groups: Vec<String>,
+    /// Whether the first admin may enroll conf servers; `None` ⇒
+    /// prompt, defaulting to yes (someone has to be able to grow the
+    /// network).
+    pub may_enroll_servers: Option<bool>,
+    /// `None` ⇒ prompt "set up the conf server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
     /// Explicit `--listen` for the CA server (skips the prompt).
     pub listen: Option<SocketAddr>,
@@ -399,6 +418,17 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     // otherwise prompt with the `ca.<domain>` default when we know the
     // domain.
     let common_name = resolve_ca_cn(opts.common_name, opts.domain.as_deref())?;
+    // The conf-server config wants a concrete domain (it's what the
+    // network is grouped by in discovery). Prefer the threaded one;
+    // fall back to the CN's domain part, which `resolve_ca_cn` makes
+    // likely (`ca.<domain>`).
+    let domain = match &opts.domain {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => match common_name.split_once('.') {
+            Some((_, d)) if !d.is_empty() => d.to_string(),
+            _ => common_name.clone(),
+        },
+    };
     // `--admin` short-circuits the prompt; otherwise ask, seeding the
     // default with the current unix user. On a non-TTY (automation) the
     // default is taken silently, preserving the old auto-name behavior.
@@ -420,8 +450,15 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         "set a CA password for admin {admin:?} (this signs certs)"
     ))?;
     let policy = prompt_policy(
-        &opts.allowed_san,
-        opts.max_validity_days,
+        &PolicyArgs {
+            allow_san: &opts.allowed_san,
+            max_validity_days: opts.max_validity_days,
+            id_map_groups: &opts.id_map_groups,
+            may_enroll_servers: opts.may_enroll_servers,
+        },
+        // The founding admin defaults to being able to grow the
+        // network — someone has to.
+        true,
         &common_name,
         opts.domain.as_deref(),
     )?;
@@ -465,18 +502,20 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     let set_up_server = match opts.setup_server {
         Some(b) => b,
         None => prompt::confirm(
-            "set up the CA server (so nodes can request certs over the network)?",
+            "set up the conf server (so nodes can discover the network and \
+             request certs over it)?",
             true,
         )?,
     };
     let need = if set_up_server {
-        setup_server(
-            &opts.dir,
-            &ca,
-            opts.listen,
-            opts.listen_hint,
-            opts.units_dir.as_deref(),
-        )?
+        super::server::setup_server(super::server::SetupArgs {
+            ca_dir: &opts.dir,
+            ca: &ca,
+            domain: &domain,
+            listen: opts.listen,
+            listen_hint: opts.listen_hint,
+            units_dir: opts.units_dir.as_deref(),
+        })?
     } else {
         service::ServiceNeed::NONE
     };
@@ -513,6 +552,8 @@ fn init(p: InitParams) -> Result<()> {
         admin: p.admin,
         allowed_san: p.allow_san,
         max_validity_days: p.max_validity_days,
+        id_map_groups: p.id_map_groups,
+        may_enroll_servers: p.may_enroll_servers,
         setup_server,
         listen: p.listen,
         // No resolver in this flow; default_ca_listen_ip falls back to
@@ -530,153 +571,6 @@ fn init(p: InitParams) -> Result<()> {
     })
 }
 
-/// IP to suggest for the CA server's listen address: the resolver being
-/// created in this same flow (`hint`), else an existing resolver's
-/// listen IP, else the machine's first public IP. The CA server usually
-/// co-locates with a resolver, so its address is the resolver's.
-fn default_ca_listen_ip(hint: Option<IpAddr>) -> IpAddr {
-    hint.or_else(existing_resolver_listen_ip)
-        .unwrap_or_else(|| NetShape::detect().advertised_ip().into())
-}
-
-/// The listen IP of the default resolver config, if one is present and
-/// parseable.
-fn existing_resolver_listen_ip() -> Option<IpAddr> {
-    netidx_conf::resolver::ResolverConfig::load_default()
-        .ok()
-        .and_then(|c| c.0.member_servers.first().map(|m| m.addr.ip()))
-}
-
-/// Issue the daemon's serving cert (a CA-issued leaf with the reserved
-/// `SERVING_SAN`), write `server.json`, and (when `units_dir` is set)
-/// drop the `ca` activation unit. Returns the
-/// [`ServiceNeed`](service::ServiceNeed) the caller folds into its
-/// single end-of-process service offer — a CA server is a network
-/// daemon, so it needs a **system**-scope service when a unit was
-/// written, or `NONE` when `--no-units` left the operator to run it.
-fn setup_server(
-    ca_dir: &std::path::Path,
-    ca: &Ca,
-    listen: Option<SocketAddr>,
-    listen_hint: Option<IpAddr>,
-    units_dir: Option<&std::path::Path>,
-) -> Result<service::ServiceNeed> {
-    let server_dir = ca_dir.join("server");
-    std::fs::create_dir_all(&server_dir)
-        .with_context(|| format!("creating {}", server_dir.display()))?;
-    // Generate the serving key + CSR (ECDSA) and have the CA sign it.
-    let kc = ca_join::generate_key_and_csr(ca_proto::SERVING_SAN)?;
-    let leaf = ca
-        .sign_request(
-            kc.csr_pem.as_bytes(),
-            &[SanEntry::Dns(ca_proto::SERVING_SAN.to_string())],
-            ca::DEFAULT_LEAF_VALIDITY_DAYS,
-        )
-        .context("signing the CA server's serving certificate")?;
-    let ca_cert = std::fs::read(ca_dir.join("certificate.pem"))?;
-    // Chain = [serving leaf, ca cert] so the client receives the CA.
-    let mut chain = leaf;
-    chain.extend_from_slice(&ca_cert);
-    let serving_cert = server_dir.join("cert.pem");
-    let serving_key = server_dir.join("key.pem");
-    atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    atomic::write_atomic(&serving_key, kc.private_key_pem.as_bytes(), 0o600)?;
-
-    // Ask for the listen IP and port. The IP defaults to the resolver
-    // this CA is being set up alongside (or an existing resolver's
-    // listen address, or the machine's first public IP); the port
-    // defaults to the conventional 4565. An explicit `--listen` skips
-    // the prompt.
-    let listen = match listen {
-        Some(addr) => addr,
-        None => {
-            let ip_default = default_ca_listen_ip(listen_hint);
-            let ip = prompt::parsed_with_default::<IpAddr>(
-                "CA server listen IP",
-                None,
-                &ip_default.to_string(),
-            )?;
-            let port = prompt::parsed_with_default::<u16>(
-                "CA server listen port",
-                None,
-                &ca_proto::DEFAULT_PORT.to_string(),
-            )?;
-            SocketAddr::new(ip, port)
-        }
-    };
-    let cfg = CaServerConfig {
-        ca_dir: ca_dir.to_path_buf(),
-        listen,
-        serving_cert,
-        serving_key,
-    };
-    let cfg_path = ca_dir.join("server.json");
-    atomic::write_atomic(
-        &cfg_path,
-        serde_json::to_vec_pretty(&cfg).context("serializing server.json")?.as_slice(),
-        0o644,
-    )?;
-
-    println!();
-    println!("CA server configured:");
-    println!("  config:   {}", cfg_path.display());
-    println!("  listen:   {listen}");
-
-    // Drop the activation unit so the supervisor runs `ca serve` — but
-    // only when we have a units dir. With `--no-units` the operator
-    // wires activation themselves, so there's no system service to
-    // offer for it.
-    let Some(units_dir) = units_dir else {
-        println!(
-            "  (--no-units: no activation unit written; run it yourself with\n\
-             \x20  netidx conf ca serve -c {})",
-            cfg_path.display()
-        );
-        return Ok(service::ServiceNeed::NONE);
-    };
-    std::fs::create_dir_all(units_dir)
-        .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
-    let netidx_binary = std::env::current_exe()
-        .context("could not determine current netidx binary for the CA server unit")?;
-    let unit = netidx_conf::template::services::ca_server::unit(
-        &netidx_conf::template::services::ca_server::CaServerServiceParams {
-            netidx_binary,
-            config: cfg_path.clone(),
-        },
-    )?;
-    let dir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
-    dir.save("ca", &unit).context("writing the ca activation unit")?;
-    println!("  unit:     {}", netidx_conf::activation::unit_path_in(units_dir, "ca").display());
-    // A CA server is a network daemon → system-scope service.
-    Ok(service::ServiceNeed::at(service::ScopeArg::System))
-}
-
-// -- ca serve -----------------------------------------------------------------
-
-fn serve(p: ServeArgs) -> Result<()> {
-    env_logger::init();
-    let cfg_path = match p.config {
-        Some(c) => c,
-        None => paths::user_ca_dir()?.join("server.json"),
-    };
-    let bytes = std::fs::read(&cfg_path)
-        .with_context(|| format!("reading CA server config {}", cfg_path.display()))?;
-    let cfg: CaServerConfig = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {}", cfg_path.display()))?;
-    let serving_cert_pem = std::fs::read(&cfg.serving_cert)
-        .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
-    let serving_key_pem = std::fs::read(&cfg.serving_key)
-        .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
-    let params = ca_server::ServeParams {
-        ca_dir: cfg.ca_dir,
-        listen: cfg.listen,
-        serving_cert_pem,
-        serving_key_pem,
-    };
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    rt.block_on(ca_server::serve(params))
-}
-
 // -- ca admin -----------------------------------------------------------------
 
 fn admin(cmd: AdminCmd) -> Result<()> {
@@ -685,10 +579,16 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("new admin name", a.name)?;
             // Seed the policy suggestion from the CA's own cert domain
-            // (e.g. `ca.ryu-oh.org` → `*.ryu-oh.org`).
+            // (e.g. `ca.ryu-oh.org` → `*.ryu-oh.org`). Added admins
+            // default to NOT being able to enroll conf servers.
             let policy = prompt_policy(
-                &a.allow_san,
-                a.max_validity_days,
+                &PolicyArgs {
+                    allow_san: &a.allow_san,
+                    max_validity_days: a.max_validity_days,
+                    id_map_groups: &a.id_map_groups,
+                    may_enroll_servers: a.may_enroll_servers,
+                },
+                false,
                 &existing_ca_cn(&dir),
                 None,
             )?;
@@ -705,16 +605,25 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin whose policy to set", a.name)?;
             let policy = prompt_policy(
-                &a.allow_san,
-                a.max_validity_days,
+                &PolicyArgs {
+                    allow_san: &a.allow_san,
+                    max_validity_days: a.max_validity_days,
+                    id_map_groups: &a.id_map_groups,
+                    may_enroll_servers: a.may_enroll_servers,
+                },
+                false,
                 &existing_ca_cn(&dir),
                 None,
             )?;
             // Report the resolved policy (the prompt may have filled it),
             // not the raw flag.
             let summary = format!(
-                "allowed_san={:?} max_validity_days={}",
-                policy.allowed_san, policy.max_validity_days
+                "allowed_san={:?} max_validity_days={} id_map_groups={:?} \
+                 may_enroll_servers={}",
+                policy.allowed_san,
+                policy.max_validity_days,
+                policy.id_map_groups,
+                policy.may_enroll_servers
             );
             // Authority: any current admin's password (the same flat
             // model as add/remove). You don't need the target's.
@@ -746,8 +655,12 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             }
             for (name, pol) in admins {
                 println!(
-                    "{name}: allowed_san={:?} max_validity_days={}",
-                    pol.allowed_san, pol.max_validity_days
+                    "{name}: allowed_san={:?} max_validity_days={} \
+                     id_map_groups={:?} may_enroll_servers={}",
+                    pol.allowed_san,
+                    pol.max_validity_days,
+                    pol.id_map_groups,
+                    pol.may_enroll_servers
                 );
             }
             Ok(())
@@ -765,34 +678,60 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
 // -- ca join (the client) -----------------------------------------------------
 
 fn join(p: JoinArgs) -> Result<()> {
-    let server: SocketAddr = match p.server {
-        Some(s) => s,
-        None => prompt::required_parsed("CA server address (ip:port)", None)?,
-    };
+    use super::init::{self, ConfServers};
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Confirm WHO we've reached before any credential is entered.
-    // `fetch_ca_identity` sends nothing and closes before returning.
-    let identity = rt
-        .block_on(ca_join::fetch_ca_identity(server))
-        .with_context(|| format!("contacting CA server {server}"))?;
-    println!("The CA server at {server} presented this identity:");
-    println!("  SHA256  {}", identity.fingerprint.text());
-    println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
-    if !prompt::confirm("does this match what your CA admin gave you?", false)? {
-        bail!("CA identity was not confirmed; nothing was sent");
-    }
+    let (server, identity) = match p.server {
+        // An explicit address: confirm WHO we've reached before any
+        // credential is entered. `fetch_identity` sends nothing secret
+        // and closes before returning.
+        Some(server) => {
+            let identity = rt
+                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting conf server {server}"))?;
+            init::show_network_identity(server, &identity);
+            if !prompt::confirm("does this match what your CA admin gave you?", false)? {
+                bail!("CA identity was not confirmed; nothing was sent");
+            }
+            (server, identity)
+        }
+        // No address: this is "the CA flow not called by a higher
+        // level flow" — probe for the network ourselves (browse →
+        // confirm glyph → aggregate, with a manual-address fallback).
+        None => match init::discover_network(NodeKind::Client)? {
+            ConfServers::Have(net) => {
+                let ca = net.info.ca_addr.ok_or_else(|| {
+                    anyhow!(
+                        "network {:?} reported no CA; cannot request a certificate",
+                        net.identity.domain
+                    )
+                })?;
+                (ca, net.identity)
+            }
+            ConfServers::DontHave => {
+                bail!("no conf server found or selected; pass --server to specify one")
+            }
+            ConfServers::NotProbed => {
+                bail!("--server is required when stdin is not a TTY")
+            }
+        },
+    };
     let name = prompt::required_string("TLS identity name to request", p.name)?;
+    let groups = init::prompt_id_map_groups(
+        &p.id_map_groups,
+        init::default_id_map_groups(NodeKind::Client),
+    )?;
     let admin = prompt::required_string("admin name", p.admin)?;
     let password = Zeroizing::new(collect_existing_password(&format!(
         "CA password for admin {admin:?}"
     ))?);
-    let issued = rt.block_on(ca_join::request_cert(
+    let issued = rt.block_on(conf_client::request_cert(
         server,
-        ca_proto::NodeKind::Client,
+        NodeKind::Client,
         &name,
         &admin,
         password,
         p.validity_days,
+        groups,
         &identity,
     ))?;
     let dir = tls::identity_dir(&name)?;
@@ -806,6 +745,9 @@ fn join(p: JoinArgs) -> Result<()> {
     )?;
     atomic::write_atomic(&dir.join("trusted.pem"), issued.trusted_pem.as_bytes(), 0o644)?;
     println!("installed identity {name:?} in {}", dir.display());
+    for w in &issued.warnings {
+        println!("  warning: {w}");
+    }
     Ok(())
 }
 
@@ -835,14 +777,22 @@ fn env_user_name() -> Option<String> {
     None
 }
 
-fn prompt_policy(
-    allow_san: &[String],
+/// CLI-provided policy inputs; whatever is absent gets prompted.
+struct PolicyArgs<'a> {
+    allow_san: &'a [String],
     max_validity_days: u32,
+    id_map_groups: &'a [String],
+    may_enroll_servers: Option<bool>,
+}
+
+fn prompt_policy(
+    args: &PolicyArgs,
+    enroll_default: bool,
     cn: &str,
     domain: Option<&str>,
 ) -> Result<ca_vault::Policy> {
-    let allowed_san = if !allow_san.is_empty() {
-        allow_san.to_vec()
+    let allowed_san = if !args.allow_san.is_empty() {
+        args.allow_san.to_vec()
     } else {
         // Prefer an explicit domain (e.g. threaded from the resolver
         // install, which already asked for it) — `*.<domain>` matches the
@@ -863,7 +813,46 @@ fn prompt_policy(
         )?;
         vec![entry]
     };
-    Ok(ca_vault::Policy { allowed_san, max_validity_days })
+    let id_map_groups = if !args.id_map_groups.is_empty() {
+        // `--id-map-group ''` is the explicit "none" — filter it out so
+        // the resulting policy is empty (registration disabled) rather
+        // than containing an empty group name.
+        args.id_map_groups
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        // The *allowed set*: which groups this admin may assign when
+        // enrolling a node (the actual choice happens per-enrollment,
+        // in the SignRequest). Empty answer ⇒ this admin's signs never
+        // register id-map identities.
+        let entry = prompt::string_with_default(
+            "id-map groups this admin may assign when enrolling \
+             (comma-separated; empty for none)",
+            None,
+            "users",
+        )?;
+        entry
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let may_enroll_servers = match args.may_enroll_servers {
+        Some(b) => b,
+        None => prompt::confirm(
+            "may this admin enroll new conf servers (more privileged than any \
+             SAN glob)?",
+            enroll_default,
+        )?,
+    };
+    Ok(ca_vault::Policy {
+        allowed_san,
+        max_validity_days: args.max_validity_days,
+        id_map_groups,
+        may_enroll_servers,
+    })
 }
 
 /// The default CA common name for a domain, following the same
@@ -1018,6 +1007,9 @@ fn request(p: RequestArgs) -> Result<()> {
 }
 
 fn sign(mut p: SignArgs) -> Result<()> {
+    if p.csr_path.is_none() {
+        return sign_queue(p);
+    }
     let csr_path =
         prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
     let directory = ca_dir_for(p.ca_dir.take())?;
@@ -1147,7 +1139,7 @@ fn maybe_register_in_id_map(
     let uid: u32 = prompt::parsed_with_default(
         "uid",
         None,
-        &next_uid_suggestion(&map).to_string(),
+        &id_map::next_uid(&map).to_string(),
     )?;
     let prev = id_map::upsert_identity(&mut map, &identity_name, uid, primary, secondary)?;
     id_map::save(&map_path, &map)?;
@@ -1162,14 +1154,220 @@ fn maybe_register_in_id_map(
     Ok(())
 }
 
-/// Suggested next uid: `max(existing uids) + 1`, clamped to start at
-/// 1000. Picking from a deterministic base keeps the suggestion
-/// stable and avoids colliding with low system uids.
-fn next_uid_suggestion(map: &netidx_conf::id_map::IdMap) -> u32 {
-    let max = map.identities.values().map(|i| i.uid).max();
-    match max {
-        Some(n) if n >= 1000 => n + 1,
-        _ => 1000,
+/// Interactive queue mode: list the pending signing requests on the
+/// conf server, review one at a time (matching the request code the
+/// enrollee read out — the fingerprint of the CSR's public key,
+/// computed locally from the CSR, never trusted from the wire), and
+/// approve (choosing the id-map groups) or deny. Works from anywhere
+/// that can reach the conf server — enrollment admins don't need shell
+/// access to the CA host.
+fn sign_queue(p: SignArgs) -> Result<()> {
+    use super::init::{self, ConfServers};
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Where's the conf server? `--server`, else this host's own conf
+    // server, else discovery (browse → confirm → aggregate).
+    let (server, discovered_identity) = match p.server.or_else(local_conf_server_listen)
+    {
+        Some(s) => (s, None),
+        None => match init::discover_network(NodeKind::Client)? {
+            ConfServers::Have(net) => {
+                let ca = net.info.ca_addr.ok_or_else(|| {
+                    anyhow!(
+                        "network {:?} reported no CA; there is no queue to work",
+                        net.identity.domain
+                    )
+                })?;
+                (ca, Some(net.identity))
+            }
+            ConfServers::DontHave => {
+                bail!("no conf server found or selected; pass --server to specify one")
+            }
+            ConfServers::NotProbed => {
+                bail!("--server is required when stdin is not a TTY")
+            }
+        },
+    };
+    let identity = match discovered_identity {
+        // Discovery already glyph-confirmed the network.
+        Some(identity) => identity,
+        None => {
+            let identity = rt
+                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting conf server {server}"))?;
+            // On the CA host itself (or any box with the CA dir), the
+            // local CA cert is the trust anchor — verify automatically
+            // rather than asking the admin to confirm their own glyph.
+            let local_fp = ca_dir_for(p.ca_dir.clone())
+                .ok()
+                .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
+                .and_then(|pem| Fingerprint::of_pem(&pem).ok());
+            match local_fp {
+                Some(fp) if fp == identity.fingerprint => {
+                    println!("verified {server} against the local CA");
+                }
+                _ => {
+                    init::show_network_identity(server, &identity);
+                    if !prompt::confirm(
+                        "does this match what your CA admin gave you?",
+                        false,
+                    )? {
+                        bail!("CA identity was not confirmed; nothing was sent");
+                    }
+                }
+            }
+            identity
+        }
+    };
+    let admin = match env_user_name() {
+        Some(user) => prompt::string_with_default("admin name", None, &user)?,
+        None => prompt::required_string("admin name", None)?,
+    };
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
+    loop {
+        let queue = rt.block_on(conf_client::list_queue(
+            server,
+            &admin,
+            password.as_str(),
+            &identity,
+        ))?;
+        if queue.is_empty() {
+            println!("the signing queue is empty (pass a CSR path to sign a file)");
+            return Ok(());
+        }
+        println!();
+        println!("pending signing requests:");
+        for (i, e) in queue.iter().enumerate() {
+            let code = conf_client::csr_fingerprint(&e.csr_pem)
+                .map(|f| f.short())
+                .unwrap_or_else(|_| "????????".to_string());
+            println!(
+                "  {}) {}  code {}  kind {:?}  age {}  from {}",
+                i + 1,
+                e.requested_name,
+                code,
+                e.kind,
+                fmt_age(e.age_secs),
+                e.peer,
+            );
+        }
+        let answer =
+            prompt::required_string("request # to review (or 'q' to quit)", None)?;
+        if answer.eq_ignore_ascii_case("q") {
+            return Ok(());
+        }
+        let entry = match answer.parse::<usize>() {
+            Ok(n) if (1..=queue.len()).contains(&n) => &queue[n - 1],
+            _ => {
+                eprintln!("enter a number between 1 and {}, or 'q'", queue.len());
+                continue;
+            }
+        };
+        let fp = conf_client::csr_fingerprint(&entry.csr_pem)
+            .context("the queued CSR does not parse — deny it")?;
+        println!();
+        println!("  name:     {}", entry.requested_name);
+        println!("  kind:     {:?}", entry.kind);
+        println!("  validity: {} days (capped by your policy)", entry.requested_validity_days);
+        println!("  from:     {}", entry.peer);
+        println!("  request code:");
+        println!("  SHA256  {}", fp.text());
+        println!("{}", fp.identicon(ColorMode::detect()));
+        // The mutual-glyph moment: the enrollee's terminal shows this
+        // same code; the requester sent it over a channel the admin
+        // trusts. A mismatch means the queue entry is NOT the request
+        // the admin thinks it is.
+        if !prompt::confirm("does this code match what the requester sent you?", false)?
+        {
+            if prompt::confirm("deny this request?", true)? {
+                let reason = prompt::string_with_default(
+                    "denial reason (shown to the requester)",
+                    None,
+                    "request code mismatch",
+                )?;
+                rt.block_on(conf_client::deny(
+                    server,
+                    &admin,
+                    password.as_str(),
+                    &entry.id,
+                    &reason,
+                    &identity,
+                ))?;
+                println!("denied.");
+            }
+            continue;
+        }
+        let action: String = prompt::choice_with_default(
+            "action",
+            None,
+            &["approve", "deny", "skip"],
+            "approve",
+        )?;
+        match action.as_str() {
+            "approve" => {
+                // The admin knows who they're enrolling — the groups
+                // are chosen here, bounded by this admin's policy.
+                let groups = init::prompt_id_map_groups(
+                    &[],
+                    init::default_id_map_groups(entry.kind),
+                )?;
+                let warnings = rt.block_on(conf_client::approve(
+                    server,
+                    &admin,
+                    password.as_str(),
+                    &entry.id,
+                    groups,
+                    &identity,
+                ))?;
+                println!(
+                    "approved and signed {:?} — the requester's install picks it \
+                     up on its next poll.",
+                    entry.requested_name
+                );
+                for w in warnings {
+                    println!("  warning: {w}");
+                }
+            }
+            "deny" => {
+                let reason = prompt::required_string(
+                    "denial reason (shown to the requester)",
+                    None,
+                )?;
+                rt.block_on(conf_client::deny(
+                    server,
+                    &admin,
+                    password.as_str(),
+                    &entry.id,
+                    &reason,
+                    &identity,
+                ))?;
+                println!("denied.");
+            }
+            _ => continue,
+        }
+    }
+}
+
+/// This host's conf-server address from its own `conf-server.json`,
+/// loopback-adjusted when it binds all interfaces.
+fn local_conf_server_listen() -> Option<SocketAddr> {
+    let path = paths::discover_conf_server_config().ok()?;
+    let cfg = netidx_conf::conf_server_config::ConfServerConfig::load(&path).ok()?;
+    let mut addr = cfg.listen;
+    if addr.ip().is_unspecified() {
+        addr.set_ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    }
+    Some(addr)
+}
+
+fn fmt_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -1305,19 +1503,13 @@ fn list() -> Result<()> {
     } else {
         println!("  key:    MISSING — CA cannot sign");
     }
-    // CA server.
-    let server_json = dir.join("server.json");
-    if server_json.is_file() {
-        let listen = std::fs::read(&server_json)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<CaServerConfig>(&b).ok())
-            .map(|c| c.listen.to_string());
-        match listen {
-            Some(l) => println!("  server: configured (listen {l})"),
-            None => println!("  server: configured"),
-        }
-    } else {
-        println!("  server: not configured");
+    // Conf server.
+    let cfg = paths::discover_conf_server_config()
+        .ok()
+        .and_then(|p| netidx_conf::conf_server_config::ConfServerConfig::load(&p).ok());
+    match cfg {
+        Some(c) => println!("  server: configured (listen {})", c.listen),
+        None => println!("  server: not configured"),
     }
     Ok(())
 }
@@ -1397,18 +1589,19 @@ pub(super) fn open_default_ca() -> Result<Ca> {
     open_ca(&paths::user_ca_dir()?)
 }
 
-/// Refuse to mint the CA server's reserved serving name from the local
-/// CLI, mirroring the network sign path's refusal. The reserved name is
-/// the linchpin of the join trust model; only the CA-server setup flow
-/// (which signs it directly) may issue it.
+/// Refuse to mint the conf server's reserved serving name from the
+/// local CLI, mirroring the network sign path's refusal. The reserved
+/// name is the linchpin of the trust model; only the conf-server setup
+/// flow (which signs it directly) and the policy-gated network Enroll
+/// may issue it.
 fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
     for s in san {
         if let SanEntry::Dns(d) = s {
-            if d.eq_ignore_ascii_case(ca_proto::SERVING_SAN) {
+            if d.eq_ignore_ascii_case(conf_proto::SERVING_SAN) {
                 bail!(
-                    "{:?} is reserved for the CA server's serving certificate and \
+                    "{:?} is reserved for the conf server's serving certificate and \
                      can't be issued here",
-                    ca_proto::SERVING_SAN
+                    conf_proto::SERVING_SAN
                 );
             }
         }
@@ -1491,7 +1684,7 @@ mod tests {
 
     #[test]
     fn reserved_serving_san_is_refused() {
-        let reserved = ca_proto::SERVING_SAN;
+        let reserved = conf_proto::SERVING_SAN;
         assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_string())]).is_err());
         // DNS is case-insensitive — an upper/mixed-case variant is the
         // same reserved name and must also be refused.
@@ -1581,6 +1774,7 @@ mod tests {
         .unwrap();
         let cert_path = scratch.path().join("client.pem");
         sign(SignArgs {
+            server: None,
             csr_path: Some(csr_path.clone()),
             san: vec![],
             // Explicit accept: the round trip flow simulates the admin
@@ -1637,6 +1831,7 @@ mod tests {
         .unwrap();
         let out_cert = scratch.path().join("out.pem");
         sign(SignArgs {
+            server: None,
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
@@ -1682,6 +1877,7 @@ mod tests {
         )
         .unwrap();
         let err = sign(SignArgs {
+            server: None,
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
@@ -1724,6 +1920,7 @@ mod tests {
         )
         .unwrap();
         let err = sign(SignArgs {
+            server: None,
             csr_path: Some(csr_path),
             san: vec!["dns:x.example.com".into()],
             accept_csr_san: true,

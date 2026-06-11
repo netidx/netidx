@@ -114,6 +114,37 @@ pub fn user_ca_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// `${dirs::config_dir}/netidx/conf-server.json`. No existence check.
+pub fn user_conf_server_config() -> Result<PathBuf> {
+    let mut p = user_config_root()?;
+    p.push("conf-server.json");
+    Ok(p)
+}
+
+/// `/etc/netidx/conf-server.json` on unix, `C:\netidx\conf-server.json`
+/// on windows.
+pub fn system_conf_server_config() -> PathBuf {
+    let mut p = system_config_root();
+    p.push("conf-server.json");
+    p
+}
+
+/// Find the first existing conf-server config in standard order:
+/// `${dirs::config_dir}/netidx/conf-server.json` then the system path.
+/// Errors if none exists.
+pub fn discover_conf_server_config() -> Result<PathBuf> {
+    if let Ok(p) = user_conf_server_config()
+        && p.is_file()
+    {
+        return Ok(p);
+    }
+    let sys = system_conf_server_config();
+    if sys.is_file() {
+        return Ok(sys);
+    }
+    bail!("no conf-server config found in any standard location")
+}
+
 /// Find the first existing client config in the standard search order:
 /// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
 /// `${HOME}/.config/netidx/client.json`, then the system path. Errors

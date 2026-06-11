@@ -14,8 +14,8 @@ use arcstr::ArcStr;
 use std::path::{Path, PathBuf};
 
 pub use netidx_id_map::file::{
-    Group, GroupBuilder, IdMap, IdMapBuilder, Identity, IdentityBuilder, Query,
-    parse_bytes,
+    check_name_chars, Group, GroupBuilder, IdMap, IdMapBuilder, Identity,
+    IdentityBuilder, Query, parse_bytes,
 };
 
 /// Canonical user path for the id-map JSON
@@ -200,6 +200,61 @@ pub fn set_defaults(map: &mut IdMap, default_uid: u32, default_gid: u32) {
     map.default_gid = default_gid;
 }
 
+/// Next free uid: `max(existing uids) + 1`, clamped to start at 1000.
+/// Deterministic and stable, and clear of low system uids. uids are
+/// local to each id-map — perms are keyed on *names* — so per-host
+/// allocation needs no cross-host coordination.
+pub fn next_uid(map: &IdMap) -> u32 {
+    match map.identities.values().map(|i| i.uid).max() {
+        Some(n) if n >= 1000 => n + 1,
+        _ => 1000,
+    }
+}
+
+/// Next free gid: same scheme as [`next_uid`], over the groups table.
+pub fn next_gid(map: &IdMap) -> u32 {
+    match map.groups.values().map(|g| g.gid).max() {
+        Some(n) if n >= 1000 => n + 1,
+        _ => 1000,
+    }
+}
+
+/// Zero-touch registration: ensure every named group exists (creating
+/// missing ones with allocated gids), then upsert `name` — an existing
+/// identity keeps its uid (idempotent re-registration), a new one gets
+/// [`next_uid`]. Returns the identity's uid.
+///
+/// Names are checked against the id-map delimiter rules up front so a
+/// network caller gets a clear refusal instead of a save-time
+/// validation failure.
+pub fn register_identity(
+    map: &mut IdMap,
+    name: &str,
+    primary_group: &str,
+    groups: &[&str],
+) -> Result<u32> {
+    check_name_chars("identity name", name)?;
+    if name.parse::<u32>().is_ok() {
+        bail!("identity name {name:?} parses as a u32; it would be unreachable by name");
+    }
+    check_name_chars("group name", primary_group)?;
+    for g in groups {
+        check_name_chars("group name", g)?;
+    }
+    for g in std::iter::once(primary_group).chain(groups.iter().copied()) {
+        if !map.groups.contains_key(g) {
+            let gid = next_gid(map);
+            upsert_group(map, g, gid);
+        }
+    }
+    let uid = match map.identities.get(name) {
+        Some(existing) => existing.uid,
+        None => next_uid(map),
+    };
+    upsert_identity(map, name, uid, primary_group, groups)?;
+    Ok(uid)
+}
+
 /// Parse an octal unix mode string. Accepts `"600"`, `"0600"`, or
 /// `"0o600"`. The whole input after stripping at most one `0o`/`0O`
 /// prefix is interpreted in base 8 — no leading-zero stripping. That
@@ -301,6 +356,47 @@ mod tests {
         let err = remove_group_member(&mut m, "alice.example.com", "users")
             .unwrap_err();
         assert!(format!("{err:#}").contains("primary group"));
+    }
+
+    #[test]
+    fn next_uid_and_gid_allocate_from_1000() {
+        let m = IdMap::default();
+        assert_eq!(next_uid(&m), 1000);
+        assert_eq!(next_gid(&m), 1000);
+        let m = seed(); // alice has uid 1000; users gid 100, wheel gid 10
+        assert_eq!(next_uid(&m), 1001);
+        assert_eq!(next_gid(&m), 1000, "low system gids don't shift the base");
+    }
+
+    #[test]
+    fn register_identity_is_zero_touch_and_idempotent() {
+        let mut m = IdMap::default();
+        // Fresh map: groups don't exist yet — they're created with
+        // allocated gids; the identity gets the first free uid.
+        let uid =
+            register_identity(&mut m, "eric.ryu-oh.org", "users", &["wheel"]).unwrap();
+        assert_eq!(uid, 1000);
+        assert!(m.groups.contains_key("users"));
+        assert!(m.groups.contains_key("wheel"));
+        assert_ne!(m.groups["users"].gid, m.groups["wheel"].gid);
+        m.validate().unwrap();
+        // Re-registration (a node re-joining) keeps the uid.
+        let again =
+            register_identity(&mut m, "eric.ryu-oh.org", "users", &[]).unwrap();
+        assert_eq!(again, uid);
+        // A second identity gets the next uid.
+        let bob = register_identity(&mut m, "bob.ryu-oh.org", "users", &[]).unwrap();
+        assert_eq!(bob, 1001);
+    }
+
+    #[test]
+    fn register_identity_rejects_hostile_names() {
+        let mut m = IdMap::default();
+        // Delimiter injection and numeric names are refused up front —
+        // these arrive over the network.
+        assert!(register_identity(&mut m, "a) gid=0(root", "users", &[]).is_err());
+        assert!(register_identity(&mut m, "1000", "users", &[]).is_err());
+        assert!(register_identity(&mut m, "a.example.com", "ev(il", &[]).is_err());
     }
 
     #[test]

@@ -40,6 +40,11 @@ rustls-pemfile = { workspace = true }
 # fingerprint-confirmed CA, on any platform, without openssl.
 x509-parser = { workspace = true, features = ["verify"] }
 log = { workspace = true }
+# mDNS/DNS-SD conf-server discovery (the `discovery` module). Pure
+# Rust, no system daemon — a Windows workstation can browse and the
+# unix conf-server daemon advertises with the same stack. The beacon
+# is a display/candidate hint only; trust comes from the TLS layer.
+mdns-sd = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }

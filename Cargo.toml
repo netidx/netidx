@@ -55,6 +55,9 @@ immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
 indexmap = "2"
 keyring = "3"
 log = "0.4"
+# Conf-server discovery (netidx-conf `discovery` module): pure-Rust
+# mDNS/DNS-SD — no avahi/Bonjour daemon dependency, works on Windows.
+mdns-sd = "0.20"
 memmap2 = "0.9"
 nix = { version = "0.31", features = ["process", "signal"] }
 num_cpus = "1"

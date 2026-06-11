@@ -17,6 +17,12 @@ mod init;
 mod perms;
 mod prompt;
 mod resolver;
+// `server` (the conf-server daemon CLI) depends on the
+// `netidx_conf::conf_server` engine module, which is unix-only (the
+// CA signer pulls openssl). Browsing/joining from Windows still works
+// via `install workstation` — only the daemon is unix-gated.
+#[cfg(unix)]
+mod server;
 mod service;
 mod uninstall;
 
@@ -57,6 +63,12 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
+    /// run the conf server (network discovery + setup daemon)
+    #[cfg(unix)]
+    Server {
+        #[command(subcommand)]
+        cmd: server::Cmd,
+    },
     /// edit the netidx id-map (TLS uid/group lookups)
     IdMap {
         #[command(subcommand)]
@@ -79,6 +91,8 @@ pub(crate) fn run(p: Params) -> Result<()> {
         Params::Activation { cmd } => activation::run(cmd),
         #[cfg(unix)]
         Params::Ca { cmd } => ca::run(cmd),
+        #[cfg(unix)]
+        Params::Server { cmd } => server::run(cmd),
         Params::IdMap { cmd } => id_map::run(cmd),
         Params::Service { cmd } => service::run(cmd),
     }

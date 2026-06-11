@@ -56,6 +56,18 @@ pub struct Policy {
     /// allow-everything).
     pub allowed_san: Vec<String>,
     pub max_validity_days: u32,
+    /// id-map groups this admin **may assign** when signing — the
+    /// allowed set bounding the groups chosen at enrollment time in
+    /// the `SignRequest`. Empty ⇒ this admin's signs never register
+    /// identities.
+    #[serde(default)]
+    pub id_map_groups: Vec<String>,
+    /// Whether this admin may enroll new conf servers — i.e. authorize
+    /// issuance of the reserved serving SAN. Granted explicitly; a
+    /// rogue enrollee can impersonate the conf plane, so this is more
+    /// privileged than any `allowed_san` glob.
+    #[serde(default)]
+    pub may_enroll_servers: bool,
 }
 
 /// The result of a successful [`unlock`]: the admin identified by the
@@ -351,7 +363,12 @@ mod tests {
     use super::*;
 
     fn pol(san: &str) -> Policy {
-        Policy { allowed_san: vec![san.to_string()], max_validity_days: 365 }
+        Policy {
+            allowed_san: vec![san.to_string()],
+            max_validity_days: 365,
+            id_map_groups: vec!["users".to_string()],
+            may_enroll_servers: false,
+        }
     }
 
     const KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\nMOCKKEYBYTES\n-----END PRIVATE KEY-----\n";

@@ -1,5 +1,16 @@
 # CA server — design
 
+> **Superseded in part by [`conf-server.md`](conf-server.md).** The CA
+> server has been generalized into the **conf server**: one per-host
+> daemon with roles (`ca`, `resolver`, `id-map`), mDNS discovery, a
+> `GetInfo` protocol, network enrollment, and CA-pushed id-map
+> registration. Module renames: `ca_proto` → `conf_proto`, `ca_join` →
+> `conf_client`, `ca_server` → `conf_server`; the reserved serving SAN
+> is now `netidx-conf-server`; the daemon config is `conf-server.json`
+> (`netidx conf server run`). The vault (§ keyslots), signing engine,
+> issuance policy, and the two-connection fingerprint trust model below
+> are unchanged and remain authoritative.
+
 **Status: Engine + CLI + activation/service setup + composite
 resolver-install flow implemented and tested end-to-end.** Remaining is
 only `ca migrate` (v1 → vault). `netidx conf ca init` and the

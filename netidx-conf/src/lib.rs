@@ -29,18 +29,35 @@ pub mod ca;
 /// key, and the CA module is unix-only. See [`design/ca-server.md`].
 #[cfg(unix)]
 pub mod ca_vault;
-/// Wire protocol (message types + framing) shared by the CA server and
-/// the join client. Cross-platform — a Windows node speaks it to a unix
-/// CA. See [`design/ca-server.md`].
-pub mod ca_proto;
-/// CA join client: generate a key + CSR and request a signature over
-/// TLS, verifying the CA identity by fingerprint first. Cross-platform
-/// (rcgen + rustls, no openssl).
-pub mod ca_join;
-/// CA server: validates a sign request against per-admin policy and
-/// signs it. Unix-only (openssl signer). See [`design/ca-server.md`].
+/// File-backed queue of pending signing requests
+/// (`<ca-dir>/queue/`), behind the conf server's Enqueue / Poll /
+/// Approve / Deny. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
-pub mod ca_server;
+pub mod ca_queue;
+/// Wire protocol (message types + framing) shared by the conf server
+/// and its clients. Cross-platform — a Windows node speaks it to a unix
+/// conf server. See [`design/ca-server.md`].
+pub mod conf_proto;
+/// Conf-server client: fetch a network's identity and info, join it
+/// (key + CSR + signature over TLS), and enroll new conf servers —
+/// verifying the CA identity by fingerprint first. Cross-platform
+/// (rcgen + rustls, no openssl).
+pub mod conf_client;
+/// Conf server: answers network-info queries, validates sign/enroll
+/// requests against per-admin policy, and pushes id-map registrations
+/// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].
+#[cfg(unix)]
+pub mod conf_server;
+/// On-disk config (`conf-server.json`) for the conf-server daemon:
+/// domain, listen address, serving identity, roles, peers. Unix-only —
+/// only the daemon and its installer read or write it.
+#[cfg(unix)]
+pub mod conf_server_config;
+/// mDNS/DNS-SD advertisement + browsing for conf servers. The beacon is
+/// a *hint* (candidate addresses, display grouping) — nothing
+/// security-relevant is decided from it. Cross-platform: a Windows
+/// workstation browses; the unix daemon advertises.
+pub mod discovery;
 pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]
@@ -67,7 +84,7 @@ pub mod resolver;
 pub mod resolver_probe;
 pub mod template;
 pub mod tls;
-/// Shared trust-on-first-use rustls verifier for [`ca_join`] and
+/// Shared trust-on-first-use rustls verifier for [`conf_client`] and
 /// [`resolver_probe`].
 mod tls_tofu;
 pub mod uninstall;
