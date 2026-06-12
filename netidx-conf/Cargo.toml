@@ -28,6 +28,7 @@ dirs = { workspace = true }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
+netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
 parking_lot = { workspace = true }
 # Cross-platform PEM-cert parsing for `tls::validate_pem_cert_file`.
 # Lighter than openssl and pure-Rust — works on Windows where openssl
@@ -92,14 +93,6 @@ argon2 = { workspace = true }
 rand = { workspace = true }
 # Timestamp type rcgen's CRL builder takes (`ca_index::write_crl`).
 time = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# Pure-Rust TPM 2.0 stack: seal the autorenew credential to the CA
-# host's TPM (`tpm` module) so a stolen disk / backup can't recover
-# it. Linux-only: the kernel resource manager (/dev/tpmrm0) is the
-# only transport we speak, and the CA host is unix anyway.
-tpm2-protocol = { workspace = true }
-tpm2-device = { workspace = true }
 
 [dev-dependencies]
 # `tokio::test` + multi-thread runtime for the e2e harness in

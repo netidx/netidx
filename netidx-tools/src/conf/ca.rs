@@ -454,7 +454,7 @@ pub(super) fn setup_autorenew_slot(
     let password = random_password();
     ca_vault::add_admin(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
     let keytab = autorenew_keytab_path()?;
-    match netidx_conf::tpm::seal(password.as_bytes()) {
+    match netidx_tpm::seal(password.as_bytes()) {
         Ok(blob) => {
             atomic::write_atomic(&keytab, &blob, 0o600)?;
             println!(
@@ -493,11 +493,11 @@ fn autorenew(p: AutorenewArgs) -> Result<()> {
         Some(path) => {
             let raw = std::fs::read(path)
                 .with_context(|| format!("reading keytab {}", path.display()))?;
-            let pw = if netidx_conf::tpm::is_sealed(&raw) {
+            let pw = if netidx_tpm::is_sealed(&raw) {
                 // A sealed keytab that won't unseal must scream, not
                 // skip: a renewal daemon that silently stops is a
                 // certificate outage on a delay timer.
-                let secret = netidx_conf::tpm::unseal(&raw).with_context(|| {
+                let secret = netidx_tpm::unseal(&raw).with_context(|| {
                     format!(
                         "unsealing keytab {} — if this host's TPM was cleared \
                          or the board was replaced, mint a fresh keytab with \

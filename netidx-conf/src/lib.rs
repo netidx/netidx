@@ -96,9 +96,4 @@ pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`conf_client`] and
 /// [`resolver_probe`].
 mod tls_tofu;
-/// Seal small secrets (the autorenew keytab) to this host's TPM 2.0 so
-/// a stolen disk or backup can't recover them. Pure Rust over
-/// /dev/tpmrm0; on non-linux platforms the module compiles to honest
-/// "not available" stubs.
-pub mod tpm;
 pub mod uninstall;

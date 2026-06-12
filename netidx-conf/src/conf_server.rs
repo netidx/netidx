@@ -143,6 +143,32 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
     let serving_key_pem = std::fs::read(&cfg.serving_key)
         .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
+    // A TPM-sealed serving key: `<key>.tpm` holds the password, sealed
+    // to this machine. Unseal + decrypt here, in memory; failure is a
+    // hard error naming the fix (a conf server silently down means no
+    // discovery and no renewals for the whole network).
+    let serving_key_pem = {
+        let sidecar = crate::tls::sealed_sidecar(&cfg.serving_key);
+        if sidecar.exists() {
+            let blob = std::fs::read(&sidecar)
+                .with_context(|| format!("reading sealed password {sidecar:?}"))?;
+            let pw = netidx_tpm::unseal(&blob).with_context(|| {
+                format!(
+                    "unsealing {sidecar:?} — if this host's TPM was cleared or \
+                     the board was replaced, re-enroll this conf server"
+                )
+            })?;
+            let pw = std::str::from_utf8(&pw).context("sealed password is not utf8")?;
+            let pem = std::str::from_utf8(&serving_key_pem)
+                .context("serving key is not utf8")?;
+            netidx::tls::decrypt_private_key(pem, pw)
+                .context("decrypting the serving key")?
+                .as_bytes()
+                .to_vec()
+        } else {
+            serving_key_pem
+        }
+    };
     let listen = cfg.listen;
     let mdns = cfg.mdns;
     let state = Server::new(cfg, Some(cfg_path), serving_cert_pem, serving_key_pem)?;

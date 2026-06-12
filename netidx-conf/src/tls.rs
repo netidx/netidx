@@ -69,6 +69,26 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
     atomic::write_atomic(&cert_dst, &cert_bytes, 0o644)?;
     atomic::write_atomic(&key_dst, &key_bytes, 0o600)?;
     atomic::write_atomic(&ca_dst, &ca_bytes, 0o644)?;
+    // A TPM-sealed password sidecar (`<key>.tpm`, see
+    // `netidx::tls::sealed_password_path`) travels with its key:
+    // without it an encrypted key is undecryptable, so installing one
+    // and not the other would produce an identity that looks installed
+    // but can't load. Symmetrically, a key with no sidecar must clear
+    // any stale one at the destination — at load time a leftover
+    // sidecar is authoritative and would shadow the new key's real
+    // password source.
+    let tpm_src = sealed_sidecar(p.private_key_src);
+    let tpm_dst = sealed_sidecar(&key_dst);
+    if tpm_src.exists() {
+        if tpm_src != tpm_dst {
+            let blob = std::fs::read(&tpm_src)
+                .with_context(|| format!("reading sealed password {tpm_src:?}"))?;
+            atomic::write_atomic(&tpm_dst, &blob, 0o600)?;
+        }
+    } else if tpm_dst.exists() {
+        std::fs::remove_file(&tpm_dst)
+            .with_context(|| format!("removing stale sealed password {tpm_dst:?}"))?;
+    }
 
     Ok(InstalledIdentity {
         cn: p.cn.to_string(),
@@ -77,6 +97,61 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
         private_key: key_dst,
         trusted: ca_dst,
     })
+}
+
+/// The TPM-sealed password sidecar beside `key` — the same path
+/// `netidx::tls::load_key_password` consults at load time.
+pub fn sealed_sidecar(key: &Path) -> PathBuf {
+    let mut s = key.as_os_str().to_os_string();
+    s.push(".tpm");
+    PathBuf::from(s)
+}
+
+/// Protect a freshly issued plaintext PKCS#8 key with a TPM-sealed
+/// random password: encrypt the key (PBES2, pure Rust) and seal the
+/// password. Returns `(encrypted_key_pem, sealed_password_blob)` —
+/// write the blob to [`sealed_sidecar`] beside wherever the key lands.
+/// Fails when no TPM is usable; callers decide the fallback.
+pub fn seal_private_key(plain_pem: &str) -> Result<(String, Vec<u8>)> {
+    let password = netidx_tpm::random_secret();
+    let blob = netidx_tpm::seal(password.as_bytes())?;
+    let encrypted = netidx::tls::encrypt_private_key(plain_pem, &password)
+        .context("encrypting the private key under the sealed password")?;
+    Ok((encrypted, blob))
+}
+
+/// How [`write_private_key_maybe_sealed`] protected the key.
+pub enum KeyWrite {
+    /// Encrypted, password sealed to this machine's TPM.
+    Sealed,
+    /// Written plaintext; the error says why sealing wasn't possible.
+    Plain(anyhow::Error),
+}
+
+/// Write a daemon's private key at `path`, TPM-sealed when the host
+/// has a usable TPM, plaintext otherwise — daemons can't type
+/// passwords, so for them the choice is seal-or-nothing and setup must
+/// not dead-end on a missing TPM. Callers print what happened from the
+/// returned [`KeyWrite`].
+pub fn write_private_key_maybe_sealed(path: &Path, plain_pem: &str) -> Result<KeyWrite> {
+    match seal_private_key(plain_pem) {
+        Ok((enc, blob)) => {
+            atomic::write_atomic(path, enc.as_bytes(), 0o600)?;
+            atomic::write_atomic(&sealed_sidecar(path), &blob, 0o600)?;
+            Ok(KeyWrite::Sealed)
+        }
+        Err(e) => {
+            atomic::write_atomic(path, plain_pem.as_bytes(), 0o600)?;
+            // A stale sidecar beside a plaintext key would shadow it at
+            // load time with a password that decrypts nothing.
+            let sidecar = sealed_sidecar(path);
+            if sidecar.exists() {
+                std::fs::remove_file(&sidecar)
+                    .with_context(|| format!("removing stale sidecar {sidecar:?}"))?;
+            }
+            Ok(KeyWrite::Plain(e))
+        }
+    }
 }
 
 /// The three on-disk files [`install_identity`] writes into
@@ -402,5 +477,102 @@ mod tests {
         let id2 = install_identity(&p).unwrap();
         assert_eq!(std::fs::read(&id2.certificate).unwrap(), b"second cert");
         assert_eq!(id.certificate, id2.certificate);
+    }
+
+    /// The key's DER must survive encrypt → decrypt unchanged — this
+    /// is the pure-Rust PBES2 path every sealed or password-protected
+    /// key takes (no TPM involved here; the password is the variable).
+    #[test]
+    fn encrypt_decrypt_round_trips_the_key() {
+        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let enc =
+            netidx::tls::encrypt_private_key(&kc.private_key_pem, "hunter2").unwrap();
+        assert!(enc.contains("ENCRYPTED PRIVATE KEY"));
+        // The wrong password must fail, not produce garbage.
+        assert!(netidx::tls::decrypt_private_key(&enc, "wrong").is_err());
+        let dec = netidx::tls::decrypt_private_key(&enc, "hunter2").unwrap();
+        let der = |pem: &str| {
+            rustls_pemfile::private_key(&mut std::io::Cursor::new(pem.as_bytes()))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            der(&kc.private_key_pem).secret_der(),
+            der(&dec).secret_der(),
+            "decrypted key must equal the original",
+        );
+    }
+
+    /// The whole daemon path on real hardware: seal a key, write it +
+    /// sidecar the way the install flows do, and load it back through
+    /// `netidx::tls::load_private_key` exactly as a starting resolver
+    /// would — no keychain, no askpass, no human. Skips silently where
+    /// no TPM is reachable.
+    #[test]
+    fn sealed_key_loads_through_netidx_tls() {
+        if !netidx_tpm::available() {
+            eprintln!("skipping: no usable TPM on this host");
+            return;
+        }
+        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("private.key");
+        let (enc, blob) = seal_private_key(&kc.private_key_pem).unwrap();
+        std::fs::write(&key, enc.as_bytes()).unwrap();
+        std::fs::write(sealed_sidecar(&key), &blob).unwrap();
+        let loaded =
+            netidx::tls::load_private_key(None, &key.to_string_lossy()).unwrap();
+        let original =
+            rustls_pemfile::private_key(&mut std::io::Cursor::new(
+                kc.private_key_pem.as_bytes(),
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.secret_der(), original.secret_der());
+        // A corrupted sidecar must be a hard error, not a fallthrough
+        // to a password prompt that would hang a daemon.
+        let mut bad = blob.clone();
+        let n = bad.len();
+        bad[n / 2] ^= 0xff;
+        std::fs::write(sealed_sidecar(&key), &bad).unwrap();
+        // The password cache inside netidx::tls is keyed by path; use a
+        // fresh path so the cached good password doesn't mask the
+        // corruption.
+        let key2 = dir.path().join("other.key");
+        std::fs::write(&key2, enc.as_bytes()).unwrap();
+        std::fs::write(sealed_sidecar(&key2), &bad).unwrap();
+        assert!(netidx::tls::load_private_key(None, &key2.to_string_lossy()).is_err());
+    }
+
+    /// Sidecars travel with their keys through the identity installer —
+    /// copied when the source has one, and a stale one at the
+    /// destination cleared when it doesn't.
+    #[test]
+    fn install_carries_and_clears_sidecars() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let cert_src = src.path().join("cert.pem");
+        let key_src = src.path().join("key.pem");
+        let ca_src = src.path().join("ca.pem");
+        write(&cert_src, b"cert");
+        write(&key_src, b"key");
+        write(&ca_src, b"ca");
+        write(&sealed_sidecar(&key_src), b"sealed blob");
+        let p = InstallIdentity {
+            cn: "h",
+            dest_dir: dest.path(),
+            certificate_src: &cert_src,
+            private_key_src: &key_src,
+            trusted_src: &ca_src,
+        };
+        let id = install_identity(&p).unwrap();
+        let dst_sidecar = sealed_sidecar(&id.private_key);
+        assert_eq!(std::fs::read(&dst_sidecar).unwrap(), b"sealed blob");
+        // Re-install from a source with no sidecar: the stale one at
+        // the destination must go — at load time it would shadow the
+        // new key's real password source.
+        std::fs::remove_file(sealed_sidecar(&key_src)).unwrap();
+        install_identity(&p).unwrap();
+        assert!(!dst_sidecar.exists());
     }
 }

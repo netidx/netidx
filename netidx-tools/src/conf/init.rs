@@ -15,10 +15,6 @@ use netidx_conf::{
     },
 };
 use zeroize::Zeroizing;
-// `tls::identity_dir` is referenced only by the unix-gated TLS cert
-// generation flows (`generate_and_wait_for_parent_cert`,
-// `resolver_tls_generate`); on Windows the import would be unused.
-#[cfg(unix)]
 use netidx_conf::tls;
 use std::{
     collections::BTreeMap,
@@ -466,6 +462,12 @@ pub(crate) struct WorkstationFlags {
     units_dir: Option<PathBuf>,
     #[arg(long = "netidx-binary")]
     netidx_binary: Option<PathBuf>,
+    /// How new private keys are protected at rest: `seal` (bind to
+    /// this machine's TPM), `password` (typed; interactive only), or
+    /// `none`. Default: seal when the host has a usable TPM (prompted
+    /// on a TTY), else none.
+    #[arg(long = "key-protection")]
+    key_protection: Option<KeyProtArg>,
     /// Skip emitting the default `container` activation unit. By
     /// default a workstation gets both `resolver` and `container`
     /// units; pass this when you don't want a container service.
@@ -577,6 +579,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
                     net,
                     NodeKind::Workstation,
                     have_identity,
+                    f.key_protection,
                     &mut tls_identities,
                     &mut tls_staging,
                 )?;
@@ -586,7 +589,11 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
                     addrs,
                 })
             }
-            None => match prompt_parent_referral(parent_default_path, &probe)? {
+            None => match prompt_parent_referral(
+                parent_default_path,
+                f.key_protection,
+                &probe,
+            )? {
                 None => None,
                 Some((parent_ref, maybe_ident)) => {
                     if let Some(si) = maybe_ident {
@@ -662,6 +669,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
 /// is always available for the non-interactive case.
 fn prompt_parent_referral(
     default_path: &str,
+    kp: Option<KeyProtArg>,
     probe: &ConfServers,
 ) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
     // The upstream resolver IP is the one thing the operator has to
@@ -707,7 +715,7 @@ fn prompt_parent_referral(
             // SAN as `<user>.<domain>`, the domain taken from the
             // resolver's SAN we just resolved.
             let suggested = suggest_client_san(&server_name);
-            let staged = prompt_tls_client_identity(suggested.as_deref(), probe)?;
+            let staged = prompt_tls_client_identity(suggested.as_deref(), kp, probe)?;
             (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(staged))
         }
     };
@@ -733,6 +741,9 @@ struct JoinedIdentity {
     certificate: PathBuf,
     private_key: PathBuf,
     trusted: PathBuf,
+    /// The client-config askpass fallback, when the operator chose
+    /// password protection for the key.
+    askpass: Option<PathBuf>,
 }
 
 /// A client TLS identity plus the tempdir its files are staged in until
@@ -757,6 +768,7 @@ fn maybe_join_ca_server(
     probe: &ConfServers,
     kind: NodeKind,
     suggested_name: Option<&str>,
+    kp: Option<KeyProtArg>,
 ) -> Result<Option<(JoinedIdentity, tempfile::TempDir)>> {
     let probed_here;
     let net = match probe {
@@ -779,7 +791,8 @@ fn maybe_join_ca_server(
         return Ok(None);
     };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let (j, staging) = join_network(&rt, ca_addr, kind, suggested_name, &net.identity)?;
+    let (j, staging) =
+        join_network(&rt, ca_addr, kind, suggested_name, kp, &net.identity)?;
     Ok(Some((j, staging)))
 }
 
@@ -833,6 +846,7 @@ fn join_network(
     addr: SocketAddr,
     kind: NodeKind,
     suggested_name: Option<&str>,
+    kp: Option<KeyProtArg>,
     identity: &conf_client::CaIdentity,
 ) -> Result<(JoinedIdentity, tempfile::TempDir)> {
     let name_label = "TLS identity name to request (the cert's DNS SAN)";
@@ -840,6 +854,11 @@ fn join_network(
         Some(s) => prompt::string_with_default(name_label, None, s)?,
         None => prompt::required_string(name_label, None)?,
     };
+    // Key protection is decided before the request: the operator is
+    // here now, and the queued path may wait on a remote admin for a
+    // long time after.
+    let protection =
+        choose_key_protection(kp, &tls::identity_dir(&name)?.join("private.key"), &name)?;
     let admin_here = prompt::confirm(
         "is a CA admin at this machine to enter their password now? \
          (No: queue the request for remote approval)",
@@ -912,17 +931,34 @@ fn join_network(
     let private_key = staging.path().join("private.key");
     let trusted = staging.path().join("trusted.pem");
     netidx_conf::atomic::write_atomic(&certificate, issued.cert_pem.as_bytes(), 0o644)?;
-    netidx_conf::atomic::write_atomic(
-        &private_key,
-        issued.private_key_pem.as_bytes(),
-        0o600,
-    )?;
+    // Apply the protection decided up front: the key is encrypted
+    // before it ever touches disk (sealed and password cases), and a
+    // sealed password's blob is staged beside it — the identity
+    // installer copies sidecars with their keys.
+    let key_payload = match protection.password() {
+        Some(pw) => Zeroizing::new(
+            netidx::tls::encrypt_private_key(&issued.private_key_pem, pw)
+                .context("encrypting the issued private key")?,
+        ),
+        None => issued.private_key_pem.clone(),
+    };
+    netidx_conf::atomic::write_atomic(&private_key, key_payload.as_bytes(), 0o600)?;
+    protection.write_sidecar(&private_key)?;
     netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     println!("got TLS identity {name:?} from conf server {addr}");
     for w in &issued.warnings {
         println!("  warning: {w}");
     }
-    Ok((JoinedIdentity { name, certificate, private_key, trusted }, staging))
+    Ok((
+        JoinedIdentity {
+            name,
+            certificate,
+            private_key,
+            trusted,
+            askpass: protection.askpass(),
+        },
+        staging,
+    ))
 }
 
 /// Install the renewal-daemon activation unit — every host with TLS
@@ -1134,6 +1170,7 @@ fn network_addrs_and_identity(
     net: &DiscoveredNetwork,
     kind: NodeKind,
     have_identity: bool,
+    kp: Option<KeyProtArg>,
     tls_identities: &mut Vec<TlsIdentitySpec>,
     tls_staging: &mut Vec<tempfile::TempDir>,
 ) -> Result<Vec<(SocketAddr, ReferralAuth)>> {
@@ -1178,7 +1215,7 @@ fn network_addrs_and_identity(
             current_username().map(|u| format!("{u}.{}", net.identity.domain));
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
         let (j, staging) =
-            join_network(&rt, ca_addr, kind, suggested.as_deref(), &net.identity)?;
+            join_network(&rt, ca_addr, kind, suggested.as_deref(), kp, &net.identity)?;
         tls_identities.push(joined_to_spec(j));
         tls_staging.push(staging);
     }
@@ -1208,7 +1245,7 @@ fn joined_to_spec(j: JoinedIdentity) -> TlsIdentitySpec {
         private_key: j.private_key,
         trusted: j.trusted,
         dest_dir: None,
-        askpass: None,
+        askpass: j.askpass,
     }
 }
 
@@ -1220,7 +1257,7 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
         certificate: j.certificate,
         private_key: j.private_key,
         trusted: j.trusted,
-        askpass: None,
+        askpass: j.askpass,
     }
 }
 
@@ -1244,6 +1281,7 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
 /// `--tls-cert / --tls-key / --tls-trusted` at the result.
 fn prompt_tls_client_identity(
     suggested_name: Option<&str>,
+    kp: Option<KeyProtArg>,
     probe: &ConfServers,
 ) -> Result<StagedIdentity> {
     // First the network path: a conf server signs our CSR on the
@@ -1252,7 +1290,7 @@ fn prompt_tls_client_identity(
     // What we already know about conf servers (`probe`) decides
     // whether this asks anything at all.
     if let Some((j, staging)) =
-        maybe_join_ca_server(probe, NodeKind::Client, suggested_name)?
+        maybe_join_ca_server(probe, NodeKind::Client, suggested_name, kp)?
     {
         return Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) });
     }
@@ -1277,7 +1315,7 @@ fn prompt_tls_client_identity(
     let (our_name, certificate, private_key, trusted, askpass) = if is_generate {
         #[cfg(unix)]
         {
-            generate_and_wait_for_parent_cert(suggested_name)?
+            generate_and_wait_for_parent_cert(suggested_name, kp)?
         }
         #[cfg(not(unix))]
         {
@@ -1381,6 +1419,7 @@ fn prompt_tls_client_identity(
 #[cfg(unix)]
 fn generate_and_wait_for_parent_cert(
     suggested_name: Option<&str>,
+    kp: Option<KeyProtArg>,
 ) -> Result<(String, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     let name_label = "your TLS identity name (CN for the CSR; cert SAN)";
     let our_name = match suggested_name {
@@ -1388,7 +1427,7 @@ fn generate_and_wait_for_parent_cert(
         None => prompt::required_string(name_label, None)?,
     };
     let (cert_path, key_path, trusted_path, askpass) =
-        generate_csr_and_wait_for_cert(&our_name)?;
+        generate_csr_and_wait_for_cert(&our_name, kp)?;
     Ok((our_name, cert_path, key_path, trusted_path, askpass))
 }
 
@@ -1457,77 +1496,195 @@ fn find_askpass() -> Option<PathBuf> {
     None
 }
 
-/// Prompt for a private-key password, and if one is given, for an
-/// askpass program with [`find_askpass`]'s discovery result as the
-/// level-1 default. Returns `(Some(password), Some(askpass))` if
-/// the operator chose encryption, `(None, None)` if they didn't
-/// (blank password, no TTY, etc.).
+/// How a private key is protected at rest. Decided once per identity
+/// at issue time by [`choose_key_protection`]; every key-producing
+/// flow acts on the same three cases.
+enum KeyProtection {
+    /// Encrypted under a random password sealed to this machine's
+    /// TPM. The blob is written beside the key as `<key>.tpm`
+    /// ([`netidx_conf::tls::sealed_sidecar`]); the key is useless
+    /// off-host.
+    Sealed { password: Zeroizing<String>, blob: Vec<u8> },
+    /// Encrypted under a typed password (saved to the system keychain;
+    /// `askpass` is the client-config fallback when the keychain is
+    /// locked or missing).
+    Password { password: String, askpass: Option<PathBuf> },
+    /// Plaintext — file modes are the only protection.
+    None,
+}
+
+impl KeyProtection {
+    /// The encryption password, if any (what the openssl issue paths
+    /// take).
+    fn password(&self) -> Option<&str> {
+        match self {
+            KeyProtection::Sealed { password, .. } => Some(password),
+            KeyProtection::Password { password, .. } => Some(password),
+            KeyProtection::None => None,
+        }
+    }
+
+    fn askpass(&self) -> Option<PathBuf> {
+        match self {
+            KeyProtection::Password { askpass, .. } => askpass.clone(),
+            KeyProtection::Sealed { .. } | KeyProtection::None => None,
+        }
+    }
+
+    /// Write the sealed-password sidecar beside `key` (no-op for the
+    /// other variants). Call with wherever the key file actually
+    /// lands — staging dirs included; the identity installer copies
+    /// sidecars along with their keys.
+    fn write_sidecar(&self, key: &Path) -> Result<()> {
+        if let KeyProtection::Sealed { blob, .. } = self {
+            netidx_conf::atomic::write_atomic(
+                &netidx_conf::tls::sealed_sidecar(key),
+                blob,
+                0o600,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The `--key-protection` flag: like [`choose_key_protection`]'s
+/// interactive choice, but scriptable. `password` is inherently
+/// interactive (it prompts), so headless installs use seal or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyProtArg {
+    Seal,
+    Password,
+    None,
+}
+
+impl FromStr for KeyProtArg {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "seal" => Ok(Self::Seal),
+            "password" => Ok(Self::Password),
+            "none" => Ok(Self::None),
+            _ => bail!("key-protection must be one of seal|password|none"),
+        }
+    }
+}
+
+/// Decide how a new identity's private key is protected at rest:
+/// **seal** (TPM — the default whenever the host has one), **password**
+/// (typed, keychain + askpass), or **none**.
 ///
-/// `key_path` is the canonical on-disk location the encrypted key
-/// will eventually live at. When a password is collected, this
-/// function *also* writes it into the system keychain under
-/// `("netidx", key_path)` — that's where `netidx::tls::load_private_key`
-/// looks first at startup. Pre-populating the keychain lets the
-/// resolver server (which has no `askpass` field in its
-/// per-member-server `Auth::Tls` schema) still decrypt its own
-/// key without operator intervention. The `askpass` we return is
-/// for the client-side `cfile::Tls.askpass` fallback, in case the
-/// keychain entry is missing or the keyring isn't unlocked.
-#[cfg(unix)]
-fn collect_key_password_and_askpass(
+/// `key_path` is the canonical on-disk location the key will live at —
+/// the keychain entry (password case) is keyed on it. On a non-TTY the
+/// default applies silently: seal when a TPM is usable, none
+/// otherwise. A TPM that fails at seal time degrades to the no-TPM
+/// behavior with a warning — setup must not dead-end on flaky
+/// hardware.
+fn choose_key_protection(
+    flag: Option<KeyProtArg>,
     key_path: &Path,
     name: &str,
-) -> Result<(Option<String>, Option<PathBuf>)> {
-    // Skip everything on non-interactive runs. Scripted installs
-    // shouldn't hang at an rpassword prompt, and they have no
-    // realistic way to feed in a password anyway.
-    if !std::io::stdin().is_terminal() {
-        return Ok((None, None));
+) -> Result<KeyProtection> {
+    let tpm = netidx_tpm::available();
+    let choice = match flag {
+        Some(KeyProtArg::Seal) => "seal".to_string(),
+        Some(KeyProtArg::Password) => "password".to_string(),
+        Some(KeyProtArg::None) => "none".to_string(),
+        None if !prompt::stdin_is_tty() => {
+            if tpm { "seal".to_string() } else { "none".to_string() }
+        }
+        None => {
+            let (options, default): (&[&str], &str) = if tpm {
+                (&["seal", "password", "none"], "seal")
+            } else {
+                (&["password", "none"], "none")
+            };
+            prompt::choice_with_default(
+                &format!(
+                    "private key protection for {name} (seal: bind to this \
+                     machine's TPM; password: typed at issue, kept in the \
+                     keychain; none: file modes only)"
+                ),
+                None,
+                options,
+                default,
+            )?
+        }
+    };
+    match choice.as_str() {
+        "seal" => {
+            let password = netidx_tpm::random_secret();
+            match netidx_tpm::seal(password.as_bytes()) {
+                Ok(blob) => {
+                    println!(
+                        "  the key for {name} will be sealed to this machine's \
+                         TPM — copied anywhere else it is useless"
+                    );
+                    Ok(KeyProtection::Sealed { password, blob })
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: TPM sealing failed ({e:#}); falling back to an \
+                         unprotected key. Re-run once the TPM is usable, or \
+                         choose password protection interactively."
+                    );
+                    Ok(KeyProtection::None)
+                }
+            }
+        }
+        "password" => {
+            // Name the identity so an operator setting up several
+            // certs in one session knows which key this password is
+            // for.
+            let pw = rpassword::prompt_password(format!(
+                "private key password for {name}: "
+            ))?;
+            if pw.is_empty() {
+                bail!("empty password; choose 'none' for an unprotected key");
+            }
+            let again = rpassword::prompt_password(format!(
+                "private key password for {name} (again): "
+            ))?;
+            if again != pw {
+                bail!("passwords did not match");
+            }
+            // Search for an askpass program and prompt the operator to
+            // confirm or override it. A blank answer takes the
+            // default; an operator who explicitly wants no askpass can
+            // type an empty string when the default is itself empty.
+            #[cfg(unix)]
+            let discovered = find_askpass();
+            #[cfg(not(unix))]
+            let discovered: Option<PathBuf> = None;
+            let default = discovered
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let answer = prompt::string_with_default(
+                "askpass program (used to ask for the key password at startup)",
+                None,
+                &default,
+            )?;
+            let askpass =
+                if answer.is_empty() { None } else { Some(PathBuf::from(answer)) };
+            // Save into the system keychain so the resolver server can
+            // decrypt its key without an askpass at startup. Failure
+            // here isn't fatal — the keychain might be locked,
+            // sandboxed, or missing entirely, and the askpass fallback
+            // still lets the client config work. We log and continue.
+            if let Err(e) =
+                netidx::tls::save_password_for_key(&key_path.to_string_lossy(), &pw)
+            {
+                eprintln!(
+                    "warning: failed to save key password to the system keychain \
+                     ({e:#}); the resolver may need an askpass at startup. \
+                     Re-run with the keychain unlocked, or pre-populate the entry \
+                     manually.",
+                );
+            }
+            Ok(KeyProtection::Password { password: pw, askpass })
+        }
+        _ => Ok(KeyProtection::None),
     }
-    // Name the identity so an operator setting up several certs in one
-    // session knows which key this password is for.
-    let pw = rpassword::prompt_password(format!(
-        "private key password for {name} (blank for no encryption): "
-    ))?;
-    if pw.is_empty() {
-        return Ok((None, None));
-    }
-    let again =
-        rpassword::prompt_password(format!("private key password for {name} (again): "))?;
-    if again != pw {
-        bail!("passwords did not match");
-    }
-    // Search for an askpass program and prompt the operator to
-    // confirm or override it. A blank answer takes the default; an
-    // operator who explicitly wants no askpass can type an empty
-    // string when the default is itself empty.
-    let discovered = find_askpass();
-    let default = discovered
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let answer = prompt::string_with_default(
-        "askpass program (used to ask for the key password at startup)",
-        None,
-        &default,
-    )?;
-    let askpass = if answer.is_empty() { None } else { Some(PathBuf::from(answer)) };
-    // Save into the system keychain so the resolver server can
-    // decrypt its key without an askpass at startup. Failure here
-    // isn't fatal — the keychain might be locked, sandboxed, or
-    // missing entirely, and the askpass fallback still lets the
-    // client config work. We log and continue.
-    if let Err(e) = netidx::tls::save_password_for_key(
-        &key_path.to_string_lossy(),
-        &pw,
-    ) {
-        eprintln!(
-            "warning: failed to save key password to the system keychain ({e:#}); \
-             the resolver may need an askpass at startup. \
-             Re-run with the keychain unlocked, or pre-populate the entry manually.",
-        );
-    }
-    Ok((Some(pw), askpass))
 }
 
 /// Generate a private key + CSR for `name`, write the key to the
@@ -1557,6 +1714,7 @@ fn collect_key_password_and_askpass(
 #[cfg(unix)]
 fn generate_csr_and_wait_for_cert(
     name: &str,
+    kp: Option<KeyProtArg>,
 ) -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     let dest_dir = tls::identity_dir(name)?;
     std::fs::create_dir_all(&dest_dir).with_context(|| {
@@ -1575,16 +1733,18 @@ fn generate_csr_and_wait_for_cert(
             key_path.display(),
         );
     }
-    let (password, askpass) = collect_key_password_and_askpass(&key_path, name)?;
+    let protection = choose_key_protection(kp, &key_path, name)?;
+    let askpass = protection.askpass();
     let kr = netidx_conf::ca::generate_csr(
         &netidx_conf::ca::Subject::cn(name.to_string()),
         &[netidx_conf::ca::SanEntry::Dns(name.to_string())],
         2048,
-        password.as_deref(),
+        protection.password(),
     )
     .context("generating private key + CSR")?;
     netidx_conf::atomic::write_atomic(&key_path, &kr.private_key_pem, 0o600)
         .with_context(|| format!("writing private key to {}", key_path.display()))?;
+    protection.write_sidecar(&key_path)?;
     netidx_conf::atomic::write_atomic(&csr_path, &kr.csr_pem, 0o644)
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
 
@@ -1592,8 +1752,14 @@ fn generate_csr_and_wait_for_cert(
     println!("Generated TLS identity '{}':", name);
     println!("  private key (0600): {}", key_path.display());
     println!("  CSR         (0644): {}", csr_path.display());
-    if password.is_some() {
-        println!("  private key is encrypted; password saved to the system keychain.");
+    match &protection {
+        KeyProtection::Sealed { .. } => {
+            println!("  private key is encrypted; the password is TPM-sealed beside it.");
+        }
+        KeyProtection::Password { .. } => {
+            println!("  private key is encrypted; password saved to the system keychain.");
+        }
+        KeyProtection::None => (),
     }
     println!();
     println!("Next steps:");
@@ -1905,6 +2071,12 @@ pub(crate) struct ResolverFlags {
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-conf-server")]
     no_conf_server: bool,
+    /// How new private keys are protected at rest: `seal` (bind to
+    /// this machine's TPM), `password` (typed; interactive only), or
+    /// `none`. Default: seal when the host has a usable TPM (prompted
+    /// on a TTY), else none.
+    #[arg(long = "key-protection")]
+    key_protection: Option<KeyProtArg>,
     /// Override the id-map socket path (default
     /// `${dirs::config_dir}/netidx/id-map.sock`).
     #[arg(long = "id-map-socket")]
@@ -2385,7 +2557,7 @@ fn resolver_tls_auth(
         if cert_choice == "csr" {
             note_external_pki(&name);
             let (certificate, private_key, trusted, askpass) =
-                generate_csr_and_wait_for_cert(&name)?;
+                generate_csr_and_wait_for_cert(&name, f.key_protection)?;
             return Ok(ResolvedAuth::external(AuthChoice::Tls {
                 name: ArcStr::from(name.as_str()),
                 certificate,
@@ -2463,7 +2635,7 @@ fn resolver_tls_generate(
         // The resolver requests its own already-decided SAN, so default
         // the join's name prompt to it.
         if let Some((j, staging)) =
-            maybe_join_ca_server(probe, NodeKind::Resolver, Some(name))?
+            maybe_join_ca_server(probe, NodeKind::Resolver, Some(name), f.key_protection)?
         {
             return Ok(ResolvedAuth {
                 choice: joined_to_auth(j),
@@ -2572,23 +2744,28 @@ fn resolver_tls_generate(
         // resolver's own units dir, so that one service supervises it.
         created
     };
-    // Local-CA-issue path: prompt for an optional leaf-key password
-    // (and an askpass program if one is given). The password is saved
-    // to the system keychain keyed on the *canonical* key path (where
-    // the daemon will read it from), so the resolver server can decrypt
-    // at startup without needing askpass wiring (the rfile::Auth::Tls
-    // schema has none); the askpass goes into the emitted client config
-    // as the fallback if the keychain entry is ever missing.
+    // Local-CA-issue path: choose how the leaf key is protected at
+    // rest (TPM seal when the host has one; or a typed password saved
+    // to the system keychain keyed on the *canonical* key path, where
+    // the daemon will read it from; or nothing). The askpass goes into
+    // the emitted client config as the password case's fallback.
     let key_path = identity_dir.join("private.key");
-    let (password, askpass) = collect_key_password_and_askpass(&key_path, name)?;
+    let protection = choose_key_protection(f.key_protection, &key_path, name)?;
     // Issue into a staging dir, not the canonical location: `apply()`
     // is the only thing that should write under the config tree. The
     // returned guard keeps the staging files alive until apply() copies
     // them into place, then drops (cleaning the tempdir up).
     let staging = tempfile::TempDir::new().context("creating tls staging dir")?;
     println!("issuing resolver certificate '{name}' (this may take a moment)...");
-    let issued =
-        ca::issue_identity(&ca, name, staging.path().to_path_buf(), password.as_deref())?;
+    let issued = ca::issue_identity(
+        &ca,
+        name,
+        staging.path().to_path_buf(),
+        protection.password(),
+    )?;
+    // The sealed password rides beside the staged key; apply()'s
+    // identity install copies sidecars with their keys.
+    protection.write_sidecar(&issued.private_key)?;
     println!("issued resolver certificate:");
     println!("  name:        {name}");
     // Show the *installed* paths apply() will create, not the transient
@@ -2596,8 +2773,14 @@ fn resolver_tls_generate(
     println!("  certificate: {}", identity_dir.join("certificate.pem").display());
     println!("  private key: {}", identity_dir.join("private.key").display());
     println!("  trusted CA:  {}", ca_cert.display());
-    if password.is_some() {
-        println!("  private key is encrypted; password saved to the system keychain.");
+    match &protection {
+        KeyProtection::Sealed { .. } => {
+            println!("  private key is encrypted; the password is TPM-sealed beside it.");
+        }
+        KeyProtection::Password { .. } => {
+            println!("  private key is encrypted; password saved to the system keychain.");
+        }
+        KeyProtection::None => (),
     }
     Ok(ResolvedAuth {
         choice: AuthChoice::Tls {
@@ -2605,7 +2788,7 @@ fn resolver_tls_generate(
             certificate: issued.certificate,
             private_key: issued.private_key,
             trusted: ca_cert,
-            askpass,
+            askpass: protection.askpass(),
         },
         staging: Some(staging),
         netidx_ca: true,
@@ -2677,6 +2860,7 @@ fn resolver_auth_from_network(
                 ca_addr,
                 NodeKind::Resolver,
                 Some(&suggested),
+                f.key_protection,
                 &net.identity,
             )?;
             Ok(ResolvedAuth {
@@ -2868,11 +3052,17 @@ fn enroll_conf_server(
     let serving_key = dir.join("key.pem");
     let trusted = dir.join("trusted.pem");
     netidx_conf::atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    netidx_conf::atomic::write_atomic(
+    match netidx_conf::tls::write_private_key_maybe_sealed(
         &serving_key,
-        issued.private_key_pem.as_bytes(),
-        0o600,
-    )?;
+        &issued.private_key_pem,
+    )? {
+        netidx_conf::tls::KeyWrite::Sealed => {
+            println!("  serving key sealed to this machine's TPM");
+        }
+        netidx_conf::tls::KeyWrite::Plain(e) => {
+            println!("  note: serving key is plaintext (TPM sealing unavailable: {e:#})");
+        }
+    }
     netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     let cfg = ConfServerConfig {
         domain: net.identity.domain.clone(),
@@ -2948,6 +3138,12 @@ pub(crate) struct PublisherFlags {
     /// remember that). Defaults to the user activation dir.
     #[arg(long = "units-dir")]
     units_dir: Option<PathBuf>,
+    /// How new private keys are protected at rest: `seal` (bind to
+    /// this machine's TPM), `password` (typed; interactive only), or
+    /// `none`. Default: seal when the host has a usable TPM (prompted
+    /// on a TTY), else none.
+    #[arg(long = "key-protection")]
+    key_protection: Option<KeyProtArg>,
     #[command(flatten)]
     common: CommonFlags,
 }
@@ -2979,6 +3175,7 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
                 net,
                 NodeKind::Publisher,
                 have_identity,
+                f.key_protection,
                 &mut tls_identities,
                 &mut tls_staging,
             )?
@@ -3015,7 +3212,11 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
                     ReferralAuth::Tls(san) => suggest_client_san(san),
                     _ => None,
                 };
-                let si = prompt_tls_client_identity(suggested.as_deref(), &probe)?;
+                let si = prompt_tls_client_identity(
+                    suggested.as_deref(),
+                    f.key_protection,
+                    &probe,
+                )?;
                 tls_identities.push(si.spec);
                 tls_staging.extend(si.staging);
             }

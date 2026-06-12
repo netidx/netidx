@@ -1,0 +1,24 @@
+[package]
+name = "netidx-tpm"
+version = "0.32.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "netidx TPM 2.0 sealing — bind small secrets (key passwords, credentials) to the host TPM"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+documentation = "https://docs.rs/netidx-tpm"
+keywords = ["networking", "distributed", "security", "tpm"]
+categories = ["network-programming", "cryptography"]
+
+[dependencies]
+anyhow = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+# Pure-Rust TPM 2.0 marshalling (Jarkko Sakkinen, the kernel TPM
+# subsystem maintainer). Pinned exactly: pre-1.0, the API still moves.
+# Unconditional — it's no_std pure Rust and the command-building code
+# compiles everywhere; only the *transport* is per-platform (linux
+# /dev/tpmrm0 today; Windows TBS is an additive transport later).
+tpm2-protocol = { workspace = true }

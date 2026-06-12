@@ -248,20 +248,60 @@ machine's TPM will open, and a stolen disk, leaked backup, or
 decommissioned drive recovers nothing. No TPM ⇒ plaintext fallback
 with a printed note about what that costs.
 
-Mechanics: pure Rust over `/dev/tpmrm0` (`tpm2-protocol`, pinned —
-no C tss stack, so sealing exists in every build and is detected at
-runtime). The secret is a `KeyedHash` sealed-data object under the
-TCG-standard ECC P-256 SRK template on the owner hierarchy;
-`CreatePrimary` deterministically re-derives the SRK each time, so
-the TPM holds no persistent state. Deliberately **no PCR binding**:
-a firmware update must not silently stop renewal (an outage on a
-delay timer); the honest threat model is at-rest/offline theft, not
-live-host compromise — root on the running box can unseal, exactly
-as it could have read the plaintext. Unseal failure (TPM cleared,
-board swapped) is a screaming error whose message names the fix:
-`netidx conf ca autorenew --rotate`. Operational note: the device
-node is root:tss, so the CA user needs `tss` group membership —
-without it, setup falls back to plaintext and says so.
+Mechanics: pure Rust over `/dev/tpmrm0` (the `netidx-tpm` crate on a
+pinned `tpm2-protocol` — no C tss stack, so sealing exists in every
+build and is detected at runtime; the transport sits behind a trait,
+so the Windows port is "add a TBS transport"). The secret is a
+`KeyedHash` sealed-data object under the TCG-standard ECC P-256 SRK
+template on the owner hierarchy; `CreatePrimary` deterministically
+re-derives the SRK each time, so the TPM holds no persistent state.
+Deliberately **no PCR binding**: a firmware update must not silently
+stop renewal (an outage on a delay timer); the honest threat model is
+at-rest/offline theft, not live-host compromise — root on the running
+box can unseal, exactly as it could have read the plaintext. Unseal
+failure (TPM cleared, board swapped) is a screaming error whose
+message names the fix: `netidx conf ca autorenew --rotate`.
+Operational note: the device node is root:tss, so the CA user needs
+`tss` group membership — without it, setup falls back to plaintext
+and says so.
+
+### TLS private keys at rest (seal | password | none)
+
+The same machinery protects every TLS private key netidx issues. The
+key is **never sealed directly** (TPM sealed data is ≤128 bytes; and a
+proprietary key format would lock operators out): the key file stays a
+standard **encrypted PKCS#8** (PBES2 scrypt + AES-256-CBC, pure Rust,
+openssl-3-decryptable), and what's sealed is its random password,
+written beside the key as the **`<key>.tpm` sidecar**. Convention, not
+config — no schema changed anywhere.
+
+At load, `netidx::tls::load_key_password` treats a sidecar as
+authoritative: present ⇒ unseal or **hard error** (no fallthrough to
+keychain/askpass — a daemon hanging on a password prompt nobody will
+answer is worse than a clear failure). Absent ⇒ the existing
+keychain → askpass chain. Every daemon and client inherits this
+through the one loader.
+
+At issue, every flow asks once — `choose_key_protection`, also the
+`--key-protection seal|password|none` flag:
+
+- **seal** (default whenever a TPM is usable, including headless):
+  random password, encrypted key, sealed sidecar. The identity is
+  machine-bound; a stolen disk or backup holds nothing usable.
+- **password**: typed at issue, saved to the system keychain (keyed on
+  the canonical key path), askpass as the client-config fallback — the
+  pre-TPM behavior.
+- **none**: plaintext, file modes only.
+
+Daemon serving keys (conf server, local and enrolled) skip the
+question — a daemon can't type, so they're sealed-or-plaintext
+automatically with a printed note. The identity installer copies
+sidecars with their keys (and clears stale ones — a leftover sidecar
+would shadow the new key's password source); `renewd` preserves the
+seal across renewals: fresh key ⇒ fresh password ⇒ fresh seal, and a
+failed re-seal aborts the install loudly rather than degrading to
+plaintext. Recovery from a cleared TPM is re-issue — one command,
+which is the point of the whole renewal chapter: keys are disposable.
 
 ## Per-admin policy (vault slots)
 

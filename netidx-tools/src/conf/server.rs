@@ -106,7 +106,17 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     let serving_cert = server_dir.join("cert.pem");
     let serving_key = server_dir.join("key.pem");
     atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    atomic::write_atomic(&serving_key, kc.private_key_pem.as_bytes(), 0o600)?;
+    match netidx_conf::tls::write_private_key_maybe_sealed(
+        &serving_key,
+        &kc.private_key_pem,
+    )? {
+        netidx_conf::tls::KeyWrite::Sealed => {
+            println!("  serving key sealed to this machine's TPM");
+        }
+        netidx_conf::tls::KeyWrite::Plain(e) => {
+            println!("  note: serving key is plaintext (TPM sealing unavailable: {e:#})");
+        }
+    }
 
     // Ask for the listen IP and port. The IP defaults to the resolver
     // this conf server is being set up alongside (or an existing

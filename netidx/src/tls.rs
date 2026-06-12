@@ -91,48 +91,77 @@ pub fn clear_cached_passwords() {
     }
 }
 
+/// The TPM-sealed password sidecar for the key at `path` — `<path>.tpm`.
+/// Written at issue time when the operator chose to seal; the password
+/// inside only unseals on this machine's TPM, which is what makes the
+/// (encrypted) key file useless off-host.
+pub fn sealed_password_path(path: &str) -> String {
+    format!("{path}.tpm")
+}
+
 /// load the password for the key at path
 ///
-/// or else call askpass to ask the user, or else fail.
+/// A TPM-sealed sidecar (`<path>.tpm`) is authoritative when present —
+/// it's the daemon path: machine-bound, no keychain, no session, no
+/// human. Failure to unseal it is a hard error rather than a fallthrough
+/// to the keychain/askpass: a daemon hanging on a password prompt that
+/// will never be answered is strictly worse than a clear failure, and
+/// the fix is one command. Otherwise: the keychain, or else askpass, or
+/// else fail.
 pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     use keyring::Entry;
     use std::process::Command;
-    info!("loading password for {} from the system keyring", path);
     let mut cache = CACHED.lock();
-    match cache.get(path) {
-        Some(pass) => Ok(pass.into()),
-        None => {
-            let entry = Entry::new("netidx", path)?;
-            match entry.get_password() {
-                Ok(password) => {
-                    cache.insert(path.into(), password.clone());
-                    Ok(password)
-                }
-                Err(e) => match askpass {
-                    None => {
-                        bail!("password isn't in the keychain and no askpass specified")
-                    }
-                    Some(askpass) => {
-                        info!(
-                            "failed to find password entry for netidx {}, error {}",
-                            path, e
-                        );
-                        let res = Command::new(askpass).arg(path).output()?;
-                        let password = String::from_utf8_lossy(&res.stdout);
-                        let password = password.trim_matches(|c| c == '\r' || c == '\n');
-                        if let Err(e) = entry.set_password(password) {
-                            warn!(
-                                "failed to set password entry for netidx {}, error {}",
-                                path, e
-                            );
-                        }
-                        let password = String::from(password);
-                        cache.insert(path.into(), password.clone());
-                        Ok(password)
-                    }
-                },
-            }
+    if let Some(pass) = cache.get(path) {
+        return Ok(pass.into());
+    }
+    let sealed = sealed_password_path(path);
+    if std::path::Path::new(&sealed).exists() {
+        info!("unsealing password for {} from the TPM ({sealed})", path);
+        let blob = std::fs::read(&sealed)
+            .with_context(|| format!("reading sealed password {sealed}"))?;
+        let secret = netidx_tpm::unseal(&blob).with_context(|| {
+            format!(
+                "unsealing {sealed} — if this host's TPM was cleared or the \
+                 board was replaced, re-issue the key (netidx certificate \
+                 issuance is one command; see `netidx conf ca`)"
+            )
+        })?;
+        let password = String::from_utf8(secret.to_vec())
+            .context("sealed password is not utf8")?;
+        cache.insert(path.into(), password.clone());
+        return Ok(password);
+    }
+    info!("loading password for {} from the system keyring", path);
+    let entry = Entry::new("netidx", path)?;
+    match entry.get_password() {
+        Ok(password) => {
+            cache.insert(path.into(), password.clone());
+            Ok(password)
         }
+        Err(e) => match askpass {
+            None => {
+                bail!("password isn't in the keychain and no askpass specified")
+            }
+            Some(askpass) => {
+                info!(
+                    "failed to find password entry for netidx {}, error {}",
+                    path, e
+                );
+                let res = Command::new(askpass).arg(path).output()?;
+                let password = String::from_utf8_lossy(&res.stdout);
+                let password = password.trim_matches(|c| c == '\r' || c == '\n');
+                if let Err(e) = entry.set_password(password) {
+                    warn!(
+                        "failed to set password entry for netidx {}, error {}",
+                        path, e
+                    );
+                }
+                let password = String::from(password);
+                cache.insert(path.into(), password.clone());
+                Ok(password)
+            }
+        },
     }
 }
 
@@ -141,6 +170,56 @@ pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
     use keyring::Entry;
     let entry = Entry::new("netidx", path)?;
     Ok(entry.set_password(password)?)
+}
+
+/// Decrypt an encrypted PKCS#8 private key PEM with `password`,
+/// returning the plaintext PKCS#8 PEM. For loaders that don't go
+/// through [`load_private_key`] (e.g. handing PEM bytes to rustls
+/// directly); the returned value is key material — hold it briefly.
+pub fn decrypt_private_key(
+    enc_pem: &str,
+    password: &str,
+) -> Result<pkcs8::der::zeroize::Zeroizing<String>> {
+    use pkcs8::{
+        der::pem::PemLabel, EncryptedPrivateKeyInfo, LineEnding, PrivateKeyInfo,
+        SecretDocument,
+    };
+    let (label, doc) = SecretDocument::from_pem(enc_pem)
+        .map_err(|e| anyhow!("parsing private key pem: {e}"))?;
+    if label != EncryptedPrivateKeyInfo::PEM_LABEL {
+        bail!("expected an encrypted PKCS#8 private key, got {label:?}");
+    }
+    let enc = EncryptedPrivateKeyInfo::try_from(doc.as_bytes())
+        .map_err(|e| anyhow!("parsing encrypted PKCS#8: {e}"))?;
+    let dec = enc.decrypt(password).map_err(|e| anyhow!("decrypting key: {e}"))?;
+    let pem = dec
+        .to_pem(PrivateKeyInfo::PEM_LABEL, LineEnding::LF)
+        .map_err(|e| anyhow!("encoding key pem: {e}"))?;
+    Ok(pem)
+}
+
+/// Encrypt a plaintext PKCS#8 private key PEM under `password` (PBES2:
+/// scrypt + AES-256-CBC — pure Rust, and what [`load_private_key`]
+/// and openssl 3 both decrypt). The issue-time half of key protection;
+/// pairs with either a typed password or a TPM-sealed one
+/// ([`sealed_password_path`]).
+pub fn encrypt_private_key(plain_pem: &str, password: &str) -> Result<String> {
+    use pkcs8::{
+        der::pem::PemLabel, rand_core::OsRng, EncryptedPrivateKeyInfo, LineEnding,
+        PrivateKeyInfo, SecretDocument,
+    };
+    let (label, doc) = SecretDocument::from_pem(plain_pem)
+        .map_err(|e| anyhow!("parsing private key pem: {e}"))?;
+    if label != PrivateKeyInfo::PEM_LABEL {
+        bail!("expected an unencrypted PKCS#8 private key, got {label:?}");
+    }
+    let pki = PrivateKeyInfo::try_from(doc.as_bytes())
+        .map_err(|e| anyhow!("parsing PKCS#8 structure: {e}"))?;
+    let enc = pki.encrypt(OsRng, password).map_err(|e| anyhow!("encrypting key: {e}"))?;
+    let pem = enc
+        .to_pem(EncryptedPrivateKeyInfo::PEM_LABEL, LineEnding::LF)
+        .map_err(|e| anyhow!("encoding encrypted key pem: {e}"))?;
+    Ok(pem.to_string())
 }
 
 /// load a private key

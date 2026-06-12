@@ -43,6 +43,9 @@ keyring = { workspace = true }
 log = { workspace = true }
 netidx-core = { version = "0.32.0", path = "../netidx-core" }
 netidx-netproto = { version = "0.32.0", path = "../netidx-netproto" }
+# TPM-sealed key passwords: `tls::load_key_password` reads `<key>.tpm`
+# sidecars (machine-bound daemon credentials, no keychain required).
+netidx-tpm = { version = "0.32.0", path = "../netidx-tpm" }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }
 pkcs8 = { workspace = true }

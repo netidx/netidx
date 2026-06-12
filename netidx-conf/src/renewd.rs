@@ -302,6 +302,13 @@ async fn renew_identity(
 /// the bare leaf, so whichever shape the file had is rebuilt — the
 /// issuing CA appended from the returned bundle when the old file was
 /// a chain.
+///
+/// Seal preservation: an identity whose key carries a TPM-sealed
+/// password sidecar (`<key>.tpm`) was deliberately bound to this
+/// machine — the renewal's fresh key gets a fresh password, sealed the
+/// same way. If sealing fails (TPM gone) this errors rather than
+/// silently degrading to a plaintext key; the old identity stays
+/// intact and the daemon retries next tick.
 fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
     let was_chain = std::fs::read(&id.certificate)
         .map(|pem| {
@@ -315,7 +322,19 @@ fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
     } else {
         issued.cert_pem.clone()
     };
-    atomic::write_atomic(&id.private_key, issued.private_key_pem.as_bytes(), 0o600)?;
+    let sidecar = crate::tls::sealed_sidecar(&id.private_key);
+    if sidecar.exists() {
+        let (enc_pem, blob) = crate::tls::seal_private_key(&issued.private_key_pem)
+            .context("re-sealing the renewed key (old key left in place)")?;
+        // Two files, two renames: a crash exactly between them leaves a
+        // mismatched key/sidecar pair (unloadable until the next renewal
+        // or a re-issue). The window is microseconds inside one process
+        // and the daemon only reads keys at startup — accepted.
+        atomic::write_atomic(&sidecar, &blob, 0o600)?;
+        atomic::write_atomic(&id.private_key, enc_pem.as_bytes(), 0o600)?;
+    } else {
+        atomic::write_atomic(&id.private_key, issued.private_key_pem.as_bytes(), 0o600)?;
+    }
     atomic::write_atomic(&id.certificate, cert_payload.as_bytes(), 0o644)?;
     atomic::write_atomic(&id.trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     for w in &issued.warnings {

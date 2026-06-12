@@ -1,13 +1,13 @@
 //! Seal a small secret to this host's TPM 2.0.
 //!
-//! Used to protect the autorenew keytab: the keytab password can
-//! unlock the CA vault's master key, so at rest it is cryptographically
-//! a CA-key-decryption credential. Sealing binds it to this machine's
-//! TPM — the blob written to disk is inert anywhere else, which closes
-//! the stolen-disk / leaked-backup / decommissioned-drive recovery
-//! path. It does NOT defend against an attacker with code execution on
-//! the live host (they can ask the TPM to unseal, just as they could
-//! have read a plaintext keytab) — that boundary is unchanged.
+//! netidx uses this to bind credentials to a machine: TLS private-key
+//! passwords (`<key>.tpm` sidecars read by `netidx::tls`) and the CA
+//! autorenew keytab. A sealed blob written to disk is inert anywhere
+//! else — stolen disks, leaked backups, and decommissioned drives
+//! recover nothing. It does NOT defend against an attacker with code
+//! execution on the live host (they can ask the TPM to unseal, just as
+//! they could have read a plaintext secret) — that boundary is
+//! unchanged.
 //!
 //! Mechanism: the secret is wrapped in a TPM `KeyedHash` sealed-data
 //! object under the standard ECC P-256 storage root key (SRK) template
@@ -18,20 +18,25 @@
 //! is the TPM binding, not a second password (which would just move
 //! the problem to "where do we store that").
 //!
-//! v1 deliberately binds to no PCRs: a PCR-bound blob silently stops
-//! unsealing after a firmware update, and a renewal daemon that
-//! silently stops is a certificate outage with a delay timer. The
-//! recovery story for any unseal failure (TPM cleared, board swapped)
-//! is one command: `netidx conf ca autorenew --rotate`.
+//! Deliberately **no PCR binding**: a PCR-bound blob silently stops
+//! unsealing after a firmware update, and a daemon that silently stops
+//! is an outage on a delay timer. The recovery story for any unseal
+//! failure (TPM cleared, board swapped) is re-issue/re-seal — netidx
+//! certificate issuance is one command, so keys are disposable.
 //!
-//! Linux-only: the kernel TPM resource manager (`/dev/tpmrm0`) is the
-//! transport. On other platforms [`available`] is `false` and
-//! [`seal`]/[`unseal`] return errors; callers fall back to the
-//! plaintext keytab. Note the device node is conventionally
-//! root:tss — the CA user needs `tss` group membership.
+//! The command marshalling is pure Rust ([`tpm2-protocol`]) and
+//! compiles everywhere; only the *transport* is per-platform. Today
+//! that's the linux kernel resource manager (`/dev/tpmrm0`, note the
+//! device node is conventionally root:tss); a Windows TBS transport
+//! ([`Tbsip_Submit_Command`] takes the same raw buffers) slots in
+//! behind [`Transport`] without touching anything else. On platforms
+//! with no transport, [`available`] is `false` and [`seal`]/[`unseal`]
+//! return honest errors; callers fall back to their plaintext path.
 
-/// Marker prefixed to sealed keytab files. Contains a NUL so it can
-/// never collide with a plaintext password (which is printable text).
+use anyhow::Result;
+
+/// Marker prefixed to sealed files. Contains a NUL so it can never
+/// collide with a plaintext secret (which is printable text).
 pub const MAGIC: &[u8] = b"#netidx-tpm-sealed-v1\0";
 
 /// Does `data` carry a TPM-sealed payload (vs a plaintext secret)?
@@ -39,15 +44,32 @@ pub fn is_sealed(data: &[u8]) -> bool {
     data.starts_with(MAGIC)
 }
 
-#[cfg(target_os = "linux")]
-mod imp {
-    use super::MAGIC;
+/// A long random secret (256 bits, lowercase hex — printable, so it
+/// composes with anything that expects a password string). Used as the
+/// generated password when a key is sealed rather than typed.
+pub fn random_secret() -> zeroize::Zeroizing<String> {
+    use rand::Rng;
+    use std::fmt::Write;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    zeroize::Zeroizing::new(s)
+}
+
+/// One marshalled TPM command in, one complete raw response frame out.
+/// The only piece of this crate that touches a platform API.
+pub trait Transport {
+    fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>>;
+}
+
+mod ops {
+    use super::Transport;
     use anyhow::{anyhow, bail, Context, Result};
-    use std::{
-        fs::{File, OpenOptions},
-        io::{Read, Write},
-    };
     use tpm2_protocol::{
+        basic::TpmHandle,
         constant::TPM_MAX_COMMAND_SIZE,
         data::{
             Tpm2bAuth, Tpm2bData, Tpm2bDigest, Tpm2bNonce, Tpm2bPublic, Tpm2bSensitiveCreate,
@@ -58,37 +80,21 @@ mod imp {
             TpmuKeyedhashScheme, TpmuPublicId, TpmuPublicParms, TpmuSymKeyBits, TpmuSymMode,
         },
         frame::{
-            tpm_marshal_command, TpmCreateCommand, TpmCreatePrimaryCommand, TpmFlushContextCommand,
-            TpmFrame, TpmMarshalBody, TpmResponse, TpmUnsealCommand,
+            tpm_marshal_command, TpmCreateCommand, TpmCreatePrimaryCommand,
+            TpmFlushContextCommand, TpmFrame, TpmMarshalBody, TpmResponse, TpmUnsealCommand,
         },
-        basic::TpmHandle,
         TpmMarshal, TpmResult, TpmSized, TpmWriter,
     };
     use zeroize::{Zeroize, Zeroizing};
 
-    const DEVICE: &str = "/dev/tpmrm0";
-
     /// Sealed-data capacity every TPM 2.0 guarantees (MAX_SYM_DATA).
     /// The protocol types allow more, but a portable seal must not.
-    const MAX_SEAL_BYTES: usize = 128;
-
-    pub fn available() -> bool {
-        open_device().is_ok()
-    }
-
-    fn open_device() -> Result<File> {
-        OpenOptions::new().read(true).write(true).open(DEVICE).with_context(|| {
-            format!(
-                "opening {DEVICE} (no TPM 2.0, or this user lacks access — \
-                 the device node is conventionally root:tss)"
-            )
-        })
-    }
+    pub const MAX_SEAL_BYTES: usize = 128;
 
     /// The empty-password authorization session (TPM_RS_PW). We assume
     /// an empty owner-hierarchy auth, which is how every mainstream
     /// distro ships; a site that sets an owner password gets a clear
-    /// TPM_RC_BAD_AUTH and falls back to the plaintext keytab.
+    /// TPM_RC_BAD_AUTH and falls back to its plaintext path.
     fn pw_session() -> TpmsAuthCommand {
         TpmsAuthCommand {
             session_handle: (TpmRh::Pw as u32).into(),
@@ -138,7 +144,7 @@ mod imp {
     /// this TPM and parent, gated by (empty) user auth, exempt from
     /// dictionary-attack lockout — an empty password can't be
     /// brute-forced, and DA lockout would let any local process wedge
-    /// renewal by spamming bad auths.
+    /// the daemon by spamming bad auths.
     fn sealed_template() -> TpmtPublic {
         TpmtPublic {
             object_type: TpmAlgId::KeyedHash,
@@ -203,9 +209,13 @@ mod imp {
         }
     }
 
-    /// Marshal `cmd`, write it to the device, read back one complete
-    /// response frame, and fail on a non-success TPM return code.
-    fn transmit(dev: &mut File, cmd: &impl TpmFrame, sessions: &[TpmsAuthCommand]) -> Result<Vec<u8>> {
+    /// Marshal `cmd`, exchange it over the transport, and fail on a
+    /// non-success TPM return code.
+    fn transmit(
+        dev: &mut dyn Transport,
+        cmd: &impl TpmFrame,
+        sessions: &[TpmsAuthCommand],
+    ) -> Result<Vec<u8>> {
         let cc = cmd.cc();
         let mut buf = vec![0u8; TPM_MAX_COMMAND_SIZE];
         let len = {
@@ -215,28 +225,10 @@ mod imp {
                 .map_err(|e| anyhow!("marshalling {cc}: {e}"))?;
             writer.len()
         };
-        dev.write_all(&buf[..len]).with_context(|| format!("sending {cc} to the TPM"))?;
+        let resp = dev
+            .exchange(&buf[..len])
+            .with_context(|| format!("exchanging {cc} with the TPM"))?;
         buf.zeroize();
-        // The resource manager hands back the whole response in one
-        // read, but loop on the self-described size to be safe.
-        let mut resp: Vec<u8> = Vec::with_capacity(4096);
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = dev.read(&mut chunk).with_context(|| format!("reading {cc} response"))?;
-            if n == 0 {
-                bail!("TPM closed the connection mid-response to {cc}");
-            }
-            resp.extend_from_slice(&chunk[..n]);
-            if resp.len() >= 10 {
-                let total = u32::from_be_bytes(resp[2..6].try_into().unwrap()) as usize;
-                if !(10..=TPM_MAX_COMMAND_SIZE).contains(&total) {
-                    bail!("TPM response to {cc} declares an absurd size {total}");
-                }
-                if resp.len() >= total {
-                    break;
-                }
-            }
-        }
         let frame = TpmResponse::cast(&resp).map_err(|e| anyhow!("parsing {cc} response: {e}"))?;
         let rc = frame.rc().map_err(|e| anyhow!("parsing {cc} return code: {e}"))?;
         if !matches!(rc, TpmRc::Fmt0(TpmRcBase::Success)) {
@@ -295,7 +287,7 @@ mod imp {
 
     /// Re-derive the SRK on the owner hierarchy; returns its transient
     /// handle (flush it when done).
-    fn create_primary(dev: &mut File) -> Result<TpmHandle> {
+    fn create_primary(dev: &mut dyn Transport) -> Result<TpmHandle> {
         let cmd = TpmCreatePrimaryCommand {
             handles: [(TpmRh::Owner as u32).into()],
             in_sensitive: empty_sensitive(),
@@ -308,14 +300,14 @@ mod imp {
         Ok(u32::from_be_bytes(handles[..4].try_into().unwrap()).into())
     }
 
-    fn flush(dev: &mut File, handle: TpmHandle) {
+    fn flush(dev: &mut dyn Transport, handle: TpmHandle) {
         // Best-effort: the handle is transient, so a failed flush costs
         // a TPM object slot until the next reboot, nothing more.
         let cmd = TpmFlushContextCommand { flush_handle: handle, handles: [] };
         let _ = transmit(dev, &cmd, &[]);
     }
 
-    pub fn seal(secret: &[u8]) -> Result<Vec<u8>> {
+    pub fn seal(dev: &mut dyn Transport, secret: &[u8]) -> Result<Vec<u8>> {
         if secret.len() > MAX_SEAL_BYTES {
             bail!(
                 "cannot TPM-seal {} bytes; every TPM 2.0 guarantees only \
@@ -323,8 +315,7 @@ mod imp {
                 secret.len()
             );
         }
-        let mut dev = open_device()?;
-        let primary = create_primary(&mut dev)?;
+        let primary = create_primary(dev)?;
         let result = (|| {
             let cmd = TpmCreateCommand {
                 handles: [primary],
@@ -339,22 +330,23 @@ mod imp {
                 outside_info: Tpm2bData::default(),
                 creation_pcr: TpmlPcrSelection::default(),
             };
-            let resp = transmit(&mut dev, &cmd, &[pw_session()])?;
+            let resp = transmit(dev, &cmd, &[pw_session()])?;
             let (_, params) = response_areas(&resp, 0)?;
             let (private, rest) = take_tpm2b(params).context("TPM2_Create out_private")?;
             let (public, _) = take_tpm2b(rest).context("TPM2_Create out_public")?;
-            let mut blob = Vec::with_capacity(MAGIC.len() + private.len() + public.len());
-            blob.extend_from_slice(MAGIC);
+            let mut blob =
+                Vec::with_capacity(super::MAGIC.len() + private.len() + public.len());
+            blob.extend_from_slice(super::MAGIC);
             blob.extend_from_slice(private);
             blob.extend_from_slice(public);
             Ok(blob)
         })();
-        flush(&mut dev, primary);
+        flush(dev, primary);
         result
     }
 
-    pub fn unseal(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let Some(body) = blob.strip_prefix(MAGIC) else {
+    pub fn unseal(dev: &mut dyn Transport, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let Some(body) = blob.strip_prefix(super::MAGIC) else {
             bail!("not a netidx TPM-sealed blob (bad magic)");
         };
         let (private, rest) = take_tpm2b(body).context("sealed blob private area")?;
@@ -362,17 +354,16 @@ mod imp {
         if !rest.is_empty() {
             bail!("trailing garbage after the sealed blob");
         }
-        let mut dev = open_device()?;
-        let primary = create_primary(&mut dev)?;
+        let primary = create_primary(dev)?;
         let result = (|| {
             let cmd = RawLoadCommand { parent: primary, in_private: private, in_public: public };
-            let resp = transmit(&mut dev, &cmd, &[pw_session()])?;
+            let resp = transmit(dev, &cmd, &[pw_session()])?;
             let (handles, _) = response_areas(&resp, 1)?;
             let loaded: TpmHandle =
                 u32::from_be_bytes(handles[..4].try_into().unwrap()).into();
             let result = (|| {
                 let cmd = TpmUnsealCommand { handles: [loaded] };
-                let mut resp = transmit(&mut dev, &cmd, &[pw_session()])?;
+                let mut resp = transmit(dev, &cmd, &[pw_session()])?;
                 let secret = {
                     let (_, params) = response_areas(&resp, 0)?;
                     let (out, _) = take_tpm2b(params).context("TPM2_Unseal out_data")?;
@@ -381,40 +372,106 @@ mod imp {
                 resp.zeroize();
                 Ok(secret)
             })();
-            flush(&mut dev, loaded);
+            flush(dev, loaded);
             result
         })();
-        flush(&mut dev, primary);
+        flush(dev, primary);
         result
     }
 }
 
+pub use ops::MAX_SEAL_BYTES;
+
+/// Seal `secret` to this host's TPM over the platform transport.
+pub fn seal(secret: &[u8]) -> Result<Vec<u8>> {
+    let mut dev = platform::transport()?;
+    ops::seal(&mut dev, secret)
+}
+
+/// Unseal a blob produced by [`seal`] on this same machine.
+pub fn unseal(blob: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    let mut dev = platform::transport()?;
+    ops::unseal(&mut dev, blob)
+}
+
+/// Is a TPM usable here (device present and accessible)?
+pub fn available() -> bool {
+    platform::transport().is_ok()
+}
+
 #[cfg(target_os = "linux")]
-pub use imp::{available, seal, unseal};
+mod platform {
+    use super::Transport;
+    use anyhow::{bail, Context, Result};
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+    };
+    use tpm2_protocol::constant::TPM_MAX_COMMAND_SIZE;
 
-#[cfg(not(target_os = "linux"))]
-mod imp {
-    use anyhow::{bail, Result};
-    use zeroize::Zeroizing;
+    const DEVICE: &str = "/dev/tpmrm0";
 
-    pub fn available() -> bool {
-        false
+    /// The kernel TPM resource manager: write one whole command, read
+    /// back one whole response.
+    pub struct LinuxDevice(File);
+
+    pub fn transport() -> Result<LinuxDevice> {
+        let file =
+            OpenOptions::new().read(true).write(true).open(DEVICE).with_context(|| {
+                format!(
+                    "opening {DEVICE} (no TPM 2.0, or this user lacks access — \
+                     the device node is conventionally root:tss)"
+                )
+            })?;
+        Ok(LinuxDevice(file))
     }
 
-    pub fn seal(_secret: &[u8]) -> Result<Vec<u8>> {
-        bail!("TPM sealing is only supported on linux")
-    }
-
-    pub fn unseal(_blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        bail!(
-            "this keytab is TPM-sealed but TPM unsealing is only supported \
-             on linux; rotate it with `netidx conf ca autorenew --rotate`"
-        )
+    impl Transport for LinuxDevice {
+        fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>> {
+            self.0.write_all(command).context("writing to the TPM")?;
+            // The resource manager hands back the whole response in one
+            // read, but loop on the self-described size to be safe.
+            let mut resp: Vec<u8> = Vec::with_capacity(4096);
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = self.0.read(&mut chunk).context("reading the TPM response")?;
+                if n == 0 {
+                    bail!("TPM closed the connection mid-response");
+                }
+                resp.extend_from_slice(&chunk[..n]);
+                if resp.len() >= 10 {
+                    let total =
+                        u32::from_be_bytes(resp[2..6].try_into().unwrap()) as usize;
+                    if !(10..=TPM_MAX_COMMAND_SIZE).contains(&total) {
+                        bail!("TPM response declares an absurd size {total}");
+                    }
+                    if resp.len() >= total {
+                        break;
+                    }
+                }
+            }
+            Ok(resp)
+        }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub use imp::{available, seal, unseal};
+mod platform {
+    use super::Transport;
+    use anyhow::{bail, Result};
+
+    pub struct NoDevice;
+
+    pub fn transport() -> Result<NoDevice> {
+        bail!("TPM sealing is not supported on this platform yet (linux only)")
+    }
+
+    impl Transport for NoDevice {
+        fn exchange(&mut self, _command: &[u8]) -> Result<Vec<u8>> {
+            bail!("no TPM transport on this platform")
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -430,6 +487,15 @@ mod tests {
         assert!(!is_sealed(b""));
         // A prefix of the magic is not the magic.
         assert!(!is_sealed(&MAGIC[..MAGIC.len() - 1]));
+    }
+
+    #[test]
+    fn random_secrets_are_long_and_distinct() {
+        let a = random_secret();
+        let b = random_secret();
+        assert_eq!(a.len(), 64);
+        assert_ne!(*a, *b);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 
     /// Real hardware round-trip. Runs only where a TPM is reachable
@@ -449,8 +515,6 @@ mod tests {
         assert_eq!(&*out, secret);
         // Corrupting the private area must fail loudly, not produce data.
         let mut bad = blob.clone();
-        let n = bad.len();
-        bad[n - 1] ^= 0xff;
         let last_private_byte = MAGIC.len() + 10;
         bad[last_private_byte] ^= 0xff;
         assert!(unseal(&bad).is_err());
