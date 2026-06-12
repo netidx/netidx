@@ -4,9 +4,13 @@
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
+// Qualified `conf_proto::` uses are all in the unix-only conf-server
+// enrollment path; the items below are cross-platform.
+#[cfg(unix)]
+use netidx_conf::conf_proto;
 use netidx_conf::{
     conf_client, discovery,
-    conf_proto::{self, InfoAuth, NodeKind, Role},
+    conf_proto::{InfoAuth, NodeKind, Role},
     fingerprint::ColorMode,
     netshape::NetShape,
     paths,
@@ -18,7 +22,6 @@ use zeroize::Zeroizing;
 use netidx_conf::tls;
 use std::{
     collections::BTreeMap,
-    io::IsTerminal,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
@@ -463,9 +466,9 @@ pub(crate) struct WorkstationFlags {
     #[arg(long = "netidx-binary")]
     netidx_binary: Option<PathBuf>,
     /// How new private keys are protected at rest: `seal` (bind to
-    /// this machine's TPM), `password` (typed; interactive only), or
-    /// `none`. Default: seal when the host has a usable TPM (prompted
-    /// on a TTY), else none.
+    /// this machine's TPM / Secure Enclave), `password` (typed;
+    /// interactive only), or `none`. Default: seal when the host has
+    /// usable sealing hardware (prompted on a TTY), else none.
     #[arg(long = "key-protection")]
     key_protection: Option<KeyProtArg>,
     /// Skip emitting the default `container` activation unit. By
@@ -1570,15 +1573,15 @@ impl FromStr for KeyProtArg {
 }
 
 /// Decide how a new identity's private key is protected at rest:
-/// **seal** (TPM — the default whenever the host has one), **password**
-/// (typed, keychain + askpass), or **none**.
+/// **seal** (TPM / Secure Enclave — the default whenever the host has
+/// one), **password** (typed, keychain + askpass), or **none**.
 ///
 /// `key_path` is the canonical on-disk location the key will live at —
 /// the keychain entry (password case) is keyed on it. On a non-TTY the
-/// default applies silently: seal when a TPM is usable, none
-/// otherwise. A TPM that fails at seal time degrades to the no-TPM
-/// behavior with a warning — setup must not dead-end on flaky
-/// hardware.
+/// default applies silently: seal when the hardware is usable, none
+/// otherwise. Hardware that fails at seal time degrades to the
+/// no-hardware behavior with a warning — setup must not dead-end on
+/// flaky hardware.
 fn choose_key_protection(
     flag: Option<KeyProtArg>,
     key_path: &Path,
@@ -1601,8 +1604,9 @@ fn choose_key_protection(
             prompt::choice_with_default(
                 &format!(
                     "private key protection for {name} (seal: bind to this \
-                     machine's TPM; password: typed at issue, kept in the \
-                     keychain; none: file modes only)"
+                     machine's {}; password: typed at issue, kept in the \
+                     keychain; none: file modes only)",
+                    netidx_tpm::MECHANISM
                 ),
                 None,
                 options,
@@ -1617,15 +1621,17 @@ fn choose_key_protection(
                 Ok(blob) => {
                     println!(
                         "  the key for {name} will be sealed to this machine's \
-                         TPM — copied anywhere else it is useless"
+                         {} — copied anywhere else it is useless",
+                        netidx_tpm::MECHANISM
                     );
                     Ok(KeyProtection::Sealed { password, blob })
                 }
                 Err(e) => {
                     eprintln!(
-                        "warning: TPM sealing failed ({e:#}); falling back to an \
-                         unprotected key. Re-run once the TPM is usable, or \
-                         choose password protection interactively."
+                        "warning: {} sealing failed ({e:#}); falling back to an \
+                         unprotected key. Re-run once the hardware is usable, or \
+                         choose password protection interactively.",
+                        netidx_tpm::MECHANISM
                     );
                     Ok(KeyProtection::None)
                 }
@@ -1754,7 +1760,11 @@ fn generate_csr_and_wait_for_cert(
     println!("  CSR         (0644): {}", csr_path.display());
     match &protection {
         KeyProtection::Sealed { .. } => {
-            println!("  private key is encrypted; the password is TPM-sealed beside it.");
+            println!(
+                "  private key is encrypted; the password is sealed to this \
+                 machine's {} beside it.",
+                netidx_tpm::MECHANISM
+            );
         }
         KeyProtection::Password { .. } => {
             println!("  private key is encrypted; password saved to the system keychain.");
@@ -1782,6 +1792,7 @@ fn generate_csr_and_wait_for_cert(
 /// scripted installs shouldn't hang waiting for human input.
 #[cfg(unix)]
 fn wait_for_cert_files(cert_path: &Path, trusted_path: &Path) -> Result<()> {
+    use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return check_cert_files_present(cert_path, trusted_path).with_context(|| {
             "non-interactive install: required cert files missing. \
@@ -2072,9 +2083,9 @@ pub(crate) struct ResolverFlags {
     #[arg(long = "no-conf-server")]
     no_conf_server: bool,
     /// How new private keys are protected at rest: `seal` (bind to
-    /// this machine's TPM), `password` (typed; interactive only), or
-    /// `none`. Default: seal when the host has a usable TPM (prompted
-    /// on a TTY), else none.
+    /// this machine's TPM / Secure Enclave), `password` (typed;
+    /// interactive only), or `none`. Default: seal when the host has
+    /// usable sealing hardware (prompted on a TTY), else none.
     #[arg(long = "key-protection")]
     key_protection: Option<KeyProtArg>,
     /// Override the id-map socket path (default
@@ -2387,6 +2398,9 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
 /// This function IS the install-profile matrix — documented in
 /// design/conf-server.md (Install profiles) and exhaustively tested
 /// below; change all three together.
+// cfg(unix): only the unix-gated resolver install stands up conf
+// servers (the CA signer is openssl/unix).
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfPlane {
     /// Set it up. Announce what's happening; don't ask.
@@ -2411,6 +2425,7 @@ enum ConfPlane {
 /// admin's `may_enroll_servers` gate runs at approval), so no admin
 /// needs to be at this keyboard and there is no reason for the join
 /// side of the matrix to differ.
+#[cfg(unix)]
 fn conf_plane_decision(kind: AuthKind, no_conf_server: bool) -> ConfPlane {
     if no_conf_server {
         return ConfPlane::Skip;
@@ -2775,7 +2790,11 @@ fn resolver_tls_generate(
     println!("  trusted CA:  {}", ca_cert.display());
     match &protection {
         KeyProtection::Sealed { .. } => {
-            println!("  private key is encrypted; the password is TPM-sealed beside it.");
+            println!(
+                "  private key is encrypted; the password is sealed to this \
+                 machine's {} beside it.",
+                netidx_tpm::MECHANISM
+            );
         }
         KeyProtection::Password { .. } => {
             println!("  private key is encrypted; password saved to the system keychain.");
@@ -3057,10 +3076,13 @@ fn enroll_conf_server(
         &issued.private_key_pem,
     )? {
         netidx_conf::tls::KeyWrite::Sealed => {
-            println!("  serving key sealed to this machine's TPM");
+            println!("  serving key sealed to this machine's {}", netidx_tpm::MECHANISM);
         }
         netidx_conf::tls::KeyWrite::Plain(e) => {
-            println!("  note: serving key is plaintext (TPM sealing unavailable: {e:#})");
+            println!(
+                "  note: serving key is plaintext ({} sealing unavailable: {e:#})",
+                netidx_tpm::MECHANISM
+            );
         }
     }
     netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
@@ -3139,9 +3161,9 @@ pub(crate) struct PublisherFlags {
     #[arg(long = "units-dir")]
     units_dir: Option<PathBuf>,
     /// How new private keys are protected at rest: `seal` (bind to
-    /// this machine's TPM), `password` (typed; interactive only), or
-    /// `none`. Default: seal when the host has a usable TPM (prompted
-    /// on a TTY), else none.
+    /// this machine's TPM / Secure Enclave), `password` (typed;
+    /// interactive only), or `none`. Default: seal when the host has
+    /// usable sealing hardware (prompted on a TTY), else none.
     #[arg(long = "key-protection")]
     key_protection: Option<KeyProtArg>,
     #[command(flatten)]
@@ -3400,6 +3422,7 @@ mod tests {
     // The install-profile matrix, exhaustively. This test and
     // design/conf-server.md (Install profiles) mirror
     // `conf_plane_decision`; change all three together.
+    #[cfg(unix)]
     #[test]
     fn the_conf_plane_matrix() {
         use AuthKind::*;

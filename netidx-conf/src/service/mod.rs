@@ -141,13 +141,18 @@ pub enum ServiceStatus {
     NotInstalled,
 }
 
+// The name is validated here, before any backend runs, so every
+// platform (including stubs) enforces it — no backend can forget.
 pub fn install(p: &ServiceParams) -> Result<InstalledService> {
+    ensure_valid_service_name(&p.service_name)?;
     platform::install(p)
 }
 pub fn uninstall(p: &ServiceParams) -> Result<()> {
+    ensure_valid_service_name(&p.service_name)?;
     platform::uninstall(p)
 }
 pub fn status(p: &ServiceParams) -> Result<ServiceStatus> {
+    ensure_valid_service_name(&p.service_name)?;
     platform::status(p)
 }
 
@@ -214,6 +219,24 @@ mod tests {
             ensure_valid_service_name("mycompany-netidx").is_ok(),
             "hyphenated names are valid",
         );
+    }
+
+    // Against the public entry points, where the validation lives —
+    // so this holds on every platform, stub backends included. Only
+    // the error path is directly testable: the success path would
+    // actually talk to the init system.
+    #[test]
+    fn install_uninstall_status_reject_invalid_service_name() {
+        let p = ServiceParams {
+            scope: ServiceScope::User,
+            for_user: Some("alice".into()),
+            binary: PathBuf::from("/usr/local/bin/netidx"),
+            service_name: "../../etc/passwd".into(),
+            activation_dir: None,
+        };
+        assert!(install(&p).is_err());
+        assert!(uninstall(&p).is_err());
+        assert!(status(&p).is_err());
     }
 
     #[cfg(target_os = "linux")]

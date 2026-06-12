@@ -117,14 +117,19 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     }
     let sealed = sealed_password_path(path);
     if std::path::Path::new(&sealed).exists() {
-        info!("unsealing password for {} from the TPM ({sealed})", path);
+        info!(
+            "unsealing password for {} from the {} ({sealed})",
+            path,
+            netidx_tpm::MECHANISM
+        );
         let blob = std::fs::read(&sealed)
             .with_context(|| format!("reading sealed password {sealed}"))?;
         let secret = netidx_tpm::unseal(&blob).with_context(|| {
             format!(
-                "unsealing {sealed} — if this host's TPM was cleared or the \
-                 board was replaced, re-issue the key (netidx certificate \
-                 issuance is one command; see `netidx conf ca`)"
+                "unsealing {sealed} — if this host's {} was cleared or the \
+                 hardware was replaced, re-issue the key (netidx certificate \
+                 issuance is one command; see `netidx conf ca`)",
+                netidx_tpm::MECHANISM
             )
         })?;
         let password = String::from_utf8(secret.to_vec())

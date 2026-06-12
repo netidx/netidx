@@ -5,10 +5,7 @@
 //! everything else (file writes, `launchctl` invocations) is shelled
 //! out.
 
-use super::{
-    ensure_valid_service_name, InstalledService, ServiceParams, ServiceScope,
-    ServiceStatus,
-};
+use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
 use anyhow::{Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -123,7 +120,6 @@ fn plist_path(p: &ServiceParams) -> Result<PathBuf> {
 }
 
 pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
-    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     let body = render_plist(p);
     if let Some(parent) = path.parent() {
@@ -138,7 +134,6 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
 }
 
 pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
-    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     // `launchctl bootout` removes the loaded job. If the service was
     // never bootstrapped, bootout errors — best-effort, ignore.
@@ -151,7 +146,6 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
 }
 
 pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    ensure_valid_service_name(&p.service_name)?;
     let path = plist_path(p)?;
     if !path.exists() {
         return Ok(ServiceStatus::NotInstalled);
@@ -331,23 +325,14 @@ mod tests {
     }
 
     #[test]
-    fn install_uninstall_status_reject_invalid_service_name() {
-        let mut p = params(ServiceScope::User);
-        p.service_name = "../escape".into();
-        assert!(install(&p).is_err());
-        assert!(uninstall(&p).is_err());
-        assert!(status(&p).is_err());
-    }
-
-    #[test]
     fn xml_escape_converts_the_five_entities() {
         assert_eq!(
-            platform::quote_exec_arg("a & b < c > d \" e ' f"),
+            quote_exec_arg("a & b < c > d \" e ' f"),
             "a &amp; b &lt; c &gt; d &quot; e &apos; f",
         );
         // Idempotency / round-trip safety on ASCII strings.
-        assert_eq!(platform::quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
+        assert_eq!(quote_exec_arg("/usr/bin/netidx"), "/usr/bin/netidx");
         // Empty in, empty out.
-        assert_eq!(platform::quote_exec_arg(""), "");
+        assert_eq!(quote_exec_arg(""), "");
     }
 }

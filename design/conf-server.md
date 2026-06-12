@@ -242,16 +242,19 @@ The empty policy bounds what the keytab can do *over the wire*; it
 does nothing at rest — the vault is flat, so any slot password
 recovers the master key, making the keytab plus a copy of the CA dir
 an offline CA-key compromise. So `setup_autorenew_slot` seals the
-password to the host's TPM 2.0 when one is usable (`netidx-conf`'s
-`tpm` module): the keytab file becomes a sealed blob that only this
+password to the host's TPM 2.0 when one is usable (the `netidx-tpm`
+crate): the keytab file becomes a sealed blob that only this
 machine's TPM will open, and a stolen disk, leaked backup, or
 decommissioned drive recovers nothing. No TPM ⇒ plaintext fallback
 with a printed note about what that costs.
 
-Mechanics: pure Rust over `/dev/tpmrm0` (the `netidx-tpm` crate on a
-pinned `tpm2-protocol` — no C tss stack, so sealing exists in every
-build and is detected at runtime; the transport sits behind a trait,
-so the Windows port is "add a TBS transport"). The secret is a
+Mechanics: pure Rust (the `netidx-tpm` crate on a pinned
+`tpm2-protocol` — no C tss stack, so sealing exists in every build
+and is detected at runtime). The marshalling is platform-independent;
+the transport sits behind a trait with two implementations: the linux
+kernel resource manager (`/dev/tpmrm0`) and Windows TPM Base Services
+(`Tbsip_Submit_Command` exchanges the same raw frames; raw-dylib
+linkage, so it cross-compiles from linux with no SDK). The secret is a
 `KeyedHash` sealed-data object under the TCG-standard ECC P-256 SRK
 template on the owner hierarchy; `CreatePrimary` deterministically
 re-derives the SRK each time, so the TPM holds no persistent state.
@@ -261,9 +264,31 @@ at-rest/offline theft, not live-host compromise — root on the running
 box can unseal, exactly as it could have read the plaintext. Unseal
 failure (TPM cleared, board swapped) is a screaming error whose
 message names the fix: `netidx conf ca autorenew --rotate`.
-Operational note: the device node is root:tss, so the CA user needs
-`tss` group membership — without it, setup falls back to plaintext
-and says so.
+Operational note: on linux the device node is root:tss, so the CA
+user needs `tss` group membership — without it, setup falls back to
+plaintext and says so. On Windows, TBS brokers access for any user;
+no group dance.
+
+**macOS** has no TPM; the same `seal`/`unseal` contract rides the
+**Secure Enclave** with the same blob philosophy: each seal generates
+a fresh transient SE P-256 key, ECIES-encrypts the secret under it
+(`SecKeyCreateEncryptedData`, the X9.63-SHA256/AES-GCM variant
+CryptoKit uses), and embeds the SEP-wrapped private key — the CTK
+token object id, what CryptoKit calls `dataRepresentation` — in the
+blob itself. Nothing touches the keychain, deliberately: SE keys can
+only persist in the data-protection keychain, which demands an
+application-identifier entitlement that cargo-installed (ad-hoc
+signed) binaries don't have — discovered empirically as
+errSecMissingEntitlement; the in-blob design sidesteps the problem
+and has no system state to lose. Access policy: after-first-unlock,
+this-device-only, **no user-presence gate** (a daemon stuck on a
+biometric prompt is the same outage-on-a-delay-timer as PCR
+brittleness). SE blobs carry a distinct magic, so a sidecar carried
+across platforms fails with "sealed elsewhere — re-issue", not a
+parse error. Pure Rust via `security-framework` (OS frameworks only —
+no Swift, no C library); messages name the mechanism via
+`netidx_tpm::MECHANISM` so a Mac operator reads "Secure Enclave", not
+"TPM".
 
 ### TLS private keys at rest (seal | password | none)
 
@@ -285,7 +310,8 @@ through the one loader.
 At issue, every flow asks once — `choose_key_protection`, also the
 `--key-protection seal|password|none` flag:
 
-- **seal** (default whenever a TPM is usable, including headless):
+- **seal** (default whenever sealing hardware is usable — TPM on
+  linux/windows, Secure Enclave on macOS — including headless):
   random password, encrypted key, sealed sidecar. The identity is
   machine-bound; a stolen disk or backup holds nothing usable.
 - **password**: typed at issue, saved to the system keychain (keyed on

@@ -86,6 +86,13 @@ rust_decimal = { version = "1", features = [
 rustls = "0.23"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
+# Pure-Rust bindings to macOS Security.framework / CoreFoundation (no
+# C library — the frameworks ship with the OS). The -sys crate covers
+# the raw SecKey calls the wrapper doesn't expose; versions track
+# what security-framework 3.x itself uses.
+core-foundation = "0.10"
+security-framework = { version = "3", features = ["OSX_10_15"] }
+security-framework-sys = "2"
 seq-macro = "0.3"
 serde_derive = "1"
 serde_json = "1"

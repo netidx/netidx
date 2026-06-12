@@ -6,10 +6,7 @@
 //! out — there's no Rust crate worth pulling in for the small number
 //! of `systemctl` commands we need.
 
-use super::{
-    ensure_valid_service_name, InstalledService, ServiceParams, ServiceScope,
-    ServiceStatus,
-};
+use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
 use anyhow::{Context, Result};
 use std::{
     path::PathBuf,
@@ -148,7 +145,6 @@ fn service_id(p: &ServiceParams, for_user: &str) -> String {
 }
 
 pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
-    ensure_valid_service_name(&p.service_name)?;
     let path = unit_path(p)?;
     let body = render_unit(p);
     if let Some(parent) = path.parent() {
@@ -169,7 +165,6 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
 }
 
 pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
-    ensure_valid_service_name(&p.service_name)?;
     let for_user = resolve_for_user(p)?;
     let id = service_id(p, &for_user);
     let path = unit_path(p)?;
@@ -185,7 +180,6 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
 }
 
 pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    ensure_valid_service_name(&p.service_name)?;
     let path = unit_path(p)?;
     if !path.exists() {
         return Ok(ServiceStatus::NotInstalled);
@@ -354,15 +348,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn install_uninstall_status_reject_invalid_service_name() {
-        // The validator is called from all three entry points; we
-        // can only directly exercise the error path because the
-        // success path would actually try to talk to systemd.
-        let mut p = params(ServiceScope::User);
-        p.service_name = "../../etc/passwd".into();
-        assert!(install(&p).is_err());
-        assert!(uninstall(&p).is_err());
-        assert!(status(&p).is_err());
-    }
 }

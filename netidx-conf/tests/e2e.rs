@@ -85,6 +85,14 @@ fn ensure_xdg_redirect() {
         // env var is stable.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", td.path());
+            // macOS ignores XDG: dirs::config_dir() there is
+            // $HOME/Library/Application Support, so redirect HOME too.
+            // Without this every run installs test identities — and,
+            // fatally, the revocation test's crl.pem — into the real
+            // config dir, where they poison the NEXT run's resolver
+            // (a stale CRL from a dead CA refuses every handshake).
+            #[cfg(target_os = "macos")]
+            std::env::set_var("HOME", td.path());
         }
         td
     });

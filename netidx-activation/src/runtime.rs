@@ -5,7 +5,7 @@
 //! `netidx` binary's `main`.
 
 use crate::file::{ProcessCfg, Restart, Trigger, Unit};
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
 use netidx::{

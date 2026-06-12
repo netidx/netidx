@@ -30,7 +30,20 @@
       "Bash(pkg-config --modversion tss2-esys)",
       "Read(//dev/**)",
       "Read(//home/eric/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tpm2-protocol-0.19.0/src/frame/**)",
-      "Bash(sg tss *)"
+      "Bash(sg tss *)",
+      "Bash(rustup target *)",
+      "Bash(wine --version)",
+      "Bash(TMPDIR=/home/eric/tmp/cc-tmp cargo build -p netidx-tools --target x86_64-pc-windows-gnu)",
+      "Bash(WINEDEBUG=+loaddll,+module timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
+      "Bash(sed -n '1770,1800p' /home/eric/proj/netidx/netidx-tools/src/conf/init.rs)",
+      "Bash(sed -n '2950,2990p' /home/eric/proj/netidx/netidx-tools/src/conf/init.rs)",
+      "Bash(sed -n '5,20p' /home/eric/proj/netidx/netidx-tools/src/conf/uninstall.rs)",
+      "Bash(sed -n '10,20p' /home/eric/proj/netidx/netidx-tools/src/conf/service.rs)",
+      "Bash(sed -n '3395,3425p' /home/eric/proj/netidx/netidx-tools/src/conf/init.rs)",
+      "Bash(WINEDEBUG=+loaddll timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
+      "Bash(timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
+      "Bash(WINEDEBUG=+module timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
+      "Bash(x86_64-w64-mingw32-objdump -x /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)"
     ],
     "deny": [],
     "ask": []

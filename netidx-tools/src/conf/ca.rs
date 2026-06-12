@@ -458,16 +458,18 @@ pub(super) fn setup_autorenew_slot(
         Ok(blob) => {
             atomic::write_atomic(&keytab, &blob, 0o600)?;
             println!(
-                "  the keytab is sealed to this machine's TPM — copied \
-                 anywhere else (disk image, backup) it is useless"
+                "  the keytab is sealed to this machine's {} — copied \
+                 anywhere else (disk image, backup) it is useless",
+                netidx_tpm::MECHANISM
             );
         }
         Err(e) => {
             atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
             println!(
-                "  note: the keytab is plaintext (TPM sealing unavailable: \
+                "  note: the keytab is plaintext ({} sealing unavailable: \
                  {e:#}). It still works, but treat any copy of it as a copy \
-                 of the CA key."
+                 of the CA key.",
+                netidx_tpm::MECHANISM
             );
         }
     }

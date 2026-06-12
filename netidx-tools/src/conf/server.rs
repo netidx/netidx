@@ -111,10 +111,13 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
         &kc.private_key_pem,
     )? {
         netidx_conf::tls::KeyWrite::Sealed => {
-            println!("  serving key sealed to this machine's TPM");
+            println!("  serving key sealed to this machine's {}", netidx_tpm::MECHANISM);
         }
         netidx_conf::tls::KeyWrite::Plain(e) => {
-            println!("  note: serving key is plaintext (TPM sealing unavailable: {e:#})");
+            println!(
+                "  note: serving key is plaintext ({} sealing unavailable: {e:#})",
+                netidx_tpm::MECHANISM
+            );
         }
     }
 

@@ -507,11 +507,11 @@ mod tests {
     /// sidecar the way the install flows do, and load it back through
     /// `netidx::tls::load_private_key` exactly as a starting resolver
     /// would — no keychain, no askpass, no human. Skips silently where
-    /// no TPM is reachable.
+    /// no sealing hardware is reachable.
     #[test]
     fn sealed_key_loads_through_netidx_tls() {
         if !netidx_tpm::available() {
-            eprintln!("skipping: no usable TPM on this host");
+            eprintln!("skipping: no usable sealing hardware on this host");
             return;
         }
         let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();

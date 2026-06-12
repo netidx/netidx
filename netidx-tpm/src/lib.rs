@@ -25,24 +25,56 @@
 //! certificate issuance is one command, so keys are disposable.
 //!
 //! The command marshalling is pure Rust ([`tpm2-protocol`]) and
-//! compiles everywhere; only the *transport* is per-platform. Today
-//! that's the linux kernel resource manager (`/dev/tpmrm0`, note the
-//! device node is conventionally root:tss); a Windows TBS transport
-//! ([`Tbsip_Submit_Command`] takes the same raw buffers) slots in
-//! behind [`Transport`] without touching anything else. On platforms
-//! with no transport, [`available`] is `false` and [`seal`]/[`unseal`]
-//! return honest errors; callers fall back to their plaintext path.
+//! compiles everywhere; only the *transport* is per-platform: the
+//! linux kernel resource manager (`/dev/tpmrm0`, note the device node
+//! is conventionally root:tss) and Windows TPM Base Services
+//! (`Tbsip_Submit_Command` takes the same raw frames).
+//!
+//! macOS has no TPM; there the same [`seal`]/[`unseal`] contract is
+//! kept by the **Secure Enclave** instead, with the same blob shape
+//! as the TPM path: each seal generates a fresh transient SE P-256
+//! key, ECIES-encrypts the secret under it, and stores the key's
+//! SEP-wrapped private material *inside the blob* (the CTK token
+//! object id — what CryptoKit calls `dataRepresentation`). Nothing
+//! touches the keychain, so no code-signing entitlement is needed,
+//! and there is no system state to lose: the blob is self-contained
+//! and only this machine's enclave can unwrap it. No user-presence
+//! gate, accessible after first unlock — a daemon that can't start
+//! unattended is an outage on a delay timer.
+//!
+//! On platforms with neither, [`available`] is `false` and
+//! [`seal`]/[`unseal`] return honest errors; callers fall back to
+//! their plaintext path.
 
 use anyhow::Result;
 
-/// Marker prefixed to sealed files. Contains a NUL so it can never
-/// collide with a plaintext secret (which is printable text).
+/// Marker prefixed to TPM-sealed files. Contains a NUL so it can
+/// never collide with a plaintext secret (which is printable text).
 pub const MAGIC: &[u8] = b"#netidx-tpm-sealed-v1\0";
 
-/// Does `data` carry a TPM-sealed payload (vs a plaintext secret)?
+/// Marker prefixed to Secure-Enclave-sealed files (macOS). Same NUL
+/// trick. A distinct magic means a blob carried to the wrong platform
+/// fails with "sealed elsewhere — re-issue", not a parse error.
+pub const SE_MAGIC: &[u8] = b"#netidx-se-sealed-v1\0";
+
+/// Does `data` carry a sealed payload (vs a plaintext secret),
+/// whichever platform sealed it?
 pub fn is_sealed(data: &[u8]) -> bool {
-    data.starts_with(MAGIC)
+    data.starts_with(MAGIC) || data.starts_with(SE_MAGIC)
 }
+
+/// What does the sealing on this platform — for user-facing messages
+/// ("serving key sealed to this machine's {MECHANISM}").
+#[cfg(target_os = "macos")]
+pub const MECHANISM: &str = "Secure Enclave";
+#[cfg(not(target_os = "macos"))]
+pub const MECHANISM: &str = "TPM";
+
+/// Largest secret [`seal`] accepts, on every platform. The number is
+/// the sealed-data capacity every TPM 2.0 guarantees (MAX_SYM_DATA);
+/// the Secure Enclave's ECIES wouldn't care, but one portable
+/// contract beats per-platform limits a caller would have to probe.
+pub const MAX_SEAL_BYTES: usize = 128;
 
 /// A long random secret (256 bits, lowercase hex — printable, so it
 /// composes with anything that expects a password string). Used as the
@@ -60,11 +92,15 @@ pub fn random_secret() -> zeroize::Zeroizing<String> {
 }
 
 /// One marshalled TPM command in, one complete raw response frame out.
-/// The only piece of this crate that touches a platform API.
+/// The only piece of the TPM path that touches a platform API. Not
+/// defined on macOS — the Secure Enclave doesn't speak TPM2 frames;
+/// its platform module implements seal/unseal directly.
+#[cfg(not(target_os = "macos"))]
 pub trait Transport {
     fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>>;
 }
 
+#[cfg(not(target_os = "macos"))]
 mod ops {
     use super::Transport;
     use anyhow::{anyhow, bail, Context, Result};
@@ -87,14 +123,14 @@ mod ops {
     };
     use zeroize::{Zeroize, Zeroizing};
 
-    /// Sealed-data capacity every TPM 2.0 guarantees (MAX_SYM_DATA).
-    /// The protocol types allow more, but a portable seal must not.
-    pub const MAX_SEAL_BYTES: usize = 128;
+    use super::MAX_SEAL_BYTES;
 
     /// The empty-password authorization session (TPM_RS_PW). We assume
-    /// an empty owner-hierarchy auth, which is how every mainstream
-    /// distro ships; a site that sets an owner password gets a clear
-    /// TPM_RC_BAD_AUTH and falls back to its plaintext path.
+    /// an empty owner-hierarchy auth: how every mainstream linux
+    /// distro ships, and how modern Windows provisions TPM 2.0 (it
+    /// randomizes only lockoutAuth). A site that sets an owner
+    /// password gets a clear TPM_RC_BAD_AUTH and falls back to its
+    /// plaintext path.
     fn pw_session() -> TpmsAuthCommand {
         TpmsAuthCommand {
             session_handle: (TpmRh::Pw as u32).into(),
@@ -347,6 +383,12 @@ mod ops {
 
     pub fn unseal(dev: &mut dyn Transport, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let Some(body) = blob.strip_prefix(super::MAGIC) else {
+            if blob.starts_with(super::SE_MAGIC) {
+                bail!(
+                    "this blob was sealed by a Mac's Secure Enclave, which only \
+                     that machine can open — re-issue the credential on this host"
+                );
+            }
             bail!("not a netidx TPM-sealed blob (bad magic)");
         };
         let (private, rest) = take_tpm2b(body).context("sealed blob private area")?;
@@ -380,23 +422,38 @@ mod ops {
     }
 }
 
-pub use ops::MAX_SEAL_BYTES;
-
-/// Seal `secret` to this host's TPM over the platform transport.
+/// Seal `secret` to this host's TPM over the platform transport (or
+/// the Secure Enclave on macOS).
+#[cfg(not(target_os = "macos"))]
 pub fn seal(secret: &[u8]) -> Result<Vec<u8>> {
     let mut dev = platform::transport()?;
     ops::seal(&mut dev, secret)
 }
+#[cfg(target_os = "macos")]
+pub fn seal(secret: &[u8]) -> Result<Vec<u8>> {
+    platform::seal(secret)
+}
 
 /// Unseal a blob produced by [`seal`] on this same machine.
+#[cfg(not(target_os = "macos"))]
 pub fn unseal(blob: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     let mut dev = platform::transport()?;
     ops::unseal(&mut dev, blob)
 }
+#[cfg(target_os = "macos")]
+pub fn unseal(blob: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    platform::unseal(blob)
+}
 
-/// Is a TPM usable here (device present and accessible)?
+/// Is sealing usable here (TPM present and accessible, or a working
+/// Secure Enclave on macOS)?
+#[cfg(not(target_os = "macos"))]
 pub fn available() -> bool {
     platform::transport().is_ok()
+}
+#[cfg(target_os = "macos")]
+pub fn available() -> bool {
+    platform::available()
 }
 
 #[cfg(target_os = "linux")]
@@ -455,7 +512,291 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+mod platform {
+    use super::Transport;
+    use anyhow::{anyhow, bail, Error, Result};
+    use std::ffi::c_void;
+    use tpm2_protocol::constant::TPM_MAX_COMMAND_SIZE;
+    use windows::Win32::System::TpmBaseServices::{
+        TBS_COMMAND_LOCALITY_ZERO, TBS_COMMAND_PRIORITY_NORMAL, TBS_CONTEXT_PARAMS,
+        TBS_CONTEXT_PARAMS2, TBS_CONTEXT_PARAMS2_0, TBS_CONTEXT_VERSION_TWO, TBS_SUCCESS,
+        Tbsi_Context_Create, Tbsip_Context_Close, Tbsip_Submit_Command,
+    };
+
+    /// TPM Base Services — the Windows TPM resource manager.
+    /// `Tbsip_Submit_Command` exchanges the same raw TPM2 frames the
+    /// linux device does; TBS virtualizes transient handles per
+    /// context just like tpmrm0.
+    pub struct TbsDevice(*mut c_void);
+
+    pub fn transport() -> Result<TbsDevice> {
+        let params = TBS_CONTEXT_PARAMS2 {
+            version: TBS_CONTEXT_VERSION_TWO,
+            // includeTpm20 is bit 2 of the flags word. We never speak
+            // TPM 1.2 — on a 1.2-only machine context creation fails
+            // and the caller takes its plaintext path.
+            Anonymous: TBS_CONTEXT_PARAMS2_0 { asUINT32: 1 << 2 },
+        };
+        let mut ctx: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe {
+            // The API takes the v1 struct type; v2 extends it in place
+            // (the version field is how TBS tells them apart).
+            Tbsi_Context_Create(
+                &params as *const TBS_CONTEXT_PARAMS2 as *const TBS_CONTEXT_PARAMS,
+                &mut ctx,
+            )
+        };
+        if rc != TBS_SUCCESS || ctx.is_null() {
+            return Err(tbs_error("opening a TBS context", rc));
+        }
+        Ok(TbsDevice(ctx))
+    }
+
+    impl Drop for TbsDevice {
+        fn drop(&mut self) {
+            unsafe { Tbsip_Context_Close(self.0) };
+        }
+    }
+
+    impl Transport for TbsDevice {
+        fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>> {
+            let mut resp = vec![0u8; TPM_MAX_COMMAND_SIZE];
+            // In: buffer capacity. Out: actual response length.
+            let mut len = resp.len() as u32;
+            let rc = unsafe {
+                Tbsip_Submit_Command(
+                    self.0,
+                    // User mode may only use locality zero.
+                    TBS_COMMAND_LOCALITY_ZERO,
+                    TBS_COMMAND_PRIORITY_NORMAL,
+                    command,
+                    resp.as_mut_ptr(),
+                    &mut len,
+                )
+            };
+            if rc != TBS_SUCCESS {
+                return Err(tbs_error("submitting the TPM command", rc));
+            }
+            let len = len as usize;
+            if len > resp.len() {
+                bail!("TBS declared a response longer than the buffer it filled");
+            }
+            resp.truncate(len);
+            Ok(resp)
+        }
+    }
+
+    /// Name the TBS facility errors an operator can act on; anything
+    /// else is reported as the raw HRESULT (they're all in tbs.h).
+    fn tbs_error(doing: &str, rc: u32) -> Error {
+        let detail = match rc {
+            0x8028400F => "no TPM 2.0 on this machine (TBS_E_TPM_NOT_FOUND)",
+            0x80284008 => {
+                "the TPM Base Services service is not running (TBS_E_SERVICE_NOT_RUNNING)"
+            }
+            0x8028400B => "TPM Base Services is still starting (TBS_E_SERVICE_START_PENDING)",
+            0x80284010 => "TPM Base Services is disabled (TBS_E_SERVICE_DISABLED)",
+            0x80284012 => "access to the TPM was denied (TBS_E_ACCESS_DENIED)",
+            0x80280400 => {
+                "the command is on the TBS blocked-commands list (TPM_E_COMMAND_BLOCKED)"
+            }
+            rc => return anyhow!("{doing}: TBS error {rc:#010x}"),
+        };
+        anyhow!("{doing}: {detail}")
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use anyhow::{anyhow, bail, Result};
+    use core_foundation::{
+        base::TCFType, data::CFData, dictionary::CFDictionary, string::CFString,
+    };
+    use security_framework::{
+        access_control::{ProtectionMode, SecAccessControl},
+        key::{Algorithm, GenerateKeyOptions, KeyType, SecKey, Token},
+    };
+    use security_framework_sys::{
+        item::{
+            kSecAttrKeyClass, kSecAttrKeyClassPrivate, kSecAttrKeyType,
+            kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave,
+        },
+        key::{SecKeyCopyAttributes, SecKeyCreateWithData},
+    };
+    use zeroize::Zeroizing;
+
+    /// Apple's recommended ECIES for SE keys (ephemeral ECDH +
+    /// X9.63-SHA256 KDF + AES-GCM) — what CryptoKit uses underneath.
+    /// Encryption needs only the public half; the enclave is touched
+    /// at decrypt.
+    const ALGORITHM: Algorithm = Algorithm::ECIESEncryptionCofactorVariableIVX963SHA256AESGCM;
+
+    /// kSecAccessControlPrivateKeyUsage — mandatory for Secure
+    /// Enclave keys; the access control governs private-key use.
+    /// security-framework takes raw flags and doesn't re-export the
+    /// constant (SecAccessControlCreateFlags in Apple's headers).
+    const PRIVATE_KEY_USAGE: usize = 1 << 30;
+
+    /// CryptoTokenKit's token-object-id attribute: the SEP-wrapped
+    /// private key material — exactly what CryptoKit exposes as an SE
+    /// key's `dataRepresentation`. Not in the public headers, but it
+    /// is the persistence format of every CryptoKit Secure Enclave
+    /// key in every shipped app, so it is frozen ABI in practice.
+    /// Verified empirically on this design's bring-up: a key
+    /// reconstituted via `{kSecAttrTokenID: SE, "toid": blob}` has
+    /// the same public key and decrypts what the original sealed.
+    /// (Beware: `SecKeyCreateWithData` WITHOUT the toid attribute
+    /// silently generates a fresh key instead of failing.)
+    const TOID: &str = "toid";
+
+    /// A fresh transient SE key — never persisted anywhere; its
+    /// wrapped private material travels inside the sealed blob, just
+    /// like a TPM sealed object's private area. AfterFirstUnlock +
+    /// ThisDeviceOnly, and deliberately NO user-presence gate — same
+    /// reasoning as no PCR binding on the TPM path: the threat model
+    /// is offline theft, not live-host compromise, and a daemon stuck
+    /// on a biometric prompt nobody will answer is an outage on a
+    /// delay timer.
+    fn fresh_key() -> Result<SecKey> {
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly),
+            PRIVATE_KEY_USAGE,
+        )
+        .map_err(|e| anyhow!("creating the sealing key's access control: {e}"))?;
+        let mut opts = GenerateKeyOptions::default();
+        opts.set_key_type(KeyType::ec());
+        opts.set_size_in_bits(256);
+        opts.set_token(Token::SecureEnclave);
+        // NB: no set_location → kSecAttrIsPermanent unset → the key
+        // exists only in this process and the blob we serialize.
+        opts.set_access_control(access);
+        SecKey::new(&opts).map_err(|e| {
+            anyhow!("generating a Secure Enclave key (no enclave on this machine?): {e}")
+        })
+    }
+
+    /// Pull the SEP-wrapped key material out of a transient SE key.
+    fn extract_toid(key: &SecKey) -> Result<Vec<u8>> {
+        unsafe {
+            let attrs: CFDictionary =
+                CFDictionary::wrap_under_create_rule(SecKeyCopyAttributes(
+                    key.as_concrete_TypeRef(),
+                ) as _);
+            let toid_key = CFString::from_static_string(TOID);
+            let v = attrs
+                .find(toid_key.as_concrete_TypeRef() as *const _)
+                .ok_or_else(|| anyhow!("SE key attributes carry no token object id"))?;
+            Ok(CFData::wrap_under_get_rule(*v as _).bytes().to_vec())
+        }
+    }
+
+    /// Load the SEP-wrapped key material back into a usable key. Only
+    /// the enclave that wrapped it can — that is the machine binding.
+    fn reconstitute(toid: &[u8]) -> Result<SecKey> {
+        unsafe {
+            let attrs = CFDictionary::from_CFType_pairs(&[
+                (
+                    CFString::wrap_under_get_rule(kSecAttrTokenID).as_CFType(),
+                    CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave).as_CFType(),
+                ),
+                (
+                    CFString::wrap_under_get_rule(kSecAttrKeyType).as_CFType(),
+                    CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
+                ),
+                (
+                    CFString::wrap_under_get_rule(kSecAttrKeyClass).as_CFType(),
+                    CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate).as_CFType(),
+                ),
+                (
+                    CFString::from_static_string(TOID).as_CFType(),
+                    CFData::from_buffer(toid).as_CFType(),
+                ),
+            ]);
+            let mut error = std::ptr::null_mut();
+            let key = SecKeyCreateWithData(
+                CFData::from_buffer(&[]).as_concrete_TypeRef(),
+                attrs.as_concrete_TypeRef() as _,
+                &mut error,
+            );
+            if key.is_null() {
+                let e = core_foundation::base::CFType::wrap_under_create_rule(error as _);
+                bail!(
+                    "the Secure Enclave could not load the sealed key — sealed on \
+                     another machine, or this Mac's enclave was reset? re-issue the \
+                     credential on this host ({e:?})"
+                );
+            }
+            Ok(SecKey::wrap_under_create_rule(key))
+        }
+    }
+
+    /// Blob layout after [`super::SE_MAGIC`]: u16 BE toid length,
+    /// the toid, then the ECIES ciphertext.
+    pub fn seal(secret: &[u8]) -> Result<Vec<u8>> {
+        // Mirror the TPM path's portable limit so the public contract
+        // is one contract (ECIES itself wouldn't care).
+        if secret.len() > super::MAX_SEAL_BYTES {
+            bail!(
+                "cannot seal {} bytes; the portable limit is {} bytes",
+                secret.len(),
+                super::MAX_SEAL_BYTES
+            );
+        }
+        let key = fresh_key()?;
+        let toid = extract_toid(&key)?;
+        let toid_len = u16::try_from(toid.len())
+            .map_err(|_| anyhow!("absurd token object id size {}", toid.len()))?;
+        let public = key
+            .public_key()
+            .ok_or_else(|| anyhow!("the sealing key has no public half"))?;
+        let ct = public
+            .encrypt_data(ALGORITHM, secret)
+            .map_err(|e| anyhow!("Secure Enclave encrypt: {e}"))?;
+        let mut blob =
+            Vec::with_capacity(super::SE_MAGIC.len() + 2 + toid.len() + ct.len());
+        blob.extend_from_slice(super::SE_MAGIC);
+        blob.extend_from_slice(&toid_len.to_be_bytes());
+        blob.extend_from_slice(&toid);
+        blob.extend_from_slice(&ct);
+        Ok(blob)
+    }
+
+    pub fn unseal(blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let Some(body) = blob.strip_prefix(super::SE_MAGIC) else {
+            if blob.starts_with(super::MAGIC) {
+                bail!(
+                    "this blob was sealed by a TPM, which only that machine can \
+                     open — re-issue the credential on this host"
+                );
+            }
+            bail!("not a netidx sealed blob (bad magic)");
+        };
+        if body.len() < 2 {
+            bail!("truncated sealed blob");
+        }
+        let (len, rest) = body.split_at(2);
+        let toid_len = u16::from_be_bytes(len.try_into().unwrap()) as usize;
+        if rest.len() < toid_len {
+            bail!("sealed blob truncated inside the wrapped key");
+        }
+        let (toid, ct) = rest.split_at(toid_len);
+        let key = reconstitute(toid)?;
+        let secret = key
+            .decrypt_data(ALGORITHM, ct)
+            .map_err(|e| anyhow!("Secure Enclave decrypt: {e}"))?;
+        Ok(Zeroizing::new(secret))
+    }
+
+    /// Generating a transient key IS the probe — it leaves nothing
+    /// behind, and a Mac without a Secure Enclave (or with one the OS
+    /// can't reach) fails right here.
+    pub fn available() -> bool {
+        fresh_key().is_ok()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 mod platform {
     use super::Transport;
     use anyhow::{bail, Result};
@@ -463,7 +804,7 @@ mod platform {
     pub struct NoDevice;
 
     pub fn transport() -> Result<NoDevice> {
-        bail!("TPM sealing is not supported on this platform yet (linux only)")
+        bail!("no sealing mechanism for this platform yet (supported: linux, windows, macos)")
     }
 
     impl Transport for NoDevice {
@@ -513,10 +854,12 @@ mod tests {
         assert!(is_sealed(&blob));
         let out = unseal(&blob).expect("unseal");
         assert_eq!(&*out, secret);
-        // Corrupting the private area must fail loudly, not produce data.
+        // Corrupting the payload must fail loudly, not produce data.
+        // The last byte sits in the TPM public area (perturbs the
+        // object name) or the SE blob's GCM tag — both must reject.
         let mut bad = blob.clone();
-        let last_private_byte = MAGIC.len() + 10;
-        bad[last_private_byte] ^= 0xff;
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
         assert!(unseal(&bad).is_err());
     }
 }

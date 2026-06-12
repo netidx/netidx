@@ -13,7 +13,10 @@ use netidx_conf::service::{
     self, ServiceParams, ServiceScope, ServiceStatus,
 };
 use clap::{Args, Subcommand};
-use std::{io::IsTerminal, path::PathBuf, process::Command};
+use std::{io::IsTerminal, path::PathBuf};
+// `Command` only drives the unix sudo re-exec path.
+#[cfg(unix)]
+use std::process::Command;
 
 use super::prompt;
 

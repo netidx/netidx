@@ -6,15 +6,23 @@
 //! and prompts the operator before deleting anything (unless
 //! `--yes`).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use netidx_conf::{
     service::ServiceScope,
     uninstall::{self, UninstallParams, UninstallReport},
 };
 use clap::Args;
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
 
-use super::{prompt, service::{self as svc_cli, ELEVATED_ENV, ScopeArg}};
+use super::{prompt, service::{self as svc_cli, ScopeArg}};
+// Only the unix sudo re-exec path builds commands or adds error
+// context.
+#[cfg(unix)]
+use super::service::ELEVATED_ENV;
+#[cfg(unix)]
+use anyhow::Context;
+#[cfg(unix)]
+use std::process::Command;
 
 #[derive(Args, Debug)]
 pub(crate) struct Params {
