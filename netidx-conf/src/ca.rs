@@ -32,7 +32,6 @@ use openssl::{
         },
     },
 };
-use parking_lot::Mutex;
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
@@ -193,6 +192,9 @@ pub struct IssueParams {
     /// somewhere a netidx process can find it (e.g. the system
     /// keychain via `netidx::tls::save_password_for_key`).
     pub password: Option<String>,
+    /// The X.509 serial to assign. The daemon allocates these from its
+    /// in-memory counter; bootstrap/CLI callers pass a fresh value.
+    pub serial: u64,
 }
 
 /// Output of `Ca::issue`.
@@ -203,18 +205,14 @@ pub struct IssuedFiles {
     pub certificate: PathBuf,
 }
 
-/// A loaded local certificate authority.
-///
-/// The `serial_lock` serializes concurrent `issue` / `sign_request`
-/// calls so that the on-disk serial counter is never read-modified-
-/// written by two threads in parallel (which would silently emit two
-/// certificates with the same X.509 serial, a CA contract violation).
+/// A loaded local certificate authority. Pure crypto: serial allocation
+/// and the issuance index belong to the daemon's `ca_store`, so callers
+/// hand `sign_request`/`issue` a serial.
 #[derive(Debug)]
 pub struct Ca {
     directory: PathBuf,
     cert: X509,
     pkey: PKey<Private>,
-    serial_lock: Mutex<()>,
 }
 
 impl Ca {
@@ -242,13 +240,7 @@ impl Ca {
         let cert_pem = cert.to_pem().context("encoding CA cert")?;
         atomic::write_atomic(&key_path, &key_pem, 0o600)?;
         atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
-        write_next_serial(&params.directory, 2)?;
-        Ok(Self {
-            directory: params.directory.clone(),
-            cert,
-            pkey,
-            serial_lock: Mutex::new(()),
-        })
+        Ok(Self { directory: params.directory.clone(), cert, pkey })
     }
 
     /// Create a CA whose key goes into a [`crate::ca_vault`] rather than
@@ -265,13 +257,7 @@ impl Ca {
         let key_pem = pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?;
         let cert_pem = cert.to_pem().context("encoding CA cert")?;
         atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
-        write_next_serial(&params.directory, 2)?;
-        let ca = Self {
-            directory: params.directory.clone(),
-            cert,
-            pkey,
-            serial_lock: Mutex::new(()),
-        };
+        let ca = Self { directory: params.directory.clone(), cert, pkey };
         Ok((ca, zeroize::Zeroizing::new(key_pem)))
     }
 
@@ -375,7 +361,7 @@ impl Ca {
             .with_context(|| format!("parsing {:?}", key_path))?;
         let cert = X509::from_pem(&cert_pem)
             .with_context(|| format!("parsing {:?}", cert_path))?;
-        Ok(Self { directory, cert, pkey, serial_lock: Mutex::new(()) })
+        Ok(Self { directory, cert, pkey })
     }
 
     /// Build a CA from an in-memory **unencrypted** PKCS#8 key PEM and
@@ -390,7 +376,7 @@ impl Ca {
     ) -> Result<Self> {
         let pkey = parse_key_pem(key_pem, None).context("parsing CA key PEM")?;
         let cert = X509::from_pem(cert_pem).context("parsing CA cert PEM")?;
-        Ok(Self { directory, cert, pkey, serial_lock: Mutex::new(()) })
+        Ok(Self { directory, cert, pkey })
     }
 
     /// The CA cert in PEM form (the trust anchor consumers pin).
@@ -406,11 +392,16 @@ impl Ca {
     /// Sign a CSR. Returns the signed leaf certificate as PEM bytes.
     /// The `san` argument overrides whatever the CSR claims — the CA
     /// is the sole authority on SAN content.
+    /// Sign a CSR with the caller-allocated `serial`, returning the leaf
+    /// cert PEM. Pure: the issuance index, the durable record, and serial
+    /// allocation all live in the daemon's `ca_store` (the daemon owns
+    /// the CA state), so this only does the cryptography.
     pub fn sign_request(
         &self,
         csr_pem: &[u8],
         san: &[SanEntry],
         validity_days: u32,
+        serial: u64,
     ) -> Result<Vec<u8>> {
         let req = X509Req::from_pem(csr_pem).context("parsing CSR")?;
         // Verify the CSR was signed by the key inside it (proof of
@@ -444,18 +435,11 @@ impl Ca {
             validity_days.min((remaining - 1) as u32)
         };
 
-        let serial_n = {
-            // Brief read-modify-write of the on-disk counter; held
-            // long enough to keep two concurrent `issue` calls from
-            // colliding on the same number.
-            let _g = self.serial_lock.lock();
-            next_serial(&self.directory)?
-        };
         let mut cert = X509Builder::new()?;
         cert.set_version(2)?;
-        let serial =
-            BigNum::from_dec_str(&serial_n.to_string())?.to_asn1_integer()?;
-        cert.set_serial_number(&serial)?;
+        let serial_asn1 =
+            BigNum::from_dec_str(&serial.to_string())?.to_asn1_integer()?;
+        cert.set_serial_number(&serial_asn1)?;
         cert.set_subject_name(req.subject_name())?;
         cert.set_issuer_name(self.cert.subject_name())?;
         cert.set_pubkey(&req_pubkey)?;
@@ -484,33 +468,6 @@ impl Ca {
         cert.append_extension(san_ext)?;
         cert.sign(&self.pkey, MessageDigest::sha512()).context("signing leaf")?;
         let cert = cert.build();
-        // Record the issuance before the cert leaves this function —
-        // every signing path (network sign/approve/enroll, CLI issue
-        // and sign, serving certs) flows through here, so the index is
-        // complete by construction. An index write failure fails the
-        // sign: an unrecorded certificate would be invisible to
-        // revoke-by-name and duplicate-name refusal, which is worse
-        // than asking the operator to retry.
-        let name = san
-            .iter()
-            .find_map(|s| match s {
-                SanEntry::Dns(d) => Some(d.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let spki = req_pubkey.public_key_to_der().context("encoding leaf SPKI")?;
-        let now = crate::ca_index::now_unix();
-        crate::ca_index::append(
-            &self.directory,
-            &crate::ca_index::Event::Issued(crate::ca_index::IssuedCert {
-                serial: serial_n,
-                name,
-                spki_fp: crate::fingerprint::Fingerprint::of_der(&spki).text(),
-                not_after_unix: now + validity_days as u64 * 86_400,
-                issued_unix: now,
-            }),
-        )
-        .context("recording the issuance in the index")?;
         Ok(cert.to_pem()?)
     }
 
@@ -533,6 +490,7 @@ impl Ca {
             &kr.csr_pem,
             &params.san,
             params.validity_days,
+            params.serial,
         )?;
         let key_path = params.out_dir.join("private.key");
         let cert_path = params.out_dir.join("certificate.pem");
@@ -562,7 +520,22 @@ pub const CA_RENEW_THRESHOLD_DAYS: u32 = DEFAULT_LEAF_VALIDITY_DAYS + 90;
 /// our old certificate replaced by the new one, matched by public key;
 /// the bundle then propagates to the fleet through every sign and
 /// renewal response.
-pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8]) -> Result<bool> {
+/// Cheap check (no serial, no key) of whether the CA certificate is
+/// inside its renewal window — the daemon calls this before allocating a
+/// serial for [`maybe_renew_ca_cert`], so the common "no renewal needed"
+/// path burns nothing.
+pub fn ca_cert_needs_renewal(ca_dir: &Path) -> bool {
+    (|| -> Option<bool> {
+        let cert_pem = std::fs::read(ca_dir.join("certificate.pem")).ok()?;
+        let old = X509::from_pem(&cert_pem).ok()?;
+        let now = Asn1Time::days_from_now(0).ok()?;
+        let remaining = now.diff(old.not_after()).ok()?.days;
+        Some(remaining <= CA_RENEW_THRESHOLD_DAYS as i32)
+    })()
+    .unwrap_or(false)
+}
+
+pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8], serial: u64) -> Result<bool> {
     let cert_pem = std::fs::read(ca_dir.join("certificate.pem"))
         .context("reading CA certificate")?;
     let old = X509::from_pem(&cert_pem).context("parsing CA certificate")?;
@@ -574,13 +547,12 @@ pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8]) -> Result<bool> {
     let pkey =
         PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
     // Rebuild: subject, SAN, and profile identical to `Ca::generate`;
-    // fresh serial (the counter is shared with leaf issuance — fine,
-    // serials just need uniqueness per issuer) and a fresh validity
-    // window.
+    // the caller-allocated `serial` (the daemon's counter is shared with
+    // leaf issuance — fine, serials just need uniqueness per issuer) and
+    // a fresh validity window.
     let mut cert = X509Builder::new()?;
     cert.set_version(2)?;
-    let serial_n = next_serial(ca_dir)?;
-    let serial = BigNum::from_dec_str(&serial_n.to_string())?.to_asn1_integer()?;
+    let serial = BigNum::from_dec_str(&serial.to_string())?.to_asn1_integer()?;
     cert.set_serial_number(&serial)?;
     cert.set_subject_name(old.subject_name())?;
     cert.set_issuer_name(old.subject_name())?;
@@ -877,64 +849,15 @@ fn parse_key_pem(pem: &[u8], password: Option<&str>) -> Result<PKey<Private>> {
     }
 }
 
-fn serial_path(dir: &Path) -> PathBuf {
-    dir.join("serial")
-}
-
-fn next_serial(dir: &Path) -> Result<u64> {
-    // Serialize the counter read-modify-write with an exclusive OS file
-    // lock. The per-`Ca` `serial_lock` only covers one instance, but the
-    // CA server builds a fresh `Ca` per request and a `ca issue` may run
-    // alongside the daemon — without a shared (and inter-process) lock,
-    // concurrent signers race the counter and mint duplicate X.509
-    // serials. We lock a dedicated `serial.lock` rather than the serial
-    // file itself, which `write_next_serial` replaces by atomic rename
-    // (that would drop a lock held on the old inode). The lock releases
-    // when `_lock` drops at end of scope (including on early return).
-    let lock_path = dir.join("serial.lock");
-    let _lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening serial lock {lock_path:?}"))?;
-    _lock
-        .lock()
-        .with_context(|| format!("locking serial counter {lock_path:?}"))?;
-    let p = serial_path(dir);
-    let cur = match std::fs::read_to_string(&p) {
-        Ok(s) => s.trim().parse::<u64>().with_context(|| {
-            format!("parsing serial counter at {p:?}")
-        })?,
-        // Serial file is missing: someone deleted it or the CA was
-        // restored from a partial backup. Falling back to 2 here
-        // would silently reuse a serial number that's already on a
-        // previously-issued leaf. Instead, read the CA cert's serial
-        // (issued certs use the next slot up) and start the counter
-        // beyond whichever is higher: CA serial + 1, or any default.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let from_cert = ca_cert_serial(dir).unwrap_or(1);
-            from_cert.saturating_add(1).max(2)
-        }
-        Err(e) => return Err(anyhow!("reading {p:?}: {e}")),
-    };
-    write_next_serial(dir, cur + 1)?;
-    Ok(cur)
-}
-
-/// Read the CA cert's own X.509 serial number. Used to defensively
-/// seed `next_serial` if the on-disk counter file is missing or
-/// damaged. Returns `None` on any failure (the caller falls back to
-/// the default).
-fn ca_cert_serial(dir: &Path) -> Option<u64> {
+/// Read the CA cert's own X.509 serial number. The daemon uses this to
+/// defensively seed its in-memory serial counter at startup (issued
+/// leaves take the next slot up). Returns `None` on any failure (the
+/// caller falls back to the default).
+pub fn ca_cert_serial(dir: &Path) -> Option<u64> {
     let cert_pem = std::fs::read(dir.join("certificate.pem")).ok()?;
     let cert = X509::from_pem(&cert_pem).ok()?;
     let bn = cert.serial_number().to_bn().ok()?;
     bn.to_dec_str().ok()?.parse::<u64>().ok()
-}
-
-fn write_next_serial(dir: &Path, next: u64) -> Result<()> {
-    atomic::write_atomic(&serial_path(dir), next.to_string().as_bytes(), 0o644)
 }
 
 #[cfg(test)]
@@ -986,6 +909,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: leaf_dir.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap();
         assert_eq!(
@@ -1016,6 +940,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: leaf_dir.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap();
         validate_pem_cert_file(&issued.certificate).unwrap();
@@ -1027,7 +952,6 @@ mod tests {
         let ca = small_ca(dir.path());
         assert!(dir.path().join("private.key").exists());
         assert!(dir.path().join("certificate.pem").exists());
-        assert!(dir.path().join("serial").exists());
         drop(ca);
 
         let reopened = Ca::open(dir.path(), None).unwrap();
@@ -1074,6 +998,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap_err();
         assert!(format!("{err:#}").contains("exactly one DNS SAN"));
@@ -1092,6 +1017,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap_err();
         assert!(format!("{err:#}").contains("exactly one DNS SAN"));
@@ -1138,6 +1064,7 @@ mod tests {
                 .csr_pem,
                 &[SanEntry::Dns("h.example.com".into())],
                 30,
+                2,
             )
             .unwrap();
         assert!(leaf_pem.starts_with(b"-----BEGIN CERTIFICATE-----"));
@@ -1324,6 +1251,7 @@ mod tests {
                 &kr.csr_pem,
                 &[SanEntry::Dns("host.example.com".into())],
                 30,
+                2,
             )
             .unwrap();
         let leaf = X509::from_pem(&leaf_pem).unwrap();
@@ -1345,6 +1273,66 @@ mod tests {
         assert!(ok, "leaf should verify against the CA store");
     }
 
+    /// `commit_issuance` must record the `notAfter` of the cert the CA
+    /// actually signed, not the *requested* validity. `sign_request`
+    /// clamps a leaf to the CA's remaining lifetime, so a request that
+    /// outlives the CA (a 365-day leaf against a 30-day CA) is shortened —
+    /// and recording the request instead would mark an already-expired
+    /// cert "live", wedging its replacement and pinning it in the CRL.
+    #[test]
+    fn commit_issuance_records_the_signed_validity_not_the_requested() {
+        use crate::{ca_store, conf_proto::NodeKind};
+        let dir = tempfile::tempdir().unwrap();
+        let ca = small_ca(dir.path()); // 30-day CA
+        let name = "host.example.com";
+        let kr = generate_csr(
+            &Subject::cn(name),
+            &[SanEntry::Dns(name.into())],
+            2048,
+            None,
+        )
+        .unwrap();
+        let requested_days = 365u32;
+        let serial = ca_store::next_serial(dir.path()).unwrap();
+        let leaf = ca
+            .sign_request(
+                &kr.csr_pem,
+                &[SanEntry::Dns(name.into())],
+                requested_days,
+                serial,
+            )
+            .unwrap();
+        let req = ca_store::QueuedReq::new(
+            NodeKind::Workstation,
+            String::from_utf8(kr.csr_pem.clone()).unwrap(),
+            name.to_string(),
+            requested_days,
+            "test".to_string(),
+            false,
+            None,
+        );
+        ca_store::commit_issuance(
+            dir.path(),
+            &req,
+            serial,
+            name,
+            std::str::from_utf8(&leaf).unwrap(),
+            &[],
+        )
+        .unwrap();
+        let now = ca_store::now_unix();
+        let rec = ca_store::live_for_name(dir.path(), name).unwrap();
+        assert_eq!(rec.len(), 1, "the issuance should be recorded and live");
+        let not_after = rec[0].not_after_unix;
+        // The 30-day CA clamps the 365-day request to ~28 days; the record
+        // must track that, nowhere near the old `now + 365d` it used to store.
+        assert!(
+            not_after > now + 20 * 86_400 && not_after < now + 35 * 86_400,
+            "recorded notAfter {not_after} should track the clamped (~28d) \
+             cert, not the {requested_days}d request (now = {now})"
+        );
+    }
+
     #[test]
     fn issue_round_trip() {
         let ca_dir = tempfile::tempdir().unwrap();
@@ -1362,6 +1350,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap();
 
@@ -1404,6 +1393,7 @@ mod tests {
                     validity_days: 30,
                     out_dir: id_dir.path().to_path_buf(),
                     password: None,
+                    serial: 2 + i as u64,
                 })
                 .unwrap();
             let leaf =

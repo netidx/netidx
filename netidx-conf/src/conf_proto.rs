@@ -142,6 +142,60 @@ pub enum Request {
     /// pulls this and drops `crl.pem` beside each resolver's trusted
     /// bundle, where netidx's TLS acceptor enforces it.
     GetCrl,
+    /// Revoke certificates by serial (admin-authenticated). The daemon
+    /// owns the issuance index, so the `ca` CLI sends this rather than
+    /// touching the CA files. Answered with [`RevokeResponse`].
+    Revoke(RevokeRequest),
+    /// List the issued certificates (admin-authenticated) — the revoke
+    /// UI and inspection. Answered with [`ListIssuedResponse`].
+    ListIssued(ListIssuedRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeRequest {
+    pub admin: String,
+    pub password: Secret,
+    /// Serial numbers to revoke (chosen from a [`ListIssuedResponse`]).
+    pub serials: Vec<u64>,
+    /// Recorded with each revocation and shown in the audit log.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RevokeResponse {
+    Ok {
+        /// Non-fatal follow-ups (e.g. couldn't install the CRL beside a
+        /// local resolver).
+        #[serde(default)]
+        warnings: Vec<String>,
+    },
+    Err {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListIssuedRequest {
+    pub admin: String,
+    pub password: Secret,
+}
+
+/// One issued certificate, for the admin revoke UI / inspection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedEntry {
+    pub serial: u64,
+    /// The DNS SAN the cert carries (empty for the rare no-DNS-SAN cert).
+    pub name: String,
+    /// SPKI fingerprint (grouped text) — the glyph shown at enrollment.
+    pub spki_fp: String,
+    pub not_after_unix: u64,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ListIssuedResponse {
+    Ok { entries: Vec<IssuedEntry> },
+    Err { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -361,6 +361,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         validity_days: 30,
         out_dir: resolver_id_src.clone(),
         password: None,
+        serial: 2,
     })?;
 
     // Render the resolver template with TLS auth + auto-seed perms +
@@ -446,7 +447,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
-    use netidx_conf::ca_index;
+    use netidx_conf::{ca_index, ca_store};
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
     let dir = TempDir::new()?;
@@ -475,6 +476,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
         validity_days: 30,
         out_dir: resolver_id_src.clone(),
         password: None,
+        serial: 2,
     })?;
 
     let id_map_sock = dir.path().join("id-map.sock");
@@ -509,20 +511,47 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     round_trip(client_cfg.clone(), "/users/resolver.revoked.example/pre", Value::I64(1))
         .await?;
 
-    // 2. Revoke the client identity's serial (the index recorded it at
-    //    issuance) and sign + install the CRL beside the resolver's
-    //    trusted bundle — the convention the acceptor watches. The
-    //    resolver keeps running throughout.
-    let live = ca_index::live_for_name(&ca_dir, "resolver.revoked.example")?;
-    assert_eq!(live.len(), 1, "issuance index should hold the one client cert");
-    ca_index::append(
+    // 2. Record the issuance in the CA store the way the daemon would
+    //    (the standalone `Ca::issue` bootstrap path used above doesn't
+    //    keep the store), revoke its serial, then sign + install the CRL
+    //    beside the resolver's trusted bundle — the convention the
+    //    acceptor watches. The resolver keeps running throughout.
+    let cert_pem = std::fs::read_to_string(&resolver_issued.certificate)?;
+    let now = ca_store::now_unix();
+    ca_store::commit_signed(
         &ca_dir,
-        &ca_index::Event::Revoked(ca_index::Revocation {
-            serial: live[0].cert.serial,
-            revoked_unix: ca_index::now_unix(),
-            reason: "e2e test".into(),
-        }),
+        &ca_store::IssuedRecord {
+            req: ca_store::QueuedReq::new(
+                netidx_conf::conf_proto::NodeKind::Resolver,
+                String::new(),
+                "resolver.revoked.example".into(),
+                30,
+                "(e2e)".into(),
+                false,
+                None,
+            ),
+            serial: 2,
+            name: "resolver.revoked.example".into(),
+            spki_fp: String::new(),
+            cert_pem,
+            groups: vec![],
+            not_after_unix: now + 30 * 24 * 3600,
+            issued_unix: now,
+            warnings: vec![],
+            revoked: None,
+            push_done: true,
+        },
     )?;
+    let revoked = ca_store::revoke(
+        &ca_dir,
+        2,
+        ca_store::Revocation {
+            serial: 2,
+            revoked_unix: now,
+            reason: "e2e test".into(),
+        },
+    )?;
+    assert!(revoked, "the issued serial should be live, then revoked");
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
     ca_index::write_crl(&ca_dir, &ca_key)?;
     let rcfg = netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;

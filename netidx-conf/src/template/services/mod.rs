@@ -8,7 +8,6 @@
 //! activation engine consumes — is a `netidx_activation::file::Unit`
 //! produced by the service's `unit(&Params)` function.
 
-pub mod autorenew;
 pub mod conf_server;
 pub mod container;
 pub mod id_map;

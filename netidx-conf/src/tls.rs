@@ -14,6 +14,7 @@
 use crate::{atomic, paths};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// What an installed identity looks like on disk.
 #[derive(Debug, Clone)]
@@ -118,6 +119,18 @@ pub fn seal_private_key(plain_pem: &str) -> Result<(String, Vec<u8>)> {
     let encrypted = netidx::tls::encrypt_private_key(plain_pem, &password)
         .context("encrypting the private key under the sealed password")?;
     Ok((encrypted, blob))
+}
+
+/// Recover the plaintext PKCS#8 PEM from a key sealed by
+/// [`seal_private_key`]: unseal the password from the TPM, then decrypt.
+/// The exact inverse — `(enc_pem, blob)` are the two values
+/// `seal_private_key` returned (the encrypted key and its sidecar blob).
+pub fn unseal_private_key(enc_pem: &str, blob: &[u8]) -> Result<Zeroizing<String>> {
+    let secret = netidx_tpm::unseal(blob).context("unsealing the sealed password")?;
+    let password =
+        String::from_utf8(secret.to_vec()).context("sealed password is not utf8")?;
+    netidx::tls::decrypt_private_key(enc_pem, &password)
+        .context("decrypting the sealed private key")
 }
 
 /// How [`write_private_key_maybe_sealed`] protected the key.
@@ -542,6 +555,34 @@ mod tests {
         std::fs::write(&key2, enc.as_bytes()).unwrap();
         std::fs::write(sealed_sidecar(&key2), &bad).unwrap();
         assert!(netidx::tls::load_private_key(None, &key2.to_string_lossy()).is_err());
+    }
+
+    /// `seal_private_key` → `unseal_private_key` recovers the exact
+    /// plaintext key, and a corrupted sidecar blob is a hard error.
+    /// Skips silently where no sealing hardware is reachable.
+    #[test]
+    fn seal_unseal_round_trips_the_key() {
+        if !netidx_tpm::available() {
+            eprintln!("skipping: no usable sealing hardware on this host");
+            return;
+        }
+        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let (enc, blob) = seal_private_key(&kc.private_key_pem).unwrap();
+        let recovered = unseal_private_key(&enc, &blob).unwrap();
+        let der = |pem: &str| {
+            rustls_pemfile::private_key(&mut std::io::Cursor::new(pem.as_bytes()))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            der(&recovered).secret_der(),
+            der(&kc.private_key_pem).secret_der(),
+            "unsealed key must equal the original",
+        );
+        let mut bad = blob.clone();
+        let n = bad.len();
+        bad[n / 2] ^= 0xff;
+        assert!(unseal_private_key(&enc, &bad).is_err());
     }
 
     /// Sidecars travel with their keys through the identity installer —

@@ -11,11 +11,10 @@ use clap::{Args, Subcommand};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    time::Duration,
 };
 use zeroize::Zeroizing;
 
-use super::{prompt, service};
+use super::{init, prompt, service};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -40,31 +39,19 @@ pub(crate) enum Cmd {
     Join(JoinArgs),
     /// revoke certificates by name (or serial) and re-sign the CRL
     Revoke(RevokeArgs),
-    /// automatically approve verified renewals (daemon)
+    /// set up or rotate the autorenew slot (the running conf server then
+    /// approves verified renewals in-process)
     Autorenew(AutorenewArgs),
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct AutorenewArgs {
-    /// File holding the autorenew admin slot's password. Without it,
-    /// an admin name + password are prompted and held in memory.
-    #[arg(long)]
-    pub keytab: Option<PathBuf>,
-    /// Conf server to watch. Defaults to this host's own conf server.
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
-    /// Seconds between queue checks. Default 30.
-    #[arg(long, default_value = "30")]
-    pub interval: u64,
-    /// Rotate the autorenew slot: revoke the old keyslot, mint a new
-    /// long random password, write the keytab, exit. The one-command
-    /// response to a leaked keytab.
+    /// Rotate the autorenew slot: revoke the old keyslot, mint a new long
+    /// random password, and rewrite the keytab — the one-command response
+    /// to a leaked keytab. Restart the conf server afterwards to pick up
+    /// the new credential.
     #[arg(long)]
     pub rotate: bool,
-    /// Don't daemonize (run in the foreground).
-    #[arg(short, long)]
-    #[allow(dead_code)]
-    pub foreground: bool,
 }
 
 #[derive(Args, Debug)]
@@ -79,6 +66,12 @@ pub(crate) struct RevokeArgs {
     /// Revocation reason, recorded in the index. Prompted when omitted.
     #[arg(long)]
     pub reason: Option<String>,
+    /// Conf server to revoke through. Defaults to this host's own conf
+    /// server, else discovered on the local network.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
+    /// CA dir, used only to verify the conf server's identity against the
+    /// local CA cert when one is present.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -404,7 +397,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
-pub(super) const AUTORENEW_ADMIN: &str = "autorenew";
+pub(super) const AUTORENEW_ADMIN: &str = netidx_conf::conf_server::AUTORENEW_ADMIN;
 
 fn autorenew_policy() -> ca_vault::Policy {
     ca_vault::Policy {
@@ -425,8 +418,8 @@ fn autorenew_keytab_path() -> Result<PathBuf> {
 fn random_password() -> String {
     format!(
         "{}{}",
-        netidx_conf::ca_queue::new_id(),
-        netidx_conf::ca_queue::new_id()
+        netidx_conf::ca_store::new_id(),
+        netidx_conf::ca_store::new_id()
     )
 }
 
@@ -476,146 +469,130 @@ pub(super) fn setup_autorenew_slot(
     Ok(keytab)
 }
 
+/// Set up (or rotate) the autorenew slot and point this host's
+/// conf-server config at its keytab. Approval itself is the running
+/// daemon's job now — it reads the keytab named here and approves
+/// verified renewals in-process — so this command just manages the
+/// credential. `--rotate` is the same operation framed as a leaked-keytab
+/// response: [`setup_autorenew_slot`] always replaces the slot, so enable
+/// and rotate share one path and differ only in what they print.
 fn autorenew(p: AutorenewArgs) -> Result<()> {
     env_logger::init();
-    if p.rotate {
-        let dir = ca_dir_for(None)?;
-        let authorizing = collect_existing_password(
-            "your admin password (authorizes rotating the autorenew slot)",
-        )?;
-        let keytab = setup_autorenew_slot(&dir, &authorizing)?;
-        println!(
-            "rotated the autorenew slot; new keytab at {} (restart the \
-             autorenew service to pick it up)",
-            keytab.display()
-        );
-        return Ok(());
-    }
-    let (admin, password) = match &p.keytab {
-        Some(path) => {
-            let raw = std::fs::read(path)
-                .with_context(|| format!("reading keytab {}", path.display()))?;
-            let pw = if netidx_tpm::is_sealed(&raw) {
-                // A sealed keytab that won't unseal must scream, not
-                // skip: a renewal daemon that silently stops is a
-                // certificate outage on a delay timer.
-                let secret = netidx_tpm::unseal(&raw).with_context(|| {
-                    format!(
-                        "unsealing keytab {} — if this host's TPM was cleared \
-                         or the board was replaced, mint a fresh keytab with \
-                         `netidx conf ca autorenew --rotate`",
-                        path.display()
-                    )
-                })?;
-                Zeroizing::new(
-                    String::from_utf8(secret.to_vec())
-                        .context("sealed keytab payload is not utf8")?,
-                )
-            } else {
-                let pw = String::from_utf8(raw)
-                    .with_context(|| format!("keytab {} is not utf8", path.display()))?;
-                Zeroizing::new(pw.trim().to_string())
-            };
-            (AUTORENEW_ADMIN.to_string(), pw)
+    let dir = ca_dir_for(None)?;
+    let authorizing = collect_existing_password(
+        "your admin password (authorizes setting up the autorenew slot)",
+    )?;
+    let keytab = setup_autorenew_slot(&dir, &authorizing)?;
+    let verb = if p.rotate { "rotated" } else { "enabled" };
+    println!("autorenew {verb}:");
+    println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
+    println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
+    // Rotation rewrote the keytab's contents but not its path, so pointing
+    // the config at it is correct whether we just created or replaced it.
+    match super::server::set_ca_autorenew(&keytab) {
+        Ok(cfg_path) => {
+            println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
+            println!("  restart the conf server to pick up the keytab.");
         }
-        None => {
-            let admin = match env_user_name() {
-                Some(user) => prompt::string_with_default("admin name", None, &user)?,
-                None => prompt::required_string("admin name", None)?,
-            };
-            let pw = Zeroizing::new(collect_existing_password(&format!(
-                "CA password for admin {admin:?}"
-            ))?);
-            (admin, pw)
+        Err(e) => {
+            println!("  note: could not update the conf-server config ({e:#}).");
+            println!("        set roles.ca.autorenew to the keytab path and");
+            println!("        restart the conf server.");
         }
-    };
-    let server = match p.server.or_else(local_conf_server_listen) {
-        Some(s) => s,
-        None => bail!("no conf server on this host; pass --server"),
-    };
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Unattended trust: verify the conf server against the local CA
-    // cert — the daemon runs on (or adjacent to) the CA host and must
-    // never approve against an impostor.
-    let identity = rt
-        .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-        .with_context(|| format!("contacting conf server {server}"))?;
-    let local_fp = std::fs::read(ca_dir_for(None)?.join("certificate.pem"))
-        .ok()
-        .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
-    match local_fp {
-        Some(fp) if fp == identity.fingerprint => {}
-        Some(_) => bail!(
-            "the conf server at {server} does not match the local CA — refusing \
-             to approve renewals against an unverified server"
-        ),
-        None => bail!(
-            "no local CA certificate to verify {server} against; autorenew must \
-             run where the CA cert is available"
-        ),
     }
-    log::info!("autorenew: watching the queue at {server} as {admin:?}");
-    let interval = Duration::from_secs(p.interval.max(5));
-    loop {
-        match rt.block_on(conf_client::list_queue(
-            server,
-            &admin,
-            password.as_str(),
-            &identity,
-        )) {
-            Err(e) => log::warn!("autorenew: listing the queue failed: {e:#}"),
-            Ok(queue) => {
-                for entry in queue.iter().filter(|e| e.verified_renewal) {
-                    match rt.block_on(conf_client::approve(
-                        server,
-                        &admin,
-                        password.as_str(),
-                        &entry.id,
-                        vec![],
-                        &identity,
-                    )) {
-                        Ok(warnings) => {
-                            log::info!(
-                                "autorenew: approved renewal of {:?}",
-                                entry.requested_name
-                            );
-                            for w in warnings {
-                                log::warn!("autorenew: server warning: {w}");
-                            }
-                        }
-                        Err(e) => log::warn!(
-                            "autorenew: approving renewal of {:?} failed: {e:#}",
-                            entry.requested_name
-                        ),
-                    }
-                }
-            }
-        }
-        std::thread::sleep(interval);
-    }
+    Ok(())
 }
 
 // -- ca revoke ----------------------------------------------------------------
 
-/// Revoke certificates and re-sign the CRL. By name (the common case —
-/// the index maps names to serials, so the admin never hunts serial
-/// numbers), by serial, or interactively from the list of live
-/// identities. The admin's password both proves authority and signs
-/// the updated CRL; the new CRL is copied beside the local resolver's
-/// trust bundle immediately when this host runs one, so enforcement on
-/// the CA host doesn't wait for distribution.
+/// Revoke certificates and re-sign the CRL — over RPC. The daemon owns
+/// the CA: it holds the issuance index, signs the CRL, and serves it
+/// (`GetCrl`). The CLI is a pure client — it lists the issued set
+/// (`ListIssued`), lets the admin pick by name/serial/interactively, and
+/// sends `Revoke`. By name is the common case; the daemon's list maps
+/// names to serials so the admin never hunts serial numbers.
+///
+/// CR claude for estokes: the old local-file revoke also (a) copied the
+/// fresh CRL beside this host's resolver for instant enforcement and (b)
+/// offered to drop the revoked identity from the local id-map. Both
+/// needed direct file access the CLI no longer has now the daemon owns
+/// the CA. The CRL still re-signs (in the daemon) and distributes via
+/// `GetCrl`; the local-resolver fast-path and the id-map cleanup are
+/// dropped here. If we want them back they belong in the daemon's
+/// `handle_revoke` (it has the resolver role config and can reach id-map
+/// peers) — flagging the behavior change rather than hiding it.
 fn revoke(p: RevokeArgs) -> Result<()> {
-    use netidx_conf::ca_index;
-    let dir = ca_dir_for(p.ca_dir)?;
-    let now = ca_index::now_unix();
-    let live: Vec<ca_index::CertState> =
-        ca_index::all(&dir)?.into_iter().filter(|s| s.live(now)).collect();
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Find the CA: an explicit `--server`, else this host's own conf
+    // server, else discover one on the network (glyph-confirmed).
+    let (server, known_identity) = match p.server.or_else(local_conf_server_listen) {
+        Some(s) => (s, None),
+        None => match init::discover_network(NodeKind::Client)? {
+            init::ConfServers::Have(net) => {
+                let ca = net.info.ca_addr.ok_or_else(|| {
+                    anyhow!("network {:?} reported no CA; cannot revoke", net.info.domain)
+                })?;
+                (ca, Some(net.identity))
+            }
+            init::ConfServers::DontHave => {
+                bail!("no conf server found or selected; pass --server")
+            }
+            init::ConfServers::NotProbed => {
+                bail!("--server is required when stdin is not a TTY")
+            }
+        },
+    };
+    // Confirm who we're talking to. If this host holds the CA cert, verify
+    // silently against it; otherwise glyph-confirm with the operator.
+    let identity = match known_identity {
+        Some(identity) => identity,
+        None => {
+            let identity = rt
+                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting conf server {server}"))?;
+            let local_fp = ca_dir_for(p.ca_dir.clone())
+                .ok()
+                .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
+                .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
+            match local_fp {
+                Some(fp) if fp == identity.fingerprint => {
+                    println!("verified {server} against the local CA");
+                }
+                _ => {
+                    init::show_network_identity(server, &identity);
+                    if !prompt::confirm(
+                        "does this match what your CA admin gave you?",
+                        false,
+                    )? {
+                        bail!("CA identity was not confirmed; nothing was sent");
+                    }
+                }
+            }
+            identity
+        }
+    };
+    let admin = match env_user_name() {
+        Some(user) => prompt::string_with_default("admin name", None, &user)?,
+        None => prompt::required_string("admin name", None)?,
+    };
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
+    // The daemon owns the index — read the issued set from it.
+    let entries = rt.block_on(conf_client::list_issued(
+        server,
+        &admin,
+        password.as_str(),
+        &identity,
+    ))?;
+    let live: Vec<&conf_proto::IssuedEntry> =
+        entries.iter().filter(|e| !e.revoked).collect();
     if live.is_empty() {
         println!("no live certificates in the index — nothing to revoke");
         return Ok(());
     }
-    let targets: Vec<ca_index::CertState> = if let Some(serial) = p.serial {
-        let t: Vec<_> = live.into_iter().filter(|s| s.cert.serial == serial).collect();
+    let targets: Vec<&conf_proto::IssuedEntry> = if let Some(serial) = p.serial {
+        let t: Vec<_> = live.iter().copied().filter(|e| e.serial == serial).collect();
         if t.is_empty() {
             bail!("no live certificate with serial {serial}");
         }
@@ -626,11 +603,11 @@ fn revoke(p: RevokeArgs) -> Result<()> {
             None => {
                 // Distinct names, most recently issued first.
                 let mut names: Vec<&str> = Vec::new();
-                for s in live.iter().rev() {
-                    if !s.cert.name.is_empty()
-                        && !names.iter().any(|n| n.eq_ignore_ascii_case(&s.cert.name))
+                for e in live.iter().rev() {
+                    if !e.name.is_empty()
+                        && !names.iter().any(|n| n.eq_ignore_ascii_case(&e.name))
                     {
-                        names.push(&s.cert.name);
+                        names.push(&e.name);
                     }
                 }
                 if names.is_empty() {
@@ -641,18 +618,9 @@ fn revoke(p: RevokeArgs) -> Result<()> {
                 }
                 println!("live identities:");
                 for (i, n) in names.iter().enumerate() {
-                    let certs: Vec<_> = live
-                        .iter()
-                        .filter(|s| s.cert.name.eq_ignore_ascii_case(n))
-                        .collect();
-                    let soonest =
-                        certs.iter().map(|s| s.cert.not_after_unix).min().unwrap_or(0);
-                    let days = soonest.saturating_sub(now) / 86_400;
-                    println!(
-                        "  {}) {n}  ({} cert(s), expires in {days}d)",
-                        i + 1,
-                        certs.len(),
-                    );
+                    let count =
+                        live.iter().filter(|e| e.name.eq_ignore_ascii_case(n)).count();
+                    println!("  {}) {n}  ({count} cert(s))", i + 1);
                 }
                 let answer = prompt::required_string(
                     "identity # to revoke (or 'q' to quit)",
@@ -667,10 +635,8 @@ fn revoke(p: RevokeArgs) -> Result<()> {
                 }
             }
         };
-        let t: Vec<_> = live
-            .into_iter()
-            .filter(|s| s.cert.name.eq_ignore_ascii_case(&name))
-            .collect();
+        let t: Vec<_> =
+            live.iter().copied().filter(|e| e.name.eq_ignore_ascii_case(&name)).collect();
         if t.is_empty() {
             bail!("no live certificate for {name:?}");
         }
@@ -682,13 +648,11 @@ fn revoke(p: RevokeArgs) -> Result<()> {
     println!();
     for t in &targets {
         println!(
-            "  serial {}  {}  issued {}d ago, expires in {}d",
-            t.cert.serial,
-            if t.cert.name.is_empty() { "(no name)" } else { &t.cert.name },
-            now.saturating_sub(t.cert.issued_unix) / 86_400,
-            t.cert.not_after_unix.saturating_sub(now) / 86_400,
+            "  serial {}  {}",
+            t.serial,
+            if t.name.is_empty() { "(no name)" } else { &t.name },
         );
-        if let Ok(fp) = Fingerprint::parse_text(&t.cert.spki_fp) {
+        if let Ok(fp) = Fingerprint::parse_text(&t.spki_fp) {
             println!("  SHA256  {}", fp.text());
             println!("{}", fp.identicon(ColorMode::detect()));
         }
@@ -707,99 +671,18 @@ fn revoke(p: RevokeArgs) -> Result<()> {
             "unspecified",
         )?,
     };
-    // The password proves authority and unlocks the CA key to sign the
-    // updated CRL — revocation without a fresh CRL is just a wish.
-    let password = collect_existing_password(
-        "your admin password (authorizes revocation and signs the new CRL)",
-    )?;
-    let unlocked = ca_vault::unlock(&dir, &password)
-        .context("no admin slot accepts that password")?;
-    for t in &targets {
-        ca_index::append(
-            &dir,
-            &ca_index::Event::Revoked(ca_index::Revocation {
-                serial: t.cert.serial,
-                revoked_unix: now,
-                reason: reason.clone(),
-            }),
-        )?;
-        netidx_conf::conf_server::audit(
-            &dir,
-            &unlocked.admin,
-            "revoke",
-            if t.cert.name.is_empty() { "(no name)" } else { &t.cert.name },
-            0,
-        );
-    }
-    ca_index::write_crl(&dir, &unlocked.ca_key_pem)?;
-    println!(
-        "revoked {} certificate(s); CRL re-signed at {}",
-        targets.len(),
-        ca_index::crl_path(&dir).display(),
-    );
-    // Local enforcement now: when this host runs a resolver, drop the
-    // fresh CRL beside its trust bundle — the resolver's CRL-watching
-    // acceptor picks it up on the next connection. Other hosts get it
-    // from the conf plane.
-    if let Err(e) = install_crl_beside_local_resolver(&dir) {
-        println!("note: could not install the CRL for the local resolver: {e:#}");
-    }
-    // The revoked identity usually shouldn't keep its id-map entry.
-    let revoked_name =
-        targets.iter().find(|t| !t.cert.name.is_empty()).map(|t| t.cert.name.clone());
-    if let Some(name) = revoked_name {
-        offer_id_map_removal(&name)?;
-    }
-    Ok(())
-}
-
-/// Copy the CA's CRL beside the local resolver's trusted bundle (the
-/// convention netidx's acceptor watches), if this host runs one.
-fn install_crl_beside_local_resolver(ca_dir: &Path) -> Result<()> {
-    use netidx::resolver_server::config::file as rfile;
-    let crl = std::fs::read(netidx_conf::ca_index::crl_path(ca_dir))
-        .context("reading the freshly signed CRL")?;
-    let rcfg_path = match paths::discover_resolver_config() {
-        Ok(p) => p,
-        Err(_) => return Ok(()), // no resolver on this host
-    };
-    let rcfg = netidx_conf::resolver::ResolverConfig::load(&rcfg_path)?;
-    for member in &rcfg.0.member_servers {
-        if let rfile::Auth::Tls { trusted, .. } = &member.auth {
-            let dest = Path::new(trusted.as_str()).with_file_name("crl.pem");
-            atomic::write_atomic(&dest, &crl, 0o644)?;
-            println!("installed CRL for the local resolver at {}", dest.display());
-        }
-    }
-    Ok(())
-}
-
-/// Offer to drop a revoked identity from the local id-map (best-effort
-/// — id-map hosts elsewhere keep their entries until the operator
-/// cleans them; a revoked cert can't authenticate regardless).
-fn offer_id_map_removal(name: &str) -> Result<()> {
-    use netidx_conf::id_map;
-    if !prompt::stdin_is_tty() {
-        return Ok(());
-    }
-    let map_path = match id_map::user_id_map_path() {
-        Ok(p) if p.exists() => p,
-        _ => return Ok(()),
-    };
-    let mut map = match id_map::load(&map_path) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if map.lookup_by_name(name).is_none() {
-        return Ok(());
-    }
-    if prompt::confirm(
-        &format!("remove {name:?} from the local id-map as well?"),
-        true,
-    )? {
-        id_map::remove_identity(&mut map, name);
-        id_map::save(&map_path, &map)?;
-        println!("removed {name:?} from {}", map_path.display());
+    let serials: Vec<u64> = targets.iter().map(|t| t.serial).collect();
+    let warnings = rt.block_on(conf_client::revoke(
+        server,
+        &admin,
+        password.as_str(),
+        serials,
+        &reason,
+        &identity,
+    ))?;
+    println!("revoked {} certificate(s); the daemon re-signed the CRL", targets.len());
+    for w in warnings {
+        println!("  warning: {w}");
     }
     Ok(())
 }
@@ -1000,32 +883,15 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         };
         if auto {
             let keytab = setup_autorenew_slot(&opts.dir, &password)?;
+            // Point the conf-server config's CA role at the keytab: the
+            // daemon set up just above approves verified renewals
+            // in-process — no separate autorenew daemon to install.
+            let cfg_path = super::server::set_ca_autorenew(&keytab)?;
             println!("automatic renewal approval enabled:");
             println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
             println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
             println!("          rotate anytime with `netidx conf ca autorenew --rotate`)");
-            if let Some(units_dir) = opts.units_dir.as_deref() {
-                std::fs::create_dir_all(units_dir).with_context(|| {
-                    format!("creating activation dir {}", units_dir.display())
-                })?;
-                let netidx_binary = std::env::current_exe().context(
-                    "could not determine current netidx binary for the autorenew unit",
-                )?;
-                let unit = netidx_conf::template::services::autorenew::unit(
-                    &netidx_conf::template::services::autorenew::AutorenewServiceParams {
-                        netidx_binary,
-                        keytab,
-                    },
-                )?;
-                let adir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
-                adir.save("autorenew", &unit)
-                    .context("writing the autorenew activation unit")?;
-                println!(
-                    "  unit:   {}",
-                    netidx_conf::activation::unit_path_in(units_dir, "autorenew")
-                        .display()
-                );
-            }
+            println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
         }
     }
     Ok((ca, need))
@@ -1443,26 +1309,31 @@ fn issue(p: IssueArgs) -> Result<()> {
     let ca = open_ca(&directory)?;
     let san = parse_sans(&p.san, &cn)?;
     ensure_san_not_reserved(&san)?;
-    let issued = ca.issue(&IssueParams {
-        subject: Subject {
-            common_name: cn.clone(),
-            country: p.country,
-            state: p.state,
-            locality: p.locality,
-            organization: p.organization,
+    let issued = issue_and_record(
+        &ca,
+        NodeKind::Client,
+        IssueParams {
+            subject: Subject {
+                common_name: cn.clone(),
+                country: p.country,
+                state: p.state,
+                locality: p.locality,
+                organization: p.organization,
+            },
+            san,
+            key_bits: p.key_bits,
+            validity_days: p.validity_days,
+            out_dir,
+            // Leaf key encryption is wired through the install flow
+            // (`netidx conf init`), where the engine knows how to plumb
+            // an askpass entry into the emitted client config. The bare
+            // `ca issue` CLI deliberately stays unencrypted: callers
+            // here are doing manual cert issuance and don't necessarily
+            // have a netidx config to receive the askpass.
+            password: None,
+            serial: 0, // assigned by issue_and_record
         },
-        san,
-        key_bits: p.key_bits,
-        validity_days: p.validity_days,
-        out_dir,
-        // Leaf key encryption is wired through the install flow
-        // (`netidx conf init`), where the engine knows how to plumb
-        // an askpass entry into the emitted client config. The bare
-        // `ca issue` CLI deliberately stays unencrypted: callers
-        // here are doing manual cert issuance and don't necessarily
-        // have a netidx config to receive the askpass.
-        password: None,
-    })?;
+    )?;
     println!("issued cert:");
     println!("  cn:          {}", cn);
     println!("  private key: {}", issued.private_key.display());
@@ -1560,7 +1431,11 @@ fn sign(mut p: SignArgs) -> Result<()> {
     for entry in &san {
         println!("    - {}", san_display(entry));
     }
-    let cert_pem = ca.sign_request(&csr_pem, &san, p.validity_days)?;
+    let name = first_dns_san(&san)
+        .or_else(|| summary.common_name.clone())
+        .unwrap_or_default();
+    let cert_pem =
+        sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, p.validity_days)?;
     atomic::write_atomic(&out, &cert_pem, 0o644)
         .with_context(|| format!("writing certificate to {:?}", out))?;
     println!("\nsigned cert (0644): {}", out.display());
@@ -2212,6 +2087,106 @@ fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
 /// Encrypted-key callers in the install flow also wire an
 /// `askpass` entry into the emitted client config so netidx can
 /// decrypt the key at startup.
+/// The first DNS SAN of a leaf — the identity name the index keys on.
+fn first_dns_san(san: &[SanEntry]) -> Option<String> {
+    san.iter().find_map(|s| match s {
+        SanEntry::Dns(d) => Some(d.clone()),
+        _ => None,
+    })
+}
+
+/// Record an offline (pre-daemon) issuance in the CA store, exactly as the
+/// daemon records its own. Offline issuance happens during bootstrap —
+/// before the daemon takes ownership of the CA — so it must seed the
+/// serial from, and commit back into, the same store the daemon reads:
+/// that keeps serials unique across the bootstrap certs and every later
+/// daemon issuance, and makes a bootstrap cert revocable like any other.
+/// `csr_pem` is empty when the key was generated internally (the
+/// revoke-UI glyph is then simply absent).
+pub(super) fn record_offline_issuance(
+    ca_dir: &Path,
+    serial: u64,
+    kind: NodeKind,
+    name: &str,
+    csr_pem: &str,
+    cert_pem: &str,
+    validity_days: u32,
+) -> Result<()> {
+    let req = netidx_conf::ca_store::QueuedReq::new(
+        kind,
+        csr_pem.to_string(),
+        name.to_string(),
+        validity_days,
+        "(offline issue)".to_string(),
+        false,
+        None,
+    );
+    netidx_conf::ca_store::commit_issuance(
+        ca_dir,
+        &req,
+        serial,
+        name,
+        cert_pem,
+        &[],
+    )
+}
+
+/// Issue a leaf offline, allocating a fresh serial and recording the
+/// issuance (see [`record_offline_issuance`]). Returns the written files.
+fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<IssuedFiles> {
+    let ca_dir = ca.directory().to_path_buf();
+    // Take the same exclusive flock the daemon holds: offline issuance is
+    // only legitimate before the daemon owns the CA, and the serial is
+    // allocated from (and committed back to) the store the daemon seeds
+    // its in-memory counter from. Without this lock a `ca issue` run
+    // against a live daemon would mint the serial the daemon allocates
+    // next, producing a duplicate X.509 serial.
+    let _lock = netidx_conf::ca_store::lock_ca_exclusive(&ca_dir)
+        .context("cannot issue offline: a running conf server owns this CA")?;
+    let serial = netidx_conf::ca_store::next_serial(&ca_dir)?;
+    params.serial = serial;
+    let name = first_dns_san(&params.san)
+        .unwrap_or_else(|| params.subject.common_name.clone());
+    let validity_days = params.validity_days;
+    let issued = ca.issue(&params)?;
+    let cert_pem = std::fs::read_to_string(&issued.certificate)
+        .with_context(|| format!("reading issued cert {}", issued.certificate.display()))?;
+    // `ca.issue` already wrote the key + cert to disk. If recording the
+    // issuance fails, roll those back: an un-recorded cert is invisible to
+    // `next_serial`, so leaving it would let its serial be handed out again.
+    if let Err(e) =
+        record_offline_issuance(&ca_dir, serial, kind, &name, "", &cert_pem, validity_days)
+    {
+        let _ = std::fs::remove_file(&issued.certificate);
+        let _ = std::fs::remove_file(&issued.private_key);
+        return Err(e);
+    }
+    Ok(issued)
+}
+
+/// Sign an external CSR offline, allocating a fresh serial and recording
+/// the issuance (see [`record_offline_issuance`]). Returns the leaf PEM.
+pub(super) fn sign_and_record(
+    ca: &Ca,
+    kind: NodeKind,
+    csr_pem: &[u8],
+    san: &[SanEntry],
+    name: &str,
+    validity_days: u32,
+) -> Result<Vec<u8>> {
+    let ca_dir = ca.directory().to_path_buf();
+    // See `issue_and_record`: hold the daemon's exclusive flock so offline
+    // signing can't race the daemon's serial counter.
+    let _lock = netidx_conf::ca_store::lock_ca_exclusive(&ca_dir)
+        .context("cannot sign offline: a running conf server owns this CA")?;
+    let serial = netidx_conf::ca_store::next_serial(&ca_dir)?;
+    let cert = ca.sign_request(csr_pem, san, validity_days, serial)?;
+    let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
+    let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
+    record_offline_issuance(&ca_dir, serial, kind, name, csr_str, cert_str, validity_days)?;
+    Ok(cert)
+}
+
 pub(super) fn issue_identity(
     ca: &Ca,
     name: &str,
@@ -2231,16 +2206,21 @@ fn issue_identity_into(
     key_bits: u32,
     password: Option<&str>,
 ) -> Result<IssuedFiles> {
-    ca.issue(&IssueParams {
-        subject: Subject::cn(name),
-        // Exactly one DNS SAN, matching the CN — that's what the
-        // netidx TLS validator requires of a member-server cert.
-        san: vec![SanEntry::Dns(name.to_string())],
-        key_bits,
-        validity_days: ca::DEFAULT_LEAF_VALIDITY_DAYS,
-        out_dir,
-        password: password.map(|s| s.to_string()),
-    })
+    issue_and_record(
+        ca,
+        NodeKind::Client,
+        IssueParams {
+            subject: Subject::cn(name),
+            // Exactly one DNS SAN, matching the CN — that's what the
+            // netidx TLS validator requires of a member-server cert.
+            san: vec![SanEntry::Dns(name.to_string())],
+            key_bits,
+            validity_days: ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            out_dir,
+            password: password.map(|s| s.to_string()),
+            serial: 0, // assigned by issue_and_record
+        },
+    )
     .with_context(|| format!("issuing certificate for {name}"))
 }
 

@@ -29,14 +29,14 @@ pub mod ca;
 /// key, and the CA module is unix-only. See [`design/ca-server.md`].
 #[cfg(unix)]
 pub mod ca_vault;
-/// File-backed queue of pending signing requests
-/// (`<ca-dir>/queue/`), behind the conf server's Enqueue / Poll /
-/// Approve / Deny. Unix-only — it lives in the CA dir.
+/// The CA's request store — one atomic JSON record per request, owned by
+/// the daemon (`queue/`, `issued/`, `denied/` under the CA dir). Backs
+/// the conf server's Enqueue / Poll / Approve / Deny, revoke-by-name, and
+/// duplicate-name refusal. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
-pub mod ca_queue;
-/// Append-only index of issued/revoked certificates
-/// (`<ca-dir>/issued.jsonl`) — backs revoke-by-name, duplicate-name
-/// refusal, and CRL construction. Unix-only — it lives in the CA dir.
+pub mod ca_store;
+/// The CA's published CRL (`<ca-dir>/crl.pem`), built from
+/// [`ca_store`]'s revoked set. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod ca_index;
 /// Wire protocol (message types + framing) shared by the conf server

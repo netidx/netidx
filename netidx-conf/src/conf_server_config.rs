@@ -21,6 +21,14 @@ use std::{
 pub struct CaRole {
     /// The CA directory (vault, certificate.pem, audit log).
     pub dir: PathBuf,
+    /// Path to the auto-renewal slot's keytab. `Some` ⇒ the daemon
+    /// approves verified renewals in-process as the dedicated empty-scope
+    /// `autorenew` admin whose password the keytab holds (TPM-sealed where
+    /// the host can); `None` ⇒ renewals wait for a human. A standalone
+    /// file — kept out of the CA dir and excluded from backups — so
+    /// rotating the credential never has to rewrite this config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autorenew: Option<PathBuf>,
 }
 
 /// A resolver server runs on this host; GetInfo reports its address
@@ -118,7 +126,10 @@ mod tests {
             serving_key: PathBuf::from("/etc/netidx/ca/server/key.pem"),
             trusted: PathBuf::from("/etc/netidx/tls/trusted.pem"),
             roles: Roles {
-                ca: Some(CaRole { dir: PathBuf::from("/etc/netidx/ca") }),
+                ca: Some(CaRole {
+                    dir: PathBuf::from("/etc/netidx/ca"),
+                    autorenew: Some(PathBuf::from("/etc/netidx/autorenew.keytab")),
+                }),
                 resolver: Some(ResolverRole {
                     config: PathBuf::from("/etc/netidx/resolver.json"),
                 }),

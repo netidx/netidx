@@ -644,6 +644,7 @@ mod tests {
                 validity_days: 30,
                 out_dir: id_src.path().to_path_buf(),
                 password: None,
+                serial: 2,
             })
             .unwrap();
 

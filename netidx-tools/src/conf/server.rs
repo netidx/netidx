@@ -4,13 +4,13 @@
 //! is the CLI shell plus [`setup_server`], the shared "stand up a conf
 //! server on this host" step used by `ca init` and the install flows.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, SanEntry},
     conf_client,
-    conf_proto::{self, SERVING_SAN},
+    conf_proto::{self, NodeKind, SERVING_SAN},
     conf_server,
     conf_server_config::{CaRole, ConfServerConfig, Roles},
     netshape::NetShape,
@@ -90,15 +90,20 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     std::fs::create_dir_all(&server_dir)
         .with_context(|| format!("creating {}", server_dir.display()))?;
     // Generate the serving key + CSR (ECDSA) and have the CA sign it.
+    // This is bootstrap — before the daemon owns the CA — so record the
+    // issuance (allocating the serial from the store) the way the daemon
+    // would, keeping the serving cert's serial unique and the daemon's
+    // startup counter seeded past it.
     let kc = conf_client::generate_key_and_csr(SERVING_SAN)?;
-    let leaf = a
-        .ca
-        .sign_request(
-            kc.csr_pem.as_bytes(),
-            &[SanEntry::Dns(SERVING_SAN.to_string())],
-            ca::DEFAULT_LEAF_VALIDITY_DAYS,
-        )
-        .context("signing the conf server's serving certificate")?;
+    let leaf = super::ca::sign_and_record(
+        a.ca,
+        NodeKind::ConfServer,
+        kc.csr_pem.as_bytes(),
+        &[SanEntry::Dns(SERVING_SAN.to_string())],
+        SERVING_SAN,
+        ca::DEFAULT_LEAF_VALIDITY_DAYS,
+    )
+    .context("signing the conf server's serving certificate")?;
     let ca_cert = std::fs::read(a.ca_dir.join("certificate.pem"))?;
     // Chain = [serving leaf, ca cert] so the client receives the CA.
     let mut chain = leaf;
@@ -156,7 +161,7 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
         serving_key,
         trusted,
         roles: Roles {
-            ca: Some(CaRole { dir: a.ca_dir.to_path_buf() }),
+            ca: Some(CaRole { dir: a.ca_dir.to_path_buf(), autorenew: None }),
             resolver: None,
             id_map: None,
         },
@@ -223,6 +228,23 @@ pub(super) fn update_roles(
     let cfg_path = paths::discover_conf_server_config()?;
     let mut cfg = ConfServerConfig::load(&cfg_path)?;
     update(&mut cfg.roles);
+    cfg.save(&cfg_path)?;
+    Ok(cfg_path)
+}
+
+/// Point this host's CA role at the autorenew slot's `keytab`, so the
+/// running conf-server daemon approves verified renewals in-process. The
+/// config must already exist and hold a CA role — autorenew is a CA-host
+/// feature, and the keytab path is all the daemon needs to read the slot.
+pub(super) fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
+    let cfg_path = paths::discover_conf_server_config()?;
+    let mut cfg = ConfServerConfig::load(&cfg_path)?;
+    let ca = cfg
+        .roles
+        .ca
+        .as_mut()
+        .ok_or_else(|| anyhow!("conf-server config {} has no CA role", cfg_path.display()))?;
+    ca.autorenew = Some(keytab.to_path_buf());
     cfg.save(&cfg_path)?;
     Ok(cfg_path)
 }

@@ -36,9 +36,11 @@ use crate::{
     conf_proto::{
         self, AddIdentityRequest, AddIdentityResponse, ApproveRequest, ApproveResponse,
         ClientHello, DenyRequest, DenyResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetInfoResponse, ListQueueRequest, ListQueueResponse, NodeKind,
-        PollRequest, PollResponse, QueueEntry, Request, ResolverAddr, Role, Secret,
-        ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION, SERVING_SAN,
+        EnrollRequest, GetInfoResponse, IssuedEntry, ListIssuedRequest,
+        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PollRequest,
+        PollResponse, QueueEntry, Request, ResolverAddr, RevokeRequest, RevokeResponse,
+        Role, Secret, ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION,
+        SERVING_SAN,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -46,7 +48,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use log::warn;
 use rustls::ClientConfig;
-use rustls_pki_types::{CertificateDer, ServerName};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -711,6 +713,58 @@ pub async fn deny(
     }
 }
 
+/// List every issued certificate the daemon holds (admin-authenticated) —
+/// live and revoked, with the metadata the revoke UI needs. The daemon
+/// owns the index; this is the only way to read it.
+pub async fn list_issued(
+    addr: SocketAddr,
+    admin: &str,
+    password: &str,
+    expected: &CaIdentity,
+) -> Result<Vec<IssuedEntry>> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ListIssued(ListIssuedRequest {
+            admin: admin.to_string(),
+            password: Secret(password.to_string()),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
+        ListIssuedResponse::Ok { entries } => Ok(entries),
+        ListIssuedResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
+/// Revoke certificates by serial (admin-authenticated). The daemon
+/// rewrites their records and re-signs the CRL; returns any non-fatal
+/// follow-up warnings.
+pub async fn revoke(
+    addr: SocketAddr,
+    admin: &str,
+    password: &str,
+    serials: Vec<u64>,
+    reason: &str,
+    expected: &CaIdentity,
+) -> Result<Vec<String>> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::Revoke(RevokeRequest {
+            admin: admin.to_string(),
+            password: Secret(password.to_string()),
+            serials,
+            reason: reason.to_string(),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
+        RevokeResponse::Ok { warnings } => Ok(warnings),
+        RevokeResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
 /// Push an identity registration to a peer conf server, authenticating
 /// with *our* serving cert (server-to-server; the receiver requires the
 /// reserved SAN). Unlike the operator-facing calls this does real PKI —
@@ -727,10 +781,13 @@ pub async fn push_identity(
     roots: rustls::RootCertStore,
     req: &AddIdentityRequest,
 ) -> Result<Option<u32>> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
+        .context("parsing client key")?
+        .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
     let (mut tls, hello) = connect_pki(
         addr,
         roots,
-        Some((client_cert_pem, client_key_pem)),
+        Some((client_cert_pem, key)),
         NodeKind::ConfServer,
     )
     .await?;
@@ -754,7 +811,7 @@ pub async fn push_identity(
 async fn connect_pki(
     addr: SocketAddr,
     roots: rustls::RootCertStore,
-    client_identity: Option<(&[u8], &[u8])>,
+    client_identity: Option<(&[u8], PrivateKeyDer<'static>)>,
     kind: NodeKind,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
@@ -763,14 +820,11 @@ async fn connect_pki(
         .context("selecting TLS versions")?
         .with_root_certificates(roots);
     let config = match client_identity {
-        Some((cert_pem, key_pem)) => {
+        Some((cert_pem, key)) => {
             let certs: Vec<CertificateDer<'static>> =
                 rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
                     .collect::<std::result::Result<_, _>>()
                     .context("parsing client certificate chain")?;
-            let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key_pem))
-                .context("parsing client key")?
-                .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
             builder
                 .with_client_auth_cert(certs, key)
                 .context("building client TLS config")?
@@ -798,6 +852,49 @@ pub struct PendingRenewal {
     kc: KeyAndCsr,
 }
 
+impl PendingRenewal {
+    /// The requested name (single DNS SAN) of this renewal.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The SubjectPublicKeyInfo DER of the fresh key — what a later
+    /// [`poll_renewal`] checks the issued leaf binds to.
+    pub fn our_spki(&self) -> &[u8] {
+        &self.our_spki
+    }
+
+    /// The fresh private key, PKCS#8 PEM. **Secret** — a caller that
+    /// persists it must seal/encrypt it first.
+    pub fn private_key_pem(&self) -> &str {
+        &self.kc.private_key_pem
+    }
+
+    /// The fresh CSR PEM (not secret).
+    pub fn csr_pem(&self) -> &str {
+        &self.kc.csr_pem
+    }
+
+    /// Reconstruct a pending renewal persisted by an earlier cycle so
+    /// [`poll_renewal`] can resume it — a renewal queued in one pass and
+    /// approved later must still install, which means the fresh key it
+    /// was signed against has to survive across passes (sealed on disk).
+    pub fn resume(
+        request_id: String,
+        name: String,
+        our_spki: Vec<u8>,
+        private_key_pem: Zeroizing<String>,
+        csr_pem: String,
+    ) -> Self {
+        PendingRenewal {
+            request_id,
+            name,
+            our_spki,
+            kc: KeyAndCsr { private_key_pem, csr_pem },
+        }
+    }
+}
+
 /// Queue a **verified renewal**: generate a fresh key + CSR for `name`
 /// and enqueue it over a connection authenticated by the *current*
 /// cert + key — the proof of possession that marks the request
@@ -809,13 +906,13 @@ pub async fn enqueue_renewal(
     name: &str,
     validity_days: u32,
     current_cert_pem: &[u8],
-    current_key_pem: &[u8],
+    current_key: PrivateKeyDer<'static>,
     roots: rustls::RootCertStore,
 ) -> Result<PendingRenewal> {
     let kc = generate_key_and_csr(name)?;
     let our_spki = csr_spki(&kc.csr_pem)?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((current_cert_pem, current_key_pem)), kind)
+        connect_pki(addr, roots, Some((current_cert_pem, current_key)), kind)
             .await?;
     conf_proto::write_msg(
         &mut tls,
@@ -843,14 +940,15 @@ pub async fn enqueue_renewal(
 
 /// Check on a queued renewal. On `Signed`, the returned leaf must
 /// contain our fresh key and exact name, and be signed by a CA in the
-/// *returned* bundle — which is itself trusted because it arrived over
-/// a channel verified against the installed roots. (Accepting the
-/// returned bundle is deliberate: it's how a renewed CA certificate
-/// propagates to the fleet.)
+/// **installed** trust bundle (`installed_pem`, the content of the
+/// host's `trusted` file). The returned `trusted_pem` is carried back
+/// for [`reconcile_trusted_bundle`] to fold in same-SPKI CA refreshes —
+/// it is *not* itself a trust anchor for the leaf.
 pub async fn poll_renewal(
     addr: SocketAddr,
     kind: NodeKind,
     pending: &PendingRenewal,
+    installed_pem: &str,
     roots: rustls::RootCertStore,
 ) -> Result<PollOutcome> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
@@ -865,7 +963,7 @@ pub async fn poll_renewal(
         PollResponse::Unknown => Ok(PollOutcome::Expired),
         PollResponse::Signed { signed_cert_pem, trusted_pem, warnings } => {
             verify_issued_any(
-                &trusted_pem,
+                installed_pem,
                 &pending.name,
                 &pending.our_spki,
                 &signed_cert_pem,
@@ -907,9 +1005,11 @@ pub async fn get_crl_pki(
 }
 
 /// Verify a leaf binds to our key + name and is signed by *some* CA in
-/// `bundle` — the renewal-path counterpart of [`verify_issued`], where
-/// the trust anchor is the returned bundle rather than one pinned cert
-/// (federated bundles carry several CAs; any of them may have signed).
+/// `bundle` — the renewal-path counterpart of [`verify_issued`]. The
+/// `bundle` here is the host's **installed** trust bundle, not anything
+/// the peer returned, so a leaf is only accepted if one of the CAs we
+/// already trust signed it (federated bundles carry several CAs; any of
+/// them may have signed).
 fn verify_issued_any(
     bundle: &str,
     name: &str,
@@ -917,7 +1017,7 @@ fn verify_issued_any(
     signed_cert_pem: &str,
 ) -> Result<()> {
     let mut rd = std::io::Cursor::new(bundle.as_bytes());
-    let mut last_err = anyhow!("the returned trust bundle contains no certificates");
+    let mut last_err = anyhow!("the installed trust bundle contains no certificates");
     for der in rustls_pemfile::certs(&mut rd).flatten() {
         match verify_issued_leaf(signed_cert_pem, &der, name, our_spki) {
             Ok(()) => return Ok(()),
@@ -926,8 +1026,87 @@ fn verify_issued_any(
     }
     Err(last_err.context(
         "the renewed certificate failed verification against every CA in the \
-         returned bundle",
+         installed trust bundle",
     ))
+}
+
+/// Build the trust bundle to install after a renewal, anchored to what
+/// we already trust. Starting from the installed roots, an installed CA
+/// is replaced by a cert from the peer's returned bundle only when that
+/// cert has the same public key (SPKI) *and* carries a valid signature
+/// under that key — i.e. a genuine same-key CA-cert refresh (extended
+/// validity). Certs whose key we don't already trust are ignored
+/// (with a warning): introducing a new trust anchor is an out-of-band
+/// admin action, never something an arbitrary renewal peer can do. An
+/// installed root the peer omitted is kept.
+pub fn reconcile_trusted_bundle(installed_pem: &str, returned_pem: &str) -> Result<String> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    // Installed roots, in order, keyed by SPKI fingerprint so a returned
+    // refresh can replace the matching entry in place.
+    let mut roots: Vec<(Fingerprint, Vec<u8>)> = Vec::new();
+    for der in rustls_pemfile::certs(&mut std::io::Cursor::new(installed_pem.as_bytes()))
+        .flatten()
+    {
+        let fp = Fingerprint::of_cert_der(der.as_ref())
+            .context("fingerprinting an installed trust anchor")?;
+        roots.push((fp, der.as_ref().to_vec()));
+    }
+    anyhow::ensure!(!roots.is_empty(), "the installed trust bundle contains no certificates");
+    for der in rustls_pemfile::certs(&mut std::io::Cursor::new(returned_pem.as_bytes()))
+        .flatten()
+    {
+        let fp = match Fingerprint::of_cert_der(der.as_ref()) {
+            Ok(fp) => fp,
+            Err(e) => {
+                warn!("ignoring an unparseable cert in the renewal trust bundle: {e:#}");
+                continue;
+            }
+        };
+        match roots.iter_mut().find(|(known, _)| *known == fp) {
+            None => warn!(
+                "ignoring CA {} offered by the renewal response: it is not a \
+                 trust anchor we already hold (distribute trust changes out of band)",
+                fp.short()
+            ),
+            Some((_, slot)) => {
+                // Same key — accept the refreshed cert only if it is
+                // validly self-signed under that key. A new validity
+                // window is the point; tampered constraints over a
+                // forged self-signature are not (the attacker lacks the
+                // CA private key, so a bad self-signature can't pass).
+                let (_, cert) = X509Certificate::from_der(der.as_ref())
+                    .map_err(|e| anyhow!("parsing a refreshed CA cert: {e}"))?;
+                match cert.verify_signature(Some(cert.public_key())) {
+                    Ok(()) => *slot = der.as_ref().to_vec(),
+                    Err(e) => warn!(
+                        "ignoring same-key CA refresh for {}: not validly \
+                         self-signed: {e}",
+                        fp.short()
+                    ),
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    for (_, der) in &roots {
+        out.push_str(&pem_encode_cert(der));
+    }
+    Ok(out)
+}
+
+/// PEM-encode a single DER certificate (no external pem dep — the rest
+/// of this module already hand-rolls PEM via [`pem_to_der`]).
+fn pem_encode_cert(der: &[u8]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut out = String::with_capacity(b64.len() + 64);
+    out.push_str("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 /// True if `fp` is the identity (SPKI) fingerprint of any certificate
@@ -1050,5 +1229,68 @@ mod tests {
         let kc = generate_key_and_csr("resolver.example.com").unwrap();
         assert!(kc.csr_pem.contains("BEGIN CERTIFICATE REQUEST"));
         assert!(kc.private_key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    fn self_signed(name: &str, key: &rcgen::KeyPair) -> String {
+        rcgen::CertificateParams::new(vec![name.to_string()])
+            .unwrap()
+            .self_signed(key)
+            .unwrap()
+            .pem()
+    }
+
+    /// The renewal trust-bundle reconciliation: installed roots are kept,
+    /// a returned cert with the same key replaces its installed peer (a
+    /// CA-cert refresh), and a returned cert whose key we don't already
+    /// trust is dropped — a renewal peer can't introduce a new anchor.
+    #[test]
+    fn reconcile_keeps_roots_swaps_same_key_drops_unknown() {
+        let key_a = rcgen::KeyPair::generate().unwrap();
+        let key_b = rcgen::KeyPair::generate().unwrap();
+        let key_c = rcgen::KeyPair::generate().unwrap();
+        let a = self_signed("ca-a", &key_a);
+        let b = self_signed("ca-b", &key_b);
+        // Same key as A, different cert => same SPKI, a legitimate refresh.
+        let a_refresh = self_signed("ca-a-renewed", &key_a);
+        let c = self_signed("ca-c", &key_c);
+
+        let installed = format!("{a}{b}");
+        // The peer returns: a refresh of A, B unchanged, and an unknown CA C.
+        let returned = format!("{a_refresh}{b}{c}");
+        let out = reconcile_trusted_bundle(&installed, &returned).unwrap();
+
+        let fp = |pem: &str| Fingerprint::of_cert_pem(pem.as_bytes()).unwrap();
+        // A (by SPKI) and B survive; C is dropped; nothing extra is added.
+        assert!(bundle_contains(&out, &fp(&a)));
+        assert!(bundle_contains(&out, &fp(&b)));
+        assert!(!bundle_contains(&out, &fp(&c)));
+        let count = rustls_pemfile::certs(&mut std::io::Cursor::new(out.as_bytes()))
+            .flatten()
+            .count();
+        assert_eq!(count, 2, "exactly the two installed roots remain");
+
+        // The A slot now holds the refreshed cert's DER, not the old one.
+        let a_fp = fp(&a);
+        let der_of = |pem: &str| pem_to_der(pem, "CERTIFICATE").unwrap();
+        let matched = rustls_pemfile::certs(&mut std::io::Cursor::new(out.as_bytes()))
+            .flatten()
+            .find(|d| Fingerprint::of_cert_der(d.as_ref()).unwrap() == a_fp)
+            .unwrap();
+        assert_eq!(matched.as_ref(), der_of(&a_refresh).as_slice(), "A was refreshed");
+        assert_ne!(matched.as_ref(), der_of(&a).as_slice());
+    }
+
+    /// A returned bundle that shares no key with the installed roots
+    /// changes nothing — the installed anchors are kept verbatim.
+    #[test]
+    fn reconcile_ignores_an_all_unknown_bundle() {
+        let key_a = rcgen::KeyPair::generate().unwrap();
+        let key_x = rcgen::KeyPair::generate().unwrap();
+        let a = self_signed("ca-a", &key_a);
+        let x = self_signed("attacker-ca", &key_x);
+        let out = reconcile_trusted_bundle(&a, &x).unwrap();
+        let fp = |pem: &str| Fingerprint::of_cert_pem(pem.as_bytes()).unwrap();
+        assert!(bundle_contains(&out, &fp(&a)));
+        assert!(!bundle_contains(&out, &fp(&x)));
     }
 }

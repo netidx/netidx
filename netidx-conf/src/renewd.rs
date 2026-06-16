@@ -28,11 +28,13 @@
 use crate::{atomic, conf_client, conf_proto::NodeKind, paths};
 use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
+use serde_derive::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -43,7 +45,8 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 
 /// How long a queued renewal is polled within one cycle before leaving
 /// it for the next (the admin may simply not have approved yet — the
-/// request id is persisted and picked back up).
+/// full pending state, sealed fresh key included, is persisted and
+/// resumed next cycle).
 const APPROVAL_POLL: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -199,6 +202,11 @@ async fn find_ca_addr(
         match conf_client::get_info_pki(addr, NodeKind::Client, roots.clone()).await {
             Ok(info) => {
                 if let Some(ca) = info.ca_addr {
+                    let ca = if ca.ip().is_unspecified() {
+                        SocketAddr::new(addr.ip(), ca.port())
+                    } else {
+                        ca
+                    };
                     return Ok(ca);
                 }
                 queue.extend(info.peers);
@@ -212,11 +220,96 @@ async fn find_ca_addr(
     bail!("no conf server holding the CA could be found")
 }
 
-/// The persisted request id of an in-flight renewal, kept beside the
-/// certificate so a daemon restart resumes polling instead of queueing
-/// a duplicate.
-fn pending_path(certificate: &Path) -> PathBuf {
-    certificate.with_file_name("renewal.id")
+/// Where a not-yet-installed renewal is persisted beside the
+/// certificate so a slow approval (or a daemon restart) resumes instead
+/// of queueing a duplicate: the non-secret state in `renewal.json`, the
+/// fresh key in `renewal.key` (sealed exactly like an identity key where
+/// a TPM exists, 0600 plaintext otherwise) with its sealed-password
+/// sidecar.
+fn pending_meta_path(certificate: &Path) -> PathBuf {
+    certificate.with_file_name("renewal.json")
+}
+
+fn pending_key_path(certificate: &Path) -> PathBuf {
+    certificate.with_file_name("renewal.key")
+}
+
+/// The non-secret half of a persisted renewal. The fresh private key is
+/// NOT here — it lives sealed at [`pending_key_path`].
+#[derive(Serialize, Deserialize)]
+struct PersistedRenewal {
+    request_id: String,
+    name: String,
+    our_spki: Vec<u8>,
+    csr_pem: String,
+}
+
+/// Persist a queued renewal so a later cycle can resume polling and
+/// install it. The fresh key is sealed the same way identity keys are.
+fn persist_pending(
+    certificate: &Path,
+    pending: &conf_client::PendingRenewal,
+) -> Result<()> {
+    let key_path = pending_key_path(certificate);
+    let _ =
+        crate::tls::write_private_key_maybe_sealed(&key_path, pending.private_key_pem())
+            .with_context(|| format!("persisting renewal key {}", key_path.display()))?;
+    let meta = PersistedRenewal {
+        request_id: pending.request_id.clone(),
+        name: pending.name().to_string(),
+        our_spki: pending.our_spki().to_vec(),
+        csr_pem: pending.csr_pem().to_string(),
+    };
+    let bytes = serde_json::to_vec_pretty(&meta).context("serializing renewal state")?;
+    atomic::write_atomic(&pending_meta_path(certificate), &bytes, 0o600)
+}
+
+/// Reconstruct a renewal persisted by an earlier cycle, if any.
+fn load_pending(certificate: &Path) -> Result<Option<conf_client::PendingRenewal>> {
+    let meta_path = pending_meta_path(certificate);
+    let bytes = match std::fs::read(&meta_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", meta_path.display()))
+        }
+    };
+    let meta: PersistedRenewal =
+        serde_json::from_slice(&bytes).context("parsing persisted renewal state")?;
+    let private_key_pem = read_pending_key(&pending_key_path(certificate))?;
+    Ok(Some(conf_client::PendingRenewal::resume(
+        meta.request_id,
+        meta.name,
+        meta.our_spki,
+        private_key_pem,
+        meta.csr_pem,
+    )))
+}
+
+/// Read back the persisted fresh key, unsealing it when a `.tpm`
+/// sidecar is present (the same test [`install`] uses to decide whether
+/// to re-seal).
+fn read_pending_key(key_path: &Path) -> Result<Zeroizing<String>> {
+    let enc = std::fs::read_to_string(key_path)
+        .with_context(|| format!("reading renewal key {}", key_path.display()))?;
+    let sidecar = crate::tls::sealed_sidecar(key_path);
+    if sidecar.exists() {
+        let blob = std::fs::read(&sidecar)
+            .with_context(|| format!("reading sealed password {}", sidecar.display()))?;
+        crate::tls::unseal_private_key(&enc, &blob)
+            .context("unsealing the persisted renewal key")
+    } else {
+        Ok(Zeroizing::new(enc))
+    }
+}
+
+/// Remove all persisted renewal state for an identity (on install, on
+/// denial/expiry, or when the cert no longer needs renewing).
+fn clear_pending(certificate: &Path) {
+    let _ = std::fs::remove_file(pending_meta_path(certificate));
+    let key_path = pending_key_path(certificate);
+    let _ = std::fs::remove_file(crate::tls::sealed_sidecar(&key_path));
+    let _ = std::fs::remove_file(&key_path);
 }
 
 /// One renewal pass over a single identity. Returns a short
@@ -228,44 +321,66 @@ async fn renew_identity(
     let (name, nb, na) = cert_facts(&id.certificate)?;
     let now = now_unix();
     if !needs_renewal(nb, na, now) {
-        // Outside the window: clear any stale pending marker and move on.
-        let _ = std::fs::remove_file(pending_path(&id.certificate));
+        // Outside the window: clear any stale pending state and move on.
+        clear_pending(&id.certificate);
         return Ok("current");
     }
     let roots = load_roots(&id.trusted)?;
+    let installed_pem = std::fs::read_to_string(&id.trusted)
+        .with_context(|| format!("reading trust bundle {}", id.trusted.display()))?;
     let ca_addr = find_ca_addr(server, &roots).await?;
-    let cert_pem = std::fs::read(&id.certificate)?;
-    let key_pem = std::fs::read(&id.private_key)?;
-    // The original validity is what we re-request (capped by the
-    // approving admin's policy server-side).
-    let validity_days = ((na.saturating_sub(nb)) / 86_400).max(1) as u32;
-    let pending = conf_client::enqueue_renewal(
-        ca_addr,
-        NodeKind::Client,
-        &name,
-        validity_days,
-        &cert_pem,
-        &key_pem,
-        roots.clone(),
-    )
-    .await
-    .with_context(|| format!("queueing renewal of {name}"))?;
-    atomic::write_atomic(
-        &pending_path(&id.certificate),
-        pending.request_id.as_bytes(),
-        0o644,
-    )?;
-    info!(
-        "renewd: queued renewal of {name} (request {}); waiting for approval",
-        pending.request_id
-    );
-    // Poll within this cycle for a bounded while — `autorenew` answers
-    // in seconds; a human admin may take until some later cycle.
+    let pending = match load_pending(&id.certificate)? {
+        Some(pending) => {
+            info!(
+                "renewd: resuming renewal of {name} (request {})",
+                pending.request_id
+            );
+            pending
+        }
+        None => {
+            let cert_pem = std::fs::read(&id.certificate)?;
+            let key =
+                netidx::tls::load_private_key(None, &id.private_key.to_string_lossy())
+                    .with_context(|| {
+                        format!("loading private key {}", id.private_key.display())
+                    })?;
+            // The original validity is what we re-request (capped by the
+            // approving admin's policy server-side).
+            let validity_days = ((na.saturating_sub(nb)) / 86_400).max(1) as u32;
+            let pending = conf_client::enqueue_renewal(
+                ca_addr,
+                NodeKind::Client,
+                &name,
+                validity_days,
+                &cert_pem,
+                key,
+                roots.clone(),
+            )
+            .await
+            .with_context(|| format!("queueing renewal of {name}"))?;
+            persist_pending(&id.certificate, &pending)
+                .with_context(|| format!("persisting renewal state for {name}"))?;
+            info!(
+                "renewd: queued renewal of {name} (request {}); waiting for approval",
+                pending.request_id
+            );
+            pending
+        }
+    };
+    // Poll within this cycle for a bounded while — `autorenew` answers in
+    // seconds; a human admin may take until some later cycle, when the
+    // persisted state above is resumed.
     let deadline = tokio::time::Instant::now() + APPROVAL_POLL;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        match conf_client::poll_renewal(ca_addr, NodeKind::Client, &pending, roots.clone())
-            .await?
+        match conf_client::poll_renewal(
+            ca_addr,
+            NodeKind::Client,
+            &pending,
+            &installed_pem,
+            roots.clone(),
+        )
+        .await?
         {
             conf_client::PollOutcome::Pending => {
                 if tokio::time::Instant::now() >= deadline {
@@ -274,18 +389,18 @@ async fn renew_identity(
             }
             conf_client::PollOutcome::Issued(issued) => {
                 install(id, &issued)?;
-                let _ = std::fs::remove_file(pending_path(&id.certificate));
+                clear_pending(&id.certificate);
                 info!(
                     "renewd: renewed {name}; running processes pick it up on restart"
                 );
                 return Ok("renewed");
             }
             conf_client::PollOutcome::Denied(reason) => {
-                let _ = std::fs::remove_file(pending_path(&id.certificate));
+                clear_pending(&id.certificate);
                 bail!("renewal of {name} was denied: {reason}");
             }
             conf_client::PollOutcome::Expired => {
-                let _ = std::fs::remove_file(pending_path(&id.certificate));
+                clear_pending(&id.certificate);
                 bail!("renewal request for {name} expired before approval");
             }
         }
@@ -309,6 +424,12 @@ async fn renew_identity(
 /// same way. If sealing fails (TPM gone) this errors rather than
 /// silently degrading to a plaintext key; the old identity stays
 /// intact and the daemon retries next tick.
+///
+/// Trust anchoring: the trust bundle is never replaced wholesale with
+/// what the peer returned. [`conf_client::reconcile_trusted_bundle`]
+/// keeps the installed roots and folds in only same-key, validly
+/// self-signed CA-cert refreshes — a compromised peer cannot introduce
+/// a new trust anchor through renewal.
 fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
     let was_chain = std::fs::read(&id.certificate)
         .map(|pem| {
@@ -336,7 +457,12 @@ fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
         atomic::write_atomic(&id.private_key, issued.private_key_pem.as_bytes(), 0o600)?;
     }
     atomic::write_atomic(&id.certificate, cert_payload.as_bytes(), 0o644)?;
-    atomic::write_atomic(&id.trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    let installed_pem = std::fs::read_to_string(&id.trusted)
+        .with_context(|| format!("reading current trust bundle {}", id.trusted.display()))?;
+    let reconciled =
+        conf_client::reconcile_trusted_bundle(&installed_pem, &issued.trusted_pem)
+            .context("reconciling the renewed trust bundle")?;
+    atomic::write_atomic(&id.trusted, reconciled.as_bytes(), 0o644)?;
     for w in &issued.warnings {
         warn!("renewd: server warning: {w}");
     }
