@@ -226,19 +226,25 @@ anyway. The pieces:
 - **`ca sign` queue UI**: verified renewals list separately with a
   one-keystroke "approve all"; new identities keep the full per-entry
   code-matching ceremony.
-- **`ca autorenew`** (the lazy-correct default, asked at CA creation,
-  default yes): a daemon that approves *verified renewals only*,
-  authorized by a dedicated `autorenew` keyslot with an **empty
-  policy** — over the wire its password can approve continuations and
-  nothing else (no SANs, no groups, no enrollment). The password lives
-  in `${config}/netidx/autorenew.keytab` (0600, deliberately outside
-  the CA dir — never back it up), and `--rotate` is the one-command
-  kill-and-replace. Invariant: **no new identity without a human;
-  continuations are automatic.**
+- **Auto-approving renewals** (`ca autorenew`, the lazy-correct default,
+  asked at CA creation, default yes): a dedicated `autorenew` keyslot
+  with an **empty policy** — its password can approve continuations and
+  nothing else (no SANs, no groups, no enrollment). The conf-server
+  daemon, the CA's sole owner, does the approving **in-process**: when
+  the CA role's `autorenew` field (in `conf-server.json`) names the
+  keytab, each sweep it reads the keytab, unlocks the slot, and approves
+  every pending *verified renewal* the same way a human admin would
+  (audited `op=renew`) — there is no separate approval process. The `ca
+  autorenew` command just creates or rotates that slot and points the
+  config at its keytab, which lives in
+  `${config}/netidx/autorenew.keytab` (0600, deliberately outside the CA
+  dir — never back it up); `--rotate` is the one-command kill-and-replace
+  (restart the conf server to pick up the new keytab). Invariant: **no
+  new identity without a human; continuations are automatic.**
 
 ### The keytab at rest (TPM sealing)
 
-The empty policy bounds what the keytab can do *over the wire*; it
+The empty policy bounds what the keytab can *authorize*; it
 does nothing at rest — the vault is flat, so any slot password
 recovers the master key, making the keytab plus a copy of the CA dir
 an offline CA-key compromise. So `setup_autorenew_slot` seals the
