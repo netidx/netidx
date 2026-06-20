@@ -3,7 +3,7 @@
 //! The activation supervisor is great at running netidx daemons, but
 //! it needs something to *run it* at boot. This module writes the
 //! native OS init-system unit file and registers it with the local
-//! service manager. The CLI (`netidx conf service install`) layers
+//! service manager. The CLI (`netidx conf component service install`) layers
 //! interactive prompting and `sudo` escalation on top.
 //!
 //! Per-platform plans:

@@ -1,4 +1,4 @@
-//! `netidx conf service {install,uninstall,status}` — the CLI shell
+//! `netidx conf component service {install,uninstall,status}` — the CLI shell
 //! over `netidx_conf::service`. Handles sudo elevation for
 //! system-scope installs, and re-execs the same binary across the
 //! privilege boundary so the elevated child runs the binary the
@@ -107,7 +107,7 @@ pub(super) fn offer(need: ServiceNeed, gate: ServiceGate) -> Result<()> {
     } else {
         eprintln!(
             "note: pass --with-service to register netidx as an OS service \
-             (run `netidx conf service install` later if you prefer)"
+             (run `netidx conf component service install` later if you prefer)"
         );
         false
     };

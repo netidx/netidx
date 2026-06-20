@@ -1,6 +1,7 @@
-//! `netidx conf renew …` — the certificate renewal daemon CLI. The
-//! engine lives in `netidx_conf::renewd`; templates install the `run`
-//! form as an activation unit on every TLS host.
+//! The certificate renewal daemon CLI, surfaced as `netidx conf component tls
+//! auto-renew …` (see the `tls` module). The engine lives in
+//! `netidx_conf::renewd`; templates install the `run` form as an
+//! activation unit on every TLS host.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};

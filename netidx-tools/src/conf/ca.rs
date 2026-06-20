@@ -22,10 +22,10 @@ pub(crate) enum Cmd {
     Init(InitParams),
     /// issue a leaf certificate from a CA
     Issue(IssueArgs),
-    /// generate a private key + CSR locally, to be signed by a CA elsewhere
-    Request(RequestArgs),
-    /// sign an externally-supplied CSR with a local CA
+    /// sign an externally-supplied CSR file with a local CA
     Sign(SignArgs),
+    /// work the enrollment queue: approve or deny pending requests
+    Approve(ApproveArgs),
     /// list local CAs
     List,
     /// manage CA admin keyslots (add / revoke / set-policy / list)
@@ -35,23 +35,35 @@ pub(crate) enum Cmd {
     },
     /// show the CA's fingerprint + identicon for out-of-band verification
     Fingerprint(FingerprintArgs),
-    /// request a certificate from a conf server and install it
-    Join(JoinArgs),
     /// revoke certificates by name (or serial) and re-sign the CRL
     Revoke(RevokeArgs),
-    /// set up or rotate the autorenew slot (the running conf server then
-    /// approves verified renewals in-process)
-    Autorenew(AutorenewArgs),
+    /// set up or rotate the auto-approve slot, so the running conf server
+    /// approves verified renewals in-process (no human per renewal)
+    AutoApprove(AutoApproveArgs),
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct AutorenewArgs {
-    /// Rotate the autorenew slot: revoke the old keyslot, mint a new long
-    /// random password, and rewrite the keytab — the one-command response
-    /// to a leaked keytab. Restart the conf server afterwards to pick up
-    /// the new credential.
+pub(crate) struct AutoApproveArgs {
+    /// Rotate the auto-approve slot: revoke the old keyslot, mint a new
+    /// long random password, and rewrite the keytab — the one-command
+    /// response to a leaked keytab. Restart the conf server afterwards to
+    /// pick up the new credential.
     #[arg(long)]
     pub rotate: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ApproveArgs {
+    /// Conf server whose enrollment queue to work. Defaults to this
+    /// host's own conf server, then mDNS discovery — so an enrollment
+    /// admin can approve from their workstation without shell access to
+    /// the CA host.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
+    /// CA dir, used only to verify the conf server's identity against the
+    /// local CA cert when one is present.
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -329,16 +341,10 @@ pub(crate) struct RequestArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct SignArgs {
-    /// Path to the CSR (PEM-encoded) to sign. When omitted, `sign`
-    /// runs in queue mode: list the pending signing requests on the
-    /// conf server and approve/deny them interactively.
+    /// Path to the CSR (PEM-encoded) to sign. Prompted when omitted.
+    /// (To approve queued enrollment requests instead of signing a CSR
+    /// file, use `netidx conf ca approve`.)
     pub csr_path: Option<PathBuf>,
-    /// Conf server to work the queue on (queue mode). Defaults to
-    /// this host's own conf server, then mDNS discovery — so an
-    /// enrollment admin can approve from their workstation without
-    /// shell access to the CA host.
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
     /// SubjectAltName entry to embed in the signed cert. Repeatable.
     /// The CA is authoritative — these override whatever the CSR
     /// claims. One of `--san` or `--accept-csr-san` must be passed:
@@ -377,18 +383,17 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Init(p) => init(p),
         Cmd::Issue(p) => issue(p),
-        Cmd::Request(p) => request(p),
         Cmd::Sign(p) => sign(p),
+        Cmd::Approve(p) => approve(p),
         Cmd::List => list(),
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
-        Cmd::Join(p) => join(p),
         Cmd::Revoke(p) => revoke(p),
-        Cmd::Autorenew(p) => autorenew(p),
+        Cmd::AutoApprove(p) => auto_approve(p),
     }
 }
 
-// -- ca autorenew -------------------------------------------------------------
+// -- ca auto-approve ----------------------------------------------------------
 
 /// The dedicated autorenew slot: a name nobody types and an
 /// empty-scope policy — over the wire its password can approve
@@ -476,15 +481,15 @@ pub(super) fn setup_autorenew_slot(
 /// credential. `--rotate` is the same operation framed as a leaked-keytab
 /// response: [`setup_autorenew_slot`] always replaces the slot, so enable
 /// and rotate share one path and differ only in what they print.
-fn autorenew(p: AutorenewArgs) -> Result<()> {
+fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
     let authorizing = collect_existing_password(
-        "your admin password (authorizes setting up the autorenew slot)",
+        "your admin password (authorizes setting up the auto-approve slot)",
     )?;
     let keytab = setup_autorenew_slot(&dir, &authorizing)?;
     let verb = if p.rotate { "rotated" } else { "enabled" };
-    println!("autorenew {verb}:");
+    println!("auto-approve {verb}:");
     println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
     println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
     // Rotation rewrote the keytab's contents but not its path, so pointing
@@ -749,7 +754,7 @@ pub(super) struct NewCaOpts {
 }
 
 /// **The** entry point for building a new vaulted CA, shared verbatim
-/// by `netidx conf ca init` and the `netidx conf install resolver`
+/// by `netidx conf ca init` and the `netidx conf resolver install`
 /// "create a new CA" branch — so the operator gets the identical
 /// experience (admin/policy, identicon, the "set up the CA server?"
 /// question) either way.
@@ -890,7 +895,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
             println!("automatic renewal approval enabled:");
             println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
             println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
-            println!("          rotate anytime with `netidx conf ca autorenew --rotate`)");
+            println!("          rotate anytime with `netidx conf ca auto-approve --rotate`)");
             println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
         }
     }
@@ -1060,7 +1065,7 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
 
 // -- ca join (the client) -----------------------------------------------------
 
-fn join(p: JoinArgs) -> Result<()> {
+pub(crate) fn join(p: JoinArgs) -> Result<()> {
     use super::init::{self, ConfServers};
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let (server, identity) = match p.server {
@@ -1341,7 +1346,7 @@ fn issue(p: IssueArgs) -> Result<()> {
     Ok(())
 }
 
-fn request(p: RequestArgs) -> Result<()> {
+pub(crate) fn request(p: RequestArgs) -> Result<()> {
     let cn = prompt::required_string("requested certificate common name", p.cn)?;
     // `--out-key` default is `./private.key`, but the *default* path
     // refuses to clobber: re-running `request` in the same dir would
@@ -1395,9 +1400,6 @@ fn request(p: RequestArgs) -> Result<()> {
 }
 
 fn sign(mut p: SignArgs) -> Result<()> {
-    if p.csr_path.is_none() {
-        return sign_queue(p);
-    }
     let csr_path =
         prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
     let directory = ca_dir_for(p.ca_dir.take())?;
@@ -1450,7 +1452,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
 /// - no local id-map exists at the canonical user path, or
 /// - the CSR carries no usable identity name (no SAN DNS entry and
 ///   no CN), or
-/// - stdin is not a TTY (scripts use `netidx conf id-map set-user`
+/// - stdin is not a TTY (scripts use `netidx conf component id-map set-user`
 ///   for explicit non-interactive registration; we don't want a
 ///   level-1 prompt to silently write a wrong UID).
 ///
@@ -1497,7 +1499,7 @@ fn maybe_register_in_id_map(
             // they want one, but don't fail the sign.
             println!(
                 "(no local id-map at {} — skipping registration; \
-                 create one with `netidx conf id-map init`)",
+                 create one with `netidx conf component id-map init`)",
                 map_path.display(),
             );
             return Ok(());
@@ -1546,14 +1548,14 @@ fn maybe_register_in_id_map(
     Ok(())
 }
 
-/// Interactive queue mode: list the pending signing requests on the
-/// conf server, review one at a time (matching the request code the
-/// enrollee read out — the fingerprint of the CSR's public key,
-/// computed locally from the CSR, never trusted from the wire), and
-/// approve (choosing the id-map groups) or deny. Works from anywhere
-/// that can reach the conf server — enrollment admins don't need shell
-/// access to the CA host.
-fn sign_queue(p: SignArgs) -> Result<()> {
+/// `ca approve` — interactive enrollment-queue mode: list the pending
+/// requests on the conf server, review one at a time (matching the
+/// request code the enrollee read out — the fingerprint of the CSR's
+/// public key, computed locally from the CSR, never trusted from the
+/// wire), and approve (choosing the id-map groups) or deny. Works from
+/// anywhere that can reach the conf server — enrollment admins don't
+/// need shell access to the CA host.
+fn approve(p: ApproveArgs) -> Result<()> {
     use super::init::{self, ConfServers};
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Where's the conf server? `--server`, else this host's own conf
@@ -1983,7 +1985,7 @@ fn list() -> Result<()> {
 
 // -- generate-flow helpers ---------------------------------------------------
 //
-// Used by `netidx conf install resolver --auth tls` to offer a
+// Used by `netidx conf resolver install --auth tls` to offer a
 // "just generate the resolver certificate" path: for a small org the
 // resolver host is commonly the CA host too, and making that one-step
 // is the whole point.
@@ -2346,7 +2348,6 @@ mod tests {
         .unwrap();
         let cert_path = scratch.path().join("client.pem");
         sign(SignArgs {
-            server: None,
             csr_path: Some(csr_path.clone()),
             san: vec![],
             // Explicit accept: the round trip flow simulates the admin
@@ -2403,7 +2404,6 @@ mod tests {
         .unwrap();
         let out_cert = scratch.path().join("out.pem");
         sign(SignArgs {
-            server: None,
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
@@ -2449,7 +2449,6 @@ mod tests {
         )
         .unwrap();
         let err = sign(SignArgs {
-            server: None,
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
@@ -2492,7 +2491,6 @@ mod tests {
         )
         .unwrap();
         let err = sign(SignArgs {
-            server: None,
             csr_path: Some(csr_path),
             san: vec!["dns:x.example.com".into()],
             accept_csr_san: true,

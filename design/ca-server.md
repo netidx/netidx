@@ -7,14 +7,14 @@
 > registration. Module renames: `ca_proto` → `conf_proto`, `ca_join` →
 > `conf_client`, `ca_server` → `conf_server`; the reserved serving SAN
 > is now `netidx-conf-server`; the daemon config is `conf-server.json`
-> (`netidx conf server run`). The vault (§ keyslots), signing engine,
+> (`netidx conf component server run`). The vault (§ keyslots), signing engine,
 > issuance policy, and the two-connection fingerprint trust model below
 > are unchanged and remain authoritative.
 
 **Status: Engine + CLI + activation/service setup + composite
 resolver-install flow implemented and tested end-to-end.** Remaining is
 only `ca migrate` (v1 → vault). `netidx conf ca init` and the
-`netidx conf install resolver` "create a new CA" branch now share one
+`netidx conf resolver install` "create a new CA" branch now share one
 entry point, `create_vaulted_ca` (§15), so creating a CA is identical
 either way — vault, identicon, and the "set up the CA server?" prompt.
 
@@ -59,7 +59,7 @@ registered as an OS service **once** per top-level process. The design:
   `conf install` templates (via `finish`) and `ca init` call it.
 - **Composition**: a flow that stands up several daemons drops all their
   units into one activation dir and offers a single service.
-  **Implemented**: `netidx conf install resolver` creating a CA calls
+  **Implemented**: `netidx conf resolver install` creating a CA calls
   the shared `create_vaulted_ca` (the same entry point as
   `netidx conf ca init`), which writes the `ca.unit` into the resolver's
   *own* activation dir; the resolver install then makes its single
@@ -454,7 +454,7 @@ operator to type a single IP address. In the common small-org case the
 CA daemon runs on the resolver box, so the suggested IP is usually
 correct; the multicast machinery from the old sketch is dropped
 entirely. (The resolver-address IP/port split has already landed across
-all the init flows that take one — `conf install {resolver,publisher}`
+all the init flows that take one — `conf {resolver,publisher} install`
 and the parent-referral cascade the workstation uses; the CA-server
 prompt arrives with this daemon.)
 

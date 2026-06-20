@@ -229,7 +229,7 @@ mod tests {
     }
 
     /// Service name unlikely to clash with anything the developer has
-    /// actually installed via `netidx conf service install`. The
+    /// actually installed via `netidx conf component service install`. The
     /// per-OS uninstall is best-effort + idempotent — with this name
     /// in a test environment it's a no-op.
     fn test_service_name() -> String {

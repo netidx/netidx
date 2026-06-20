@@ -80,7 +80,7 @@ const PUSH_BROWSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// policy whose only over-the-wire power is approving verified renewals.
 /// When [`CaRole::autorenew`](crate::conf_server_config::CaRole) names its
 /// keytab, the daemon authenticates as this slot to approve renewals
-/// in-process — the same narrow principal the separate `conf ca autorenew`
+/// in-process — the same narrow principal the separate `conf ca auto-approve`
 /// process used to be, now without the extra process.
 pub const AUTORENEW_ADMIN: &str = "autorenew";
 
@@ -1663,7 +1663,7 @@ fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
             format!(
                 "unsealing autorenew keytab {} — if this host's TPM was cleared \
                  or the board was replaced, mint a fresh keytab with \
-                 `netidx conf ca autorenew --rotate`",
+                 `netidx conf ca auto-approve --rotate`",
                 keytab.display()
             )
         })?;

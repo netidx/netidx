@@ -214,17 +214,14 @@ async fn resolver_template_anonymous_round_trip() -> Result<()> {
     Ok(())
 }
 
-/// Same as the anonymous round-trip, but with the auto-seeded
-/// perms file in play (the default behaviour from change set
-/// "resolver template includes perms.json by default"). Verifies
-/// that the auto-seeded base-anchored rules (`<base>/$[user]` →
-/// `$[user]` → swlpd and `<base>` → users group → swl) are
-/// loadable by the resolver, AND don't break anonymous publish at
-/// any path — anonymous principals match no entity in the seed,
-/// but anonymous auth bypasses perms checks entirely, so the
-/// round-trip must still succeed.
+/// Anonymous auth enforces no permissions (the resolver allows every
+/// operation regardless of perms), so the template writes NO perms file
+/// even when `with_perms_file` is requested — emitting an inert
+/// perms.json would only suggest the wide-open resolver is somehow
+/// access-controlled. Verifies no perms file lands on disk and the
+/// round-trip still works.
 #[tokio::test(flavor = "multi_thread")]
-async fn resolver_template_anonymous_with_default_perms_round_trip() -> Result<()> {
+async fn resolver_template_anonymous_skips_perms_file() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
     let dir = TempDir::new()?;
@@ -234,13 +231,18 @@ async fn resolver_template_anonymous_with_default_perms_round_trip() -> Result<(
     params.perms_path = Some(dir.path().join("perms.json"));
 
     let rt = template::resolver::resolver(&params)?;
+    assert!(rt.perms_file.is_none(), "anonymous must not emit a perms file");
     rt.apply()?;
+    assert!(
+        !dir.path().join("perms.json").exists(),
+        "anonymous must not write a perms file to disk",
+    );
 
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
     let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
 
     let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
-    round_trip(client_cfg, "/e2e/anonymous-with-perms", Value::U32(7)).await?;
+    round_trip(client_cfg, "/e2e/anonymous-no-perms", Value::U32(7)).await?;
     Ok(())
 }
 

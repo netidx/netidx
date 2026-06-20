@@ -1,5 +1,10 @@
 //! `netidx conf …` CLI surface. A thin presentation layer over
 //! `netidx-conf`.
+//!
+//! Two levels: **system roles** (`workstation` / `resolver` /
+//! `publisher`, each with `install` and lifecycle actions) plus `ca`,
+//! are top-level; the low-level single-component commands live under
+//! `component`. `uninstall` tears an install down.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -11,53 +16,42 @@ mod activation;
 #[cfg(unix)]
 mod ca;
 mod client;
+mod component;
 mod editor;
 mod id_map;
 mod init;
+mod lifecycle;
 mod perms;
 mod prompt;
 mod renew;
 mod resolver;
+mod roles;
 // `server` (the conf-server daemon CLI) depends on the
 // `netidx_conf::conf_server` engine module, which is unix-only (the
 // CA signer pulls openssl). Browsing/joining from Windows still works
-// via `install workstation` — only the daemon is unix-gated.
+// via `workstation install` — only the daemon is unix-gated.
 #[cfg(unix)]
 mod server;
 mod service;
+mod tls;
 mod uninstall;
 
-// One-shot CLI argument value on the stack; boxing the big variant
-// would trade nothing for an allocation.
-#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub(crate) enum Params {
-    /// install a templated netidx setup
-    Install {
+    /// workstation role: a local resolver + matching client
+    Workstation {
         #[command(subcommand)]
-        params: init::Params,
+        cmd: roles::workstation::Cmd,
     },
-    /// tear down a netidx install (config dir + OS service)
-    Uninstall(uninstall::Params),
-    /// show or edit the client config
-    Client {
-        #[command(subcommand)]
-        cmd: client::Cmd,
-    },
-    /// show or edit the resolver-server config
+    /// resolver role: a network-facing resolver server
     Resolver {
         #[command(subcommand)]
-        cmd: resolver::Cmd,
+        cmd: roles::resolver::Cmd,
     },
-    /// edit resolver-server perms
-    Perms {
+    /// publisher role: a client config for a publisher host
+    Publisher {
         #[command(subcommand)]
-        cmd: perms::Cmd,
-    },
-    /// edit netidx-activation units
-    Activation {
-        #[command(subcommand)]
-        cmd: activation::Cmd,
+        cmd: roles::publisher::Cmd,
     },
     /// manage a local certificate authority
     // Unix-only — the engine module (`netidx_conf::ca`) needs
@@ -67,43 +61,24 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
-    /// run the conf server (network discovery + setup daemon)
-    #[cfg(unix)]
-    Server {
+    /// tear down a netidx install (config dir + OS service)
+    Uninstall(uninstall::Params),
+    /// low-level single-component commands (client / resolver config /
+    /// perms / units / server / tls / id-map / service)
+    Component {
         #[command(subcommand)]
-        cmd: server::Cmd,
-    },
-    /// certificate renewal daemon (renew this host's TLS identities)
-    Renew {
-        #[command(subcommand)]
-        cmd: renew::Cmd,
-    },
-    /// edit the netidx id-map (TLS uid/group lookups)
-    IdMap {
-        #[command(subcommand)]
-        cmd: id_map::Cmd,
-    },
-    /// install netidx as an OS service
-    Service {
-        #[command(subcommand)]
-        cmd: service::Cmd,
+        cmd: component::Cmd,
     },
 }
 
 pub(crate) fn run(p: Params) -> Result<()> {
     match p {
-        Params::Install { params } => init::run(params),
-        Params::Uninstall(p) => uninstall::run(p),
-        Params::Client { cmd } => client::run(cmd),
-        Params::Resolver { cmd } => resolver::run(cmd),
-        Params::Perms { cmd } => perms::run(cmd),
-        Params::Activation { cmd } => activation::run(cmd),
+        Params::Workstation { cmd } => roles::workstation::run(cmd),
+        Params::Resolver { cmd } => roles::resolver::run(cmd),
+        Params::Publisher { cmd } => roles::publisher::run(cmd),
         #[cfg(unix)]
         Params::Ca { cmd } => ca::run(cmd),
-        #[cfg(unix)]
-        Params::Server { cmd } => server::run(cmd),
-        Params::Renew { cmd } => renew::run(cmd),
-        Params::IdMap { cmd } => id_map::run(cmd),
-        Params::Service { cmd } => service::run(cmd),
+        Params::Uninstall(p) => uninstall::run(p),
+        Params::Component { cmd } => component::run(cmd),
     }
 }

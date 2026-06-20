@@ -1,6 +1,6 @@
 //! On-disk config for the conf-server daemon (`conf-server.json`).
 //!
-//! Written by the install flows, read by `netidx conf server run`.
+//! Written by the install flows, read by `netidx conf component server run`.
 //! Roles are explicit: the file states exactly what this host does
 //! (holds the CA, runs a resolver, runs an id-map) and where each
 //! role's backing files live — the daemon never guesses from what it

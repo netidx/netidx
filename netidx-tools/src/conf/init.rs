@@ -1,4 +1,4 @@
-//! `netidx conf install <type>` — render and apply a `RenderedTemplate`
+//! `netidx conf <role> install` — render and apply a `RenderedTemplate`
 //! for one of the three v1 templates.
 
 use anyhow::{Context, Result};
@@ -14,6 +14,7 @@ use netidx_conf::{
     fingerprint::ColorMode,
     netshape::NetShape,
     paths,
+    provenance::{InstallRecord, InstallRole, NetworkIdentity},
     template::{
         self, AuthChoice, ParentRef, ReferralAuth, RenderedTemplate, TlsIdentitySpec,
         resolver::IdMapMode,
@@ -28,30 +29,16 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use clap::{Args, Subcommand};
+use clap::Args;
 
 // `ca` submodule depends on netidx_conf::ca which is unix-only.
 #[cfg(unix)]
 use super::ca;
 use super::{prompt, service};
 
-#[derive(Subcommand, Debug)]
-pub(crate) enum Params {
-    /// local-auth resolver + matching client
-    Workstation(WorkstationFlags),
-    /// single network-facing resolver-server
-    Resolver(ResolverFlags),
-    /// publisher-host config pointing at a remote cluster
-    Publisher(PublisherFlags),
-}
-
-pub(crate) fn run(p: Params) -> Result<()> {
-    match p {
-        Params::Workstation(f) => run_workstation(f),
-        Params::Resolver(f) => run_resolver(f),
-        Params::Publisher(f) => run_publisher(f),
-    }
-}
+// The three install entry points are exposed to the per-role command
+// modules (`conf::roles::*`), which own the `<role> install` surface.
+// `init` stays the shared install engine + helpers.
 
 // -- Common -------------------------------------------------------------------
 
@@ -83,6 +70,15 @@ impl AuthKind {
             Self::Local => DefaultAuthMech::Local,
             Self::Krb5 => DefaultAuthMech::Krb5,
             Self::Tls => DefaultAuthMech::Tls,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Local => "local",
+            Self::Krb5 => "krb5",
+            Self::Tls => "tls",
         }
     }
 }
@@ -539,7 +535,7 @@ fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>>
     Ok(provided.map(|s| ArcStr::from(s.as_str())))
 }
 
-fn run_workstation(f: WorkstationFlags) -> Result<()> {
+pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let cli_tls_id = f.tls.to_spec()?;
     let mut tls_identities = vec![];
     if let Some(spec) = cli_tls_id {
@@ -566,6 +562,9 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
     // into the prompt cascade — which, on a non-TTY, returns `None`
     // and produces a workstation with no parent referral at all. Same
     // contract `run_resolver` already has.
+    // Provenance for the install record: set when the workstation joins
+    // a discovered (glyph-confirmed) network below.
+    let mut net_prov: (Option<NetworkIdentity>, Option<SocketAddr>) = (None, None);
     let parent = if f.parent.any_set() {
         f.parent.to_parent_ref(parent_default_path)?
     } else {
@@ -576,6 +575,7 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
         // probe outcome rides into the manual cascade so a declined
         // discovery is never re-offered.
         let probe = discover_network(NodeKind::Workstation)?;
+        net_prov = network_provenance(&probe);
         match probe.have() {
             Some(net) => {
                 let have_identity = !tls_identities.is_empty();
@@ -638,12 +638,23 @@ fn run_workstation(f: WorkstationFlags) -> Result<()> {
         with_container: !f.no_container,
     };
     let rt = template::workstation(&params)?;
+    let (network, conf_server) = net_prov;
+    // The workstation's own resolver is local-auth; the network it refers
+    // up to (if any) carries its auth inside the parent referral.
+    let record = InstallRecord::new(
+        InstallRole::Workstation,
+        f.base.clone(),
+        "local",
+        network,
+        conf_server,
+    );
     // A workstation runs in the operator's session; a user-scope
     // systemd / launchd service is the right level — no sudo needed.
     finish_with(
         rt,
         &f.common,
         service::ServiceNeed::at(service::ScopeArg::User),
+        record,
         // TLS identities expire: install the renewal daemon alongside.
         move || match (&post_apply_units_dir, has_tls) {
             (Some(d), true) => install_renew_unit(d),
@@ -839,7 +850,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// `apply()` installs it).
 ///
 /// The default path queues a signing request and waits for an admin to
-/// approve it remotely (`netidx conf ca sign`): the enrollee shows a
+/// approve it remotely (`netidx conf ca approve`): the enrollee shows a
 /// request code (the CSR key's fingerprint) the admin matches out of
 /// band, and the admin — who knows who they're enrolling — chooses the
 /// id-map groups at approval. The synchronous path (an admin present
@@ -903,9 +914,9 @@ fn join_network(
         println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
         println!(
             "send this code to your CA admin (chat, phone — any channel you \
-             trust); they approve with `netidx conf ca sign` after matching \
-             it. Waiting for approval (Ctrl-C to abort; the request expires \
-             on its own)..."
+             trust); they approve with `netidx conf ca approve` after \
+             matching it. Waiting for approval (Ctrl-C to abort; the request \
+             expires on its own)..."
         );
         loop {
             std::thread::sleep(POLL_INTERVAL);
@@ -1078,7 +1089,7 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
         return Ok(ConfServers::NotProbed);
     }
     println!(
-        "searching for netidx conf servers on the local network \
+        "searching for netidx conf component servers on the local network \
          ({}s)...",
         DISCOVERY_TIMEOUT.as_secs()
     );
@@ -1415,7 +1426,7 @@ fn prompt_tls_client_identity(
 /// key/cert/trusted all under `~/.config/netidx/tls/<our-name>/`.
 ///
 /// The CSR itself lands in the *current working directory* as
-/// `./<our-name>.csr` (matching `netidx conf ca request`), not in
+/// `./<our-name>.csr` (matching `netidx conf component tls request`), not in
 /// the identity dir — it's something the operator hands off to the
 /// CA admin, so it needs to be where they'll naturally look for it
 /// (attach to an email, scp, etc.), not buried under XDG config.
@@ -1720,7 +1731,7 @@ fn choose_key_protection(
 /// so the caller can plumb it into the emitted client config.
 ///
 /// The CSR itself lands in the *current working directory* as
-/// `./<name>.csr` (matching `netidx conf ca request`), not in the
+/// `./<name>.csr` (matching `netidx conf component tls request`), not in the
 /// identity dir — the operator hands it off to a CA admin, so it
 /// needs to be where they'll naturally look for it.
 #[cfg(unix)]
@@ -2134,7 +2145,7 @@ pub(crate) struct ResolverFlags {
     common: CommonFlags,
 }
 
-fn run_resolver(mut f: ResolverFlags) -> Result<()> {
+pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // Ask the network before asking the human: a second (or third…)
     // resolver discovers the existing network and imports its settings
     // — auth scheme, domain, where the CA is. Peer resolvers stay
@@ -2362,6 +2373,18 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         None
     };
     let post_apply_units_dir = units_dir.clone();
+    // Build the install record before the post-apply closure moves
+    // `probe`. A resolver joining a discovered network pins that
+    // network's identity; a fresh first resolver records none (it is the
+    // root — `resolver update` is a later pass).
+    let (network, conf_server) = network_provenance(&probe);
+    let record = InstallRecord::new(
+        InstallRole::Resolver,
+        f.base.clone(),
+        f.auth.map(|k| k.as_str()).unwrap_or("tls"),
+        network,
+        conf_server,
+    );
     let params = netidx_conf::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
@@ -2389,6 +2412,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         rt,
         &f.common,
         service::ServiceNeed::at(service::ScopeArg::System),
+        record,
         // Conf-server step, after the configs it points at exist: a
         // discovered network ⇒ enroll a new conf server here; a fresh
         // network ⇒ add this host's roles to the config the CA setup
@@ -2582,8 +2606,9 @@ fn resolver_self_auth(
         AuthKind::Local => bail!(
             "the resolver template does not support local auth: local (unix-socket) \
              auth only authenticates clients on the same machine, so it cannot serve \
-             a network. For a single-machine setup use `netidx conf install \
-             workstation`; for a network resolver choose anonymous, krb5, or tls."
+             a network. For a single-machine setup use `netidx conf \
+             workstation install`; for a network resolver choose anonymous, krb5, \
+             or tls."
         ),
         AuthKind::Krb5 => {
             let spn = match default_krb5_spn() {
@@ -3132,7 +3157,7 @@ fn enroll_conf_server(
         println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
         println!(
             "send this code to your CA admin (chat, phone — any channel you \
-             trust); they approve with `netidx conf ca sign` (their policy \
+             trust); they approve with `netidx conf ca approve` (their policy \
              must grant may_enroll_servers). Waiting for approval (Ctrl-C to \
              abort; the request expires on its own)..."
         );
@@ -3221,7 +3246,7 @@ fn enroll_conf_server(
     } else {
         println!(
             "  (--no-units: no activation unit written; run it yourself with\n\
-             \x20  netidx conf server run -c {})",
+             \x20  netidx conf component server run -c {})",
             cfg_path.display()
         );
     }
@@ -3282,7 +3307,7 @@ pub(crate) struct PublisherFlags {
     common: CommonFlags,
 }
 
-fn run_publisher(mut f: PublisherFlags) -> Result<()> {
+pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     let mut tls_identities = vec![];
     // Holds the staging tempdir(s) for any conf-server-joined identity
     // until `finish` (which runs the template's --force-gated install)
@@ -3418,6 +3443,14 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     } else {
         service::ServiceNeed::NONE
     };
+    let (network, conf_server) = network_provenance(&probe);
+    let record = InstallRecord::new(
+        InstallRole::Publisher,
+        f.base.clone(),
+        f.auth.map(|k| k.as_str()).unwrap_or("tls"),
+        network,
+        conf_server,
+    );
     let params = netidx_conf::template::publisher::PublisherParams {
         addrs,
         default_auth,
@@ -3427,7 +3460,7 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         default_bind_config,
     };
     let rt = template::publisher(&params)?;
-    finish_with(rt, &f.common, need, move || match &units_dir {
+    finish_with(rt, &f.common, need, record, move || match &units_dir {
         Some(d) => install_renew_unit(d),
         None => Ok(()),
     })
@@ -3465,6 +3498,28 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 
 // -- Apply / dry-run ----------------------------------------------------------
 
+/// Extract install provenance from a network probe: the glyph-confirmed
+/// network identity (domain + CA fingerprint) to pin later lifecycle ops
+/// to, and a reachable conf-server address to start from. `(None, None)`
+/// when the install didn't join a *discovered* network — a CLI-flag
+/// parent, the manual prompt cascade, or no parent at all carry no
+/// confirmed identity, so they record none and a later `join` supplies
+/// it.
+fn network_provenance(
+    probe: &ConfServers,
+) -> (Option<NetworkIdentity>, Option<SocketAddr>) {
+    match probe.have() {
+        Some(net) => {
+            let id = NetworkIdentity::new(
+                net.identity.domain.clone(),
+                &net.identity.fingerprint,
+            );
+            (Some(id), net.info.reached.first().copied())
+        }
+        None => (None, None),
+    }
+}
+
 /// Describe + apply the rendered template, with a post-apply step that
 /// runs after it has been installed (and never on `--dry-run`). The
 /// resolver install uses the step to stand up / update this host's
@@ -3474,6 +3529,7 @@ fn finish_with(
     rt: RenderedTemplate,
     common: &CommonFlags,
     need: service::ServiceNeed,
+    record: InstallRecord,
     post_apply: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     println!("{}", rt.describe());
@@ -3482,6 +3538,11 @@ fn finish_with(
         rt.apply().context("applying template")?;
         println!("ok");
         post_apply()?;
+        // Record what we installed and the network it joined
+        // (identity-pinned), so lifecycle ops (`status`/`update`) know
+        // what this host is and can re-pin to the same CA before
+        // trusting a conf server's picture of the network.
+        record.save_default().context("writing the install record")?;
     }
     // Single end-of-process hook: offer the OS service (or print the
     // dry-run note). Sub-steps with their own units merge their needs

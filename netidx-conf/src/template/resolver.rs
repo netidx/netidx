@@ -235,12 +235,21 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // per-user-playground layout under the resolver's base, rather
     // than an empty perms map that denies everything.
     //
+    // Exception: anonymous auth performs no access control — the
+    // resolver allows every operation regardless of perms
+    // (`resolver_server::config`: "For Anonymous all operations on the
+    // server are always allowed"). A perms file would be completely
+    // inert and only invite the misreading that the wide-open resolver
+    // is somehow restricted, so we don't write one. (Local auth *does*
+    // enforce perms, via uid→user/group mapping, so it keeps the seed.)
+    //
     // For auth modes that carry a stable identity for the resolver
     // itself (TLS cert SAN, Krb5 SPN), grant that identity full
     // rights at the base — without it the resolver can't
     // subscribe / publish under its own tree (e.g. the local-client
     // config we emit below, or future self-published cluster state).
-    let perms_file = if p.with_perms_file {
+    let anonymous = matches!(p.auth, AuthChoice::Anonymous);
+    let perms_file = if p.with_perms_file && !anonymous {
         let path = match &p.perms_path {
             Some(p) => p.clone(),
             None => paths::user_perms_file()?,
@@ -262,6 +271,15 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     } else {
         None
     };
+    // Don't silently drop an explicitly-supplied seed on the anonymous
+    // path — say why it wasn't written.
+    if anonymous && p.perms_seed.is_some() {
+        warnings.push(arcstr::literal!(
+            "anonymous auth enforces no permissions (the resolver allows \
+             every operation), so the supplied perms seed was not written; \
+             perms apply only under local, krb5, or tls auth"
+        ));
+    }
 
     let mut rcfg_builder = rfile::ConfigBuilder::default();
     rcfg_builder.member_servers(vec![member]);
@@ -700,6 +718,11 @@ mod tests {
     fn auto_seeds_default_perms_when_enabled() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
+        // Anonymous no longer emits a perms file (perms are inert under
+        // it). Use local auth, which enforces perms and — like
+        // anonymous — has no resolver self-entity, so the seed is
+        // exactly `default_seed` with no extra base entry to account for.
+        p.auth = AuthChoice::Local { path: out.path().join("auth.sock") };
         p.with_perms_file = true;
         p.perms_path = Some(out.path().join("perms.json"));
         let rt = resolver(&p).unwrap();
@@ -737,6 +760,9 @@ mod tests {
     fn perms_seed_emits_separate_file() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
+        // Local auth, not anonymous: anonymous discards a supplied seed
+        // (perms are inert under it); local enforces it.
+        p.auth = AuthChoice::Local { path: out.path().join("auth.sock") };
         let mut seed = perms::empty();
         perms::add_entry(&mut seed, "/", "alice", "swlpd").unwrap();
         p.perms_seed = Some(seed);
@@ -1096,29 +1122,47 @@ mod tests {
         .expect("resolver config including krb5-SPN perms must validate");
     }
 
-    /// Anonymous and Local auth have no stable identity for the
-    /// resolver itself — so `resolver_self_entity` returns None, and
-    /// the perms seed should contain only the default
-    /// per-user-playground rules (no `swlpd` entry at the base).
+    /// Anonymous auth enforces no permissions (the resolver allows every
+    /// operation regardless of perms), so a perms file would be inert and
+    /// misleading — the template must write none, and must not wire
+    /// `include_permissions`, even with `with_perms_file` on.
     #[test]
-    fn anonymous_resolver_does_not_seed_self_entity() {
+    fn anonymous_resolver_emits_no_perms_file() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.with_perms_file = true;
         p.perms_path = Some(out.path().join("perms.json"));
         let rt = resolver(&p).unwrap();
-        let (_, seeded) = rt.perms_file.as_ref().unwrap();
-        // No entity gets swlpd at base; the default seed's entries
-        // (e.g. $[user]) don't carry that string at `/`.
-        let entries_at_root: Vec<_> = crate::perms::iter(seeded)
-            .filter(|(p, _, _)| *p == "/")
-            .collect();
-        for (_, ent, perm) in &entries_at_root {
-            assert_ne!(
-                perm.as_str(),
-                "swlpd",
-                "unexpected swlpd entry for {ent} at / in anonymous seed",
-            );
-        }
+        assert!(rt.perms_file.is_none(), "anonymous must not emit a perms file");
+        let (_, r) = rt.resolver_config.as_ref().unwrap();
+        assert!(
+            r.0.include_permissions.is_empty(),
+            "anonymous must not wire include_permissions: {:?}",
+            r.0.include_permissions,
+        );
+        // Nothing lands on disk after apply either.
+        rt.apply().unwrap();
+        assert!(!out.path().join("perms.json").exists());
+    }
+
+    /// An explicitly-supplied perms seed on the anonymous path is
+    /// dropped (perms are inert under anonymous), but loudly — the
+    /// operator gets a warning rather than a silent no-op.
+    #[test]
+    fn anonymous_resolver_warns_when_dropping_explicit_seed() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        let mut seed = perms::empty();
+        perms::add_entry(&mut seed, "/", "alice", "swlpd").unwrap();
+        p.perms_seed = Some(seed);
+        p.with_perms_file = true;
+        p.perms_path = Some(out.path().join("perms.json"));
+        let rt = resolver(&p).unwrap();
+        assert!(rt.perms_file.is_none());
+        assert!(
+            rt.warnings.iter().any(|w| w.contains("perms seed was not written")),
+            "expected a dropped-seed warning, got {:?}",
+            rt.warnings,
+        );
     }
 }

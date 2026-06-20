@@ -121,6 +121,22 @@ pub fn user_conf_server_config() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// `${dirs::config_dir}/netidx/install.json`. No existence check. The
+/// install provenance record — what role was installed here and which
+/// network (identity-pinned) it joined. See [`crate::provenance`].
+pub fn user_install_record() -> Result<PathBuf> {
+    let mut p = user_config_root()?;
+    p.push("install.json");
+    Ok(p)
+}
+
+/// `/etc/netidx/install.json` on unix, `C:\netidx\install.json` on windows.
+pub fn system_install_record() -> PathBuf {
+    let mut p = system_config_root();
+    p.push("install.json");
+    p
+}
+
 /// `/etc/netidx/conf-server.json` on unix, `C:\netidx\conf-server.json`
 /// on windows.
 pub fn system_conf_server_config() -> PathBuf {

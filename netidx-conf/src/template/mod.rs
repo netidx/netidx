@@ -375,8 +375,8 @@ impl RenderedTemplate {
 }
 
 /// One-line description of a client-side resolver auth, for the
-/// `--dry-run` plan.
-fn describe_client_auth(auth: &cfile::Auth) -> String {
+/// `--dry-run` plan and `status`.
+pub fn describe_client_auth(auth: &cfile::Auth) -> String {
     match auth {
         cfile::Auth::Anonymous => "anonymous".to_string(),
         cfile::Auth::Krb5(spn) => format!("krb5, spn {spn}"),
@@ -386,7 +386,7 @@ fn describe_client_auth(auth: &cfile::Auth) -> String {
 }
 
 /// One-line description of a resolver member-server's auth.
-fn describe_member_auth(auth: &rfile::Auth) -> String {
+pub fn describe_member_auth(auth: &rfile::Auth) -> String {
     match auth {
         rfile::Auth::Anonymous => "anonymous".to_string(),
         rfile::Auth::Krb5(spn) => format!("krb5, spn {spn}"),
@@ -396,7 +396,7 @@ fn describe_member_auth(auth: &rfile::Auth) -> String {
 }
 
 /// One-line description of a parent referral's auth.
-fn describe_ref_auth(auth: &rfile::RefAuth) -> String {
+pub fn describe_ref_auth(auth: &rfile::RefAuth) -> String {
     match auth {
         rfile::RefAuth::Anonymous => "anonymous".to_string(),
         rfile::RefAuth::Krb5(spn) => format!("krb5, spn {spn}"),

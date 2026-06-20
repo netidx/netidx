@@ -134,7 +134,7 @@ lives), audited as `op=approve`; the outcome is deposited as a sidecar
 the daemon serves to `Poll` idempotently. `Deny` carries a reason the
 enrollee sees.
 
-The admin works the queue with `netidx conf ca sign` (no arguments):
+The admin works the queue with `netidx conf ca approve`:
 list → pick → match the code → choose groups → approve, or deny. It
 finds the conf server via `--server`, the host's own
 `conf-server.json`, or discovery — an enrollment admin needs no shell
@@ -204,7 +204,7 @@ anyway. The pieces:
   serving SAN (conf servers renew themselves), and audits `op=renew`.
   A revoked serial never verifies — a thief with stolen cert+key falls
   through to the glyph-gated queue, in front of an admin's eyes.
-- **The renewal daemon** (`netidx conf renew run`, installed by every
+- **The renewal daemon** (`netidx conf component tls auto-renew run`, installed by every
   TLS install — workstation, publisher, resolver, CA host): scans this
   host's identities (client config, resolver config, conf-server
   serving cert), and inside the window — `min(30d, validity/3)` —
@@ -226,7 +226,7 @@ anyway. The pieces:
 - **`ca sign` queue UI**: verified renewals list separately with a
   one-keystroke "approve all"; new identities keep the full per-entry
   code-matching ceremony.
-- **Auto-approving renewals** (`ca autorenew`, the lazy-correct default,
+- **Auto-approving renewals** (`ca auto-approve`, the lazy-correct default,
   asked at CA creation, default yes): a dedicated `autorenew` keyslot
   with an **empty policy** — its password can approve continuations and
   nothing else (no SANs, no groups, no enrollment). The conf-server
@@ -269,7 +269,7 @@ stop renewal (an outage on a delay timer); the honest threat model is
 at-rest/offline theft, not live-host compromise — root on the running
 box can unseal, exactly as it could have read the plaintext. Unseal
 failure (TPM cleared, board swapped) is a screaming error whose
-message names the fix: `netidx conf ca autorenew --rotate`.
+message names the fix: `netidx conf ca auto-approve --rotate`.
 Operational note: on linux the device node is root:tss, so the CA
 user needs `tss` group membership — without it, setup falls back to
 plaintext and says so. On Windows, TBS brokers access for any user;
@@ -360,7 +360,7 @@ domain. Networks that filter multicast set `mdns: false` and rely on
 
 ## Config (`conf-server.json`)
 
-Written by the install flows, read by `netidx conf server run`. Roles
+Written by the install flows, read by `netidx conf component server run`. Roles
 are explicit — the daemon never guesses from what's lying around:
 
 ```json
@@ -391,7 +391,7 @@ sub-flow that could offer a network join: `Have(network)` (discovered
 and glyph-confirmed — use it, ask nothing), `DontHave` (probed and/or
 declined — never re-offer), `NotProbed` (CLI-flag path, non-TTY — a
 sub-flow that wants a conf server probes itself; this is also how
-`netidx conf ca join` without `--server` finds the network). The
+`netidx conf component tls join` without `--server` finds the network). The
 operator answers the conf-server question at most once per install.
 
 - **Workstation / publisher**: browse → pick the domain (asked only if

@@ -27,6 +27,7 @@ pub struct ConfServerServiceParams {
 pub fn unit(p: &ConfServerServiceParams) -> Result<Unit> {
     let args: Vec<String> = vec![
         "conf".to_string(),
+        "component".to_string(),
         "server".to_string(),
         "run".to_string(),
         "-c".to_string(),
@@ -53,7 +54,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             u.process.args,
-            ["conf", "server", "run", "-c", "/etc/netidx/conf-server.json", "-f"]
+            ["conf", "component", "server", "run", "-c", "/etc/netidx/conf-server.json", "-f"]
                 .into_iter()
                 .map(String::from)
                 .collect::<Vec<_>>(),

@@ -8,6 +8,8 @@
 
 use anyhow::Result;
 use netidx_conf::{
+    paths,
+    provenance::InstallRecord,
     service::ServiceScope,
     uninstall::{self, UninstallParams, UninstallReport},
 };
@@ -89,6 +91,22 @@ pub(crate) fn run(p: Params) -> Result<()> {
 /// executes. The system-scope cross-probe (only meaningful for an
 /// unelevated `--scope user` run) happens separately in `run`.
 fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
+    // Surface what role this install is, when it left a provenance
+    // marker — a confirmation of *what* is being torn down. Best-effort:
+    // a hand-rolled config (no marker) just skips the line. The marker
+    // itself is removed with the rest of the config root below.
+    if let Some(rec) = load_install_record(p, scope) {
+        match &rec.network {
+            Some(net) => println!(
+                "tearing down {} install (joined to network {:?})",
+                rec.role.as_str(),
+                net.domain,
+            ),
+            None => {
+                println!("tearing down {} install (local-only)", rec.role.as_str())
+            }
+        }
+    }
     let base = UninstallParams {
         scope,
         service_name: p.service_name.clone(),
@@ -238,6 +256,25 @@ fn remove_system_scope_if_present(p: &Params) -> Result<()> {
     let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
     print_report(&report, true);
     Ok(())
+}
+
+/// Load the install provenance marker for the config root this teardown
+/// targets (honouring a `--config-dir` override). `None` when there's no
+/// marker (hand-rolled config, or an install predating the record) or it
+/// can't be read — reporting the role is a convenience, never a gate.
+fn load_install_record(p: &Params, scope: ServiceScope) -> Option<InstallRecord> {
+    let root = match &p.config_dir {
+        Some(d) => d.clone(),
+        None => match scope {
+            ServiceScope::User => paths::user_config_root().ok()?,
+            ServiceScope::System => paths::system_config_root(),
+        },
+    };
+    let path = root.join("install.json");
+    if !path.exists() {
+        return None;
+    }
+    InstallRecord::load(&path).ok()
 }
 
 fn plan_contains_ca(r: &UninstallReport) -> bool {

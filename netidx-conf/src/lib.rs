@@ -84,6 +84,8 @@ pub mod id_map;
 #[cfg(feature = "cloud-detect")]
 pub mod netshape;
 pub mod paths;
+pub mod provenance;
+pub mod reconcile;
 pub mod service;
 pub mod perms;
 pub mod resolver;

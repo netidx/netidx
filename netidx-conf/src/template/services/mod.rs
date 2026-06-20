@@ -1,6 +1,6 @@
 //! Service templates — typed shortcuts for "drop an activation unit
 //! that runs <netidx subcommand> with sensible defaults." Used by
-//! `netidx conf activation add <service> …` to skip the manual
+//! `netidx conf component activation add <service> …` to skip the manual
 //! `--exe / --arg` plumbing.
 //!
 //! Each service is its own module so the parameter struct can be

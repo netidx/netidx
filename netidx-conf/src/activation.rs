@@ -10,7 +10,7 @@
 //! Naming: the on-disk file is `<name>.unit`; the API keys (in `list`'s
 //! returned map and in the `name` argument to `save` / `get` / `remove`)
 //! are bare basenames *without* the `.unit` suffix, which is what the
-//! CLI exposes (`netidx conf activation add my-publisher …`).
+//! CLI exposes (`netidx conf component activation add my-publisher …`).
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};

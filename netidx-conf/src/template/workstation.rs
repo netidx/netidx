@@ -95,7 +95,7 @@ pub struct WorkstationParams {
     /// an empty perms map.
     ///
     /// The CLI fills this from `nix::unistd::User::from_uid(getuid())`
-    /// so a `conf install workstation` run as `alice` grants `alice`
+    /// so a `conf workstation install` run as `alice` grants `alice`
     /// the local-resolver namespace. Tests pass an explicit name.
     pub owner: Option<ArcStr>,
     /// Initial perms map. `None` + `with_perms_file = true` +
