@@ -703,7 +703,7 @@ fn prompt_parent_referral(
         }
         AuthKind::Krb5 => {
             let spn = prompt::required_string(
-                "parent Kerberos SPN (e.g. host/resolver.example.com@REALM)",
+                "parent resolver's kerberos SPN (e.g. netidx/resolver.example.com@REALM)",
                 None,
             )?;
             (ReferralAuth::Krb5(ArcStr::from(spn.as_str())), None)
@@ -3240,8 +3240,11 @@ pub(crate) struct PublisherFlags {
     /// Auth scheme (anonymous|local|krb5|tls). Prompted when omitted.
     #[arg(long = "auth")]
     auth: Option<AuthKind>,
+    /// Resolver's Kerberos SPN (with `--auth krb5`), e.g.
+    /// `netidx/resolver.example.com@REALM`.
     #[arg(long = "spn")]
     spn: Option<String>,
+    /// Resolver's local-auth socket path (with `--auth local`).
     #[arg(long = "socket")]
     socket: Option<PathBuf>,
     /// Server's TLS name (when `--auth tls`).
@@ -3443,7 +3446,11 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
                 .as_ref(),
         )),
         AuthKind::Krb5 => ReferralAuth::Krb5(ArcStr::from(
-            prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
+            prompt::required_string(
+                "resolver's kerberos SPN (e.g. netidx/resolver.example.com@REALM)",
+                f.spn.clone(),
+            )?
+            .as_str(),
         )),
         AuthKind::Tls => ReferralAuth::Tls(ArcStr::from(
             prompt_resolver_tls_name(

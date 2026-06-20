@@ -301,11 +301,44 @@ impl RenderedTemplate {
     /// Human-readable summary suitable for `--dry-run`.
     pub fn describe(&self) -> String {
         let mut out = String::new();
-        if let Some((p, _)) = &self.client_config {
+        if let Some((p, c)) = &self.client_config {
             let _ = writeln!(out, "client config → {p:?}");
+            // Surface the connection the config encodes so a --dry-run
+            // actually previews "am I pointing at the right resolver with
+            // the right auth?" rather than just naming the output file.
+            let cfg = &c.0;
+            for (addr, auth) in &cfg.addrs {
+                let _ = writeln!(out, "    resolver {addr} ({})", describe_client_auth(auth));
+            }
+            if let Some(bind) = &cfg.default_bind_config {
+                let _ = writeln!(out, "    publisher bind: {bind}");
+            }
         }
-        if let Some((p, _)) = &self.resolver_config {
+        if let Some((p, r)) = &self.resolver_config {
             let _ = writeln!(out, "resolver config → {p:?}");
+            // Show what this resolver listens as, and (the easy thing to
+            // get wrong) the parent referral the operator just typed —
+            // its address and auth/SPN — so --dry-run previews it.
+            let cfg = &r.0;
+            for m in &cfg.member_servers {
+                let _ = writeln!(
+                    out,
+                    "    listen {} (bind {}, {})",
+                    m.addr,
+                    m.bind_addr,
+                    describe_member_auth(&m.auth),
+                );
+            }
+            if let Some(parent) = &cfg.parent {
+                for (addr, auth) in &parent.addrs {
+                    let _ = writeln!(
+                        out,
+                        "    parent {addr} ({}) — attaches at {:?}",
+                        describe_ref_auth(auth),
+                        parent.path,
+                    );
+                }
+            }
         }
         if let Some((p, m)) = &self.perms_file {
             let _ = writeln!(out, "perms file → {p:?} ({} entries)", m.0.len());
@@ -338,6 +371,37 @@ impl RenderedTemplate {
             out.push_str("(empty plan)");
         }
         out
+    }
+}
+
+/// One-line description of a client-side resolver auth, for the
+/// `--dry-run` plan.
+fn describe_client_auth(auth: &cfile::Auth) -> String {
+    match auth {
+        cfile::Auth::Anonymous => "anonymous".to_string(),
+        cfile::Auth::Krb5(spn) => format!("krb5, spn {spn}"),
+        cfile::Auth::Local(path) => format!("local, socket {path}"),
+        cfile::Auth::Tls(name) => format!("tls, name {name}"),
+    }
+}
+
+/// One-line description of a resolver member-server's auth.
+fn describe_member_auth(auth: &rfile::Auth) -> String {
+    match auth {
+        rfile::Auth::Anonymous => "anonymous".to_string(),
+        rfile::Auth::Krb5(spn) => format!("krb5, spn {spn}"),
+        rfile::Auth::Local(path) => format!("local, socket {path}"),
+        rfile::Auth::Tls { name, .. } => format!("tls, name {name}"),
+    }
+}
+
+/// One-line description of a parent referral's auth.
+fn describe_ref_auth(auth: &rfile::RefAuth) -> String {
+    match auth {
+        rfile::RefAuth::Anonymous => "anonymous".to_string(),
+        rfile::RefAuth::Krb5(spn) => format!("krb5, spn {spn}"),
+        rfile::RefAuth::Local(path) => format!("local, socket {path}"),
+        rfile::RefAuth::Tls(name) => format!("tls, name {name}"),
     }
 }
 
