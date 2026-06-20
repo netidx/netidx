@@ -73,7 +73,17 @@ impl Mapper {
             let mut primary = Mapper::parse_output(&s, "gid=")?;
             let groups = Mapper::parse_output(&s, "groups=")?;
             let primary = if primary.is_empty() {
-                bail!("missing primary group")
+                // No `gid=` in the mapper output ⇒ the identity resolved
+                // to no unix primary group. The usual cause is a krb5
+                // principal (or TLS SAN) that doesn't correspond to a
+                // local user — name it and point at the fix rather than
+                // failing with a bare "missing primary group".
+                bail!(
+                    "no unix primary group for {user:?} — the authenticated \
+                     identity does not map to a local user. Install the netidx \
+                     id-mapper and register this identity, or configure your \
+                     system IdM (sssd/FreeIPA/AD) so `id {user:?}` resolves it."
+                )
             } else {
                 primary.swap_remove(0)
             };
@@ -83,6 +93,19 @@ impl Mapper {
             Mapper::DoNotMap => Ok((user.into(), vec![])),
             Mapper::Command(cmd) => {
                 let out = Command::new(&**cmd).arg(user).output().await?;
+                // `id <user>` exits non-zero for an unknown user and
+                // writes nothing useful to stdout, so without this check
+                // the parse below fails with the opaque "no primary
+                // group" rather than the actual "no such user" reason.
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    bail!(
+                        "could not map identity {user:?} to unix ids: \
+                         `{cmd}` failed ({}): {}",
+                        out.status,
+                        err.trim()
+                    )
+                }
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
             }
             Mapper::Socket(path) => {

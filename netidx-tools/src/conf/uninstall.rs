@@ -29,8 +29,9 @@ pub(crate) struct Params {
     /// User or system scope. System-scope re-execs under sudo. The
     /// config root and the OS service are both per-scope. As a
     /// convenience, an unelevated `--scope user` run also probes for
-    /// a matching system-scope install (which the resolver template
-    /// registers via sudo) and offers to escalate + remove it.
+    /// a matching system-scope install (which the resolver and
+    /// publisher templates register via sudo) and offers to escalate
+    /// + remove it.
     #[arg(long, default_value = "user")]
     pub scope: ScopeArg,
     /// Service name to disable + remove. Default "netidx".
@@ -67,12 +68,18 @@ pub(crate) fn run(p: Params) -> Result<()> {
         return escalate(&p);
     }
     do_primary_scope(&p, scope)?;
-    // A non-root user who installed the resolver template got a
-    // system-scope service registered via sudo (`netidx@<user>.service`
-    // + `/etc/netidx`). That install doesn't show up in our user-scope
-    // probe — pick it up here and offer to tear it down too.
-    if scope == ServiceScope::User && !svc_cli::is_elevated()? {
-        offer_system_scope(&p)?;
+    // Templated installs (resolver, publisher) register a *system*-scope
+    // service (`netidx@<user>.service`) even when the config they write is
+    // user-scope (`~/.config/netidx`), so it never shows up in our
+    // user-scope probe. A `--scope user` teardown still has to catch it,
+    // or `install` then `uninstall` leaves the daemons running. As root we
+    // remove it directly; unelevated, we offer to escalate.
+    if scope == ServiceScope::User {
+        if svc_cli::is_elevated()? {
+            remove_system_scope_if_present(&p)?;
+        } else {
+            offer_system_scope(&p)?;
+        }
     }
     Ok(())
 }
@@ -91,7 +98,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
         dry_run: true,
     };
     let plan = uninstall::uninstall(&base)?;
-    print_report(&plan, "plan");
+    print_report(&plan, false);
     if p.dry_run {
         return Ok(());
     }
@@ -121,7 +128,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
         dry_run: false,
         ..base
     })?;
-    print_report(&report, "removed");
+    print_report(&report, true);
     Ok(())
 }
 
@@ -156,10 +163,11 @@ fn offer_system_scope(p: &Params) -> Result<()> {
     }
     println!();
     println!(
-        "Detected a matching system-scope install (the resolver template \
-         registers one via sudo):"
+        "Detected a matching system-scope install (a templated install \
+         registers its service at system scope even when the config is \
+         user-scope):"
     );
-    print_report(&plan, "plan");
+    print_report(&plan, false);
     if p.dry_run {
         println!("(re-run with `--scope system` to remove it)");
         return Ok(());
@@ -185,15 +193,71 @@ fn offer_system_scope(p: &Params) -> Result<()> {
     Ok(())
 }
 
+/// Already-root counterpart to [`offer_system_scope`]: a `--scope user`
+/// teardown run as root must still remove the system-scope service a
+/// templated install (resolver, publisher) registered — but we can do it
+/// directly, no escalation. Probe the system scope and, if anything's there, remove it
+/// under the same `--dry-run` / `--yes` / confirm rules as the primary
+/// scope. Silent when there's nothing to remove (the common single-scope
+/// case), so it never adds noise to a plain user-scope teardown.
+fn remove_system_scope_if_present(p: &Params) -> Result<()> {
+    let base = UninstallParams {
+        scope: ServiceScope::System,
+        service_name: p.service_name.clone(),
+        for_user: p.for_user.clone(),
+        // Probe the canonical /etc/netidx — a user-scope `--config-dir`
+        // override was for the user dir, not this.
+        config_dir: None,
+        remove_ca: p.with_ca,
+        dry_run: true,
+    };
+    let plan = match uninstall::uninstall(&base) {
+        Ok(plan) => plan,
+        Err(e) => {
+            log::debug!("system-scope probe failed (skipping): {e:#}");
+            return Ok(());
+        }
+    };
+    if plan.is_empty() {
+        return Ok(());
+    }
+    println!();
+    println!(
+        "Detected a matching system-scope service (a templated install \
+         registers its service at system scope even when the config is \
+         user-scope):"
+    );
+    print_report(&plan, false);
+    if p.dry_run {
+        return Ok(());
+    }
+    if !p.yes && !prompt::confirm("Also remove the system-scope service?", true)? {
+        println!("(left the system-scope service in place)");
+        return Ok(());
+    }
+    let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
+    print_report(&report, true);
+    Ok(())
+}
+
 fn plan_contains_ca(r: &UninstallReport) -> bool {
     r.removed
         .iter()
         .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
 }
 
-fn print_report(r: &UninstallReport, kind: &str) {
+/// Print an uninstall report. `applied` distinguishes the dry-run
+/// preview (`false` ⇒ "plan", subjunctive "would be uninstalled") from
+/// the report of work actually done (`true` ⇒ "removed", past-tense
+/// "uninstalled"). Folding the tense into one flag keeps the preview
+/// and the result from ever disagreeing.
+fn print_report(r: &UninstallReport, applied: bool) {
     if r.service_was_installed {
-        println!("service: would be uninstalled");
+        if applied {
+            println!("service: uninstalled");
+        } else {
+            println!("service: would be uninstalled");
+        }
     } else {
         println!("service: not installed");
     }
@@ -203,7 +267,7 @@ fn print_report(r: &UninstallReport, kind: &str) {
     if r.removed.is_empty() && r.kept.is_empty() {
         return;
     }
-    println!("{kind}:");
+    println!("{}:", if applied { "removed" } else { "plan" });
     for p in &r.removed {
         println!("  - {}", p.display());
     }

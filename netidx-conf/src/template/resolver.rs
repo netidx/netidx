@@ -16,6 +16,29 @@ use anyhow::Result;
 use netidx::resolver_server::config::file::IdMapType;
 use std::{net::SocketAddr, path::PathBuf};
 
+/// How the resolver maps an authenticated identity (a TLS cert SAN, or
+/// a kerberos principal with realm) to a unix uid/gid set for permission
+/// checks. Only meaningful for [`AuthChoice::Tls`] / [`AuthChoice::Krb5`]
+/// — anonymous has no user, and local goes through `Mapper::user(uid)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdMapMode {
+    /// Run the netidx id-mapper daemon and look identities up in the
+    /// id-map config (`id_map_type: Socket`). The only coherent choice
+    /// for TLS (cert SANs have no `/bin/id` translation), and the choice
+    /// for a krb5 site with no system IdM that wants real uid/gid perms.
+    Netidx,
+    /// Map through the platform's `id` / nsswitch (`id_map_type: Command`
+    /// with no command ⇒ `PlatformDefault`). Correct for a krb5 site
+    /// whose system IdM (FreeIPA, AD, sssd) resolves full principals like
+    /// `user@REALM`. Fails for TLS SANs and for krb5 without such an IdM.
+    Platform,
+    /// Don't map at all (`id_map_type: DoNotMap`): permissions are keyed
+    /// on the raw identity string (the full krb5 principal, or the cert
+    /// SAN). No daemon, no system IdM — the simplest working choice for a
+    /// small krb5 setup.
+    None,
+}
+
 /// Parameters for [`resolver`].
 #[derive(Debug, Clone)]
 pub struct ResolverParams {
@@ -68,24 +91,20 @@ pub struct ResolverParams {
     /// The CLI fills this from `std::env::current_exe()` when the
     /// operator doesn't pass `--netidx-binary`.
     pub netidx_binary: PathBuf,
-    /// Auto-install the id-mapper daemon. Meaningful for
-    /// `AuthChoice::Tls` and `AuthChoice::Krb5` — both feed the
-    /// resolver a name string (cert SAN, or kerberos principal with
-    /// realm) that needs translating to a unix uid/gid set. Anonymous
-    /// has no user; Local goes through `Mapper::user(uid)` against
-    /// `/bin/id` and doesn't benefit. When auth is TLS or Krb5 and
-    /// this is `true`:
-    /// - The resolver config's member auth is set to
-    ///   `id_map_type: Socket` + `id_map_command: <socket path>`.
-    /// - An `id-map.unit` activation unit is emitted alongside
-    ///   `resolver.unit`.
-    /// - A starter id-map JSON file is written if `id_map_path` does
-    ///   not already exist (so `apply()` is idempotent on re-runs).
+    /// How to map authenticated identities to unix uid/gid (see
+    /// [`IdMapMode`]). [`IdMapMode::Netidx`] installs the id-mapper
+    /// daemon — the resolver member gets `id_map_type: Socket`, an
+    /// `id-map.unit` is emitted alongside `resolver.unit`, and a starter
+    /// id-map JSON is written if absent. [`IdMapMode::Platform`] uses the
+    /// member's default `id_map_type: Command` (`/bin/id`).
+    /// [`IdMapMode::None`] sets `id_map_type: DoNotMap`. The latter two
+    /// emit no daemon.
     ///
     /// Note for Krb5: the resolver passes the **full principal with
     /// realm** (e.g. `eric@RYU-OH.ORG`) as the lookup key, so id-map
-    /// entries must be written in that exact form.
-    pub with_id_map: bool,
+    /// entries (Netidx) — or perms entries (None) — must use that exact
+    /// form.
+    pub id_map: IdMapMode,
     /// Where to put the id-map JSON. `None` ⇒
     /// `netidx_conf::id_map::user_id_map_path()`.
     pub id_map_path: Option<PathBuf>,
@@ -154,20 +173,20 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // id-mapper daemon over a unix socket. Anonymous has no user;
     // Local goes through `Mapper::user(uid)` against `/bin/id` and
     // doesn't benefit from the daemon.
-    let id_map_active = p.with_id_map
+    let id_map_active = matches!(p.id_map, IdMapMode::Netidx)
         && matches!(p.auth, AuthChoice::Tls { .. } | AuthChoice::Krb5 { .. });
     let mut warnings = Vec::new();
-    // A TLS resolver without the id-mapper falls back to `/bin/id
-    // <cert-SAN>`, which resolves no SAN-shaped name — every identity
-    // maps to nobody and perms deny all non-anonymous operations. Krb5
-    // without it is fine (principals resolve through the system IdM via
-    // nsswitch), so only TLS is incoherent.
-    if matches!(p.auth, AuthChoice::Tls { .. }) && !p.with_id_map {
+    // A TLS resolver that maps through `/bin/id` (Platform) resolves no
+    // SAN-shaped name — every identity maps to nobody and perms deny all
+    // non-anonymous operations. `DoNotMap` (None) keys perms on the SAN
+    // directly and is coherent; `Netidx` translates it. So only
+    // Platform is a trap for TLS.
+    if matches!(p.auth, AuthChoice::Tls { .. }) && matches!(p.id_map, IdMapMode::Platform) {
         warnings.push(arcstr::literal!(
-            "TLS auth without the id-mapper daemon: certificate identities \
+            "TLS auth with platform id-mapping: certificate identities \
              (e.g. user.domain) have no /bin/id translation, so they map to \
              no unix user and perms will deny every non-anonymous operation. \
-             Expert setups only (--no-id-map)."
+             Use the netidx id-mapper, or DoNotMap to key perms on the SAN."
         ));
     }
     let id_map_socket_path = if id_map_active {
@@ -197,7 +216,12 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         member_builder
             .id_map_type(IdMapType::Socket)
             .id_map_command(ArcStr::from(sock.to_string_lossy().as_ref()));
+    } else if matches!(p.id_map, IdMapMode::None) {
+        // Perms keyed on the raw identity string — no daemon, no `/bin/id`.
+        member_builder.id_map_type(IdMapType::DoNotMap);
     }
+    // else: the builder default (`id_map_type: Command`, no command ⇒
+    // PlatformDefault) covers IdMapMode::Platform.
     let member = member_builder.build()?;
 
     // -- Perms file (separate from the main config) -------------------------
@@ -473,7 +497,7 @@ mod tests {
             resolver_config_path: Some(out.path().join("resolver.json")),
             units_dir: Some(out.path().join("activation")),
             netidx_binary: PathBuf::from("/usr/local/bin/netidx"),
-            with_id_map: false,
+            id_map: IdMapMode::Platform,
             id_map_path: None,
             id_map_socket: None,
             // Most existing tests don't write a client.json; they
@@ -851,7 +875,7 @@ mod tests {
             trusted: ca_dir.path().join("certificate.pem"),
             askpass: None,
         };
-        p.with_id_map = true;
+        p.id_map = IdMapMode::Netidx;
         let id_map_socket = out.path().join("id-map.sock");
         let id_map_path = out.path().join("id-map.json");
         p.id_map_socket = Some(id_map_socket.clone());
@@ -924,7 +948,7 @@ mod tests {
             trusted: ca_dir.path().join("certificate.pem"),
             askpass: None,
         };
-        p.with_id_map = true;
+        p.id_map = IdMapMode::Netidx;
         let id_map_path = out.path().join("id-map.json");
         p.id_map_socket = Some(out.path().join("id-map.sock"));
         p.id_map_path = Some(id_map_path.clone());
@@ -953,14 +977,14 @@ mod tests {
     }
 
     /// Anonymous and Local auth must NOT get id-map auto-installation
-    /// even with `with_id_map = true`. Anonymous has no user; Local
+    /// even with `id_map = Netidx`. Anonymous has no user; Local
     /// goes through `/bin/id` against the peer's uid and doesn't need
     /// the daemon.
     #[test]
     fn id_map_not_installed_for_anonymous_or_local() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
-        p.with_id_map = true;
+        p.id_map = IdMapMode::Netidx;
         let rt = resolver(&p).unwrap();
         assert!(rt.id_map_file.is_none());
         assert!(!rt.units.contains_key("id-map"));
@@ -968,13 +992,13 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.auth = AuthChoice::Local { path: PathBuf::from("/tmp/netidx-local.sock") };
-        p.with_id_map = true;
+        p.id_map = IdMapMode::Netidx;
         let rt = resolver(&p).unwrap();
         assert!(rt.id_map_file.is_none());
         assert!(!rt.units.contains_key("id-map"));
     }
 
-    /// Krb5 with `with_id_map = true` must install the daemon: the
+    /// Krb5 with `id_map = Netidx` must install the daemon: the
     /// resolver hands the daemon the full principal (e.g.
     /// `eric@RYU-OH.ORG`) as the lookup key, and gets back the
     /// uid/gid set the perms map keys on.
@@ -983,7 +1007,7 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.auth = AuthChoice::Krb5 { spn: ArcStr::from("netidx/resolver@RYU-OH.ORG") };
-        p.with_id_map = true;
+        p.id_map = IdMapMode::Netidx;
         let id_map_socket = out.path().join("id-map.sock");
         let id_map_path = out.path().join("id-map.json");
         p.id_map_socket = Some(id_map_socket.clone());
@@ -1010,15 +1034,36 @@ mod tests {
         assert!(out.path().join("activation/resolver.unit").exists());
     }
 
-    /// Krb5 without the id-mapper is the *normal* profile (system IdM
-    /// via SSSD/nsswitch) — it must not warn the way TLS does.
+    /// Krb5 with `Platform` (a site IdM resolves full principals) is the
+    /// default profile — `id_map_type: Command`, no daemon, no warning.
     #[test]
-    fn krb5_without_id_map_is_coherent() {
+    fn krb5_platform_is_coherent() {
         let out = tempfile::tempdir().unwrap();
         let mut p = anon_params(&out);
         p.auth = AuthChoice::Krb5 { spn: ArcStr::from("netidx/resolver@RYU-OH.ORG") };
+        p.id_map = IdMapMode::Platform;
         let rt = resolver(&p).unwrap();
         assert!(rt.warnings.is_empty());
+        let (_, r) = rt.resolver_config.as_ref().unwrap();
+        assert!(matches!(r.0.member_servers[0].id_map_type, IdMapType::Command));
+        assert!(!rt.units.contains_key("id-map"));
+        assert!(rt.id_map_file.is_none());
+    }
+
+    /// Krb5 with `None` (no IdM) ⇒ `id_map_type: DoNotMap`: perms keyed
+    /// on the raw principal, no daemon, no warning.
+    #[test]
+    fn krb5_none_uses_donotmap_no_daemon() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.auth = AuthChoice::Krb5 { spn: ArcStr::from("netidx/resolver@RYU-OH.ORG") };
+        p.id_map = IdMapMode::None;
+        let rt = resolver(&p).unwrap();
+        assert!(rt.warnings.is_empty());
+        let (_, r) = rt.resolver_config.as_ref().unwrap();
+        assert!(matches!(r.0.member_servers[0].id_map_type, IdMapType::DoNotMap));
+        assert!(!rt.units.contains_key("id-map"));
+        assert!(rt.id_map_file.is_none());
     }
 
     /// Krb5 resolver must grant its own SPN full rights at the base —

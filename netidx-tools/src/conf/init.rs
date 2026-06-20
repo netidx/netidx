@@ -16,6 +16,7 @@ use netidx_conf::{
     paths,
     template::{
         self, AuthChoice, ParentRef, ReferralAuth, RenderedTemplate, TlsIdentitySpec,
+        resolver::IdMapMode,
     },
 };
 use zeroize::Zeroizing;
@@ -1089,7 +1090,7 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
     }
     let manual_fallback = || -> Result<Option<Vec<SocketAddr>>> {
         Ok(prompt::optional_parsed::<SocketAddr>(
-            "conf server address (ip:port, blank for manual setup)",
+            "address of an existing conf server to join (ip:port), blank if there is none",
             None,
         )?
         .map(|a| vec![a]))
@@ -1212,10 +1213,15 @@ fn network_addrs_and_identity(
                 net.identity.domain,
             )
         };
-        // `<user>.<domain>` per the netidx identity convention; the
-        // domain here is the TLS-attested one from the server hello.
-        let suggested =
-            current_username().map(|u| format!("{u}.{}", net.identity.domain));
+        // Default identity name: a service host is best identified by its
+        // hostname (`publisher.<domain>`), a personal machine by its user
+        // (`alice.<domain>`). The domain is the TLS-attested one from the
+        // server hello.
+        let base = match kind {
+            NodeKind::Publisher => current_hostname(),
+            _ => current_username(),
+        };
+        let suggested = base.map(|n| format!("{n}.{}", net.identity.domain));
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
         let (j, staging) =
             join_network(&rt, ca_addr, kind, suggested.as_deref(), kp, &net.identity)?;
@@ -1936,7 +1942,7 @@ fn prompt_resolver_own_tls_name(provided: Option<String>) -> Result<String> {
         DEFAULT_TLS_DOMAIN,
     )?;
     let name = prompt::string_with_default(
-        "resolver name (the leftmost label of its cert SAN)",
+        "this resolver's name",
         None,
         DEFAULT_RESOLVER_NAME,
     )?;
@@ -1954,6 +1960,22 @@ fn prompt_resolver_own_tls_name(provided: Option<String>) -> Result<String> {
 /// *suggestion*, so it never fails (returns `None` if it can't tell).
 /// Prefers the passwd entry on unix so it agrees with the workstation
 /// owner [`resolve_workstation_owner`] derives the same way.
+/// This machine's hostname (short form) — the natural identity name for a
+/// service host (a publisher), as opposed to the unix user for a personal
+/// workstation.
+fn current_hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        if let Ok(h) = nix::unistd::gethostname()
+            && let Ok(s) = h.into_string()
+            && !s.is_empty()
+        {
+            return Some(s);
+        }
+    }
+    std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
+}
+
 fn current_username() -> Option<String> {
     #[cfg(unix)]
     {
@@ -1992,9 +2014,6 @@ pub(crate) struct ResolverFlags {
     /// Kerberos SPN (with `--auth krb5`).
     #[arg(long = "spn")]
     spn: Option<String>,
-    /// Local-auth socket path (with `--auth local`).
-    #[arg(long = "socket")]
-    socket: Option<PathBuf>,
     /// Resolver's own TLS name — the full cert SAN, e.g.
     /// `resolver.ryu-oh.org` (with `--auth tls`). Prompted in two parts
     /// (domain, then name) when omitted, defaulting to `resolver.local`.
@@ -2064,8 +2083,9 @@ pub(crate) struct ResolverFlags {
     /// Skip auto-installing the id-mapper daemon. When set, the
     /// resolver uses its `IdMapType::Command` default (`/bin/id`) and
     /// no `id-map.unit` is written. When unset:
-    /// - `--auth tls` prompts with default Y (cert SANs have no
-    ///   meaningful `/bin/id` translation path).
+    /// - `--auth tls` installs it automatically (informing you, not
+    ///   asking): cert SANs have no `/bin/id` translation path, so the
+    ///   daemon is required.
     /// - `--auth krb5` prompts with default N — most kerberos sites
     ///   have a system-level IdM (FreeIPA, AD, OpenIDM) handling
     ///   principal → uid via SSSD / nsswitch already.
@@ -2146,12 +2166,20 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             );
             k
         }
-        None => prompt::choice_with_default(
-            "auth scheme",
-            f.auth,
-            &["anonymous", "local", "krb5", "tls"],
-            "tls",
-        )?,
+        None => {
+            if f.auth.is_none() && prompt::stdin_is_tty() {
+                println!("auth scheme — how clients prove who they are to this resolver:");
+                println!("  anonymous  no authentication; any client may connect (labs, trusted LANs)");
+                println!("  tls        certificate-based identity — the recommended default for a network");
+                println!("  krb5       Kerberos; choose this only if your site already runs it");
+            }
+            prompt::choice_with_default(
+                "auth scheme",
+                f.auth,
+                &["anonymous", "krb5", "tls"],
+                "tls",
+            )?
+        }
     };
     f.auth = Some(kind);
     // Shape detection (incl. cloud-metadata probe) only fires when
@@ -2314,7 +2342,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // resolver attaches in the parent's namespace, which is just
     // wherever this resolver hosts its own tree.
     let parent_default_path = f.base.clone();
-    let with_id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
+    let id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
     let no_conf_server = f.no_conf_server;
     // The conf-server step after apply() needs the *actual* config
     // paths this install produces — resolve the template's defaults
@@ -2323,7 +2351,9 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         Some(p) => p.clone(),
         None => netidx_conf::resolver::default_save_path()?,
     };
-    let id_map_actual = if with_id_map {
+    // Only the netidx id-mapper writes an id-map.json the post-apply
+    // step needs to know about; Platform / None have no such file.
+    let id_map_actual = if matches!(id_map, IdMapMode::Netidx) {
         Some(match &f.id_map_path {
             Some(p) => p.clone(),
             None => netidx_conf::id_map::user_id_map_path()?,
@@ -2344,7 +2374,7 @@ fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         resolver_config_path: f.resolver_config_path,
         units_dir,
         netidx_binary: resolve_netidx_binary(f.netidx_binary)?,
-        with_id_map,
+        id_map,
         id_map_path: f.id_map_path,
         id_map_socket: f.id_map_socket,
         with_local_client: !f.no_client,
@@ -2437,19 +2467,20 @@ fn conf_plane_decision(kind: AuthKind, no_conf_server: bool) -> ConfPlane {
     }
 }
 
-/// Decide whether to install the id-mapper daemon alongside the
-/// resolver. `--no-id-map` is always honoured (skip — the template
-/// layer emits a coherence warning for TLS). Otherwise: TLS gets the
-/// daemon unconditionally — cert SANs have no `/bin/id` translation,
-/// so a TLS resolver without it denies every non-anonymous operation;
-/// that's not a choice, it's a trap. Krb5 stays a question defaulting
-/// to NO on the assumption that most kerberos sites already have a
-/// system-level IdM (FreeIPA, AD, OpenIDM) handling principal → uid
-/// via SSSD / nsswitch — `prompt::confirm` flips silently to the
-/// default on a non-TTY. Anonymous and Local don't use the daemon.
-fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
+/// Decide how the resolver maps authenticated identities to unix
+/// uid/gid (see [`IdMapMode`]). `--no-id-map` forces `Platform` (the
+/// historical "no daemon, /bin/id" behaviour). TLS always installs the
+/// netidx id-mapper — cert SANs have no `/bin/id` translation, so any
+/// other choice denies every non-anonymous operation; that's not a
+/// choice, it's a trap. Krb5 is a three-way question: platform (a site
+/// IdM resolves full principals), netidx (map them yourself), or none
+/// (perms keyed on the raw principal — simplest with no IdM). The
+/// non-TTY default is `Platform`, matching the old assumption that most
+/// kerberos sites already run a system IdM. Anonymous and Local don't
+/// use the daemon.
+fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<IdMapMode> {
     if no_id_map {
-        return Ok(false);
+        return Ok(IdMapMode::Platform);
     }
     match auth {
         AuthChoice::Tls { .. } => {
@@ -2457,16 +2488,31 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<bool> {
                 "installing the netidx id-mapper daemon (maps TLS cert \
                  identities to unix uids; skip with --no-id-map)"
             );
-            Ok(true)
+            Ok(IdMapMode::Netidx)
         }
-        AuthChoice::Krb5 { .. } => prompt::confirm(
-            "install the netidx id-mapper daemon? Most kerberos sites use a \
-             system-level IdM (FreeIPA, AD, OpenIDM) and answer N here; \
-             answer Y only if you don't have one and want netidx to map \
-             principals to uids itself",
-            false,
-        ),
-        AuthChoice::Anonymous | AuthChoice::Local { .. } => Ok(false),
+        AuthChoice::Krb5 { .. } => {
+            if prompt::stdin_is_tty() {
+                println!("how to map kerberos principals to unix ids for permission checks:");
+                println!("  platform  the system's `id`/nsswitch resolves full principals \
+                          — use this with a site IdM (FreeIPA, AD, sssd)");
+                println!("  netidx    run the netidx id-mapper and map principals yourself \
+                          (no system IdM needed)");
+                println!("  none      don't map — permissions are keyed on the raw \
+                          principal (simplest; no IdM, no daemon)");
+            }
+            let choice: String = prompt::choice_with_default(
+                "principal mapping",
+                None,
+                &["platform", "netidx", "none"],
+                "platform",
+            )?;
+            Ok(match choice.as_str() {
+                "netidx" => IdMapMode::Netidx,
+                "none" => IdMapMode::None,
+                _ => IdMapMode::Platform,
+            })
+        }
+        AuthChoice::Anonymous | AuthChoice::Local { .. } => Ok(IdMapMode::Platform),
     }
 }
 
@@ -2490,6 +2536,35 @@ impl ResolvedAuth {
 }
 
 /// Resolve the resolver's own auth choice.
+/// A best-effort default krb5 SPN for this resolver,
+/// `netidx/<fqdn>@<REALM>` — realm from `/etc/krb5.conf`'s
+/// `default_realm`. `None` when the realm can't be read: without it
+/// there's no useful default, so the operator must supply the whole SPN.
+///
+/// Kerberos service principals are FQDN-based by convention
+/// (`service/host.domain@REALM`) — that is the name `hostname -f` yields
+/// and the one an admin's keytab will carry. The local hostname is
+/// usually the short form, so qualify it: keep it as-is if it already has
+/// a domain, otherwise borrow the realm's domain (the krb5 convention is
+/// realm == the upper-cased DNS domain). The operator edits the suggested
+/// default when their realm doesn't follow that convention.
+fn default_krb5_spn() -> Option<String> {
+    let conf = std::fs::read_to_string("/etc/krb5.conf").ok()?;
+    let realm = conf.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("default_realm")
+            .and_then(|r| r.trim_start().strip_prefix('='))
+            .map(|v| v.trim().to_string())
+    })?;
+    let host = current_hostname().unwrap_or_else(|| "resolver".to_string());
+    let fqdn = if host.contains('.') {
+        host
+    } else {
+        format!("{host}.{}", realm.to_lowercase())
+    };
+    Some(format!("netidx/{fqdn}@{realm}"))
+}
+
 fn resolver_self_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
@@ -2504,14 +2579,28 @@ fn resolver_self_auth(
     let auth = f.auth.expect("auth resolved before resolver_self_auth");
     match auth {
         AuthKind::Anonymous => Ok(ResolvedAuth::external(AuthChoice::Anonymous)),
-        AuthKind::Local => Ok(ResolvedAuth::external(AuthChoice::Local {
-            path: prompt::required_path("local-auth socket path", f.socket.clone())?,
-        })),
-        AuthKind::Krb5 => Ok(ResolvedAuth::external(AuthChoice::Krb5 {
-            spn: ArcStr::from(
-                prompt::required_string("kerberos SPN", f.spn.clone())?.as_str(),
-            ),
-        })),
+        AuthKind::Local => bail!(
+            "the resolver template does not support local auth: local (unix-socket) \
+             auth only authenticates clients on the same machine, so it cannot serve \
+             a network. For a single-machine setup use `netidx conf install \
+             workstation`; for a network resolver choose anonymous, krb5, or tls."
+        ),
+        AuthKind::Krb5 => {
+            let spn = match default_krb5_spn() {
+                Some(def) => prompt::string_with_default(
+                    "kerberos SPN (the service principal clients authenticate to)",
+                    f.spn.clone(),
+                    &def,
+                )?,
+                None => prompt::required_string(
+                    "kerberos SPN, e.g. netidx/resolver.example.com@EXAMPLE.COM",
+                    f.spn.clone(),
+                )?,
+            };
+            Ok(ResolvedAuth::external(AuthChoice::Krb5 {
+                spn: ArcStr::from(spn.as_str()),
+            }))
+        }
         AuthKind::Tls => resolver_tls_auth(f, default_ca_ip, units_dir, probe),
     }
 }
@@ -2545,30 +2634,41 @@ fn resolver_tls_auth(
     probe: &ConfServers,
 ) -> Result<ResolvedAuth> {
     let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
-    // 'generate' / 'csr' (local key + CSR via openssl) are unix-only —
-    // the CA module depends on openssl which we don't ship to Windows.
-    #[cfg(unix)]
-    let (label, default) = (
-        "resolver certificate (a path; 'generate' to issue from the local \
-         CA; 'csr' for an external PKI — make a key + CSR here, you get it \
-         signed)",
-        "generate",
-    );
-    #[cfg(not(unix))]
-    let (label, default) = (
-        "resolver certificate path (CA-issued; local issuance is unix-only)",
-        "",
-    );
-    let cert_choice = prompt::string_with_default(
-        label,
-        f.tls_cert.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        default,
-    )?;
+    // The flag form of `--tls-cert` is a path, the literal `generate`, or
+    // `csr`. Ask the easy yes/no question first: most operators want the
+    // batteries-included CA, and only the ones who don't should have to
+    // think about cert paths. `generate` / `csr` (local key + CSR via
+    // openssl) are unix-only — the CA module depends on openssl.
+    let flag = f.tls_cert.as_ref().map(|p| p.to_string_lossy().into_owned());
     #[cfg(unix)]
     {
-        if cert_choice == "generate" {
+        let use_built_in_ca = match flag.as_deref() {
+            Some("generate") => true,
+            Some(_) => false,
+            None => prompt::confirm(
+                "use netidx's built-in certificate authority? It creates a local \
+                 CA (if there isn't one already) and issues this resolver's \
+                 certificate from it — the zero-setup path. Answer n to use a \
+                 certificate from your own PKI instead.",
+                true,
+            )?,
+        };
+        if use_built_in_ca {
             return resolver_tls_generate(f, &name, default_ca_ip, units_dir, probe);
         }
+    }
+    #[cfg(not(unix))]
+    let _ = (default_ca_ip, units_dir, probe);
+    // External PKI: an existing cert path, or (unix only) `csr` to make a
+    // key + CSR here for your PKI to sign.
+    #[cfg(unix)]
+    let cert_label = "path to this resolver's certificate, or 'csr' to make a \
+                      key + CSR here for your PKI to sign";
+    #[cfg(not(unix))]
+    let cert_label = "resolver certificate path (CA-issued; local issuance is unix-only)";
+    let cert_choice = prompt::string_with_default(cert_label, flag, "")?;
+    #[cfg(unix)]
+    {
         if cert_choice == "csr" {
             note_external_pki(&name);
             let (certificate, private_key, trusted, askpass) =
@@ -2582,12 +2682,10 @@ fn resolver_tls_auth(
             }));
         }
     }
-    #[cfg(not(unix))]
-    let _ = (default_ca_ip, units_dir, probe);
     if cert_choice.is_empty() {
         bail!(
-            "resolver certificate path required (local issuance is \
-             unix-only — provide a pre-issued cert on this platform)"
+            "a certificate path is required (or, on unix, 'csr' to generate a \
+             key + CSR for your PKI to sign)"
         );
     }
     // Explicit cert path — the operator is bringing their own
@@ -2722,6 +2820,17 @@ fn resolver_tls_generate(
         let domain = netidx_conf::tls::domain_from_san(name)
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
+        // The built-in-CA path applies a sensible default issuance policy
+        // rather than interrogating a newcomer about SAN globs and id-map
+        // groups — but say what it is and how to change it. The explicit
+        // `ca init` flow is where the founding admin's policy gets tuned.
+        let allowed_san = vec![format!("*.{domain}")];
+        println!(
+            "  the CA's founding admin will issue *.{domain} certificates, place \
+             enrolled nodes in the 'users' id-map group, and may enroll conf \
+             servers — change any of this later with `netidx conf ca admin \
+             set-policy`."
+        );
         let setup_server = match conf_plane_decision(AuthKind::Tls, f.no_conf_server) {
             ConfPlane::Mandatory => Some(true),
             ConfPlane::Skip => Some(false),
@@ -2740,10 +2849,10 @@ fn resolver_tls_generate(
             key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
             validity_days: netidx_conf::ca::DEFAULT_CA_VALIDITY_DAYS,
             admin: None,
-            allowed_san: vec![],
+            allowed_san,
             max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
-            id_map_groups: vec![],
-            may_enroll_servers: None,
+            id_map_groups: vec!["users".to_string()],
+            may_enroll_servers: Some(true),
             setup_server,
             autorenew: None,
             listen: None,
@@ -3299,7 +3408,10 @@ fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         None
     };
     let need = if units_dir.is_some() {
-        service::ServiceNeed::at(service::ScopeArg::User)
+        // A publisher is typically a headless (often cloud) host, so a
+        // system service that starts at boot — no login session needed —
+        // is the right default, like the resolver.
+        service::ServiceNeed::at(service::ScopeArg::System)
     } else {
         service::ServiceNeed::NONE
     };
@@ -3447,8 +3559,8 @@ mod tests {
     // TLS gets the id-mapper unconditionally (no prompt — in test
     // builds stdin_is_tty() is pinned false, so a prompt would flip to
     // its default and hide a regression here); krb5 falls to its
-    // default-N prompt; anonymous and local never use the daemon.
-    // `--no-id-map` always wins.
+    // default `platform` choice; anonymous and local don't map through
+    // the daemon. `--no-id-map` forces platform.
     #[test]
     fn id_map_choice_per_profile() {
         let tls = AuthChoice::Tls {
@@ -3460,11 +3572,14 @@ mod tests {
         };
         let krb5 = AuthChoice::Krb5 { spn: ArcStr::from("host/x@REALM") };
         let local = AuthChoice::Local { path: PathBuf::from("/x/sock") };
-        assert!(resolve_id_map_choice(&tls, false).unwrap());
-        assert!(!resolve_id_map_choice(&tls, true).unwrap());
-        assert!(!resolve_id_map_choice(&krb5, false).unwrap());
-        assert!(!resolve_id_map_choice(&AuthChoice::Anonymous, false).unwrap());
-        assert!(!resolve_id_map_choice(&local, false).unwrap());
+        assert_eq!(resolve_id_map_choice(&tls, false).unwrap(), IdMapMode::Netidx);
+        assert_eq!(resolve_id_map_choice(&tls, true).unwrap(), IdMapMode::Platform);
+        assert_eq!(resolve_id_map_choice(&krb5, false).unwrap(), IdMapMode::Platform);
+        assert_eq!(
+            resolve_id_map_choice(&AuthChoice::Anonymous, false).unwrap(),
+            IdMapMode::Platform
+        );
+        assert_eq!(resolve_id_map_choice(&local, false).unwrap(), IdMapMode::Platform);
     }
 
     // The BYO-CSR generate flows (resolver-declines-local-CA, and the

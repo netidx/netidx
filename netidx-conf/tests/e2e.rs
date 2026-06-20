@@ -51,7 +51,7 @@ use netidx_conf::template::workstation::WorkstationParams;
 use netidx_conf::template::{
     self, AuthChoice, ReferralAuth,
     publisher::PublisherParams,
-    resolver::ResolverParams,
+    resolver::{IdMapMode, ResolverParams},
 };
 #[cfg(unix)]
 use netidx_id_map::runtime::{Server as IdMapServer, ServerParams as IdMapParams};
@@ -179,7 +179,7 @@ fn anon_params(dir: &TempDir, port: u16) -> ResolverParams {
         // Pick something absolute so the template's validation passes
         // even on this code path (it errors on relative).
         netidx_binary: PathBuf::from("/usr/local/bin/netidx"),
-        with_id_map: false,
+        id_map: IdMapMode::Platform,
         id_map_path: None,
         id_map_socket: None,
         with_local_client: true,
@@ -381,7 +381,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     };
     params.with_perms_file = true;
     params.perms_path = Some(dir.path().join("perms.json"));
-    params.with_id_map = true;
+    params.id_map = IdMapMode::Netidx;
     params.id_map_socket = Some(id_map_sock.clone());
     params.id_map_path = Some(id_map_json.clone());
     let rt = template::resolver::resolver(&params)?;
@@ -491,7 +491,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     };
     params.with_perms_file = true;
     params.perms_path = Some(dir.path().join("perms.json"));
-    params.with_id_map = true;
+    params.id_map = IdMapMode::Netidx;
     params.id_map_socket = Some(id_map_sock.clone());
     params.id_map_path = Some(id_map_json.clone());
     let rt = template::resolver::resolver(&params)?;

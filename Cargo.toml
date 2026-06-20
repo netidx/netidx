@@ -59,7 +59,7 @@ log = "0.4"
 # mDNS/DNS-SD — no avahi/Bonjour daemon dependency, works on Windows.
 mdns-sd = "0.20"
 memmap2 = "0.9"
-nix = { version = "0.31", features = ["process", "signal"] }
+nix = { version = "0.31", features = ["process", "signal", "hostname"] }
 num_cpus = "1"
 once_cell = "1.17.2"
 openssl = "0.10"

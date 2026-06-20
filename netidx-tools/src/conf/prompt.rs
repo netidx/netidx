@@ -267,6 +267,17 @@ where
             Some(line) if line.is_empty() => {
                 return parse_default(label, default)
             }
+            // The displayed options are authoritative: validate against
+            // them before parsing. `T` is often `String` (whose `FromStr`
+            // never fails), so without this an off-list answer would slip
+            // through to whatever catch-all consumes the parsed value.
+            Some(line) if !choices.contains(&line.as_str()) => {
+                eprintln!(
+                    "invalid {label}: {line:?} is not one of [{}]; please try again",
+                    choices.join(", ")
+                );
+                continue;
+            }
             Some(line) => match line.parse::<T>() {
                 Ok(v) => return Ok(v),
                 Err(e) => {
