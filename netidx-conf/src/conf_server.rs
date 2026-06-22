@@ -16,14 +16,20 @@
 
 use crate::{
     ca::{Ca, SanEntry},
-    ca_store, ca_vault, conf_client,
+    ca_store, ca_vault, conf_client, delegation_store,
     conf_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, ApproveRequest, ApproveResponse,
-        ClientHello, DenyRequest, DenyResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetCrlResponse, GetInfoResponse, InfoAuth, IssuedEntry,
-        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
-        PollResponse, QueueEntry, Request, ResolverAddr, RevokeRequest, RevokeResponse,
-        Role, ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION, SERVING_SAN,
+        self, AddIdentityRequest, AddIdentityResponse, ApplyReferralEditRequest,
+        ApplyReferralEditResponse, ApproveDelegationRequest, ApproveDelegationResponse,
+        ApproveRequest, ApproveResponse, ClientHello, ReferralEdit,
+        DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
+        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
+        EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
+        InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
+        ListIssuedResponse, ListQueueRequest, PollRequest,
+        ListQueueResponse, PeerResult, PollResponse, QueueEntry, Request, ResolverAddr,
+        RevokeRequest,
+        RevokeResponse, Role, ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION,
+        SERVING_SAN,
     },
     conf_server_config::ConfServerConfig,
     discovery, id_map,
@@ -133,6 +139,11 @@ pub struct Server {
     roots: RootCertStore,
     /// Serializes read-modify-write cycles on the local id-map file.
     id_map_lock: Mutex<()>,
+    /// Serializes read-modify-write cycles on the local resolver config
+    /// (delegation children/parent edits) and the delegation queue's
+    /// approve/deny transitions — so exactly one of a concurrent
+    /// approve/deny lands and edits don't interleave.
+    resolver_edit_lock: Mutex<()>,
 }
 
 impl Server {
@@ -144,13 +155,8 @@ impl Server {
     ) -> Result<Arc<Self>> {
         let trusted = std::fs::read(&cfg.trusted)
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
-        let mut roots = RootCertStore::empty();
-        for der in rustls_pemfile::certs(&mut std::io::Cursor::new(&trusted)) {
-            roots.add(der.context("parsing trust bundle")?).context("adding trust anchor")?;
-        }
-        if roots.is_empty() {
-            bail!("trust bundle {} contains no certificates", cfg.trusted.display());
-        }
+        let roots = load_roots(&trusted)
+            .with_context(|| format!("trust bundle {}", cfg.trusted.display()))?;
         // If we hold the CA, take the singleton flock and seed the serial
         // counter before serving — a second daemon for the same CA fails
         // here, and the counter starts beyond every serial ever issued.
@@ -172,6 +178,7 @@ impl Server {
             serving_key_pem,
             roots,
             id_map_lock: Mutex::new(()),
+            resolver_edit_lock: Mutex::new(()),
         }))
     }
 
@@ -645,6 +652,82 @@ async fn handle_conn(
                 .await
                 .context("writing ListIssuedResponse")
         }
+        Request::RequestDelegation(req) => {
+            let resp = match ca_dir(state) {
+                None => DelegationResponse::Err {
+                    reason: "this host does not hold the CA".to_string(),
+                },
+                Some(dir) => tokio::task::spawn_blocking(move || {
+                    handle_request_delegation(&dir, &req, peer)
+                })
+                .await
+                .context("delegation request task panicked")?,
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing DelegationResponse")
+        }
+        Request::PollDelegation(req) => {
+            let resp = match ca_dir(state) {
+                None => DelegationPollResponse::Unknown,
+                Some(dir) => tokio::task::spawn_blocking(move || {
+                    handle_poll_delegation(&dir, &req)
+                })
+                .await
+                .context("delegation poll task panicked")?,
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing DelegationPollResponse")
+        }
+        Request::ListDelegations(req) => {
+            let resp = match ca_dir(state) {
+                None => ListDelegationsResponse::Err {
+                    reason: "this host does not hold the CA".to_string(),
+                },
+                Some(dir) => tokio::task::spawn_blocking(move || {
+                    handle_list_delegations(&dir, &req)
+                })
+                .await
+                .context("list delegations task panicked")?,
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ListDelegationsResponse")
+        }
+        Request::ApproveDelegation(req) => {
+            let resp = handle_approve_delegation(state, req).await;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApproveDelegationResponse")
+        }
+        Request::DenyDelegation(req) => {
+            let resp = {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || handle_deny_delegation(&state, &req))
+                    .await
+                    .context("deny delegation task panicked")?
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing DenyDelegationResponse")
+        }
+        Request::ApplyReferralEdit(req) => {
+            let resp = if !peer_is_conf_server {
+                ApplyReferralEditResponse::Err {
+                    reason: "a referral edit requires a conf-server peer certificate"
+                        .to_string(),
+                }
+            } else {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || handle_apply_referral_edit(&state, &req))
+                    .await
+                    .context("apply referral edit task panicked")?
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApplyReferralEditResponse")
+        }
         Request::GetCrl => {
             let resp = match ca_dir(state) {
                 None => GetCrlResponse { crl_pem: None },
@@ -739,23 +822,13 @@ fn get_info(state: &Server) -> GetInfoResponse {
 }
 
 /// Derive this host's advertised resolver address + data-plane auth
-/// from its resolver config. `Local` auth is host-local by definition —
-/// nothing to advertise.
+/// from its resolver config — the first advertisable (non-`Local`)
+/// member, the representative `GetInfo` reports. See
+/// [`ResolverConfig::resolver_addrs`](crate::resolver::ResolverConfig::resolver_addrs)
+/// for the full cluster set (used by delegation).
 fn resolver_info(config: &Path) -> Result<Option<ResolverAddr>> {
-    use netidx::resolver_server::config::file::Auth;
     let rc = crate::resolver::ResolverConfig::load(config)?;
-    let member = rc
-        .0
-        .member_servers
-        .first()
-        .ok_or_else(|| anyhow!("resolver config has no member servers"))?;
-    let auth = match &member.auth {
-        Auth::Anonymous => InfoAuth::Anonymous,
-        Auth::Local(_) => return Ok(None),
-        Auth::Krb5(spn) => InfoAuth::Krb5 { spn: spn.to_string() },
-        Auth::Tls { name, .. } => InfoAuth::Tls { name: name.to_string() },
-    };
-    Ok(Some(ResolverAddr { addr: member.addr, auth }))
+    Ok(rc.resolver_addrs().into_iter().next())
 }
 
 /// Fan the freshly signed identity out to every id-map host we know of:
@@ -1821,6 +1894,385 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
     }
 }
 
+// -- resolver hierarchy delegation -------------------------------------------
+
+/// Structural check on a proposed delegation subtree (the authoritative
+/// children-constraint check happens at approval, via `validate_for_path`).
+fn validate_delegation_path(path: &str) -> Result<()> {
+    use netidx::path::Path as NPath;
+    let p = NPath::from(String::from(path));
+    if !NPath::is_absolute(&p) {
+        bail!("delegation path must be absolute (got {path:?})");
+    }
+    if p.as_ref() == "/" {
+        bail!("the root path cannot be delegated");
+    }
+    Ok(())
+}
+
+/// `RequestDelegation` (unauthenticated): structural checks then enqueue.
+fn handle_request_delegation(
+    ca_dir: &Path,
+    req: &DelegationRequest,
+    peer: SocketAddr,
+) -> DelegationResponse {
+    if let Err(e) = validate_delegation_path(&req.proposed_path) {
+        return DelegationResponse::Err { reason: format!("{e:#}") };
+    }
+    if req.child.is_empty() {
+        return DelegationResponse::Err {
+            reason: "no child resolver address supplied".to_string(),
+        };
+    }
+    // The request code is fingerprinted over the concrete child address, so
+    // an unspecified (0.0.0.0/::) address can't be matched out of band.
+    if req.child.iter().any(|r| r.addr.ip().is_unspecified()) {
+        return DelegationResponse::Err {
+            reason: "child resolver address must be a concrete advertised address"
+                .to_string(),
+        };
+    }
+    let pending = delegation_store::PendingDelegation::new(
+        req.proposed_path.clone(),
+        req.child.clone(),
+        peer.to_string(),
+    );
+    match delegation_store::enqueue(ca_dir, &pending) {
+        Ok(()) => DelegationResponse::Ok { request_id: pending.id },
+        Err(e) => DelegationResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+/// `PollDelegation` (unauthenticated): map the stored status to the wire.
+fn handle_poll_delegation(ca_dir: &Path, req: &PollRequest) -> DelegationPollResponse {
+    match delegation_store::status(ca_dir, &req.request_id) {
+        Ok(delegation_store::Status::Pending(_)) => DelegationPollResponse::Pending,
+        Ok(delegation_store::Status::Approved { parent }) => {
+            DelegationPollResponse::Approved { parent }
+        }
+        Ok(delegation_store::Status::Denied { reason }) => {
+            DelegationPollResponse::Denied { reason }
+        }
+        Ok(delegation_store::Status::Unknown) | Err(_) => DelegationPollResponse::Unknown,
+    }
+}
+
+/// `ListDelegations` (admin-authenticated): the pending queue for review.
+fn handle_list_delegations(
+    ca_dir: &Path,
+    req: &ListDelegationsRequest,
+) -> ListDelegationsResponse {
+    if let Err(reason) = authenticate(ca_dir, &req.admin, &req.password.0) {
+        return ListDelegationsResponse::Err { reason };
+    }
+    match delegation_store::pending(ca_dir) {
+        Ok(reqs) => ListDelegationsResponse::Ok {
+            requests: reqs
+                .into_iter()
+                .map(|r| DelegationEntry {
+                    age_secs: r.age_secs(),
+                    id: r.id,
+                    proposed_path: r.proposed_path,
+                    child: r.child,
+                    peer: r.peer,
+                })
+                .collect(),
+        },
+        Err(e) => ListDelegationsResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+/// `DenyDelegation` (admin-authenticated): deny a pending request, under
+/// the resolver-edit lock so it's mutually exclusive with approve.
+fn handle_deny_delegation(
+    state: &Server,
+    req: &DenyDelegationRequest,
+) -> DenyDelegationResponse {
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return DenyDelegationResponse::Err {
+                reason: "this host does not hold the CA".to_string(),
+            }
+        }
+    };
+    if let Err(reason) = authenticate(&ca_dir, &req.admin, &req.password.0) {
+        return DenyDelegationResponse::Err { reason };
+    }
+    let _guard = state.resolver_edit_lock.lock();
+    match delegation_store::read_pending(&ca_dir, &req.request_id) {
+        Ok(Some(pending)) => match delegation_store::deny(&ca_dir, &pending, &req.reason) {
+            Ok(()) => DenyDelegationResponse::Ok,
+            Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
+        },
+        Ok(None) => DenyDelegationResponse::Err {
+            reason: "no such pending delegation request (expired, never queued, or \
+                     already decided)"
+                .to_string(),
+        },
+        Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+fn info_to_refauth(a: &InfoAuth) -> netidx::resolver_server::config::file::RefAuth {
+    use netidx::resolver_server::config::file::RefAuth;
+    match a {
+        InfoAuth::Anonymous => RefAuth::Anonymous,
+        InfoAuth::Krb5 { spn } => RefAuth::Krb5(arcstr::ArcStr::from(spn.as_str())),
+        InfoAuth::Tls { name } => RefAuth::Tls(arcstr::ArcStr::from(name.as_str())),
+    }
+}
+
+/// Apply a referral edit to the local resolver config — add/replace a
+/// child, or set the parent. Idempotent (re-applying the same edit is a
+/// no-op); validated via `validate_for_path` (so children-constraint
+/// violations fail here) before the atomic save.
+fn apply_referral_edit_local(
+    resolver_config_path: &Path,
+    edit: &ReferralEdit,
+) -> Result<()> {
+    use netidx::resolver_server::config::file::Referral;
+    let mut rc = crate::resolver::ResolverConfig::load(resolver_config_path)
+        .with_context(|| {
+            format!("loading resolver config {}", resolver_config_path.display())
+        })?;
+    match edit {
+        ReferralEdit::AddChild { path, child } => {
+            let addrs = child
+                .iter()
+                .map(|r| (r.addr, info_to_refauth(&r.auth)))
+                .collect::<Vec<_>>();
+            let referral =
+                Referral { path: arcstr::ArcStr::from(path.as_str()), ttl: None, addrs };
+            let children = &mut rc.as_file_mut().children;
+            match children.iter_mut().find(|c| &*c.path == path.as_str()) {
+                Some(existing) => *existing = referral,
+                None => children.push(referral),
+            }
+        }
+        ReferralEdit::SetParent { path, parent } => {
+            let addrs = parent
+                .iter()
+                .map(|r| (r.addr, info_to_refauth(&r.auth)))
+                .collect::<Vec<_>>();
+            rc.as_file_mut().parent =
+                Some(Referral { path: arcstr::ArcStr::from(path.as_str()), ttl: None, addrs });
+        }
+    }
+    rc.save(resolver_config_path)
+        .context("the referral edit would make the resolver config invalid")
+}
+
+/// `ApplyReferralEdit` (server-to-server, peer-cert-gated): the receive
+/// side of cluster-wide delegation propagation. Requires a resolver role
+/// (the config to edit).
+fn handle_apply_referral_edit(
+    state: &Server,
+    req: &ApplyReferralEditRequest,
+) -> ApplyReferralEditResponse {
+    let path =
+        match state.cfg.lock().roles.resolver.as_ref().map(|r| r.config.clone()) {
+            Some(p) => p,
+            None => {
+                return ApplyReferralEditResponse::Err {
+                    reason: "this host has no resolver role to edit".to_string(),
+                }
+            }
+        };
+    let _guard = state.resolver_edit_lock.lock();
+    match apply_referral_edit_local(&path, &req.edit) {
+        Ok(()) => ApplyReferralEditResponse::Ok,
+        Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+/// The blocking half of `ApproveDelegation`: authenticate, validate the
+/// proposed subtree, apply the child edit to the **local** resolver
+/// config, and (if the request was Pending) commit the approval so the
+/// child can poll. Idempotent on an already-`Approved` request — re-runs
+/// re-sync the cluster. Returns `(edit, cluster member resolver addresses)`
+/// for the async peer push; the `Err` arm carries the response to send.
+fn approve_delegation_prepare(
+    state: &Server,
+    req: &ApproveDelegationRequest,
+) -> std::result::Result<(ReferralEdit, Vec<SocketAddr>), ApproveDelegationResponse> {
+    let err = |reason: String| ApproveDelegationResponse::Err { reason };
+    let ca_dir = state
+        .ca_dir()
+        .map(|d| d.to_path_buf())
+        .ok_or_else(|| err("this host does not hold the CA".to_string()))?;
+    let resolver_path = state
+        .cfg
+        .lock()
+        .roles
+        .resolver
+        .as_ref()
+        .map(|r| r.config.clone())
+        .ok_or_else(|| {
+            err("approving a delegation requires a resolver role on this host (the \
+                 config to edit + its address)"
+                .to_string())
+        })?;
+    let unlocked = authenticate(&ca_dir, &req.admin, &req.password.0).map_err(err)?;
+    // The resolver edit + commit happen under this lock — mutually
+    // exclusive with deny and other approves.
+    let _guard = state.resolver_edit_lock.lock();
+    // Pending ⇒ approve + commit; Approved ⇒ re-sync (re-apply + re-push,
+    // already committed); else an error.
+    let (pending, commit) = match delegation_store::status(&ca_dir, &req.request_id) {
+        Ok(delegation_store::Status::Pending(p)) => (p, true),
+        Ok(delegation_store::Status::Approved { .. }) => {
+            match delegation_store::read_approved(&ca_dir, &req.request_id) {
+                Ok(Some(rec)) => (rec.req, false),
+                _ => return Err(err("the approved record vanished".to_string())),
+            }
+        }
+        Ok(delegation_store::Status::Denied { .. }) => {
+            return Err(err("that delegation was already denied".to_string()))
+        }
+        Ok(delegation_store::Status::Unknown) => {
+            return Err(err(
+                "no such pending delegation request (expired or never queued)"
+                    .to_string(),
+            ))
+        }
+        Err(e) => return Err(err(format!("{e:#}"))),
+    };
+    let edit = ReferralEdit::AddChild {
+        path: pending.proposed_path.clone(),
+        child: pending.child.clone(),
+    };
+    // Validated against the children constraints (start_with(root) /
+    // deeper / non-overlapping) by `validate_for_path` inside the edit.
+    apply_referral_edit_local(&resolver_path, &edit)
+        .map_err(|e| err(format!("validating/applying the delegation: {e:#}")))?;
+    let rc = crate::resolver::ResolverConfig::load(&resolver_path)
+        .map_err(|e| err(format!("reading this resolver's address: {e:#}")))?;
+    let parent = rc.resolver_addrs();
+    if parent.is_empty() {
+        return Err(err("this resolver advertises no network address (Local-only?) — \
+                        it cannot be a delegation parent"
+            .to_string()));
+    }
+    let member_addrs: Vec<SocketAddr> =
+        rc.as_file().member_servers.iter().map(|m| m.addr).collect();
+    if commit {
+        delegation_store::approve(&ca_dir, &pending, parent)
+            .map_err(|e| err(format!("committing the approval: {e:#}")))?;
+        audit(&ca_dir, &unlocked.admin, "approve-delegation", &pending.proposed_path, 0);
+    }
+    Ok((edit, member_addrs))
+}
+
+/// Propagate `edit` to the OTHER members of this resolver cluster so a
+/// single admin approval updates every peer. For each `member_servers`
+/// resolver address that isn't this host's, push the edit to the conf
+/// server co-located with it (same IP, this conf server's port — the
+/// cluster-uniform-port convention). A down or rejecting peer is
+/// **reported** (not silently skipped), so the admin knows the cluster is
+/// out of sync; the push is idempotent, so re-approving re-syncs it.
+async fn push_to_cluster_peers(
+    state: &Arc<Server>,
+    edit: &ReferralEdit,
+    member_addrs: &[SocketAddr],
+) -> Vec<PeerResult> {
+    let my_listen = { state.cfg.lock().listen };
+    push_referral_edit_to_peers(
+        edit,
+        member_addrs,
+        my_listen,
+        &state.serving_cert_pem,
+        &state.serving_key_pem,
+        state.roots.clone(),
+    )
+    .await
+}
+
+/// Push a referral edit to every cluster peer's conf server. Peers are
+/// derived from the resolver's `member_addrs` as `member.ip :
+/// my_listen.port()` (the uniform conf-port convention), excluding
+/// `my_listen` itself (already applied locally; with an unspecified listen
+/// IP we can't identify ourselves, but a self-push is an idempotent no-op,
+/// so it's harmless). Loud: every unreachable or erroring peer comes back
+/// as a `PeerResult` with its `error` set.
+///
+/// Shared by both directions of delegation: the parent side pushes
+/// `AddChild` from the approve handler (the daemon, with its in-memory
+/// serving PEMs), and the child side pushes `SetParent` from the
+/// `add-parent` CLI (loading the same identity off disk).
+pub async fn push_referral_edit_to_peers(
+    edit: &ReferralEdit,
+    member_addrs: &[SocketAddr],
+    my_listen: SocketAddr,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: RootCertStore,
+) -> Vec<PeerResult> {
+    let (my_ip, conf_port) = (my_listen.ip(), my_listen.port());
+    let mut targets: Vec<SocketAddr> = Vec::new();
+    for m in member_addrs {
+        if !my_ip.is_unspecified() && m.ip() == my_ip {
+            continue;
+        }
+        let cs = SocketAddr::new(m.ip(), conf_port);
+        if cs != my_listen && !targets.contains(&cs) {
+            targets.push(cs);
+        }
+    }
+    let mut results = Vec::new();
+    for addr in targets {
+        let res = conf_client::push_referral_edit(
+            addr,
+            serving_cert_pem,
+            serving_key_pem,
+            roots.clone(),
+            edit,
+        )
+        .await;
+        results.push(PeerResult { addr, error: res.err().map(|e| format!("{e:#}")) });
+    }
+    results
+}
+
+/// Build a [`RootCertStore`] from a PEM trust bundle (one or more CA
+/// certificates). Shared by the daemon's [`Server::new`] and the
+/// `add-parent` CLI, which both need to trust the same network CA to talk
+/// to cluster peers.
+pub fn load_roots(trusted_pem: &[u8]) -> Result<RootCertStore> {
+    let mut roots = RootCertStore::empty();
+    for der in rustls_pemfile::certs(&mut std::io::Cursor::new(trusted_pem)) {
+        roots.add(der.context("parsing trust bundle")?).context("adding trust anchor")?;
+    }
+    if roots.is_empty() {
+        bail!("no certificates in trust bundle");
+    }
+    Ok(roots)
+}
+
+/// `ApproveDelegation` (admin-authenticated): the blocking prepare (auth,
+/// validate, local edit, commit) followed by the async cluster-wide push.
+/// Requires both the ca role (admin auth) and the resolver role.
+async fn handle_approve_delegation(
+    state: &Arc<Server>,
+    req: ApproveDelegationRequest,
+) -> ApproveDelegationResponse {
+    let prepared = {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || approve_delegation_prepare(&state, &req)).await
+    };
+    let (edit, member_addrs) = match prepared {
+        Ok(Ok(p)) => p,
+        Ok(Err(resp)) => return resp,
+        Err(e) => {
+            return ApproveDelegationResponse::Err {
+                reason: format!("approve delegation task panicked: {e}"),
+            }
+        }
+    };
+    let peers = push_to_cluster_peers(state, &edit, &member_addrs).await;
+    ApproveDelegationResponse::Ok { peers }
+}
+
 /// True if `name` matches any of the admin's `allowed` glob patterns.
 /// An empty pattern list denies everything (issuance scope is granted
 /// explicitly).
@@ -1866,7 +2318,7 @@ mod tests {
         ca_vault::{self, Policy},
         conf_client,
         conf_proto::{NodeKind, Secret},
-        conf_server_config::{CaRole, ConfServerConfig, IdMapRole, Roles},
+        conf_server_config::{CaRole, ConfServerConfig, IdMapRole, ResolverRole, Roles},
         fingerprint::Fingerprint,
         tls_tofu::TofuVerifier,
     };
@@ -1953,17 +2405,31 @@ mod tests {
         roles: Roles,
         peers: Vec<SocketAddr>,
     ) -> (SocketAddr, Arc<Server>) {
-        let (cert, key) = issue_serving_cert(dir);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        spawn_server_at(dir, "127.0.0.1:0", roles, peers).await
+    }
+
+    /// Like [`spawn_server_with`] but binds an explicit address and takes
+    /// its serving cert + roots from `ca_dir` (which may differ from
+    /// where this server's resolver config lives) — for multi-peer
+    /// cluster tests where several conf servers share one CA but each
+    /// holds its own resolver.json.
+    async fn spawn_server_at(
+        ca_dir: &Path,
+        bind: &str,
+        roles: Roles,
+        peers: Vec<SocketAddr>,
+    ) -> (SocketAddr, Arc<Server>) {
+        let (cert, key) = issue_serving_cert(ca_dir);
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let cfg = ConfServerConfig {
             domain: "ryu-oh.org".to_string(),
             listen: addr,
             // serve_on uses the in-memory PEMs; these paths are only
             // read by `serve()`, which tests don't go through.
-            serving_cert: dir.join("unused-cert.pem"),
-            serving_key: dir.join("unused-key.pem"),
-            trusted: dir.join("certificate.pem"),
+            serving_cert: ca_dir.join("unused-cert.pem"),
+            serving_key: ca_dir.join("unused-key.pem"),
+            trusted: ca_dir.join("certificate.pem"),
             roles,
             ca_addr: None,
             peers,
@@ -3455,5 +3921,457 @@ mod tests {
         assert_eq!(resolver_info(&p).unwrap().unwrap().auth, InfoAuth::Anonymous);
         let p = write_cfg(rfile::Auth::Local("/run/x.sock".into()), "local.json");
         assert!(resolver_info(&p).unwrap().is_none());
+    }
+
+    /// A single anonymous resolver member on 127.0.0.1 — when this is the
+    /// conf server's own member, single-host delegation pushes to no
+    /// remote peer (the member is recognized as self).
+    fn write_anon_resolver_cfg(dir: &Path, name: &str) -> PathBuf {
+        use netidx::resolver_server::config::file as rfile;
+        let member = rfile::MemberServerBuilder::default()
+            .addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+            .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .auth(rfile::Auth::Anonymous)
+            .build()
+            .unwrap();
+        let cfg =
+            rfile::ConfigBuilder::default().member_servers(vec![member]).build().unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        p
+    }
+
+    /// Spawn a single-host parent: a conf server holding both ca +
+    /// resolver roles over the anon resolver config at `dir/resolver.json`.
+    /// Returns its address, the resolver config path, and the live state.
+    async fn spawn_anon_parent(dir: &Path) -> (SocketAddr, PathBuf, Arc<Server>) {
+        let rpath = write_anon_resolver_cfg(dir, "resolver.json");
+        let roles = Roles {
+            ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: rpath.clone() }),
+            id_map: None,
+        };
+        let (addr, state) = spawn_server_with(dir, roles, vec![]).await;
+        (addr, rpath, state)
+    }
+
+    /// End-to-end delegation over the real pinned-TLS protocol: a conf
+    /// server wearing both ca + resolver hats hosts a parent
+    /// resolver.json (root `/`, one anon member, no children). A child
+    /// requests `/eu`, the admin lists then approves, and we assert the
+    /// parent config gained `children[/eu]` and the child's poll returns
+    /// `Approved{parent}` carrying the parent's own resolver address.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+
+        // The child site queues a request for /eu carrying its own
+        // (concrete) resolver address.
+        let child = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let request_id =
+            conf_client::request_delegation(addr, "/eu", child.clone(), &identity)
+                .await
+                .unwrap();
+        assert!(matches!(
+            conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap(),
+            DelegationPollResponse::Pending
+        ));
+
+        // The parent admin lists the queue; the code it computes locally
+        // matches the child's (same canonical (path, child) bytes).
+        let queue =
+            conf_client::list_delegations(addr, "alice", "apw", &identity).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].proposed_path, "/eu");
+        assert_eq!(
+            conf_client::delegation_code(&queue[0].proposed_path, &queue[0].child),
+            conf_client::delegation_code("/eu", &child)
+        );
+
+        // Approve. Single-member cluster ⇒ no remote peer push.
+        let peers =
+            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap();
+        assert!(peers.is_empty(), "single-member cluster should push to no peers");
+
+        // The parent resolver.json now mounts the child at /eu.
+        let rc = crate::resolver::ResolverConfig::load(&rpath).unwrap();
+        assert_eq!(rc.as_file().children.len(), 1);
+        let ch = &rc.as_file().children[0];
+        assert_eq!(&*ch.path, "/eu");
+        assert_eq!(ch.addrs.len(), 1);
+        assert_eq!(ch.addrs[0].0, "203.0.113.9:4564".parse::<SocketAddr>().unwrap());
+
+        // The child's poll flips to Approved, carrying the parent's own
+        // resolver address for its `parent` referral.
+        match conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
+            DelegationPollResponse::Approved { parent } => {
+                assert_eq!(parent.len(), 1);
+                assert_eq!(
+                    parent[0].addr,
+                    "127.0.0.1:4564".parse::<SocketAddr>().unwrap()
+                );
+                assert_eq!(parent[0].auth, InfoAuth::Anonymous);
+            }
+            other => panic!("expected Approved, got {other:?}"),
+        }
+
+        // Re-approving an already-approved request is an idempotent
+        // re-sync — still Ok, children unchanged (no duplicate mount).
+        let peers =
+            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap();
+        assert!(peers.is_empty());
+        let rc = crate::resolver::ResolverConfig::load(&rpath).unwrap();
+        assert_eq!(
+            rc.as_file().children.len(),
+            1,
+            "re-approve must not duplicate the child"
+        );
+    }
+
+    /// Two anonymous resolver members on distinct loopback IPs (same
+    /// resolver port). Each peer keeps its own copy of this config; a
+    /// delegation must reach both. Linux-only: the cluster push derives a
+    /// peer's conf address from its member IP, so the peers must live on
+    /// separate loopback IPs (127.0.0.0/8, all loopback on Linux).
+    #[cfg(target_os = "linux")]
+    fn write_cluster_cfg(ca_dir: &Path, name: &str) -> PathBuf {
+        use netidx::resolver_server::config::file as rfile;
+        let member = |ip: &str| {
+            rfile::MemberServerBuilder::default()
+                .addr(SocketAddr::new(ip.parse().unwrap(), 4564))
+                .bind_addr(ip.parse::<std::net::IpAddr>().unwrap())
+                .auth(rfile::Auth::Anonymous)
+                .build()
+                .unwrap()
+        };
+        let cfg = rfile::ConfigBuilder::default()
+            .member_servers(vec![member("127.0.0.2"), member("127.0.0.3")])
+            .build()
+            .unwrap();
+        let p = ca_dir.join(name);
+        std::fs::write(&p, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        p
+    }
+
+    /// A 2-peer parent cluster: approving a delegation on peer A must
+    /// push the `AddChild` edit to peer B so BOTH members mount the
+    /// child — the cluster stays consistent under one admin action.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_cluster_propagation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path();
+        setup_ca(ca_dir);
+        let ra = write_cluster_cfg(ca_dir, "resolver_a.json");
+        let rb = write_cluster_cfg(ca_dir, "resolver_b.json");
+
+        // Peer A holds the CA (it approves); peer B only receives pushes.
+        let roles_a = Roles {
+            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: ra.clone() }),
+            id_map: None,
+        };
+        let roles_b = Roles {
+            ca: None,
+            resolver: Some(ResolverRole { config: rb.clone() }),
+            id_map: None,
+        };
+        let (addr_a, _a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
+        // B shares A's conf port on the other loopback IP — the cluster
+        // push derives a peer's conf address as member.ip : my_conf_port.
+        let port = addr_a.port();
+        let (addr_b, _b) =
+            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles_b, vec![]).await;
+
+        let identity =
+            conf_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
+        let child = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let request_id =
+            conf_client::request_delegation(addr_a, "/eu", child, &identity).await.unwrap();
+        let peers =
+            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap();
+        // Exactly one remote peer (B), pushed cleanly.
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addr, addr_b);
+        assert!(peers[0].error.is_none(), "peer B push failed: {:?}", peers[0].error);
+        // BOTH cluster members now mount the child at /eu.
+        for p in [&ra, &rb] {
+            let rc = crate::resolver::ResolverConfig::load(p).unwrap();
+            assert_eq!(rc.as_file().children.len(), 1, "{p:?} missing the child");
+            assert_eq!(&*rc.as_file().children[0].path, "/eu");
+        }
+    }
+
+    /// A cluster peer whose conf server is down must be reported LOUDLY
+    /// (the cluster is now inconsistent), and a re-approve once it
+    /// recovers must re-sync it idempotently.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_cluster_down_peer_then_resync() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path();
+        setup_ca(ca_dir);
+        let ra = write_cluster_cfg(ca_dir, "resolver_a.json");
+        let rb = write_cluster_cfg(ca_dir, "resolver_b.json");
+
+        let roles_a = Roles {
+            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: ra.clone() }),
+            id_map: None,
+        };
+        let (addr_a, _a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
+        let port = addr_a.port();
+
+        let identity =
+            conf_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
+        let child = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let request_id =
+            conf_client::request_delegation(addr_a, "/eu", child, &identity).await.unwrap();
+
+        // Peer B is down — approve still commits locally on A, but the
+        // push to B is reported as a failure (the cluster is now split).
+        let peers =
+            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addr.port(), port);
+        assert!(peers[0].error.is_some(), "a down peer must be reported as failed");
+        // A applied locally; B's config is untouched.
+        let rc_a = crate::resolver::ResolverConfig::load(&ra).unwrap();
+        assert_eq!(rc_a.as_file().children.len(), 1);
+        let rc_b = crate::resolver::ResolverConfig::load(&rb).unwrap();
+        assert!(rc_b.as_file().children.is_empty(), "down peer must not be edited");
+
+        // B recovers; re-approving the (already-approved) request is an
+        // idempotent re-sync that converges the cluster.
+        let roles_b = Roles {
+            ca: None,
+            resolver: Some(ResolverRole { config: rb.clone() }),
+            id_map: None,
+        };
+        let (_addr_b, _b) =
+            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles_b, vec![]).await;
+        let peers =
+            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap();
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].error.is_none(), "re-sync push failed: {:?}", peers[0].error);
+        let rc_b = crate::resolver::ResolverConfig::load(&rb).unwrap();
+        assert_eq!(rc_b.as_file().children.len(), 1, "re-sync must mount the child on B");
+        assert_eq!(&*rc_b.as_file().children[0].path, "/eu");
+        // And A stays single-mounted (idempotent, no duplicate).
+        let rc_a = crate::resolver::ResolverConfig::load(&ra).unwrap();
+        assert_eq!(rc_a.as_file().children.len(), 1);
+    }
+
+    /// The child-cluster direction: `push_referral_edit_to_peers` with a
+    /// `SetParent` edit (what `add-parent` runs after writing the local
+    /// referral) reaches the other child member's conf server and sets its
+    /// `parent` referral, while self is excluded.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_parent_pushes_to_child_cluster_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_dir = dir.path();
+        setup_ca(ca_dir);
+        let ra = write_cluster_cfg(ca_dir, "child_a.json");
+        let rb = write_cluster_cfg(ca_dir, "child_b.json");
+        // A holds the conf identity used to push; B only receives.
+        let roles = |cfg: PathBuf| Roles {
+            ca: None,
+            resolver: Some(ResolverRole { config: cfg }),
+            id_map: None,
+        };
+        let (addr_a, state_a) =
+            spawn_server_at(ca_dir, "127.0.0.2:0", roles(ra.clone()), vec![]).await;
+        let port = addr_a.port();
+        let (_addr_b, _b) =
+            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles(rb.clone()), vec![])
+                .await;
+
+        let member_addrs = vec![
+            "127.0.0.2:4564".parse::<SocketAddr>().unwrap(),
+            "127.0.0.3:4564".parse::<SocketAddr>().unwrap(),
+        ];
+        let edit = ReferralEdit::SetParent {
+            path: "/eu".to_string(),
+            parent: vec![ResolverAddr {
+                addr: "203.0.113.1:4564".parse().unwrap(),
+                auth: InfoAuth::Anonymous,
+            }],
+        };
+        let peers = push_referral_edit_to_peers(
+            &edit,
+            &member_addrs,
+            addr_a,
+            &state_a.serving_cert_pem,
+            &state_a.serving_key_pem,
+            state_a.roots.clone(),
+        )
+        .await;
+        // Exactly one remote peer (B), pushed cleanly; A is self-excluded.
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].error.is_none(), "push to B failed: {:?}", peers[0].error);
+        let rc_b = crate::resolver::ResolverConfig::load(&rb).unwrap();
+        let par = rc_b.as_file().parent.as_ref().expect("B should have a parent referral");
+        assert_eq!(&*par.path, "/eu");
+        assert_eq!(par.addrs[0].0, "203.0.113.1:4564".parse::<SocketAddr>().unwrap());
+        let rc_a = crate::resolver::ResolverConfig::load(&ra).unwrap();
+        assert!(
+            rc_a.as_file().parent.is_none(),
+            "A is self-excluded; its config must be untouched"
+        );
+    }
+
+    /// Approving requires BOTH ca (admin auth) and resolver (the config to
+    /// edit) roles. A ca-only host can queue a request but must refuse to
+    /// approve it — it has no resolver config to mount the child into.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_approve_requires_resolver_role() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            resolver: None,
+            id_map: None,
+        };
+        let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let child = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let request_id =
+            conf_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
+        let err =
+            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("resolver role"), "got: {err:#}");
+    }
+
+    /// A subtree that overlaps an already-mounted child is rejected at
+    /// approve time by the children-constraint validation — the cluster
+    /// never commits an ambiguous routing table, and nothing changes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_overlapping_subtree_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        // First child mounts /eu.
+        let a = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let id_a =
+            conf_client::request_delegation(addr, "/eu", a, &identity).await.unwrap();
+        conf_client::approve_delegation(addr, "alice", "apw", &id_a, &identity)
+            .await
+            .unwrap();
+        // A second site asks for /eu/sub — inside the first child's
+        // subtree. Overlapping mounts are invalid; approve must refuse.
+        let b = vec![ResolverAddr {
+            addr: "203.0.113.10:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let id_b =
+            conf_client::request_delegation(addr, "/eu/sub", b, &identity).await.unwrap();
+        let err =
+            conf_client::approve_delegation(addr, "alice", "apw", &id_b, &identity)
+                .await
+                .unwrap_err();
+        assert!(format!("{err:#}").to_lowercase().contains("below"), "got: {err:#}");
+        // The parent's mount table is unchanged: still just /eu.
+        let rc = crate::resolver::ResolverConfig::load(&rpath).unwrap();
+        assert_eq!(rc.as_file().children.len(), 1);
+        assert_eq!(&*rc.as_file().children[0].path, "/eu");
+    }
+
+    /// Deny path + status precedence: a denied request polls `Denied`,
+    /// and a later approve of the same request is refused (a terminal
+    /// decision is final).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_deny_then_approve_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (addr, _rpath, _state) = spawn_anon_parent(dir.path()).await;
+        let identity =
+            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let child = vec![ResolverAddr {
+            addr: "203.0.113.9:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        }];
+        let request_id =
+            conf_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
+        conf_client::deny_delegation(
+            addr,
+            "alice",
+            "apw",
+            &request_id,
+            "not your subtree",
+            &identity,
+        )
+        .await
+        .unwrap();
+        match conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
+            DelegationPollResponse::Denied { reason } => {
+                assert_eq!(reason, "not your subtree")
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+        let err =
+            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+                .await
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("denied"), "got: {err:#}");
+    }
+
+    /// The server-to-server `SetParent` receive path (used when a child
+    /// is itself a cluster) sets the `parent` referral and is idempotent.
+    #[test]
+    fn apply_referral_edit_set_parent_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_anon_resolver_cfg(dir.path(), "child.json");
+        let edit = ReferralEdit::SetParent {
+            path: "/eu".to_string(),
+            parent: vec![ResolverAddr {
+                addr: "203.0.113.1:4564".parse().unwrap(),
+                auth: InfoAuth::Anonymous,
+            }],
+        };
+        apply_referral_edit_local(&p, &edit).unwrap();
+        let rc = crate::resolver::ResolverConfig::load(&p).unwrap();
+        let par = rc.as_file().parent.as_ref().expect("parent referral set");
+        assert_eq!(&*par.path, "/eu");
+        assert_eq!(par.addrs.len(), 1);
+        assert_eq!(par.addrs[0].0, "203.0.113.1:4564".parse::<SocketAddr>().unwrap());
+        // Re-applying the same edit is a no-op, not an error.
+        apply_referral_edit_local(&p, &edit).unwrap();
+        let rc = crate::resolver::ResolverConfig::load(&p).unwrap();
+        assert_eq!(&*rc.as_file().parent.as_ref().unwrap().path, "/eu");
     }
 }

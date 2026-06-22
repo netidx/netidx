@@ -374,6 +374,79 @@ impl RenderedTemplate {
     }
 }
 
+/// Build the edits that attach an already-installed workstation/client
+/// to a network — the engine half of `workstation join`. Loads the
+/// existing resolver + client configs, adds `parent` to the resolver,
+/// sets the client's `default_auth` (derived from the parent's auth) and
+/// TLS identities, and returns a [`RenderedTemplate`] that touches ONLY
+/// those two configs plus the cert install. Perms, units, and every
+/// unrelated field are preserved — this edits, it never re-renders. Use
+/// the returned template's `describe()`/`apply()` like any install.
+///
+/// Errors if the resolver already carries a parent referral: re-joining
+/// a different network is a separate, more careful operation.
+pub fn attach_to_network(
+    resolver_config_path: &Path,
+    client_config_path: &Path,
+    parent: ParentRef,
+    tls_identities: Vec<TlsIdentitySpec>,
+) -> Result<RenderedTemplate> {
+    // The resolver-only half (set the parent referral) is shared with
+    // `resolver add-parent`.
+    let mut rt = set_parent_referral(resolver_config_path, parent.clone())?;
+
+    let mut ccfg = client::ClientConfig::load(client_config_path).with_context(|| {
+        format!("loading client config {}", client_config_path.display())
+    })?;
+    ccfg.0.default_auth = derive_default_auth(parent.addrs.iter().map(|(_, a)| a));
+    if let Some(tls) = client_tls_section_from(&tls_identities)? {
+        // A local-only workstation has no TLS section; a join that
+        // enrolled a cert adds one.
+        ccfg.0.tls = Some(tls);
+    }
+
+    rt.client_config = Some((client_config_path.to_path_buf(), ccfg));
+    rt.tls_install = tls_identities
+        .iter()
+        .map(|s| s.install_job())
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rt)
+}
+
+/// Set the `parent` referral on an existing resolver config — the
+/// resolver-only half of attaching to a network, for `resolver
+/// add-parent` (and reused by [`attach_to_network`]). Returns a
+/// [`RenderedTemplate`] touching only the resolver config (no client
+/// edit, no cert install). Refuses a resolver that already has a parent —
+/// re-parenting a different network is a separate, more careful op.
+pub fn set_parent_referral(
+    resolver_config_path: &Path,
+    parent: ParentRef,
+) -> Result<RenderedTemplate> {
+    let mut rcfg = resolver_engine::ResolverConfig::load(resolver_config_path)
+        .with_context(|| {
+            format!("loading resolver config {}", resolver_config_path.display())
+        })?;
+    if rcfg.as_file().parent.is_some() {
+        bail!(
+            "this resolver already has a parent referral — it's already attached \
+             to a network. Re-parenting isn't supported yet (uninstall + \
+             reinstall to switch networks)."
+        );
+    }
+    rcfg.as_file_mut().parent = Some(parent_into_file(parent));
+    Ok(RenderedTemplate {
+        client_config: None,
+        resolver_config: Some((resolver_config_path.to_path_buf(), rcfg)),
+        perms_file: None,
+        id_map_file: None,
+        units: BTreeMap::new(),
+        units_dir: None,
+        tls_install: Vec::new(),
+        warnings: Vec::new(),
+    })
+}
+
 /// One-line description of a client-side resolver auth, for the
 /// `--dry-run` plan and `status`.
 pub fn describe_client_auth(auth: &cfile::Auth) -> String {
@@ -590,3 +663,66 @@ pub(crate) fn parent_into_file(p: ParentRef) -> rfile::Referral {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    const LOCAL_MEMBER: &str = r#"{"addr":"127.0.0.1:4654","bind_addr":"127.0.0.1","auth":"Anonymous","hello_timeout":10,"max_connections":768,"pid_file":"","reader_ttl":60,"writer_ttl":120,"id_map_command":null,"id_map_type":"DoNotMap","id_map_timeout":3600}"#;
+    const LOCAL_CLIENT: &str = r#"{"base":"/local","addrs":[["127.0.0.1:4654","Anonymous"]],"tls":null,"default_auth":"Local","default_bind_config":null}"#;
+
+    fn anon_parent() -> ParentRef {
+        ParentRef {
+            path: ArcStr::from("/local"),
+            ttl: None,
+            addrs: vec![("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous)],
+        }
+    }
+
+    #[test]
+    fn attach_to_network_adds_parent_and_derives_default_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        // A local-only workstation: resolver with no parent, client with
+        // default_auth Local.
+        let rpath = write(
+            dir.path(),
+            "resolver.json",
+            &format!(
+                r#"{{"children":[],"parent":null,"member_servers":[{LOCAL_MEMBER}],"perms":{{}},"include_permissions":[]}}"#
+            ),
+        );
+        let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
+
+        let rt = attach_to_network(&rpath, &cpath, anon_parent(), vec![]).unwrap();
+        rt.apply().unwrap();
+
+        // The resolver gained the parent referral...
+        let rcfg = resolver_engine::ResolverConfig::load(&rpath).unwrap();
+        let parent = rcfg.as_file().parent.as_ref().expect("parent referral added");
+        assert_eq!(parent.addrs.len(), 1);
+        assert_eq!(parent.addrs[0].0, "10.0.0.1:4564".parse().unwrap());
+        // ...and the client's default_auth is derived from the parent (anon).
+        let ccfg = client::ClientConfig::load(&cpath).unwrap();
+        assert!(matches!(ccfg.0.default_auth, DefaultAuthMech::Anonymous));
+    }
+
+    #[test]
+    fn attach_refuses_a_resolver_that_already_has_a_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpath = write(
+            dir.path(),
+            "resolver.json",
+            &format!(
+                r#"{{"children":[],"parent":{{"path":"/local","ttl":null,"addrs":[["10.9.9.9:4564","Anonymous"]]}},"member_servers":[{LOCAL_MEMBER}],"perms":{{}},"include_permissions":[]}}"#
+            ),
+        );
+        let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
+        assert!(attach_to_network(&rpath, &cpath, anon_parent(), vec![]).is_err());
+    }
+}

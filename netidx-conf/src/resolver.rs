@@ -4,7 +4,11 @@
 //! that adds atomic save and a `validate` shortcut that round-trips
 //! through `Config::from_file`.
 
-use crate::{atomic, paths};
+use crate::{
+    atomic,
+    conf_proto::{InfoAuth, ResolverAddr},
+    paths,
+};
 use anyhow::{Context, Result};
 use netidx::resolver_server::config::{self, Config, file};
 use std::path::{Path, PathBuf};
@@ -86,6 +90,28 @@ impl ResolverConfig {
 
     pub fn into_file(self) -> file::Config {
         self.0
+    }
+
+    /// This resolver cluster's advertised member addresses + data-plane
+    /// auth, as [`ResolverAddr`]s — the form delegation exchanges and
+    /// `GetInfo` reports. `Local`-auth members are host-local by
+    /// definition and omitted (nothing to advertise to the network).
+    pub fn resolver_addrs(&self) -> Vec<ResolverAddr> {
+        self.0
+            .member_servers
+            .iter()
+            .filter_map(|m| {
+                let auth = match &m.auth {
+                    file::Auth::Anonymous => InfoAuth::Anonymous,
+                    file::Auth::Local(_) => return None,
+                    file::Auth::Krb5(spn) => InfoAuth::Krb5 { spn: spn.to_string() },
+                    file::Auth::Tls { name, .. } => {
+                        InfoAuth::Tls { name: name.to_string() }
+                    }
+                };
+                Some(ResolverAddr { addr: m.addr, auth })
+            })
+            .collect()
     }
 }
 

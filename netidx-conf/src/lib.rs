@@ -35,6 +35,11 @@ pub mod ca_vault;
 /// duplicate-name refusal. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod ca_store;
+/// The conf server's resolver-hierarchy delegation request store (the
+/// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
+/// Unix-only — it lives in the CA dir.
+#[cfg(unix)]
+pub mod delegation_store;
 /// The CA's published CRL (`<ca-dir>/crl.pem`), built from
 /// [`ca_store`]'s revoked set. Unix-only — it lives in the CA dir.
 #[cfg(unix)]

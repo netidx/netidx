@@ -663,6 +663,90 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     )
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct WorkstationJoinFlags {
+    /// Show the join plan without writing anything.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    /// How a newly-enrolled private key is protected at rest: `seal`,
+    /// `password`, or `none`. Only relevant when joining a TLS network
+    /// (where `join` enrolls a client certificate).
+    #[arg(long = "key-protection")]
+    pub key_protection: Option<KeyProtArg>,
+}
+
+/// `workstation join` — graduate a local-only workstation to a networked
+/// one: discover + glyph-confirm a network, enroll a client cert if it's
+/// TLS, and attach the local resolver to it via a parent referral —
+/// without a reinstall or a hand-edit. The marker records the joined
+/// (pinned) network so later `status`/`update` can re-pin to it.
+pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
+    let mut rec = InstallRecord::load_default()?.context(
+        "no install record found — `workstation join` operates on an existing \
+         workstation install",
+    )?;
+    if rec.role != InstallRole::Workstation {
+        bail!(
+            "this host is a {} install, not a workstation — `join` is a \
+             workstation operation",
+            rec.role.as_str(),
+        );
+    }
+    if let Some(net) = &rec.network {
+        bail!(
+            "this workstation has already joined network {:?}. Re-joining a \
+             different network isn't supported yet (uninstall + reinstall to \
+             switch).",
+            net.domain,
+        );
+    }
+    let rpath = paths::discover_resolver_config()
+        .context("no resolver config found — is this a workstation install?")?;
+    let cpath = paths::discover_client_config()
+        .context("no client config found — is this a workstation install?")?;
+    // Discover + glyph-confirm the network to join (the one human trust
+    // decision), then map its resolvers — enrolling a client cert when the
+    // network is TLS.
+    let probe = discover_network(NodeKind::Workstation)?;
+    let net = probe.have().context(
+        "no network was selected to join (nothing discovered, or the offer was \
+         declined)",
+    )?;
+    let mut tls_identities: Vec<TlsIdentitySpec> = Vec::new();
+    // Holds the enrolled cert's staging tempdir until `apply()` copies it
+    // into place — must outlive the apply below.
+    let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
+    let addrs = network_addrs_and_identity(
+        net,
+        NodeKind::Workstation,
+        false,
+        f.key_protection,
+        &mut tls_identities,
+        &mut tls_staging,
+    )?;
+    let parent = ParentRef { path: ArcStr::from(rec.base.as_str()), ttl: None, addrs };
+    // Capture the confirmed identity for the marker before applying.
+    let network =
+        NetworkIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
+    let conf_server = net.info.reached.first().copied();
+    let rt =
+        netidx_conf::template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
+    println!("{}", rt.describe());
+    if f.dry_run {
+        return Ok(());
+    }
+    rt.apply().context("applying the join")?;
+    println!("ok");
+    rec.network = Some(network);
+    rec.conf_server = conf_server;
+    rec.save_default().context("updating the install record")?;
+    println!(
+        "joined network {:?} — restart the local resolver to use it",
+        rec.network.as_ref().expect("just set").domain,
+    );
+    Ok(())
+}
+
 /// Interactive cascade for the workstation's optional parent
 /// referral. Returns `Ok(None)` when the operator presses return at
 /// the address prompt (the level-1 default "none"). Returns
@@ -2113,6 +2197,17 @@ pub(crate) struct ResolverFlags {
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-conf-server")]
     no_conf_server: bool,
+    /// Set this resolver up as a CHILD of an existing network: give the
+    /// parent's conf-server address (`ip:port`). The install requests
+    /// delegation of a subtree (`--delegate-subtree`) and, once the parent
+    /// admin approves, bakes the parent referral into the config — no
+    /// restart. Distinct from the peer-join discovery path. Unix-only.
+    #[arg(long = "parent-conf-server")]
+    parent_conf_server: Option<SocketAddr>,
+    /// The subtree this resolver will own under the parent (with
+    /// `--parent-conf-server`), e.g. `/eu`. Prompted if omitted.
+    #[arg(long = "delegate-subtree")]
+    delegate_subtree: Option<String>,
     /// How new private keys are protected at rest: `seal` (bind to
     /// this machine's TPM / Secure Enclave), `password` (typed;
     /// interactive only), or `none`. Default: seal when the host has
@@ -2385,12 +2480,66 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         network,
         conf_server,
     );
+    // Install-time child: delegate this resolver under a parent (the same
+    // ceremony as `add-parent`, run inline) and bake the resulting parent
+    // referral into the config the install writes — no restart needed.
+    // Distinct from the peer-join discovery path above.
+    let parent = match f.parent_conf_server {
+        None => f.parent.to_parent_ref(&parent_default_path)?,
+        Some(parent_conf) => {
+            #[cfg(unix)]
+            {
+                if f.common.dry_run {
+                    // delegate_under_parent runs the real ceremony — it
+                    // enqueues a request on the parent and blocks until a
+                    // remote admin approves (which mutates the parent
+                    // cluster). That is not a no-op, so it cannot honor
+                    // --dry-run's "write nothing" contract.
+                    bail!(
+                        "--dry-run can't preview an install-time delegation: \
+                         --parent-conf-server runs a live, interactive approval \
+                         ceremony with the parent admin (it enqueues a request on \
+                         the parent and blocks until they approve). Re-run without \
+                         --dry-run, or drop --parent-conf-server to preview a \
+                         standalone install."
+                    );
+                }
+                let child_auth = authchoice_to_info(&auth)?;
+                let child = vec![netidx_conf::conf_proto::ResolverAddr {
+                    addr: listen,
+                    auth: child_auth,
+                }];
+                let subtree = prompt::required_string(
+                    "subtree this resolver will own under the parent (e.g. /eu)",
+                    f.delegate_subtree.clone(),
+                )?;
+                let parent_addrs = super::delegation::delegate_under_parent(
+                    parent_conf,
+                    &subtree,
+                    child,
+                )?;
+                Some(ParentRef {
+                    path: ArcStr::from(subtree.as_str()),
+                    ttl: None,
+                    addrs: parent_addrs
+                        .into_iter()
+                        .map(|r| (r.addr, super::delegation::info_to_referral_auth(&r.auth)))
+                        .collect(),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = parent_conf;
+                bail!("delegation (--parent-conf-server) is unix-only")
+            }
+        }
+    };
     let params = netidx_conf::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
         listen,
         bind,
-        parent: f.parent.to_parent_ref(&parent_default_path)?,
+        parent,
         perms_seed,
         with_perms_file: !f.no_perms,
         perms_path: f.perms_path,
@@ -3497,6 +3646,23 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 }
 
 // -- Apply / dry-run ----------------------------------------------------------
+
+/// Map this resolver's chosen data-plane auth to the `InfoAuth` the
+/// delegation handshake exchanges (the child's address carries it). Local
+/// auth is host-local and can't serve a delegated network subtree.
+#[cfg(unix)]
+fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_conf::conf_proto::InfoAuth> {
+    use netidx_conf::conf_proto::InfoAuth;
+    match a {
+        AuthChoice::Anonymous => Ok(InfoAuth::Anonymous),
+        AuthChoice::Krb5 { spn } => Ok(InfoAuth::Krb5 { spn: spn.to_string() }),
+        AuthChoice::Tls { name, .. } => Ok(InfoAuth::Tls { name: name.to_string() }),
+        AuthChoice::Local { .. } => bail!(
+            "a local-auth resolver can't be delegated a network subtree \
+             (its auth is host-local)"
+        ),
+    }
+}
 
 /// Extract install provenance from a network probe: the glyph-confirmed
 /// network identity (domain + CA fingerprint) to pin later lifecycle ops

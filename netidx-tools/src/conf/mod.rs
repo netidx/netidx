@@ -17,6 +17,10 @@ mod activation;
 mod ca;
 mod client;
 mod component;
+// `delegation` (resolver hierarchy add-parent / review-delegation) drives
+// the conf server's CA admin auth + the delegation queue, both unix-only.
+#[cfg(unix)]
+mod delegation;
 mod editor;
 mod id_map;
 mod init;

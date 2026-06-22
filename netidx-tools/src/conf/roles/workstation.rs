@@ -16,6 +16,9 @@ pub(crate) enum Cmd {
     /// add resolver peers the network has gained since install (additive
     /// reconcile of the parent referral)
     Update(lifecycle::UpdateFlags),
+    /// attach this local-only workstation to an existing network (add a
+    /// parent referral; enroll a cert if the network is TLS)
+    Join(init::WorkstationJoinFlags),
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -23,5 +26,6 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Install(f) => init::run_workstation(f),
         Cmd::Status => lifecycle::workstation_status(),
         Cmd::Update(f) => lifecycle::workstation_update(f),
+        Cmd::Join(f) => init::run_workstation_join(f),
     }
 }

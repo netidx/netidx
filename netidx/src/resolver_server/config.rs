@@ -521,7 +521,11 @@ impl Config {
                 })
                 .collect::<Result<BTreeMap<Path, Referral>>>()?;
             for (p, r) in children.iter() {
-                if !p.starts_with(&*root) {
+                // Component-aware containment (matches the overlap check
+                // below): `/european` is not under `/eu`, so a byte-prefix
+                // test would wrongly accept it as a child of a `/eu`-rooted
+                // resolver.
+                if !Path::is_parent(root, p) {
                     bail!("child paths much be under the root path {}", p)
                 }
                 if Path::levels(&*p) <= Path::levels(&*root) {
@@ -534,7 +538,12 @@ impl Config {
                 match res.next() {
                     None => (),
                     Some((p, _)) => {
-                        if r.path.starts_with(p.as_ref()) {
+                        // The immediate successor is the lexicographically
+                        // smallest path greater than r.path; if r.path is an
+                        // ancestor of anything, its descendants sort first,
+                        // so this catches every nested (overlapping) child.
+                        // Component-aware: `/european` is not below `/eu`.
+                        if Path::is_parent(&r.path, p) {
                             bail!("can't put a referral {} below {}", p, r.path);
                         }
                     }
@@ -854,5 +863,92 @@ mod perms_merge_tests {
             cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(),
             "swlpd",
         );
+    }
+}
+
+#[cfg(test)]
+mod children_overlap_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn try_build(children: &[(&str, &str)]) -> anyhow::Result<Config> {
+        let member = file::MemberServerBuilder::default()
+            .addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+            .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .auth(file::Auth::Anonymous)
+            .build()
+            .unwrap();
+        let refs = children
+            .iter()
+            .map(|(p, ip)| file::Referral {
+                path: ArcStr::from(*p),
+                ttl: None,
+                addrs: vec![(
+                    format!("{ip}:4564").parse::<SocketAddr>().unwrap(),
+                    file::RefAuth::Anonymous,
+                )],
+            })
+            .collect::<Vec<_>>();
+        let cfg = file::ConfigBuilder::default()
+            .member_servers(vec![member])
+            .children(refs)
+            .build()
+            .unwrap();
+        Config::from_file(cfg)
+    }
+
+    #[test]
+    fn nested_children_are_rejected() {
+        // A child nested under another is an ambiguous mount table.
+        assert!(try_build(&[("/eu", "203.0.113.9"), ("/eu/sub", "203.0.113.10")]).is_err());
+        // Insertion order is irrelevant — validation sorts internally.
+        assert!(try_build(&[("/eu/sub", "203.0.113.10"), ("/eu", "203.0.113.9")]).is_err());
+        // Deeper nesting is caught too.
+        assert!(try_build(&[("/eu", "203.0.113.9"), ("/eu/a/b/c", "203.0.113.11")]).is_err());
+    }
+
+    #[test]
+    fn disjoint_children_are_accepted() {
+        // Distinct sibling subtrees.
+        assert!(try_build(&[("/eu", "203.0.113.9"), ("/asia", "203.0.113.10")]).is_ok());
+        // A lexical prefix that is NOT a path-component prefix: `/european`
+        // is not under `/eu`, so both may be delegated independently.
+        assert!(try_build(&[("/eu", "203.0.113.9"), ("/european", "203.0.113.10")]).is_ok());
+    }
+
+    #[test]
+    fn child_must_be_within_parent_subtree() {
+        // A mid-tier resolver that is itself delegated /eu (it carries a
+        // parent referral rooted at /eu). Its own children must stay
+        // within /eu — checked component-aware, not by byte prefix.
+        let build = |child_path: &str| -> anyhow::Result<Config> {
+            let member = file::MemberServerBuilder::default()
+                .addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+                .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+                .auth(file::Auth::Anonymous)
+                .build()
+                .unwrap();
+            let referral = |path: &str, ip: &str| file::Referral {
+                path: ArcStr::from(path),
+                ttl: None,
+                addrs: vec![(
+                    format!("{ip}:4564").parse::<SocketAddr>().unwrap(),
+                    file::RefAuth::Anonymous,
+                )],
+            };
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![member])
+                .parent(referral("/eu", "203.0.113.99"))
+                .children(vec![referral(child_path, "203.0.113.10")])
+                .build()
+                .unwrap();
+            Config::from_file(cfg)
+        };
+        // Genuinely under /eu — fine.
+        assert!(build("/eu/west").is_ok());
+        // Component-aware: /eu2/... is NOT under /eu and must be rejected.
+        assert!(build("/eu2/x").is_err());
+        // A subtree entirely outside the delegated root is rejected.
+        assert!(build("/asia/x").is_err());
     }
 }

@@ -149,6 +149,30 @@ pub enum Request {
     /// List the issued certificates (admin-authenticated) — the revoke
     /// UI and inspection. Answered with [`ListIssuedResponse`].
     ListIssued(ListIssuedRequest),
+    /// Request delegation of a namespace subtree to the child resolver
+    /// described here — no credentials; the parent admin authorizes it
+    /// (matching the out-of-band code) via `review-delegation`. Answered
+    /// with [`DelegationResponse`].
+    RequestDelegation(DelegationRequest),
+    /// Check on a queued delegation request. Answered with
+    /// [`DelegationPollResponse`].
+    PollDelegation(PollRequest),
+    /// List pending delegation requests (admin-authenticated). Answered
+    /// with [`ListDelegationsResponse`].
+    ListDelegations(ListDelegationsRequest),
+    /// Approve a queued delegation: add the child to this resolver's
+    /// `children` (propagated cluster-wide) and record the parent
+    /// cluster's address(es) for the child to poll (admin-authenticated).
+    /// Answered with [`ApproveDelegationResponse`].
+    ApproveDelegation(ApproveDelegationRequest),
+    /// Deny a queued delegation (admin-authenticated). Answered with
+    /// [`DenyDelegationResponse`].
+    DenyDelegation(DenyDelegationRequest),
+    /// Server-to-server: apply a referral edit (add a child / set the
+    /// parent) to this host's local resolver config — the receive side of
+    /// cluster-wide delegation propagation. Peer-cert-gated like
+    /// [`Request::AddIdentity`]. Answered with [`ApplyReferralEditResponse`].
+    ApplyReferralEdit(ApplyReferralEditRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +439,121 @@ pub enum DenyResponse {
     Err { reason: String },
 }
 
+// -- resolver hierarchy delegation -------------------------------------------
+
+/// A delegation request: the child proposes to own `proposed_path` as a
+/// subtree and submits its own resolver cluster's address(es). No
+/// credentials — the parent admin authorizes by matching the out-of-band
+/// request code (a fingerprint over exactly `(proposed_path, child)`)
+/// before approving. The `child` list is the full child cluster so the
+/// parent can refer down to any member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRequest {
+    pub proposed_path: String,
+    pub child: Vec<ResolverAddr>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DelegationResponse {
+    Ok { request_id: String },
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DelegationPollResponse {
+    /// Still waiting for the parent admin.
+    Pending,
+    /// Approved — the parent resolver cluster's address(es), to write
+    /// into the child's `parent` referral.
+    Approved { parent: Vec<ResolverAddr> },
+    Denied { reason: String },
+    /// Never seen, expired, or already cleaned up.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDelegationsRequest {
+    pub admin: String,
+    pub password: Secret,
+}
+
+/// One pending delegation request for the admin reviewer. The
+/// `proposed_path` and `child` are exactly what the request code
+/// fingerprints, so the admin's CLI recomputes the code locally — never
+/// trusting a wire value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationEntry {
+    pub id: String,
+    pub proposed_path: String,
+    pub child: Vec<ResolverAddr>,
+    pub age_secs: u64,
+    pub peer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ListDelegationsResponse {
+    Ok { requests: Vec<DelegationEntry> },
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproveDelegationRequest {
+    pub admin: String,
+    pub password: Secret,
+    pub request_id: String,
+}
+
+/// The per-peer outcome of propagating a delegation edit across the
+/// resolver cluster. A non-`Ok` peer means the cluster is inconsistent
+/// until re-synced — the reviewer surfaces it loudly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerResult {
+    pub addr: SocketAddr,
+    /// `None` ⇒ updated; `Some(err)` ⇒ failed (unreachable / rejected).
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApproveDelegationResponse {
+    Ok { peers: Vec<PeerResult> },
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DenyDelegationRequest {
+    pub admin: String,
+    pub password: Secret,
+    pub request_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DenyDelegationResponse {
+    Ok,
+    Err { reason: String },
+}
+
+/// A referral edit pushed server-to-server for cluster-wide consistency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReferralEdit {
+    /// Add `child` as the resolver's child owning `path`.
+    AddChild { path: String, child: Vec<ResolverAddr> },
+    /// Set the resolver's `parent` referral: it attaches at `path` under
+    /// the parent cluster `parent`.
+    SetParent { path: String, parent: Vec<ResolverAddr> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyReferralEditRequest {
+    pub edit: ReferralEdit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApplyReferralEditResponse {
+    Ok,
+    Err { reason: String },
+}
+
 /// How clients authenticate to a resolver — the data-plane auth, as
 /// opposed to the conf plane, which is always TLS rooted at the CA.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,6 +653,87 @@ mod tests {
         assert_eq!(got.password.0, "pw");
         assert_eq!(got.requested_name, "resolver.example.com");
         assert_eq!(got.id_map_groups, vec!["users".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn delegation_messages_round_trip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let req = Request::RequestDelegation(DelegationRequest {
+            proposed_path: "/eu".to_string(),
+            child: vec![ResolverAddr {
+                addr: "10.0.0.2:4564".parse().unwrap(),
+                auth: InfoAuth::Anonymous,
+            }],
+        });
+        write_msg(&mut a, &req).await.unwrap();
+        let got: Request = read_msg(&mut b).await.unwrap();
+        let Request::RequestDelegation(got) = got else {
+            panic!("expected RequestDelegation")
+        };
+        assert_eq!(got.proposed_path, "/eu");
+        assert_eq!(got.child.len(), 1);
+
+        let resp = DelegationPollResponse::Approved {
+            parent: vec![ResolverAddr {
+                addr: "10.0.0.1:4564".parse().unwrap(),
+                auth: InfoAuth::Tls { name: "r.eu.example".to_string() },
+            }],
+        };
+        write_msg(&mut a, &resp).await.unwrap();
+        match read_msg::<_, DelegationPollResponse>(&mut b).await.unwrap() {
+            DelegationPollResponse::Approved { parent } => {
+                assert_eq!(parent[0].addr, "10.0.0.1:4564".parse().unwrap());
+            }
+            _ => panic!("expected Approved"),
+        }
+
+        let edit = Request::ApplyReferralEdit(ApplyReferralEditRequest {
+            edit: ReferralEdit::AddChild {
+                path: "/eu".to_string(),
+                child: vec![ResolverAddr {
+                    addr: "10.0.0.2:4564".parse().unwrap(),
+                    auth: InfoAuth::Anonymous,
+                }],
+            },
+        });
+        write_msg(&mut a, &edit).await.unwrap();
+        let Request::ApplyReferralEdit(got) = read_msg(&mut b).await.unwrap() else {
+            panic!("expected ApplyReferralEdit")
+        };
+        match got.edit {
+            ReferralEdit::AddChild { path, child } => {
+                assert_eq!(path, "/eu");
+                assert_eq!(child.len(), 1);
+            }
+            _ => panic!("expected AddChild"),
+        }
+
+        // The child-cluster direction: SetParent carries the parent's
+        // address(es) + auth and must round-trip identically.
+        let edit = Request::ApplyReferralEdit(ApplyReferralEditRequest {
+            edit: ReferralEdit::SetParent {
+                path: "/eu".to_string(),
+                parent: vec![ResolverAddr {
+                    addr: "10.0.0.1:4564".parse().unwrap(),
+                    auth: InfoAuth::Krb5 { spn: "svc/r@EU".to_string() },
+                }],
+            },
+        });
+        write_msg(&mut a, &edit).await.unwrap();
+        let Request::ApplyReferralEdit(got) = read_msg(&mut b).await.unwrap() else {
+            panic!("expected ApplyReferralEdit")
+        };
+        match got.edit {
+            ReferralEdit::SetParent { path, parent } => {
+                assert_eq!(path, "/eu");
+                assert_eq!(parent.len(), 1);
+                assert_eq!(
+                    parent[0].auth,
+                    InfoAuth::Krb5 { spn: "svc/r@EU".to_string() }
+                );
+            }
+            _ => panic!("expected SetParent"),
+        }
     }
 
     #[test]

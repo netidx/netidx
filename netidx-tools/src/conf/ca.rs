@@ -1154,7 +1154,7 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
 /// The current unix user, if discoverable, to seed the admin-name
 /// prompt's default. `None` when neither env var is set (e.g. a daemon
 /// context), in which case the caller prompts with no default.
-fn env_user_name() -> Option<String> {
+pub(super) fn env_user_name() -> Option<String> {
     for var in ["USER", "LOGNAME"] {
         if let Ok(v) = std::env::var(var)
             && !v.is_empty()
@@ -1299,7 +1299,7 @@ fn collect_required_password(label: &str) -> Result<String> {
 }
 
 /// Prompt once for an existing password (no confirmation).
-fn collect_existing_password(label: &str) -> Result<String> {
+pub(super) fn collect_existing_password(label: &str) -> Result<String> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!("{label}: stdin is not a TTY"));
@@ -1820,7 +1820,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
 
 /// This host's conf-server address from its own `conf-server.json`,
 /// loopback-adjusted when it binds all interfaces.
-fn local_conf_server_listen() -> Option<SocketAddr> {
+pub(super) fn local_conf_server_listen() -> Option<SocketAddr> {
     let path = paths::discover_conf_server_config().ok()?;
     let cfg = netidx_conf::conf_server_config::ConfServerConfig::load(&path).ok()?;
     let mut addr = cfg.listen;
@@ -1830,7 +1830,7 @@ fn local_conf_server_listen() -> Option<SocketAddr> {
     Some(addr)
 }
 
-fn fmt_age(secs: u64) -> String {
+pub(super) fn fmt_age(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {

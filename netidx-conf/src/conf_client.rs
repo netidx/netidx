@@ -34,13 +34,17 @@
 
 use crate::{
     conf_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, ApproveRequest, ApproveResponse,
-        ClientHello, DenyRequest, DenyResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetInfoResponse, IssuedEntry, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PollRequest,
-        PollResponse, QueueEntry, Request, ResolverAddr, RevokeRequest, RevokeResponse,
-        Role, Secret, ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION,
-        SERVING_SAN,
+        self, AddIdentityRequest, AddIdentityResponse, ApplyReferralEditRequest,
+        ApplyReferralEditResponse, ApproveDelegationRequest, ApproveDelegationResponse,
+        ApproveRequest, ApproveResponse, ClientHello, DelegationEntry,
+        DelegationPollResponse, DelegationRequest, DelegationResponse,
+        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
+        EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse, IssuedEntry,
+        ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
+        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PeerResult,
+        PollRequest, PollResponse, QueueEntry, ReferralEdit, Request, ResolverAddr,
+        RevokeRequest, RevokeResponse, Role, Secret, ServerHello, SignRequest,
+        SignResponse, PROTOCOL_VERSION, SERVING_SAN,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -710,6 +714,165 @@ pub async fn deny(
     match conf_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
         DenyResponse::Ok => Ok(()),
         DenyResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
+// -- resolver hierarchy delegation -------------------------------------------
+
+/// The request code for a delegation: a fingerprint over exactly
+/// `(proposed_path, child)` — the value the child admin shows and the
+/// parent admin recomputes from the queued request, matched out of band.
+/// Child addresses are sorted so the code is order-independent (a cluster
+/// child may list its members in any order).
+pub fn delegation_code(proposed_path: &str, child: &[ResolverAddr]) -> Fingerprint {
+    let mut sorted = child.to_vec();
+    sorted.sort_by_key(|r| r.addr);
+    // Canonical, byte-identical on both sides: a tuple's field order and a
+    // struct's field order are fixed, and we sorted the vec.
+    let canonical = serde_json::to_vec(&(proposed_path, &sorted)).unwrap_or_default();
+    Fingerprint::of_der(&canonical)
+}
+
+/// Queue a delegation request with the parent's conf server (no
+/// credentials — the parent admin authorizes by matching the code).
+/// Returns the request id to [`poll_delegation`] with.
+pub async fn request_delegation(
+    addr: SocketAddr,
+    proposed_path: &str,
+    child: Vec<ResolverAddr>,
+    expected: &CaIdentity,
+) -> Result<String> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::RequestDelegation(DelegationRequest {
+            proposed_path: proposed_path.to_string(),
+            child,
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, DelegationResponse>(&mut tls).await? {
+        DelegationResponse::Ok { request_id } => Ok(request_id),
+        DelegationResponse::Err { reason } => {
+            bail!("the parent refused the delegation request: {reason}")
+        }
+    }
+}
+
+/// Check on a queued delegation — one short pinned connection per poll.
+pub async fn poll_delegation(
+    addr: SocketAddr,
+    request_id: &str,
+    expected: &CaIdentity,
+) -> Result<DelegationPollResponse> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::PollDelegation(PollRequest { request_id: request_id.to_string() }),
+    )
+    .await?;
+    conf_proto::read_msg(&mut tls).await
+}
+
+/// List the pending delegation queue, authenticated as `admin` (pinned).
+pub async fn list_delegations(
+    addr: SocketAddr,
+    admin: &str,
+    password: &str,
+    expected: &CaIdentity,
+) -> Result<Vec<DelegationEntry>> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ListDelegations(ListDelegationsRequest {
+            admin: admin.to_string(),
+            password: Secret(password.to_string()),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
+        ListDelegationsResponse::Ok { requests } => Ok(requests),
+        ListDelegationsResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
+/// Approve a queued delegation. Returns the per-peer cluster-push results
+/// (a non-empty `error` means that peer is out of sync — surface it).
+pub async fn approve_delegation(
+    addr: SocketAddr,
+    admin: &str,
+    password: &str,
+    request_id: &str,
+    expected: &CaIdentity,
+) -> Result<Vec<PeerResult>> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ApproveDelegation(ApproveDelegationRequest {
+            admin: admin.to_string(),
+            password: Secret(password.to_string()),
+            request_id: request_id.to_string(),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
+        ApproveDelegationResponse::Ok { peers } => Ok(peers),
+        ApproveDelegationResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
+/// Deny a queued delegation with a reason shown to the waiting child.
+pub async fn deny_delegation(
+    addr: SocketAddr,
+    admin: &str,
+    password: &str,
+    request_id: &str,
+    reason: &str,
+    expected: &CaIdentity,
+) -> Result<()> {
+    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::DenyDelegation(DenyDelegationRequest {
+            admin: admin.to_string(),
+            password: Secret(password.to_string()),
+            request_id: request_id.to_string(),
+            reason: reason.to_string(),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
+        DenyDelegationResponse::Ok => Ok(()),
+        DenyDelegationResponse::Err { reason } => bail!("conf server refused: {reason}"),
+    }
+}
+
+/// Server-to-server: push a referral edit to a peer conf server's local
+/// resolver config (the cluster-wide propagation push), authenticated by
+/// our reserved-SAN serving cert. Mirrors [`push_identity`].
+pub async fn push_referral_edit(
+    addr: SocketAddr,
+    client_cert_pem: &[u8],
+    client_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    edit: &ReferralEdit,
+) -> Result<()> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
+        .context("parsing client key")?
+        .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ApplyReferralEdit(ApplyReferralEditRequest { edit: edit.clone() }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
+        ApplyReferralEditResponse::Ok => Ok(()),
+        ApplyReferralEditResponse::Err { reason } => {
+            bail!("peer refused the referral edit: {reason}")
+        }
     }
 }
 
