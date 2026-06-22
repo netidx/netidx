@@ -456,9 +456,10 @@ async fn handle_client(
                     queue.queue_send(Response::CallFailed { id: cid, error })
                 }
             },
-            r = rx_ws.select_next_some() => match r {
-                BatchItem::InBatch(r) => input_batch.push(r),
-                BatchItem::EndBatch => {
+            r = rx_ws.next() => match r {
+                None => return Ok(()),
+                Some(BatchItem::InBatch(r)) => input_batch.push(r),
+                Some(BatchItem::EndBatch) => {
                     ctx.process_from_client(
                         &mut queue,
                         &mut input_batch,
