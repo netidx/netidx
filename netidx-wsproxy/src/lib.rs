@@ -65,13 +65,13 @@ type PendingCall =
 /// is set
 /// if this function returns false then that means the client was not
 /// ready to accept the message and it must be retried at a later time.
-async fn reply<'a>(
+async fn reply(
     tx: &mut tmpsc::Sender<Message>,
     qsend: &QSend,
     timeout: Option<Duration>,
     disconnect_pfactor: DisconnectPfactor,
 ) -> Result<bool> {
-    async fn send<'a>(
+    async fn send(
         tx: &mut tmpsc::Sender<Message>,
         m: &Response,
         timeout: Option<Duration>,
@@ -305,7 +305,8 @@ impl ClientCtx {
                 },
             }
         }
-        Ok(batch.commit(timeout).await)
+        batch.commit(timeout).await;
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use anyhow::bail;
 use clap::Args;
@@ -24,7 +24,7 @@ impl FromStr for DisconnectPfactor {
         match s {
             "never" => Ok(Self::Never),
             s => {
-                let n = usize::from_str(&s)?;
+                let n = usize::from_str(s)?;
                 if n < 5 {
                     bail!("disconnect_pfactor may not be less than 5")
                 }
@@ -34,11 +34,11 @@ impl FromStr for DisconnectPfactor {
     }
 }
 
-impl ToString for DisconnectPfactor {
-    fn to_string(&self) -> String {
+impl fmt::Display for DisconnectPfactor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Never => "never".into(),
-            Self::Threshold(t) => t.to_string(),
+            Self::Never => f.write_str("never"),
+            Self::Threshold(t) => write!(f, "{t}"),
         }
     }
 }
