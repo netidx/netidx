@@ -637,11 +637,11 @@ impl Value {
                     Typ::Duration => Duration::try_from_secs_f64($v as f64)
                         .ok()
                         .map(|d| Value::Duration(Arc::new(d))),
-                    Typ::Bool => Some(if $v as i64 > 0 {
-                        Value::Bool(true)
-                    } else {
-                        Value::Bool(false)
-                    }),
+                    // Truthiness is "> 0"; compute it without narrowing
+                    // through i64, which made high-bit u64 values (e.g.
+                    // u64::MAX as i64 == -1) and sub-integer fractions (0.5
+                    // as i64 == 0) wrongly read as false.
+                    Typ::Bool => Some(Value::Bool($v as f64 > 0.0)),
                     Typ::String => {
                         Some(Value::String(format_compact!("{}", self).as_str().into()))
                     }
@@ -784,14 +784,17 @@ impl Value {
             },
             Value::Duration(ref d) => match typ {
                 Typ::U8 | Typ::I8 | Typ::U16 | Typ::I16 => None,
-                Typ::U32 => Some(Value::U32(d.as_secs() as u32)),
-                Typ::V32 => Some(Value::V32(d.as_secs() as u32)),
-                Typ::I32 => Some(Value::I32(d.as_secs() as i32)),
-                Typ::Z32 => Some(Value::Z32(d.as_secs() as i32)),
-                Typ::U64 => Some(Value::U64(d.as_secs() as u64)),
-                Typ::V64 => Some(Value::V64(d.as_secs() as u64)),
-                Typ::I64 => Some(Value::I64(d.as_secs() as i64)),
-                Typ::Z64 => Some(Value::Z64(d.as_secs() as i64)),
+                // Range-check the seconds (like the DateTime arm) so an
+                // out-of-range duration is None, never a silently wrapped /
+                // sign-flipped integer. U64/V64 hold the full u64 directly.
+                Typ::U32 => u32::try_from(d.as_secs()).ok().map(Value::U32),
+                Typ::V32 => u32::try_from(d.as_secs()).ok().map(Value::V32),
+                Typ::I32 => i32::try_from(d.as_secs()).ok().map(Value::I32),
+                Typ::Z32 => i32::try_from(d.as_secs()).ok().map(Value::Z32),
+                Typ::U64 => Some(Value::U64(d.as_secs())),
+                Typ::V64 => Some(Value::V64(d.as_secs())),
+                Typ::I64 => i64::try_from(d.as_secs()).ok().map(Value::I64),
+                Typ::Z64 => i64::try_from(d.as_secs()).ok().map(Value::Z64),
                 Typ::F32 => Some(Value::F32(d.as_secs_f32())),
                 Typ::F64 => Some(Value::F64(d.as_secs_f64())),
                 Typ::Array => Some(Value::Array([self].into())),
@@ -835,6 +838,10 @@ impl Value {
             },
             Value::Bytes(_) if typ == Typ::Bytes => Some(self),
             Value::Bytes(_) => None,
+            // Casting to one's own type is identity for every other variant;
+            // Error must round-trip too (the Bool(false) fallthrough below
+            // otherwise dropped it to None for Typ::Error).
+            Value::Error(_) if typ == Typ::Error => Some(self),
             Value::Error(_) => Value::Bool(false).cast(typ),
             Value::Null if typ == Typ::Null => Some(self),
             Value::Null => None,

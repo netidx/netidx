@@ -414,3 +414,40 @@ fn cast_float_to_datetime_preserves_fraction_and_guards() {
         Some(Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(5, 0).unwrap())))
     );
 }
+
+#[test]
+fn cast_to_bool_does_not_narrow_through_i64() {
+    // Truthiness is "> 0", but the old `$v as i64 > 0` narrowed first, so
+    // high-bit u64 values and sub-integer fractions wrongly read false.
+    assert_eq!(Value::U64(u64::MAX).cast(Typ::Bool), Some(Value::Bool(true)));
+    assert_eq!(Value::U64(1u64 << 63).cast(Typ::Bool), Some(Value::Bool(true)));
+    assert_eq!(Value::F64(0.5).cast(Typ::Bool), Some(Value::Bool(true)));
+    assert_eq!(Value::F32(0.5).cast(Typ::Bool), Some(Value::Bool(true)));
+    // The "> 0" convention is preserved: zero and negatives are false.
+    assert_eq!(Value::U64(0).cast(Typ::Bool), Some(Value::Bool(false)));
+    assert_eq!(Value::I64(-1).cast(Typ::Bool), Some(Value::Bool(false)));
+    assert_eq!(Value::F64(-0.5).cast(Typ::Bool), Some(Value::Bool(false)));
+    assert_eq!(Value::I64(5).cast(Typ::Bool), Some(Value::Bool(true)));
+}
+
+#[test]
+fn cast_duration_to_int_guards_overflow() {
+    // Out-of-range durations are None (matching the DateTime arm), never a
+    // silently wrapped or sign-flipped integer.
+    let big = Value::Duration(Arc::new(Duration::from_secs(5_000_000_000)));
+    assert_eq!(big.clone().cast(Typ::U32), None); // would wrap to 705_032_704
+    assert_eq!(big.clone().cast(Typ::I32), None); // would sign-flip negative
+    assert_eq!(big.cast(Typ::U64), Some(Value::U64(5_000_000_000)));
+    let huge = Value::Duration(Arc::new(Duration::new(u64::MAX, 0)));
+    assert_eq!(huge.clone().cast(Typ::I64), None); // would read as -1
+    assert_eq!(huge.cast(Typ::U64), Some(Value::U64(u64::MAX)));
+    // In-range still converts.
+    let ok = Value::Duration(Arc::new(Duration::from_secs(10)));
+    assert_eq!(ok.cast(Typ::U32), Some(Value::U32(10)));
+}
+
+#[test]
+fn cast_error_to_error_is_identity() {
+    let e = Value::error("boom");
+    assert_eq!(e.clone().cast(Typ::Error), Some(e));
+}
