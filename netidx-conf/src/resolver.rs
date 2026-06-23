@@ -6,7 +6,7 @@
 
 use crate::{
     atomic,
-    conf_proto::{InfoAuth, ResolverAddr},
+    conf_proto::{ClusterEdge, ClusterFacts, InfoAuth, ResolverAddr},
     paths,
 };
 use anyhow::{Context, Result};
@@ -113,6 +113,63 @@ impl ResolverConfig {
             })
             .collect()
     }
+
+    /// Where this cluster attaches in the namespace — the parent
+    /// referral's path, or `/` for a root cluster with no parent.
+    pub fn base_path(&self) -> String {
+        self.0
+            .parent
+            .as_ref()
+            .map(|r| r.path.to_string())
+            .unwrap_or_else(|| "/".to_string())
+    }
+
+    /// The parent cluster this resolver attaches under, as a map edge, if any.
+    pub fn parent_edge(&self) -> Option<ClusterEdge> {
+        self.0.parent.as_ref().map(referral_to_edge)
+    }
+
+    /// The child clusters delegated below this resolver, as map edges.
+    pub fn children_edges(&self) -> Vec<ClusterEdge> {
+        self.0.children.iter().map(referral_to_edge).collect()
+    }
+
+    /// This resolver cluster's [`ClusterFacts`] for the network map:
+    /// advertisable members + base path + hierarchy edges.
+    pub fn cluster_facts(&self) -> ClusterFacts {
+        ClusterFacts {
+            members: self.resolver_addrs(),
+            base: self.base_path(),
+            parent: self.parent_edge(),
+            children: self.children_edges(),
+        }
+    }
+}
+
+/// Map a referral (parent / child) to a network-map [`ClusterEdge`],
+/// dropping `Local`-auth addrs (host-local, nothing to advertise).
+fn referral_to_edge(r: &file::Referral) -> ClusterEdge {
+    ClusterEdge {
+        path: r.path.to_string(),
+        addrs: r
+            .addrs
+            .iter()
+            .filter_map(|(addr, auth)| {
+                Some(ResolverAddr { addr: *addr, auth: refauth_to_info(auth)? })
+            })
+            .collect(),
+    }
+}
+
+/// Inverse of `reconcile::info_auth_to_ref`, dropping `Local` (mirrors
+/// [`ResolverConfig::resolver_addrs`]).
+fn refauth_to_info(a: &file::RefAuth) -> Option<InfoAuth> {
+    match a {
+        file::RefAuth::Anonymous => Some(InfoAuth::Anonymous),
+        file::RefAuth::Local(_) => None,
+        file::RefAuth::Krb5(spn) => Some(InfoAuth::Krb5 { spn: spn.to_string() }),
+        file::RefAuth::Tls(name) => Some(InfoAuth::Tls { name: name.to_string() }),
+    }
 }
 
 impl From<file::Config> for ResolverConfig {
@@ -158,6 +215,34 @@ mod tests {
         back.save(&p).unwrap();
         let second = std::fs::read(&p).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn cluster_facts_reports_members_base_and_edges() {
+        // A child cluster: two members (one Local, dropped), a parent
+        // referral at /eu, and one child edge.
+        let json = r#"{
+            "children": [
+                {"path":"/eu/sub","ttl":null,"addrs":[["10.0.0.9:4564","Anonymous"]]}
+            ],
+            "parent": {"path":"/eu","ttl":null,"addrs":[["10.0.0.1:4564","Anonymous"]]},
+            "member_servers": [
+                {"addr":"10.0.0.2:4564","bind_addr":"10.0.0.2","auth":"Anonymous","hello_timeout":10,"max_connections":768,"pid_file":"","reader_ttl":60,"writer_ttl":120,"id_map_command":null,"id_map_type":"Command","id_map_timeout":3600},
+                {"addr":"10.0.0.3:4564","bind_addr":"10.0.0.3","auth":{"Local":"/tmp/sock"},"hello_timeout":10,"max_connections":768,"pid_file":"","reader_ttl":60,"writer_ttl":120,"id_map_command":null,"id_map_type":"Command","id_map_timeout":3600}
+            ],
+            "perms": {},
+            "include_permissions": []
+        }"#;
+        let cfg = ResolverConfig(serde_json::from_str(json).unwrap());
+        let facts = cfg.cluster_facts();
+        assert_eq!(facts.members.len(), 1, "Local member dropped");
+        assert_eq!(facts.members[0].addr, "10.0.0.2:4564".parse().unwrap());
+        assert_eq!(facts.base, "/eu");
+        let parent = facts.parent.expect("parent edge");
+        assert_eq!(parent.path, "/eu");
+        assert_eq!(parent.addrs.len(), 1);
+        assert_eq!(facts.children.len(), 1);
+        assert_eq!(facts.children[0].path, "/eu/sub");
     }
 
     #[test]

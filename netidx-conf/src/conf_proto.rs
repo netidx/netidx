@@ -173,6 +173,26 @@ pub enum Request {
     /// cluster-wide delegation propagation. Peer-cert-gated like
     /// [`Request::AddIdentity`]. Answered with [`ApplyReferralEditResponse`].
     ApplyReferralEdit(ApplyReferralEditRequest),
+    /// Server→CA push: register/update this conf server's facts (address,
+    /// roles, resolver-cluster facts) in the CA's authoritative network
+    /// map. Peer-cert-gated like [`Request::AddIdentity`]. Answered with
+    /// [`RegisterResponse`].
+    Register(RegisterRequest),
+    /// Server→CA push: drop this conf server from the CA's map (on
+    /// uninstall). Peer-cert-gated. Answered with [`RegisterResponse`].
+    Deregister(DeregisterRequest),
+    /// Cheap probe: return the served map's current version so a caching
+    /// conf server can skip a full pull when unchanged. Answered with
+    /// [`GetMapVersionResponse`].
+    GetMapVersion,
+    /// Fetch the full network map — the CA's authoritative copy, or a conf
+    /// server's cache. One round trip to any conf server is the whole
+    /// network. Answered with [`GetMapResponse`].
+    GetMap,
+    /// Admin-authenticated: drop a (dead) conf server from the CA's map,
+    /// cascading to its resolver servers — for a machine that never ran
+    /// `uninstall`. Answered with [`RemoveServerResponse`].
+    RemoveServer(RemoveServerRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -586,6 +606,109 @@ pub struct GetInfoResponse {
     pub peers: Vec<SocketAddr>,
 }
 
+/// One edge of the resolver hierarchy: a mount path and the cluster it
+/// points at. A read-only fact for the network map — distinct from
+/// [`ReferralEdit`], which *mutates* a referral during delegation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterEdge {
+    pub path: String,
+    pub addrs: Vec<ResolverAddr>,
+}
+
+/// A resolver cluster's facts, self-reported by one of its conf servers:
+/// its advertisable members, where it attaches in the namespace, and its
+/// hierarchy edges. This is the single-owner fact the CA folds into the
+/// map — each cluster owns its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterFacts {
+    /// The cluster's advertisable member resolver servers (`Local` dropped).
+    pub members: Vec<ResolverAddr>,
+    /// Where this cluster attaches — its parent-referral path, or `/` for
+    /// the root cluster.
+    pub base: String,
+    /// The parent cluster this one attaches under, if any.
+    pub parent: Option<ClusterEdge>,
+    /// The child clusters delegated below this one.
+    pub children: Vec<ClusterEdge>,
+}
+
+/// One conf server in the trust domain, as recorded in the CA's map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerEntry {
+    /// The conf server's listen address.
+    pub addr: SocketAddr,
+    /// What this host does (see [`Role`]).
+    pub roles: Vec<Role>,
+    /// Its resolver cluster's facts, if it runs a resolver.
+    pub cluster: Option<ClusterFacts>,
+}
+
+/// The CA-authoritative, versioned picture of the whole trust domain. The
+/// CA builds it from conf-server [`Request::Register`] pushes — never by
+/// walking — bumps `version` on every change, persists it, and serves it.
+/// Every conf server caches a copy (version-checked) and serves it to
+/// clients, so one round trip to any conf server is the whole network.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkMap {
+    /// Monotonic, bumped by the CA on every change. Callers cheap-compare
+    /// this (via [`Request::GetMapVersion`]) before pulling the full map.
+    pub version: u64,
+    /// Where the CA lives (the Sign/Enroll destination).
+    pub ca_addr: Option<SocketAddr>,
+    /// Every conf server in the trust domain.
+    pub servers: Vec<ServerEntry>,
+}
+
+/// Server→CA: register/update this conf server's facts in the map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    /// This conf server's own listen address.
+    pub addr: SocketAddr,
+    pub roles: Vec<Role>,
+    pub cluster: Option<ClusterFacts>,
+}
+
+/// Server→CA: drop this conf server from the map (on uninstall).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeregisterRequest {
+    pub addr: SocketAddr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RegisterResponse {
+    Ok { version: u64 },
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GetMapVersionResponse {
+    Ok { version: u64 },
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GetMapResponse {
+    Ok { map: NetworkMap },
+    Err { reason: String },
+}
+
+/// Admin-authenticated: drop a (dead) conf server from the CA's map,
+/// cascading to its resolver servers. For the machine that never ran
+/// `uninstall`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveServerRequest {
+    pub admin: String,
+    pub password: Secret,
+    /// The listen address of the conf server to remove.
+    pub addr: SocketAddr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RemoveServerResponse {
+    Ok { version: u64 },
+    Err { reason: String },
+}
+
 /// Write a length-prefixed JSON message and flush.
 pub async fn write_msg<S, T>(stream: &mut S, msg: &T) -> Result<()>
 where
@@ -791,5 +914,66 @@ mod tests {
         let resp: SignResponse = serde_json::from_str(json).unwrap();
         let SignResponse::Ok { warnings, .. } = resp else { panic!("expected Ok") };
         assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn map_messages_round_trip() {
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let req = Request::Register(RegisterRequest {
+            addr: "10.0.0.2:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            cluster: Some(ClusterFacts {
+                members: vec![ResolverAddr {
+                    addr: "10.0.0.2:4564".parse().unwrap(),
+                    auth: InfoAuth::Anonymous,
+                }],
+                base: "/eu".to_string(),
+                parent: Some(ClusterEdge {
+                    path: "/eu".to_string(),
+                    addrs: vec![ResolverAddr {
+                        addr: "10.0.0.1:4564".parse().unwrap(),
+                        auth: InfoAuth::Anonymous,
+                    }],
+                }),
+                children: vec![],
+            }),
+        });
+        write_msg(&mut a, &req).await.unwrap();
+        let got: Request = read_msg(&mut b).await.unwrap();
+        let Request::Register(got) = got else { panic!("expected Register") };
+        assert_eq!(got.addr, "10.0.0.2:4565".parse().unwrap());
+        assert_eq!(got.cluster.unwrap().base, "/eu");
+
+        let resp = GetMapResponse::Ok {
+            map: NetworkMap {
+                version: 7,
+                ca_addr: Some("10.0.0.1:4565".parse().unwrap()),
+                servers: vec![ServerEntry {
+                    addr: "10.0.0.1:4565".parse().unwrap(),
+                    roles: vec![Role::Ca, Role::Resolver],
+                    cluster: None,
+                }],
+            },
+        };
+        write_msg(&mut a, &resp).await.unwrap();
+        match read_msg::<_, GetMapResponse>(&mut b).await.unwrap() {
+            GetMapResponse::Ok { map } => {
+                assert_eq!(map.version, 7);
+                assert_eq!(map.servers.len(), 1);
+                assert_eq!(map.servers[0].roles, vec![Role::Ca, Role::Resolver]);
+            }
+            GetMapResponse::Err { reason } => panic!("err: {reason}"),
+        }
+    }
+
+    #[test]
+    fn cluster_facts_root_decodes() {
+        // A root cluster reports base "/" and no parent/children.
+        let json = r#"{"members":[{"addr":"10.0.0.1:4564","auth":"Anonymous"}],"base":"/","parent":null,"children":[]}"#;
+        let cf: ClusterFacts = serde_json::from_str(json).unwrap();
+        assert_eq!(cf.base, "/");
+        assert!(cf.parent.is_none());
+        assert!(cf.children.is_empty());
+        assert_eq!(cf.members.len(), 1);
     }
 }

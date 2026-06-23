@@ -24,6 +24,7 @@ use crate::{
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
+        GetMapResponse, GetMapVersionResponse, RegisterResponse, RemoveServerResponse,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, PollRequest,
         ListQueueResponse, PeerResult, PollResponse, QueueEntry, Request, ResolverAddr,
@@ -747,6 +748,35 @@ async fn handle_conn(
                 .context("CRL read task panicked")?,
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
+        }
+        Request::Register(_) | Request::Deregister(_) => {
+            // CA-authoritative network map — handler lands in the map-state step.
+            let resp = RegisterResponse::Err {
+                reason: "network map registration not yet enabled on this server".to_string(),
+            };
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing RegisterResponse")
+        }
+        Request::GetMapVersion => {
+            let resp = GetMapVersionResponse::Err {
+                reason: "network map not yet enabled on this server".to_string(),
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing GetMapVersionResponse")
+        }
+        Request::GetMap => {
+            let resp = GetMapResponse::Err {
+                reason: "network map not yet enabled on this server".to_string(),
+            };
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetMapResponse")
+        }
+        Request::RemoveServer(_) => {
+            let resp = RemoveServerResponse::Err {
+                reason: "network map not yet enabled on this server".to_string(),
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing RemoveServerResponse")
         }
     }
 }
