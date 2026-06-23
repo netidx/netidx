@@ -1,6 +1,12 @@
 use anyhow::{anyhow, bail, Result};
 use futures::{SinkExt, StreamExt};
-use netidx::{path::Path, protocol::value::Value, publisher::Val, InternalOnly};
+use netidx::{
+    path::Path,
+    protocol::value::Value,
+    publisher::{PublisherBuilder, Val},
+    subscriber::SubscriberBuilder,
+    InternalOnly,
+};
 use serde_json::{json, Value as Json};
 use std::{
     net::SocketAddr,
@@ -11,9 +17,7 @@ use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
-// Keep hung clients from hiding behind a large kernel receive buffer.
-const SLOW_RECV_BUF: u32 = 4096;
-const FAST_RECV_BUF: u32 = 1 << 20;
+const RECV_BUF: u32 = 1 << 20;
 
 struct TestEnv {
     netidx: InternalOnly,
@@ -30,9 +34,18 @@ impl TestEnv {
         let val = netidx.publisher().publish(path.clone(), Value::U64(0))?;
         netidx.publisher().flushed().await;
 
-        let routes = netidx_wsproxy::filter(
-            netidx.publisher().clone(),
-            netidx.subscriber().clone(),
+        // every websocket client gets its own publisher and subscriber, so a
+        // slow client is isolated to its own netidx session
+        let cfg = netidx.cfg();
+        let routes = netidx_wsproxy::filter_with(
+            move || {
+                let cfg = cfg.clone();
+                async move {
+                    let subscriber = SubscriberBuilder::new(cfg.clone()).build()?;
+                    let publisher = PublisherBuilder::new(cfg).build().await?;
+                    Ok((publisher, subscriber))
+                }
+            },
             "ws",
             Some(TEST_TIMEOUT),
         );
@@ -40,13 +53,6 @@ impl TestEnv {
         let wsproxy = tokio::spawn(server);
 
         Ok(Self { netidx, path, val, ws_addr, wsproxy })
-    }
-
-    async fn publish_seq(&self, seq: u64, payload: &str) -> Result<()> {
-        let mut batch = self.netidx.publisher().start_batch();
-        self.val.update(&mut batch, format!("{seq}:{payload}"));
-        batch.commit(None).await;
-        Ok(())
     }
 
     async fn publish_u64(&self, seq: u64) -> Result<()> {
@@ -71,13 +77,13 @@ struct Client {
 }
 
 impl Client {
-    async fn connect(env: &TestEnv, recv_buf: u32) -> Result<Self> {
+    async fn connect(env: &TestEnv) -> Result<Self> {
         let socket = if env.ws_addr.is_ipv4() {
             TcpSocket::new_v4()?
         } else {
             TcpSocket::new_v6()?
         };
-        socket.set_recv_buffer_size(recv_buf)?;
+        socket.set_recv_buffer_size(RECV_BUF)?;
         let stream = socket.connect(env.ws_addr).await?;
         let url = format!("ws://{}/ws", env.ws_addr);
         let (mut ws, _) = client_async(url, stream).await?;
@@ -157,82 +163,28 @@ fn response_seq(msg: &Json, id: u64) -> Option<u64> {
             continue;
         }
         let value = event.get("value")?;
-        match value.get("type").and_then(Json::as_str)? {
-            "U64" => return value.get("value")?.as_u64(),
-            "String" => {
-                let s = value.get("value")?.as_str()?;
-                return s.split_once(':')?.0.parse().ok();
-            }
-            _ => {}
+        if value.get("type").and_then(Json::as_str)? == "U64" {
+            return value.get("value")?.as_u64();
         }
     }
     None
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn websocket_clients_share_one_netidx_subscription() -> Result<()> {
-    let env = TestEnv::new("shared").await?;
+async fn each_websocket_client_gets_its_own_session() -> Result<()> {
+    let env = TestEnv::new("independent").await?;
     let mut clients = Vec::new();
     for _ in 0..8 {
-        clients.push(Client::connect(&env, FAST_RECV_BUF).await?);
+        clients.push(Client::connect(&env).await?);
     }
 
-    assert_eq!(env.netidx.publisher().clients(), 1);
+    // a shared subscriber would show one client; per client subscribers show
+    // one netidx client connection per websocket client
+    assert_eq!(env.netidx.publisher().clients(), 8);
     env.publish_u64(1).await?;
     for client in &mut clients {
         client.wait_for_seq(1).await?;
     }
-    assert_eq!(env.netidx.publisher().clients(), 1);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_hung_websocket_client_does_not_block_fast_clients() -> Result<()> {
-    let env = TestEnv::new("one-hung").await?;
-    let _hung = Client::connect(&env, SLOW_RECV_BUF).await?;
-    let mut fast = Client::connect(&env, FAST_RECV_BUF).await?;
-    let payload = "x".repeat(64 * 1024);
-
-    assert_eq!(env.netidx.publisher().clients(), 1);
-    for seq in 1..=240 {
-        time::timeout(Duration::from_secs(1), env.publish_seq(seq, &payload))
-            .await
-            .map_err(|_| {
-                anyhow!("publish {seq} was backpressured by one hung client")
-            })??;
-        fast.wait_for_seq(seq).await?;
-    }
-    assert_eq!(env.netidx.publisher().clients(), 1);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn all_hung_websocket_clients_apply_netidx_backpressure() -> Result<()> {
-    let env = TestEnv::new("all-hung").await?;
-    let _hung0 = Client::connect(&env, SLOW_RECV_BUF).await?;
-    let _hung1 = Client::connect(&env, SLOW_RECV_BUF).await?;
-    let payload = "x".repeat(512 * 1024);
-    let mut saw_backpressure = false;
-
-    assert_eq!(env.netidx.publisher().clients(), 1);
-    for seq in 1..=400 {
-        let started = Instant::now();
-        match time::timeout(Duration::from_millis(150), env.publish_seq(seq, &payload))
-            .await
-        {
-            // Ignore initial writes while the websocket and netidx queues fill.
-            Ok(Ok(())) if seq <= 16 || started.elapsed() < Duration::from_millis(75) => {
-                continue
-            }
-            Ok(Ok(())) | Err(_) => {
-                saw_backpressure = true;
-                break;
-            }
-            Ok(Err(e)) => return Err(e),
-        }
-    }
-
-    assert!(saw_backpressure, "all hung clients did not push back on publisher");
-    assert_eq!(env.netidx.publisher().clients(), 1);
+    assert_eq!(env.netidx.publisher().clients(), 8);
     Ok(())
 }

@@ -14,13 +14,22 @@ pub(super) async fn run(
     proxy: netidx_wsproxy::config::Config,
 ) -> Result<()> {
     env_logger::init();
-    let publisher = PublisherBuilder::new(cfg.clone())
-        .desired_auth(auth.clone())
-        .bind_cfg(pcfg.bind)
-        .build()
-        .await
-        .context("creating publisher")?;
-    let subscriber = Subscriber::new(cfg, auth).context("creating subscriber")?;
     let timeout = pcfg.timeout.map(Duration::from_secs);
-    netidx_wsproxy::run(proxy, publisher, subscriber, timeout).await.context("ws proxy")
+    let bind = pcfg.bind;
+    let make = move || {
+        let cfg = cfg.clone();
+        let auth = auth.clone();
+        async move {
+            let publisher = PublisherBuilder::new(cfg.clone())
+                .desired_auth(auth.clone())
+                .bind_cfg(bind)
+                .build()
+                .await
+                .context("creating publisher")?;
+            let subscriber =
+                Subscriber::new(cfg, auth).context("creating subscriber")?;
+            Ok((publisher, subscriber))
+        }
+    };
+    netidx_wsproxy::run(proxy, make, timeout).await.context("ws proxy")
 }
