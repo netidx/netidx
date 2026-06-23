@@ -16,13 +16,17 @@
 use crate::{
     client::ClientConfig,
     conf_client::NetworkInfo,
-    conf_proto::InfoAuth,
+    conf_proto::{InfoAuth, NetworkMap, ResolverAddr},
     resolver::ResolverConfig,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::resolver_server::config::file as rfile;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 /// A planned set of edits to existing config files. An empty plan
 /// ([`is_empty`](Self::is_empty)) is the "already in sync" result.
@@ -73,6 +77,20 @@ impl EditPlan {
             })?;
         }
         Ok(())
+    }
+
+    /// Combine two plans that touch disjoint config files — the client
+    /// plan and the parent-referral plan, for `resolver update`.
+    pub fn merge(mut self, other: EditPlan) -> EditPlan {
+        if other.resolver_edit.is_some() {
+            self.resolver_edit = other.resolver_edit;
+        }
+        if other.client_edit.is_some() {
+            self.client_edit = other.client_edit;
+        }
+        self.changes.extend(other.changes);
+        self.warnings.extend(other.warnings);
+        self
     }
 }
 
@@ -142,10 +160,213 @@ pub fn reconcile_resolver_peers(path: &Path, net: &NetworkInfo) -> Result<EditPl
     })
 }
 
+// ---- network-map-driven reconcile (Phase B) ----
+//
+// These reconcile a host's config to exactly ONE level of the hierarchy —
+// the cluster its current addrs already belong to — from the CA-authoritative
+// network map. Unlike `reconcile_resolver_peers` above (additive-only, over
+// the flat legacy `NetworkInfo`), these both ADD missing cluster members and
+// AUTO-REMOVE entries the cluster no longer lists, with no consent: the CA is
+// the source of truth, so an addr absent from its authoritative cluster is
+// authoritatively gone. Host-local entries are never removed.
+
+/// Map a network-reported data-plane auth to a client-config auth.
+fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
+    use netidx::config::file::Auth;
+    match a {
+        InfoAuth::Anonymous => Auth::Anonymous,
+        InfoAuth::Krb5 { spn } => Auth::Krb5(ArcStr::from(spn.as_str())),
+        InfoAuth::Tls { name } => Auth::Tls(ArcStr::from(name.as_str())),
+    }
+}
+
+/// One distinct resolver cluster in the network map: where it attaches and
+/// its full member roster.
+pub struct ClusterView {
+    pub base: String,
+    pub members: Vec<ResolverAddr>,
+}
+
+/// The distinct resolver clusters in `map`, grouped by base path. A
+/// cluster's members each report the same roster; union them by address.
+pub fn clusters(map: &NetworkMap) -> Vec<ClusterView> {
+    let mut by_base: BTreeMap<String, Vec<ResolverAddr>> = BTreeMap::new();
+    for s in &map.servers {
+        if let Some(c) = &s.cluster {
+            let members = by_base.entry(c.base.clone()).or_default();
+            for m in &c.members {
+                if !members.iter().any(|x| x.addr == m.addr) {
+                    members.push(m.clone());
+                }
+            }
+        }
+    }
+    by_base.into_iter().map(|(base, members)| ClusterView { base, members }).collect()
+}
+
+/// The cluster whose members overlap `addrs` — the config's "one level".
+/// Lenient: a config whose addrs straddle clusters (e.g. one polluted by
+/// the old flat reconcile) matches the maximally-overlapping cluster, with
+/// a warning. `None` when nothing overlaps (the cluster may be transiently
+/// unreachable — the caller no-ops rather than wiping the config).
+pub fn match_cluster<'a>(
+    clusters: &'a [ClusterView],
+    addrs: &[SocketAddr],
+) -> (Option<&'a ClusterView>, Option<ArcStr>) {
+    let mut best: Option<(&ClusterView, usize)> = None;
+    let mut overlapping = 0usize;
+    for c in clusters {
+        let n = c.members.iter().filter(|m| addrs.contains(&m.addr)).count();
+        if n == 0 {
+            continue;
+        }
+        overlapping += 1;
+        if best.map(|(_, bn)| n > bn).unwrap_or(true) {
+            best = Some((c, n));
+        }
+    }
+    match best {
+        None => (None, None),
+        Some((c, _)) => {
+            let warn = (overlapping > 1).then(|| {
+                ArcStr::from(
+                    format!(
+                        "config addrs span {overlapping} clusters; reconciling to the \
+                         most-overlapping one ({})",
+                        c.base
+                    )
+                    .as_str(),
+                )
+            });
+            (Some(c), warn)
+        }
+    }
+}
+
+/// Reconcile a peer list to the matched cluster's roster: add every member
+/// the config lacks, remove every entry the cluster no longer lists —
+/// except host-local entries, which are never network peers. Returns the
+/// `+`/`-` change lines.
+fn reconcile_peer_list<A: Clone>(
+    current: &mut Vec<(SocketAddr, A)>,
+    members: &[ResolverAddr],
+    map_auth: impl Fn(&InfoAuth) -> A,
+    is_local: impl Fn(&A) -> bool,
+    add_line: impl Fn(SocketAddr, &InfoAuth) -> String,
+    rm_line: impl Fn(SocketAddr) -> String,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    for m in members {
+        if !current.iter().any(|(a, _)| *a == m.addr) {
+            current.push((m.addr, map_auth(&m.auth)));
+            changes.push(add_line(m.addr, &m.auth));
+        }
+    }
+    let member_addrs: Vec<SocketAddr> = members.iter().map(|m| m.addr).collect();
+    let mut removed = Vec::new();
+    current.retain(|(a, auth)| {
+        if is_local(auth) || member_addrs.contains(a) {
+            true
+        } else {
+            removed.push(*a);
+            false
+        }
+    });
+    for a in removed {
+        changes.push(rm_line(a));
+    }
+    changes
+}
+
+/// Reconcile a host's **client config** addrs to its own resolver cluster
+/// (the cluster its current addrs belong to) from the network map. Add +
+/// auto-remove; a config matching no cluster is left untouched (warned).
+pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
+    let mut cfg = ClientConfig::load(path)
+        .with_context(|| format!("loading client config {}", path.display()))?;
+    let cur: Vec<SocketAddr> = cfg.as_file().addrs.iter().map(|(a, _)| *a).collect();
+    let cls = clusters(map);
+    let (cluster, warn) = match_cluster(&cls, &cur);
+    let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
+    let Some(cluster) = cluster else {
+        warnings.push(ArcStr::from(
+            "this client's resolvers match no cluster in the network map \
+             (unreachable?) — leaving the config unchanged",
+        ));
+        return Ok(EditPlan { warnings, ..EditPlan::default() });
+    };
+    let members = cluster.members.clone();
+    let changes = reconcile_peer_list(
+        &mut cfg.as_file_mut().addrs,
+        &members,
+        info_auth_to_client,
+        |a| matches!(a, netidx::config::file::Auth::Local(_)),
+        |addr, auth| format!("client resolver {addr} ({})", describe_info_auth(auth)),
+        |addr| format!("client resolver {addr}"),
+    );
+    if changes.is_empty() {
+        return Ok(EditPlan { warnings, ..EditPlan::default() });
+    }
+    Ok(EditPlan {
+        client_edit: Some((path.to_path_buf(), cfg)),
+        changes,
+        warnings,
+        ..EditPlan::default()
+    })
+}
+
+/// Reconcile a resolver's **parent referral** to the parent cluster (the
+/// cluster the referral already points at) from the network map. Add +
+/// auto-remove. Errors if the resolver has no parent referral.
+pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
+    let mut cfg = ResolverConfig::load(path)
+        .with_context(|| format!("loading resolver config {}", path.display()))?;
+    let cur: Vec<SocketAddr> = {
+        let parent = cfg.as_file().parent.as_ref().context(
+            "this resolver has no parent referral to reconcile — it isn't \
+             attached to a network",
+        )?;
+        parent.addrs.iter().map(|(a, _)| *a).collect()
+    };
+    let cls = clusters(map);
+    let (cluster, warn) = match_cluster(&cls, &cur);
+    let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
+    let Some(cluster) = cluster else {
+        warnings.push(ArcStr::from(
+            "this resolver's parent referral matches no cluster in the network \
+             map (unreachable?) — leaving it unchanged",
+        ));
+        return Ok(EditPlan { warnings, ..EditPlan::default() });
+    };
+    let members = cluster.members.clone();
+    let parent = cfg
+        .as_file_mut()
+        .parent
+        .as_mut()
+        .expect("parent referral present — checked above");
+    let changes = reconcile_peer_list(
+        &mut parent.addrs,
+        &members,
+        info_auth_to_ref,
+        |a| matches!(a, rfile::RefAuth::Local(_)),
+        |addr, auth| format!("parent resolver {addr} ({})", describe_info_auth(auth)),
+        |addr| format!("parent resolver {addr}"),
+    );
+    if changes.is_empty() {
+        return Ok(EditPlan { warnings, ..EditPlan::default() });
+    }
+    Ok(EditPlan {
+        resolver_edit: Some((path.to_path_buf(), cfg)),
+        changes,
+        warnings,
+        ..EditPlan::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf_proto::ResolverAddr;
+    use crate::conf_proto::{ClusterFacts, ResolverAddr, Role, ServerEntry};
     use std::net::SocketAddr;
 
     fn addr(s: &str) -> SocketAddr {
@@ -260,5 +481,115 @@ mod tests {
         let network =
             net(vec![ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous }]);
         assert!(reconcile_resolver_peers(&path, &network).is_err());
+    }
+
+    // ---- map-driven reconcile (Phase B) ----
+
+    fn srv(addr: &str, base: &str, members: &[&str]) -> ServerEntry {
+        ServerEntry {
+            addr: addr.parse().unwrap(),
+            roles: vec![Role::Resolver],
+            cluster: Some(ClusterFacts {
+                members: members
+                    .iter()
+                    .map(|m| ResolverAddr { addr: m.parse().unwrap(), auth: InfoAuth::Anonymous })
+                    .collect(),
+                base: base.to_string(),
+                parent: None,
+                children: vec![],
+            }),
+        }
+    }
+
+    fn map_of(servers: Vec<ServerEntry>) -> NetworkMap {
+        NetworkMap { version: 1, ca_addr: None, servers }
+    }
+
+    fn write_client(dir: &Path, addrs: &[&str]) -> PathBuf {
+        use netidx::config::file::{Auth, ConfigBuilder};
+        let cfg = ClientConfig(
+            ConfigBuilder::default()
+                .addrs(addrs.iter().map(|a| (addr(a), Auth::Anonymous)).collect::<Vec<_>>())
+                .build()
+                .unwrap(),
+        );
+        let path = dir.join("client.json");
+        cfg.save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn match_cluster_picks_the_one_level() {
+        let m = map_of(vec![
+            srv("10.0.0.11:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"]),
+            srv("10.0.0.12:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"]),
+            srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"]),
+        ]);
+        let cls = clusters(&m);
+        assert_eq!(cls.len(), 2, "two distinct clusters by base");
+        let (c, w) = match_cluster(&cls, &[addr("10.0.0.15:4564")]);
+        assert_eq!(c.unwrap().base, "/eu");
+        assert!(w.is_none());
+        let (c, _) = match_cluster(&cls, &[addr("10.9.9.9:4564")]);
+        assert!(c.is_none(), "no overlap → None");
+        // Straddling both clusters → max-overlap (root wins 2:1) + a warning.
+        let (c, w) = match_cluster(
+            &cls,
+            &[addr("10.0.0.11:4564"), addr("10.0.0.12:4564"), addr("10.0.0.15:4564")],
+        );
+        assert_eq!(c.unwrap().base, "/");
+        assert!(w.is_some());
+    }
+
+    #[test]
+    fn client_reconcile_adds_removes_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Client points at one /eu member plus a stale addr the cluster
+        // no longer lists.
+        let path = write_client(&dir.path(), &["10.0.0.15:4564", "10.0.0.99:4564"]);
+        let m = map_of(vec![srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"])]);
+        let plan = reconcile_client_peers(&path, &m).unwrap();
+        assert_eq!(plan.changes.len(), 2, "add .16, remove .99");
+        assert!(plan.changes.iter().any(|c| c.contains("10.0.0.16:4564")));
+        assert!(plan.changes.iter().any(|c| c.contains("10.0.0.99:4564")));
+        plan.apply().unwrap();
+        let cfg = ClientConfig::load(&path).unwrap();
+        let addrs: Vec<_> = cfg.as_file().addrs.iter().map(|(a, _)| *a).collect();
+        assert!(addrs.contains(&addr("10.0.0.15:4564")));
+        assert!(addrs.contains(&addr("10.0.0.16:4564")));
+        assert!(!addrs.contains(&addr("10.0.0.99:4564")), "stale peer auto-removed");
+        let plan2 = reconcile_client_peers(&path, &m).unwrap();
+        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes);
+    }
+
+    #[test]
+    fn client_reconcile_no_matching_cluster_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_client(&dir.path(), &["10.0.0.99:4564"]);
+        let m = map_of(vec![srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564"])]);
+        let plan = reconcile_client_peers(&path, &m).unwrap();
+        assert!(plan.changes.is_empty());
+        assert!(!plan.warnings.is_empty(), "warns rather than wiping");
+        plan.apply().unwrap();
+        assert_eq!(ClientConfig::load(&path).unwrap().as_file().addrs.len(), 1, "untouched");
+    }
+
+    #[test]
+    fn parent_reconcile_adds_and_removes_against_parent_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(
+            &dir.path(),
+            r#"["10.0.0.11:4564", "Anonymous"], ["10.0.0.99:4564", "Anonymous"]"#,
+        );
+        let m = map_of(vec![srv("10.0.0.11:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"])]);
+        let plan = reconcile_parent_peers(&path, &m).unwrap();
+        assert_eq!(plan.changes.len(), 2, "add .12, remove .99");
+        plan.apply().unwrap();
+        let cfg = ResolverConfig::load(&path).unwrap();
+        let addrs: Vec<_> =
+            cfg.as_file().parent.as_ref().unwrap().addrs.iter().map(|(a, _)| *a).collect();
+        assert!(addrs.contains(&addr("10.0.0.12:4564")));
+        assert!(!addrs.contains(&addr("10.0.0.99:4564")));
+        assert!(reconcile_parent_peers(&path, &m).unwrap().is_empty(), "idempotent");
     }
 }

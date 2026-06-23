@@ -4,7 +4,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::conf::init;
+use crate::conf::{init, lifecycle};
 #[cfg(unix)]
 use crate::conf::delegation;
 
@@ -12,6 +12,12 @@ use crate::conf::delegation;
 pub(crate) enum Cmd {
     /// install a network-facing resolver server
     Install(init::ResolverFlags),
+    /// report what this resolver is and whether its config is in sync with
+    /// the network map
+    Status,
+    /// reconcile this resolver's client config + parent referral to the
+    /// network map (never its member_servers)
+    Update(lifecycle::UpdateFlags),
     /// attach this standalone resolver under a parent by delegation
     /// (queues a request; the parent admin approves a subtree for it)
     #[cfg(unix)]
@@ -25,6 +31,8 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Install(f) => init::run_resolver(f),
+        Cmd::Status => lifecycle::resolver_status(),
+        Cmd::Update(f) => lifecycle::resolver_update(f),
         #[cfg(unix)]
         Cmd::AddParent(f) => delegation::add_parent(f),
         #[cfg(unix)]

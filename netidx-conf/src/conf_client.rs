@@ -298,6 +298,23 @@ pub async fn get_info(
     conf_proto::read_msg(&mut tls).await
 }
 
+/// Fetch the whole network map from one conf server, pinned to the
+/// confirmed CA identity — one round trip is the entire network. The
+/// client-facing counterpart of [`get_map`] (which authenticates with a
+/// serving cert for the server-to-server refresh path).
+pub async fn get_map_pinned(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+) -> Result<NetworkMap> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match conf_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+        GetMapResponse::Ok { map } => Ok(map),
+        GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
+    }
+}
+
 /// The aggregated picture of a network, built by walking conf servers'
 /// `peers` from one or more seeds. Everything in it was served over
 /// connections pinned to the operator-confirmed CA.

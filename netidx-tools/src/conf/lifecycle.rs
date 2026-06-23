@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use netidx_conf::{
     conf_client::{self, NetworkInfo},
-    conf_proto::NodeKind,
+    conf_proto::{NetworkMap, NodeKind},
     discovery, paths,
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     reconcile,
@@ -184,4 +184,178 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     plan.apply()?;
     println!("ok — restart the local resolver to serve the new peers");
     Ok(())
+}
+
+// -- shared helpers for the map-driven roles (resolver / publisher) ------------
+
+/// The client config this host's role keeps in sync with its cluster.
+fn client_config_path() -> Result<std::path::PathBuf> {
+    paths::discover_client_config()
+        .context("no client config found at the standard locations")
+}
+
+/// Like [`fetch_network_pinned`] but returns the CA-authoritative network
+/// map in one round trip (no client-side walk). Same fail-closed pinning.
+fn fetch_map_pinned(
+    net_id: &NetworkIdentity,
+    conf_server: Option<SocketAddr>,
+    kind: NodeKind,
+) -> Result<NetworkMap> {
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let mut candidates: Vec<SocketAddr> = Vec::new();
+    if let Some(a) = conf_server {
+        candidates.push(a);
+    }
+    for d in discovery::browse_or_empty(DISCOVERY_TIMEOUT) {
+        candidates.extend(d.socket_addrs());
+    }
+    candidates.dedup();
+    let mut saw_mismatch = false;
+    for addr in &candidates {
+        let id = match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        if net_id.matches(&id.fingerprint)? {
+            return rt
+                .block_on(conf_client::get_map_pinned(*addr, kind, &id))
+                .context("fetching the network map");
+        }
+        saw_mismatch = true;
+    }
+    if saw_mismatch {
+        bail!(
+            "reached a conf server, but its CA fingerprint did not match this \
+             install's pinned network identity (network {:?}). Refusing to trust \
+             it — if your network's CA legitimately changed, re-join.",
+            net_id.domain,
+        )
+    }
+    bail!(
+        "could not reach any conf server for network {:?} (the recorded address \
+         and mDNS both failed). Is the resolver / conf-server host up?",
+        net_id.domain,
+    )
+}
+
+/// Apply a reconcile plan (or just describe it) — the shared tail of every
+/// map-driven `update`.
+fn run_update(plan: reconcile::EditPlan, dry_run: bool, restart_hint: &str) -> Result<()> {
+    if plan.is_empty() {
+        println!("already in sync — nothing to do");
+        return Ok(());
+    }
+    print!("{}", plan.describe());
+    if dry_run {
+        println!("(dry-run: nothing written)");
+        return Ok(());
+    }
+    plan.apply()?;
+    println!("ok — {restart_hint}");
+    Ok(())
+}
+
+/// Print a reconcile result as a drift summary for `status`.
+fn report_drift(what: &str, plan: Result<reconcile::EditPlan>) {
+    match plan {
+        Err(e) => println!("  {what}: could not check ({e:#})"),
+        Ok(p) if p.is_empty() => println!("  {what}: in sync"),
+        Ok(p) => {
+            println!("  {what}: out of sync — run `update`:");
+            print!("{}", p.describe());
+        }
+    }
+}
+
+// -- resolver -----------------------------------------------------------------
+
+pub(crate) fn resolver_status() -> Result<()> {
+    let rec = require_record()?;
+    require_role(&rec, InstallRole::Resolver)?;
+    println!("resolver install (base {})", rec.base);
+    let rpath = resolver_config_path()?;
+    let rcfg = ResolverConfig::load(&rpath)?;
+    for m in &rcfg.as_file().member_servers {
+        println!("  member: {} ({})", m.addr, describe_member_auth(&m.auth));
+    }
+    let has_parent = rcfg.as_file().parent.is_some();
+    match &rec.network {
+        None => println!("  network: local-only — not attached"),
+        Some(net_id) => {
+            println!("  network: {:?}", net_id.domain);
+            match fetch_map_pinned(net_id, rec.conf_server, NodeKind::Resolver) {
+                Err(e) => println!("  sync: could not check ({e:#})"),
+                Ok(map) => {
+                    if let Ok(cpath) = client_config_path() {
+                        report_drift("client", reconcile::reconcile_client_peers(&cpath, &map));
+                    }
+                    if has_parent {
+                        report_drift(
+                            "parent referral",
+                            reconcile::reconcile_parent_peers(&rpath, &map),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
+    let rec = require_record()?;
+    require_role(&rec, InstallRole::Resolver)?;
+    let net_id = rec.network.as_ref().context(
+        "this resolver is local-only — it hasn't joined a network, so there is \
+         nothing to update",
+    )?;
+    let map = fetch_map_pinned(net_id, rec.conf_server, NodeKind::Resolver)?;
+    // The client config (the resolvers this host talks to), if present.
+    let mut plan = match client_config_path() {
+        Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
+        Err(_) => reconcile::EditPlan::default(),
+    };
+    // The parent referral, if this resolver is a child. NEVER member_servers.
+    let rpath = resolver_config_path()?;
+    if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
+        plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
+    }
+    run_update(plan, flags.dry_run, "restart the resolver / re-run clients to use the new peers")
+}
+
+// -- publisher ----------------------------------------------------------------
+
+pub(crate) fn publisher_status() -> Result<()> {
+    let rec = require_record()?;
+    require_role(&rec, InstallRole::Publisher)?;
+    println!("publisher install (base {})", rec.base);
+    match &rec.network {
+        None => println!("  network: local-only — not attached"),
+        Some(net_id) => {
+            println!("  network: {:?}", net_id.domain);
+            match fetch_map_pinned(net_id, rec.conf_server, NodeKind::Publisher) {
+                Err(e) => println!("  sync: could not check ({e:#})"),
+                Ok(map) => match client_config_path() {
+                    Ok(cpath) => {
+                        report_drift("client", reconcile::reconcile_client_peers(&cpath, &map))
+                    }
+                    Err(e) => println!("  client config: {e:#}"),
+                },
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn publisher_update(flags: UpdateFlags) -> Result<()> {
+    let rec = require_record()?;
+    require_role(&rec, InstallRole::Publisher)?;
+    let net_id = rec.network.as_ref().context(
+        "this publisher is local-only — it hasn't joined a network, so there is \
+         nothing to update",
+    )?;
+    let map = fetch_map_pinned(net_id, rec.conf_server, NodeKind::Publisher)?;
+    let cpath = client_config_path()?;
+    let plan = reconcile::reconcile_client_peers(&cpath, &map)?;
+    run_update(plan, flags.dry_run, "re-run publishers to use the new resolvers")
 }
