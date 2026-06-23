@@ -8,7 +8,7 @@
 //! hosts mDNS can't see; on a flat LAN discovery makes it redundant.
 
 use crate::atomic;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -79,9 +79,11 @@ pub struct ConfServerConfig {
     /// server-to-server connections.
     pub trusted: PathBuf,
     pub roles: Roles,
-    /// Where Sign/Enroll go when this host doesn't hold the CA.
-    /// `None` with no ca role ⇒ GetInfo reports no CA (clients may
-    /// still find it via `peers`).
+    /// The CA's conf server: where this host registers its facts and
+    /// fetches the network map (and where Sign/Enroll go). **Required for
+    /// a non-CA conf server** — without it the host can't register and is
+    /// silently absent from the map. Only the CA host (which owns the map)
+    /// may omit it. Enforced by [`ConfServerConfig::validate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_addr: Option<SocketAddr>,
     /// Other conf servers this one knows of. Served verbatim in GetInfo
@@ -103,8 +105,26 @@ impl ConfServerConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading conf-server config {}", path.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {}", path.display()))
+        let cfg: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        cfg.validate()
+            .with_context(|| format!("invalid conf-server config {}", path.display()))?;
+        Ok(cfg)
+    }
+
+    /// A non-CA conf server must know its CA: without `ca_addr` it can
+    /// neither register its facts nor version-check + pull the network
+    /// map, so it would be silently invisible to the map. Only the CA host
+    /// (`roles.ca` set), which *is* the map's owner, may omit it.
+    pub fn validate(&self) -> Result<()> {
+        if self.roles.ca.is_none() && self.ca_addr.is_none() {
+            bail!(
+                "a non-CA conf server must set `ca_addr` — the CA it registers \
+                 with and fetches the network map from. Only the CA host (with \
+                 a `ca` role) may omit it."
+            );
+        }
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -169,6 +189,31 @@ mod tests {
         assert!(cfg.peers.is_empty());
         assert!(cfg.ca_addr.is_none());
         assert_eq!(cfg.roles, Roles::default());
+    }
+
+    #[test]
+    fn non_ca_requires_ca_addr() {
+        // The CA host (sample has a `ca` role) may omit ca_addr — it owns
+        // the map.
+        let mut cfg = sample();
+        assert!(cfg.ca_addr.is_none());
+        assert!(cfg.validate().is_ok());
+        // Drop the CA role: now ca_addr is mandatory (it must know where to
+        // register / fetch the map).
+        cfg.roles.ca = None;
+        assert!(cfg.validate().is_err(), "non-CA + no ca_addr must be rejected");
+        // Supplying it makes the config valid again.
+        cfg.ca_addr = Some("10.0.0.1:4565".parse().unwrap());
+        assert!(cfg.validate().is_ok());
+        // load() enforces it: an on-disk non-CA config without ca_addr is
+        // rejected at load, not silently accepted (it would never register).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("conf-server.json");
+        let mut bad = sample();
+        bad.roles.ca = None;
+        bad.ca_addr = None;
+        bad.save(&p).unwrap(); // save does not validate
+        assert!(ConfServerConfig::load(&p).is_err(), "load rejects non-CA + no ca_addr");
     }
 
     #[test]
