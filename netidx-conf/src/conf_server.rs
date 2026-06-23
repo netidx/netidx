@@ -251,10 +251,12 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let listen = cfg.listen;
     let mdns = cfg.mdns;
     let state = Server::new(cfg, Some(cfg_path), serving_cert_pem, serving_key_pem)?;
+    let crl = load_serving_crl(&state);
     let acceptor = TlsAcceptor::from(Arc::new(build_server_config(
         &state.serving_cert_pem,
         &state.serving_key_pem,
         state.roots.clone(),
+        crl.as_deref(),
     )?));
     let listener = TcpListener::bind(listen)
         .await
@@ -1033,6 +1035,7 @@ fn build_server_config(
     cert_pem: &[u8],
     key_pem: &[u8],
     roots: RootCertStore,
+    crl_pem: Option<&[u8]>,
 ) -> Result<RustlsServerConfig> {
     let certs: Vec<CertificateDer<'static>> =
         rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
@@ -1045,22 +1048,60 @@ fn build_server_config(
         .context("parsing serving private key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    // Client certs are *optional*: join clients have none yet; peer
-    // conf servers authenticate with theirs (verified against the CA
-    // bundle) to authorize server-to-server requests.
-    let verifier = WebPkiClientVerifier::builder_with_provider(
-        Arc::new(roots),
-        provider.clone(),
-    )
-    .allow_unauthenticated()
-    .build()
-    .context("building client cert verifier")?;
+    let builder =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
+    // Client certs are *optional*: join clients have none yet; peer conf
+    // servers authenticate with theirs (verified against the CA bundle) to
+    // authorize server-to-server requests. When we hold a CRL, a *presented*
+    // peer cert is additionally checked for revocation, so a revoked but
+    // unexpired serving cert is refused at the handshake — closing the peer
+    // gate (Register/Deregister/ApplyPermsEdit/…) against decommissioned or
+    // compromised conf servers. Unknown status stays permitted: absence of a
+    // CRL must not lock the plane out, presence on one must. (The CRL is read
+    // when the acceptor is built; a revocation takes effect on the next
+    // conf-server restart, the same coarseness as a serving-cert rotation.)
+    let crls: Vec<rustls_pki_types::CertificateRevocationListDer<'static>> = match crl_pem {
+        Some(pem) => rustls_pemfile::crls(&mut std::io::Cursor::new(pem))
+            .collect::<std::result::Result<_, _>>()
+            .context("parsing CRL")?,
+        None => Vec::new(),
+    };
+    let verifier = if crls.is_empty() {
+        builder.allow_unauthenticated().build().context("building client cert verifier")?
+    } else {
+        builder
+            .with_crls(crls)
+            .allow_unknown_revocation_status()
+            .allow_unauthenticated()
+            .build()
+            .context("building client cert verifier with CRL")?
+    };
     RustlsServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("selecting TLS versions")?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .context("building TLS server config")
+}
+
+/// The CRL this conf server enforces on inbound peer certs: the CA's own
+/// authoritative `crl.pem` when we hold the CA, else the copy the renewal
+/// daemon places beside our trust bundle (the convention netidx's own
+/// acceptor watches). Absent ⇒ `None` — a missing CRL must never lock the
+/// conf plane out; it just means no revocation is enforced yet.
+fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
+    let path = match state.ca_dir() {
+        Some(ca_dir) => crate::ca_index::crl_path(ca_dir),
+        None => state.cfg.lock().trusted.with_file_name("crl.pem"),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!("conf-server: reading CRL {path:?}: {e:#} (revocation NOT enforced)");
+            None
+        }
+    }
 }
 
 /// A sign outcome: the wire response plus, on success, what the id-map
@@ -2891,11 +2932,13 @@ mod tests {
             mdns: false,
         };
         let state = Server::new(cfg, None, cert, key).unwrap();
+        let crl = load_serving_crl(&state);
         let acceptor = TlsAcceptor::from(Arc::new(
             build_server_config(
                 &state.serving_cert_pem,
                 &state.serving_key_pem,
                 state.roots.clone(),
+                crl.as_deref(),
             )
             .unwrap(),
         ));
@@ -2950,6 +2993,56 @@ mod tests {
         assert!(v3 > v1);
         let map2 = conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await.unwrap();
         assert_eq!(map2.servers.len(), 1);
+    }
+
+    /// A conf server enforces the CA's CRL on inbound peer certs: a
+    /// revoked-but-unexpired serving cert is refused at the handshake, so
+    /// the peer-gated endpoints (here Register) are closed to it — while a
+    /// freshly issued cert is still accepted (the CRL only adds denials).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoked_peer_cert_is_refused_at_the_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+
+        // Issue a peer serving cert, capture its serial, revoke it, and
+        // publish the CRL — all BEFORE the CA conf server starts, so its
+        // acceptor loads the CRL with this serial already revoked.
+        let victim_serial = ca_store::next_serial(dir.path()).unwrap();
+        let (vcert, vkey) = issue_serving_cert(dir.path());
+        let now = ca_store::now_unix();
+        let revoked = ca_store::revoke(
+            dir.path(),
+            victim_serial,
+            ca_store::Revocation {
+                serial: victim_serial,
+                revoked_unix: now,
+                reason: "test".into(),
+            },
+        )
+        .unwrap();
+        assert!(revoked, "the issued serial should be live, then revoked");
+        let unlocked = ca_vault::unlock(dir.path(), "apw").unwrap();
+        crate::ca_index::write_crl(dir.path(), &unlocked.ca_key_pem).unwrap();
+
+        let (ca_addr, ca_state) = spawn_ca_server(dir.path()).await;
+        let roots = ca_state.roots.clone();
+        let req = RegisterRequest {
+            addr: "10.1.1.1:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            cluster: None,
+        };
+
+        // The revoked cert is refused at the TLS handshake — Register never
+        // reaches the app layer.
+        let denied = conf_client::register(ca_addr, &vcert, &vkey, roots.clone(), &req).await;
+        assert!(denied.is_err(), "a revoked peer cert must be refused at the handshake");
+
+        // A fresh (un-revoked) serving cert is still accepted — the CRL adds
+        // denials without locking valid peers out.
+        let (gcert, gkey) = issue_serving_cert(dir.path());
+        conf_client::register(ca_addr, &gcert, &gkey, roots, &req)
+            .await
+            .expect("a valid peer cert is still accepted");
     }
 
     /// Build a vault-protected CA in `dir`: a real (RSA) CA whose key is
