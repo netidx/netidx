@@ -117,7 +117,11 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     };
     let plan = uninstall::uninstall(&base)?;
     print_report(&plan, false);
+    let root = config_root(p, scope);
     if p.dry_run {
+        if let Some(root) = &root {
+            deregister_conf_server(root, true);
+        }
         return Ok(());
     }
     if plan.is_empty() {
@@ -141,6 +145,11 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     if !confirm {
         println!("aborted");
         return Ok(());
+    }
+    // Drop ourselves from the CA's map before deleting the certs we'd need
+    // to authenticate the deregister.
+    if let Some(root) = &root {
+        deregister_conf_server(root, false);
     }
     let report = uninstall::uninstall(&UninstallParams {
         dry_run: false,
@@ -282,6 +291,63 @@ fn plan_contains_ca(r: &UninstallReport) -> bool {
         .iter()
         .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
 }
+
+/// The config root this teardown targets (honouring `--config-dir`).
+fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
+    match &p.config_dir {
+        Some(d) => Some(d.clone()),
+        None => match scope {
+            ServiceScope::User => paths::user_config_root().ok(),
+            ServiceScope::System => Some(paths::system_config_root()),
+        },
+    }
+}
+
+/// Tell the CA to drop this conf server from the network map before we
+/// delete its config + certs. Best-effort: a non-CA conf server registers
+/// its facts with the CA, so on teardown it should deregister, or the CA
+/// keeps a dead entry until `conf ca remove-server`. The CA host itself
+/// owns the map and has nothing to deregister from. Runs while the serving
+/// cert/key still exist (before the teardown removes them). Unix-only: the
+/// conf-server daemon is, so only a unix host ever has one to deregister.
+#[cfg(unix)]
+fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
+    use netidx_conf::{conf_client, conf_server, conf_server_config::ConfServerConfig};
+    let cfg = match ConfServerConfig::load(&root.join("conf-server.json")) {
+        Ok(c) => c,
+        Err(_) => return, // no conf server here (workstation/publisher/hand-rolled)
+    };
+    if cfg.roles.ca.is_some() {
+        return; // the CA owns the map; it doesn't deregister from itself
+    }
+    let Some(ca_addr) = cfg.ca_addr else { return };
+    if dry_run {
+        println!("conf server: would deregister {} from the CA at {ca_addr}", cfg.listen);
+        return;
+    }
+    let result = (|| -> Result<()> {
+        let cert = std::fs::read(&cfg.serving_cert)
+            .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
+        let key = std::fs::read(&cfg.serving_key)
+            .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
+        let trusted = std::fs::read(&cfg.trusted)
+            .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
+        let roots = conf_server::load_roots(&trusted)?;
+        let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+        rt.block_on(conf_client::deregister(ca_addr, &cert, &key, roots, cfg.listen))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => println!("conf server: deregistered {} from the CA at {ca_addr}", cfg.listen),
+        Err(e) => eprintln!(
+            "conf server: could not deregister from the CA at {ca_addr} ({e:#}); \
+             the CA will keep this server in its map until `netidx conf ca remove-server`"
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+fn deregister_conf_server(_root: &std::path::Path, _dry_run: bool) {}
 
 /// Print an uninstall report. `applied` distinguishes the dry-run
 /// preview (`false` ⇒ "plan", subjunctive "would be uninstalled") from
