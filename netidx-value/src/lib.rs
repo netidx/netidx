@@ -616,9 +616,13 @@ impl Value {
                     Typ::DateTime => Some(Value::DateTime(Arc::new(
                         DateTime::from_timestamp($v as i64, 0)?,
                     ))),
-                    Typ::Duration => Some(Value::Duration(Arc::new(
-                        Duration::from_secs_f64($v as f64),
-                    ))),
+                    // `from_secs_f64` PANICS on negative / NaN / +-Inf /
+                    // overflowing input; use the fallible form so an
+                    // out-of-range cast fails to None like every other arm
+                    // here (e.g. casting a negative number to a duration).
+                    Typ::Duration => Duration::try_from_secs_f64($v as f64)
+                        .ok()
+                        .map(|d| Value::Duration(Arc::new(d))),
                     Typ::Bool => Some(if $v as i64 > 0 {
                         Value::Bool(true)
                     } else {

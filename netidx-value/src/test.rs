@@ -353,3 +353,33 @@ fn cast_datetime_to_float_preserves_subseconds() {
     let far = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(10_000_000_000, 0).unwrap()));
     assert_eq!(far.cast(Typ::F64), Some(Value::F64(10_000_000_000.0)));
 }
+
+#[test]
+fn cast_to_duration_never_panics() {
+    // `Duration::from_secs_f64` panics on negative / non-finite / overflowing
+    // seconds; casting must fail to None instead (durations are unsigned).
+    // Reachable from e.g. `cast<duration>(-1)`.
+    for v in [
+        Value::I64(-1),
+        Value::I32(-5),
+        Value::Z64(-1),
+        Value::F64(-1.0),
+        Value::F64(f64::NAN),
+        Value::F64(f64::INFINITY),
+        Value::F64(f64::NEG_INFINITY),
+        Value::F64(1e30),
+        Value::U64(u64::MAX),
+    ] {
+        let got = catch_unwind(AssertUnwindSafe(|| v.clone().cast(Typ::Duration)));
+        assert_eq!(got.ok(), Some(None), "{v:?} -> Duration must be None, not a panic");
+    }
+    // Valid non-negative finite values still convert.
+    assert_eq!(
+        Value::U32(5).cast(Typ::Duration),
+        Some(Value::Duration(Arc::new(Duration::from_secs(5))))
+    );
+    assert_eq!(
+        Value::F64(1.5).cast(Typ::Duration),
+        Some(Value::Duration(Arc::new(Duration::from_secs_f64(1.5))))
+    );
+}
