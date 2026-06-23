@@ -619,7 +619,7 @@ pub struct ClusterEdge {
 /// its advertisable members, where it attaches in the namespace, and its
 /// hierarchy edges. This is the single-owner fact the CA folds into the
 /// map — each cluster owns its own.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterFacts {
     /// The cluster's advertisable member resolver servers (`Local` dropped).
     pub members: Vec<ResolverAddr>,
@@ -633,7 +633,7 @@ pub struct ClusterFacts {
 }
 
 /// One conf server in the trust domain, as recorded in the CA's map.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
     /// The conf server's listen address.
     pub addr: SocketAddr,
@@ -648,7 +648,7 @@ pub struct ServerEntry {
 /// walking — bumps `version` on every change, persists it, and serves it.
 /// Every conf server caches a copy (version-checked) and serves it to
 /// clients, so one round trip to any conf server is the whole network.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
     /// this (via [`Request::GetMapVersion`]) before pulling the full map.

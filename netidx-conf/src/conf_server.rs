@@ -24,7 +24,8 @@ use crate::{
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
-        GetMapResponse, GetMapVersionResponse, RegisterResponse, RemoveServerResponse,
+        DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, RegisterRequest,
+        RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, PollRequest,
         ListQueueResponse, PeerResult, PollResponse, QueueEntry, Request, ResolverAddr,
@@ -33,7 +34,7 @@ use crate::{
         SERVING_SAN,
     },
     conf_server_config::ConfServerConfig,
-    discovery, id_map,
+    discovery, id_map, netmap,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use globset::Glob;
@@ -145,6 +146,10 @@ pub struct Server {
     /// approve/deny transitions — so exactly one of a concurrent
     /// approve/deny lands and edits don't interleave.
     resolver_edit_lock: Mutex<()>,
+    /// The network map: on the CA host the authoritative, persisted copy
+    /// (the CA is its only writer); on every other host an in-memory cache
+    /// the refresh loop keeps current. Served whole to clients in one shot.
+    map: Mutex<NetworkMap>,
 }
 
 impl Server {
@@ -169,6 +174,19 @@ impl Server {
             }
             None => (None, 0),
         };
+        // The network map: the CA owns + persists it, seeded with the CA's
+        // own entry + address so it's never empty of itself; every other
+        // host starts with an empty cache the refresh loop fills.
+        let map = match &ca_dir {
+            Some(dir) => {
+                let mut m = netmap::load(dir)?;
+                m.ca_addr = Some(cfg.listen);
+                netmap::upsert(&mut m, self_entry(&cfg));
+                netmap::save(dir, &m)?;
+                m
+            }
+            None => NetworkMap::default(),
+        };
         Ok(Arc::new(Server {
             cfg: Mutex::new(cfg),
             cfg_path,
@@ -180,6 +198,7 @@ impl Server {
             roots,
             id_map_lock: Mutex::new(()),
             resolver_edit_lock: Mutex::new(()),
+            map: Mutex::new(map),
         }))
     }
 
@@ -189,18 +208,7 @@ impl Server {
     }
 
     fn roles(&self) -> Vec<Role> {
-        let cfg = self.cfg.lock();
-        let mut roles = Vec::new();
-        if cfg.roles.ca.is_some() {
-            roles.push(Role::Ca);
-        }
-        if cfg.roles.resolver.is_some() {
-            roles.push(Role::Resolver);
-        }
-        if cfg.roles.id_map.is_some() {
-            roles.push(Role::IdMap);
-        }
-        roles
+        roles_of(&self.cfg.lock())
     }
 }
 
@@ -749,31 +757,47 @@ async fn handle_conn(
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
         }
-        Request::Register(_) | Request::Deregister(_) => {
-            // CA-authoritative network map — handler lands in the map-state step.
-            let resp = RegisterResponse::Err {
-                reason: "network map registration not yet enabled on this server".to_string(),
+        Request::Register(req) => {
+            let resp = if !peer_is_conf_server {
+                RegisterResponse::Err {
+                    reason: "register requires a conf-server peer certificate".to_string(),
+                }
+            } else {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || handle_register(&state, &req))
+                    .await
+                    .context("register task panicked")?
+            };
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing RegisterResponse")
+        }
+        Request::Deregister(req) => {
+            let resp = if !peer_is_conf_server {
+                RegisterResponse::Err {
+                    reason: "deregister requires a conf-server peer certificate".to_string(),
+                }
+            } else {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || handle_deregister(&state, &req))
+                    .await
+                    .context("deregister task panicked")?
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing RegisterResponse")
         }
         Request::GetMapVersion => {
-            let resp = GetMapVersionResponse::Err {
-                reason: "network map not yet enabled on this server".to_string(),
-            };
+            let resp = GetMapVersionResponse::Ok { version: state.map.lock().version };
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing GetMapVersionResponse")
         }
         Request::GetMap => {
-            let resp = GetMapResponse::Err {
-                reason: "network map not yet enabled on this server".to_string(),
-            };
+            let resp = GetMapResponse::Ok { map: state.map.lock().clone() };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetMapResponse")
         }
-        Request::RemoveServer(_) => {
-            let resp = RemoveServerResponse::Err {
-                reason: "network map not yet enabled on this server".to_string(),
-            };
+        Request::RemoveServer(req) => {
+            let state = state.clone();
+            let resp = tokio::task::spawn_blocking(move || handle_remove_server(&state, &req))
+                .await
+                .context("remove-server task panicked")?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RemoveServerResponse")
@@ -2114,6 +2138,111 @@ fn handle_apply_referral_edit(
         Ok(()) => ApplyReferralEditResponse::Ok,
         Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
     }
+}
+
+/// The role list a conf-server config implies.
+fn roles_of(cfg: &ConfServerConfig) -> Vec<Role> {
+    let mut out = Vec::new();
+    if cfg.roles.ca.is_some() {
+        out.push(Role::Ca);
+    }
+    if cfg.roles.resolver.is_some() {
+        out.push(Role::Resolver);
+    }
+    if cfg.roles.id_map.is_some() {
+        out.push(Role::IdMap);
+    }
+    out
+}
+
+/// This host's own [`ServerEntry`] for the network map: its listen
+/// address, its roles, and — if it runs a resolver — its cluster facts.
+fn self_entry(cfg: &ConfServerConfig) -> ServerEntry {
+    let cluster = cfg.roles.resolver.as_ref().and_then(|r| {
+        match crate::resolver::ResolverConfig::load(&r.config) {
+            Ok(rc) => Some(rc.cluster_facts()),
+            Err(e) => {
+                warn!(
+                    "conf-server: deriving own cluster facts from {}: {e:#}",
+                    r.config.display()
+                );
+                None
+            }
+        }
+    });
+    ServerEntry { addr: cfg.listen, roles: roles_of(cfg), cluster }
+}
+
+/// CA-side: register/update a conf server's facts in the authoritative
+/// map and persist it. Peer-cert-gated at the dispatch. The CA is the
+/// map's only writer, so a non-CA host refuses.
+fn handle_register(state: &Server, req: &RegisterRequest) -> RegisterResponse {
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return RegisterResponse::Err {
+                reason: "this host does not hold the CA — register with the CA".to_string(),
+            }
+        }
+    };
+    let mut map = state.map.lock();
+    let entry =
+        ServerEntry { addr: req.addr, roles: req.roles.clone(), cluster: req.cluster.clone() };
+    if netmap::upsert(&mut map, entry) {
+        if let Err(e) = netmap::save(&ca_dir, &map) {
+            return RegisterResponse::Err {
+                reason: format!("persisting the network map: {e:#}"),
+            };
+        }
+    }
+    RegisterResponse::Ok { version: map.version }
+}
+
+/// CA-side: drop a conf server from the map on uninstall.
+fn handle_deregister(state: &Server, req: &DeregisterRequest) -> RegisterResponse {
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return RegisterResponse::Err {
+                reason: "this host does not hold the CA".to_string(),
+            }
+        }
+    };
+    let mut map = state.map.lock();
+    if netmap::remove(&mut map, req.addr) {
+        if let Err(e) = netmap::save(&ca_dir, &map) {
+            return RegisterResponse::Err {
+                reason: format!("persisting the network map: {e:#}"),
+            };
+        }
+    }
+    RegisterResponse::Ok { version: map.version }
+}
+
+/// CA-side: admin-authenticated removal of a (dead) conf server from the
+/// map — for a machine that never ran `uninstall`. Cascades via the
+/// dropped entry, which carries that host's resolver-cluster facts.
+fn handle_remove_server(state: &Server, req: &RemoveServerRequest) -> RemoveServerResponse {
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return RemoveServerResponse::Err {
+                reason: "this host does not hold the CA".to_string(),
+            }
+        }
+    };
+    if let Err(reason) = authenticate(&ca_dir, &req.admin, &req.password.0) {
+        return RemoveServerResponse::Err { reason };
+    }
+    let mut map = state.map.lock();
+    if netmap::remove(&mut map, req.addr) {
+        if let Err(e) = netmap::save(&ca_dir, &map) {
+            return RemoveServerResponse::Err {
+                reason: format!("persisting the network map: {e:#}"),
+            };
+        }
+    }
+    RemoveServerResponse::Ok { version: map.version }
 }
 
 /// The blocking half of `ApproveDelegation`: authenticate, validate the

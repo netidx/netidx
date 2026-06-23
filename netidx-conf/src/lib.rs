@@ -88,6 +88,7 @@ pub mod id_map;
 /// enumeration that config-only consumers don't need.
 #[cfg(feature = "cloud-detect")]
 pub mod netshape;
+pub mod netmap;
 pub mod paths;
 pub mod provenance;
 pub mod reconcile;
