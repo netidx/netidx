@@ -26,6 +26,11 @@ mod id_map;
 mod init;
 mod lifecycle;
 mod perms;
+// `perms` admin (remote, map-routed perms show/edit) drives the conf
+// server's CA admin auth + cluster push, both unix-only (the engine
+// pulls openssl), same as `delegation`.
+#[cfg(unix)]
+mod perms_admin;
 mod prompt;
 mod renew;
 mod resolver;
@@ -65,6 +70,14 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
+    /// remotely show or edit a cluster's permissions through the conf
+    /// server, routed by the network map (no SSH).
+    // Unix-only — like `ca`/`delegation`, the admin path needs openssl.
+    #[cfg(unix)]
+    Perms {
+        #[command(subcommand)]
+        cmd: perms_admin::Cmd,
+    },
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
     /// low-level single-component commands (client / resolver config /
@@ -82,6 +95,8 @@ pub(crate) fn run(p: Params) -> Result<()> {
         Params::Publisher { cmd } => roles::publisher::run(cmd),
         #[cfg(unix)]
         Params::Ca { cmd } => ca::run(cmd),
+        #[cfg(unix)]
+        Params::Perms { cmd } => perms_admin::run(cmd),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Component { cmd } => component::run(cmd),
     }

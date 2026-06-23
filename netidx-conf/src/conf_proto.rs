@@ -193,6 +193,21 @@ pub enum Request {
     /// cascading to its resolver servers — for a machine that never ran
     /// `uninstall`. Answered with [`RemoveServerResponse`].
     RemoveServer(RemoveServerRequest),
+    /// Read this resolver host's permissions file (no credentials — perms
+    /// are readable within the trust domain, like the map). The client
+    /// routes to a member of the cluster it wants. Answered with
+    /// [`GetPermsResponse`].
+    GetPerms,
+    /// Admin-authenticated, sent to the **CA**: replace a target cluster's
+    /// permissions file, validated and propagated cluster-wide. The CA
+    /// authorizes the admin and pushes [`Request::ApplyPermsEdit`] to the
+    /// target cluster's conf servers. Answered with [`EditPermsResponse`].
+    EditPerms(EditPermsRequest),
+    /// Server-to-server: apply a permissions edit to this host's local
+    /// resolver perms — the receive side of cluster-wide perms propagation.
+    /// Peer-cert-gated like [`Request::ApplyReferralEdit`]. Answered with
+    /// [`ApplyPermsEditResponse`].
+    ApplyPermsEdit(ApplyPermsEditRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -706,6 +721,42 @@ pub struct RemoveServerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RemoveServerResponse {
     Ok { version: u64 },
+    Err { reason: String },
+}
+
+/// This host's permissions file, serialized (a resolver `PMap` as JSON).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GetPermsResponse {
+    Ok { perms_json: String },
+    Err { reason: String },
+}
+
+/// Admin → CA: replace the `target_path` cluster's permissions with
+/// `perms_json` (a serialized resolver `PMap`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditPermsRequest {
+    pub admin: String,
+    pub password: Secret,
+    /// The base path of the cluster whose perms to edit (e.g. `/eu`).
+    pub target_path: String,
+    pub perms_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EditPermsResponse {
+    Ok { peers: Vec<PeerResult> },
+    Err { reason: String },
+}
+
+/// Server → server: apply a permissions edit to the local resolver perms.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyPermsEditRequest {
+    pub perms_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApplyPermsEditResponse {
+    Ok,
     Err { reason: String },
 }
 

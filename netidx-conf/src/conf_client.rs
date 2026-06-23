@@ -40,8 +40,9 @@ use crate::{
         DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         DeregisterRequest, EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse,
-        GetMapResponse, GetMapVersionResponse, NetworkMap, RegisterRequest, RegisterResponse,
-        IssuedEntry,
+        ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
+        GetMapResponse, GetMapVersionResponse, GetPermsResponse, NetworkMap, RegisterRequest,
+        RegisterResponse, IssuedEntry,
         ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PeerResult,
         PollRequest, PollResponse, QueueEntry, ReferralEdit, Request, ResolverAddr,
@@ -312,6 +313,71 @@ pub async fn get_map_pinned(
     match conf_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
+    }
+}
+
+/// Server→server: apply a perms edit to a peer conf server (serving-cert
+/// authed). Mirrors [`push_referral_edit`].
+pub async fn push_perms_edit(
+    addr: SocketAddr,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    perms_json: &str,
+) -> Result<()> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ApplyPermsEdit(ApplyPermsEditRequest { perms_json: perms_json.to_string() }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
+        ApplyPermsEditResponse::Ok => Ok(()),
+        ApplyPermsEditResponse::Err { reason } => bail!("peer refused the perms edit: {reason}"),
+    }
+}
+
+/// Read a conf server's local perms, pinned to the confirmed CA (perms are
+/// readable within the trust domain). The client routes to a member of the
+/// cluster it wants.
+pub async fn get_perms(addr: SocketAddr, kind: NodeKind, expected: &CaIdentity) -> Result<String> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetPerms).await?;
+    match conf_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
+        GetPermsResponse::Ok { perms_json } => Ok(perms_json),
+        GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): edit a target cluster's perms; returns the per-peer
+/// propagation results so the caller can surface a partial failure.
+pub async fn edit_perms(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+    target_path: &str,
+    perms_json: &str,
+) -> Result<Vec<conf_proto::PeerResult>> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::EditPerms(EditPermsRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+            target_path: target_path.to_string(),
+            perms_json: perms_json.to_string(),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
+        EditPermsResponse::Ok { peers } => Ok(peers),
+        EditPermsResponse::Err { reason } => bail!("the CA refused the perms edit: {reason}"),
     }
 }
 

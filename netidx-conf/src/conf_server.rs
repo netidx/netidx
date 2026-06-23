@@ -24,6 +24,8 @@ use crate::{
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
+        ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
+        GetPermsResponse,
         DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, NodeKind,
         RegisterRequest, RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
@@ -802,6 +804,32 @@ async fn handle_conn(
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RemoveServerResponse")
+        }
+        Request::GetPerms => {
+            let state = state.clone();
+            let resp = tokio::task::spawn_blocking(move || handle_get_perms(&state))
+                .await
+                .context("get-perms task panicked")?;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetPermsResponse")
+        }
+        Request::EditPerms(req) => {
+            let resp = handle_edit_perms(state, &req).await;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing EditPermsResponse")
+        }
+        Request::ApplyPermsEdit(req) => {
+            let resp = if !peer_is_conf_server {
+                ApplyPermsEditResponse::Err {
+                    reason: "a perms edit requires a conf-server peer certificate".to_string(),
+                }
+            } else {
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || handle_apply_perms_edit(&state, &req))
+                    .await
+                    .context("apply perms edit task panicked")?
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApplyPermsEditResponse")
         }
     }
 }
@@ -2310,6 +2338,157 @@ fn handle_remove_server(state: &Server, req: &RemoveServerRequest) -> RemoveServ
         }
     }
     RemoveServerResponse::Ok { version: map.version }
+}
+
+/// The local resolver's permissions file, resolved against its config dir.
+fn local_perms_path(state: &Server) -> Result<PathBuf> {
+    let rconfig = state
+        .cfg
+        .lock()
+        .roles
+        .resolver
+        .as_ref()
+        .map(|r| r.config.clone())
+        .context("this host has no resolver role — no perms to read or edit")?;
+    let rc = crate::resolver::ResolverConfig::load(&rconfig)?;
+    let inc = rc.as_file().include_permissions.first().cloned().context(
+        "this resolver has no permissions file (include_permissions is empty — an \
+         anonymous network has no perms)",
+    )?;
+    let base = rconfig.parent().unwrap_or_else(|| Path::new("."));
+    Ok(base.join(inc.as_str()))
+}
+
+/// Read the local resolver's perms file, serialized for the wire.
+fn handle_get_perms(state: &Server) -> GetPermsResponse {
+    let read = || -> Result<String> {
+        let path = local_perms_path(state)?;
+        let pmap = crate::perms::load_perms(&path)?;
+        serde_json::to_string(&pmap).context("serializing perms")
+    };
+    match read() {
+        Ok(perms_json) => GetPermsResponse::Ok { perms_json },
+        Err(e) => GetPermsResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+/// Write `perms_json` to the local perms file under the resolver-edit lock,
+/// validating the resolver config and reverting the file if it goes invalid.
+fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
+    let path = local_perms_path(state)?;
+    let pmap: crate::perms::PMap =
+        serde_json::from_str(perms_json).context("parsing the new perms")?;
+    let rconfig = state
+        .cfg
+        .lock()
+        .roles
+        .resolver
+        .as_ref()
+        .map(|r| r.config.clone())
+        .context("no resolver role")?;
+    let _guard = state.resolver_edit_lock.lock();
+    let backup = std::fs::read(&path).ok();
+    crate::perms::save_perms(&path, &pmap)?;
+    if let Err(e) = crate::resolver::ResolverConfig::load(&rconfig)
+        .and_then(|rc| rc.validate_for_path(&rconfig))
+    {
+        if let Some(old) = backup {
+            let _ = std::fs::write(&path, old);
+        }
+        return Err(e).context("the edited perms made the resolver config invalid; reverted");
+    }
+    Ok(())
+}
+
+/// Server-to-server receive side of a perms edit (peer-cert-gated).
+fn handle_apply_perms_edit(state: &Server, req: &ApplyPermsEditRequest) -> ApplyPermsEditResponse {
+    match apply_perms_local(state, &req.perms_json) {
+        Ok(()) => ApplyPermsEditResponse::Ok,
+        Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+/// The resolver member addresses of the cluster whose base path is
+/// `target_path`, from the map. `None` if no such cluster.
+fn cluster_members_for(map: &NetworkMap, target_path: &str) -> Option<Vec<SocketAddr>> {
+    let mut members: Vec<SocketAddr> = Vec::new();
+    for s in &map.servers {
+        if let Some(c) = &s.cluster {
+            if c.base == target_path {
+                for m in &c.members {
+                    if !members.contains(&m.addr) {
+                        members.push(m.addr);
+                    }
+                }
+            }
+        }
+    }
+    (!members.is_empty()).then_some(members)
+}
+
+/// Push a perms edit to every conf server co-located with a target-cluster
+/// member (`member.ip : my_conf_port`, the uniform-port convention),
+/// ourselves included when we're in the target cluster (a loopback push is
+/// an idempotent apply). Loud: each unreachable/erroring peer is a
+/// `PeerResult`.
+async fn push_perms_edit_to_peers(
+    state: &Arc<Server>,
+    perms_json: &str,
+    member_addrs: &[SocketAddr],
+) -> Vec<PeerResult> {
+    let (my_listen, cert, key, roots) = {
+        let cfg = state.cfg.lock();
+        (cfg.listen, state.serving_cert_pem.clone(), state.serving_key_pem.clone(), state.roots.clone())
+    };
+    let conf_port = my_listen.port();
+    let mut targets: Vec<SocketAddr> = Vec::new();
+    for m in member_addrs {
+        let cs = SocketAddr::new(m.ip(), conf_port);
+        if !targets.contains(&cs) {
+            targets.push(cs);
+        }
+    }
+    let mut results = Vec::new();
+    for addr in targets {
+        let res = conf_client::push_perms_edit(addr, &cert, &key, roots.clone(), perms_json).await;
+        results.push(PeerResult { addr, error: res.err().map(|e| format!("{e:#}")) });
+    }
+    results
+}
+
+/// CA-side: authenticate the admin, find the target cluster in the map, and
+/// propagate the perms edit to its conf servers (peer-cert-gated). The CA
+/// never edits a foreign cluster's files directly — it pushes.
+async fn handle_edit_perms(state: &Arc<Server>, req: &EditPermsRequest) -> EditPermsResponse {
+    let err = |reason: String| EditPermsResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("a perms edit must be sent to the CA host".to_string()),
+    };
+    let auth = {
+        let admin = req.admin.clone();
+        let pw = req.password.0.clone();
+        tokio::task::spawn_blocking(move || authenticate(&ca_dir, &admin, &pw).map(|_| ())).await
+    };
+    match auth {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => return err(reason),
+        Err(e) => return err(format!("auth task panicked: {e}")),
+    }
+    let members = {
+        let map = state.map.lock();
+        match cluster_members_for(&map, &req.target_path) {
+            Some(m) => m,
+            None => {
+                return err(format!(
+                    "no resolver cluster serving {:?} in the network map",
+                    req.target_path
+                ))
+            }
+        }
+    };
+    let peers = push_perms_edit_to_peers(state, &req.perms_json, &members).await;
+    EditPermsResponse::Ok { peers }
 }
 
 /// The blocking half of `ApproveDelegation`: authenticate, validate the
@@ -4218,6 +4397,70 @@ mod tests {
         };
         let (addr, state) = spawn_server_with(dir, roles, vec![]).await;
         (addr, rpath, state)
+    }
+
+    /// A resolver config: one anon member + a relative perms file.
+    fn write_resolver_with_perms(dir: &Path) -> PathBuf {
+        use netidx::resolver_server::config::file as rfile;
+        let member = rfile::MemberServerBuilder::default()
+            .addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+            .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .auth(rfile::Auth::Anonymous)
+            .build()
+            .unwrap();
+        let cfg = rfile::ConfigBuilder::default()
+            .member_servers(vec![member])
+            .include_permissions(vec!["perms.json".into()])
+            .build()
+            .unwrap();
+        let p = dir.join("resolver.json");
+        std::fs::write(&p, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        p
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn perms_edit_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        let rpath = write_resolver_with_perms(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: rpath }),
+            id_map: None,
+        };
+        let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+
+        // Read the current perms (no credentials — readable in-domain).
+        let p0 = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p0.contains("users"), "got {p0}");
+
+        // Edit the root cluster's perms (admin-authed at the CA, propagated
+        // to the cluster — here a single self-member loopback push).
+        let new_perms = r#"{"/foo":{"bob":"swl"}}"#;
+        let peers =
+            conf_client::edit_perms(addr, NodeKind::Client, &id, "alice", "apw", "/", new_perms)
+                .await
+                .unwrap();
+        assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
+
+        // The edit is reflected.
+        let p1 = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p1.contains("bob") && !p1.contains("users"), "got {p1}");
+
+        // Wrong password is refused (the file is unchanged).
+        assert!(conf_client::edit_perms(
+            addr,
+            NodeKind::Client,
+            &id,
+            "alice",
+            "wrong",
+            "/",
+            new_perms
+        )
+        .await
+        .is_err());
     }
 
     /// End-to-end delegation over the real pinned-TLS protocol: a conf
