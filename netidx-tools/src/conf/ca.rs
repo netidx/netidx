@@ -92,6 +92,9 @@ pub(crate) struct RevokeArgs {
 pub(crate) enum AdminCmd {
     /// add an admin keyslot (a new password that can sign)
     Add(AdminAddArgs),
+    /// add a role keyslot: authenticates and may edit perms in scope, but
+    /// can NEVER unlock the CA key or sign certs
+    AddRole(AdminAddRoleArgs),
     /// revoke an admin keyslot
     Remove(AdminRemoveArgs),
     /// replace an admin's issuance policy (allowed SANs / max validity)
@@ -127,6 +130,24 @@ pub(crate) struct AdminAddArgs {
     /// omitted (default no for added admins).
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
+    /// Netidx path this (signing) admin may also edit perms under
+    /// (repeatable, e.g. /eu). Empty unless granted. For a perms-only
+    /// admin use `admin add-role` instead.
+    #[arg(long = "perms-scope", num_args = 1)]
+    pub perms_scope: Vec<String>,
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminAddRoleArgs {
+    /// Name of the new role admin. Prompted when omitted.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Netidx path this role may edit perms under (repeatable, e.g. /eu,
+    /// or / for the whole tree). Prompted when omitted.
+    #[arg(long = "perms-scope", num_args = 1)]
+    pub perms_scope: Vec<String>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -152,6 +173,10 @@ pub(crate) struct AdminSetPolicyArgs {
     /// omitted.
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
+    /// Netidx path this admin may edit perms under (repeatable). Replaces
+    /// the existing list.
+    #[arg(long = "perms-scope", num_args = 1)]
+    pub perms_scope: Vec<String>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -410,6 +435,7 @@ fn autorenew_policy() -> ca_vault::Policy {
         max_validity_days: 730,
         id_map_groups: vec![],
         may_enroll_servers: false,
+        perms_edit_scopes: vec![],
     }
 }
 
@@ -445,7 +471,7 @@ pub(super) fn setup_autorenew_slot(
     // Replace-not-fail: rotation and re-runs both land here.
     let exists = ca_vault::list_admins(ca_dir)?
         .iter()
-        .any(|(name, _)| name == AUTORENEW_ADMIN);
+        .any(|info| info.admin == AUTORENEW_ADMIN);
     if exists {
         ca_vault::remove_admin(ca_dir, authorizing, AUTORENEW_ADMIN, false)?;
     }
@@ -808,6 +834,9 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
             max_validity_days: opts.max_validity_days,
             id_map_groups: &opts.id_map_groups,
             may_enroll_servers: opts.may_enroll_servers,
+            // The founding admin is a signing slot, so it holds full perms
+            // authority already — no explicit scope needed.
+            perms_scope: &[],
         },
         // The founding admin defaults to being able to grow the
         // network — someone has to.
@@ -975,6 +1004,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                     max_validity_days: a.max_validity_days,
                     id_map_groups: &a.id_map_groups,
                     may_enroll_servers: a.may_enroll_servers,
+                    perms_scope: &a.perms_scope,
                 },
                 false,
                 &existing_ca_cn(&dir),
@@ -989,6 +1019,45 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             println!("added admin {name:?}");
             Ok(())
         }
+        AdminCmd::AddRole(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let name = prompt::required_string("new role admin name", a.name)?;
+            let scopes: Vec<String> = if !a.perms_scope.is_empty() {
+                a.perms_scope.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            } else {
+                prompt::required_string(
+                    "netidx paths this role may edit perms under (comma-separated, e.g. /eu)",
+                    None,
+                )?
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+            };
+            if scopes.is_empty() {
+                bail!(
+                    "a role keyslot with no perms scope can do nothing — grant at \
+                     least one --perms-scope"
+                );
+            }
+            let policy = ca_vault::Policy {
+                allowed_san: vec![],
+                max_validity_days: 0,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: scopes.clone(),
+            };
+            // Authority: minting a role requires a SIGNING admin's password
+            // (a role admin can't escalate by creating more admins).
+            let authorizing = collect_existing_password(
+                "your own (signing) admin password — authorizes minting a role keyslot",
+            )?;
+            let new_pw =
+                collect_required_password(&format!("password for new role admin {name:?}"))?;
+            ca_vault::add_role_admin(&dir, &authorizing, &name, &new_pw, policy)?;
+            println!("added role admin {name:?} scoped to perms under {scopes:?}");
+            Ok(())
+        }
         AdminCmd::SetPolicy(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin whose policy to set", a.name)?;
@@ -998,6 +1067,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                     max_validity_days: a.max_validity_days,
                     id_map_groups: &a.id_map_groups,
                     may_enroll_servers: a.may_enroll_servers,
+                    perms_scope: &a.perms_scope,
                 },
                 false,
                 &existing_ca_cn(&dir),
@@ -1007,11 +1077,12 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             // not the raw flag.
             let summary = format!(
                 "allowed_san={:?} max_validity_days={} id_map_groups={:?} \
-                 may_enroll_servers={}",
+                 may_enroll_servers={} perms_edit_scopes={:?}",
                 policy.allowed_san,
                 policy.max_validity_days,
                 policy.id_map_groups,
-                policy.may_enroll_servers
+                policy.may_enroll_servers,
+                policy.perms_edit_scopes
             );
             // Authority: any current admin's password (the same flat
             // model as add/remove). You don't need the target's.
@@ -1041,14 +1112,21 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             if admins.is_empty() {
                 println!("(no admins — this CA is not vault-protected)");
             }
-            for (name, pol) in admins {
+            for info in admins {
+                let tier = match info.kind {
+                    ca_vault::SlotKind::Signing => "signing",
+                    ca_vault::SlotKind::Role => "role",
+                };
+                let pol = &info.policy;
                 println!(
-                    "{name}: allowed_san={:?} max_validity_days={} \
-                     id_map_groups={:?} may_enroll_servers={}",
+                    "{} [{tier}]: allowed_san={:?} max_validity_days={} \
+                     id_map_groups={:?} may_enroll_servers={} perms_edit_scopes={:?}",
+                    info.admin,
                     pol.allowed_san,
                     pol.max_validity_days,
                     pol.id_map_groups,
-                    pol.may_enroll_servers
+                    pol.may_enroll_servers,
+                    pol.perms_edit_scopes
                 );
             }
             Ok(())
@@ -1171,6 +1249,10 @@ struct PolicyArgs<'a> {
     max_validity_days: u32,
     id_map_groups: &'a [String],
     may_enroll_servers: Option<bool>,
+    /// Netidx paths this admin may edit perms under. Taken straight from
+    /// the flag (no prompt) — a signing admin gets perms scopes only when
+    /// explicitly granted; role admins are minted by `admin add-role`.
+    perms_scope: &'a [String],
 }
 
 fn prompt_policy(
@@ -1235,11 +1317,18 @@ fn prompt_policy(
             enroll_default,
         )?,
     };
+    let perms_edit_scopes = args
+        .perms_scope
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     Ok(ca_vault::Policy {
         allowed_san,
         max_validity_days: args.max_validity_days,
         id_map_groups,
         may_enroll_servers,
+        perms_edit_scopes,
     })
 }
 
@@ -1960,7 +2049,7 @@ fn list() -> Result<()> {
     // back to the legacy single-key format.
     if ca_vault::exists(&dir) {
         let admins = ca_vault::list_admins(&dir)
-            .map(|a| a.into_iter().map(|(n, _)| n).collect::<Vec<_>>())
+            .map(|a| a.into_iter().map(|i| i.admin).collect::<Vec<_>>())
             .unwrap_or_default();
         if admins.is_empty() {
             println!("  key:    keyslot vault");

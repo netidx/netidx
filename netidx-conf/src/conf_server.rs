@@ -2378,6 +2378,14 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
     let path = local_perms_path(state)?;
     let pmap: crate::perms::PMap =
         serde_json::from_str(perms_json).context("parsing the new perms")?;
+    // Validate the permission bits before touching the file — `load_perms`
+    // and `validate_for_path` both keep bits as opaque strings, so without
+    // this an edit with unparseable bits (only `!swlpd` are valid) would be
+    // written and only blow up when the resolver next loads it.
+    for (p, e, bits) in crate::perms::iter(&pmap) {
+        netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
+            .with_context(|| format!("invalid permission bits {bits:?} for {e:?} at {p:?}"))?;
+    }
     let rconfig = state
         .cfg
         .lock()
@@ -2392,10 +2400,26 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
     if let Err(e) = crate::resolver::ResolverConfig::load(&rconfig)
         .and_then(|rc| rc.validate_for_path(&rconfig))
     {
-        if let Some(old) = backup {
-            let _ = std::fs::write(&path, old);
-        }
-        return Err(e).context("the edited perms made the resolver config invalid; reverted");
+        // Roll back to *exactly* the prior state — restore the old bytes
+        // (atomically), or remove the file we just created if there was
+        // none before. A failed rollback is itself reported: never claim
+        // "reverted" while leaving an invalid perms file in place.
+        let rolled_back = match &backup {
+            Some(old) => crate::atomic::write_atomic(&path, old, 0o644)
+                .context("restoring the previous perms file"),
+            None => std::fs::remove_file(&path)
+                .context("removing the rejected perms file"),
+        };
+        return match rolled_back {
+            Ok(()) => {
+                Err(e).context("the edited perms made the resolver config invalid; reverted")
+            }
+            Err(re) => Err(e).context(format!(
+                "the edited perms made the resolver config invalid AND the revert \
+                 failed ({re:#}); the perms file at {} may be left invalid",
+                path.display()
+            )),
+        };
     }
     Ok(())
 }
@@ -2406,6 +2430,13 @@ fn handle_apply_perms_edit(state: &Server, req: &ApplyPermsEditRequest) -> Apply
         Ok(()) => ApplyPermsEditResponse::Ok,
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
     }
+}
+
+/// Whether any granted scope covers `target` — target equals or descends
+/// from a scope (`/` covers the whole tree). The path-aware prefix test
+/// (`Path::is_parent`) won't let `/eu` match `/europe`.
+fn perms_scope_covers(scopes: &[String], target: &str) -> bool {
+    scopes.iter().any(|s| netidx::path::Path::is_parent(s, target))
 }
 
 /// The resolver member addresses of the cluster whose base path is
@@ -2465,15 +2496,33 @@ async fn handle_edit_perms(state: &Arc<Server>, req: &EditPermsRequest) -> EditP
         Some(d) => d.to_path_buf(),
         None => return err("a perms edit must be sent to the CA host".to_string()),
     };
+    // Authenticate WITHOUT unlocking the CA key — a perms edit needs no
+    // key, so a role keyslot is a first-class admin here. Authorize by
+    // tier: a signing admin holds full authority (it can already unlock
+    // the CA and do anything); a role admin needs a `perms_edit_scopes`
+    // entry covering the target path.
     let auth = {
         let admin = req.admin.clone();
         let pw = req.password.0.clone();
-        tokio::task::spawn_blocking(move || authenticate(&ca_dir, &admin, &pw).map(|_| ())).await
+        tokio::task::spawn_blocking(move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
     };
-    match auth {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => return err(reason),
+    let authd = match auth {
+        Ok(Ok(a)) => a,
+        Ok(Err(_)) => return err("authentication failed".to_string()),
         Err(e) => return err(format!("auth task panicked: {e}")),
+    };
+    let authorized = authd.kind == ca_vault::SlotKind::Signing
+        || perms_scope_covers(&authd.policy.perms_edit_scopes, &req.target_path);
+    if !authorized {
+        return err(format!(
+            "admin {:?} ({}) is not authorized to edit perms at {:?}",
+            req.admin,
+            match authd.kind {
+                ca_vault::SlotKind::Signing => "signing",
+                ca_vault::SlotKind::Role => "role",
+            },
+            req.target_path
+        ));
     }
     let members = {
         let map = state.map.lock();
@@ -2735,6 +2784,7 @@ mod tests {
             max_validity_days: 30,
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: true,
+            perms_edit_scopes: vec![],
         }
     }
 
@@ -2982,6 +3032,7 @@ mod tests {
                 // The *allowed set* — what this admin may assign.
                 id_map_groups: vec!["users".to_string(), "dev".to_string()],
                 may_enroll_servers: false,
+                perms_edit_scopes: vec![],
             },
         );
         let iss = issuer(dir.path());
@@ -3069,6 +3120,7 @@ mod tests {
                 max_validity_days: 30,
                 id_map_groups: vec![],
                 may_enroll_servers: true,
+                perms_edit_scopes: vec![],
             },
         );
         let req = request(SERVING_SAN, "alice", "apw", 30);
@@ -3100,6 +3152,7 @@ mod tests {
                 max_validity_days: 30,
                 id_map_groups: vec![],
                 may_enroll_servers: false,
+                perms_edit_scopes: vec![],
             },
         );
         let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
@@ -3391,6 +3444,7 @@ mod tests {
                 max_validity_days: 30,
                 id_map_groups: vec![],
                 may_enroll_servers: false,
+                perms_edit_scopes: vec![],
             },
         )
         .unwrap();
@@ -3601,6 +3655,7 @@ mod tests {
                 max_validity_days: 730,
                 id_map_groups: vec![],
                 may_enroll_servers: false,
+                perms_edit_scopes: vec![],
             },
         )
         .unwrap();
@@ -4089,6 +4144,7 @@ mod tests {
                 max_validity_days: 730,
                 id_map_groups: vec![],
                 may_enroll_servers: false,
+                perms_edit_scopes: vec![],
             },
         )
         .unwrap();
@@ -4461,6 +4517,98 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    /// A role keyslot may edit perms only within its granted scope, and
+    /// never unlocks the CA key. Two role admins on the root-cluster CA:
+    /// `eve` scoped to `/eu` (does NOT cover the `/` cluster) and `rod`
+    /// scoped to `/` (does). The CA authorizes by scope before touching
+    /// the map.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn role_keyslot_perms_scope_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        // Mint two role keyslots off the signing admin (apw).
+        let role = |scope: &str| ca_vault::Policy {
+            allowed_san: vec![],
+            max_validity_days: 0,
+            id_map_groups: vec![],
+            may_enroll_servers: false,
+            perms_edit_scopes: vec![scope.to_string()],
+        };
+        ca_vault::add_role_admin(dir.path(), "apw", "eve", "epw", role("/eu")).unwrap();
+        ca_vault::add_role_admin(dir.path(), "apw", "rod", "rpw", role("/")).unwrap();
+
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        let rpath = write_resolver_with_perms(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: rpath }),
+            id_map: None,
+        };
+        let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let new_perms = r#"{"/foo":{"bob":"swl"}}"#;
+
+        // eve's scope `/eu` does not cover the `/` cluster — refused on
+        // authorization, before the map is even consulted, and the file
+        // is untouched.
+        let denied =
+            conf_client::edit_perms(addr, NodeKind::Client, &id, "eve", "epw", "/", new_perms)
+                .await;
+        let msg = format!("{:#}", denied.unwrap_err());
+        assert!(msg.contains("not authorized"), "got {msg}");
+        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p.contains("users") && !p.contains("bob"), "deny must not mutate: {p}");
+
+        // A wrong password for a real role admin is also refused.
+        assert!(conf_client::edit_perms(addr, NodeKind::Client, &id, "eve", "nope", "/eu", new_perms)
+            .await
+            .is_err());
+
+        // rod's scope `/` covers the root cluster — authorized, and the
+        // edit propagates (a role admin edits perms with no CA key).
+        let peers =
+            conf_client::edit_perms(addr, NodeKind::Client, &id, "rod", "rpw", "/", new_perms)
+                .await
+                .unwrap();
+        assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
+        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p.contains("bob") && !p.contains("users"), "in-scope edit applied: {p}");
+    }
+
+    /// An edit that parses as JSON but makes the resolver config invalid is
+    /// rejected by the receiving peer and rolled back — the prior perms
+    /// survive intact.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_perms_edit_is_rejected_and_reverted() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        let rpath = write_resolver_with_perms(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            resolver: Some(ResolverRole { config: rpath }),
+            id_map: None,
+        };
+        let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+
+        // Valid JSON, but `xyz` are not permission bits (only `!swlpd`).
+        // The peer writes it, validation fails, and it rolls back.
+        let bad = r#"{"/foo":{"bob":"xyz"}}"#;
+        let peers =
+            conf_client::edit_perms(addr, NodeKind::Client, &id, "alice", "apw", "/", bad)
+                .await
+                .unwrap();
+        assert!(
+            peers.iter().any(|p| p.error.is_some()),
+            "peer must reject the invalid perms: {peers:?}"
+        );
+
+        // The prior perms survive — the bad edit was reverted.
+        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p.contains("users") && !p.contains("bob"), "reverted to prior perms: {p}");
     }
 
     /// End-to-end delegation over the real pinned-TLS protocol: a conf

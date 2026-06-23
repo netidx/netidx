@@ -68,16 +68,53 @@ pub struct Policy {
     /// privileged than any `allowed_san` glob.
     #[serde(default)]
     pub may_enroll_servers: bool,
+    /// Netidx hierarchy paths under which this admin may edit permissions
+    /// (the remote perms edit). A target path is in scope when it equals
+    /// or descends from one of these (`/` ⇒ the whole tree). Empty ⇒ no
+    /// perms-edit authority. Unlike issuance, this needs no CA key, so a
+    /// `Role` keyslot can carry it.
+    #[serde(default)]
+    pub perms_edit_scopes: Vec<String>,
+}
+
+/// What a keyslot's `wrap` field protects, and so what authority the slot
+/// confers. The cryptographic boundary of the RBAC model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlotKind {
+    /// The slot wraps the master key, so its password can recover the CA
+    /// private key and sign certificates. The original (and default for
+    /// pre-RBAC vaults, whose slots all wrap MK).
+    Signing,
+    /// The slot wraps a random verifier — never the master key — so its
+    /// password authenticates and yields the slot's scoped [`Policy`] but
+    /// can NEVER recover the CA private key. A satellite admin's keyslot.
+    Role,
+}
+
+/// Pre-RBAC slots have no `kind` field but all wrap MK, so they are
+/// signing slots — the only back-compatible default.
+fn default_slot_kind() -> SlotKind {
+    SlotKind::Signing
 }
 
 /// The result of a successful [`unlock`]: the admin identified by the
 /// password, their policy, and the decrypted CA key. The key bytes are
 /// zeroized on drop — hold the `Unlocked` only as long as needed to
-/// sign one request.
+/// sign one request. Only a [`SlotKind::Signing`] slot can produce this.
 pub struct Unlocked {
     pub admin: String,
     pub policy: Policy,
     pub ca_key_pem: Zeroizing<Vec<u8>>,
+}
+
+/// The result of a successful [`authenticate`]: who the password belongs
+/// to, what they may do, and which keyslot tier they hold — but NO CA
+/// key. Every non-signing admin op authorizes against this.
+pub struct Authenticated {
+    pub admin: String,
+    pub policy: Policy,
+    pub kind: SlotKind,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,7 +137,13 @@ struct Kdf {
 struct Slot {
     admin: String,
     kdf: Kdf,
-    wrap: AeadBlob, // AES-256-GCM(KEK, MK)
+    // AES-256-GCM(KEK, secret). For a `Signing` slot the secret is the
+    // master key (so its password recovers the CA key); for a `Role` slot
+    // it is a random verifier (the GCM tag proves the password, but the
+    // plaintext is useless — it cannot decrypt `key_enc`).
+    wrap: AeadBlob,
+    #[serde(default = "default_slot_kind")]
+    kind: SlotKind,
     policy: Policy,
 }
 
@@ -137,7 +180,7 @@ pub fn create(
     let mut mk = Zeroizing::new([0u8; 32]);
     rand::rng().fill_bytes(&mut mk[..]);
     let key_enc = aead_seal(&mk, ca_key_pem)?;
-    let slot = make_slot(&mk, admin, password, policy)?;
+    let slot = make_slot(&mk, SlotKind::Signing, admin, password, policy)?;
     write_vault(&path, &VaultFile { version: VAULT_VERSION, key_enc, slots: vec![slot] })
 }
 
@@ -159,6 +202,38 @@ pub fn unlock(ca_dir: &Path, password: &str) -> Result<Unlocked> {
     })
 }
 
+/// Authenticate `admin` by `password` against any keyslot (signing or
+/// role) and return their policy and tier — but never the CA key. The
+/// password proof is the GCM tag on the slot's `wrap`; we don't care what
+/// it wraps, only that it opens. This is the auth primitive for every
+/// admin op that doesn't sign a certificate (perms edits, map admin), so
+/// a role keyslot is a first-class admin for those ops without ever
+/// touching the CA private key.
+pub fn authenticate(ca_dir: &Path, admin: &str, password: &str) -> Result<Authenticated> {
+    let vault = read_vault(&vault_path(ca_dir))?;
+    for slot in &vault.slots {
+        if slot.admin != admin {
+            continue;
+        }
+        let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
+        let kek = derive_kek(
+            password.as_bytes(),
+            &salt,
+            slot.kdf.m_cost_kib,
+            slot.kdf.t_cost,
+            slot.kdf.p_cost,
+        )?;
+        if aead_try_open(&kek, &slot.wrap)?.is_some() {
+            return Ok(Authenticated {
+                admin: slot.admin.clone(),
+                policy: slot.policy.clone(),
+                kind: slot.kind,
+            });
+        }
+    }
+    bail!("authentication failed")
+}
+
 /// Add an admin slot. `existing_password` must unlock an existing slot
 /// (proof of authority); the new admin gets `new_password` and
 /// `policy`. The CA key is untouched.
@@ -175,7 +250,36 @@ pub fn add_admin(
         bail!("an admin named {new_admin:?} already exists");
     }
     let (_slot, mk) = recover_mk(&vault, existing_password)?;
-    let slot = make_slot(&mk, new_admin, new_password, policy)?;
+    let slot = make_slot(&mk, SlotKind::Signing, new_admin, new_password, policy)?;
+    vault.slots.push(slot);
+    write_vault(&path, &vault)
+}
+
+/// Add a **role** admin: a keyslot that authenticates and carries
+/// `policy` but does NOT wrap the master key, so it can never recover the
+/// CA private key. `authorizing_password` must unlock a *signing* slot —
+/// only signing admins may mint roles (a role admin cannot escalate by
+/// creating more admins, since it can't recover MK). The role slot wraps
+/// a throwaway random verifier purely so its password has something to
+/// prove against; MK is required here only as proof of signing authority,
+/// never copied into the new slot.
+pub fn add_role_admin(
+    ca_dir: &Path,
+    authorizing_password: &str,
+    new_admin: &str,
+    new_password: &str,
+    policy: Policy,
+) -> Result<()> {
+    let path = vault_path(ca_dir);
+    let mut vault = read_vault(&path)?;
+    if vault.slots.iter().any(|s| s.admin == new_admin) {
+        bail!("an admin named {new_admin:?} already exists");
+    }
+    recover_mk(&vault, authorizing_password)
+        .context("creating a role keyslot requires a signing admin's password")?;
+    let mut verifier = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(&mut verifier[..]);
+    let slot = make_slot(&verifier, SlotKind::Role, new_admin, new_password, policy)?;
     vault.slots.push(slot);
     write_vault(&path, &vault)
 }
@@ -233,18 +337,35 @@ pub fn set_policy(
     write_vault(&path, &vault)
 }
 
-/// List the admins and their policies (no secrets).
-pub fn list_admins(ca_dir: &Path) -> Result<Vec<(String, Policy)>> {
+/// One admin keyslot's public facts (no secrets), for `ca admin list`.
+pub struct AdminInfo {
+    pub admin: String,
+    pub kind: SlotKind,
+    pub policy: Policy,
+}
+
+/// List the admins, their tiers, and their policies (no secrets).
+pub fn list_admins(ca_dir: &Path) -> Result<Vec<AdminInfo>> {
     let vault = read_vault(&vault_path(ca_dir))?;
-    Ok(vault.slots.into_iter().map(|s| (s.admin, s.policy)).collect())
+    Ok(vault
+        .slots
+        .into_iter()
+        .map(|s| AdminInfo { admin: s.admin, kind: s.kind, policy: s.policy })
+        .collect())
 }
 
 // -- internals ----------------------------------------------------------------
 
-/// Try every slot; return the index of the slot `password` unlocks plus
-/// the recovered master key.
+/// Try every **signing** slot; return the index of the slot `password`
+/// unlocks plus the recovered master key. Role slots are skipped — their
+/// `wrap` holds a verifier, not MK, so they can never produce the key.
+/// This is the cryptographic enforcement of the keyslot tiering: there is
+/// no code path by which a role password reaches MK.
 fn recover_mk(vault: &VaultFile, password: &str) -> Result<(usize, Zeroizing<[u8; 32]>)> {
     for (i, slot) in vault.slots.iter().enumerate() {
+        if slot.kind != SlotKind::Signing {
+            continue;
+        }
         let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
         let kek = derive_kek(
             password.as_bytes(),
@@ -262,10 +383,18 @@ fn recover_mk(vault: &VaultFile, password: &str) -> Result<(usize, Zeroizing<[u8
             return Ok((i, mk));
         }
     }
-    bail!("no key slot accepts that password")
+    bail!("no signing keyslot accepts that password")
 }
 
-fn make_slot(mk: &[u8; 32], admin: &str, password: &str, policy: Policy) -> Result<Slot> {
+/// Build a slot wrapping `secret` (MK for a signing slot, a random
+/// verifier for a role slot) under a fresh Argon2id KDF of `password`.
+fn make_slot(
+    secret: &[u8; 32],
+    kind: SlotKind,
+    admin: &str,
+    password: &str,
+    policy: Policy,
+) -> Result<Slot> {
     if admin.is_empty() {
         bail!("admin name must not be empty");
     }
@@ -273,7 +402,7 @@ fn make_slot(mk: &[u8; 32], admin: &str, password: &str, policy: Policy) -> Resu
     let mut salt = [0u8; 16];
     rand::rng().fill_bytes(&mut salt);
     let kek = derive_kek(password.as_bytes(), &salt, m, t, p)?;
-    let wrap = aead_seal(&kek, mk)?;
+    let wrap = aead_seal(&kek, secret)?;
     Ok(Slot {
         admin: admin.to_string(),
         kdf: Kdf {
@@ -284,6 +413,7 @@ fn make_slot(mk: &[u8; 32], admin: &str, password: &str, policy: Policy) -> Resu
             p_cost: p,
         },
         wrap,
+        kind,
         policy,
     })
 }
@@ -368,6 +498,18 @@ mod tests {
             max_validity_days: 365,
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: false,
+            perms_edit_scopes: vec![],
+        }
+    }
+
+    /// A role policy: no issuance, just a perms-edit scope.
+    fn role_pol(scope: &str) -> Policy {
+        Policy {
+            allowed_san: vec![],
+            max_validity_days: 0,
+            id_map_groups: vec![],
+            may_enroll_servers: false,
+            perms_edit_scopes: vec![scope.to_string()],
         }
     }
 
@@ -475,11 +617,79 @@ mod tests {
         create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
         add_admin(dir.path(), "apw", "bob", "bpw", pol("*.b")).unwrap();
         let mut admins = list_admins(dir.path()).unwrap();
-        admins.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(admins, vec![
-            ("alice".to_string(), pol("*.a")),
-            ("bob".to_string(), pol("*.b")),
+        admins.sort_by(|a, b| a.admin.cmp(&b.admin));
+        let summary: Vec<_> =
+            admins.iter().map(|a| (a.admin.clone(), a.kind, a.policy.clone())).collect();
+        assert_eq!(summary, vec![
+            ("alice".to_string(), SlotKind::Signing, pol("*.a")),
+            ("bob".to_string(), SlotKind::Signing, pol("*.b")),
         ]);
+    }
+
+    #[test]
+    fn role_slot_authenticates_but_cannot_unlock_the_ca_key() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
+        // A signing admin mints a /eu-scoped role keyslot.
+        add_role_admin(dir.path(), "apw", "eve", "epw", role_pol("/eu")).unwrap();
+
+        // The role admin authenticates and gets exactly its scoped policy.
+        let a = authenticate(dir.path(), "eve", "epw").unwrap();
+        assert_eq!(a.admin, "eve");
+        assert_eq!(a.kind, SlotKind::Role);
+        assert_eq!(a.policy, role_pol("/eu"));
+
+        // But its password can NEVER recover the CA key — `unlock` only
+        // considers signing slots, so a role password is "no signing slot".
+        assert!(unlock(dir.path(), "epw").is_err());
+
+        // The signing admin authenticates too (any tier) and still unlocks.
+        let s = authenticate(dir.path(), "alice", "apw").unwrap();
+        assert_eq!(s.kind, SlotKind::Signing);
+        assert_eq!(unlock(dir.path(), "apw").unwrap().admin, "alice");
+
+        // Authentication is admin+password: right password, wrong name fails.
+        assert!(authenticate(dir.path(), "alice", "epw").is_err());
+        assert!(authenticate(dir.path(), "eve", "apw").is_err());
+    }
+
+    #[test]
+    fn role_admin_cannot_mint_admins_or_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
+        add_role_admin(dir.path(), "apw", "eve", "epw", role_pol("/eu")).unwrap();
+
+        // A role password is not signing authority: it can neither add a
+        // signing admin (needs MK) nor mint another role (needs a signing
+        // authorizer), nor remove/rescope anyone.
+        assert!(add_admin(dir.path(), "epw", "bob", "bpw", pol("*.b")).is_err());
+        assert!(add_role_admin(dir.path(), "epw", "fred", "fpw", role_pol("/us")).is_err());
+        assert!(remove_admin(dir.path(), "epw", "alice", false).is_err());
+        assert!(set_policy(dir.path(), "epw", "alice", pol("*")).is_err());
+
+        // The signing admin can revoke the role slot.
+        remove_admin(dir.path(), "apw", "eve", false).unwrap();
+        assert!(authenticate(dir.path(), "eve", "epw").is_err());
+    }
+
+    #[test]
+    fn pre_rbac_vault_without_kind_loads_as_signing() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
+        // Simulate a vault written before slot tiering: drop the `kind`
+        // field from every slot. The serde default must read it as Signing
+        // — pre-RBAC slots all wrap MK, so they really are signing slots.
+        let path = vault_path(dir.path());
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for slot in v["slots"].as_array_mut().unwrap() {
+            slot.as_object_mut().unwrap().remove("kind");
+        }
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+
+        assert_eq!(list_admins(dir.path()).unwrap()[0].kind, SlotKind::Signing);
+        assert_eq!(unlock(dir.path(), "apw").unwrap().admin, "alice");
+        assert_eq!(authenticate(dir.path(), "alice", "apw").unwrap().kind, SlotKind::Signing);
     }
 
     #[test]
