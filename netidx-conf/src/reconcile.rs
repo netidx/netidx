@@ -28,14 +28,41 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// One planned edit, carrying its direction so the preview can't mislabel
+/// a removal as an add (the verb is derived from the variant, never
+/// hard-coded). The payload is the change subject without the verb.
+#[derive(Debug, Clone)]
+pub enum Change {
+    Add(String),
+    Del(String),
+}
+
+impl Change {
+    /// The change subject, without the add/remove verb.
+    pub fn text(&self) -> &str {
+        match self {
+            Change::Add(s) | Change::Del(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Change::Add(s) => write!(f, "+ add {s}"),
+            Change::Del(s) => write!(f, "- remove {s}"),
+        }
+    }
+}
+
 /// A planned set of edits to existing config files. An empty plan
 /// ([`is_empty`](Self::is_empty)) is the "already in sync" result.
 #[derive(Debug, Default)]
 pub struct EditPlan {
     pub resolver_edit: Option<(PathBuf, ResolverConfig)>,
     pub client_edit: Option<(PathBuf, ClientConfig)>,
-    /// One human-readable line per change — the `--dry-run`/`status` body.
-    pub changes: Vec<String>,
+    /// One change per edit — the `--dry-run`/`status` body.
+    pub changes: Vec<Change>,
     pub warnings: Vec<ArcStr>,
 }
 
@@ -52,7 +79,7 @@ impl EditPlan {
             out.push_str("  (already in sync — no changes)\n");
         } else {
             for c in &self.changes {
-                let _ = writeln!(out, "  + add {c}");
+                let _ = writeln!(out, "  {c}");
             }
         }
         for w in &self.warnings {
@@ -142,11 +169,11 @@ pub fn reconcile_resolver_peers(path: &Path, net: &NetworkInfo) -> Result<EditPl
                 continue;
             }
             parent.addrs.push((r.addr, info_auth_to_ref(&r.auth)));
-            changes.push(format!(
+            changes.push(Change::Add(format!(
                 "resolver peer {} ({})",
                 r.addr,
                 describe_info_auth(&r.auth),
-            ));
+            )));
         }
     }
     if changes.is_empty() {
@@ -254,12 +281,12 @@ fn reconcile_peer_list<A: Clone>(
     is_local: impl Fn(&A) -> bool,
     add_line: impl Fn(SocketAddr, &InfoAuth) -> String,
     rm_line: impl Fn(SocketAddr) -> String,
-) -> Vec<String> {
+) -> Vec<Change> {
     let mut changes = Vec::new();
     for m in members {
         if !current.iter().any(|(a, _)| *a == m.addr) {
             current.push((m.addr, map_auth(&m.auth)));
-            changes.push(add_line(m.addr, &m.auth));
+            changes.push(Change::Add(add_line(m.addr, &m.auth)));
         }
     }
     let member_addrs: Vec<SocketAddr> = members.iter().map(|m| m.addr).collect();
@@ -273,7 +300,7 @@ fn reconcile_peer_list<A: Clone>(
         }
     });
     for a in removed {
-        changes.push(rm_line(a));
+        changes.push(Change::Del(rm_line(a)));
     }
     changes
 }
@@ -437,7 +464,7 @@ mod tests {
         ]);
         let plan = reconcile_resolver_peers(&path, &network).unwrap();
         assert_eq!(plan.changes.len(), 1, "exactly one new peer (B)");
-        assert!(plan.changes[0].contains("10.0.0.2:4564"));
+        assert!(plan.changes[0].text().contains("10.0.0.2:4564"));
         plan.apply().unwrap();
         // Both peers now present on disk.
         let cfg = ResolverConfig::load(&path).unwrap();
@@ -550,8 +577,18 @@ mod tests {
         let m = map_of(vec![srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"])]);
         let plan = reconcile_client_peers(&path, &m).unwrap();
         assert_eq!(plan.changes.len(), 2, "add .16, remove .99");
-        assert!(plan.changes.iter().any(|c| c.contains("10.0.0.16:4564")));
-        assert!(plan.changes.iter().any(|c| c.contains("10.0.0.99:4564")));
+        // .16 is the addition, .99 is the removal — and the verbs must match.
+        assert!(plan.changes.iter().any(
+            |c| matches!(c, Change::Add(_)) && c.text().contains("10.0.0.16:4564")
+        ));
+        assert!(plan.changes.iter().any(
+            |c| matches!(c, Change::Del(_)) && c.text().contains("10.0.0.99:4564")
+        ));
+        // The preview must label each edit by its real direction — a stale
+        // peer being removed must read "- remove", never "+ add".
+        let body = plan.describe();
+        assert!(body.contains("+ add") && body.contains("10.0.0.16:4564"), "{body}");
+        assert!(body.contains("- remove") && body.contains("10.0.0.99:4564"), "{body}");
         plan.apply().unwrap();
         let cfg = ClientConfig::load(&path).unwrap();
         let addrs: Vec<_> = cfg.as_file().addrs.iter().map(|(a, _)| *a).collect();
