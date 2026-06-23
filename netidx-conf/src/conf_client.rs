@@ -39,7 +39,9 @@ use crate::{
         ApproveRequest, ApproveResponse, ClientHello, DelegationEntry,
         DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse, IssuedEntry,
+        DeregisterRequest, EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse,
+        GetMapResponse, GetMapVersionResponse, NetworkMap, RegisterRequest, RegisterResponse,
+        IssuedEntry,
         ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PeerResult,
         PollRequest, PollResponse, QueueEntry, ReferralEdit, Request, ResolverAddr,
@@ -963,6 +965,79 @@ pub async fn push_identity(
         AddIdentityResponse::Err { reason } => {
             bail!("conf server refused the identity: {reason}")
         }
+    }
+}
+
+/// Server→CA: register/update this conf server's facts in the CA's network
+/// map, authenticated with the serving cert (peer-cert-gated). Returns the
+/// CA's new map version.
+pub async fn register(
+    addr: SocketAddr,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    req: &RegisterRequest,
+) -> Result<u64> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+    conf_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
+    match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+        RegisterResponse::Ok { version } => Ok(version),
+        RegisterResponse::Err { reason } => bail!("the CA refused the registration: {reason}"),
+    }
+}
+
+/// Server→CA: drop this conf server (`own_addr`) from the map on uninstall.
+pub async fn deregister(
+    addr: SocketAddr,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    own_addr: SocketAddr,
+) -> Result<u64> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+    conf_proto::write_msg(&mut tls, &Request::Deregister(DeregisterRequest { addr: own_addr }))
+        .await?;
+    match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+        RegisterResponse::Ok { version } => Ok(version),
+        RegisterResponse::Err { reason } => bail!("the CA refused the deregistration: {reason}"),
+    }
+}
+
+/// Cheap probe: the served map's current version. No client cert needed —
+/// the map is public within the trust domain (reads are pinned to the CA).
+pub async fn get_map_version(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    kind: NodeKind,
+) -> Result<u64> {
+    let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
+    match conf_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
+        GetMapVersionResponse::Ok { version } => Ok(version),
+        GetMapVersionResponse::Err { reason } => bail!("map version query refused: {reason}"),
+    }
+}
+
+/// Fetch the whole network map in one round trip — every cluster, every
+/// conf server's role, the CA location.
+pub async fn get_map(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    kind: NodeKind,
+) -> Result<NetworkMap> {
+    let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    conf_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match conf_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+        GetMapResponse::Ok { map } => Ok(map),
+        GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
 }
 

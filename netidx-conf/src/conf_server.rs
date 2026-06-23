@@ -24,8 +24,8 @@ use crate::{
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
-        DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, RegisterRequest,
-        RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
+        DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, NodeKind,
+        RegisterRequest, RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, PollRequest,
         ListQueueResponse, PeerResult, PollResponse, QueueEntry, Request, ResolverAddr,
@@ -322,6 +322,7 @@ pub async fn serve_on(
     // If the CA role names an autorenew keytab, approve verified renewals
     // in-process from here on (a no-op when it doesn't).
     spawn_autorenew(&state);
+    spawn_map_refresh(&state);
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
     loop {
@@ -1854,6 +1855,72 @@ fn autorenew_sweep(issuer: &Mutex<CaIssuer>, ca_dir: &Path, password: &str) -> u
 /// had, on the same host, now without the extra process. A keytab that
 /// won't unseal is logged and the task simply isn't spawned (the daemon
 /// keeps serving). Captures a `Weak`, so a dropped server stops the loop.
+/// How often a non-CA conf server re-asserts its own facts to the CA and
+/// refreshes its cached map (a cheap version probe; a full pull only when
+/// it changed). Short enough that `update` sees recent changes, infrequent
+/// enough to be free on a control plane.
+const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// On a non-CA conf server, keep the cached network map current and keep
+/// our own entry registered with the CA. The CA owns the map; we are a
+/// read-replica — if the CA is unreachable we keep serving the last copy
+/// we cached, and the re-register self-heals a push lost while it was down.
+fn spawn_map_refresh(state: &Arc<Server>) {
+    let ca_addr = {
+        let cfg = state.cfg.lock();
+        if cfg.roles.ca.is_some() {
+            return; // the CA owns the map — nothing to refresh
+        }
+        match cfg.ca_addr {
+            Some(a) => a,
+            None => return, // no conf-plane CA configured
+        }
+    };
+    let weak = Arc::downgrade(state);
+    tokio::spawn(async move {
+        loop {
+            let Some(state) = weak.upgrade() else { break };
+            let (req, cert, key, roots) = {
+                let cfg = state.cfg.lock();
+                let e = self_entry(&cfg);
+                (
+                    RegisterRequest { addr: e.addr, roles: e.roles, cluster: e.cluster },
+                    state.serving_cert_pem.clone(),
+                    state.serving_key_pem.clone(),
+                    state.roots.clone(),
+                )
+            };
+            // Self-heal: (re)register our own facts. Idempotent at the CA.
+            if let Err(e) =
+                conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await
+            {
+                warn!("conf-server: registering with the CA {ca_addr} failed (will retry): {e:#}");
+            }
+            // Refresh the cache: cheap version check, full pull only when changed.
+            match conf_client::get_map_version(ca_addr, roots.clone(), NodeKind::ConfServer).await {
+                Ok(v) => {
+                    let stale = state.map.lock().version != v;
+                    if stale {
+                        match conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await {
+                            Ok(map) => *state.map.lock() = map,
+                            Err(e) => warn!(
+                                "conf-server: pulling the network map from {ca_addr} failed \
+                                 (serving the cached copy): {e:#}"
+                            ),
+                        }
+                    }
+                }
+                Err(e) => warn!(
+                    "conf-server: map version check against {ca_addr} failed \
+                     (serving the cached copy): {e:#}"
+                ),
+            }
+            drop(state);
+            tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
+        }
+    });
+}
+
 fn spawn_autorenew(state: &Arc<Server>) {
     let keytab = {
         let cfg = state.cfg.lock();
@@ -2615,6 +2682,45 @@ mod tests {
                 id_map: None,
             };
         spawn_server_with(dir, roles, vec![]).await
+    }
+
+    #[tokio::test]
+    async fn register_then_get_map_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let (ca_addr, ca_state) = spawn_ca_server(dir.path()).await;
+        let roots = ca_state.roots.clone();
+
+        // The CA seeded its own entry + address.
+        let map0 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer).await.unwrap();
+        assert_eq!(map0.servers.len(), 1);
+        assert_eq!(map0.ca_addr, Some(ca_addr));
+        let v0 = map0.version;
+
+        // A resolver conf server registers its facts (peer-cert-gated).
+        let (cert, key) = issue_serving_cert(dir.path());
+        let target: SocketAddr = "10.9.9.9:4565".parse().unwrap();
+        let req = RegisterRequest { addr: target, roles: vec![Role::Resolver], cluster: None };
+        let v1 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await.unwrap();
+        assert!(v1 > v0);
+
+        // Served whole to a plain reader: both servers now present.
+        let map1 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer).await.unwrap();
+        assert_eq!(map1.servers.len(), 2);
+        assert!(map1.servers.iter().any(|s| s.addr == target));
+        assert_eq!(map1.version, v1);
+
+        // Idempotent re-register of identical facts: no version churn.
+        let v2 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await.unwrap();
+        assert_eq!(v2, v1);
+
+        // Deregister drops it and bumps.
+        let v3 = conf_client::deregister(ca_addr, &cert, &key, roots.clone(), target)
+            .await
+            .unwrap();
+        assert!(v3 > v1);
+        let map2 = conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await.unwrap();
+        assert_eq!(map2.servers.len(), 1);
     }
 
     /// Build a vault-protected CA in `dir`: a real (RSA) CA whose key is
