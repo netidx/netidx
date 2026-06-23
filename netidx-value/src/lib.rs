@@ -613,9 +613,23 @@ impl Value {
                         Ok(d) => Some(Value::Decimal(Arc::new(d))),
                         Err(_) => None,
                     },
-                    Typ::DateTime => Some(Value::DateTime(Arc::new(
-                        DateTime::from_timestamp($v as i64, 0)?,
-                    ))),
+                    // Seconds since the epoch, fraction included. Going
+                    // through f64 + floor makes this the exact inverse of the
+                    // DateTime -> float cast (round-trips sub-second values),
+                    // floors sub-epoch times correctly (vs `as i64`'s
+                    // truncate-toward-zero), and maps NaN / +-Inf / out-of-
+                    // range (incl. huge u64) to None instead of a bogus date.
+                    Typ::DateTime => {
+                        let s = $v as f64;
+                        if !s.is_finite() {
+                            None
+                        } else {
+                            let secs = s.floor();
+                            let nanos = ((s - secs) * 1_000_000_000.0).round() as u32;
+                            DateTime::from_timestamp(secs as i64, nanos.min(999_999_999))
+                                .map(|d| Value::DateTime(Arc::new(d)))
+                        }
+                    }
                     // `from_secs_f64` PANICS on negative / NaN / +-Inf /
                     // overflowing input; use the fallible form so an
                     // out-of-range cast fails to None like every other arm

@@ -383,3 +383,34 @@ fn cast_to_duration_never_panics() {
         Some(Value::Duration(Arc::new(Duration::from_secs_f64(1.5))))
     );
 }
+
+#[test]
+fn cast_float_to_datetime_preserves_fraction_and_guards() {
+    // Inverse of the DateTime -> float cast: the fraction survives, so
+    // f64 -> DateTime -> f64 round-trips (old code hard-coded nanos = 0).
+    let v = Value::F64(1.5).cast(Typ::DateTime).unwrap();
+    assert_eq!(
+        v,
+        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap()))
+    );
+    assert_eq!(v.cast(Typ::F64), Some(Value::F64(1.5)));
+
+    // Sub-epoch floors (not truncate-toward-zero): -1.5s == (secs -2, 5e8ns).
+    let n = Value::F64(-1.5).cast(Typ::DateTime).unwrap();
+    assert_eq!(
+        n,
+        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap()))
+    );
+    assert_eq!(n.cast(Typ::F64), Some(Value::F64(-1.5)));
+
+    // Non-finite and out-of-range map to None, not a bogus epoch / wrapped date.
+    assert_eq!(Value::F64(f64::NAN).cast(Typ::DateTime), None);
+    assert_eq!(Value::F64(f64::INFINITY).cast(Typ::DateTime), None);
+    assert_eq!(Value::U64(u64::MAX).cast(Typ::DateTime), None);
+
+    // Integer sources still cast to a whole-second DateTime.
+    assert_eq!(
+        Value::I64(5).cast(Typ::DateTime),
+        Some(Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(5, 0).unwrap())))
+    );
+}
