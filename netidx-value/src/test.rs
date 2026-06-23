@@ -332,3 +332,24 @@ fn checked_methods() {
     // cross-type checked
     assert!(matches!(Value::I64(i64::MAX).checked_add(Value::I32(1)), Value::Error(_)));
 }
+
+#[test]
+fn cast_datetime_to_float_preserves_subseconds() {
+    // The old code added `timestamp_nanos_opt()? / 1_000_000_000` — integer
+    // division that recovered the whole seconds and DOUBLE-COUNTED them, and
+    // returned None for dates past ~2262 (nanos-since-epoch overflows i64).
+    // The fix adds only the sub-second fraction via `timestamp_subsec_nanos`.
+    let dt = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap()));
+    assert_eq!(dt.clone().cast(Typ::F64), Some(Value::F64(1.5)));
+    assert_eq!(dt.cast(Typ::F32), Some(Value::F32(1.5)));
+
+    // Sub-epoch: chrono stores floor-seconds with a non-negative subsec, so
+    // -1.5s is (secs -2, nanos 5e8) and must still read back as -1.5.
+    let neg = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap()));
+    assert_eq!(neg.cast(Typ::F64), Some(Value::F64(-1.5)));
+
+    // A date past 2262 (whole nanos-since-epoch overflows i64) — the old
+    // `timestamp_nanos_opt()?` returned None here; now it converts.
+    let far = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(10_000_000_000, 0).unwrap()));
+    assert_eq!(far.cast(Typ::F64), Some(Value::F64(10_000_000_000.0)));
+}

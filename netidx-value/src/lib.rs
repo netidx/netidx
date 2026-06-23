@@ -744,8 +744,8 @@ impl Value {
                 Typ::I64 => Some(Value::I64(v.timestamp())),
                 Typ::Z64 => Some(Value::Z64(v.timestamp())),
                 Typ::F32 | Typ::F64 => {
-                    let dur = v.timestamp() as f64;
-                    let dur = dur + (v.timestamp_nanos_opt()? / 1_000_000_000) as f64;
+                    let dur = v.timestamp() as f64
+                        + v.timestamp_subsec_nanos() as f64 / 1_000_000_000.0;
                     if typ == Typ::F32 {
                         Some(Value::F32(dur as f32))
                     } else {
