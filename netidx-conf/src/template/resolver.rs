@@ -254,7 +254,17 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
             Some(p) => p.clone(),
             None => paths::user_perms_file()?,
         };
-        let base_str = if p.base.is_empty() { "/" } else { p.base.as_str() };
+        // A delegated child's runtime authority root is its parent referral
+        // path, not `/`: `resolver_server::Config::root()` returns the
+        // parent's path, and the perms validator rejects any entry outside
+        // that root. Seed under the same base so a delegated resolver boots
+        // instead of crash-looping ("permission entry for parent: /sat1,
+        // entry: /"). A non-delegated resolver keeps its own base (or `/`).
+        let base_str = match &p.parent {
+            Some(parent) if !parent.path.is_empty() => parent.path.as_str(),
+            _ if p.base.is_empty() => "/",
+            _ => p.base.as_str(),
+        };
         let mut seed = p
             .perms_seed
             .clone()
