@@ -1232,12 +1232,19 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
             },
         }
     };
-    // Fetch the network identity from the first reachable seed and have
-    // the operator confirm it — the single human trust decision.
-    // Everything after this is pinned to the confirmed fingerprint.
+    confirm_seeds(&seeds, kind)
+}
+
+/// Fetch the network identity from the first reachable seed and have the
+/// operator confirm it — the single human trust decision; everything after
+/// is pinned to the confirmed fingerprint. Then map the network. Shared by
+/// mDNS discovery and the explicit `--parent-conf-server` / manual-address
+/// paths, so "is a CA reachable?" has ONE answer feeding the
+/// create-vs-enroll decision.
+fn confirm_seeds(seeds: &[SocketAddr], kind: NodeKind) -> Result<ConfServers> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut fetched = None;
-    for addr in &seeds {
+    for addr in seeds {
         match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
             Ok(id) => {
                 fetched = Some((*addr, id));
@@ -1254,9 +1261,17 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
         bail!("the network identity was not confirmed; nothing was sent");
     }
     let info = rt
-        .block_on(conf_client::aggregate(&seeds, kind, &identity))
+        .block_on(conf_client::aggregate(seeds, kind, &identity))
         .context("mapping the network (GetInfo peer walk)")?;
     Ok(ConfServers::Have(DiscoveredNetwork { identity, info }))
+}
+
+/// Confirm a network reachable at one explicit address — the WAN parent
+/// given via `--parent-conf-server`, where there is no mDNS. Resolving the
+/// parent into a `Have` BEFORE the create-vs-enroll decision is what makes a
+/// satellite enroll its cert from the existing CA and never mint its own.
+fn confirm_network_at(addr: SocketAddr, kind: NodeKind) -> Result<ConfServers> {
+    confirm_seeds(&[addr], kind)
 }
 
 /// Map a confirmed network's resolvers into per-address referral auth,
@@ -2248,7 +2263,20 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // The probe outcome rides through the whole install: once the
     // operator has said "no conf server", nothing downstream offers a
     // network join again.
-    let probe = if f.auth.is_none() && !f.common.dry_run {
+    let probe = if let Some(parent) = f.parent_conf_server {
+        if f.common.dry_run {
+            // dry-run can't run the live confirm; the parent match below
+            // bails on dry-run with a clear message.
+            ConfServers::NotProbed
+        } else {
+            // An explicit WAN parent (no mDNS): confirm it and pin the
+            // network. This makes `probe.have()` Some, so the install
+            // ENROLLS this resolver's cert from the parent's CA and the
+            // "create a local CA" branches become unreachable — a satellite
+            // shares the one trust domain, it never mints its own.
+            confirm_network_at(parent, NodeKind::Resolver)?
+        }
+    } else if f.auth.is_none() && !f.common.dry_run {
         discover_network(NodeKind::Resolver)?
     } else {
         ConfServers::NotProbed
@@ -2259,7 +2287,16 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // conventional resolver port), so a blank answer is fine. A
     // discovered network's auth scheme wins — a resolver joining a
     // network must speak what its peers speak.
-    let kind: AuthKind = match probe.have().and_then(network_auth_kind) {
+    // A delegated child (`--parent-conf-server`) keeps the data-plane auth
+    // the operator chose — a /eu subtree may run krb5 under a TLS parent —
+    // so only the trust-domain/CA decision comes from the parent, never its
+    // auth. A plain discovered peer still imports its cluster's scheme.
+    let imported_auth = if f.parent_conf_server.is_some() {
+        None
+    } else {
+        probe.have().and_then(network_auth_kind)
+    };
+    let kind: AuthKind = match imported_auth {
         Some(k) => {
             println!(
                 "importing auth scheme from the network: {}",
@@ -2386,6 +2423,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // `resolver_tls_generate`.
     #[cfg(unix)]
     if probe.have().is_none()
+        && f.parent_conf_server.is_none()
         && !f.common.dry_run
         && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
         && !ca::default_ca_present()
@@ -2513,10 +2551,14 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
                     "subtree this resolver will own under the parent (e.g. /eu)",
                     f.delegate_subtree.clone(),
                 )?;
+                // The probe already glyph-confirmed this parent (it had to,
+                // to enroll our cert from its CA), so pass that identity in —
+                // the operator confirms the parent's glyph exactly once.
                 let parent_addrs = super::delegation::delegate_under_parent(
                     parent_conf,
                     &subtree,
                     child,
+                    probe.have().map(|n| &n.identity),
                 )?;
                 Some(ParentRef {
                     path: ArcStr::from(subtree.as_str()),
@@ -2985,6 +3027,17 @@ fn resolver_tls_generate(
         // the domain through so the first admin's policy defaults to
         // `*.<domain>` — no extra typing and no mismatch with the
         // names this deployment will issue.
+        // Belt-and-suspenders: a resolver told about a parent conf server
+        // must enroll from that network's CA, never mint its own. The probe
+        // (confirm_network_at) already routes such installs to the enroll
+        // path, so reaching here with a parent set would be a bug.
+        if f.parent_conf_server.is_some() {
+            bail!(
+                "about to create a local CA while --parent-conf-server is set; a \
+                 delegated child must enroll from the parent's CA, not create its \
+                 own trust domain (internal: the probe should have prevented this)"
+            );
+        }
         println!(
             "no CA found at {} — creating the network's CA (it signs this \
              resolver's certificate and anchors discovery, enrollment, and \
@@ -3174,12 +3227,15 @@ fn resolver_auth_from_network(
     }
 }
 
-/// The resolver install's post-apply conf-server step. Joining an
-/// existing network ⇒ [`enroll_conf_server`] (a brand new conf server
-/// here, serving cert minted by the network's CA). A fresh network ⇒
-/// the CA-creation path already wrote a ca-role `conf-server.json` via
-/// `setup_server`; add this host's resolver / id-map roles to it. No
-/// config at all ⇒ the operator declined a conf server — nothing to do.
+/// The resolver install's post-apply conf-server step. Three cases:
+/// (1) joining an existing network whose CA we do NOT hold ⇒
+/// [`enroll_conf_server`] (a brand new conf server here, serving cert minted
+/// by the network's CA). (2) A fresh network we just created, OR a
+/// "discovered" network whose CA *this host already holds* (it ran `ca init`
+/// and is now adding a resolver) ⇒ the ca-role `conf-server.json` already
+/// exists; merge this host's resolver / id-map roles into it, preserving the
+/// `ca` role. (3) No config at all ⇒ the operator declined a conf server —
+/// nothing to do.
 #[cfg(unix)]
 fn post_apply_conf_server(
     discovered: Option<&DiscoveredNetwork>,
@@ -3190,8 +3246,21 @@ fn post_apply_conf_server(
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
 ) -> Result<()> {
-    use netidx_conf::conf_server_config::{IdMapRole, ResolverRole};
     match discovered {
+        // A "discovered" network whose CA this host already holds is our OWN
+        // network: this host bootstrapped the CA (`ca init`, or an earlier
+        // install) and is now adding a resolver. It already serves the conf
+        // plane with the `ca` role, so it must MERGE the new resolver/id-map
+        // roles into that config — never enroll a fresh conf server, whose
+        // join-shape config drops the `ca` role and silently disables signing
+        // (observed in the lab). Same handling as the fresh-network arm below.
+        Some(net) if host_holds_ca(net) => match conf_plane_decision(kind, no_conf_server) {
+            // Honor an explicit `--no-conf-server` (and Local auth) the same way
+            // the enroll arm does — don't advertise this resolver — even though
+            // the conf server itself keeps running here (it's the CA).
+            ConfPlane::Skip => Ok(()),
+            _ => merge_resolver_roles(resolver_config, id_map),
+        },
         Some(net) => enroll_conf_server(
             net,
             kind,
@@ -3201,20 +3270,49 @@ fn post_apply_conf_server(
             resolver_config,
             id_map,
         ),
-        None => {
-            if paths::discover_conf_server_config().is_err() {
-                return Ok(());
-            }
-            let path = super::server::update_roles(|roles| {
-                roles.resolver = Some(ResolverRole { config: resolver_config });
-                if let Some(map) = id_map {
-                    roles.id_map = Some(IdMapRole { map });
-                }
-            })?;
-            println!("updated conf-server roles in {}", path.display());
-            Ok(())
-        }
+        None => merge_resolver_roles(resolver_config, id_map),
     }
+}
+
+/// True when this host already holds the CA for the just-discovered network —
+/// i.e. the network is our own (this host ran `ca init`, or created the CA on
+/// an earlier install). We compare the local CA cert's fingerprint against the
+/// discovered identity so we only short-circuit for genuinely our own CA, never
+/// a different network that merely happens to be reachable on the wire.
+#[cfg(unix)]
+fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
+    use netidx_conf::fingerprint::Fingerprint;
+    if !ca::default_ca_present() {
+        return false;
+    }
+    let Ok(ca_dir) = paths::user_ca_dir() else {
+        return false;
+    };
+    let Ok(pem) = std::fs::read(ca_dir.join("certificate.pem")) else {
+        return false;
+    };
+    matches!(Fingerprint::of_cert_pem(&pem), Ok(fp) if fp == net.identity.fingerprint)
+}
+
+/// Merge this host's resolver / id-map roles into the existing
+/// `conf-server.json`, preserving every other role (notably `ca`). Used both
+/// when there's no discovered network (a fresh network we just created) and
+/// when the discovered network is our own CA host. No existing config ⇒ the
+/// operator declined a conf server here, so there's nothing to update.
+#[cfg(unix)]
+fn merge_resolver_roles(resolver_config: PathBuf, id_map: Option<PathBuf>) -> Result<()> {
+    use netidx_conf::conf_server_config::{IdMapRole, ResolverRole};
+    if paths::discover_conf_server_config().is_err() {
+        return Ok(());
+    }
+    let path = super::server::update_roles(|roles| {
+        roles.resolver = Some(ResolverRole { config: resolver_config });
+        if let Some(map) = id_map {
+            roles.id_map = Some(IdMapRole { map });
+        }
+    })?;
+    println!("updated conf-server roles in {}", path.display());
+    Ok(())
 }
 
 /// Enroll a conf server on this (non-CA) host: the network's CA signs

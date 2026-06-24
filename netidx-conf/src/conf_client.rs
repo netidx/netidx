@@ -106,6 +106,7 @@ pub fn generate_key_and_csr(name: &str) -> Result<KeyAndCsr> {
 /// certificate it's bound to, and the domain + roles the server claimed
 /// inside TLS. Pass it to [`get_info`] / [`request_cert`] / [`enroll`]
 /// to pin those connections to exactly the CA the operator confirmed.
+#[derive(Clone)]
 pub struct CaIdentity {
     /// SHA-256 of the CA cert, for out-of-band comparison (text +
     /// identicon).

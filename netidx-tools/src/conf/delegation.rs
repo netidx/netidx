@@ -50,15 +50,31 @@ pub(crate) fn delegate_under_parent(
     parent_conf_addr: SocketAddr,
     proposed_path: &str,
     child: Vec<ResolverAddr>,
+    confirmed: Option<&conf_client::CaIdentity>,
 ) -> Result<Vec<ResolverAddr>> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let identity = rt
-        .block_on(conf_client::fetch_identity(parent_conf_addr, NodeKind::Client))
-        .with_context(|| format!("contacting parent conf server {parent_conf_addr}"))?;
-    init::show_network_identity(parent_conf_addr, &identity);
-    if !prompt::confirm("does this match the parent network's admin glyph?", false)? {
-        bail!("the parent network identity was not confirmed; nothing was sent");
-    }
+    // Reuse an identity the caller already glyph-confirmed (the resolver
+    // install probe confirms the parent up front, so don't ask twice);
+    // otherwise fetch + confirm here (the standalone `add-parent` path).
+    // Either way it is the one human trust decision for this delegation.
+    let identity = match confirmed {
+        Some(id) => (*id).clone(),
+        None => {
+            let id = rt
+                .block_on(conf_client::fetch_identity(parent_conf_addr, NodeKind::Client))
+                .with_context(|| {
+                    format!("contacting parent conf server {parent_conf_addr}")
+                })?;
+            init::show_network_identity(parent_conf_addr, &id);
+            if !prompt::confirm(
+                "does this match the parent network's admin glyph?",
+                false,
+            )? {
+                bail!("the parent network identity was not confirmed; nothing was sent");
+            }
+            id
+        }
+    };
     let request_id = rt.block_on(conf_client::request_delegation(
         parent_conf_addr,
         proposed_path,
@@ -138,7 +154,9 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
         "the subtree this resolver will own under the parent (e.g. /eu)",
         f.path,
     )?;
-    let parent = delegate_under_parent(server, &proposed_path, child)?;
+    // Standalone add-parent: no prior confirm, so delegate_under_parent does
+    // the fetch + glyph-confirm itself.
+    let parent = delegate_under_parent(server, &proposed_path, child, None)?;
     let parent_ref = ParentRef {
         path: ArcStr::from(proposed_path.as_str()),
         ttl: None,
