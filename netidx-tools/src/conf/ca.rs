@@ -129,6 +129,11 @@ pub(crate) enum AdminCmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminScopeArgs {
+    /// Manage admins on a REMOTE CA over the conf plane (instead of the
+    /// local vault). Authenticates as a `may_manage_admins` role admin;
+    /// the operator confirms the CA's fingerprint before any password.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
     /// Override the CA directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -186,6 +191,10 @@ pub(crate) struct AdminAddRoleArgs {
     /// or / for the whole tree). Prompted when omitted.
     #[arg(long = "perms-scope", num_args = 1)]
     pub perms_scope: Vec<String>,
+    /// Mint the role admin on a REMOTE CA over the conf plane. The CA
+    /// enforces no-escalation (you may only grant ⊆ your own authority).
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -215,6 +224,10 @@ pub(crate) struct AdminSetPolicyArgs {
     /// the existing list.
     #[arg(long = "perms-scope", num_args = 1)]
     pub perms_scope: Vec<String>,
+    /// Rescope a role admin on a REMOTE CA over the conf plane (CA enforces
+    /// no-escalation).
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -227,6 +240,9 @@ pub(crate) struct AdminRemoveArgs {
     /// Allow removing the last admin (locks the CA permanently).
     #[arg(long)]
     pub force: bool,
+    /// Remove a role admin on a REMOTE CA over the conf plane.
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -1202,6 +1218,71 @@ fn init(p: InitParams) -> Result<()> {
 
 // -- ca admin -----------------------------------------------------------------
 
+/// The preamble for a `--server` admin op: confirm WHO the conf server is
+/// (silently against the local CA cert when this host holds it, else
+/// glyph-confirm with the operator — before any password is typed), then
+/// prompt for the managing admin's name + password. Returns the runtime, the
+/// pinned identity, and the admin credentials. Mirrors `revoke` / `approve`.
+fn remote_admin_preamble(
+    server: SocketAddr,
+    ca_dir: Option<PathBuf>,
+) -> Result<(tokio::runtime::Runtime, conf_client::CaIdentity, String, Zeroizing<String>)> {
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let identity = rt
+        .block_on(conf_client::fetch_identity(server, NodeKind::Client))
+        .with_context(|| format!("contacting conf server {server}"))?;
+    let local_fp = ca_dir_for(ca_dir)
+        .ok()
+        .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
+        .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
+    match local_fp {
+        Some(fp) if fp == identity.fingerprint => {
+            println!("verified {server} against the local CA");
+        }
+        _ => {
+            init::show_network_identity(server, &identity);
+            if !prompt::confirm("does this match what your CA admin gave you?", false)? {
+                bail!("CA identity was not confirmed; nothing was sent");
+            }
+        }
+    }
+    let admin = match env_user_name() {
+        Some(user) => prompt::string_with_default("your admin name", None, &user)?,
+        None => prompt::required_string("your admin name", None)?,
+    };
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
+    Ok((rt, identity, admin, password))
+}
+
+/// Print the admin roster (local `list` and remote `list --server` share
+/// this), one line per admin: name, tier, and full policy incl.
+/// `may_manage_admins`.
+fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
+    if admins.is_empty() {
+        println!("(no admins — this CA is not vault-protected)");
+    }
+    for info in admins {
+        let tier = match info.kind {
+            ca_vault::SlotKind::Signing => "signing",
+            ca_vault::SlotKind::Role => "role",
+        };
+        let pol = &info.policy;
+        println!(
+            "{} [{tier}]: allowed_san={:?} max_validity_days={} id_map_groups={:?} \
+             may_enroll_servers={} may_manage_admins={} perms_edit_scopes={:?}",
+            info.admin,
+            pol.allowed_san,
+            pol.max_validity_days,
+            pol.id_map_groups,
+            pol.may_enroll_servers,
+            pol.may_manage_admins,
+            pol.perms_edit_scopes
+        );
+    }
+}
+
 fn admin(cmd: AdminCmd) -> Result<()> {
     match cmd {
         AdminCmd::Add(_) => {
@@ -1218,37 +1299,56 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             )
         }
         AdminCmd::AddRole(a) => {
-            let dir = ca_dir_for(a.ca_dir)?;
-            let name = prompt::required_string("new role admin name", a.name)?;
+            let name = prompt::required_string("new role admin name", a.name.clone())?;
             if ca_vault::is_reserved_admin(&name) {
                 bail!(
                     "{name:?} is a reserved signing-slot name (recovery / autorenew) \
                      and cannot be a role admin"
                 );
             }
-            // A role admin now carries a full policy, just like the founding
-            // superuser: issuance scope, id-map groups, may-enroll, and perms
-            // scopes. A role with no authority at all is allowed (a placeholder
-            // to scope later) — the empty-scope bail is gone.
-            let policy = prompt_policy(
-                &PolicyArgs {
-                    allow_san: &a.allow_san,
-                    max_validity_days: a.max_validity_days,
-                    id_map_groups: &a.id_map_groups,
-                    may_enroll_servers: a.may_enroll_servers,
-                    perms_scope: &a.perms_scope,
-                },
-                false,
-                &existing_ca_cn(&dir),
-                None,
-            )?;
+            let policy_args = PolicyArgs {
+                allow_san: &a.allow_san,
+                max_validity_days: a.max_validity_days,
+                id_map_groups: &a.id_map_groups,
+                may_enroll_servers: a.may_enroll_servers,
+                perms_scope: &a.perms_scope,
+            };
+            // Remote: the CA enforces no-escalation (granted policy ⊆ the
+            // managing admin's). Local: on-box FS access is the authority.
+            if let Some(server) = a.server {
+                let (rt, identity, admin, password) =
+                    remote_admin_preamble(server, a.ca_dir.clone())?;
+                let policy = prompt_policy(
+                    &policy_args,
+                    false,
+                    &default_ca_cn(&identity.domain),
+                    Some(&identity.domain),
+                )?;
+                let new_pw = collect_required_password(&format!(
+                    "password for new role admin {name:?}"
+                ))?;
+                rt.block_on(conf_client::add_role_admin(
+                    server,
+                    NodeKind::Client,
+                    &identity,
+                    &admin,
+                    password.as_str(),
+                    &name,
+                    &new_pw,
+                    policy,
+                ))?;
+                println!("added role admin {name:?} on the CA at {server}");
+                return Ok(());
+            }
+            // A role admin carries a full policy, just like the founding
+            // superuser. A role with no authority at all is allowed (a
+            // placeholder to scope later).
+            let dir = ca_dir_for(a.ca_dir)?;
+            let policy = prompt_policy(&policy_args, false, &existing_ca_cn(&dir), None)?;
             let summary = format!(
                 "allowed_san={:?} may_enroll_servers={} perms_edit_scopes={:?}",
                 policy.allowed_san, policy.may_enroll_servers, policy.perms_edit_scopes
             );
-            // On-box authority is filesystem access to the vault; a role slot
-            // wraps no MK, so no signing password is needed. (Phase 4 adds a
-            // --server path gated by may_manage_admins over the conf plane.)
             let new_pw =
                 collect_required_password(&format!("password for new role admin {name:?}"))?;
             ca_vault::add_role_slot(&dir, &name, &new_pw, policy)?;
@@ -1256,28 +1356,44 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             Ok(())
         }
         AdminCmd::SetPolicy(a) => {
-            let dir = ca_dir_for(a.ca_dir)?;
-            let name = prompt::required_string("admin whose policy to set", a.name)?;
+            let name = prompt::required_string("admin whose policy to set", a.name.clone())?;
             if ca_vault::is_reserved_admin(&name) {
                 bail!(
                     "{name:?} is a system-managed signing slot; its narrow policy is \
                      fixed and must not be widened. Manage authority through role admins."
                 );
             }
-            let policy = prompt_policy(
-                &PolicyArgs {
-                    allow_san: &a.allow_san,
-                    max_validity_days: a.max_validity_days,
-                    id_map_groups: &a.id_map_groups,
-                    may_enroll_servers: a.may_enroll_servers,
-                    perms_scope: &a.perms_scope,
-                },
-                false,
-                &existing_ca_cn(&dir),
-                None,
-            )?;
-            // Report the resolved policy (the prompt may have filled it),
-            // not the raw flag.
+            let policy_args = PolicyArgs {
+                allow_san: &a.allow_san,
+                max_validity_days: a.max_validity_days,
+                id_map_groups: &a.id_map_groups,
+                may_enroll_servers: a.may_enroll_servers,
+                perms_scope: &a.perms_scope,
+            };
+            if let Some(server) = a.server {
+                let (rt, identity, admin, password) =
+                    remote_admin_preamble(server, a.ca_dir.clone())?;
+                let policy = prompt_policy(
+                    &policy_args,
+                    false,
+                    &default_ca_cn(&identity.domain),
+                    Some(&identity.domain),
+                )?;
+                rt.block_on(conf_client::set_admin_policy(
+                    server,
+                    NodeKind::Client,
+                    &identity,
+                    &admin,
+                    password.as_str(),
+                    &name,
+                    policy,
+                ))?;
+                println!("updated policy for admin {name:?} on the CA at {server}");
+                return Ok(());
+            }
+            let dir = ca_dir_for(a.ca_dir)?;
+            let policy = prompt_policy(&policy_args, false, &existing_ca_cn(&dir), None)?;
+            // Report the resolved policy (the prompt may have filled it).
             let summary = format!(
                 "allowed_san={:?} max_validity_days={} id_map_groups={:?} \
                  may_enroll_servers={} perms_edit_scopes={:?}",
@@ -1294,8 +1410,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             Ok(())
         }
         AdminCmd::Remove(a) => {
-            let dir = ca_dir_for(a.ca_dir)?;
-            let name = prompt::required_string("admin to revoke", a.name)?;
+            let name = prompt::required_string("admin to revoke", a.name.clone())?;
             if ca_vault::is_reserved_admin(&name) {
                 bail!(
                     "{name:?} is a system-managed signing slot and cannot be removed \
@@ -1304,36 +1419,45 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                      autorenew with `netidx conf ca auto-approve --rotate`."
                 );
             }
+            if let Some(server) = a.server {
+                let (rt, identity, admin, password) =
+                    remote_admin_preamble(server, a.ca_dir.clone())?;
+                rt.block_on(conf_client::remove_admin(
+                    server,
+                    NodeKind::Client,
+                    &identity,
+                    &admin,
+                    password.as_str(),
+                    &name,
+                ))?;
+                println!("removed role admin {name:?} on the CA at {server}");
+                return Ok(());
+            }
             // On-box authority is filesystem access to the vault; you revoke
             // a slot by name. The last-signing-slot guard prevents orphaning
             // the CA key.
+            let dir = ca_dir_for(a.ca_dir)?;
             ca_vault::remove_slot(&dir, &name, a.force)?;
             println!("revoked admin {name:?}");
             Ok(())
         }
         AdminCmd::List(a) => {
+            if let Some(server) = a.server {
+                let (rt, identity, admin, password) =
+                    remote_admin_preamble(server, a.ca_dir.clone())?;
+                let admins = rt.block_on(conf_client::list_admins(
+                    server,
+                    NodeKind::Client,
+                    &identity,
+                    &admin,
+                    password.as_str(),
+                ))?;
+                print_admin_list(&admins);
+                return Ok(());
+            }
             let dir = ca_dir_for(a.ca_dir)?;
             let admins = ca_vault::list_admins(&dir)?;
-            if admins.is_empty() {
-                println!("(no admins — this CA is not vault-protected)");
-            }
-            for info in admins {
-                let tier = match info.kind {
-                    ca_vault::SlotKind::Signing => "signing",
-                    ca_vault::SlotKind::Role => "role",
-                };
-                let pol = &info.policy;
-                println!(
-                    "{} [{tier}]: allowed_san={:?} max_validity_days={} \
-                     id_map_groups={:?} may_enroll_servers={} perms_edit_scopes={:?}",
-                    info.admin,
-                    pol.allowed_san,
-                    pol.max_validity_days,
-                    pol.id_map_groups,
-                    pol.may_enroll_servers,
-                    pol.perms_edit_scopes
-                );
-            }
+            print_admin_list(&admins);
             Ok(())
         }
     }
@@ -1571,8 +1695,10 @@ fn existing_ca_cn(dir: &Path) -> String {
 }
 
 /// Prompt twice for a new password (confirmed, non-empty). Bails on a
-/// non-TTY — a vaulted CA must have a real password.
-fn collect_required_password(label: &str) -> Result<String> {
+/// non-TTY — a vaulted CA must have a real password. The result (and the
+/// confirmation temporary) are `Zeroizing` — this mints a credential, so its
+/// plaintext shouldn't linger in freed heap.
+fn collect_required_password(label: &str) -> Result<Zeroizing<String>> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!(
@@ -1580,13 +1706,13 @@ fn collect_required_password(label: &str) -> Result<String> {
         ));
     }
     loop {
-        let pw = rpassword::prompt_password(format!("{label}: "))?;
+        let pw = Zeroizing::new(rpassword::prompt_password(format!("{label}: "))?);
         if pw.is_empty() {
             eprintln!("password must not be empty");
             continue;
         }
-        let again = rpassword::prompt_password("again: ")?;
-        if again != pw {
+        let again = Zeroizing::new(rpassword::prompt_password("again: ")?);
+        if *again != *pw {
             eprintln!("passwords did not match; try again");
             continue;
         }

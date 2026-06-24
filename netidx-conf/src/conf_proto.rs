@@ -18,7 +18,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Conventional conf-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -208,6 +208,26 @@ pub enum Request {
     /// Peer-cert-gated like [`Request::ApplyReferralEdit`]. Answered with
     /// [`ApplyPermsEditResponse`].
     ApplyPermsEdit(ApplyPermsEditRequest),
+    /// Admin-authenticated, sent to the **CA**: mint a new **role** admin
+    /// with the given scoped policy. Gated on the caller's
+    /// `may_manage_admins` (or a signing slot), and the granted policy must
+    /// be a subset of the caller's (no privilege escalation). Answered with
+    /// [`AdminMgmtResponse`].
+    AddRoleAdmin(AddRoleAdminRequest),
+    /// Admin-authenticated, sent to the **CA**: replace a role admin's
+    /// policy. Same gate + no-escalation subset rule as
+    /// [`Request::AddRoleAdmin`]; never touches the reserved signing slots.
+    /// Answered with [`AdminMgmtResponse`].
+    SetAdminPolicy(SetAdminPolicyRequest),
+    /// Admin-authenticated, sent to the **CA**: remove a role admin. Never
+    /// the reserved signing slots, and never the last admin that can manage
+    /// admins. Answered with [`AdminMgmtResponse`].
+    RemoveAdmin(RemoveAdminRequest),
+    /// Admin-authenticated, sent to the **CA**: list the admins, their tiers
+    /// and policies (gated on `may_manage_admins` / a signing slot — the
+    /// admin roster is not readable by a lower-tier role). Answered with
+    /// [`AdminListResponse`].
+    ListAdmins(ListAdminsRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -757,6 +777,65 @@ pub struct ApplyPermsEditRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApplyPermsEditResponse {
     Ok,
+    Err { reason: String },
+}
+
+// -- remote admin management (over the conf plane) ----------------------------
+
+/// Admin → CA: mint a new role admin `name` with `policy`. The server gates
+/// on the caller's `may_manage_admins` (or a signing slot) and enforces that
+/// `policy` is a subset of the caller's own (no escalation). `new_password`
+/// is the password set on the minted slot (the managing admin conveys it to
+/// the satellite); it rides the same TLS-to-the-pinned-CA channel as the
+/// caller's own password.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddRoleAdminRequest {
+    pub admin: String,
+    pub password: Secret,
+    pub name: String,
+    pub new_password: Secret,
+    pub policy: crate::ca_vault::Policy,
+}
+
+/// Admin → CA: replace role admin `target`'s policy with `policy` (same gate
+/// + subset rule as [`AddRoleAdminRequest`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetAdminPolicyRequest {
+    pub admin: String,
+    pub password: Secret,
+    pub target: String,
+    pub policy: crate::ca_vault::Policy,
+}
+
+/// Admin → CA: remove role admin `target`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveAdminRequest {
+    pub admin: String,
+    pub password: Secret,
+    pub target: String,
+}
+
+/// Admin → CA: list the admin roster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListAdminsRequest {
+    pub admin: String,
+    pub password: Secret,
+}
+
+/// Response to add/set/remove admin ops. These are CA-local (no cluster
+/// propagation), so there is no peer-result list — just success or a safe
+/// reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AdminMgmtResponse {
+    Ok,
+    Err { reason: String },
+}
+
+/// Response to [`Request::ListAdmins`]: the roster (each entry carries the
+/// admin's name, tier, and full policy — including `may_manage_admins`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AdminListResponse {
+    Ok { admins: Vec<crate::ca_vault::AdminInfo> },
     Err { reason: String },
 }
 

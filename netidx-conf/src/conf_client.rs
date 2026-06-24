@@ -41,6 +41,8 @@ use crate::{
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         DeregisterRequest, EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse,
         ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
+        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
+        RemoveAdminRequest, SetAdminPolicyRequest,
         GetMapResponse, GetMapVersionResponse, GetPermsResponse, NetworkMap, RegisterRequest,
         RegisterResponse, IssuedEntry,
         ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
@@ -378,6 +380,113 @@ pub async fn edit_perms(
     match conf_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
         EditPermsResponse::Ok { peers } => Ok(peers),
         EditPermsResponse::Err { reason } => bail!("the CA refused the perms edit: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): mint a new role admin `name` with `policy` and
+/// `new_password`. The server gates on the caller's management authority and
+/// enforces `policy ⊆ caller`.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_role_admin(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+    name: &str,
+    new_password: &str,
+    policy: crate::ca_vault::Policy,
+) -> Result<()> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::AddRoleAdmin(AddRoleAdminRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+            name: name.to_string(),
+            new_password: conf_proto::Secret(new_password.to_string()),
+            policy,
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): replace role admin `target`'s policy.
+pub async fn set_admin_policy(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+    target: &str,
+    policy: crate::ca_vault::Policy,
+) -> Result<()> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::SetAdminPolicy(SetAdminPolicyRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+            target: target.to_string(),
+            policy,
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): remove role admin `target`.
+pub async fn remove_admin(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+    target: &str,
+) -> Result<()> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::RemoveAdmin(RemoveAdminRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+            target: target.to_string(),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): list the admin roster (tier + policy per admin).
+pub async fn list_admins(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+) -> Result<Vec<crate::ca_vault::AdminInfo>> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ListAdmins(ListAdminsRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
+        AdminListResponse::Ok { admins } => Ok(admins),
+        AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
 

@@ -26,6 +26,8 @@ use crate::{
         EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
         ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
         GetPermsResponse,
+        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
+        RemoveAdminRequest, SetAdminPolicyRequest,
         DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, NodeKind,
         RegisterRequest, RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
@@ -767,12 +769,10 @@ async fn handle_conn(
                 .context("writing ApproveDelegationResponse")
         }
         Request::DenyDelegation(req) => {
-            let resp = {
-                let state = state.clone();
-                tokio::task::spawn_blocking(move || handle_deny_delegation(&state, &req))
-                    .await
-                    .context("deny delegation task panicked")?
-            };
+            // Argon2-bound (vault auth) — keep it under the sign semaphore.
+            let state = state.clone();
+            let resp =
+                run_signing(&signs, move || handle_deny_delegation(&state, &req)).await?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing DenyDelegationResponse")
@@ -850,10 +850,9 @@ async fn handle_conn(
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetMapResponse")
         }
         Request::RemoveServer(req) => {
+            // Argon2-bound (vault auth) — keep it under the sign semaphore.
             let state = state.clone();
-            let resp = tokio::task::spawn_blocking(move || handle_remove_server(&state, &req))
-                .await
-                .context("remove-server task panicked")?;
+            let resp = run_signing(&signs, move || handle_remove_server(&state, &req)).await?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RemoveServerResponse")
@@ -866,7 +865,7 @@ async fn handle_conn(
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetPermsResponse")
         }
         Request::EditPerms(req) => {
-            let resp = handle_edit_perms(state, &req).await;
+            let resp = handle_edit_perms(state, &signs, &req).await;
             conf_proto::write_msg(&mut tls, &resp).await.context("writing EditPermsResponse")
         }
         Request::ApplyPermsEdit(req) => {
@@ -883,6 +882,32 @@ async fn handle_conn(
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApplyPermsEditResponse")
+        }
+        Request::AddRoleAdmin(req) => {
+            // Bound the Argon2 in `authenticate` by the sign semaphore, like
+            // every other vault-auth handler — a bare `spawn_blocking` would
+            // let an anonymous flood pin unbounded 64 MiB derivations.
+            let state = state.clone();
+            let resp =
+                run_signing(&signs, move || handle_add_role_admin(&state, &req)).await?;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+        }
+        Request::SetAdminPolicy(req) => {
+            let state = state.clone();
+            let resp =
+                run_signing(&signs, move || handle_set_admin_policy(&state, &req)).await?;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+        }
+        Request::RemoveAdmin(req) => {
+            let state = state.clone();
+            let resp =
+                run_signing(&signs, move || handle_remove_admin(&state, &req)).await?;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+        }
+        Request::ListAdmins(req) => {
+            let state = state.clone();
+            let resp = run_signing(&signs, move || handle_list_admins(&state, &req)).await?;
+            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminListResponse")
         }
     }
 }
@@ -2757,7 +2782,11 @@ async fn push_perms_edit_to_peers(
 /// CA-side: authenticate the admin, find the target cluster in the map, and
 /// propagate the perms edit to its conf servers (peer-cert-gated). The CA
 /// never edits a foreign cluster's files directly — it pushes.
-async fn handle_edit_perms(state: &Arc<Server>, req: &EditPermsRequest) -> EditPermsResponse {
+async fn handle_edit_perms(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &EditPermsRequest,
+) -> EditPermsResponse {
     let err = |reason: String| EditPermsResponse::Err { reason };
     let ca_dir = match state.ca_dir() {
         Some(d) => d.to_path_buf(),
@@ -2767,11 +2796,12 @@ async fn handle_edit_perms(state: &Arc<Server>, req: &EditPermsRequest) -> EditP
     // key, so a role keyslot is a first-class admin here. Authorize by
     // tier: a signing admin holds full authority (it can already unlock
     // the CA and do anything); a role admin needs a `perms_edit_scopes`
-    // entry covering the target path.
+    // entry covering the target path. The Argon2 runs under the sign
+    // semaphore so an anonymous flood can't pin unbounded memory.
     let auth = {
         let admin = req.admin.clone();
         let pw = req.password.0.clone();
-        tokio::task::spawn_blocking(move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
+        run_signing(signs, move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
     };
     let authd = match auth {
         Ok(Ok(a)) => a,
@@ -2805,6 +2835,281 @@ async fn handle_edit_perms(state: &Arc<Server>, req: &EditPermsRequest) -> EditP
     };
     let peers = push_perms_edit_to_peers(state, &req.perms_json, &members).await;
     EditPermsResponse::Ok { peers }
+}
+
+// -- remote admin management --------------------------------------------------
+
+/// Authenticate `admin`/`password` and require the authority to manage
+/// admins: a signing slot (the founding recovery / autorenew credentials,
+/// which hold the master key) or a role admin whose policy carries
+/// `may_manage_admins`. The returned identity's policy bounds what it may
+/// grant (the no-escalation rule); `Err` is a safe wire reason.
+fn authorize_admin_mgmt(
+    ca_dir: &Path,
+    admin: &str,
+    password: &str,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    let authd = ca_vault::authenticate(ca_dir, admin, password)
+        .map_err(|_| "authentication failed".to_string())?;
+    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins {
+        Ok(authd)
+    } else {
+        Err(format!(
+            "admin {admin:?} is not authorized to manage admins (needs may_manage_admins)"
+        ))
+    }
+}
+
+/// Whether the caller's issuance glob `caller` covers the granted glob
+/// `granted` — i.e. every name `granted` could match is also matched by
+/// `caller`. Decidable and **sound** for the realistic DNS patterns (`*`,
+/// `*.<suffix>`, and literal names): it never reports coverage that does not
+/// hold, so it can't permit an escalation. Patterns it can't prove
+/// containment for (a mid-string `*`, a `?`) are conservatively *not* covered
+/// — grant those on-box with `ca admin add-role`, which carries no subset
+/// check.
+fn glob_covers(caller: &str, granted: &str) -> bool {
+    if caller == granted {
+        return true; // identical pattern
+    }
+    if caller == "*" {
+        return true; // matches every (slash-free) name
+    }
+    if let Some(suffix) = caller.strip_prefix("*.") {
+        // `*.<suffix>` matches exactly the names ending in `.<suffix>`. The
+        // granted pattern is covered iff its tail is the literal `.<suffix>`:
+        // then every name it matches ends in `.<suffix>`, whatever globbing
+        // precedes that tail.
+        return granted.ends_with(&format!(".{suffix}"));
+    }
+    false // a literal (or a pattern we don't reason about) only covers itself
+}
+
+/// The no-escalation rule: a managing role admin may grant a target only
+/// capabilities that are a subset of its own. Returns the first violated
+/// field as a safe reason, or `Ok(())`. The founding signing slots bypass
+/// this entirely (they hold the key — the caller checks `kind` first).
+fn policy_within(
+    caller: &ca_vault::Policy,
+    granted: &ca_vault::Policy,
+) -> std::result::Result<(), String> {
+    for g in &granted.allowed_san {
+        if !caller.allowed_san.iter().any(|c| glob_covers(c, g)) {
+            return Err(format!(
+                "cannot grant issuance scope {g:?}: it is not within your own scope {:?}",
+                caller.allowed_san
+            ));
+        }
+    }
+    if granted.max_validity_days > caller.max_validity_days {
+        return Err(format!(
+            "cannot grant max_validity_days {} — yours is {}",
+            granted.max_validity_days, caller.max_validity_days
+        ));
+    }
+    for g in &granted.id_map_groups {
+        if !caller.id_map_groups.contains(g) {
+            return Err(format!(
+                "cannot grant id-map group {g:?}: it is not in your own set {:?}",
+                caller.id_map_groups
+            ));
+        }
+    }
+    if granted.may_enroll_servers && !caller.may_enroll_servers {
+        return Err("cannot grant may_enroll_servers — you do not have it".to_string());
+    }
+    if granted.may_manage_admins && !caller.may_manage_admins {
+        return Err("cannot grant may_manage_admins — you do not have it".to_string());
+    }
+    for s in &granted.perms_edit_scopes {
+        if !perms_scope_covers(&caller.perms_edit_scopes, s) {
+            return Err(format!(
+                "cannot grant perms scope {s:?}: it is not within your own scopes {:?}",
+                caller.perms_edit_scopes
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `target` is the only ROLE admin carrying `may_manage_admins`.
+/// Removing or demoting it would strand remote admin management — only the
+/// off-box recovery password (a signing slot) could restore it. We refuse
+/// that footgun by default; the recovery credential remains the backstop.
+fn last_role_manager(ca_dir: &Path, target: &str) -> Result<bool> {
+    let admins = ca_vault::list_admins(ca_dir)?;
+    let is_role_manager = |a: &ca_vault::AdminInfo| {
+        a.kind == ca_vault::SlotKind::Role && a.policy.may_manage_admins
+    };
+    let managers = admins.iter().filter(|a| is_role_manager(a)).count();
+    let target_is_manager = admins.iter().any(|a| a.admin == target && is_role_manager(a));
+    Ok(target_is_manager && managers <= 1)
+}
+
+/// `AddRoleAdmin`: mint a new role admin (CA-only, admin-authenticated).
+fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest) -> AdminMgmtResponse {
+    let err = |reason: String| AdminMgmtResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("admin management must be sent to the CA host".to_string()),
+    };
+    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(reason) => return err(reason),
+    };
+    // The reserved signing-slot names are off-limits (add_role_slot also
+    // refuses them, but a clear message beats a generic one).
+    if ca_vault::is_reserved_admin(&req.name) {
+        return err(format!(
+            "{:?} is a reserved signing-slot name and cannot be a role admin",
+            req.name
+        ));
+    }
+    // No escalation — the founding signing credentials are exempt.
+    if !matches!(authd.kind, ca_vault::SlotKind::Signing)
+        && let Err(reason) = policy_within(&authd.policy, &req.policy)
+    {
+        return err(reason);
+    }
+    // Serialize the vault read-modify-write: admin-mgmt ops run concurrently
+    // (one per connection on the blocking pool), and the vault file is a
+    // read-modify-write. Hold the same lock the issuance path uses so two
+    // concurrent writes can't clobber each other (or both pass a guard that
+    // a single op would have failed). The slow Argon2 auth already ran above,
+    // outside the lock.
+    let _vault = state.ca.lock();
+    match ca_vault::add_role_slot(&ca_dir, &req.name, &req.new_password.0, req.policy.clone()) {
+        Ok(()) => {
+            audit(&ca_dir, &authd.admin, "add-role-admin", &req.name, 0);
+            AdminMgmtResponse::Ok
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// `SetAdminPolicy`: rescope an existing role admin (CA-only).
+fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> AdminMgmtResponse {
+    let err = |reason: String| AdminMgmtResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("admin management must be sent to the CA host".to_string()),
+    };
+    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(reason) => return err(reason),
+    };
+    if ca_vault::is_reserved_admin(&req.target) {
+        return err(format!("{:?} is a system-managed signing slot", req.target));
+    }
+    if !matches!(authd.kind, ca_vault::SlotKind::Signing)
+        && let Err(reason) = policy_within(&authd.policy, &req.policy)
+    {
+        return err(reason);
+    }
+    // Hold the vault lock across the look-up, the last-manager guard, AND the
+    // write, so a concurrent op can't change the slot's tier or the manager
+    // count between the checks and the mutation (close the TOCTOU).
+    let _vault = state.ca.lock();
+    // The target must exist and be a role slot — remote ops never touch the
+    // master-key-holding signing slots.
+    let (kind, current) = match ca_vault::slot_policy(&ca_dir, &req.target) {
+        Ok(kp) => kp,
+        Err(_) => return err(format!("no admin named {:?}", req.target)),
+    };
+    if kind != ca_vault::SlotKind::Role {
+        return err("remote admin management operates on role admins only".to_string());
+    }
+    // Don't let a rescope strand admin management by demoting the last role
+    // manager.
+    if current.may_manage_admins && !req.policy.may_manage_admins {
+        match last_role_manager(&ca_dir, &req.target) {
+            Ok(true) => {
+                return err(format!(
+                    "refusing to drop may_manage_admins from {:?}: it is the last role \
+                     admin that can manage admins (restoring it would need the recovery \
+                     password)",
+                    req.target
+                ))
+            }
+            Ok(false) => (),
+            Err(e) => return err(format!("checking admin roster: {e:#}")),
+        }
+    }
+    match ca_vault::set_policy(&ca_dir, &req.target, req.policy.clone()) {
+        Ok(()) => {
+            audit(&ca_dir, &authd.admin, "set-admin-policy", &req.target, 0);
+            AdminMgmtResponse::Ok
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// `RemoveAdmin`: remove a role admin (CA-only).
+fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtResponse {
+    let err = |reason: String| AdminMgmtResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("admin management must be sent to the CA host".to_string()),
+    };
+    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(reason) => return err(reason),
+    };
+    if ca_vault::is_reserved_admin(&req.target) {
+        return err(format!(
+            "{:?} is a system-managed signing slot — rotate it with `recovery rotate` \
+             / `auto-approve --rotate`, it cannot be removed",
+            req.target
+        ));
+    }
+    // Hold the vault lock across the look-up, the last-manager guard, and the
+    // removal so two concurrent removes can't both pass the guard and strand
+    // management (close the TOCTOU).
+    let _vault = state.ca.lock();
+    let (kind, current) = match ca_vault::slot_policy(&ca_dir, &req.target) {
+        Ok(kp) => kp,
+        Err(_) => return err(format!("no admin named {:?}", req.target)),
+    };
+    if kind != ca_vault::SlotKind::Role {
+        return err("remote admin management operates on role admins only".to_string());
+    }
+    if current.may_manage_admins {
+        match last_role_manager(&ca_dir, &req.target) {
+            Ok(true) => {
+                return err(format!(
+                    "refusing to remove {:?}: it is the last role admin that can manage \
+                     admins (restoring it would need the recovery password)",
+                    req.target
+                ))
+            }
+            Ok(false) => (),
+            Err(e) => return err(format!("checking admin roster: {e:#}")),
+        }
+    }
+    match ca_vault::remove_slot(&ca_dir, &req.target, false) {
+        Ok(()) => {
+            audit(&ca_dir, &authd.admin, "remove-admin", &req.target, 0);
+            AdminMgmtResponse::Ok
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// `ListAdmins`: the admin roster (CA-only; gated on management authority so
+/// a lower-tier role can't read everyone's capabilities).
+fn handle_list_admins(state: &Server, req: &ListAdminsRequest) -> AdminListResponse {
+    let err = |reason: String| AdminListResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("admin management must be sent to the CA host".to_string()),
+    };
+    if let Err(reason) = authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+        return err(reason);
+    }
+    match ca_vault::list_admins(&ca_dir) {
+        Ok(admins) => AdminListResponse::Ok { admins },
+        Err(e) => err(format!("listing admins: {e:#}")),
+    }
 }
 
 /// The blocking half of `ApproveDelegation`: authenticate, validate the
@@ -5821,5 +6126,314 @@ mod tests {
         apply_referral_edit_local(&p, &edit).unwrap();
         let rc = crate::resolver::ResolverConfig::load(&p).unwrap();
         assert_eq!(&*rc.as_file().parent.as_ref().unwrap().path, "/eu");
+    }
+
+    // -- Phase 4: remote admin management ------------------------------------
+
+    /// The glob-subset check is SOUND: it never reports coverage that doesn't
+    /// hold (which would be an escalation), and it handles the realistic
+    /// delegation patterns. Exotic patterns it can't reason about are
+    /// conservatively rejected (fail closed).
+    #[test]
+    fn glob_covers_is_sound() {
+        // `*` covers everything.
+        assert!(glob_covers("*", "anything.example.com"));
+        assert!(glob_covers("*", "*.eu.example.com"));
+        // `*.suffix` covers sub-delegations and literals under it…
+        assert!(glob_covers("*.ryu-oh.org", "*.eu.ryu-oh.org"));
+        assert!(glob_covers("*.ryu-oh.org", "host.eu.ryu-oh.org"));
+        assert!(glob_covers("*.ryu-oh.org", "*.ryu-oh.org")); // identical
+        // …but NOT a different suffix, a broader pattern, the bare suffix, a
+        // dash-boundary near-match, or a deeper-domain trick.
+        assert!(!glob_covers("*.ryu-oh.org", "*.us.example.com"));
+        assert!(!glob_covers("*.ryu-oh.org", "*"));
+        assert!(!glob_covers("*.ryu-oh.org", "ryu-oh.org"));
+        assert!(!glob_covers("*.ryu-oh.org", "evil-ryu-oh.org"));
+        assert!(!glob_covers("*.ryu-oh.org", "*.ryu-oh.org.attacker.com"));
+        // A literal only covers itself.
+        assert!(glob_covers("host.example.com", "host.example.com"));
+        assert!(!glob_covers("host.example.com", "*.example.com"));
+        // Exotic caller patterns are conservatively rejected even when a true
+        // subset (fail closed — grant those on-box).
+        assert!(!glob_covers("a*c", "abc"));
+        assert!(!glob_covers("a?c", "abc"));
+    }
+
+    fn full_policy(
+        sans: &[&str],
+        days: u32,
+        groups: &[&str],
+        enroll: bool,
+        scopes: &[&str],
+        manage: bool,
+    ) -> Policy {
+        Policy {
+            allowed_san: sans.iter().map(|s| s.to_string()).collect(),
+            max_validity_days: days,
+            id_map_groups: groups.iter().map(|s| s.to_string()).collect(),
+            may_enroll_servers: enroll,
+            perms_edit_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            may_manage_admins: manage,
+        }
+    }
+
+    /// `policy_within` enforces the no-escalation rule on every field.
+    #[test]
+    fn policy_within_enforces_every_field() {
+        let caller = full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/eu"], true);
+        // A strict subset is allowed.
+        assert!(policy_within(
+            &caller,
+            &full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false)
+        )
+        .is_ok());
+        // The empty policy is a subset of anything.
+        assert!(policy_within(&caller, &full_policy(&[], 0, &[], false, &[], false)).is_ok());
+        // Each field, widened past the caller, is refused:
+        let bad = |p: Policy, needle: &str| {
+            let e = policy_within(&caller, &p).unwrap_err();
+            assert!(e.contains(needle), "got: {e}");
+        };
+        bad(full_policy(&["*.us.example.com"], 30, &[], false, &[], false), "issuance scope");
+        bad(full_policy(&[], 31, &[], false, &[], false), "max_validity_days");
+        bad(full_policy(&[], 30, &["admins"], false, &[], false), "id-map group");
+        bad(full_policy(&[], 30, &[], false, &["/us"], false), "perms scope");
+        // Booleans only when the caller has them.
+        let no_enroll = full_policy(&["*.ryu-oh.org"], 30, &[], false, &[], true);
+        assert!(policy_within(&no_enroll, &full_policy(&[], 30, &[], true, &[], false))
+            .unwrap_err()
+            .contains("may_enroll_servers"));
+        let no_manage = full_policy(&["*.ryu-oh.org"], 30, &[], false, &[], false);
+        assert!(policy_within(&no_manage, &full_policy(&[], 30, &[], false, &[], true))
+            .unwrap_err()
+            .contains("may_manage_admins"));
+    }
+
+    /// The remote admin-mgmt handlers gate on management authority, enforce
+    /// no-escalation, refuse the reserved signing slots, and won't touch a
+    /// signing slot — while a signing caller (the founding authority) bypasses
+    /// the subset check.
+    #[tokio::test]
+    async fn remote_admin_mgmt_authz() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path()); // alice = signing slot (founding authority)
+        // A role admin that can manage admins, scoped to *.ryu-oh.org and "/".
+        ca_vault::add_role_slot(
+            dir.path(),
+            "boss",
+            "bosspw",
+            full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
+        )
+        .unwrap();
+        // A plain role admin with no management authority.
+        ca_vault::add_role_slot(
+            dir.path(),
+            "plain",
+            "plainpw",
+            full_policy(&[], 0, &[], false, &["/eu"], false),
+        )
+        .unwrap();
+        let (_addr, state) = spawn_ca_server(dir.path()).await;
+
+        let in_scope = full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false);
+        let add = |admin: &str, pw: &str, name: &str, policy: Policy| AddRoleAdminRequest {
+            admin: admin.to_string(),
+            password: Secret(pw.to_string()),
+            name: name.to_string(),
+            new_password: Secret("np".to_string()),
+            policy,
+        };
+
+        // boss mints an in-scope sub-role.
+        assert!(matches!(
+            handle_add_role_admin(&state, &add("boss", "bosspw", "eu-ops", in_scope.clone())),
+            AdminMgmtResponse::Ok
+        ));
+        assert_eq!(
+            ca_vault::slot_policy(dir.path(), "eu-ops").unwrap().0,
+            ca_vault::SlotKind::Role
+        );
+        // Out of scope is refused.
+        assert!(matches!(
+            handle_add_role_admin(
+                &state,
+                &add("boss", "bosspw", "us-ops",
+                     full_policy(&["*.us.example.com"], 30, &[], false, &[], false))
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("not within")
+        ));
+        // A reserved name is refused.
+        assert!(matches!(
+            handle_add_role_admin(&state, &add("boss", "bosspw", "recovery", in_scope.clone())),
+            AdminMgmtResponse::Err { reason } if reason.contains("reserved")
+        ));
+        // A non-managing role admin can't manage.
+        assert!(matches!(
+            handle_add_role_admin(&state, &add("plain", "plainpw", "nope", in_scope.clone())),
+            AdminMgmtResponse::Err { reason } if reason.contains("not authorized")
+        ));
+        // A role that lacks may_enroll_servers can't grant it (no escalation).
+        ca_vault::add_role_slot(
+            dir.path(),
+            "eu-boss",
+            "ebpw",
+            full_policy(&["*.eu.ryu-oh.org"], 30, &[], false, &["/eu"], true),
+        )
+        .unwrap();
+        assert!(matches!(
+            handle_add_role_admin(
+                &state,
+                &add("eu-boss", "ebpw", "x",
+                     full_policy(&["*.eu.ryu-oh.org"], 30, &[], true, &[], false))
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("may_enroll_servers")
+        ));
+        // A SIGNING slot (alice) bypasses the subset check — founding authority.
+        assert!(matches!(
+            handle_add_role_admin(
+                &state,
+                &add("alice", "apw", "broadrole",
+                     full_policy(&["*"], 9999, &["anything"], true, &["/"], true))
+            ),
+            AdminMgmtResponse::Ok
+        ));
+
+        // set-policy / remove never touch a signing slot, even by name.
+        assert!(matches!(
+            handle_set_admin_policy(
+                &state,
+                &SetAdminPolicyRequest {
+                    admin: "boss".to_string(),
+                    password: Secret("bosspw".to_string()),
+                    target: "alice".to_string(),
+                    policy: in_scope.clone(),
+                }
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("role admins only")
+        ));
+        assert!(matches!(
+            handle_remove_admin(
+                &state,
+                &RemoveAdminRequest {
+                    admin: "boss".to_string(),
+                    password: Secret("bosspw".to_string()),
+                    target: "autorenew".to_string(),
+                }
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("signing slot")
+        ));
+        // boss removes a plain (non-manager) role admin: fine.
+        assert!(matches!(
+            handle_remove_admin(
+                &state,
+                &RemoveAdminRequest {
+                    admin: "boss".to_string(),
+                    password: Secret("bosspw".to_string()),
+                    target: "eu-ops".to_string(),
+                }
+            ),
+            AdminMgmtResponse::Ok
+        ));
+        // list is gated: plain can't, boss can.
+        assert!(matches!(
+            handle_list_admins(
+                &state,
+                &ListAdminsRequest {
+                    admin: "plain".to_string(),
+                    password: Secret("plainpw".to_string()),
+                }
+            ),
+            AdminListResponse::Err { .. }
+        ));
+        match handle_list_admins(
+            &state,
+            &ListAdminsRequest {
+                admin: "boss".to_string(),
+                password: Secret("bosspw".to_string()),
+            },
+        ) {
+            AdminListResponse::Ok { admins } => {
+                assert!(admins.iter().any(|a| a.admin == "boss"));
+                // The signing slots are visible to a manager (informative).
+                assert!(admins.iter().any(|a| a.admin == AUTORENEW_ADMIN));
+            }
+            AdminListResponse::Err { reason } => panic!("{reason}"),
+        }
+    }
+
+    /// Admin management can't be stranded: the last role admin that can manage
+    /// admins cannot be removed or demoted remotely (the off-box recovery
+    /// credential remains the backstop, but we don't force a safe-trip).
+    #[tokio::test]
+    async fn remote_admin_cannot_strand_management() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let boss = full_policy(&["*.ryu-oh.org"], 30, &[], true, &["/"], true);
+        ca_vault::add_role_slot(dir.path(), "boss", "bosspw", boss.clone()).unwrap();
+        let (_addr, state) = spawn_ca_server(dir.path()).await;
+
+        // boss is the only ROLE manager — it can't remove itself…
+        assert!(matches!(
+            handle_remove_admin(
+                &state,
+                &RemoveAdminRequest {
+                    admin: "boss".to_string(),
+                    password: Secret("bosspw".to_string()),
+                    target: "boss".to_string(),
+                }
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("last role admin")
+        ));
+        // …nor demote itself out of may_manage_admins.
+        let demoted = Policy { may_manage_admins: false, ..boss };
+        assert!(matches!(
+            handle_set_admin_policy(
+                &state,
+                &SetAdminPolicyRequest {
+                    admin: "boss".to_string(),
+                    password: Secret("bosspw".to_string()),
+                    target: "boss".to_string(),
+                    policy: demoted,
+                }
+            ),
+            AdminMgmtResponse::Err { reason } if reason.contains("last role admin")
+        ));
+    }
+
+    /// End to end over TLS: a managing role admin mints a sub-role through the
+    /// pinned conf plane, and it shows up in the wire `list`.
+    #[tokio::test]
+    async fn remote_add_role_admin_over_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        ca_vault::add_role_slot(
+            dir.path(),
+            "boss",
+            "bosspw",
+            full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
+        )
+        .unwrap();
+        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        conf_client::add_role_admin(
+            addr,
+            NodeKind::Client,
+            &identity,
+            "boss",
+            "bosspw",
+            "eu-ops",
+            "eupw",
+            full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false),
+        )
+        .await
+        .unwrap();
+        let admins = conf_client::list_admins(addr, NodeKind::Client, &identity, "boss", "bosspw")
+            .await
+            .unwrap();
+        let eu = admins.iter().find(|a| a.admin == "eu-ops").expect("eu-ops minted");
+        assert_eq!(eu.kind, ca_vault::SlotKind::Role);
+        assert_eq!(eu.policy.allowed_san, vec!["*.eu.ryu-oh.org".to_string()]);
+        // The new admin authenticates and is scoped (can't unlock the key).
+        assert!(ca_vault::unlock(dir.path(), "eupw").is_err());
     }
 }

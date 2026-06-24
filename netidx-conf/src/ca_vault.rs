@@ -430,7 +430,9 @@ pub fn set_policy(ca_dir: &Path, target_admin: &str, policy: Policy) -> Result<(
     write_vault(&path, &vault)
 }
 
-/// One admin keyslot's public facts (no secrets), for `ca admin list`.
+/// One admin keyslot's public facts (no secrets), for `ca admin list` —
+/// locally and over the wire (`ListAdmins`), hence `Serialize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminInfo {
     pub admin: String,
     pub kind: SlotKind,
