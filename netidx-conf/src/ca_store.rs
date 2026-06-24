@@ -54,10 +54,14 @@ pub struct QueuedReq {
     pub received_unix: u64,
     /// Socket address the request arrived from (display context).
     pub peer: String,
-    /// The enqueue connection was authenticated by a live certificate
-    /// for exactly `requested_name` — a proof-of-possession renewal.
+    /// `Some(serial)` ⇒ the enqueue connection was authenticated by the
+    /// live, in-index certificate of serial `serial` for exactly
+    /// `requested_name` (and its presented key matched that record) — a
+    /// proof-of-possession renewal. The serial is re-checked still-live
+    /// under the issuer lock at approval, so a revocation between enqueue
+    /// and approval cannot be outrun. `None` ⇒ an ordinary request.
     #[serde(default)]
-    pub verified_renewal: bool,
+    pub renewal_of: Option<u64>,
     /// `Some` ⇒ a conf-server enrollment.
     #[serde(default)]
     pub enroll_listen: Option<SocketAddr>,
@@ -71,7 +75,7 @@ impl QueuedReq {
         requested_name: String,
         requested_validity_days: u32,
         peer: String,
-        verified_renewal: bool,
+        renewal_of: Option<u64>,
         enroll_listen: Option<SocketAddr>,
     ) -> Self {
         QueuedReq {
@@ -82,9 +86,15 @@ impl QueuedReq {
             requested_validity_days,
             received_unix: now_unix(),
             peer,
-            verified_renewal,
+            renewal_of,
             enroll_listen,
         }
+    }
+
+    /// A verified renewal: it continues an identity already approved once,
+    /// proven by possession of its live key at enqueue.
+    pub fn is_verified_renewal(&self) -> bool {
+        self.renewal_of.is_some()
     }
 
     pub fn age_secs(&self) -> u64 {
@@ -574,7 +584,7 @@ mod tests {
             name.to_string(),
             30,
             "10.0.0.7:51000".to_string(),
-            false,
+            None,
             None,
         )
     }

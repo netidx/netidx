@@ -529,7 +529,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
                 "resolver.revoked.example".into(),
                 30,
                 "(e2e)".into(),
-                false,
+                None,
                 None,
             ),
             serial: 2,

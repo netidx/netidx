@@ -1308,7 +1308,7 @@ mod tests {
             name.to_string(),
             requested_days,
             "test".to_string(),
-            false,
+            None,
             None,
         );
         ca_store::commit_issuance(

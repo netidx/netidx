@@ -40,7 +40,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use globset::Glob;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig as RustlsServerConfig};
 use rustls_pki_types::CertificateDer;
@@ -108,6 +108,13 @@ pub struct CaIssuer {
     /// The next X.509 serial to mint, seeded at startup from
     /// `max(ca_store::max_serial, CA-cert-serial) + 1`.
     next_serial: u64,
+    /// The server's signing credential — the box-held `autorenew` password,
+    /// read (and unsealed) once at startup. In the server-only CA model this
+    /// is the ONLY thing that unlocks the CA key: the server signs on an
+    /// authenticated, authorized admin's behalf with it, so no admin
+    /// password ever reaches the key. `None` ⇒ the CA cannot sign (read-only
+    /// until an autorenew credential is set up / recovered).
+    autorenew_pw: Option<Zeroizing<String>>,
 }
 
 impl CaIssuer {
@@ -176,6 +183,35 @@ impl Server {
             }
             None => (None, 0),
         };
+        // The server's signing credential: the box-held autorenew password,
+        // read + unsealed once. In the server-only model this is the only key
+        // to the CA. Without it the CA authenticates + serves read-only but
+        // signs nothing — loud, because that is a degraded CA, not a crash.
+        let autorenew_pw = match cfg.roles.ca.as_ref() {
+            None => None,
+            Some(ca) => match ca.autorenew.as_ref() {
+                Some(keytab) => match read_autorenew_password(keytab) {
+                    Ok(pw) => Some(pw),
+                    Err(e) => {
+                        error!(
+                            "conf-server: CANNOT SIGN — the autorenew credential is \
+                             unavailable: {e:#}. The CA serves read-only (auth/list/deny \
+                             work; issue/enroll/approve/revoke fail). Recover with \
+                             `netidx conf ca recovery rotate`."
+                        );
+                        None
+                    }
+                },
+                None => {
+                    error!(
+                        "conf-server: CANNOT SIGN — this CA has no autorenew credential. \
+                         Set one up with `netidx conf ca auto-approve`; until then it serves \
+                         read-only."
+                    );
+                    None
+                }
+            },
+        };
         // The network map: the CA owns + persists it, seeded with the CA's
         // own entry + address so it's never empty of itself; every other
         // host starts with an empty cache the refresh loop fills.
@@ -193,7 +229,7 @@ impl Server {
             cfg: Mutex::new(cfg),
             cfg_path,
             ca_dir,
-            ca: Mutex::new(CaIssuer { next_serial }),
+            ca: Mutex::new(CaIssuer { next_serial, autorenew_pw }),
             _ca_lock: ca_lock,
             serving_cert_pem,
             serving_key_pem,
@@ -369,6 +405,18 @@ pub async fn serve_on(
     }
 }
 
+/// Who the TLS peer is, derived from its presented (already root-validated)
+/// client cert: the first DNS SAN, the serial, and the SPKI fingerprint of
+/// the leaf's public key. The serial *and fingerprint together* are what let
+/// the enqueue path confirm a renewal presents **our** live cert: a serial
+/// match alone is forgeable across a co-trusted CA whose serials collide,
+/// but the key fingerprint binds to the exact record we issued.
+struct PeerIdent {
+    san: String,
+    serial: Option<u64>,
+    spki_fp: Option<String>,
+}
+
 async fn handle_conn(
     acceptor: &TlsAcceptor,
     tcp: TcpStream,
@@ -384,16 +432,19 @@ async fn handle_conn(
     // enqueue path confirm the presented cert is the live one in our
     // own index — stronger than a CRL check, since the index is the
     // source of truth on the CA host.
-    let peer_ident: Option<(String, Option<u64>)> = {
+    let peer_ident: Option<PeerIdent> = {
         let (_io, conn) = tls.get_ref();
         conn.peer_certificates().and_then(|certs| certs.first()).and_then(|leaf| {
             let san = crate::tls::first_dns_san_from_der(leaf.as_ref())?;
-            Some((san, leaf_serial(leaf.as_ref())))
+            let spki_fp = crate::fingerprint::Fingerprint::of_cert_der(leaf.as_ref())
+                .ok()
+                .map(|f| f.text());
+            Some(PeerIdent { san, serial: leaf_serial(leaf.as_ref()), spki_fp })
         })
     };
     let peer_is_conf_server = peer_ident
         .as_ref()
-        .map(|(san, _)| san.eq_ignore_ascii_case(SERVING_SAN))
+        .map(|p| p.san.eq_ignore_ascii_case(SERVING_SAN))
         .unwrap_or(false);
     let hello: ClientHello =
         conf_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
@@ -1123,26 +1174,40 @@ pub struct PushPlan {
     pub groups: Vec<String>,
 }
 
-/// Unlock the vault with the request's password and require the named
-/// admin to be the slot it unlocks. The `Err` is a safe wire reason.
-/// Every admin-authenticated request (Sign, Enroll, ListQueue,
-/// Approve, Deny) starts here.
+/// Authenticate the requesting admin — role-capable, and crucially **no CA
+/// key**. Every admin-authenticated request starts here: the non-signing
+/// ops (list, deny, remove-server, delegation review) end here, and the
+/// signing ops authenticate this way too, then obtain the key separately
+/// via [`server_unlock`]. The `Err` is a safe wire reason.
 fn authenticate(
     ca_dir: &Path,
     admin: &str,
     password: &str,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    ca_vault::authenticate(ca_dir, admin, password)
+        .map_err(|_| "authentication failed".to_string())
+}
+
+/// The server's OWN signing key: unlock the vault with the box-held
+/// `autorenew` credential the issuer holds. This is how the server signs on
+/// an authenticated, authorized admin's behalf — no admin password ever
+/// reaches the key. The opportunistic CRL re-sign rides here (it needs the
+/// key, and every signing op passes through). `Err` (a safe wire reason)
+/// when the CA holds no autorenew credential (read-only CA). The Argon2
+/// unlock runs OUTSIDE the issuer's critical section: callers take the key
+/// here, then enter `issue_locked`.
+fn server_unlock(
+    issuer: &Mutex<CaIssuer>,
+    ca_dir: &Path,
 ) -> std::result::Result<ca_vault::Unlocked, String> {
-    let unlocked = match ca_vault::unlock(ca_dir, password) {
-        Ok(u) => u,
-        Err(_) => return Err("authentication failed".to_string()),
-    };
-    if admin != unlocked.admin {
-        return Err("admin name does not match the password".to_string());
-    }
-    // Opportunistic CRL re-signing while we hold the key (best-effort).
-    // CA-cert renewal also needs the key but additionally needs a serial,
-    // so it lives in the issuance path (`issue_locked`), which holds the
-    // issuer counter.
+    let pw = issuer.lock().autorenew_pw.clone();
+    let pw = pw.ok_or_else(|| {
+        "this CA cannot sign: it holds no autorenew credential (the server holds the \
+         only signing key). Recover with `netidx conf ca recovery rotate`."
+            .to_string()
+    })?;
+    let unlocked = ca_vault::unlock(ca_dir, &pw)
+        .map_err(|e| format!("the CA's autorenew credential failed to unlock the key: {e:#}"))?;
     match crate::ca_index::refresh_crl_if_stale(ca_dir, &unlocked.ca_key_pem) {
         Ok(true) => info!("conf-server: re-signed the CRL (was nearing nextUpdate)"),
         Ok(false) => (),
@@ -1168,7 +1233,7 @@ pub fn handle_sign_request(
         req.requested_name.clone(),
         req.requested_validity_days,
         "(direct sign)".to_string(),
-        false,
+        None,
         None,
     );
     handle_sign_request_op(issuer, ca_dir, req, "sign", &record_req, None)
@@ -1205,14 +1270,15 @@ fn try_handle(
     recheck_id: Option<&str>,
 ) -> Result<Signed> {
     let failed = |resp: SignResponse| Signed { resp, push: None };
-    // 1. Authenticate: the password must unlock a slot, and the named
-    //    admin must be the one it unlocks.
-    let unlocked = match authenticate(ca_dir, &req.admin, &req.password.0) {
-        Ok(u) => u,
-        Err(reason) => return Ok(failed(reject(&reason))),
+    // 1. Authenticate the REQUESTING admin — no CA key (a role admin is a
+    //    first-class issuer here; the server, not the admin, holds the key).
+    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(_) => return Ok(failed(reject("authentication failed"))),
     };
 
-    // 2. Authorize: the requested name must match the admin's policy.
+    // 2. Authorize against the REQUESTER's policy. Since the server can sign
+    //    anything once it unlocks (step 3), this gate is the whole boundary.
     let name = req.requested_name.trim();
     if name.is_empty() {
         return Ok(failed(reject("requested name is empty")));
@@ -1228,13 +1294,13 @@ fn try_handle(
             "that name is reserved for the conf server and cannot be issued",
         )));
     }
-    if !name_permitted(name, &unlocked.policy.allowed_san)? {
+    if !name_permitted(name, &authd.policy.allowed_san)? {
         return Ok(failed(reject(&format!(
             "name {name:?} is not permitted for admin {}",
-            unlocked.admin
+            authd.admin
         ))));
     }
-    let validity = req.requested_validity_days.min(unlocked.policy.max_validity_days);
+    let validity = req.requested_validity_days.min(authd.policy.max_validity_days);
     if validity == 0 {
         return Ok(failed(reject("validity_days must be > 0 and within policy")));
     }
@@ -1253,17 +1319,23 @@ fn try_handle(
         gs
     };
     for g in &groups {
-        if !unlocked.policy.id_map_groups.iter().any(|a| a == g) {
+        if !authd.policy.id_map_groups.iter().any(|a| a == g) {
             return Ok(failed(reject(&format!(
                 "id-map group {g:?} is not permitted for admin {}; allowed: {:?}",
-                unlocked.admin, unlocked.policy.id_map_groups,
+                authd.admin, authd.policy.id_map_groups,
             ))));
         }
     }
+    // 3. The server signs with its OWN credential; the requester is audited.
+    let signing = match server_unlock(issuer, ca_dir) {
+        Ok(u) => u,
+        Err(reason) => return Ok(failed(reject(&reason))),
+    };
     // The one-live-cert check, serial allocation, sign, and atomic record
     // commit are one critical section under the issuance lock.
     issue_locked(
-        issuer, ca_dir, &unlocked, record_req, name, validity, groups, true, op, recheck_id,
+        issuer, ca_dir, &signing, &authd.admin, record_req, name, validity, groups, true, None,
+        op, recheck_id,
     )
 }
 
@@ -1277,12 +1349,22 @@ fn try_handle(
 fn issue_locked(
     issuer: &Mutex<CaIssuer>,
     ca_dir: &Path,
-    unlocked: &ca_vault::Unlocked,
+    // The SERVER's autorenew-unlocked key (does the crypto)…
+    signing: &ca_vault::Unlocked,
+    // …vs the REQUESTING admin (named in the audit trail). They differ now:
+    // the server signs, the human authorized.
+    audit_admin: &str,
     record_req: &ca_store::QueuedReq,
     name: &str,
     validity: u32,
     groups: Vec<String>,
     one_live: bool,
+    // For a verified renewal: the serial of the cert being renewed. It was
+    // proven live (and key-matched) at enqueue, but a revocation can land
+    // between then and now — so we re-check it is STILL live under this
+    // lock, and refuse the renewal if it isn't. `None` for any
+    // non-renewal issuance.
+    renewal_of: Option<u64>,
     audit_op: &str,
     // For the approve path: re-check the queue entry is still Pending
     // under the lock, so two approvals (or an approve racing a deny) can't
@@ -1334,11 +1416,32 @@ fn issue_locked(
             });
         }
     }
+    // A verified renewal is a continuation of an identity that was live at
+    // enqueue. Re-validate under the lock that the cert it renews is still
+    // live: if it was revoked (or expired) in between, the renewal must NOT
+    // re-mint it — otherwise revocation, the only containment tool, could be
+    // outrun by an in-flight renewal (worst case re-minting the serving
+    // SAN). Refusing here also covers the auto-renew sweep, which signs
+    // through this same path.
+    if let Some(serial) = renewal_of {
+        let live = ca_store::live_for_name(ca_dir, name)
+            .context("checking the issuance index")?;
+        if !live.iter().any(|r| r.serial == serial) {
+            return Ok(Signed {
+                resp: reject(&format!(
+                    "the certificate being renewed (serial {serial} for {name:?}) is no \
+                     longer live — it may have been revoked or expired; this renewal is \
+                     refused"
+                )),
+                push: None,
+            });
+        }
+    }
     // Opportunistic CA-cert renewal — rare, and only allocates a serial
     // when actually renewing, so the common path burns nothing.
     if crate::ca::ca_cert_needs_renewal(ca_dir) {
         let rs = issuer.alloc();
-        match crate::ca::maybe_renew_ca_cert(ca_dir, &unlocked.ca_key_pem, rs) {
+        match crate::ca::maybe_renew_ca_cert(ca_dir, &signing.ca_key_pem, rs) {
             Ok(true) => info!(
                 "conf-server: renewed the CA certificate (same key; glyph unchanged)"
             ),
@@ -1347,7 +1450,7 @@ fn issue_locked(
         }
     }
     let serial = issuer.alloc();
-    let resp = sign_csr(ca_dir, &unlocked.ca_key_pem, &record_req.csr_pem, name, validity, serial)?;
+    let resp = sign_csr(ca_dir, &signing.ca_key_pem, &record_req.csr_pem, name, validity, serial)?;
     if let SignResponse::Ok { ref signed_cert_pem, .. } = resp {
         ca_store::commit_issuance(
             ca_dir,
@@ -1360,7 +1463,7 @@ fn issue_locked(
         .context("committing the issuance")?;
     }
     drop(issuer);
-    audit(ca_dir, &unlocked.admin, audit_op, name, validity);
+    audit(ca_dir, audit_admin, audit_op, name, validity);
     Ok(Signed {
         resp,
         push: if groups.is_empty() {
@@ -1390,14 +1493,14 @@ fn try_enroll(
     ca_dir: &Path,
     req: &EnrollRequest,
 ) -> Result<SignResponse> {
-    let unlocked = match authenticate(ca_dir, &req.admin, &req.password.0) {
-        Ok(u) => u,
-        Err(reason) => return Ok(reject(&reason)),
+    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(_) => return Ok(reject("authentication failed")),
     };
-    if !unlocked.policy.may_enroll_servers {
+    if !authd.policy.may_enroll_servers {
         return Ok(reject(&format!(
             "admin {} may not enroll conf servers",
-            unlocked.admin
+            authd.admin
         )));
     }
     let record_req = ca_store::QueuedReq::new(
@@ -1406,20 +1509,26 @@ fn try_enroll(
         SERVING_SAN.to_string(),
         crate::ca::DEFAULT_LEAF_VALIDITY_DAYS,
         "(enroll)".to_string(),
-        false,
+        None,
         Some(req.listen),
     );
+    let signing = match server_unlock(issuer, ca_dir) {
+        Ok(u) => u,
+        Err(reason) => return Ok(reject(&reason)),
+    };
     // Serving certs aren't subject to the one-live check (many conf
     // servers legitimately hold the reserved SAN), and carry no groups.
     let signed = issue_locked(
         issuer,
         ca_dir,
-        &unlocked,
+        &signing,
+        &authd.admin,
         &record_req,
         SERVING_SAN,
         crate::ca::DEFAULT_LEAF_VALIDITY_DAYS,
         Vec::new(),
         false,
+        None,
         "enroll",
         None,
     )?;
@@ -1507,7 +1616,7 @@ fn handle_enqueue(
     ca_dir: &Path,
     req: &EnqueueRequest,
     peer: SocketAddr,
-    peer_ident: Option<&(String, Option<u64>)>,
+    peer_ident: Option<&PeerIdent>,
 ) -> EnqueueResponse {
     // Conf-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
@@ -1523,7 +1632,7 @@ fn handle_enqueue(
             SERVING_SAN.to_string(),
             req.requested_validity_days,
             peer.to_string(),
-            false,
+            None,
             Some(listen),
         );
         return match ca_store::enqueue(ca_dir, &queued) {
@@ -1546,18 +1655,32 @@ fn handle_enqueue(
             reason: "validity_days must be > 0".to_string(),
         };
     }
-    let verified_renewal = match peer_ident {
-        Some((san, Some(serial))) if san.eq_ignore_ascii_case(name) => {
+    // A renewal must prove possession of *our* live cert for this exact
+    // name: the presented leaf's serial AND its key fingerprint must match
+    // a live record in our index. Binding the key (not just the serial)
+    // stops a co-trusted foreign CA's cert with a colliding serial from
+    // passing as a renewal of ours. `renewal_of` carries the originating
+    // serial forward so approval can re-check it is still live.
+    let renewal_of: Option<u64> = match peer_ident {
+        Some(PeerIdent { san, serial: Some(serial), spki_fp: Some(fp) })
+            if san.eq_ignore_ascii_case(name) =>
+        {
             match ca_store::live_for_name(ca_dir, name) {
-                Ok(live) => live.iter().any(|s| s.serial == *serial),
+                Ok(live)
+                    if live.iter().any(|s| s.serial == *serial && &s.spki_fp == fp) =>
+                {
+                    Some(*serial)
+                }
+                Ok(_) => None,
                 Err(e) => {
                     warn!("conf-server: index lookup during enqueue failed: {e:#}");
-                    false
+                    None
                 }
             }
         }
-        _ => false,
+        _ => None,
     };
+    let verified_renewal = renewal_of.is_some();
     if !verified_renewal {
         // Fail fast on the reserved name — approval would refuse it
         // anyway, but the enrollee should hear it now, not after the
@@ -1597,7 +1720,7 @@ fn handle_enqueue(
         name.to_string(),
         req.requested_validity_days,
         peer.to_string(),
-        verified_renewal,
+        renewal_of,
         None,
     );
     match ca_store::enqueue(ca_dir, &queued) {
@@ -1630,7 +1753,7 @@ fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse
                     requested_validity_days: q.requested_validity_days,
                     peer: q.peer,
                     csr_pem: q.csr_pem,
-                    verified_renewal: q.verified_renewal,
+                    verified_renewal: q.renewal_of.is_some(),
                     enroll_listen: q.enroll_listen,
                 })
                 .collect(),
@@ -1648,13 +1771,39 @@ fn handle_revoke(
     ca_dir: &Path,
     req: &RevokeRequest,
 ) -> RevokeResponse {
-    let unlocked = match authenticate(ca_dir, &req.admin, &req.password.0) {
-        Ok(u) => u,
-        Err(reason) => return RevokeResponse::Err { reason },
+    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(_) => {
+            return RevokeResponse::Err { reason: "authentication failed".to_string() }
+        }
     };
+    // Revocation is privileged — revoking serving certs or another region's
+    // leaves is a denial of service — and it must be **scope-bound** exactly
+    // like issuance: an admin may revoke only what it could have signed.
+    // Reject up front any admin with no issuance/management authority at all;
+    // the per-serial check below confines the rest to their own scope.
+    let broad = matches!(authd.kind, ca_vault::SlotKind::Signing)
+        || authd.policy.may_manage_admins;
+    if !broad && authd.policy.allowed_san.is_empty() && !authd.policy.may_enroll_servers {
+        return RevokeResponse::Err {
+            reason: format!("admin {} is not authorized to revoke certificates", authd.admin),
+        };
+    }
     if req.serials.is_empty() {
         return RevokeResponse::Err { reason: "no serials to revoke".to_string() };
     }
+    // Resolve each serial to the name it was issued for, so we can confine a
+    // scoped admin to revoking only certs within its `allowed_san`. Read once
+    // (names are immutable for a serial); the actual revoke loop runs under
+    // the issuer lock.
+    let names: std::collections::HashMap<u64, String> = match ca_store::list_signed(ca_dir) {
+        Ok(records) => records.into_iter().map(|r| (r.serial, r.name)).collect(),
+        Err(e) => {
+            return RevokeResponse::Err {
+                reason: format!("reading the issuance index: {e:#}"),
+            }
+        }
+    };
     let now = ca_store::now_unix();
     let mut warnings = Vec::new();
     // Each revocation is a read-modify-write of an `issued/<id>` record.
@@ -1666,6 +1815,29 @@ fn handle_revoke(
     {
         let _guard = issuer.lock();
         for serial in &req.serials {
+            // A scoped admin may only revoke a cert whose name it could have
+            // signed. An unknown serial isn't in the index, so it has no name
+            // to scope-check — fall through to `revoke`, which reports it as
+            // not-live without disclosing anything a `list` wouldn't.
+            if !broad && let Some(name) = names.get(serial) {
+                match admin_authority_over(&authd, name) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        warnings.push(format!(
+                            "serial {serial} ({name:?}) is outside admin {}'s authority; \
+                             skipped",
+                            authd.admin
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        warnings.push(format!(
+                            "evaluating authority for serial {serial}: {e:#}"
+                        ));
+                        continue;
+                    }
+                }
+            }
             let rev = ca_store::Revocation {
                 serial: *serial,
                 revoked_unix: now,
@@ -1674,7 +1846,7 @@ fn handle_revoke(
             match ca_store::revoke(ca_dir, *serial, rev) {
                 Ok(true) => audit(
                     ca_dir,
-                    &unlocked.admin,
+                    &authd.admin,
                     "revoke",
                     &format!("serial {serial}"),
                     0,
@@ -1686,8 +1858,14 @@ fn handle_revoke(
             }
         }
     }
-    if let Err(e) = crate::ca_index::write_crl(ca_dir, &unlocked.ca_key_pem) {
-        warnings.push(format!("re-signing the CRL: {e:#}"));
+    // Re-sign the CRL with the server's own key (the autorenew credential).
+    match server_unlock(issuer, ca_dir) {
+        Ok(signing) => {
+            if let Err(e) = crate::ca_index::write_crl(ca_dir, &signing.ca_key_pem) {
+                warnings.push(format!("re-signing the CRL: {e:#}"));
+            }
+        }
+        Err(reason) => warnings.push(format!("re-signing the CRL: {reason}")),
     }
     RevokeResponse::Ok { warnings }
 }
@@ -1768,19 +1946,23 @@ fn approve_locked(
     // `may_enroll_servers`; signs the reserved serving SAN; no one-live
     // check and no id-map groups (a conf server isn't a user).
     if let Some(listen) = queued.enroll_listen {
-        let unlocked = authenticate(ca_dir, &req.admin, &req.password.0)?;
-        if !unlocked.policy.may_enroll_servers {
-            return Err(format!("admin {} may not enroll conf servers", unlocked.admin));
+        let authd = ca_vault::authenticate(ca_dir, &req.admin, &req.password.0)
+            .map_err(|_| "authentication failed".to_string())?;
+        if !authd.policy.may_enroll_servers {
+            return Err(format!("admin {} may not enroll conf servers", authd.admin));
         }
+        let signing = server_unlock(issuer, ca_dir)?;
         let signed = issue_locked(
             issuer,
             ca_dir,
-            &unlocked,
+            &signing,
+            &authd.admin,
             &queued,
             SERVING_SAN,
             crate::ca::DEFAULT_LEAF_VALIDITY_DAYS,
             Vec::new(),
             false,
+            None,
             "enroll",
             Some(&req.request_id),
         )
@@ -1796,21 +1978,27 @@ fn approve_locked(
     // one-live-cert checks don't apply (a renewal's name *does* have a live
     // cert), the reserved serving name is allowed (conf servers renew
     // themselves), and the id-map is untouched (requested groups ignored).
-    if queued.verified_renewal {
-        let unlocked = authenticate(ca_dir, &req.admin, &req.password.0)?;
+    // `issue_locked` re-checks the renewed serial is STILL live under the
+    // lock, so a revocation since enqueue refuses the renewal.
+    if let Some(orig_serial) = queued.renewal_of {
+        let authd = ca_vault::authenticate(ca_dir, &req.admin, &req.password.0)
+            .map_err(|_| "authentication failed".to_string())?;
         let validity = queued
             .requested_validity_days
-            .min(unlocked.policy.max_validity_days)
+            .min(authd.policy.max_validity_days)
             .max(1);
+        let signing = server_unlock(issuer, ca_dir)?;
         let signed = issue_locked(
             issuer,
             ca_dir,
-            &unlocked,
+            &signing,
+            &authd.admin,
             &queued,
             &queued.requested_name,
             validity,
             Vec::new(),
             false,
+            Some(orig_serial),
             "renew",
             Some(&req.request_id),
         )
@@ -1894,7 +2082,7 @@ fn autorenew_sweep(issuer: &Mutex<CaIssuer>, ca_dir: &Path, password: &str) -> u
         }
     };
     let mut approved = 0;
-    for q in pending.iter().filter(|q| q.verified_renewal) {
+    for q in pending.iter().filter(|q| q.renewal_of.is_some()) {
         let req = ApproveRequest {
             admin: AUTORENEW_ADMIN.to_string(),
             password: conf_proto::Secret(password.to_string()),
@@ -1991,19 +2179,11 @@ fn spawn_map_refresh(state: &Arc<Server>) {
 }
 
 fn spawn_autorenew(state: &Arc<Server>) {
-    let keytab = {
-        let cfg = state.cfg.lock();
-        cfg.roles.ca.as_ref().and_then(|c| c.autorenew.clone())
-    };
-    let Some(keytab) = keytab else { return };
     let Some(ca_dir) = state.ca_dir().map(|d| d.to_path_buf()) else { return };
-    let password = match read_autorenew_password(&keytab) {
-        Ok(pw) => pw,
-        Err(e) => {
-            warn!("conf-server: autorenew disabled — {e:#}");
-            return;
-        }
-    };
+    // The signing credential the issuer already holds (read + unsealed once
+    // in `Server::new`). `None` ⇒ the CA can't sign, so there's nothing to
+    // auto-approve either.
+    let Some(password) = state.ca.lock().autorenew_pw.clone() else { return };
     info!("conf-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})");
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -2049,10 +2229,29 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
         }
         Err(e) => return DenyResponse::Err { reason: format!("reading the queue: {e:#}") },
     };
-    let unlocked = match authenticate(ca_dir, &req.admin, &req.password.0) {
-        Ok(u) => u,
+    let authd = match authenticate(ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
         Err(reason) => return DenyResponse::Err { reason },
     };
+    // Denying a queued request blocks an issuance, so — like revoke — it is
+    // scope-bound: an admin may deny only a request for a name it could have
+    // signed (a serving-cert enrollment needs `may_enroll_servers`).
+    match admin_authority_over(&authd, &queued.requested_name) {
+        Ok(true) => {}
+        Ok(false) => {
+            return DenyResponse::Err {
+                reason: format!(
+                    "admin {} is not authorized to deny requests for {:?}",
+                    authd.admin, queued.requested_name
+                ),
+            }
+        }
+        Err(e) => {
+            return DenyResponse::Err {
+                reason: format!("evaluating authority: {e:#}"),
+            }
+        }
+    }
     let _guard = issuer.lock();
     // Authoritative re-check under the lock (mutually exclusive with the
     // approve commit, which also holds this lock).
@@ -2077,7 +2276,7 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
     }
     match ca_store::deny(ca_dir, &queued, &req.reason) {
         Ok(()) => {
-            audit(ca_dir, &unlocked.admin, "deny", &queued.requested_name, 0);
+            audit(ca_dir, &authd.admin, "deny", &queued.requested_name, 0);
             DenyResponse::Ok
         }
         Err(e) => DenyResponse::Err { reason: format!("storing the denial: {e:#}") },
@@ -2186,15 +2385,26 @@ fn handle_deny_delegation(
             }
         }
     };
-    if let Err(reason) = authenticate(&ca_dir, &req.admin, &req.password.0) {
-        return DenyDelegationResponse::Err { reason };
-    }
+    let authd = match authenticate(&ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(reason) => return DenyDelegationResponse::Err { reason },
+    };
     let _guard = state.resolver_edit_lock.lock();
     match delegation_store::read_pending(&ca_dir, &req.request_id) {
-        Ok(Some(pending)) => match delegation_store::deny(&ca_dir, &pending, &req.reason) {
-            Ok(()) => DenyDelegationResponse::Ok,
-            Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
-        },
+        Ok(Some(pending)) => {
+            if !delegation_authority(&authd, &pending.proposed_path) {
+                return DenyDelegationResponse::Err {
+                    reason: format!(
+                        "admin {} is not authorized to decide delegations at {:?}",
+                        authd.admin, pending.proposed_path
+                    ),
+                };
+            }
+            match delegation_store::deny(&ca_dir, &pending, &req.reason) {
+                Ok(()) => DenyDelegationResponse::Ok,
+                Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
+            }
+        }
         Ok(None) => DenyDelegationResponse::Err {
             reason: "no such pending delegation request (expired, never queued, or \
                      already decided)"
@@ -2367,8 +2577,24 @@ fn handle_remove_server(state: &Server, req: &RemoveServerRequest) -> RemoveServ
             }
         }
     };
-    if let Err(reason) = authenticate(&ca_dir, &req.admin, &req.password.0) {
-        return RemoveServerResponse::Err { reason };
+    let authd = match authenticate(&ca_dir, &req.admin, &req.password.0) {
+        Ok(a) => a,
+        Err(reason) => return RemoveServerResponse::Err { reason },
+    };
+    // Evicting a conf server from the authoritative map cascades that host's
+    // resolver-cluster facts out of the map — a privileged, network-affecting
+    // edit. Gate it on the conf-server lifecycle capability (the same bit
+    // that authorizes enrolling one) or a broad admin.
+    let broad = matches!(authd.kind, ca_vault::SlotKind::Signing)
+        || authd.policy.may_manage_admins;
+    if !broad && !authd.policy.may_enroll_servers {
+        return RemoveServerResponse::Err {
+            reason: format!(
+                "admin {} is not authorized to remove conf servers (needs \
+                 may_enroll_servers)",
+                authd.admin
+            ),
+        };
     }
     let mut map = state.map.lock();
     if netmap::remove(&mut map, req.addr) {
@@ -2608,7 +2834,7 @@ fn approve_delegation_prepare(
                  config to edit + its address)"
                 .to_string())
         })?;
-    let unlocked = authenticate(&ca_dir, &req.admin, &req.password.0).map_err(err)?;
+    let authd = authenticate(&ca_dir, &req.admin, &req.password.0).map_err(err)?;
     // The resolver edit + commit happen under this lock — mutually
     // exclusive with deny and other approves.
     let _guard = state.resolver_edit_lock.lock();
@@ -2633,6 +2859,16 @@ fn approve_delegation_prepare(
         }
         Err(e) => return Err(err(format!("{e:#}"))),
     };
+    // Authorize against the subtree being delegated — same authority a deny
+    // or a perms edit needs over that path. (Authenticated above; this is the
+    // scope gate that keeps a role admin from restructuring a foreign
+    // subtree.)
+    if !delegation_authority(&authd, &pending.proposed_path) {
+        return Err(err(format!(
+            "admin {} is not authorized to decide delegations at {:?}",
+            authd.admin, pending.proposed_path
+        )));
+    }
     let edit = ReferralEdit::AddChild {
         path: pending.proposed_path.clone(),
         child: pending.child.clone(),
@@ -2654,7 +2890,7 @@ fn approve_delegation_prepare(
     if commit {
         delegation_store::approve(&ca_dir, &pending, parent)
             .map_err(|e| err(format!("committing the approval: {e:#}")))?;
-        audit(&ca_dir, &unlocked.admin, "approve-delegation", &pending.proposed_path, 0);
+        audit(&ca_dir, &authd.admin, "approve-delegation", &pending.proposed_path, 0);
     }
     Ok((edit, member_addrs))
 }
@@ -2781,6 +3017,39 @@ fn name_permitted(name: &str, allowed: &[String]) -> Result<bool> {
     Ok(false)
 }
 
+/// Whether `authd` is authorized to act destructively (revoke / deny) on a
+/// certificate or request for `name`. This MUST mirror the issuance gate in
+/// [`try_handle`] — otherwise an admin could destroy (revoke/deny) a name it
+/// could never have signed, the exact scope-confinement break the role tier
+/// exists to prevent.
+///
+/// - A `Signing` slot (the on-box recovery / autorenew credentials) or a
+///   `may_manage_admins` superuser holds authority over everything.
+/// - The reserved serving name needs `may_enroll_servers` — the same bit
+///   that authorizes minting it.
+/// - Any other name must fall within the admin's issuance scope
+///   (`allowed_san`).
+fn admin_authority_over(authd: &ca_vault::Authenticated, name: &str) -> Result<bool> {
+    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins {
+        return Ok(true);
+    }
+    if name.eq_ignore_ascii_case(SERVING_SAN) {
+        return Ok(authd.policy.may_enroll_servers);
+    }
+    name_permitted(name, &authd.policy.allowed_san)
+}
+
+/// Whether `authd` may approve or deny a delegation of the hierarchy subtree
+/// at `path`. A delegation restructures the resolver hierarchy under `path`,
+/// so — like a perms edit (see [`handle_edit_perms`]) — it needs authority
+/// over that subtree: a broad admin (signing slot / `may_manage_admins`) or a
+/// `perms_edit_scopes` entry covering the path.
+fn delegation_authority(authd: &ca_vault::Authenticated, path: &str) -> bool {
+    matches!(authd.kind, ca_vault::SlotKind::Signing)
+        || authd.policy.may_manage_admins
+        || perms_scope_covers(&authd.policy.perms_edit_scopes, path)
+}
+
 fn reject(reason: &str) -> SignResponse {
     SignResponse::Err { reason: reason.to_string() }
 }
@@ -2834,7 +3103,10 @@ mod tests {
     /// [`Server::new`] does — the direct-call handler tests pass `&this`
     /// where the daemon would pass its own `Server::ca`.
     fn issuer(dir: &Path) -> Mutex<CaIssuer> {
-        Mutex::new(CaIssuer { next_serial: ca_store::next_serial(dir).unwrap() })
+        Mutex::new(CaIssuer {
+            next_serial: ca_store::next_serial(dir).unwrap(),
+            autorenew_pw: read_test_autorenew(dir),
+        })
     }
 
     /// Issue the daemon's TLS serving cert from the (vault-protected)
@@ -2862,7 +3134,7 @@ mod tests {
             SERVING_SAN.to_string(),
             365,
             "(test serving cert)".to_string(),
-            false,
+            None,
             None,
         );
         ca_store::commit_issuance(
@@ -2892,6 +3164,40 @@ mod tests {
         let mut chain = leaf;
         chain.extend_from_slice(&ca_cert);
         (chain, kc.private_key_pem.as_bytes().to_vec())
+    }
+
+    /// Mint and index a live leaf for `san`, returning its serial — the
+    /// "originating" cert a verified renewal continues. (A renewal's
+    /// approval re-checks this serial is still live, so the originating
+    /// cert must really be in the index.)
+    fn commit_live_cert(dir: &Path, san: &str) -> u64 {
+        let unlocked = ca_vault::unlock(dir, "apw").unwrap();
+        let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
+        let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
+        let kc = conf_client::generate_key_and_csr(san).unwrap();
+        let serial = ca_store::next_serial(dir).unwrap();
+        let leaf = ca
+            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], 365, serial)
+            .unwrap();
+        let req = ca_store::QueuedReq::new(
+            NodeKind::Workstation,
+            kc.csr_pem.clone(),
+            san.to_string(),
+            365,
+            "(test live cert)".to_string(),
+            None,
+            None,
+        );
+        ca_store::commit_issuance(
+            dir,
+            &req,
+            serial,
+            san,
+            std::str::from_utf8(&leaf).unwrap(),
+            &[],
+        )
+        .unwrap();
+        serial
     }
 
     /// Bind an ephemeral port and run a conf server with the given
@@ -2950,7 +3256,7 @@ mod tests {
     async fn spawn_ca_server(dir: &Path) -> (SocketAddr, Arc<Server>) {
         let roles =
             Roles {
-                ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: None }),
+                ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: Some(autorenew_keytab(dir)) }),
                 resolver: None,
                 id_map: None,
             };
@@ -3048,6 +3354,21 @@ mod tests {
 
     /// Build a vault-protected CA in `dir`: a real (RSA) CA whose key is
     /// moved into a 1-admin vault, no `private.key` left behind.
+    /// The server's signing credential in tests: a real (plaintext) keytab
+    /// at `<ca-dir>/autorenew.keytab` whose password unlocks an `autorenew`
+    /// signing slot. `setup_ca` mints both, the spawn helpers point
+    /// `CaRole::autorenew` at the keytab, and `issuer()` reads it — so the
+    /// server can sign on an authenticated admin's behalf exactly as in prod.
+    const AUTORENEW_PW: &str = "renew-secret";
+
+    fn autorenew_keytab(dir: &Path) -> PathBuf {
+        dir.join("autorenew.keytab")
+    }
+
+    fn read_test_autorenew(dir: &Path) -> Option<Zeroizing<String>> {
+        std::fs::read_to_string(autorenew_keytab(dir)).ok().map(Zeroizing::new)
+    }
+
     fn setup_ca(dir: &Path) {
         setup_ca_with_policy(dir, policy());
     }
@@ -3062,8 +3383,29 @@ mod tests {
         };
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
+        // "alice" stands in for the recovery / first signing admin; the
+        // requester in signing tests authenticates as her.
         ca_vault::create(dir, &key, "alice", "apw", policy).unwrap();
         std::fs::remove_file(dir.join("private.key")).unwrap();
+        // The box's autorenew signing slot + its keytab — the credential the
+        // server signs with. Empty policy (it only unlocks; authorization is
+        // the requester's).
+        ca_vault::add_signing_slot(
+            dir,
+            "apw",
+            AUTORENEW_ADMIN,
+            AUTORENEW_PW,
+            Policy {
+                allowed_san: vec![],
+                max_validity_days: 730,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec![],
+                may_manage_admins: false,
+            },
+        )
+        .unwrap();
+        std::fs::write(autorenew_keytab(dir), AUTORENEW_PW).unwrap();
     }
 
     fn request(name: &str, admin: &str, pw: &str, days: u32) -> SignRequest {
@@ -3230,12 +3572,373 @@ mod tests {
     fn admin_name_must_match_password() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        // Right password, wrong admin name.
+        // A valid password under the wrong admin name: authentication keys
+        // on the (name, password) pair, so a name with no matching slot is
+        // rejected outright.
         let req = request("a.ryu-oh.org", "bob", "apw", 30);
         match handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp {
-            SignResponse::Err { reason } => assert!(reason.contains("does not match")),
+            SignResponse::Err { reason } => assert!(reason.contains("authentication failed")),
             SignResponse::Ok { .. } => panic!("admin/password mismatch accepted"),
         }
+    }
+
+    #[test]
+    fn role_admin_issues_via_server_signing() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        // A ROLE admin: it carries an issuance scope but wraps no MK, so its
+        // password can never unlock the CA key.
+        ca_vault::add_role_slot(
+            dir.path(),
+            "eu-ops",
+            "eupw",
+            Policy {
+                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                max_validity_days: 30,
+                id_map_groups: vec!["users".to_string()],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec![],
+                may_manage_admins: false,
+            },
+        )
+        .unwrap();
+        assert!(ca_vault::unlock(dir.path(), "eupw").is_err(), "role can't unlock the key");
+
+        // Yet the SERVER signs an in-scope name on its behalf.
+        let ok = request("host.eu.ryu-oh.org", "eu-ops", "eupw", 30);
+        assert!(matches!(
+            handle_sign_request(&issuer(dir.path()), dir.path(), &ok).resp,
+            SignResponse::Ok { .. }
+        ));
+        // Out of scope is still refused (the authz gate is the whole boundary).
+        let bad = request("host.us.ryu-oh.org", "eu-ops", "eupw", 30);
+        assert!(matches!(
+            handle_sign_request(&issuer(dir.path()), dir.path(), &bad).resp,
+            SignResponse::Err { .. }
+        ));
+        // The audit names the REQUESTER, not the server's autorenew credential.
+        let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+        assert!(log.contains("admin=eu-ops"), "audit names the requester: {log}");
+        assert!(!log.contains("admin=autorenew"), "audit must not name the server cred: {log}");
+    }
+
+    #[test]
+    fn ca_without_autorenew_credential_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        // An issuer holding NO signing credential (a CA whose keytab is
+        // missing) authenticates + authorizes but cannot reach the key.
+        let iss = Mutex::new(CaIssuer {
+            next_serial: ca_store::next_serial(dir.path()).unwrap(),
+            autorenew_pw: None,
+        });
+        let req = request("host.ryu-oh.org", "alice", "apw", 30);
+        match handle_sign_request(&iss, dir.path(), &req).resp {
+            SignResponse::Err { reason } => assert!(reason.contains("cannot sign"), "{reason}"),
+            SignResponse::Ok { .. } => panic!("a CA with no signing credential must not sign"),
+        }
+    }
+
+    /// Revocation is scope-bound exactly like issuance: a role admin scoped
+    /// to `*.eu` can revoke its own `*.eu` leaves but NOT another region's
+    /// `*.us` leaf nor a conf-server serving cert — otherwise the lowest
+    /// issuance privilege could take the whole network's TLS offline via the
+    /// CRL. (Adversarial-review finding: the old gate only checked "has any
+    /// issuance authority", not per-serial scope.)
+    #[test]
+    fn revoke_is_scope_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path()); // alice = signing slot (broad)
+        ca_vault::add_role_slot(
+            dir.path(),
+            "eu-ops",
+            "eupw",
+            Policy {
+                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                max_validity_days: 30,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec![],
+                may_manage_admins: false,
+            },
+        )
+        .unwrap();
+        // A perms-only role admin with no issuance authority at all.
+        ca_vault::add_role_slot(
+            dir.path(),
+            "pat",
+            "patpw",
+            Policy {
+                allowed_san: vec![],
+                max_validity_days: 0,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec!["/eu".to_string()],
+                may_manage_admins: false,
+            },
+        )
+        .unwrap();
+        let us = commit_live_cert(dir.path(), "host.us.ryu-oh.org");
+        let eu = commit_live_cert(dir.path(), "host.eu.ryu-oh.org");
+        let serving = commit_live_cert(dir.path(), SERVING_SAN);
+        let revoked = |serial: u64| {
+            ca_store::list_signed(dir.path())
+                .unwrap()
+                .into_iter()
+                .find(|r| r.serial == serial)
+                .unwrap()
+                .revoked
+                .is_some()
+        };
+
+        // A perms-only admin can't revoke anything — rejected up front.
+        let pat = handle_revoke(
+            &issuer(dir.path()),
+            dir.path(),
+            &RevokeRequest {
+                admin: "pat".to_string(),
+                password: Secret("patpw".to_string()),
+                serials: vec![eu],
+                reason: "x".to_string(),
+            },
+        );
+        assert!(matches!(pat, RevokeResponse::Err { reason } if reason.contains("not authorized")));
+        assert!(!revoked(eu), "a rejected revoke must not have revoked anything");
+
+        // eu-ops asks to revoke all three; only its in-scope leaf is revoked.
+        let resp = handle_revoke(
+            &issuer(dir.path()),
+            dir.path(),
+            &RevokeRequest {
+                admin: "eu-ops".to_string(),
+                password: Secret("eupw".to_string()),
+                serials: vec![us, eu, serving],
+                reason: "x".to_string(),
+            },
+        );
+        let RevokeResponse::Ok { warnings } = resp else { panic!("expected Ok with warnings") };
+        assert!(revoked(eu), "eu-ops may revoke its own *.eu leaf");
+        assert!(!revoked(us), "eu-ops must NOT revoke another region's *.us leaf");
+        assert!(!revoked(serving), "eu-ops must NOT revoke a serving cert");
+        assert_eq!(warnings.len(), 2, "the two out-of-scope serials are reported: {warnings:?}");
+
+        // The broad signing admin (alice) can revoke the *.us leaf.
+        let resp = handle_revoke(
+            &issuer(dir.path()),
+            dir.path(),
+            &RevokeRequest {
+                admin: "alice".to_string(),
+                password: Secret("apw".to_string()),
+                serials: vec![us],
+                reason: "x".to_string(),
+            },
+        );
+        assert!(matches!(resp, RevokeResponse::Ok { .. }));
+        assert!(revoked(us), "a broad admin may revoke any cert");
+    }
+
+    /// Denying a queued request is scope-bound like revocation: a `*.eu` role
+    /// admin can't deny another region's pending request (a queue-DoS the old
+    /// keyless-authenticate path left wide open).
+    #[test]
+    fn deny_is_scope_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        ca_vault::add_role_slot(
+            dir.path(),
+            "eu-ops",
+            "eupw",
+            Policy {
+                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                max_validity_days: 30,
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec![],
+                may_manage_admins: false,
+            },
+        )
+        .unwrap();
+        let peer = "1.2.3.4:5".parse().unwrap();
+        let enqueue = |name: &str| -> String {
+            let kc = conf_client::generate_key_and_csr(name).unwrap();
+            let req = EnqueueRequest {
+                kind: NodeKind::Client,
+                csr_pem: kc.csr_pem,
+                requested_name: name.to_string(),
+                requested_validity_days: 30,
+                enroll_listen: None,
+            };
+            match handle_enqueue(dir.path(), &req, peer, None) {
+                EnqueueResponse::Ok { request_id } => request_id,
+                EnqueueResponse::Err { reason } => panic!("enqueue {name}: {reason}"),
+            }
+        };
+        let us_id = enqueue("host.us.ryu-oh.org");
+        let eu_id = enqueue("host.eu.ryu-oh.org");
+
+        // Out of scope: refused, and the request stays pending.
+        let denied = handle_deny(
+            &issuer(dir.path()),
+            dir.path(),
+            &DenyRequest {
+                admin: "eu-ops".to_string(),
+                password: Secret("eupw".to_string()),
+                request_id: us_id.clone(),
+                reason: "x".to_string(),
+            },
+        );
+        assert!(matches!(denied, DenyResponse::Err { reason } if reason.contains("not authorized")));
+        assert!(matches!(
+            ca_store::status(dir.path(), &us_id).unwrap(),
+            ca_store::Status::Pending(_)
+        ));
+
+        // In scope: eu-ops may deny its own region's request.
+        let ok = handle_deny(
+            &issuer(dir.path()),
+            dir.path(),
+            &DenyRequest {
+                admin: "eu-ops".to_string(),
+                password: Secret("eupw".to_string()),
+                request_id: eu_id.clone(),
+                reason: "x".to_string(),
+            },
+        );
+        assert!(matches!(ok, DenyResponse::Ok));
+        assert!(matches!(
+            ca_store::status(dir.path(), &eu_id).unwrap(),
+            ca_store::Status::Denied(_)
+        ));
+    }
+
+    /// A revocation that lands while a verified renewal is queued must win:
+    /// the renewal is re-validated against the live index UNDER THE ISSUER
+    /// LOCK at approval, so the originating serial being revoked refuses the
+    /// renewal instead of auto-minting a fresh (attacker-keyed) cert. The
+    /// enqueue-then-revoke race the existing `a_revoked_certificate_cannot_
+    /// self_renew` (revoke-then-enqueue) didn't cover.
+    #[test]
+    fn a_renewal_loses_to_a_revocation_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
+        let fp = ca_store::list_signed(dir.path())
+            .unwrap()
+            .into_iter()
+            .find(|r| r.serial == orig)
+            .unwrap()
+            .spki_fp;
+        // Enqueue a verified renewal (presenting our live cert's identity).
+        let kc = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
+        let enq = EnqueueRequest {
+            kind: NodeKind::Client,
+            csr_pem: kc.csr_pem,
+            requested_name: "host.ryu-oh.org".to_string(),
+            requested_validity_days: 30,
+            enroll_listen: None,
+        };
+        let pid = PeerIdent {
+            san: "host.ryu-oh.org".to_string(),
+            serial: Some(orig),
+            spki_fp: Some(fp),
+        };
+        let rid = match handle_enqueue(dir.path(), &enq, "1.2.3.4:5".parse().unwrap(), Some(&pid)) {
+            EnqueueResponse::Ok { request_id } => request_id,
+            EnqueueResponse::Err { reason } => panic!("renewal enqueue: {reason}"),
+        };
+        assert!(
+            ca_store::pending(dir.path())
+                .unwrap()
+                .iter()
+                .any(|q| q.id == rid && q.renewal_of == Some(orig)),
+            "must be queued as a verified renewal"
+        );
+        // The admin revokes the originating cert (laptop stolen).
+        ca_store::revoke(
+            dir.path(),
+            orig,
+            ca_store::Revocation {
+                serial: orig,
+                revoked_unix: ca_store::now_unix(),
+                reason: "stolen".to_string(),
+            },
+        )
+        .unwrap();
+        // The in-flight renewal is now refused, not silently re-minted.
+        let approved = handle_approve(
+            &issuer(dir.path()),
+            dir.path(),
+            &ApproveRequest {
+                admin: "alice".to_string(),
+                password: Secret("apw".to_string()),
+                request_id: rid.clone(),
+                id_map_groups: vec![],
+            },
+        )
+        .unwrap();
+        match approved.resp {
+            SignResponse::Err { reason } => {
+                assert!(reason.contains("no longer live"), "{reason}")
+            }
+            SignResponse::Ok { .. } => panic!("a renewal of a revoked cert must be refused"),
+        }
+        assert!(matches!(
+            ca_store::status(dir.path(), &rid).unwrap(),
+            ca_store::Status::Pending(_)
+        ));
+    }
+
+    /// A verified renewal binds to our cert's KEY, not just its serial: a
+    /// co-trusted foreign CA's cert with a colliding serial (and a different
+    /// key) for the same name is NOT treated as a renewal of ours.
+    #[test]
+    fn a_colliding_serial_with_a_foreign_key_is_not_a_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
+        let real_fp = ca_store::list_signed(dir.path())
+            .unwrap()
+            .into_iter()
+            .find(|r| r.serial == orig)
+            .unwrap()
+            .spki_fp;
+        let kc = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
+        let enq = EnqueueRequest {
+            kind: NodeKind::Client,
+            csr_pem: kc.csr_pem,
+            requested_name: "host.ryu-oh.org".to_string(),
+            requested_validity_days: 30,
+            enroll_listen: None,
+        };
+        let peer = "1.2.3.4:5".parse().unwrap();
+        // SAN + serial match our live record, but the key fingerprint does
+        // not → not a renewal; treated as an ordinary request, which the
+        // one-live-cert rule then refuses (there is already a live cert).
+        let foreign = PeerIdent {
+            san: "host.ryu-oh.org".to_string(),
+            serial: Some(orig),
+            spki_fp: Some("AAAA BBBB CCCC".to_string()),
+        };
+        match handle_enqueue(dir.path(), &enq, peer, Some(&foreign)) {
+            EnqueueResponse::Err { reason } => assert!(reason.contains("already exists"), "{reason}"),
+            EnqueueResponse::Ok { .. } => {
+                panic!("a foreign cert with a colliding serial must not renew")
+            }
+        }
+        // Our own cert's fingerprint IS a verified renewal.
+        let ours = PeerIdent {
+            san: "host.ryu-oh.org".to_string(),
+            serial: Some(orig),
+            spki_fp: Some(real_fp),
+        };
+        let rid = match handle_enqueue(dir.path(), &enq, peer, Some(&ours)) {
+            EnqueueResponse::Ok { request_id } => request_id,
+            EnqueueResponse::Err { reason } => panic!("our own cert should renew: {reason}"),
+        };
+        assert!(ca_store::pending(dir.path())
+            .unwrap()
+            .iter()
+            .any(|q| q.id == rid && q.renewal_of == Some(orig)));
     }
 
     #[test]
@@ -3382,7 +4085,7 @@ mod tests {
         setup_ca(dir.path());
         let peer: SocketAddr = "192.168.0.9:4565".parse().unwrap();
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: None,
         };
@@ -3403,7 +4106,7 @@ mod tests {
         // B: a roleless stepping stone; A: the CA, which knows about B.
         let (b_addr, _b) = spawn_server_with(dir.path(), Roles::default(), vec![]).await;
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: None,
         };
@@ -3431,7 +4134,7 @@ mod tests {
         let (b_addr, _b) = spawn_server_with(dir.path(), roles_b, vec![]).await;
         // A: the CA, with B as a configured peer.
         let roles_a = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: None,
         };
@@ -3470,7 +4173,7 @@ mod tests {
             l.local_addr().unwrap()
         };
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: None,
         };
@@ -3650,7 +4353,7 @@ mod tests {
         // One server wearing both hats: signs the queue AND hosts the
         // id-map the approval registers into.
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: Some(IdMapRole { map: map_path.clone() }),
         };
@@ -3740,24 +4443,12 @@ mod tests {
     #[test]
     fn autorenew_sweep_approves_only_verified_renewals() {
         let dir = tempfile::tempdir().unwrap();
+        // setup_ca already mints the `autorenew` signing slot + keytab
+        // (password AUTORENEW_PW); the sweep authenticates + signs with it.
         setup_ca(dir.path());
-        // The dedicated empty-scope slot. The daemon needs only the vault
-        // admin + its password; the keytab/TPM plumbing lives in the CLI.
-        ca_vault::add_signing_slot(
-            dir.path(),
-            "apw",
-            AUTORENEW_ADMIN,
-            "renew-secret",
-            Policy {
-                allowed_san: vec![],
-                max_validity_days: 730,
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-            },
-        )
-        .unwrap();
+        // The renewal continues a live identity — mint+index its originating
+        // cert so the approval's still-live re-check passes.
+        let orig_serial = commit_live_cert(dir.path(), "host.ryu-oh.org");
         // A verified renewal and an ordinary new request, both pending.
         let renew = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
         let fresh = conf_client::generate_key_and_csr("newcomer.ryu-oh.org").unwrap();
@@ -3767,7 +4458,7 @@ mod tests {
             "host.ryu-oh.org".to_string(),
             30,
             "test".to_string(),
-            true,
+            Some(orig_serial),
             None,
         );
         let fresh_req = ca_store::QueuedReq::new(
@@ -3776,7 +4467,7 @@ mod tests {
             "newcomer.ryu-oh.org".to_string(),
             30,
             "test".to_string(),
-            false,
+            None,
             None,
         );
         let renew_id = renew_req.id.clone();
@@ -4547,7 +5238,7 @@ mod tests {
     async fn spawn_anon_parent(dir: &Path) -> (SocketAddr, PathBuf, Arc<Server>) {
         let rpath = write_anon_resolver_cfg(dir, "resolver.json");
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: Some(autorenew_keytab(dir)) }),
             resolver: Some(ResolverRole { config: rpath.clone() }),
             id_map: None,
         };
@@ -4581,7 +5272,7 @@ mod tests {
         std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -4643,7 +5334,7 @@ mod tests {
         std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -4688,7 +5379,7 @@ mod tests {
         std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -4835,7 +5526,7 @@ mod tests {
 
         // Peer A holds the CA (it approves); peer B only receives pushes.
         let roles_a = Roles {
-            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: Some(autorenew_keytab(ca_dir)) }),
             resolver: Some(ResolverRole { config: ra.clone() }),
             id_map: None,
         };
@@ -4888,7 +5579,7 @@ mod tests {
         let rb = write_cluster_cfg(ca_dir, "resolver_b.json");
 
         let roles_a = Roles {
-            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: Some(autorenew_keytab(ca_dir)) }),
             resolver: Some(ResolverRole { config: ra.clone() }),
             id_map: None,
         };
@@ -5009,7 +5700,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: None }),
+            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
             resolver: None,
             id_map: None,
         };

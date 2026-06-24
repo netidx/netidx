@@ -2207,7 +2207,7 @@ pub(super) fn record_offline_issuance(
         name.to_string(),
         validity_days,
         "(offline issue)".to_string(),
-        false,
+        None,
         None,
     );
     netidx_conf::ca_store::commit_issuance(
