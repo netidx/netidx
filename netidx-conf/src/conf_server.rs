@@ -2040,7 +2040,7 @@ fn approve_locked(
 /// sealed keytab that won't unseal is a hard error here — but the caller
 /// only logs it and skips spawning the approver, so the rest of the
 /// daemon serves regardless; renewals just fall back to human approval.
-fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
+pub fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
     let raw = std::fs::read(keytab)
         .with_context(|| format!("reading autorenew keytab {}", keytab.display()))?;
     if netidx_tpm::is_sealed(&raw) {

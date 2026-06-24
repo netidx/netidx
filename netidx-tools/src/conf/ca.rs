@@ -40,6 +40,25 @@ pub(crate) enum Cmd {
     /// set up or rotate the auto-approve slot, so the running conf server
     /// approves verified renewals in-process (no human per renewal)
     AutoApprove(AutoApproveArgs),
+    /// manage the off-box recovery credential (rotate it on the CA box)
+    Recovery {
+        #[command(subcommand)]
+        cmd: RecoveryCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum RecoveryCmd {
+    /// mint a fresh recovery password on the CA box (authorized by the
+    /// box's autorenew keytab, so a lost recovery password is recoverable
+    /// while the machine lives). The new password is printed once.
+    Rotate(RecoveryRotateArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RecoveryRotateArgs {
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -50,6 +69,11 @@ pub(crate) struct AutoApproveArgs {
     /// pick up the new credential.
     #[arg(long)]
     pub rotate: bool,
+    /// Proceed even when this host has no usable TPM / Secure Enclave.
+    /// DANGER: the autorenew keytab is then written in PLAINTEXT — every
+    /// backup or disk image of this machine becomes a CA compromise.
+    #[arg(long = "insecure-no-tpm")]
+    pub insecure_no_tpm: bool,
 }
 
 #[derive(Args, Debug)]
@@ -144,6 +168,20 @@ pub(crate) struct AdminAddRoleArgs {
     /// Name of the new role admin. Prompted when omitted.
     #[arg(long)]
     pub name: Option<String>,
+    /// SAN glob the server may sign on this role's behalf (repeatable).
+    /// Prompted when omitted; empty for a role that issues nothing.
+    #[arg(long = "allow-san", num_args = 1)]
+    pub allow_san: Vec<String>,
+    /// Max validity (days) this role may issue. Default 730.
+    #[arg(long, default_value = "730")]
+    pub max_validity_days: u32,
+    /// id-map groups this role may assign when enrolling (repeatable;
+    /// first is primary). Prompted when omitted; empty disables it.
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_groups: Vec<String>,
+    /// Whether this role may enroll new conf servers. Prompted when omitted.
+    #[arg(long)]
+    pub may_enroll_servers: Option<bool>,
     /// Netidx path this role may edit perms under (repeatable, e.g. /eu,
     /// or / for the whole tree). Prompted when omitted.
     #[arg(long = "perms-scope", num_args = 1)]
@@ -251,25 +289,33 @@ pub(crate) struct InitParams {
     pub key_bits: u32,
     #[arg(long, default_value = "7300")]
     pub validity_days: u32,
-    /// The first admin's name (keyslot label). Prompted when omitted,
-    /// defaulting to the current unix user.
+    /// The superuser (role) admin's name. This is the founding admin who
+    /// can mint other admins, edit perms, and enroll servers — but never
+    /// unlocks the CA key (the server signs on its behalf). Prompted when
+    /// omitted, defaulting to the current unix user.
     #[arg(long)]
     pub admin: Option<String>,
-    /// SAN glob the first admin may issue (repeatable). Prompted when
-    /// omitted — e.g. `*.example.com`.
+    /// SAN glob the superuser may have the server sign (repeatable).
+    /// Prompted when omitted — e.g. `*.example.com`.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
-    /// Max validity (days) the first admin may issue. Default 730.
+    /// Max validity (days) the superuser may issue. Default 730.
     #[arg(long, default_value = "730")]
     pub max_validity_days: u32,
-    /// id-map groups for identities signed by the first admin
+    /// id-map groups the superuser may assign when enrolling
     /// (repeatable; first is primary). Prompted when omitted.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether the first admin may enroll new conf servers. Prompted
+    /// Whether the superuser may enroll new conf servers. Prompted
     /// when omitted (default yes for the founding admin).
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
+    /// Proceed even when this host has no usable TPM / Secure Enclave.
+    /// DANGER: the autorenew credential is then written in PLAINTEXT, so
+    /// every backup or disk image of this machine is a CA compromise. Test
+    /// CAs only.
+    #[arg(long = "insecure-no-tpm")]
+    pub insecure_no_tpm: bool,
     /// Set up the CA server (issue a serving cert + write server.json)
     /// without prompting. By default `ca init` asks.
     #[arg(long)]
@@ -277,12 +323,6 @@ pub(crate) struct InitParams {
     /// Skip the CA-server setup entirely (offline CA only).
     #[arg(long, conflicts_with = "with_server")]
     pub no_server: bool,
-    /// Enable automatic renewal approval without prompting.
-    #[arg(long)]
-    pub with_autorenew: bool,
-    /// Skip automatic renewal approval (renewals wait for a human).
-    #[arg(long, conflicts_with = "with_autorenew")]
-    pub no_autorenew: bool,
     /// Address the CA server should listen on when set up. Default
     /// `0.0.0.0:<ca-port>`.
     #[arg(long)]
@@ -415,6 +455,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Fingerprint(p) => fingerprint(p),
         Cmd::Revoke(p) => revoke(p),
         Cmd::AutoApprove(p) => auto_approve(p),
+        Cmd::Recovery { cmd } => recovery(cmd),
     }
 }
 
@@ -446,28 +487,36 @@ fn autorenew_keytab_path() -> Result<PathBuf> {
     Ok(paths::user_config_root()?.join("autorenew.keytab"))
 }
 
-/// A long random password for the autorenew slot (256 bits, hex).
-fn random_password() -> String {
-    format!(
+/// A long random password for the autorenew slot (256 bits, hex). The
+/// autorenew slot is a master-key-wrapping signing credential, so keep its
+/// plaintext in a `Zeroizing` buffer that wipes on drop (it is dropped right
+/// after sealing / writing the keytab).
+fn random_password() -> Zeroizing<String> {
+    Zeroizing::new(format!(
         "{}{}",
         netidx_conf::ca_store::new_id(),
         netidx_conf::ca_store::new_id()
-    )
+    ))
 }
 
-/// Create (or replace) the autorenew slot + keytab. `authorizing` is
-/// any current admin's password. Returns the keytab path.
+/// Create (or replace) the autorenew slot + keytab. `recovery_password`
+/// authorizes the re-mint: the old autorenew slot is removed first, so the
+/// authorizing credential must be a *different* signing slot — in the
+/// server-only model that is the `recovery` password (which is also why
+/// rotating autorenew, e.g. after a TPM clear, needs the recovery
+/// password). Returns the keytab path.
 ///
 /// The keytab is TPM-sealed when the host has a usable TPM 2.0: at
-/// rest the slot password is a CA-key-decryption credential (any slot
-/// password unlocks the vault's master key), so a plaintext keytab
+/// rest the slot password is a CA-key-decryption credential (any signing
+/// slot password unlocks the vault's master key), so a plaintext keytab
 /// makes every disk image and backup of this host a CA compromise.
 /// Sealed, the file is inert anywhere but this machine. A host with no
 /// TPM (or a flaky one — setup must not dead-end) falls back to the
 /// plaintext keytab with a note saying what that costs.
 pub(super) fn setup_autorenew_slot(
     ca_dir: &Path,
-    authorizing: &str,
+    recovery_password: &str,
+    insecure_no_tpm: bool,
 ) -> Result<PathBuf> {
     // Replace-not-fail: rotation and re-runs both land here.
     let exists = ca_vault::list_admins(ca_dir)?
@@ -477,8 +526,20 @@ pub(super) fn setup_autorenew_slot(
         ca_vault::remove_slot(ca_dir, AUTORENEW_ADMIN, false)?;
     }
     let password = random_password();
-    ca_vault::add_signing_slot(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
+    ca_vault::add_signing_slot(
+        ca_dir,
+        recovery_password,
+        AUTORENEW_ADMIN,
+        &password,
+        autorenew_policy(),
+    )?;
     let keytab = autorenew_keytab_path()?;
+    // `available()` (which the caller's TPM gate checked) only proves the
+    // device opened, NOT that a seal will succeed — a present-but-locked or
+    // busy TPM fails here. The seal decision is the real one: a plaintext
+    // keytab is a master-key-equivalent credential, so falling back to it
+    // silently would defeat the whole gate. Only `--insecure-no-tpm` accepts
+    // that, and then loudly; otherwise we refuse and roll the slot back.
     match netidx_tpm::seal(password.as_bytes()) {
         Ok(blob) => {
             atomic::write_atomic(&keytab, &blob, 0o600)?;
@@ -488,13 +549,29 @@ pub(super) fn setup_autorenew_slot(
                 netidx_tpm::MECHANISM
             );
         }
-        Err(e) => {
+        Err(e) if insecure_no_tpm => {
             atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
-            println!(
-                "  note: the keytab is plaintext ({} sealing unavailable: \
-                 {e:#}). It still works, but treat any copy of it as a copy \
-                 of the CA key.",
+            eprintln!("================================================================");
+            eprintln!(
+                "WARNING: the autorenew keytab is PLAINTEXT ({} sealing failed: {e:#}).",
                 netidx_tpm::MECHANISM
+            );
+            eprintln!("Any backup or disk image of this machine now contains a credential");
+            eprintln!("that unlocks the CA key. You accepted this with --insecure-no-tpm.");
+            eprintln!("================================================================");
+        }
+        Err(e) => {
+            // Refuse: undo the slot we just minted so the vault is unchanged,
+            // and don't write the plaintext keytab. The operator can fix the
+            // TPM and re-run, or opt in with --insecure-no-tpm.
+            let _ = ca_vault::remove_slot(ca_dir, AUTORENEW_ADMIN, false);
+            bail!(
+                "the autorenew credential could not be sealed to this host's {mech} \
+                 ({e:#}). Writing it in plaintext would be equivalent to backing up the \
+                 CA key, so this is refused. Fix the {mech} (e.g. clear an owner-auth or \
+                 dictionary-attack lockout) and re-run `netidx conf ca auto-approve`, or \
+                 pass --insecure-no-tpm to accept a plaintext keytab (test CAs only).",
+                mech = netidx_tpm::MECHANISM
             );
         }
     }
@@ -511,10 +588,20 @@ pub(super) fn setup_autorenew_slot(
 fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
-    let authorizing = collect_existing_password(
-        "your admin password (authorizes setting up the auto-approve slot)",
-    )?;
-    let keytab = setup_autorenew_slot(&dir, &authorizing)?;
+    // Same gate as init: refuse on a TPM-less host unless the operator opts
+    // into a plaintext keytab. (Re-minting the box credential here is exactly
+    // the moment a plaintext fallback would leak it.)
+    tpm_gate(p.insecure_no_tpm)?;
+    // Re-minting autorenew removes the old slot first, so the recovery
+    // password (not the old keytab) is what authorizes it — and after a TPM
+    // clear the old keytab is unsealable anyway, so recovery is the only way
+    // in. Normalize a re-typed copy (spaces/case/confusables fold away).
+    let typed = Zeroizing::new(collect_existing_password(
+        "the CA recovery password (printed once at init; authorizes re-minting the \
+         autorenew credential)",
+    )?);
+    let recovery = ca_vault::normalize_recovery_password(&typed);
+    let keytab = setup_autorenew_slot(&dir, &recovery, p.insecure_no_tpm)?;
     let verb = if p.rotate { "rotated" } else { "enabled" };
     println!("auto-approve {verb}:");
     println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
@@ -749,25 +836,25 @@ pub(super) struct NewCaOpts {
     pub san: Vec<String>,
     pub key_bits: u32,
     pub validity_days: u32,
-    /// First admin name; `None` ⇒ prompt, defaulting to the current
-    /// unix user.
+    /// Superuser (role) admin name; `None` ⇒ prompt, defaulting to the
+    /// current unix user. Created only when the conf server is set up
+    /// (a role admin authenticates to the daemon; an offline CA has none).
     pub admin: Option<String>,
-    /// First admin's issuance policy globs; empty ⇒ prompt (default
+    /// Superuser's server-signing scope globs; empty ⇒ prompt (default
     /// `*.<domain>` when `domain` is set, else derived from the CN).
     pub allowed_san: Vec<String>,
     pub max_validity_days: u32,
-    /// First admin's id-map groups; empty ⇒ prompt (default `users`).
+    /// Superuser's id-map groups; empty ⇒ prompt (default `users`).
     pub id_map_groups: Vec<String>,
-    /// Whether the first admin may enroll conf servers; `None` ⇒
+    /// Whether the superuser may enroll conf servers; `None` ⇒
     /// prompt, defaulting to yes (someone has to be able to grow the
     /// network).
     pub may_enroll_servers: Option<bool>,
+    /// Proceed without a TPM / Secure Enclave (autorenew keytab written
+    /// in plaintext). A loud warning is printed; test CAs only.
+    pub insecure_no_tpm: bool,
     /// `None` ⇒ prompt "set up the conf server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
-    /// Automatic renewal approval (the scoped autorenew slot, keytab,
-    /// and unit). `None` ⇒ prompt (default yes); only takes effect
-    /// when the conf server is set up — renewals flow through it.
-    pub autorenew: Option<bool>,
     /// Explicit `--listen` for the CA server (skips the prompt).
     pub listen: Option<SocketAddr>,
     /// IP to suggest for the CA server's listen address when prompting
@@ -797,7 +884,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     // centralized here): an explicit `--cn` / threaded value wins,
     // otherwise prompt with the `ca.<domain>` default when we know the
     // domain.
-    let common_name = resolve_ca_cn(opts.common_name, opts.domain.as_deref())?;
+    let common_name = resolve_ca_cn(opts.common_name.clone(), opts.domain.as_deref())?;
     // The conf-server config wants a concrete domain (it's what the
     // network is grouped by in discovery). Prefer the threaded one;
     // fall back to the CN's domain part, which `resolve_ca_cn` makes
@@ -809,72 +896,47 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
             _ => common_name.clone(),
         },
     };
-    // `--admin` short-circuits the prompt; otherwise ask, seeding the
-    // default with the current unix user. On a non-TTY (automation) the
-    // default is taken silently, preserving the old auto-name behavior.
-    let admin = match env_user_name() {
-        Some(user) => prompt::string_with_default("CA admin name", opts.admin, &user)?,
-        None => prompt::required_string("CA admin name", opts.admin)?,
-    };
-    // Validate the vault inputs *before* anything is written to disk:
-    // `Ca::init_vaulted` commits `certificate.pem` + `serial`, and only
-    // then does `ca_vault::create` run — so a bad input rejected there
-    // (e.g. an empty admin name slipping past the CLI as `--admin ''`)
-    // would leave a half-built CA with no signing key that also blocks a
-    // retry (the dir then looks like an existing CA).
-    if admin.trim().is_empty() {
-        bail!("admin name must not be empty");
-    }
+    // Refuse to build a CA on a host that can't seal the box credential
+    // (or loudly warn under --insecure-no-tpm) BEFORE anything touches
+    // disk, so a refused init leaves the dir clean and retryable.
+    tpm_gate(opts.insecure_no_tpm)?;
     let san = parse_sans(&opts.san, &common_name)?;
-    let password = collect_required_password(&format!(
-        "set a CA password for admin {admin:?} (this signs certs)"
-    ))?;
-    let policy = prompt_policy(
-        &PolicyArgs {
-            allow_san: &opts.allowed_san,
-            max_validity_days: opts.max_validity_days,
-            id_map_groups: &opts.id_map_groups,
-            may_enroll_servers: opts.may_enroll_servers,
-            // The founding admin is a signing slot, so it holds full perms
-            // authority already — no explicit scope needed.
-            perms_scope: &[],
-        },
-        // The founding admin defaults to being able to grow the
-        // network — someone has to.
-        true,
-        &common_name,
-        opts.domain.as_deref(),
-    )?;
 
-    // Generate the CA with its key returned (never written to disk in
-    // plaintext) and seal it into the vault under the first admin.
+    // Generate the CA (its key is returned, never written to disk in
+    // plaintext) and seal it into the vault under the `recovery` slot —
+    // the off-box break-glass credential whose generated password is shown
+    // once and never stored.
     let (ca, key_pem) = Ca::init_vaulted(&CaParams {
         directory: opts.dir.clone(),
         subject: Subject {
-            common_name,
-            country: opts.country,
-            state: opts.state,
-            locality: opts.locality,
-            organization: opts.organization,
+            common_name: common_name.clone(),
+            country: opts.country.clone(),
+            state: opts.state.clone(),
+            locality: opts.locality.clone(),
+            organization: opts.organization.clone(),
         },
         san,
         key_bits: opts.key_bits,
         validity_days: opts.validity_days,
     })?;
-    // Belt and suspenders: should sealing still fail (e.g. an I/O error
-    // mid-write), roll back the cert + serial that `init_vaulted`
-    // committed so the directory isn't a keyless half-CA that blocks a
-    // clean retry. The in-memory key is dropped (zeroized) on the way
-    // out, so nothing sensitive is left behind.
-    if let Err(e) = ca_vault::create(&opts.dir, &key_pem, &admin, &password, policy) {
+    let recovery_pw = ca_vault::gen_recovery_password();
+    // Should sealing fail mid-write, roll back the cert + serial
+    // `init_vaulted` committed so the dir isn't a keyless half-CA that
+    // blocks a clean retry. The in-memory key zeroizes on the way out.
+    if let Err(e) = ca_vault::create(
+        &opts.dir,
+        &key_pem,
+        ca_vault::RECOVERY_ADMIN,
+        &recovery_pw,
+        recovery_policy(),
+    ) {
         let _ = std::fs::remove_file(opts.dir.join("certificate.pem"));
         let _ = std::fs::remove_file(opts.dir.join("serial"));
         return Err(e).context("sealing CA key into the vault");
     }
 
     println!("created a new CA at {}", opts.dir.display());
-    println!("  admin {admin:?} can sign; the CA key is encrypted at rest (keyslot vault)");
-    println!();
+    print_recovery_password(&recovery_pw);
     show_ca_identity(&opts.dir)?;
     println!();
     println!(
@@ -891,45 +953,201 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         )?,
     };
     let need = if set_up_server {
-        super::server::setup_server(super::server::SetupArgs {
+        let need = super::server::setup_server(super::server::SetupArgs {
             ca_dir: &opts.dir,
             ca: &ca,
             domain: &domain,
             listen: opts.listen,
             listen_hint: opts.listen_hint,
             units_dir: opts.units_dir.as_deref(),
-        })?
+        })?;
+        // The box's `autorenew` credential — the only signing key the
+        // daemon ever holds, and what it signs on a role admin's behalf
+        // with. Mandatory for a server CA. Authorized by the recovery
+        // password we just minted; sealed to the TPM (or plaintext under
+        // --insecure-no-tpm, which the gate above already warned about).
+        let keytab = setup_autorenew_slot(&opts.dir, &recovery_pw, opts.insecure_no_tpm)?;
+        let cfg_path = super::server::set_ca_autorenew(&keytab)?;
+        println!("automatic renewal approval enabled:");
+        println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
+        println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
+        println!("          rotate anytime with `netidx conf ca auto-approve --rotate`)");
+        println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
+        // The founding SUPERUSER role admin: it directs the server (mint
+        // admins, edit perms, enroll servers) but wraps no MK, so its
+        // password can NEVER unlock the CA key — only the server signs.
+        setup_superuser(&opts, &common_name)?;
+        need
     } else {
+        // An offline CA has no daemon to sign on anyone's behalf, so it
+        // grows no autorenew slot and no role admins: the recovery password
+        // is the operator's credential for local `ca issue` / `ca sign`.
         service::ServiceNeed::NONE
     };
-    // Automatic renewal approval: people are lazy, and a network where
-    // renewals rot in the queue becomes a network of 10-year certs.
-    // The slot is scoped to nothing but renewals; the trust ceremony
-    // stays human for new identities.
-    if set_up_server {
-        let auto = match opts.autorenew {
-            Some(b) => b,
-            None => prompt::confirm(
-                "approve certificate renewals automatically? (a dedicated keyslot \
-                 that can approve renewals and nothing else; new identities always \
-                 need a human)",
-                true,
-            )?,
-        };
-        if auto {
-            let keytab = setup_autorenew_slot(&opts.dir, &password)?;
-            // Point the conf-server config's CA role at the keytab: the
-            // daemon set up just above approves verified renewals
-            // in-process — no separate autorenew daemon to install.
-            let cfg_path = super::server::set_ca_autorenew(&keytab)?;
-            println!("automatic renewal approval enabled:");
-            println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
-            println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
-            println!("          rotate anytime with `netidx conf ca auto-approve --rotate`)");
-            println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
-        }
-    }
     Ok((ca, need))
+}
+
+/// The `recovery` signing slot's policy: the same narrow, no-standing-wire-
+/// authority shape as the autorenew slot. Its power is being a *signing*
+/// slot (it unlocks the key for on-box `ca issue` / break-glass), not any
+/// issuance policy — that authority lives in role admins. Empty here keeps a
+/// leaked-then-typed recovery password from issuing arbitrary certs over the
+/// wire (it can still revoke, which every signing slot can).
+fn recovery_policy() -> ca_vault::Policy {
+    autorenew_policy()
+}
+
+/// Refuse to build a CA on a host with no usable TPM / Secure Enclave —
+/// before any disk write — unless the operator explicitly accepts the cost
+/// with `--insecure-no-tpm`, in which case warn loudly. The autorenew
+/// credential is sealed to the box's TPM precisely so a stolen backup is
+/// inert; without sealing it sits in plaintext in every backup.
+fn tpm_gate(insecure_no_tpm: bool) -> Result<()> {
+    if netidx_tpm::available() {
+        return Ok(());
+    }
+    let mech = netidx_tpm::MECHANISM;
+    if !insecure_no_tpm {
+        bail!(
+            "this host has no usable {mech}. A CA's autorenew credential is sealed \
+             to the {mech} so a stolen backup or disk image of this machine is inert \
+             on its own. Without it, that credential sits in PLAINTEXT in every \
+             backup — equivalent to backing up the CA key.\n\n\
+             Run the CA on hardware with a TPM 2.0 / Secure Enclave, or pass \
+             --insecure-no-tpm to override (test CAs only)."
+        );
+    }
+    eprintln!("================================================================");
+    eprintln!("WARNING: --insecure-no-tpm — no {mech} sealing on this host.");
+    eprintln!("The autorenew keytab will be written in PLAINTEXT, so any backup");
+    eprintln!("or disk image of this machine then contains a credential that");
+    eprintln!("unlocks the CA key. Use this for TEST CAs only.");
+    eprintln!("================================================================");
+    Ok(())
+}
+
+/// Print the recovery password exactly once, boxed, with the store-it-in-a-
+/// safe warning. It is never persisted (only the sealed autorenew keytab
+/// carries a separate box credential), so this is the only time it is shown.
+fn print_recovery_password(pw: &str) {
+    let grouped = ca_vault::group_recovery_password(pw);
+    let shown = grouped.as_str();
+    let bar = "─".repeat(shown.chars().count() + 2);
+    println!();
+    println!("┌{bar}┐");
+    println!("│ {shown} │");
+    println!("└{bar}┘");
+    println!("This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.");
+    println!("It is shown ONCE and never stored. It is the only OFF-box credential");
+    println!("that can unlock the CA key — to mint a new admin or rotate the box's");
+    println!("own credential. If you lose it AND this machine, the CA is unrecoverable;");
+    println!("while the machine lives you can mint a fresh one with");
+    println!("`netidx conf ca recovery rotate`.");
+    println!();
+}
+
+/// Create the founding superuser ROLE admin (operator names it + sets its
+/// password). Full authority — broad issuance scope, may enroll servers,
+/// edits perms anywhere, and manages other admins — yet it wraps no master
+/// key, so its password can never unlock the CA. Only minted for a server
+/// CA (a role admin authenticates to the daemon).
+fn setup_superuser(opts: &NewCaOpts, cn: &str) -> Result<()> {
+    let name = match env_user_name() {
+        Some(user) => prompt::string_with_default("superuser admin name", opts.admin.clone(), &user)?,
+        None => prompt::required_string("superuser admin name", opts.admin.clone())?,
+    };
+    if name.trim().is_empty() {
+        bail!("superuser name must not be empty");
+    }
+    if ca_vault::is_reserved_admin(&name) {
+        bail!("{name:?} is a reserved signing-slot name; choose another for the superuser");
+    }
+    let mut policy = prompt_policy(
+        &PolicyArgs {
+            allow_san: &opts.allowed_san,
+            max_validity_days: opts.max_validity_days,
+            id_map_groups: &opts.id_map_groups,
+            may_enroll_servers: opts.may_enroll_servers,
+            perms_scope: &[],
+        },
+        // The superuser founds the network, so it defaults to may-enroll.
+        true,
+        cn,
+        opts.domain.as_deref(),
+    )?;
+    // What makes it the superuser: perms authority over the whole tree and
+    // the right to mint/scope other admins. (Issuance scope + enroll came
+    // from the prompt above.)
+    policy.perms_edit_scopes = vec!["/".to_string()];
+    policy.may_manage_admins = true;
+    let pw = collect_required_password(&format!("password for superuser {name:?}"))?;
+    ca_vault::add_role_slot(&opts.dir, &name, &pw, policy)?;
+    println!();
+    println!("superuser role admin {name:?} created — it manages admins, edits perms,");
+    println!("and enrolls servers, but never unlocks the CA key (the server signs).");
+    Ok(())
+}
+
+/// `conf ca recovery rotate`: mint a fresh recovery password on the CA box.
+/// Authorized by the box's own autorenew keytab (read + unsealed), so a lost
+/// recovery password is recoverable while the machine lives — without it.
+fn recovery(cmd: RecoveryCmd) -> Result<()> {
+    match cmd {
+        RecoveryCmd::Rotate(a) => recovery_rotate(a),
+    }
+}
+
+fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
+    let dir = ca_dir_for(a.ca_dir)?;
+    if !ca_vault::exists(&dir) {
+        bail!("no vault-protected CA at {}", dir.display());
+    }
+    // The autorenew keytab is the on-box authority: it holds a signing-slot
+    // password (sealed to this machine), and re-minting the recovery slot
+    // recovers MK to wrap it. This is why rotation works without the lost
+    // recovery password — but only on the box that holds the keytab.
+    let keytab = autorenew_keytab_path()?;
+    let autorenew_pw = netidx_conf::conf_server::read_autorenew_password(&keytab)
+        .with_context(|| {
+            format!(
+                "rotating the recovery password needs the autorenew keytab ({}); it \
+                 authorizes the re-mint on the CA box. (Set one up with \
+                 `netidx conf ca auto-approve`.)",
+                keytab.display()
+            )
+        })?;
+    // Confirm the keytab credential actually unlocks this CA BEFORE removing
+    // the old recovery slot — a stale keytab must not leave the CA with no
+    // recovery slot. (The recovered key is dropped/zeroized immediately.)
+    ca_vault::unlock(&dir, &autorenew_pw).with_context(|| {
+        format!(
+            "the autorenew keytab ({}) did not unlock this CA — its credential is \
+             stale. Re-mint it with `netidx conf ca auto-approve --rotate` (needs the \
+             recovery password) and try again.",
+            keytab.display()
+        )
+    })?;
+    // Drop the old recovery slot, then mint a fresh one. Autorenew remains
+    // the signing slot throughout, so the master key is never orphaned; if
+    // the re-mint fails, autorenew still unlocks and the rotate can be
+    // retried.
+    let exists = ca_vault::list_admins(&dir)?
+        .iter()
+        .any(|i| i.admin == ca_vault::RECOVERY_ADMIN);
+    if exists {
+        ca_vault::remove_slot(&dir, ca_vault::RECOVERY_ADMIN, false)?;
+    }
+    let new_pw = ca_vault::gen_recovery_password();
+    ca_vault::add_signing_slot(
+        &dir,
+        &autorenew_pw,
+        ca_vault::RECOVERY_ADMIN,
+        &new_pw,
+        recovery_policy(),
+    )?;
+    println!("rotated the recovery password for the CA at {}", dir.display());
+    print_recovery_password(&new_pw);
+    Ok(())
 }
 
 fn init(p: InitParams) -> Result<()> {
@@ -944,13 +1162,6 @@ fn init(p: InitParams) -> Result<()> {
     let setup_server = if p.no_server {
         Some(false)
     } else if p.with_server {
-        Some(true)
-    } else {
-        None
-    };
-    let autorenew = if p.no_autorenew {
-        Some(false)
-    } else if p.with_autorenew {
         Some(true)
     } else {
         None
@@ -971,8 +1182,8 @@ fn init(p: InitParams) -> Result<()> {
         max_validity_days: p.max_validity_days,
         id_map_groups: p.id_map_groups,
         may_enroll_servers: p.may_enroll_servers,
+        insecure_no_tpm: p.insecure_no_tpm,
         setup_server,
-        autorenew,
         listen: p.listen,
         // No resolver in this flow; default_ca_listen_ip falls back to
         // an existing resolver's IP, then the public IP.
@@ -993,12 +1204,32 @@ fn init(p: InitParams) -> Result<()> {
 
 fn admin(cmd: AdminCmd) -> Result<()> {
     match cmd {
-        AdminCmd::Add(a) => {
+        AdminCmd::Add(_) => {
+            // Signing slots are fixed to recovery + autorenew in the
+            // server-only model: minting a third MK-holder is exactly the
+            // backup-crackable extra key the design removes. Authority is
+            // granted to ROLE admins, which the server signs on behalf of.
+            bail!(
+                "`ca admin add` is gone: the only signing keyslots are `recovery` \
+                 and `autorenew`, fixed at init. To grant a new admin authority, use \
+                 `netidx conf ca admin add-role <name>` — a role admin edits perms, \
+                 manages admins, and (with --may-enroll-servers) enrolls servers, all \
+                 without ever unlocking the CA key (the server signs for it)."
+            )
+        }
+        AdminCmd::AddRole(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
-            let name = prompt::required_string("new admin name", a.name)?;
-            // Seed the policy suggestion from the CA's own cert domain
-            // (e.g. `ca.ryu-oh.org` → `*.ryu-oh.org`). Added admins
-            // default to NOT being able to enroll conf servers.
+            let name = prompt::required_string("new role admin name", a.name)?;
+            if ca_vault::is_reserved_admin(&name) {
+                bail!(
+                    "{name:?} is a reserved signing-slot name (recovery / autorenew) \
+                     and cannot be a role admin"
+                );
+            }
+            // A role admin now carries a full policy, just like the founding
+            // superuser: issuance scope, id-map groups, may-enroll, and perms
+            // scopes. A role with no authority at all is allowed (a placeholder
+            // to scope later) — the empty-scope bail is gone.
             let policy = prompt_policy(
                 &PolicyArgs {
                     allow_san: &a.allow_san,
@@ -1011,58 +1242,28 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 &existing_ca_cn(&dir),
                 None,
             )?;
-            let existing = collect_existing_password(
-                "your own (existing) admin password — unlocks the CA key to enroll the new admin",
-            )?;
-            let new_pw =
-                collect_required_password(&format!("password for new admin {name:?}"))?;
-            // Phase 3 replaces this with an error: signing slots are fixed to
-            // recovery + autorenew; grant authority via a role admin instead.
-            ca_vault::add_signing_slot(&dir, &existing, &name, &new_pw, policy)?;
-            println!("added admin {name:?}");
-            Ok(())
-        }
-        AdminCmd::AddRole(a) => {
-            let dir = ca_dir_for(a.ca_dir)?;
-            let name = prompt::required_string("new role admin name", a.name)?;
-            let scopes: Vec<String> = if !a.perms_scope.is_empty() {
-                a.perms_scope.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-            } else {
-                prompt::required_string(
-                    "netidx paths this role may edit perms under (comma-separated, e.g. /eu)",
-                    None,
-                )?
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-            };
-            if scopes.is_empty() {
-                bail!(
-                    "a role keyslot with no perms scope can do nothing — grant at \
-                     least one --perms-scope"
-                );
-            }
-            let policy = ca_vault::Policy {
-                allowed_san: vec![],
-                max_validity_days: 0,
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: scopes.clone(),
-                may_manage_admins: false,
-            };
+            let summary = format!(
+                "allowed_san={:?} may_enroll_servers={} perms_edit_scopes={:?}",
+                policy.allowed_san, policy.may_enroll_servers, policy.perms_edit_scopes
+            );
             // On-box authority is filesystem access to the vault; a role slot
             // wraps no MK, so no signing password is needed. (Phase 4 adds a
             // --server path gated by may_manage_admins over the conf plane.)
             let new_pw =
                 collect_required_password(&format!("password for new role admin {name:?}"))?;
             ca_vault::add_role_slot(&dir, &name, &new_pw, policy)?;
-            println!("added role admin {name:?} scoped to perms under {scopes:?}");
+            println!("added role admin {name:?}: {summary}");
             Ok(())
         }
         AdminCmd::SetPolicy(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin whose policy to set", a.name)?;
+            if ca_vault::is_reserved_admin(&name) {
+                bail!(
+                    "{name:?} is a system-managed signing slot; its narrow policy is \
+                     fixed and must not be widened. Manage authority through role admins."
+                );
+            }
             let policy = prompt_policy(
                 &PolicyArgs {
                     allow_san: &a.allow_san,
@@ -1095,6 +1296,14 @@ fn admin(cmd: AdminCmd) -> Result<()> {
         AdminCmd::Remove(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin to revoke", a.name)?;
+            if ca_vault::is_reserved_admin(&name) {
+                bail!(
+                    "{name:?} is a system-managed signing slot and cannot be removed \
+                     directly (that would orphan the CA key or the box credential). \
+                     Rotate recovery with `netidx conf ca recovery rotate`, or \
+                     autorenew with `netidx conf ca auto-approve --rotate`."
+                );
+            }
             // On-box authority is filesystem access to the vault; you revoke
             // a slot by name. The last-signing-slot guard prevents orphaning
             // the CA key.
@@ -2105,16 +2314,54 @@ pub(super) fn default_ca_present() -> bool {
 /// through it, so they all transparently handle vaulted CAs.
 pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
     if ca_vault::exists(dir) {
-        if !prompt::stdin_is_tty() {
-            bail!(
-                "the CA at {} is vault-protected and needs an admin password, \
-                 but stdin is not a TTY",
-                dir.display(),
-            );
-        }
-        let pw = collect_existing_password("your CA admin password")?;
-        let unlocked = ca_vault::unlock(dir, &pw)
-            .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?;
+        // Daily on-box use unlocks with the box's own autorenew credential —
+        // read + unsealed from its keytab, no human secret typed. Fall back
+        // to the recovery password only when the keytab is absent or doesn't
+        // unlock this CA (an offline CA with no autorenew, a different CA dir,
+        // or a dead TPM).
+        let from_keytab = autorenew_keytab_path()
+            .ok()
+            .filter(|k| k.exists())
+            .and_then(|keytab| {
+                match netidx_conf::conf_server::read_autorenew_password(&keytab) {
+                    Ok(pw) => match ca_vault::unlock(dir, &pw) {
+                        Ok(u) => Some(u),
+                        Err(e) => {
+                            eprintln!(
+                                "note: the autorenew keytab did not unlock this CA \
+                                 ({e:#}); falling back to the recovery password"
+                            );
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "note: could not read the autorenew keytab ({e:#}); \
+                             falling back to the recovery password"
+                        );
+                        None
+                    }
+                }
+            });
+        let unlocked = match from_keytab {
+            Some(u) => u,
+            None => {
+                if !prompt::stdin_is_tty() {
+                    bail!(
+                        "the CA at {} is vault-protected and the autorenew keytab did \
+                         not unlock it; it needs the recovery password, but stdin is \
+                         not a TTY",
+                        dir.display(),
+                    );
+                }
+                let typed = Zeroizing::new(collect_existing_password(
+                    "the CA recovery password (from your safe; printed once at init)",
+                )?);
+                let pw = ca_vault::normalize_recovery_password(&typed);
+                ca_vault::unlock(dir, &pw)
+                    .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?
+            }
+        };
         let cert = std::fs::read(dir.join("certificate.pem"))
             .with_context(|| format!("reading CA cert in {}", dir.display()))?;
         return Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
@@ -2689,5 +2936,66 @@ mod tests {
             msg.contains("not a TTY"),
             "should report non-TTY context: {msg}"
         );
+    }
+
+    /// An offline CA (no conf server) is minted with exactly one signing
+    /// slot — `recovery`, holding a generated password never typed — and no
+    /// role admins (a role admin needs a daemon to authenticate to). The
+    /// whole path runs with no prompts and no TTY. `--insecure-no-tpm`
+    /// keeps it from refusing on a TPM-less CI host.
+    #[test]
+    fn offline_ca_init_makes_exactly_the_recovery_slot() {
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().join("ca");
+        let (_ca, _need) = create_vaulted_ca(NewCaOpts {
+            dir: dir.clone(),
+            common_name: Some("ca.example.com".into()),
+            domain: Some("example.com".into()),
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec![],
+            key_bits: 2048, // test speed; production is 4096
+            validity_days: 30,
+            admin: Some("super".into()),
+            allowed_san: vec!["*.example.com".into()],
+            max_validity_days: 730,
+            id_map_groups: vec!["users".into()],
+            may_enroll_servers: Some(true),
+            insecure_no_tpm: true,
+            setup_server: Some(false),
+            listen: None,
+            listen_hint: None,
+            units_dir: None,
+        })
+        .unwrap();
+        // Exactly the recovery signing slot, and nothing else — no autorenew
+        // (no daemon), no superuser role (offline).
+        assert_eq!(
+            ca_vault::signing_slot_names(&dir).unwrap(),
+            vec![ca_vault::RECOVERY_ADMIN.to_string()]
+        );
+        let admins = ca_vault::list_admins(&dir).unwrap();
+        assert_eq!(admins.len(), 1, "offline CA has only the recovery slot");
+        assert_eq!(admins[0].admin, ca_vault::RECOVERY_ADMIN);
+        assert_eq!(admins[0].kind, ca_vault::SlotKind::Signing);
+    }
+
+    /// `ca admin add` is gone — it must error and point the operator at
+    /// `add-role` (signing slots are fixed to recovery + autorenew).
+    #[test]
+    fn admin_add_is_rejected_pointing_to_add_role() {
+        let r = admin(AdminCmd::Add(AdminAddArgs {
+            name: Some("x".into()),
+            allow_san: vec![],
+            max_validity_days: 730,
+            id_map_groups: vec![],
+            may_enroll_servers: None,
+            perms_scope: vec![],
+            ca_dir: Some("/nonexistent".into()),
+        }));
+        let msg = format!("{:#}", r.unwrap_err());
+        assert!(msg.contains("add-role"), "must point at add-role: {msg}");
     }
 }

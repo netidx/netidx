@@ -37,6 +37,89 @@ use zeroize::Zeroizing;
 pub const VAULT_FILE: &str = "vault.json";
 const VAULT_VERSION: u32 = 1;
 
+/// The off-box break-glass signing credential the operator stores in a
+/// safe — the only key-recovery credential that ever leaves the box.
+/// Minted once at init via [`create`]; rotated on-box via
+/// `conf ca recovery rotate`. With [`crate::conf_server::AUTORENEW_ADMIN`]
+/// these are the only two signing (master-key-holding) slots.
+pub const RECOVERY_ADMIN: &str = "recovery";
+
+/// True if `name` is one of the two reserved signing-slot names
+/// (`recovery`, `autorenew`). A role admin may never take either: they name
+/// the master-key holders, and a role admin shadowing one would muddy who
+/// authorizes what.
+pub fn is_reserved_admin(name: &str) -> bool {
+    name.eq_ignore_ascii_case(RECOVERY_ADMIN)
+        || name.eq_ignore_ascii_case(crate::conf_server::AUTORENEW_ADMIN)
+}
+
+/// Crockford base32 alphabet (digits + uppercase, excluding I L O U — the
+/// characters easiest to confuse written down or read aloud). The recovery
+/// password is rendered in this alphabet so it survives a trip through a
+/// safe and a human's handwriting.
+const CROCKFORD32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// Bytes of entropy in a recovery password — 160 bits (a multiple of 5, so
+/// it renders to exactly 32 base32 chars with no padding).
+const RECOVERY_ENTROPY_BYTES: usize = 20;
+
+/// Generate a fresh recovery-slot password: 160 bits rendered as 32
+/// Crockford base32 characters. This canonical string is the actual slot
+/// password; [`group_recovery_password`] renders it in quads for the
+/// operator to copy, and [`normalize_recovery_password`] folds a re-typed
+/// copy back to it. Never persisted — printed exactly once at init/rotate.
+pub fn gen_recovery_password() -> Zeroizing<String> {
+    let mut bytes = Zeroizing::new([0u8; RECOVERY_ENTROPY_BYTES]);
+    rand::rng().fill_bytes(&mut bytes[..]);
+    let mut out = String::with_capacity(32);
+    let (mut acc, mut bits) = (0u16, 0u32);
+    for &b in bytes.iter() {
+        acc = (acc << 8) | b as u16;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(CROCKFORD32[((acc >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    // 160 bits / 5 == 32 chars exactly; no leftover bits to pad.
+    Zeroizing::new(out)
+}
+
+/// Render a recovery password in 4-character quads separated by spaces
+/// (e.g. `45QD 567D 8H2K …`) for the boxed one-time display. Grouping only
+/// aids transcription; [`normalize_recovery_password`] strips it back out.
+/// The result is `Zeroizing` (it holds the full secret) — the same care
+/// [`gen_recovery_password`] takes, kept across this hop.
+pub fn group_recovery_password(pw: &str) -> Zeroizing<String> {
+    let mut out = String::with_capacity(pw.len() + pw.len() / 4);
+    for (i, c) in pw.chars().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    Zeroizing::new(out)
+}
+
+/// Fold an operator-typed recovery password back to the canonical form
+/// [`gen_recovery_password`] produced: drop whitespace and hyphens,
+/// uppercase, and apply Crockford's digit substitutions (O→0, I/L→1) so a
+/// transcription that confused those characters still unlocks. The result is
+/// `Zeroizing` — it is the secret that goes to `unlock`.
+pub fn normalize_recovery_password(typed: &str) -> Zeroizing<String> {
+    Zeroizing::new(
+        typed
+            .chars()
+            .filter_map(|c| match c.to_ascii_uppercase() {
+                ' ' | '-' | '\t' | '\n' | '\r' => None,
+                'O' => Some('0'),
+                'I' | 'L' => Some('1'),
+                c => Some(c),
+            })
+            .collect(),
+    )
+}
+
 // Argon2id cost. Per the design doc: 64 MiB / t=3 / p=4 in production;
 // the params are stored *per slot*, so `unlock` always uses whatever a
 // slot was created with — which lets the test build derive cheaply
@@ -286,6 +369,12 @@ pub fn add_role_slot(
     new_password: &str,
     policy: Policy,
 ) -> Result<()> {
+    if is_reserved_admin(new_admin) {
+        bail!(
+            "{new_admin:?} is a reserved signing-slot name (recovery / autorenew); \
+             choose another name for a role admin"
+        );
+    }
     let path = vault_path(ca_dir);
     let mut vault = read_vault(&path)?;
     if vault.slots.iter().any(|s| s.admin == new_admin) {
@@ -661,6 +750,47 @@ mod tests {
         ]);
         // Only the signing slot is an MK-holder.
         assert_eq!(signing_slot_names(dir.path()).unwrap(), vec!["recovery".to_string()]);
+    }
+
+    #[test]
+    fn reserved_names_cannot_be_role_admins() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        // A role admin may never take a reserved signing-slot name (any case).
+        assert!(add_role_slot(dir.path(), "recovery", "x", role_pol("/")).is_err());
+        assert!(add_role_slot(dir.path(), "AutoRenew", "x", role_pol("/")).is_err());
+        assert!(is_reserved_admin("recovery") && is_reserved_admin("AUTORENEW"));
+        assert!(!is_reserved_admin("eve"));
+    }
+
+    #[test]
+    fn recovery_password_roundtrips_through_display_and_renentry() {
+        let pw = gen_recovery_password();
+        // 160 bits of Crockford base32 == 32 chars from the alphabet.
+        assert_eq!(pw.len(), 32);
+        assert!(pw.chars().all(|c| CROCKFORD32.contains(&(c as u8))));
+        // Grouped for display: 8 quads separated by 7 spaces.
+        let shown = group_recovery_password(&pw);
+        assert_eq!(shown.split(' ').count(), 8);
+        assert!(shown.split(' ').all(|q| q.len() == 4));
+        // Re-typing the grouped form (or with confusable chars) folds back.
+        assert_eq!(*normalize_recovery_password(&shown), *pw);
+        // Two fresh passwords differ (RNG is actually consulted).
+        assert_ne!(*gen_recovery_password(), *pw);
+        // Crockford leniency: O→0, I/L→1, lowercase, stray hyphens.
+        assert_eq!(normalize_recovery_password("o0-iI lL-ab").as_str(), "001111AB");
+    }
+
+    #[test]
+    fn a_minted_recovery_password_actually_unlocks() {
+        // The canonical (ungrouped) password is the slot password; a copy
+        // re-typed in grouped/confusable form normalizes back and unlocks.
+        let dir = tempfile::tempdir().unwrap();
+        let pw = gen_recovery_password();
+        create(dir.path(), KEY, RECOVERY_ADMIN, &pw, pol("*.a")).unwrap();
+        assert!(unlock(dir.path(), &pw).is_ok());
+        let retyped = normalize_recovery_password(&group_recovery_password(&pw));
+        assert!(unlock(dir.path(), &retyped).is_ok());
     }
 
     #[test]

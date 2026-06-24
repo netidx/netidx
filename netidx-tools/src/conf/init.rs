@@ -2432,8 +2432,8 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
             id_map_groups: vec![],
             may_enroll_servers: None,
+            insecure_no_tpm: false,
             setup_server: Some(true),
-            autorenew: None,
             listen: None,
             listen_hint: Some(listen.ip()),
             units_dir: units_dir.clone(),
@@ -3027,8 +3027,8 @@ fn resolver_tls_generate(
             max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: Some(true),
+            insecure_no_tpm: false,
             setup_server,
-            autorenew: None,
             listen: None,
             // The CA co-locates with this resolver — suggest its IP for
             // the conf server's listen address.
