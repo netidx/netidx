@@ -436,6 +436,7 @@ fn autorenew_policy() -> ca_vault::Policy {
         id_map_groups: vec![],
         may_enroll_servers: false,
         perms_edit_scopes: vec![],
+        may_manage_admins: false,
     }
 }
 
@@ -473,10 +474,10 @@ pub(super) fn setup_autorenew_slot(
         .iter()
         .any(|info| info.admin == AUTORENEW_ADMIN);
     if exists {
-        ca_vault::remove_admin(ca_dir, authorizing, AUTORENEW_ADMIN, false)?;
+        ca_vault::remove_slot(ca_dir, AUTORENEW_ADMIN, false)?;
     }
     let password = random_password();
-    ca_vault::add_admin(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
+    ca_vault::add_signing_slot(ca_dir, authorizing, AUTORENEW_ADMIN, &password, autorenew_policy())?;
     let keytab = autorenew_keytab_path()?;
     match netidx_tpm::seal(password.as_bytes()) {
         Ok(blob) => {
@@ -1015,7 +1016,9 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             )?;
             let new_pw =
                 collect_required_password(&format!("password for new admin {name:?}"))?;
-            ca_vault::add_admin(&dir, &existing, &name, &new_pw, policy)?;
+            // Phase 3 replaces this with an error: signing slots are fixed to
+            // recovery + autorenew; grant authority via a role admin instead.
+            ca_vault::add_signing_slot(&dir, &existing, &name, &new_pw, policy)?;
             println!("added admin {name:?}");
             Ok(())
         }
@@ -1046,15 +1049,14 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: scopes.clone(),
+                may_manage_admins: false,
             };
-            // Authority: minting a role requires a SIGNING admin's password
-            // (a role admin can't escalate by creating more admins).
-            let authorizing = collect_existing_password(
-                "your own (signing) admin password — authorizes minting a role keyslot",
-            )?;
+            // On-box authority is filesystem access to the vault; a role slot
+            // wraps no MK, so no signing password is needed. (Phase 4 adds a
+            // --server path gated by may_manage_admins over the conf plane.)
             let new_pw =
                 collect_required_password(&format!("password for new role admin {name:?}"))?;
-            ca_vault::add_role_admin(&dir, &authorizing, &name, &new_pw, policy)?;
+            ca_vault::add_role_slot(&dir, &name, &new_pw, policy)?;
             println!("added role admin {name:?} scoped to perms under {scopes:?}");
             Ok(())
         }
@@ -1084,25 +1086,19 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 policy.may_enroll_servers,
                 policy.perms_edit_scopes
             );
-            // Authority: any current admin's password (the same flat
-            // model as add/remove). You don't need the target's.
-            let auth = collect_existing_password(&format!(
-                "your own admin password (authorizes setting policy for {name:?})"
-            ))?;
-            ca_vault::set_policy(&dir, &auth, &name, policy)?;
+            // On-box authority is filesystem access to the vault; rescoping
+            // touches only the slot's plaintext policy, never MK.
+            ca_vault::set_policy(&dir, &name, policy)?;
             println!("updated policy for admin {name:?}: {summary}");
             Ok(())
         }
         AdminCmd::Remove(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
             let name = prompt::required_string("admin to revoke", a.name)?;
-            // The authorizing password is the operator's OWN (any
-            // current admin's) — never the departed admin's. You revoke
-            // a slot by name; you don't need its password.
-            let auth = collect_existing_password(&format!(
-                "your own admin password (authorizes revoking {name:?})"
-            ))?;
-            ca_vault::remove_admin(&dir, &auth, &name, a.force)?;
+            // On-box authority is filesystem access to the vault; you revoke
+            // a slot by name. The last-signing-slot guard prevents orphaning
+            // the CA key.
+            ca_vault::remove_slot(&dir, &name, a.force)?;
             println!("revoked admin {name:?}");
             Ok(())
         }
@@ -1329,6 +1325,8 @@ fn prompt_policy(
         id_map_groups,
         may_enroll_servers,
         perms_edit_scopes,
+        // Phase 4 wires a --may-manage-admins flag through PolicyArgs.
+        may_manage_admins: false,
     })
 }
 

@@ -2826,6 +2826,7 @@ mod tests {
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: true,
             perms_edit_scopes: vec![],
+            may_manage_admins: false,
         }
     }
 
@@ -3126,6 +3127,7 @@ mod tests {
                 id_map_groups: vec!["users".to_string(), "dev".to_string()],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         );
         let iss = issuer(dir.path());
@@ -3214,6 +3216,7 @@ mod tests {
                 id_map_groups: vec![],
                 may_enroll_servers: true,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         );
         let req = request(SERVING_SAN, "alice", "apw", 30);
@@ -3246,6 +3249,7 @@ mod tests {
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         );
         let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
@@ -3527,7 +3531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         // bob may sign but not enroll.
-        ca_vault::add_admin(
+        ca_vault::add_signing_slot(
             dir.path(),
             "apw",
             "bob",
@@ -3538,6 +3542,7 @@ mod tests {
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         )
         .unwrap();
@@ -3738,7 +3743,7 @@ mod tests {
         setup_ca(dir.path());
         // The dedicated empty-scope slot. The daemon needs only the vault
         // admin + its password; the keytab/TPM plumbing lives in the CLI.
-        ca_vault::add_admin(
+        ca_vault::add_signing_slot(
             dir.path(),
             "apw",
             AUTORENEW_ADMIN,
@@ -3749,6 +3754,7 @@ mod tests {
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         )
         .unwrap();
@@ -3927,7 +3933,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let restricted = Policy { may_enroll_servers: false, ..policy() };
-        ca_vault::add_admin(dir.path(), "apw", "bob", "bpw", restricted).unwrap();
+        ca_vault::add_signing_slot(dir.path(), "apw", "bob", "bpw", restricted).unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
@@ -4227,7 +4233,7 @@ mod tests {
         setup_ca(dir.path());
         // An autorenew-shaped admin: empty issuance scope. It must be
         // able to approve *renewals* and nothing else.
-        ca_vault::add_admin(
+        ca_vault::add_signing_slot(
             dir.path(),
             "apw",
             "bot",
@@ -4238,6 +4244,7 @@ mod tests {
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
+                may_manage_admins: false,
             },
         )
         .unwrap();
@@ -4628,9 +4635,10 @@ mod tests {
             id_map_groups: vec![],
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
+            may_manage_admins: false,
         };
-        ca_vault::add_role_admin(dir.path(), "apw", "eve", "epw", role("/eu")).unwrap();
-        ca_vault::add_role_admin(dir.path(), "apw", "rod", "rpw", role("/")).unwrap();
+        ca_vault::add_role_slot(dir.path(), "eve", "epw", role("/eu")).unwrap();
+        ca_vault::add_role_slot(dir.path(), "rod", "rpw", role("/")).unwrap();
 
         std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
         let rpath = write_resolver_with_perms(dir.path());

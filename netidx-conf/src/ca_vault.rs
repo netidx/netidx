@@ -46,14 +46,18 @@ const KDF_COST: (u32, u32, u32) = (65536, 3, 4);
 #[cfg(test)]
 const KDF_COST: (u32, u32, u32) = (32, 1, 1);
 
-/// Per-admin issuance policy, stored in that admin's slot. Recovered by
-/// [`unlock`] so the server can authorize a request against exactly the
-/// admin who unlocked it.
+/// An admin's capabilities, stored in their slot and returned by
+/// [`authenticate`] so the server can authorize a request against exactly
+/// the admin who proved their password. In the server-signs model the
+/// SERVER holds the only signing key (the autorenew credential); this
+/// policy decides what it will sign / edit / manage *on a role admin's
+/// behalf* — a role admin's password never unlocks the key itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
-    /// Glob patterns every requested SAN must match. Empty ⇒ deny all
-    /// (issuance scope must be granted explicitly; no accidental
-    /// allow-everything).
+    /// The admin's **server-signing scope**: glob patterns every requested
+    /// SAN must match for the server to sign it on this admin's behalf.
+    /// Empty ⇒ may not cause any issuance (granted explicitly; no
+    /// accidental allow-everything).
     pub allowed_san: Vec<String>,
     pub max_validity_days: u32,
     /// id-map groups this admin **may assign** when signing — the
@@ -75,6 +79,14 @@ pub struct Policy {
     /// `Role` keyslot can carry it.
     #[serde(default)]
     pub perms_edit_scopes: Vec<String>,
+    /// Whether this admin may mint / rescope / revoke **role** admins (the
+    /// `ca admin` ops, local or over the conf plane). It never confers MK
+    /// access — a managing admin directs the server, which uses the
+    /// autorenew credential as the MK proof — and may only grant
+    /// capabilities ⊆ its own (no escalation; enforced server-side).
+    /// Granted explicitly.
+    #[serde(default)]
+    pub may_manage_admins: bool,
 }
 
 /// What a keyslot's `wrap` field protects, and so what authority the slot
@@ -234,10 +246,14 @@ pub fn authenticate(ca_dir: &Path, admin: &str, password: &str) -> Result<Authen
     bail!("authentication failed")
 }
 
-/// Add an admin slot. `existing_password` must unlock an existing slot
-/// (proof of authority); the new admin gets `new_password` and
-/// `policy`. The CA key is untouched.
-pub fn add_admin(
+/// Add a **signing** slot — one that wraps MK and so can recover the CA
+/// key. DANGER: a new signing slot is a new MK-holder, exactly the thing
+/// the two-slot model minimises; never call this from a wire-exposed
+/// handler. `existing_password` must unlock an existing signing slot (the
+/// bootstrap authority). In the server-signs model the only routine caller
+/// is autorenew setup (re-minting the box's `autorenew` slot, authorized
+/// by the `recovery` password); init mints `recovery` via [`create`].
+pub fn add_signing_slot(
     ca_dir: &Path,
     existing_password: &str,
     new_admin: &str,
@@ -255,17 +271,17 @@ pub fn add_admin(
     write_vault(&path, &vault)
 }
 
-/// Add a **role** admin: a keyslot that authenticates and carries
-/// `policy` but does NOT wrap the master key, so it can never recover the
-/// CA private key. `authorizing_password` must unlock a *signing* slot —
-/// only signing admins may mint roles (a role admin cannot escalate by
-/// creating more admins, since it can't recover MK). The role slot wraps
-/// a throwaway random verifier purely so its password has something to
-/// prove against; MK is required here only as proof of signing authority,
-/// never copied into the new slot.
-pub fn add_role_admin(
+/// Add a **role** slot: a keyslot that authenticates and carries `policy`
+/// but does NOT wrap the master key, so it can never recover the CA
+/// private key. It wraps a throwaway random verifier purely so its
+/// password has a GCM target to prove against; MK is never touched, so
+/// creating one needs no MK and no signing authority. This is a low-level
+/// primitive — **authority to call it lives in the caller** (the local CLI
+/// holds the vault file; the wire handler checks `may_manage_admins` + the
+/// no-escalation subset rule). The hard-wired `SlotKind::Role` is the
+/// guard that this path can never mint a new MK-holder.
+pub fn add_role_slot(
     ca_dir: &Path,
-    authorizing_password: &str,
     new_admin: &str,
     new_password: &str,
     policy: Policy,
@@ -275,8 +291,6 @@ pub fn add_role_admin(
     if vault.slots.iter().any(|s| s.admin == new_admin) {
         bail!("an admin named {new_admin:?} already exists");
     }
-    recover_mk(&vault, authorizing_password)
-        .context("creating a role keyslot requires a signing admin's password")?;
     let mut verifier = Zeroizing::new([0u8; 32]);
     rand::rng().fill_bytes(&mut verifier[..]);
     let slot = make_slot(&verifier, SlotKind::Role, new_admin, new_password, policy)?;
@@ -284,15 +298,13 @@ pub fn add_role_admin(
     write_vault(&path, &vault)
 }
 
-/// Remove (revoke) an admin's slot. `authorizing_password` must unlock
-/// some slot. Refuses to remove the last remaining slot unless `force`
-/// (that would lock the CA permanently).
-pub fn remove_admin(
-    ca_dir: &Path,
-    authorizing_password: &str,
-    target_admin: &str,
-    force: bool,
-) -> Result<()> {
+/// Remove (revoke) an admin's slot. A low-level primitive — authority
+/// lives in the caller (local FS / wire `may_manage_admins`). Refuses to
+/// remove the last remaining **signing** slot unless `force`: that is the
+/// only MK-holder, and removing it orphans the CA key forever (no password
+/// could ever unlock it again). Removing a role slot never trips the
+/// guard.
+pub fn remove_slot(ca_dir: &Path, target_admin: &str, force: bool) -> Result<()> {
     let path = vault_path(ca_dir);
     let mut vault = read_vault(&path)?;
     let idx = vault
@@ -300,30 +312,24 @@ pub fn remove_admin(
         .iter()
         .position(|s| s.admin == target_admin)
         .ok_or_else(|| anyhow!("no admin named {target_admin:?}"))?;
-    if vault.slots.len() == 1 && !force {
+    let signing = vault.slots.iter().filter(|s| s.kind == SlotKind::Signing).count();
+    if vault.slots[idx].kind == SlotKind::Signing && signing == 1 && !force {
         bail!(
-            "refusing to remove the last admin {target_admin:?}: that would lock \
-             the CA permanently. Pass --force if you really mean to."
+            "refusing to remove {target_admin:?}: it is the only signing keyslot, so \
+             removing it would orphan the CA key permanently (no password could unlock \
+             it again). Pass force only to intentionally retire this CA."
         );
     }
-    // Authority: the caller must know some valid admin password.
-    recover_mk(&vault, authorizing_password)
-        .context("authorizing password does not unlock any slot")?;
     vault.slots.remove(idx);
     write_vault(&path, &vault)
 }
 
-/// Replace the issuance [`Policy`] on `target_admin`'s slot.
-/// `authorizing_password` must unlock some slot (proof of authority — the
-/// same flat model as [`add_admin`]/[`remove_admin`]: any admin may
-/// re-scope any admin). The CA key, master-key wrap, and KDF params are
-/// untouched; only the (plaintext) policy field is rewritten.
-pub fn set_policy(
-    ca_dir: &Path,
-    authorizing_password: &str,
-    target_admin: &str,
-    policy: Policy,
-) -> Result<()> {
+/// Replace the [`Policy`] on `target_admin`'s slot. A low-level primitive
+/// — authority lives in the caller (local FS / wire `may_manage_admins` +
+/// subset check). It rewrites **only** the (plaintext) `policy` field; the
+/// slot's `kind` and `wrap` are untouched, so it can never promote a Role
+/// slot to Signing (a Role admin can be rescoped but never handed MK).
+pub fn set_policy(ca_dir: &Path, target_admin: &str, policy: Policy) -> Result<()> {
     let path = vault_path(ca_dir);
     let mut vault = read_vault(&path)?;
     let idx = vault
@@ -331,8 +337,6 @@ pub fn set_policy(
         .iter()
         .position(|s| s.admin == target_admin)
         .ok_or_else(|| anyhow!("no admin named {target_admin:?}"))?;
-    recover_mk(&vault, authorizing_password)
-        .context("authorizing password does not unlock any slot")?;
     vault.slots[idx].policy = policy;
     write_vault(&path, &vault)
 }
@@ -352,6 +356,31 @@ pub fn list_admins(ca_dir: &Path) -> Result<Vec<AdminInfo>> {
         .into_iter()
         .map(|s| AdminInfo { admin: s.admin, kind: s.kind, policy: s.policy })
         .collect())
+}
+
+/// The names of every MK-wrapping (`Signing`) slot. The server-only model
+/// keeps this to exactly `{recovery, autorenew}`; anything else is a
+/// backup-crackable extra key-holder. Used by init/recovery + as an
+/// invariant check.
+pub fn signing_slot_names(ca_dir: &Path) -> Result<Vec<String>> {
+    let vault = read_vault(&vault_path(ca_dir))?;
+    Ok(vault
+        .slots
+        .iter()
+        .filter(|s| s.kind == SlotKind::Signing)
+        .map(|s| s.admin.clone())
+        .collect())
+}
+
+/// One slot's tier + policy (no secrets), by admin name.
+pub fn slot_policy(ca_dir: &Path, admin: &str) -> Result<(SlotKind, Policy)> {
+    let vault = read_vault(&vault_path(ca_dir))?;
+    vault
+        .slots
+        .iter()
+        .find(|s| s.admin == admin)
+        .map(|s| (s.kind, s.policy.clone()))
+        .ok_or_else(|| anyhow!("no admin named {admin:?}"))
 }
 
 // -- internals ----------------------------------------------------------------
@@ -499,6 +528,7 @@ mod tests {
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: false,
             perms_edit_scopes: vec![],
+            may_manage_admins: false,
         }
     }
 
@@ -510,6 +540,7 @@ mod tests {
             id_map_groups: vec![],
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
+            may_manage_admins: false,
         }
     }
 
@@ -544,132 +575,92 @@ mod tests {
     }
 
     #[test]
-    fn multiple_admins_each_unlock_with_their_own_policy() {
+    fn the_two_signing_slots_each_unlock() {
+        // The server-only model keeps two signing slots: recovery + the
+        // box's autorenew. Both wrap MK and unlock; both yield the same key.
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        add_admin(dir.path(), "apw", "bob", "bpw", pol("*.b")).unwrap();
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        add_signing_slot(dir.path(), "rpw", "autorenew", "apw", pol("*.b")).unwrap();
 
+        let r = unlock(dir.path(), "rpw").unwrap();
+        assert_eq!(r.admin, "recovery");
         let a = unlock(dir.path(), "apw").unwrap();
-        assert_eq!(a.admin, "alice");
-        assert_eq!(a.policy, pol("*.a"));
-        let b = unlock(dir.path(), "bpw").unwrap();
-        assert_eq!(b.admin, "bob");
-        assert_eq!(b.policy, pol("*.b"));
-        // Both recover the same CA key.
-        assert_eq!(&a.ca_key_pem[..], &b.ca_key_pem[..]);
+        assert_eq!(a.admin, "autorenew");
+        assert_eq!(&r.ca_key_pem[..], &a.ca_key_pem[..]);
+        assert_eq!(signing_slot_names(dir.path()).unwrap().len(), 2);
     }
 
     #[test]
-    fn add_admin_requires_an_existing_password_and_unique_name() {
+    fn add_signing_slot_requires_signing_authority_and_unique_name() {
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        // Wrong existing password can't add.
-        assert!(add_admin(dir.path(), "nope", "bob", "bpw", pol("*.b")).is_err());
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        // A password unlocking no signing slot can't mint another MK-holder.
+        assert!(add_signing_slot(dir.path(), "nope", "autorenew", "apw", pol("*.b")).is_err());
+        // A role password is not signing authority either.
+        add_role_slot(dir.path(), "eve", "epw", role_pol("/eu")).unwrap();
+        assert!(add_signing_slot(dir.path(), "epw", "autorenew", "apw", pol("*")).is_err());
         // Duplicate name rejected.
-        assert!(add_admin(dir.path(), "apw", "alice", "x", pol("*")).is_err());
+        assert!(add_signing_slot(dir.path(), "rpw", "recovery", "x", pol("*")).is_err());
     }
 
     #[test]
-    fn remove_admin_revokes_and_guards_last_slot() {
+    fn role_slot_management_needs_no_password_and_cannot_reach_mk() {
+        // The vault primitives carry no authority of their own (the server /
+        // local FS gates them); they only ever touch non-MK plaintext.
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        add_admin(dir.path(), "apw", "bob", "bpw", pol("*.b")).unwrap();
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        add_role_slot(dir.path(), "eve", "epw", role_pol("/eu")).unwrap();
 
-        // Authority is required.
-        assert!(remove_admin(dir.path(), "nope", "bob", false).is_err());
-        // Revoke bob using alice's password.
-        remove_admin(dir.path(), "apw", "bob", false).unwrap();
-        assert!(unlock(dir.path(), "bpw").is_err());
-        assert!(unlock(dir.path(), "apw").is_ok());
-
-        // Can't remove the last slot without force.
-        assert!(remove_admin(dir.path(), "apw", "alice", false).is_err());
-        remove_admin(dir.path(), "apw", "alice", true).unwrap();
-        assert!(unlock(dir.path(), "apw").is_err());
-    }
-
-    #[test]
-    fn set_policy_rescopes_a_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        add_admin(dir.path(), "apw", "bob", "bpw", pol("ryu-oh.org")).unwrap();
-
-        // Authority is required: a password that unlocks no slot can't
-        // change a policy.
-        assert!(set_policy(dir.path(), "nope", "bob", pol("*.ryu-oh.org")).is_err());
-        // Unknown target admin is an error.
-        assert!(set_policy(dir.path(), "apw", "carol", pol("*")).is_err());
-
-        // Alice (any admin) re-scopes bob from the literal `ryu-oh.org`
-        // to `*.ryu-oh.org`. Bob's password and the CA key are untouched.
-        set_policy(dir.path(), "apw", "bob", pol("*.ryu-oh.org")).unwrap();
-        let b = unlock(dir.path(), "bpw").unwrap();
-        assert_eq!(b.admin, "bob");
-        assert_eq!(b.policy, pol("*.ryu-oh.org"));
-        assert_eq!(&b.ca_key_pem[..], KEY);
-        // Alice's own slot is unaffected.
-        assert_eq!(unlock(dir.path(), "apw").unwrap().policy, pol("*.a"));
-    }
-
-    #[test]
-    fn list_admins_reports_names_and_policies() {
-        let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        add_admin(dir.path(), "apw", "bob", "bpw", pol("*.b")).unwrap();
-        let mut admins = list_admins(dir.path()).unwrap();
-        admins.sort_by(|a, b| a.admin.cmp(&b.admin));
-        let summary: Vec<_> =
-            admins.iter().map(|a| (a.admin.clone(), a.kind, a.policy.clone())).collect();
-        assert_eq!(summary, vec![
-            ("alice".to_string(), SlotKind::Signing, pol("*.a")),
-            ("bob".to_string(), SlotKind::Signing, pol("*.b")),
-        ]);
-    }
-
-    #[test]
-    fn role_slot_authenticates_but_cannot_unlock_the_ca_key() {
-        let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        // A signing admin mints a /eu-scoped role keyslot.
-        add_role_admin(dir.path(), "apw", "eve", "epw", role_pol("/eu")).unwrap();
-
-        // The role admin authenticates and gets exactly its scoped policy.
+        // A role authenticates and gets its scoped policy, but NEVER unlocks.
         let a = authenticate(dir.path(), "eve", "epw").unwrap();
-        assert_eq!(a.admin, "eve");
         assert_eq!(a.kind, SlotKind::Role);
         assert_eq!(a.policy, role_pol("/eu"));
-
-        // But its password can NEVER recover the CA key — `unlock` only
-        // considers signing slots, so a role password is "no signing slot".
         assert!(unlock(dir.path(), "epw").is_err());
 
-        // The signing admin authenticates too (any tier) and still unlocks.
-        let s = authenticate(dir.path(), "alice", "apw").unwrap();
-        assert_eq!(s.kind, SlotKind::Signing);
-        assert_eq!(unlock(dir.path(), "apw").unwrap().admin, "alice");
+        // Rescoping a role — even to broad issuance authority — never hands
+        // it MK: it stays a Role slot and its password still can't unlock.
+        set_policy(dir.path(), "eve", pol("*")).unwrap();
+        assert_eq!(slot_policy(dir.path(), "eve").unwrap().0, SlotKind::Role);
+        assert!(unlock(dir.path(), "epw").is_err());
 
-        // Authentication is admin+password: right password, wrong name fails.
-        assert!(authenticate(dir.path(), "alice", "epw").is_err());
-        assert!(authenticate(dir.path(), "eve", "apw").is_err());
+        // remove_slot drops a role with no password; the signing slot stays.
+        remove_slot(dir.path(), "eve", false).unwrap();
+        assert!(authenticate(dir.path(), "eve", "epw").is_err());
+        assert!(unlock(dir.path(), "rpw").is_ok());
     }
 
     #[test]
-    fn role_admin_cannot_mint_admins_or_unlock() {
+    fn remove_slot_guards_the_last_signing_slot() {
         let dir = tempfile::tempdir().unwrap();
-        create(dir.path(), KEY, "alice", "apw", pol("*.a")).unwrap();
-        add_role_admin(dir.path(), "apw", "eve", "epw", role_pol("/eu")).unwrap();
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        add_signing_slot(dir.path(), "rpw", "autorenew", "apw", pol("*.b")).unwrap();
+        add_role_slot(dir.path(), "eve", "epw", role_pol("/eu")).unwrap();
 
-        // A role password is not signing authority: it can neither add a
-        // signing admin (needs MK) nor mint another role (needs a signing
-        // authorizer), nor remove/rescope anyone.
-        assert!(add_admin(dir.path(), "epw", "bob", "bpw", pol("*.b")).is_err());
-        assert!(add_role_admin(dir.path(), "epw", "fred", "fpw", role_pol("/us")).is_err());
-        assert!(remove_admin(dir.path(), "epw", "alice", false).is_err());
-        assert!(set_policy(dir.path(), "epw", "alice", pol("*")).is_err());
+        // Removing a role never trips the guard.
+        remove_slot(dir.path(), "eve", false).unwrap();
+        // Two signing slots: removing one is fine (one MK-holder remains).
+        remove_slot(dir.path(), "autorenew", false).unwrap();
+        // Now `recovery` is the only signing slot: refused without force
+        // (removing it would orphan the CA key forever), allowed with it.
+        assert!(remove_slot(dir.path(), "recovery", false).is_err());
+        remove_slot(dir.path(), "recovery", true).unwrap();
+        assert!(unlock(dir.path(), "rpw").is_err());
+    }
 
-        // The signing admin can revoke the role slot.
-        remove_admin(dir.path(), "apw", "eve", false).unwrap();
-        assert!(authenticate(dir.path(), "eve", "epw").is_err());
+    #[test]
+    fn list_and_signing_slot_names() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        add_role_slot(dir.path(), "eve", "epw", role_pol("/eu")).unwrap();
+        let mut admins = list_admins(dir.path()).unwrap();
+        admins.sort_by(|a, b| a.admin.cmp(&b.admin));
+        let kinds: Vec<_> = admins.iter().map(|a| (a.admin.clone(), a.kind)).collect();
+        assert_eq!(kinds, vec![
+            ("eve".to_string(), SlotKind::Role),
+            ("recovery".to_string(), SlotKind::Signing),
+        ]);
+        // Only the signing slot is an MK-holder.
+        assert_eq!(signing_slot_names(dir.path()).unwrap(), vec!["recovery".to_string()]);
     }
 
     #[test]
