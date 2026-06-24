@@ -95,6 +95,11 @@ pub struct ConfServerConfig {
     /// multicast turn it off and rely on `peers`.
     #[serde(default = "default_true")]
     pub mdns: bool,
+    /// The activation supervisor's unit directory on this host, when it isn't
+    /// the default — used to find the supervisor's control socket for remote
+    /// service control. `None` ⇒ the default search location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_units_dir: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -160,8 +165,8 @@ mod tests {
             ca_addr: None,
             peers: vec!["192.168.0.6:4565".parse().unwrap()],
             mdns: true,
-        }
-    }
+            activation_units_dir: None,
+            }    }
 
     #[test]
     fn round_trips() {

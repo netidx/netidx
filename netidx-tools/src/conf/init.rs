@@ -3383,6 +3383,7 @@ fn enroll_conf_server(
         ca_addr: Some(ca_addr),
         peers: net.info.reached.clone(),
         mdns: true,
+        activation_units_dir: None,
     };
     let cfg_path = paths::user_conf_server_config()?;
     cfg.save(&cfg_path)?;

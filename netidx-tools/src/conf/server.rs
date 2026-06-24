@@ -168,6 +168,7 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
         ca_addr: None,
         peers: Vec::new(),
         mdns: true,
+        activation_units_dir: None,
     };
     let cfg_path = paths::user_conf_server_config()?;
     cfg.save(&cfg_path)?;

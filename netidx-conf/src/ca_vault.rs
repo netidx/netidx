@@ -170,6 +170,14 @@ pub struct Policy {
     /// Granted explicitly.
     #[serde(default)]
     pub may_manage_admins: bool,
+    /// Netidx hierarchy paths under which this admin may control services
+    /// (restart / start / stop / status the activation units on the conf
+    /// servers of the cluster serving that path). Same path-scoping as
+    /// [`perms_edit_scopes`](Self::perms_edit_scopes) but a separate grant —
+    /// editing perms and restarting services are distinct authorities.
+    /// Needs no CA key, so a `Role` keyslot can carry it.
+    #[serde(default)]
+    pub service_control_scopes: Vec<String>,
 }
 
 /// What a keyslot's `wrap` field protects, and so what authority the slot
@@ -620,7 +628,7 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![],
             may_manage_admins: false,
-        }
+            service_control_scopes: vec![],        }
     }
 
     /// A role policy: no issuance, just a perms-edit scope.
@@ -632,7 +640,7 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
-        }
+            service_control_scopes: vec![],        }
     }
 
     const KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\nMOCKKEYBYTES\n-----END PRIVATE KEY-----\n";

@@ -191,6 +191,10 @@ pub(crate) struct AdminAddRoleArgs {
     /// or / for the whole tree). Prompted when omitted.
     #[arg(long = "perms-scope", num_args = 1)]
     pub perms_scope: Vec<String>,
+    /// Netidx path this role may control services under (restart/start/stop
+    /// the activation units of the cluster serving that path; repeatable).
+    #[arg(long = "service-scope", num_args = 1)]
+    pub service_scope: Vec<String>,
     /// Mint the role admin on a REMOTE CA over the conf plane. The CA
     /// enforces no-escalation (you may only grant ⊆ your own authority).
     #[arg(long)]
@@ -224,6 +228,10 @@ pub(crate) struct AdminSetPolicyArgs {
     /// the existing list.
     #[arg(long = "perms-scope", num_args = 1)]
     pub perms_scope: Vec<String>,
+    /// Netidx path this admin may control services under (repeatable).
+    /// Replaces the existing list.
+    #[arg(long = "service-scope", num_args = 1)]
+    pub service_scope: Vec<String>,
     /// Rescope a role admin on a REMOTE CA over the conf plane (CA enforces
     /// no-escalation).
     #[arg(long)]
@@ -494,6 +502,7 @@ fn autorenew_policy() -> ca_vault::Policy {
         may_enroll_servers: false,
         perms_edit_scopes: vec![],
         may_manage_admins: false,
+        service_control_scopes: vec![],
     }
 }
 
@@ -1085,16 +1094,18 @@ fn setup_superuser(opts: &NewCaOpts, cn: &str) -> Result<()> {
             id_map_groups: &opts.id_map_groups,
             may_enroll_servers: opts.may_enroll_servers,
             perms_scope: &[],
+            service_scope: &[],
         },
         // The superuser founds the network, so it defaults to may-enroll.
         true,
         cn,
         opts.domain.as_deref(),
     )?;
-    // What makes it the superuser: perms authority over the whole tree and
-    // the right to mint/scope other admins. (Issuance scope + enroll came
-    // from the prompt above.)
+    // What makes it the superuser: authority over the whole tree (perms +
+    // service control) and the right to mint/scope other admins. (Issuance
+    // scope + enroll came from the prompt above.)
     policy.perms_edit_scopes = vec!["/".to_string()];
+    policy.service_control_scopes = vec!["/".to_string()];
     policy.may_manage_admins = true;
     let pw = collect_required_password(&format!("password for superuser {name:?}"))?;
     ca_vault::add_role_slot(&opts.dir, &name, &pw, policy)?;
@@ -1223,7 +1234,7 @@ fn init(p: InitParams) -> Result<()> {
 /// glyph-confirm with the operator — before any password is typed), then
 /// prompt for the managing admin's name + password. Returns the runtime, the
 /// pinned identity, and the admin credentials. Mirrors `revoke` / `approve`.
-fn remote_admin_preamble(
+pub(super) fn remote_admin_preamble(
     server: SocketAddr,
     ca_dir: Option<PathBuf>,
 ) -> Result<(tokio::runtime::Runtime, conf_client::CaIdentity, String, Zeroizing<String>)> {
@@ -1271,14 +1282,16 @@ fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
         let pol = &info.policy;
         println!(
             "{} [{tier}]: allowed_san={:?} max_validity_days={} id_map_groups={:?} \
-             may_enroll_servers={} may_manage_admins={} perms_edit_scopes={:?}",
+             may_enroll_servers={} may_manage_admins={} perms_edit_scopes={:?} \
+             service_control_scopes={:?}",
             info.admin,
             pol.allowed_san,
             pol.max_validity_days,
             pol.id_map_groups,
             pol.may_enroll_servers,
             pol.may_manage_admins,
-            pol.perms_edit_scopes
+            pol.perms_edit_scopes,
+            pol.service_control_scopes
         );
     }
 }
@@ -1312,6 +1325,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 id_map_groups: &a.id_map_groups,
                 may_enroll_servers: a.may_enroll_servers,
                 perms_scope: &a.perms_scope,
+                service_scope: &a.service_scope,
             };
             // Remote: the CA enforces no-escalation (granted policy ⊆ the
             // managing admin's). Local: on-box FS access is the authority.
@@ -1346,8 +1360,12 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let policy = prompt_policy(&policy_args, false, &existing_ca_cn(&dir), None)?;
             let summary = format!(
-                "allowed_san={:?} may_enroll_servers={} perms_edit_scopes={:?}",
-                policy.allowed_san, policy.may_enroll_servers, policy.perms_edit_scopes
+                "allowed_san={:?} may_enroll_servers={} perms_edit_scopes={:?} \
+                 service_control_scopes={:?}",
+                policy.allowed_san,
+                policy.may_enroll_servers,
+                policy.perms_edit_scopes,
+                policy.service_control_scopes
             );
             let new_pw =
                 collect_required_password(&format!("password for new role admin {name:?}"))?;
@@ -1369,6 +1387,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 id_map_groups: &a.id_map_groups,
                 may_enroll_servers: a.may_enroll_servers,
                 perms_scope: &a.perms_scope,
+                service_scope: &a.service_scope,
             };
             if let Some(server) = a.server {
                 let (rt, identity, admin, password) =
@@ -1396,12 +1415,13 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             // Report the resolved policy (the prompt may have filled it).
             let summary = format!(
                 "allowed_san={:?} max_validity_days={} id_map_groups={:?} \
-                 may_enroll_servers={} perms_edit_scopes={:?}",
+                 may_enroll_servers={} perms_edit_scopes={:?} service_control_scopes={:?}",
                 policy.allowed_san,
                 policy.max_validity_days,
                 policy.id_map_groups,
                 policy.may_enroll_servers,
-                policy.perms_edit_scopes
+                policy.perms_edit_scopes,
+                policy.service_control_scopes
             );
             // On-box authority is filesystem access to the vault; rescoping
             // touches only the slot's plaintext policy, never MK.
@@ -1582,6 +1602,10 @@ struct PolicyArgs<'a> {
     /// the flag (no prompt) — a signing admin gets perms scopes only when
     /// explicitly granted; role admins are minted by `admin add-role`.
     perms_scope: &'a [String],
+    /// Netidx paths this admin may control services under (restart/start/
+    /// stop the activation units of the cluster serving that path). Taken
+    /// straight from the flag, like `perms_scope`.
+    service_scope: &'a [String],
 }
 
 fn prompt_policy(
@@ -1646,12 +1670,11 @@ fn prompt_policy(
             enroll_default,
         )?,
     };
-    let perms_edit_scopes = args
-        .perms_scope
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let trim_paths = |scopes: &[String]| -> Vec<String> {
+        scopes.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+    let perms_edit_scopes = trim_paths(args.perms_scope);
+    let service_control_scopes = trim_paths(args.service_scope);
     Ok(ca_vault::Policy {
         allowed_san,
         max_validity_days: args.max_validity_days,
@@ -1660,6 +1683,7 @@ fn prompt_policy(
         perms_edit_scopes,
         // Phase 4 wires a --may-manage-admins flag through PolicyArgs.
         may_manage_admins: false,
+        service_control_scopes,
     })
 }
 

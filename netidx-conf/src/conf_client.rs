@@ -43,6 +43,8 @@ use crate::{
         ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
         AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
         RemoveAdminRequest, SetAdminPolicyRequest,
+        ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceRequest,
+        ControlServiceResponse,
         GetMapResponse, GetMapVersionResponse, GetPermsResponse, NetworkMap, RegisterRequest,
         RegisterResponse, IssuedEntry,
         ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
@@ -487,6 +489,66 @@ pub async fn list_admins(
     match conf_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Admin → CA (pinned): control services on the cluster serving
+/// `target_path`. Returns one result per targeted cluster member so the
+/// caller can surface a partial failure or per-host status.
+#[allow(clippy::too_many_arguments)]
+pub async fn control_service(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+    target_path: &str,
+    targets: Vec<conf_proto::UnitTarget>,
+    op: netidx_activation::control::ControlOp,
+) -> Result<Vec<conf_proto::ServiceControlResult>> {
+    let mut tls = connect_pinned(addr, kind, expected).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ControlService(ControlServiceRequest {
+            admin: admin.to_string(),
+            password: conf_proto::Secret(password.to_string()),
+            target_path: target_path.to_string(),
+            targets,
+            op,
+        }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
+        ControlServiceResponse::Ok { results } => Ok(results),
+        ControlServiceResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Server → server: apply a service-control op to a peer conf server's local
+/// activation supervisor (serving-cert authed). Mirrors [`push_perms_edit`].
+pub async fn push_service_control(
+    addr: SocketAddr,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    units: Vec<String>,
+    op: netidx_activation::control::ControlOp,
+) -> Result<Vec<netidx_activation::control::UnitStatus>> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) =
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::ApplyServiceControl(ApplyServiceControlRequest { units, op }),
+    )
+    .await?;
+    match conf_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
+        ApplyServiceControlResponse::Ok { units } => Ok(units),
+        ApplyServiceControlResponse::Err { reason } => {
+            bail!("peer refused service control: {reason}")
+        }
     }
 }
 

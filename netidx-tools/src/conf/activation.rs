@@ -1,12 +1,15 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use arcstr::ArcStr;
 use netidx::path::Path as NetidxPath;
+use netidx_activation::control::{ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus};
 use netidx_conf::{
     activation::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
         UnitBuilder,
     },
     client::ClientConfig,
+    conf_client,
+    conf_proto::{self, NodeKind},
     id_map as id_map_engine,
     template::services::{
         container::{self, ContainerServiceParams},
@@ -16,7 +19,7 @@ use netidx_conf::{
 
 use super::prompt;
 use clap::{Args, Subcommand};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf};
 
 // One-shot CLI argument value on the stack; boxing the big variant
 // would trade nothing for an allocation.
@@ -41,6 +44,38 @@ pub(crate) enum Cmd {
         /// Unit basename to remove. Prompted when omitted.
         name: Option<String>,
     },
+    /// restart units (locally, or remotely with `--server`)
+    Restart(ServiceCtlArgs),
+    /// start units
+    Start(ServiceCtlArgs),
+    /// stop units (they will not auto-restart until started)
+    Stop(ServiceCtlArgs),
+    /// report unit status
+    Status(ServiceCtlArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ServiceCtlArgs {
+    /// Drive a REMOTE CA over the conf plane (RBAC-gated, routed by the
+    /// network map). Without it, this host's local activation supervisor is
+    /// controlled directly (on-box, filesystem authority).
+    #[arg(long)]
+    pub server: Option<SocketAddr>,
+    /// The resolver-cluster path whose services to control — the RBAC scope.
+    /// Required with `--server`; ignored locally. e.g. `/eu`.
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Units to act on (empty ⇒ every unit). With `--server`, a unit may be
+    /// pinned to one cluster member by index — `resolver:0` restarts the
+    /// resolver on the first member, `resolver:1` the second, so an admin
+    /// can stagger restarts. Locally, just unit names.
+    pub units: Vec<String>,
+    /// Activation directory (local mode). Default: the user activation dir.
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// CA dir, to verify the conf server's identity (remote mode).
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -160,6 +195,105 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Remove { dir, name } => {
             let name = prompt::required_string("unit name", name)?;
             remove(dir, name)
+        }
+        Cmd::Restart(a) => service_control(ControlOp::Restart, a),
+        Cmd::Start(a) => service_control(ControlOp::Start, a),
+        Cmd::Stop(a) => service_control(ControlOp::Stop, a),
+        Cmd::Status(a) => service_control(ControlOp::Status, a),
+    }
+}
+
+/// Restart / start / stop / status units — over the conf plane (`--server`,
+/// RBAC-gated, cluster+member targeting) or against the local activation
+/// supervisor's control socket (on-box).
+fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
+    match a.server {
+        Some(server) => {
+            let path = a.path.ok_or_else(|| {
+                anyhow!("--path <resolver-cluster-path> is required with --server")
+            })?;
+            let targets = parse_unit_targets(&a.units)?;
+            let (rt, identity, admin, password) =
+                super::ca::remote_admin_preamble(server, a.ca_dir.clone())?;
+            let results = rt.block_on(conf_client::control_service(
+                server,
+                NodeKind::Client,
+                &identity,
+                &admin,
+                password.as_str(),
+                &path,
+                targets,
+                op,
+            ))?;
+            print_service_results(&results);
+            Ok(())
+        }
+        None => {
+            // Local: talk straight to this host's activation control socket.
+            let dir = a
+                .dir
+                .or_else(netidx_activation::runtime::default_units_dir)
+                .ok_or_else(|| anyhow!("no activation directory found on this host"))?;
+            let socket = netidx_activation::control::socket_path(&dir);
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let req = ControlRequest { op, units: a.units };
+            match rt.block_on(netidx_activation::control::control(&socket, &req))? {
+                ControlResponse::Ok { units } => {
+                    print_unit_statuses(&units);
+                    Ok(())
+                }
+                ControlResponse::Err { reason } => bail!("{reason}"),
+            }
+        }
+    }
+}
+
+/// Parse `unit[:member]` tokens into [`conf_proto::UnitTarget`]s. A trailing
+/// `:<n>` pins the unit to cluster member `n`; otherwise it hits every member.
+fn parse_unit_targets(toks: &[String]) -> Result<Vec<conf_proto::UnitTarget>> {
+    toks.iter()
+        .map(|t| match t.rsplit_once(':') {
+            Some((unit, idx)) => {
+                let member = idx
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid member index in {t:?}"))?;
+                Ok(conf_proto::UnitTarget { unit: unit.to_string(), member: Some(member) })
+            }
+            None => Ok(conf_proto::UnitTarget { unit: t.clone(), member: None }),
+        })
+        .collect()
+}
+
+fn fmt_state(s: &UnitState) -> String {
+    match s {
+        UnitState::NotStarted => "not started".to_string(),
+        UnitState::Running { pid: Some(p) } => format!("running (pid {p})"),
+        UnitState::Running { pid: None } => "running".to_string(),
+        UnitState::Stopped => "stopped".to_string(),
+        UnitState::Died => "died".to_string(),
+    }
+}
+
+fn print_unit_statuses(units: &[UnitStatus]) {
+    if units.is_empty() {
+        println!("  (no units)");
+    }
+    for u in units {
+        println!("  {}: {}", u.unit, fmt_state(&u.state));
+    }
+}
+
+fn print_service_results(results: &[conf_proto::ServiceControlResult]) {
+    if results.is_empty() {
+        println!("(no cluster members matched)");
+    }
+    for r in results {
+        match &r.error {
+            Some(e) => println!("member {} ({}): ERROR {e}", r.member, r.addr),
+            None => {
+                println!("member {} ({}):", r.member, r.addr);
+                print_unit_statuses(&r.units);
+            }
         }
     }
 }
@@ -393,6 +527,24 @@ mod tests {
         // Malformed: empty after trim.
         assert_eq!(api_path_for_base(Some("")), "/container/api");
         assert_eq!(api_path_for_base(Some("//")), "/container/api");
+    }
+
+    #[test]
+    fn unit_target_parsing() {
+        let t = parse_unit_targets(&[
+            "resolver".to_string(),
+            "resolver:0".to_string(),
+            "id-map:12".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(t[0].unit, "resolver");
+        assert_eq!(t[0].member, None);
+        assert_eq!(t[1].unit, "resolver");
+        assert_eq!(t[1].member, Some(0));
+        assert_eq!(t[2].unit, "id-map");
+        assert_eq!(t[2].member, Some(12));
+        // A non-numeric index is a clear error, not a silent unit name.
+        assert!(parse_unit_targets(&["resolver:abc".to_string()]).is_err());
     }
 
     #[test]

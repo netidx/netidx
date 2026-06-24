@@ -28,6 +28,8 @@ use crate::{
         GetPermsResponse,
         AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
         RemoveAdminRequest, SetAdminPolicyRequest,
+        ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceRequest,
+        ControlServiceResponse, ServiceControlResult,
         DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, NodeKind,
         RegisterRequest, RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
         InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
@@ -908,6 +910,25 @@ async fn handle_conn(
             let state = state.clone();
             let resp = run_signing(&signs, move || handle_list_admins(&state, &req)).await?;
             conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminListResponse")
+        }
+        Request::ControlService(req) => {
+            let resp = handle_control_service(state, &signs, &req).await;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ControlServiceResponse")
+        }
+        Request::ApplyServiceControl(req) => {
+            let resp = if !peer_is_conf_server {
+                ApplyServiceControlResponse::Err {
+                    reason: "service control requires a conf-server peer certificate"
+                        .to_string(),
+                }
+            } else {
+                handle_apply_service_control(state, &req).await
+            };
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApplyServiceControlResponse")
         }
     }
 }
@@ -2837,6 +2858,192 @@ async fn handle_edit_perms(
     EditPermsResponse::Ok { peers }
 }
 
+// -- remote service control ---------------------------------------------------
+
+/// Whether `authd` may control services on the cluster serving `path`: a
+/// signing slot (founding authority) or a role admin whose
+/// `service_control_scopes` cover the path. (Distinct from perms-edit and
+/// admin-management authority — restarting services is its own grant.)
+///
+/// The scope is the *cluster path*, which selects which member HOSTS the op
+/// reaches; on a reached host the admin may control any unit that host's
+/// supervisor manages. That is intentional: a host running a `/eu` conf
+/// server is a `/eu` host, and a `/eu` service-control admin controls its
+/// services — co-locating a different cluster's services on it would merge
+/// the two clusters' control trust, which is the operator's choice.
+fn service_control_authority(authd: &ca_vault::Authenticated, path: &str) -> bool {
+    matches!(authd.kind, ca_vault::SlotKind::Signing)
+        || perms_scope_covers(&authd.policy.service_control_scopes, path)
+}
+
+/// CA-side: authenticate the admin, authorize by service-control scope, and
+/// fan the op out to the targeted members of the cluster serving
+/// `target_path` (peer-cert-gated `ApplyServiceControl`). A `UnitTarget`'s
+/// `member` index selects one member of the cluster (so an admin can stagger
+/// restarts); `None` hits every member. Mirrors [`handle_edit_perms`].
+async fn handle_control_service(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &ControlServiceRequest,
+) -> ControlServiceResponse {
+    let err = |reason: String| ControlServiceResponse::Err { reason };
+    let ca_dir = match state.ca_dir() {
+        Some(d) => d.to_path_buf(),
+        None => return err("a service-control request must be sent to the CA host".to_string()),
+    };
+    let auth = {
+        let ca_dir = ca_dir.clone();
+        let admin = req.admin.clone();
+        let pw = req.password.0.clone();
+        run_signing(signs, move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
+    };
+    let authd = match auth {
+        Ok(Ok(a)) => a,
+        Ok(Err(_)) => return err("authentication failed".to_string()),
+        Err(e) => return err(format!("auth task panicked: {e}")),
+    };
+    if !service_control_authority(&authd, &req.target_path) {
+        return err(format!(
+            "admin {:?} is not authorized to control services at {:?}",
+            req.admin, req.target_path
+        ));
+    }
+    if req.targets.is_empty() {
+        return err("no units specified".to_string());
+    }
+    // The cluster's ordered member list — a `member` index refers to this
+    // order (what `status` shows the operator).
+    let members = {
+        let map = state.map.lock();
+        match cluster_members_for(&map, &req.target_path) {
+            Some(m) => m,
+            None => {
+                return err(format!(
+                    "no resolver cluster serving {:?} in the network map",
+                    req.target_path
+                ))
+            }
+        }
+    };
+    for t in &req.targets {
+        if let Some(i) = t.member
+            && i as usize >= members.len()
+        {
+            return err(format!(
+                "member index {i} is out of range (the cluster at {:?} has {} members)",
+                req.target_path,
+                members.len()
+            ));
+        }
+    }
+    let (my_listen, cert, key, roots) = {
+        let cfg = state.cfg.lock();
+        (
+            cfg.listen,
+            state.serving_cert_pem.clone(),
+            state.serving_key_pem.clone(),
+            state.roots.clone(),
+        )
+    };
+    let conf_port = my_listen.port();
+    // Audit the *intent* before acting: the ops take effect on the members
+    // immediately, and a slow op can outlive the connection timeout — so the
+    // audit must record who/what/where up front, including the unit targets.
+    let targets_desc: Vec<String> = req
+        .targets
+        .iter()
+        .map(|t| match t.member {
+            Some(i) => format!("{}:{i}", t.unit),
+            None => t.unit.clone(),
+        })
+        .collect();
+    audit(
+        &ca_dir,
+        &authd.admin,
+        "control-service",
+        &format!("{:?} {} at {}", req.op, targets_desc.join(","), req.target_path),
+        0,
+    );
+    // Fan out to the targeted members concurrently, so a multi-member op is
+    // bounded by the slowest member, not the sum (staggering is the operator's
+    // job, via separate per-member-index commands).
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, m) in members.iter().enumerate() {
+        // Units pinned to this member, plus unpinned units (which hit every
+        // member).
+        let units: Vec<String> = req
+            .targets
+            .iter()
+            .filter(|t| t.member.is_none() || t.member == Some(idx as u32))
+            .map(|t| t.unit.clone())
+            .collect();
+        if units.is_empty() {
+            continue;
+        }
+        let addr = SocketAddr::new(m.ip(), conf_port);
+        let (cert, key, roots, op) = (cert.clone(), key.clone(), roots.clone(), req.op);
+        set.spawn(async move {
+            match conf_client::push_service_control(addr, &cert, &key, roots, units, op).await {
+                Ok(units) => ServiceControlResult { member: idx as u32, addr, error: None, units },
+                Err(e) => ServiceControlResult {
+                    member: idx as u32,
+                    addr,
+                    error: Some(format!("{e:#}")),
+                    units: vec![],
+                },
+            }
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(r) => results.push(r),
+            Err(e) => results.push(ServiceControlResult {
+                member: u32::MAX,
+                addr: my_listen,
+                error: Some(format!("fan-out task panicked: {e}")),
+                units: vec![],
+            }),
+        }
+    }
+    // Tasks complete out of order; sort by member for a stable view.
+    results.sort_by_key(|r| r.member);
+    ControlServiceResponse::Ok { results }
+}
+
+/// Server-to-server (peer-cert-gated): apply a service-control op to THIS
+/// host's local activation supervisor, via its control socket.
+async fn handle_apply_service_control(
+    state: &Server,
+    req: &ApplyServiceControlRequest,
+) -> ApplyServiceControlResponse {
+    use netidx_activation::control;
+    let err = |reason: String| ApplyServiceControlResponse::Err { reason };
+    // Use the configured activation unit directory if set (the supervisor may
+    // run with a custom `--units` dir), else the default search location —
+    // the same resolution the supervisor itself uses to place the socket.
+    let units_dir = state
+        .cfg
+        .lock()
+        .activation_units_dir
+        .clone()
+        .or_else(netidx_activation::runtime::default_units_dir);
+    let socket = match units_dir {
+        Some(dir) => control::socket_path(&dir),
+        None => {
+            return err(
+                "no activation supervisor on this host (no unit directory found)".to_string(),
+            )
+        }
+    };
+    let creq = control::ControlRequest { op: req.op, units: req.units.clone() };
+    match control::control(&socket, &creq).await {
+        Ok(control::ControlResponse::Ok { units }) => ApplyServiceControlResponse::Ok { units },
+        Ok(control::ControlResponse::Err { reason }) => err(reason),
+        Err(e) => err(format!("contacting the local activation supervisor: {e:#}")),
+    }
+}
+
 // -- remote admin management --------------------------------------------------
 
 /// Authenticate `admin`/`password` and require the authority to manage
@@ -2926,6 +3133,15 @@ fn policy_within(
             return Err(format!(
                 "cannot grant perms scope {s:?}: it is not within your own scopes {:?}",
                 caller.perms_edit_scopes
+            ));
+        }
+    }
+    for s in &granted.service_control_scopes {
+        if !perms_scope_covers(&caller.service_control_scopes, s) {
+            return Err(format!(
+                "cannot grant service-control scope {s:?}: it is not within your own \
+                 scopes {:?}",
+                caller.service_control_scopes
             ));
         }
     }
@@ -3401,7 +3617,7 @@ mod tests {
             may_enroll_servers: true,
             perms_edit_scopes: vec![],
             may_manage_admins: false,
-        }
+            service_control_scopes: vec![],        }
     }
 
     /// A fresh in-process issuer seeded from the CA dir exactly as
@@ -3542,6 +3758,7 @@ mod tests {
             ca_addr: None,
             peers,
             mdns: false,
+            activation_units_dir: None,
         };
         let state = Server::new(cfg, None, cert, key).unwrap();
         let crl = load_serving_crl(&state);
@@ -3707,7 +3924,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         std::fs::write(autorenew_keytab(dir), AUTORENEW_PW).unwrap();
@@ -3775,7 +3992,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         );
         let iss = issuer(dir.path());
         // Choosing an allowed subset works, and the plan carries the
@@ -3864,7 +4081,7 @@ mod tests {
                 may_enroll_servers: true,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         );
         let req = request(SERVING_SAN, "alice", "apw", 30);
         match handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp {
@@ -3904,7 +4121,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         assert!(ca_vault::unlock(dir.path(), "eupw").is_err(), "role can't unlock the key");
@@ -3965,7 +4182,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         // A perms-only role admin with no issuance authority at all.
@@ -3980,7 +4197,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec!["/eu".to_string()],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         let us = commit_live_cert(dir.path(), "host.us.ryu-oh.org");
@@ -4060,7 +4277,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         let peer = "1.2.3.4:5".parse().unwrap();
@@ -4258,7 +4475,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         );
         let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let req = EnrollRequest {
@@ -4551,7 +4768,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         let (a_addr, a_state) = spawn_ca_server(dir.path()).await;
@@ -5241,7 +5458,7 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-            },
+                service_control_scopes: vec![],            },
         )
         .unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
@@ -5632,7 +5849,7 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
-        };
+            service_control_scopes: vec![],        };
         ca_vault::add_role_slot(dir.path(), "eve", "epw", role("/eu")).unwrap();
         ca_vault::add_role_slot(dir.path(), "rod", "rpw", role("/")).unwrap();
 
@@ -6174,7 +6391,7 @@ mod tests {
             may_enroll_servers: enroll,
             perms_edit_scopes: scopes.iter().map(|s| s.to_string()).collect(),
             may_manage_admins: manage,
-        }
+            service_control_scopes: vec![],        }
     }
 
     /// `policy_within` enforces the no-escalation rule on every field.
@@ -6207,6 +6424,55 @@ mod tests {
         assert!(policy_within(&no_manage, &full_policy(&[], 30, &[], false, &[], true))
             .unwrap_err()
             .contains("may_manage_admins"));
+        // service-control scope is bounded the same way as perms scope.
+        let base = full_policy(&[], 0, &[], false, &[], false);
+        let caller_svc =
+            Policy { service_control_scopes: vec!["/eu".to_string()], ..base.clone() };
+        let too_wide =
+            Policy { service_control_scopes: vec!["/us".to_string()], ..base.clone() };
+        assert!(policy_within(&caller_svc, &too_wide)
+            .unwrap_err()
+            .contains("service-control scope"));
+        let in_scope =
+            Policy { service_control_scopes: vec!["/eu/west".to_string()], ..base };
+        assert!(policy_within(&caller_svc, &in_scope).is_ok());
+    }
+
+    /// Service control is gated by `service_control_scopes` (path-scoped),
+    /// with a signing slot as the founding authority — independent of perms
+    /// or admin-management authority.
+    #[test]
+    fn service_control_authority_is_path_scoped() {
+        let base = full_policy(&[], 0, &[], false, &[], false);
+        // A signing slot can control services anywhere.
+        let signing = ca_vault::Authenticated {
+            admin: "recovery".to_string(),
+            policy: base.clone(),
+            kind: ca_vault::SlotKind::Signing,
+        };
+        assert!(service_control_authority(&signing, "/anything"));
+        // A role admin needs a covering service_control_scope — and perms
+        // scope alone does NOT confer it (distinct authority).
+        let role = ca_vault::Authenticated {
+            admin: "eu-ops".to_string(),
+            policy: Policy {
+                service_control_scopes: vec!["/eu".to_string()],
+                perms_edit_scopes: vec!["/us".to_string()],
+                ..base.clone()
+            },
+            kind: ca_vault::SlotKind::Role,
+        };
+        assert!(service_control_authority(&role, "/eu"));
+        assert!(service_control_authority(&role, "/eu/west"));
+        assert!(!service_control_authority(&role, "/us")); // perms scope ≠ service scope
+        assert!(!service_control_authority(&role, "/"));
+        // No service scope ⇒ no authority.
+        let plain = ca_vault::Authenticated {
+            admin: "p".to_string(),
+            policy: base,
+            kind: ca_vault::SlotKind::Role,
+        };
+        assert!(!service_control_authority(&plain, "/eu"));
     }
 
     /// The remote admin-mgmt handlers gate on management authority, enforce
