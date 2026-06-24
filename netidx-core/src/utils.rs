@@ -139,6 +139,17 @@ macro_rules! atomic_id {
                 self.0
             }
 
+            /// Reconstruct from a raw inner value. The counter field is
+            /// otherwise private precisely so distinct ID domains can't be
+            /// mixed; this exists ONLY to round-trip an id that was already
+            /// minted by `new()` across a boundary that can't carry the
+            /// typed value (e.g. a JIT'd kernel emitting `inner()` as a
+            /// constant and reconstructing it on the other side). Do not
+            /// use it to forge ids.
+            pub fn from_inner(i: u64) -> Self {
+                $name(i)
+            }
+
             #[cfg(test)]
             #[allow(dead_code)]
             pub fn mk(i: u64) -> Self {
