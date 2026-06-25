@@ -1413,6 +1413,36 @@ impl<T: Pack> Pack for Option<T> {
     }
 }
 
+impl<T: Pack, U: Pack> Pack for crate::utils::Either<T, U> {
+    fn encoded_len(&self) -> usize {
+        1 + match self {
+            crate::utils::Either::Left(t) => <T as Pack>::encoded_len(t),
+            crate::utils::Either::Right(u) => <U as Pack>::encoded_len(u),
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self {
+            crate::utils::Either::Left(t) => {
+                buf.put_u8(0);
+                <T as Pack>::encode(t, buf)
+            }
+            crate::utils::Either::Right(u) => {
+                buf.put_u8(1);
+                <U as Pack>::encode(u, buf)
+            }
+        }
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        match <u8 as Pack>::decode(buf)? {
+            0 => Ok(crate::utils::Either::Left(<T as Pack>::decode(buf)?)),
+            1 => Ok(crate::utils::Either::Right(<U as Pack>::decode(buf)?)),
+            _ => return Err(PackError::UnknownTag),
+        }
+    }
+}
+
 impl<T: Pack, U: Pack> Pack for (T, U) {
     fn encoded_len(&self) -> usize {
         <T as Pack>::encoded_len(&self.0) + <U as Pack>::encoded_len(&self.1)
