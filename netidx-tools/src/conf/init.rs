@@ -503,11 +503,8 @@ pub(crate) struct WorkstationFlags {
 /// treats as deny-everything and the install would report success while
 /// being fundamentally broken. Operators in that situation must pass
 /// `--owner <name>` (or `--no-perms` to skip perms generation
-/// entirely).
-///
-/// Returns `Ok(None)` only on non-unix platforms (Windows) when no
-/// explicit `--owner` was passed — the engine then emits an empty
-/// perms map and the operator is expected to author one themselves.
+/// entirely). Unix-only: the workstation role (its sole caller) is
+/// unix-only.
 #[cfg(unix)]
 fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
     if let Some(s) = provided {
@@ -530,11 +527,16 @@ fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>>
     }
 }
 
+/// `workstation install` is unix-only (Local auth + activation
+/// supervisor). Fail fast here with a pointer to the publisher role,
+/// rather than running the whole discovery/enrollment cascade and only
+/// erroring at template-render time.
 #[cfg(not(unix))]
-fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
-    Ok(provided.map(|s| ArcStr::from(s.as_str())))
+pub(crate) fn run_workstation(_f: WorkstationFlags) -> Result<()> {
+    bail!("{}", netidx_conf::template::workstation::UNSUPPORTED_MSG)
 }
 
+#[cfg(unix)]
 pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let cli_tls_id = f.tls.to_spec()?;
     let mut tls_identities = vec![];
@@ -766,6 +768,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// surprise than asking the operator to re-run once they've had the
 /// CSR signed. The CLI flag path (`--parent-addr … --tls-cert …`)
 /// is always available for the non-interactive case.
+#[cfg(unix)]
 fn prompt_parent_referral(
     default_path: &str,
     kp: Option<KeyProtArg>,

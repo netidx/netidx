@@ -103,32 +103,6 @@ pub const AUTORENEW_ADMIN: &str = "autorenew";
 /// not latency-sensitive, so a slow poll is plenty.
 const AUTORENEW_POLL: Duration = Duration::from_secs(60);
 
-/// The daemon's in-memory CA issuance state. The daemon is the sole
-/// owner of the CA (a single exclusive flock at startup), so this mutex
-/// is the only mutual exclusion issuance needs: it is held across the
-/// one-live scan, serial allocation, sign, and atomic record commit, and
-/// across the approve/deny terminal transition (so exactly one lands).
-pub struct CaIssuer {
-    /// The next X.509 serial to mint, seeded at startup from
-    /// `max(ca_store::max_serial, CA-cert-serial) + 1`.
-    next_serial: u64,
-    /// The server's signing credential — the box-held `autorenew` password,
-    /// read (and unsealed) once at startup. In the server-only CA model this
-    /// is the ONLY thing that unlocks the CA key: the server signs on an
-    /// authenticated, authorized admin's behalf with it, so no admin
-    /// password ever reaches the key. `None` ⇒ the CA cannot sign (read-only
-    /// until an autorenew credential is set up / recovered).
-    autorenew_pw: Option<Zeroizing<String>>,
-}
-
-impl CaIssuer {
-    fn alloc(&mut self) -> u64 {
-        let s = self.next_serial;
-        self.next_serial += 1;
-        s
-    }
-}
-
 /// Shared state of a running conf server.
 pub struct Server {
     /// The config, mutable because [`Request::Enroll`] appends the
@@ -137,14 +111,16 @@ pub struct Server {
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
-    /// The CA directory, if this host holds the CA role.
+    /// The CA directory path, if this host holds the CA role — for the
+    /// netmap, the CA cert, and other dir files that are neither the request
+    /// store nor the vault (a lockless accessor that avoids taking the CA
+    /// mutex just to read a path).
     ca_dir: Option<PathBuf>,
-    /// In-memory CA issuance state (serial counter + the issuance lock).
-    /// Only meaningful when `ca_dir` is `Some`.
-    ca: Mutex<CaIssuer>,
-    /// The exclusive flock on `<ca-dir>/ca.lock`, held for the daemon's
-    /// lifetime so exactly one daemon owns the CA. `None` when roleless.
-    _ca_lock: Option<std::fs::File>,
+    /// The locked CA directory: the request store, the key vault, the serial
+    /// counter, and the box-held signing credential, all under one mutex —
+    /// which also owns the `<ca-dir>/ca.lock` flock, so exactly one daemon
+    /// owns the CA. `None` when this host holds no CA role.
+    ca: Option<Mutex<ca_store::CaDir>>,
     /// Serving chain + key, doubling as the client identity for
     /// outbound server-to-server pushes.
     serving_cert_pem: Vec<u8>,
@@ -180,13 +156,6 @@ impl Server {
         // counter before serving — a second daemon for the same CA fails
         // here, and the counter starts beyond every serial ever issued.
         let ca_dir = cfg.roles.ca.as_ref().map(|r| r.dir.clone());
-        let (ca_lock, next_serial) = match &ca_dir {
-            Some(dir) => {
-                let lock = ca_store::lock_ca_exclusive(dir)?;
-                (Some(lock), ca_store::next_serial(dir)?)
-            }
-            None => (None, 0),
-        };
         // The server's signing credential: the box-held autorenew password,
         // read + unsealed once. In the server-only model this is the only key
         // to the CA. Without it the CA authenticates + serves read-only but
@@ -216,6 +185,17 @@ impl Server {
                 }
             },
         };
+        // The locked CA directory: take the flock (one daemon per CA),
+        // seed the serial counter from the store, and hold the box-held
+        // signing credential. A second daemon for the same CA fails here.
+        let ca = match &ca_dir {
+            Some(dir) => {
+                let mut cadir = ca_store::CaDir::open(dir)?;
+                cadir.autorenew_pw = autorenew_pw;
+                Some(Mutex::new(cadir))
+            }
+            None => None,
+        };
         // The network map: the CA owns + persists it, seeded with the CA's
         // own entry + address so it's never empty of itself; every other
         // host starts with an empty cache the refresh loop fills.
@@ -233,8 +213,7 @@ impl Server {
             cfg: Mutex::new(cfg),
             cfg_path,
             ca_dir,
-            ca: Mutex::new(CaIssuer { next_serial, autorenew_pw }),
-            _ca_lock: ca_lock,
+            ca,
             serving_cert_pem,
             serving_key_pem,
             roots,
@@ -346,10 +325,12 @@ pub async fn serve_on(
     // admin. Best-effort: a failure stays in the recovery set and is
     // retried on the enrollee's next poll. (No issuance reconcile is
     // needed — each issuance commits as one atomic record.)
-    if let Some(dir) = state.ca_dir() {
+    if state.ca.is_some() {
         match tokio::task::spawn_blocking({
-            let dir = dir.to_path_buf();
-            move || ca_store::pending_pushes(&dir)
+            let state = state.clone();
+            move || {
+                state.ca.as_ref().expect("CA role held").lock().store.pending_pushes()
+            }
         })
         .await
         {
@@ -477,11 +458,15 @@ async fn handle_conn(
         Request::Sign(req) => {
             let resp = match ca_dir(state) {
                 None => reject("this host does not hold the CA"),
-                Some(dir) => {
+                Some(_) => {
                     let signed = run_signing(&signs, {
                         let state = state.clone();
-                        let dir = dir.clone();
-                        move || handle_sign_request(&state.ca, &dir, &req)
+                        move || {
+                            handle_sign_request(
+                                state.ca.as_ref().expect("CA role held"),
+                                &req,
+                            )
+                        }
                     })
                     .await?;
                     match (signed.resp, signed.push) {
@@ -502,12 +487,16 @@ async fn handle_conn(
         Request::Enroll(req) => {
             let resp = match ca_dir(state) {
                 None => reject("this host does not hold the CA"),
-                Some(dir) => {
+                Some(_) => {
                     let listen = req.listen;
                     let resp = run_signing(&signs, {
                         let state = state.clone();
-                        let dir = dir.clone();
-                        move || handle_enroll_request(&state.ca, &dir, &req)
+                        move || {
+                            handle_enroll_request(
+                                state.ca.as_ref().expect("CA role held"),
+                                &req,
+                            )
+                        }
                     })
                     .await?;
                     if matches!(resp, SignResponse::Ok { .. }) {
@@ -551,9 +540,15 @@ async fn handle_conn(
                 None => EnqueueResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => {
+                Some(_) => {
+                    let state = state.clone();
                     tokio::task::spawn_blocking(move || {
-                        handle_enqueue(&dir, &req, peer, peer_ident.as_ref())
+                        handle_enqueue(
+                            state.ca.as_ref().expect("CA role held"),
+                            &req,
+                            peer,
+                            peer_ident.as_ref(),
+                        )
                     })
                     .await
                     .context("enqueue task panicked")?
@@ -564,46 +559,50 @@ async fn handle_conn(
         Request::Poll(req) => {
             let resp = match ca_dir(state) {
                 None => PollResponse::Unknown,
-                Some(dir) => {
+                Some(_) => {
                     // The blocking part reads the status (a Pending request
                     // genuinely has no cert — the commit is atomic); on a
                     // Signed record whose id-map push never landed it also
                     // hands back a re-push plan, which the async part runs.
                     let (resp, repush) = {
-                        let dir = dir.clone();
+                        let state = state.clone();
                         let id = req.request_id.clone();
-                        tokio::task::spawn_blocking(move || match ca_store::status(&dir, &id)
-                        {
-                            Ok(ca_store::Status::Pending(_)) => {
-                                (PollResponse::Pending, None)
-                            }
-                            Ok(ca_store::Status::Signed(s)) => {
-                                let repush = match ca_store::read_issued(&dir, &id) {
-                                    Ok(Some(r))
-                                        if !r.groups.is_empty() && !r.push_done =>
-                                    {
-                                        Some(PushPlan {
-                                            id,
-                                            name: r.name,
-                                            groups: r.groups,
-                                        })
-                                    }
-                                    _ => None,
-                                };
-                                let o = PollResponse::Signed {
-                                    signed_cert_pem: s.signed_cert_pem,
-                                    trusted_pem: s.trusted_pem,
-                                    warnings: s.warnings,
-                                };
-                                (o, repush)
-                            }
-                            Ok(ca_store::Status::Denied(d)) => {
-                                (PollResponse::Denied { reason: d.reason }, None)
-                            }
-                            Ok(ca_store::Status::Unknown) => (PollResponse::Unknown, None),
-                            Err(e) => {
-                                warn!("conf-server: queue status failed: {e:#}");
-                                (PollResponse::Unknown, None)
+                        tokio::task::spawn_blocking(move || {
+                            let ca = state.ca.as_ref().expect("CA role held").lock();
+                            match ca.store.status(&id) {
+                                Ok(ca_store::Status::Pending(_)) => {
+                                    (PollResponse::Pending, None)
+                                }
+                                Ok(ca_store::Status::Signed(s)) => {
+                                    let repush = match ca.store.read_issued(&id) {
+                                        Ok(Some(r))
+                                            if !r.groups.is_empty() && !r.push_done =>
+                                        {
+                                            Some(PushPlan {
+                                                id,
+                                                name: r.name,
+                                                groups: r.groups,
+                                            })
+                                        }
+                                        _ => None,
+                                    };
+                                    let o = PollResponse::Signed {
+                                        signed_cert_pem: s.signed_cert_pem,
+                                        trusted_pem: s.trusted_pem,
+                                        warnings: s.warnings,
+                                    };
+                                    (o, repush)
+                                }
+                                Ok(ca_store::Status::Denied(d)) => {
+                                    (PollResponse::Denied { reason: d.reason }, None)
+                                }
+                                Ok(ca_store::Status::Unknown) => {
+                                    (PollResponse::Unknown, None)
+                                }
+                                Err(e) => {
+                                    warn!("conf-server: queue status failed: {e:#}");
+                                    (PollResponse::Unknown, None)
+                                }
                             }
                         })
                         .await
@@ -624,8 +623,12 @@ async fn handle_conn(
                 None => ListQueueResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => {
-                    run_signing(&signs, move || handle_list_queue(&dir, &req)).await?
+                Some(_) => {
+                    let state = state.clone();
+                    run_signing(&signs, move || {
+                        handle_list_queue(state.ca.as_ref().expect("CA role held"), &req)
+                    })
+                    .await?
                 }
             };
             conf_proto::write_msg(&mut tls, &resp)
@@ -637,15 +640,16 @@ async fn handle_conn(
                 None => ApproveResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => {
+                Some(_) => {
                     // Authenticate + sign on the blocking pool (Argon2 +
                     // openssl); the issuance commits atomically under the
-                    // issuer lock inside the task, then we run the
-                    // best-effort side effects.
+                    // CA lock inside the task, then we run the best-effort
+                    // side effects.
                     let signed = run_signing(&signs, {
                         let state = state.clone();
-                        let dir = dir.clone();
-                        move || handle_approve(&state.ca, &dir, &req)
+                        move || {
+                            handle_approve(state.ca.as_ref().expect("CA role held"), &req)
+                        }
                     })
                     .await?;
                     match signed {
@@ -688,9 +692,9 @@ async fn handle_conn(
                 None => DenyResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => run_signing(&signs, {
+                Some(_) => run_signing(&signs, {
                     let state = state.clone();
-                    move || handle_deny(&state.ca, &dir, &req)
+                    move || handle_deny(state.ca.as_ref().expect("CA role held"), &req)
                 })
                 .await?,
             };
@@ -701,9 +705,12 @@ async fn handle_conn(
                 None => RevokeResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => {
+                Some(_) => {
                     let state = state.clone();
-                    run_signing(&signs, move || handle_revoke(&state.ca, &dir, &req)).await?
+                    run_signing(&signs, move || {
+                        handle_revoke(state.ca.as_ref().expect("CA role held"), &req)
+                    })
+                    .await?
                 }
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing RevokeResponse")
@@ -713,8 +720,12 @@ async fn handle_conn(
                 None => ListIssuedResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => {
-                    run_signing(&signs, move || handle_list_issued(&dir, &req)).await?
+                Some(_) => {
+                    let state = state.clone();
+                    run_signing(&signs, move || {
+                        handle_list_issued(state.ca.as_ref().expect("CA role held"), &req)
+                    })
+                    .await?
                 }
             };
             conf_proto::write_msg(&mut tls, &resp)
@@ -754,11 +765,17 @@ async fn handle_conn(
                 None => ListDelegationsResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(dir) => tokio::task::spawn_blocking(move || {
-                    handle_list_delegations(&dir, &req)
-                })
-                .await
-                .context("list delegations task panicked")?,
+                Some(_) => {
+                    let state = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        handle_list_delegations(
+                            state.ca.as_ref().expect("CA role held"),
+                            &req,
+                        )
+                    })
+                    .await
+                    .context("list delegations task panicked")?
+                }
             };
             conf_proto::write_msg(&mut tls, &resp)
                 .await
@@ -798,20 +815,25 @@ async fn handle_conn(
         Request::GetCrl => {
             let resp = match ca_dir(state) {
                 None => GetCrlResponse { crl_pem: None },
-                Some(dir) => tokio::task::spawn_blocking(move || {
-                    match std::fs::read_to_string(crate::ca_index::crl_path(&dir)) {
-                        Ok(pem) => GetCrlResponse { crl_pem: Some(pem) },
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            GetCrlResponse { crl_pem: None }
+                Some(_) => {
+                    let state = state.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let path =
+                            state.ca.as_ref().expect("CA role held").lock().store.crl_path();
+                        match std::fs::read_to_string(path) {
+                            Ok(pem) => GetCrlResponse { crl_pem: Some(pem) },
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                GetCrlResponse { crl_pem: None }
+                            }
+                            Err(e) => {
+                                warn!("conf-server: reading the CRL failed: {e:#}");
+                                GetCrlResponse { crl_pem: None }
+                            }
                         }
-                        Err(e) => {
-                            warn!("conf-server: reading the CRL failed: {e:#}");
-                            GetCrlResponse { crl_pem: None }
-                        }
-                    }
-                })
-                .await
-                .context("CRL read task panicked")?,
+                    })
+                    .await
+                    .context("CRL read task panicked")?
+                }
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
         }
@@ -1117,13 +1139,12 @@ async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String>
     // of the baseline). A partial push leaves a warning, so the record
     // stays in the recovery set (`pending_pushes`) and is retried on the
     // next poll or daemon restart. The `set_push_done` read-modify-write
-    // shares the issuer mutex with `handle_revoke` so the two can't clobber
+    // shares the CA mutex with `handle_revoke` so the two can't clobber
     // each other's field on the same record.
     if warnings.is_empty()
-        && let Some(dir) = state.ca_dir()
+        && let Some(ca) = state.ca.as_ref()
     {
-        let _guard = state.ca.lock();
-        let _ = ca_store::set_push_done(dir, &plan.id);
+        let _ = ca.lock().store.set_push_done(&plan.id);
     }
     warnings
 }
@@ -1187,8 +1208,8 @@ fn build_server_config(
 /// acceptor watches). Absent ⇒ `None` — a missing CRL must never lock the
 /// conf plane out; it just means no revocation is enforced yet.
 fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
-    let path = match state.ca_dir() {
-        Some(ca_dir) => crate::ca_index::crl_path(ca_dir),
+    let path = match state.ca.as_ref() {
+        Some(ca) => ca.lock().store.crl_path(),
         None => state.cfg.lock().trusted.with_file_name("crl.pem"),
     };
     match std::fs::read(&path) {
@@ -1226,11 +1247,13 @@ pub struct PushPlan {
 /// signing ops authenticate this way too, then obtain the key separately
 /// via [`server_unlock`]. The `Err` is a safe wire reason.
 fn authenticate(
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     admin: &str,
     password: &str,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
-    ca_vault::authenticate(ca_dir, admin, password)
+    ca.lock()
+        .vault
+        .authenticate(admin, password)
         .map_err(|_| "authentication failed".to_string())
 }
 
@@ -1239,22 +1262,21 @@ fn authenticate(
 /// an authenticated, authorized admin's behalf — no admin password ever
 /// reaches the key. The opportunistic CRL re-sign rides here (it needs the
 /// key, and every signing op passes through). `Err` (a safe wire reason)
-/// when the CA holds no autorenew credential (read-only CA). The Argon2
-/// unlock runs OUTSIDE the issuer's critical section: callers take the key
-/// here, then enter `issue_locked`.
+/// when the CA holds no autorenew credential (read-only CA). Runs under the
+/// single CA lock — the Argon2 unlock included.
 fn server_unlock(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
 ) -> std::result::Result<ca_vault::Unlocked, String> {
-    let pw = issuer.lock().autorenew_pw.clone();
-    let pw = pw.ok_or_else(|| {
+    let mut ca = ca.lock();
+    let pw = ca.autorenew_pw.clone().ok_or_else(|| {
         "this CA cannot sign: it holds no autorenew credential (the server holds the \
          only signing key). Recover with `netidx conf ca recovery rotate`."
             .to_string()
     })?;
-    let unlocked = ca_vault::unlock(ca_dir, &pw)
-        .map_err(|e| format!("the CA's autorenew credential failed to unlock the key: {e:#}"))?;
-    match crate::ca_index::refresh_crl_if_stale(ca_dir, &unlocked.ca_key_pem) {
+    let unlocked = ca.vault.unlock(&pw).map_err(|e| {
+        format!("the CA's autorenew credential failed to unlock the key: {e:#}")
+    })?;
+    match ca.store.refresh_crl_if_stale(&unlocked.ca_key_pem) {
         Ok(true) => info!("conf-server: re-signed the CRL (was nearing nextUpdate)"),
         Ok(false) => (),
         Err(e) => warn!("conf-server: opportunistic CRL refresh failed: {e:#}"),
@@ -1267,8 +1289,7 @@ fn server_unlock(
 /// for the client; only an internal fault (e.g. the CA cert can't be
 /// read) maps to a generic error response — never a panic.
 pub fn handle_sign_request(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &SignRequest,
 ) -> Signed {
     // A direct Sign has no queue entry; synthesize a request to carry in
@@ -1282,7 +1303,7 @@ pub fn handle_sign_request(
         None,
         None,
     );
-    handle_sign_request_op(issuer, ca_dir, req, "sign", &record_req, None)
+    handle_sign_request_op(ca, req, "sign", &record_req, None)
 }
 
 /// [`handle_sign_request`] with the audit-log operation name, the
@@ -1291,14 +1312,13 @@ pub fn handle_sign_request(
 /// identical checks but audits as `op=approve` and keys the record by the
 /// *queued* request id.
 fn handle_sign_request_op(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &SignRequest,
     op: &str,
     record_req: &ca_store::QueuedReq,
     recheck_id: Option<&str>,
 ) -> Signed {
-    match try_handle(issuer, ca_dir, req, op, record_req, recheck_id) {
+    match try_handle(ca, req, op, record_req, recheck_id) {
         Ok(signed) => signed,
         Err(e) => Signed {
             resp: SignResponse::Err { reason: format!("internal error: {e:#}") },
@@ -1308,8 +1328,7 @@ fn handle_sign_request_op(
 }
 
 fn try_handle(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &SignRequest,
     op: &str,
     record_req: &ca_store::QueuedReq,
@@ -1318,7 +1337,7 @@ fn try_handle(
     let failed = |resp: SignResponse| Signed { resp, push: None };
     // 1. Authenticate the REQUESTING admin — no CA key (a role admin is a
     //    first-class issuer here; the server, not the admin, holds the key).
-    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+    let authd = match ca.lock().vault.authenticate(&req.admin, &req.password.0) {
         Ok(a) => a,
         Err(_) => return Ok(failed(reject("authentication failed"))),
     };
@@ -1373,15 +1392,15 @@ fn try_handle(
         }
     }
     // 3. The server signs with its OWN credential; the requester is audited.
-    let signing = match server_unlock(issuer, ca_dir) {
+    let signing = match server_unlock(ca) {
         Ok(u) => u,
         Err(reason) => return Ok(failed(reject(&reason))),
     };
     // The one-live-cert check, serial allocation, sign, and atomic record
     // commit are one critical section under the issuance lock.
     issue_locked(
-        issuer, ca_dir, &signing, &authd.admin, record_req, name, validity, groups, true, None,
-        op, recheck_id,
+        ca, &signing, &authd.admin, record_req, name, validity, groups, true, None, op,
+        recheck_id,
     )
 }
 
@@ -1393,8 +1412,7 @@ fn try_handle(
 /// multiple live certs for a name are legitimate.
 #[allow(clippy::too_many_arguments)]
 fn issue_locked(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     // The SERVER's autorenew-unlocked key (does the crypto)…
     signing: &ca_vault::Unlocked,
     // …vs the REQUESTING admin (named in the audit trail). They differ now:
@@ -1417,9 +1435,10 @@ fn issue_locked(
     // both transition it. `None` for direct (non-queued) issuance.
     recheck_id: Option<&str>,
 ) -> Result<Signed> {
-    let mut issuer = issuer.lock();
+    let mut ca = ca.lock();
+    let dir = ca.dir().to_path_buf();
     if let Some(id) = recheck_id {
-        match ca_store::status(ca_dir, id) {
+        match ca.store.status(id) {
             Ok(ca_store::Status::Pending(_)) => {}
             Ok(ca_store::Status::Signed(_)) => {
                 return Ok(Signed {
@@ -1450,7 +1469,7 @@ fn issue_locked(
         }
     }
     if one_live {
-        let live = ca_store::live_for_name(ca_dir, name)
+        let live = ca.store.live_for_name(name)
             .context("checking the issuance index")?;
         if !live.is_empty() {
             return Ok(Signed {
@@ -1470,7 +1489,7 @@ fn issue_locked(
     // SAN). Refusing here also covers the auto-renew sweep, which signs
     // through this same path.
     if let Some(serial) = renewal_of {
-        let live = ca_store::live_for_name(ca_dir, name)
+        let live = ca.store.live_for_name(name)
             .context("checking the issuance index")?;
         if !live.iter().any(|r| r.serial == serial) {
             return Ok(Signed {
@@ -1485,9 +1504,9 @@ fn issue_locked(
     }
     // Opportunistic CA-cert renewal — rare, and only allocates a serial
     // when actually renewing, so the common path burns nothing.
-    if crate::ca::ca_cert_needs_renewal(ca_dir) {
-        let rs = issuer.alloc();
-        match crate::ca::maybe_renew_ca_cert(ca_dir, &signing.ca_key_pem, rs) {
+    if crate::ca::ca_cert_needs_renewal(&dir) {
+        let rs = ca.alloc_serial();
+        match crate::ca::maybe_renew_ca_cert(&dir, &signing.ca_key_pem, rs) {
             Ok(true) => info!(
                 "conf-server: renewed the CA certificate (same key; glyph unchanged)"
             ),
@@ -1495,21 +1514,16 @@ fn issue_locked(
             Err(e) => warn!("conf-server: CA renewal check failed: {e:#}"),
         }
     }
-    let serial = issuer.alloc();
-    let resp = sign_csr(ca_dir, &signing.ca_key_pem, &record_req.csr_pem, name, validity, serial)?;
+    let serial = ca.alloc_serial();
+    let resp =
+        sign_csr(&ca, &signing.ca_key_pem, &record_req.csr_pem, name, validity, serial)?;
     if let SignResponse::Ok { ref signed_cert_pem, .. } = resp {
-        ca_store::commit_issuance(
-            ca_dir,
-            record_req,
-            serial,
-            name,
-            signed_cert_pem,
-            &groups,
-        )
-        .context("committing the issuance")?;
+        ca.store
+            .commit_issuance(record_req, serial, name, signed_cert_pem, &groups)
+            .context("committing the issuance")?;
     }
-    drop(issuer);
-    audit(ca_dir, audit_admin, audit_op, name, validity);
+    drop(ca);
+    audit(&dir, audit_admin, audit_op, name, validity);
     Ok(Signed {
         resp,
         push: if groups.is_empty() {
@@ -1524,22 +1538,20 @@ fn issue_locked(
 /// `may_enroll_servers` policy bit, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
 pub fn handle_enroll_request(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &EnrollRequest,
 ) -> SignResponse {
-    match try_enroll(issuer, ca_dir, req) {
+    match try_enroll(ca, req) {
         Ok(resp) => resp,
         Err(e) => SignResponse::Err { reason: format!("internal error: {e:#}") },
     }
 }
 
 fn try_enroll(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &EnrollRequest,
 ) -> Result<SignResponse> {
-    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+    let authd = match ca.lock().vault.authenticate(&req.admin, &req.password.0) {
         Ok(a) => a,
         Err(_) => return Ok(reject("authentication failed")),
     };
@@ -1558,15 +1570,14 @@ fn try_enroll(
         None,
         Some(req.listen),
     );
-    let signing = match server_unlock(issuer, ca_dir) {
+    let signing = match server_unlock(ca) {
         Ok(u) => u,
         Err(reason) => return Ok(reject(&reason)),
     };
     // Serving certs aren't subject to the one-live check (many conf
     // servers legitimately hold the reserved SAN), and carry no groups.
     let signed = issue_locked(
-        issuer,
-        ca_dir,
+        ca,
         &signing,
         &authd.admin,
         &record_req,
@@ -1585,22 +1596,23 @@ fn try_enroll(
 /// [`Ca`] from the decrypted key, sign the CSR for exactly `name` with
 /// the caller-allocated `serial`, and bundle the trust anchors.
 fn sign_csr(
-    ca_dir: &Path,
+    cadir: &ca_store::CaDir,
     ca_key_pem: &[u8],
     csr_pem: &str,
     name: &str,
     validity: u32,
     serial: u64,
 ) -> Result<SignResponse> {
+    let dir = cadir.dir();
     let cert_pem =
-        std::fs::read(ca_dir.join("certificate.pem")).context("reading CA certificate")?;
-    let ca = Ca::from_pem(ca_dir.to_path_buf(), ca_key_pem, &cert_pem)
+        std::fs::read(dir.join("certificate.pem")).context("reading CA certificate")?;
+    let ca = Ca::from_pem(dir.to_path_buf(), ca_key_pem, &cert_pem)
         .context("loading CA from vault")?;
     let san = [SanEntry::Dns(name.to_string())];
     let signed = ca
         .sign_request(csr_pem.as_bytes(), &san, validity, serial)
         .context("signing CSR")?;
-    let trusted_pem = ca_store::read_trusted_bundle(ca_dir)?;
+    let trusted_pem = cadir.store.read_trusted_bundle()?;
     Ok(SignResponse::Ok {
         signed_cert_pem: String::from_utf8(signed).context("signed cert not utf8")?,
         trusted_pem,
@@ -1659,11 +1671,12 @@ fn leaf_serial(der: &[u8]) -> Option<u64> {
 /// a live cert; that's the point) and is flagged for glyph-free,
 /// batchable (or automatic) approval.
 fn handle_enqueue(
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &EnqueueRequest,
     peer: SocketAddr,
     peer_ident: Option<&PeerIdent>,
 ) -> EnqueueResponse {
+    let mut ca = ca.lock();
     // Conf-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
     // reserved-name refusal (this is the sanctioned way to request it)
@@ -1681,7 +1694,7 @@ fn handle_enqueue(
             None,
             Some(listen),
         );
-        return match ca_store::enqueue(ca_dir, &queued) {
+        return match ca.store.enqueue(&queued) {
             Ok(()) => {
                 info!(
                     "conf-server: queued enrollment {} (listen {listen}) from {peer}",
@@ -1711,7 +1724,7 @@ fn handle_enqueue(
         Some(PeerIdent { san, serial: Some(serial), spki_fp: Some(fp) })
             if san.eq_ignore_ascii_case(name) =>
         {
-            match ca_store::live_for_name(ca_dir, name) {
+            match ca.store.live_for_name(name) {
                 Ok(live)
                     if live.iter().any(|s| s.serial == *serial && &s.spki_fp == fp) =>
                 {
@@ -1743,7 +1756,7 @@ fn handle_enqueue(
         // here too so the enrollee hears it immediately instead of
         // after the admin clicked through an approval that would only
         // be refused.
-        match ca_store::live_for_name(ca_dir, name) {
+        match ca.store.live_for_name(name) {
             Ok(live) if !live.is_empty() => {
                 return EnqueueResponse::Err {
                     reason: format!(
@@ -1769,7 +1782,7 @@ fn handle_enqueue(
         renewal_of,
         None,
     );
-    match ca_store::enqueue(ca_dir, &queued) {
+    match ca.store.enqueue(&queued) {
         Ok(()) => {
             info!(
                 "conf-server: queued {} {} for {name:?} from {peer}",
@@ -1783,11 +1796,14 @@ fn handle_enqueue(
 }
 
 /// List the pending queue for an authenticated admin.
-fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse {
-    if let Err(reason) = authenticate(ca_dir, &req.admin, &req.password.0) {
+fn handle_list_queue(
+    ca: &Mutex<ca_store::CaDir>,
+    req: &ListQueueRequest,
+) -> ListQueueResponse {
+    if let Err(reason) = authenticate(ca, &req.admin, &req.password.0) {
         return ListQueueResponse::Err { reason };
     }
-    match ca_store::pending(ca_dir) {
+    match ca.lock().store.pending() {
         Ok(reqs) => ListQueueResponse::Ok {
             requests: reqs
                 .into_iter()
@@ -1812,12 +1828,8 @@ fn handle_list_queue(ca_dir: &Path, req: &ListQueueRequest) -> ListQueueResponse
 /// the daemon owns the index, so the `ca` CLI sends this rather than
 /// touching the files). The fresh CRL is served via `GetCrl` and pulled by
 /// the renewal daemon to each resolver's trust bundle.
-fn handle_revoke(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
-    req: &RevokeRequest,
-) -> RevokeResponse {
-    let authd = match ca_vault::authenticate(ca_dir, &req.admin, &req.password.0) {
+fn handle_revoke(ca: &Mutex<ca_store::CaDir>, req: &RevokeRequest) -> RevokeResponse {
+    let authd = match ca.lock().vault.authenticate(&req.admin, &req.password.0) {
         Ok(a) => a,
         Err(_) => {
             return RevokeResponse::Err { reason: "authentication failed".to_string() }
@@ -1842,7 +1854,8 @@ fn handle_revoke(
     // scoped admin to revoking only certs within its `allowed_san`. Read once
     // (names are immutable for a serial); the actual revoke loop runs under
     // the issuer lock.
-    let names: std::collections::HashMap<u64, String> = match ca_store::list_signed(ca_dir) {
+    let names: std::collections::HashMap<u64, String> =
+        match ca.lock().store.list_signed() {
         Ok(records) => records.into_iter().map(|r| (r.serial, r.name)).collect(),
         Err(e) => {
             return RevokeResponse::Err {
@@ -1853,13 +1866,12 @@ fn handle_revoke(
     let now = ca_store::now_unix();
     let mut warnings = Vec::new();
     // Each revocation is a read-modify-write of an `issued/<id>` record.
-    // Hold the issuer mutex across the loop so a concurrent `set_push_done`
-    // (the other read-modify-write on an issued record) can't read a stale
-    // record and clobber the `revoked` flag. `set_push_done` takes the same
-    // lock in `push_registrations`. The CRL rewrite below has its own lock
-    // (`ca_index::CRL_LOCK`), so it stays outside this guard.
+    // Hold the CA lock across the loop so a concurrent `set_push_done` (the
+    // other read-modify-write on an issued record) can't read a stale record
+    // and clobber the `revoked` flag. The CRL rewrite below re-takes the same
+    // lock, so it stays outside this guard.
     {
-        let _guard = issuer.lock();
+        let mut guard = ca.lock();
         for serial in &req.serials {
             // A scoped admin may only revoke a cert whose name it could have
             // signed. An unknown serial isn't in the index, so it has no name
@@ -1889,9 +1901,9 @@ fn handle_revoke(
                 revoked_unix: now,
                 reason: req.reason.clone(),
             };
-            match ca_store::revoke(ca_dir, *serial, rev) {
+            match guard.store.revoke(*serial, rev) {
                 Ok(true) => audit(
-                    ca_dir,
+                    guard.dir(),
                     &authd.admin,
                     "revoke",
                     &format!("serial {serial}"),
@@ -1905,9 +1917,9 @@ fn handle_revoke(
         }
     }
     // Re-sign the CRL with the server's own key (the autorenew credential).
-    match server_unlock(issuer, ca_dir) {
+    match server_unlock(ca) {
         Ok(signing) => {
-            if let Err(e) = crate::ca_index::write_crl(ca_dir, &signing.ca_key_pem) {
+            if let Err(e) = ca.lock().store.write_crl(&signing.ca_key_pem) {
                 warnings.push(format!("re-signing the CRL: {e:#}"));
             }
         }
@@ -1918,11 +1930,14 @@ fn handle_revoke(
 
 /// List every issued certificate (admin-authenticated) — the revoke UI
 /// and inspection. The daemon owns the index.
-fn handle_list_issued(ca_dir: &Path, req: &ListIssuedRequest) -> ListIssuedResponse {
-    if let Err(reason) = authenticate(ca_dir, &req.admin, &req.password.0) {
+fn handle_list_issued(
+    ca: &Mutex<ca_store::CaDir>,
+    req: &ListIssuedRequest,
+) -> ListIssuedResponse {
+    if let Err(reason) = authenticate(ca, &req.admin, &req.password.0) {
         return ListIssuedResponse::Err { reason };
     }
-    match ca_store::list_signed(ca_dir) {
+    match ca.lock().store.list_signed() {
         Ok(records) => ListIssuedResponse::Ok {
             entries: records
                 .into_iter()
@@ -1955,13 +1970,12 @@ struct Approved {
 /// as `op=approve`. The outer `Err` is a safe wire reason for
 /// before-the-sign failures.
 fn handle_approve(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &ApproveRequest,
 ) -> std::result::Result<Approved, String> {
     // This cheap precheck (no auth) rejects an already-terminal request;
     // the authoritative re-check happens under the lock.
-    let queued = match ca_store::status(ca_dir, &req.request_id) {
+    let queued = match ca.lock().store.status(&req.request_id) {
         Ok(ca_store::Status::Pending(q)) => q,
         Ok(ca_store::Status::Signed(_)) => {
             return Err("that request was already approved".to_string())
@@ -1974,7 +1988,7 @@ fn handle_approve(
         }
         Err(e) => return Err(format!("reading the queue: {e:#}")),
     };
-    approve_locked(issuer, ca_dir, req, queued)
+    approve_locked(ca, req, queued)
 }
 
 /// Sign a queued request through the same checks a synchronous Sign goes
@@ -1983,8 +1997,7 @@ fn handle_approve(
 /// the issuer lock. `queued` came from the cheap precheck; `issue_locked`
 /// re-checks it is still Pending under the lock.
 fn approve_locked(
-    issuer: &Mutex<CaIssuer>,
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &ApproveRequest,
     queued: ca_store::QueuedReq,
 ) -> std::result::Result<Approved, String> {
@@ -1992,15 +2005,17 @@ fn approve_locked(
     // `may_enroll_servers`; signs the reserved serving SAN; no one-live
     // check and no id-map groups (a conf server isn't a user).
     if let Some(listen) = queued.enroll_listen {
-        let authd = ca_vault::authenticate(ca_dir, &req.admin, &req.password.0)
+        let authd = ca
+            .lock()
+            .vault
+            .authenticate(&req.admin, &req.password.0)
             .map_err(|_| "authentication failed".to_string())?;
         if !authd.policy.may_enroll_servers {
             return Err(format!("admin {} may not enroll conf servers", authd.admin));
         }
-        let signing = server_unlock(issuer, ca_dir)?;
+        let signing = server_unlock(ca)?;
         let signed = issue_locked(
-            issuer,
-            ca_dir,
+            ca,
             &signing,
             &authd.admin,
             &queued,
@@ -2027,16 +2042,18 @@ fn approve_locked(
     // `issue_locked` re-checks the renewed serial is STILL live under the
     // lock, so a revocation since enqueue refuses the renewal.
     if let Some(orig_serial) = queued.renewal_of {
-        let authd = ca_vault::authenticate(ca_dir, &req.admin, &req.password.0)
+        let authd = ca
+            .lock()
+            .vault
+            .authenticate(&req.admin, &req.password.0)
             .map_err(|_| "authentication failed".to_string())?;
         let validity = queued
             .requested_validity_days
             .min(authd.policy.max_validity_days)
             .max(1);
-        let signing = server_unlock(issuer, ca_dir)?;
+        let signing = server_unlock(ca)?;
         let signed = issue_locked(
-            issuer,
-            ca_dir,
+            ca,
             &signing,
             &authd.admin,
             &queued,
@@ -2067,8 +2084,7 @@ fn approve_locked(
         id_map_groups: req.id_map_groups.clone(),
     };
     let signed = handle_sign_request_op(
-        issuer,
-        ca_dir,
+        ca,
         &sign_req,
         "approve",
         &queued,
@@ -2119,8 +2135,8 @@ pub fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
 /// issuer lock by the same [`handle_approve`] the wire path uses, so it is
 /// audited as `op=renew` by the `autorenew` admin (the verified-renewal
 /// continuation gate) — exactly the trail the separate daemon left.
-fn autorenew_sweep(issuer: &Mutex<CaIssuer>, ca_dir: &Path, password: &str) -> usize {
-    let pending = match ca_store::pending(ca_dir) {
+fn autorenew_sweep(ca: &Mutex<ca_store::CaDir>, password: &str) -> usize {
+    let pending = match ca.lock().store.pending() {
         Ok(p) => p,
         Err(e) => {
             warn!("autorenew: scanning the queue failed: {e:#}");
@@ -2135,7 +2151,7 @@ fn autorenew_sweep(issuer: &Mutex<CaIssuer>, ca_dir: &Path, password: &str) -> u
             request_id: q.id.clone(),
             id_map_groups: Vec::new(),
         };
-        match handle_approve(issuer, ca_dir, &req) {
+        match handle_approve(ca, &req) {
             Ok(Approved { resp: SignResponse::Ok { .. }, .. }) => {
                 approved += 1;
                 info!("autorenew: approved renewal of {:?}", q.requested_name);
@@ -2225,22 +2241,27 @@ fn spawn_map_refresh(state: &Arc<Server>) {
 }
 
 fn spawn_autorenew(state: &Arc<Server>) {
-    let Some(ca_dir) = state.ca_dir().map(|d| d.to_path_buf()) else { return };
-    // The signing credential the issuer already holds (read + unsealed once
-    // in `Server::new`). `None` ⇒ the CA can't sign, so there's nothing to
+    if state.ca.is_none() {
+        return;
+    }
+    // The signing credential the CA already holds (read + unsealed once in
+    // `Server::new`). `None` ⇒ the CA can't sign, so there's nothing to
     // auto-approve either.
-    let Some(password) = state.ca.lock().autorenew_pw.clone() else { return };
+    let Some(password) =
+        state.ca.as_ref().expect("CA role held").lock().autorenew_pw.clone()
+    else {
+        return;
+    };
     info!("conf-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})");
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { break };
-            let dir = ca_dir.clone();
             let pw = password.clone();
             // Hand the Arc to the blocking task and let it drop there, so
             // we never hold the server alive across the sleep below.
             if let Err(e) = tokio::task::spawn_blocking(move || {
-                autorenew_sweep(&state.ca, &dir, &pw);
+                autorenew_sweep(state.ca.as_ref().expect("CA role held"), &pw);
             })
             .await
             {
@@ -2254,9 +2275,9 @@ fn spawn_autorenew(state: &Arc<Server>) {
 /// Deny a queued request (any authenticated admin). Holds the issuer lock
 /// across the status re-check and the denial write, so a deny and an
 /// approve can never both transition the same request.
-fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> DenyResponse {
+fn handle_deny(ca: &Mutex<ca_store::CaDir>, req: &DenyRequest) -> DenyResponse {
     // Cheap precheck (no auth) for an already-terminal/unknown request.
-    let queued = match ca_store::status(ca_dir, &req.request_id) {
+    let queued = match ca.lock().store.status(&req.request_id) {
         Ok(ca_store::Status::Pending(q)) => q,
         Ok(ca_store::Status::Signed(_)) => {
             return DenyResponse::Err {
@@ -2275,7 +2296,7 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
         }
         Err(e) => return DenyResponse::Err { reason: format!("reading the queue: {e:#}") },
     };
-    let authd = match authenticate(ca_dir, &req.admin, &req.password.0) {
+    let authd = match authenticate(ca, &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return DenyResponse::Err { reason },
     };
@@ -2298,10 +2319,10 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
             }
         }
     }
-    let _guard = issuer.lock();
+    let mut guard = ca.lock();
     // Authoritative re-check under the lock (mutually exclusive with the
     // approve commit, which also holds this lock).
-    match ca_store::status(ca_dir, &req.request_id) {
+    match guard.store.status(&req.request_id) {
         Ok(ca_store::Status::Pending(_)) => {}
         Ok(ca_store::Status::Signed(_)) => {
             return DenyResponse::Err {
@@ -2320,9 +2341,9 @@ fn handle_deny(issuer: &Mutex<CaIssuer>, ca_dir: &Path, req: &DenyRequest) -> De
         }
         Err(e) => return DenyResponse::Err { reason: format!("reading the queue: {e:#}") },
     }
-    match ca_store::deny(ca_dir, &queued, &req.reason) {
+    match guard.store.deny(&queued, &req.reason) {
         Ok(()) => {
-            audit(ca_dir, &authd.admin, "deny", &queued.requested_name, 0);
+            audit(guard.dir(), &authd.admin, "deny", &queued.requested_name, 0);
             DenyResponse::Ok
         }
         Err(e) => DenyResponse::Err { reason: format!("storing the denial: {e:#}") },
@@ -2394,13 +2415,14 @@ fn handle_poll_delegation(ca_dir: &Path, req: &PollRequest) -> DelegationPollRes
 
 /// `ListDelegations` (admin-authenticated): the pending queue for review.
 fn handle_list_delegations(
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     req: &ListDelegationsRequest,
 ) -> ListDelegationsResponse {
-    if let Err(reason) = authenticate(ca_dir, &req.admin, &req.password.0) {
+    if let Err(reason) = authenticate(ca, &req.admin, &req.password.0) {
         return ListDelegationsResponse::Err { reason };
     }
-    match delegation_store::pending(ca_dir) {
+    let dir = ca.lock().dir().to_path_buf();
+    match delegation_store::pending(&dir) {
         Ok(reqs) => ListDelegationsResponse::Ok {
             requests: reqs
                 .into_iter()
@@ -2431,7 +2453,7 @@ fn handle_deny_delegation(
             }
         }
     };
-    let authd = match authenticate(&ca_dir, &req.admin, &req.password.0) {
+    let authd = match authenticate(state.ca.as_ref().expect("CA role held"), &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return DenyDelegationResponse::Err { reason },
     };
@@ -2623,7 +2645,7 @@ fn handle_remove_server(state: &Server, req: &RemoveServerRequest) -> RemoveServ
             }
         }
     };
-    let authd = match authenticate(&ca_dir, &req.admin, &req.password.0) {
+    let authd = match authenticate(state.ca.as_ref().expect("CA role held"), &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return RemoveServerResponse::Err { reason },
     };
@@ -2809,10 +2831,9 @@ async fn handle_edit_perms(
     req: &EditPermsRequest,
 ) -> EditPermsResponse {
     let err = |reason: String| EditPermsResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("a perms edit must be sent to the CA host".to_string()),
-    };
+    if state.ca.is_none() {
+        return err("a perms edit must be sent to the CA host".to_string());
+    }
     // Authenticate WITHOUT unlocking the CA key — a perms edit needs no
     // key, so a role keyslot is a first-class admin here. Authorize by
     // tier: a signing admin holds full authority (it can already unlock
@@ -2820,9 +2841,19 @@ async fn handle_edit_perms(
     // entry covering the target path. The Argon2 runs under the sign
     // semaphore so an anonymous flood can't pin unbounded memory.
     let auth = {
+        let state = state.clone();
         let admin = req.admin.clone();
         let pw = req.password.0.clone();
-        run_signing(signs, move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
+        run_signing(signs, move || {
+            state
+                .ca
+                .as_ref()
+                .expect("CA role held")
+                .lock()
+                .vault
+                .authenticate(&admin, &pw)
+        })
+        .await
     };
     let authd = match auth {
         Ok(Ok(a)) => a,
@@ -2887,15 +2918,23 @@ async fn handle_control_service(
     req: &ControlServiceRequest,
 ) -> ControlServiceResponse {
     let err = |reason: String| ControlServiceResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("a service-control request must be sent to the CA host".to_string()),
-    };
+    if state.ca.is_none() {
+        return err("a service-control request must be sent to the CA host".to_string());
+    }
     let auth = {
-        let ca_dir = ca_dir.clone();
+        let state = state.clone();
         let admin = req.admin.clone();
         let pw = req.password.0.clone();
-        run_signing(signs, move || ca_vault::authenticate(&ca_dir, &admin, &pw)).await
+        run_signing(signs, move || {
+            state
+                .ca
+                .as_ref()
+                .expect("CA role held")
+                .lock()
+                .vault
+                .authenticate(&admin, &pw)
+        })
+        .await
     };
     let authd = match auth {
         Ok(Ok(a)) => a,
@@ -2957,6 +2996,7 @@ async fn handle_control_service(
             None => t.unit.clone(),
         })
         .collect();
+    let ca_dir = state.ca.as_ref().expect("CA role held").lock().dir().to_path_buf();
     audit(
         &ca_dir,
         &authd.admin,
@@ -3052,11 +3092,14 @@ async fn handle_apply_service_control(
 /// `may_manage_admins`. The returned identity's policy bounds what it may
 /// grant (the no-escalation rule); `Err` is a safe wire reason.
 fn authorize_admin_mgmt(
-    ca_dir: &Path,
+    ca: &Mutex<ca_store::CaDir>,
     admin: &str,
     password: &str,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
-    let authd = ca_vault::authenticate(ca_dir, admin, password)
+    let authd = ca
+        .lock()
+        .vault
+        .authenticate(admin, password)
         .map_err(|_| "authentication failed".to_string())?;
     if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins {
         Ok(authd)
@@ -3152,8 +3195,8 @@ fn policy_within(
 /// Removing or demoting it would strand remote admin management — only the
 /// off-box recovery password (a signing slot) could restore it. We refuse
 /// that footgun by default; the recovery credential remains the backstop.
-fn last_role_manager(ca_dir: &Path, target: &str) -> Result<bool> {
-    let admins = ca_vault::list_admins(ca_dir)?;
+fn last_role_manager(cadir: &ca_store::CaDir, target: &str) -> Result<bool> {
+    let admins = cadir.vault.list_admins()?;
     let is_role_manager = |a: &ca_vault::AdminInfo| {
         a.kind == ca_vault::SlotKind::Role && a.policy.may_manage_admins
     };
@@ -3165,11 +3208,10 @@ fn last_role_manager(ca_dir: &Path, target: &str) -> Result<bool> {
 /// `AddRoleAdmin`: mint a new role admin (CA-only, admin-authenticated).
 fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("admin management must be sent to the CA host".to_string()),
+    let Some(ca) = state.ca.as_ref() else {
+        return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+    let authd = match authorize_admin_mgmt(ca, &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -3193,10 +3235,10 @@ fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest) -> AdminMgmt
     // concurrent writes can't clobber each other (or both pass a guard that
     // a single op would have failed). The slow Argon2 auth already ran above,
     // outside the lock.
-    let _vault = state.ca.lock();
-    match ca_vault::add_role_slot(&ca_dir, &req.name, &req.new_password.0, req.policy.clone()) {
+    let mut guard = ca.lock();
+    match guard.vault.add_role_slot(&req.name, &req.new_password.0, req.policy.clone()) {
         Ok(()) => {
-            audit(&ca_dir, &authd.admin, "add-role-admin", &req.name, 0);
+            audit(guard.dir(), &authd.admin, "add-role-admin", &req.name, 0);
             AdminMgmtResponse::Ok
         }
         Err(e) => err(format!("{e:#}")),
@@ -3206,11 +3248,10 @@ fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest) -> AdminMgmt
 /// `SetAdminPolicy`: rescope an existing role admin (CA-only).
 fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("admin management must be sent to the CA host".to_string()),
+    let Some(ca) = state.ca.as_ref() else {
+        return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+    let authd = match authorize_admin_mgmt(ca, &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -3225,10 +3266,10 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> Admin
     // Hold the vault lock across the look-up, the last-manager guard, AND the
     // write, so a concurrent op can't change the slot's tier or the manager
     // count between the checks and the mutation (close the TOCTOU).
-    let _vault = state.ca.lock();
+    let mut guard = ca.lock();
     // The target must exist and be a role slot — remote ops never touch the
     // master-key-holding signing slots.
-    let (kind, current) = match ca_vault::slot_policy(&ca_dir, &req.target) {
+    let (kind, current) = match guard.vault.slot_policy(&req.target) {
         Ok(kp) => kp,
         Err(_) => return err(format!("no admin named {:?}", req.target)),
     };
@@ -3238,7 +3279,7 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> Admin
     // Don't let a rescope strand admin management by demoting the last role
     // manager.
     if current.may_manage_admins && !req.policy.may_manage_admins {
-        match last_role_manager(&ca_dir, &req.target) {
+        match last_role_manager(&guard, &req.target) {
             Ok(true) => {
                 return err(format!(
                     "refusing to drop may_manage_admins from {:?}: it is the last role \
@@ -3251,9 +3292,9 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> Admin
             Err(e) => return err(format!("checking admin roster: {e:#}")),
         }
     }
-    match ca_vault::set_policy(&ca_dir, &req.target, req.policy.clone()) {
+    match guard.vault.set_policy(&req.target, req.policy.clone()) {
         Ok(()) => {
-            audit(&ca_dir, &authd.admin, "set-admin-policy", &req.target, 0);
+            audit(guard.dir(), &authd.admin, "set-admin-policy", &req.target, 0);
             AdminMgmtResponse::Ok
         }
         Err(e) => err(format!("{e:#}")),
@@ -3263,11 +3304,10 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest) -> Admin
 /// `RemoveAdmin`: remove a role admin (CA-only).
 fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("admin management must be sent to the CA host".to_string()),
+    let Some(ca) = state.ca.as_ref() else {
+        return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+    let authd = match authorize_admin_mgmt(ca, &req.admin, &req.password.0) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -3281,8 +3321,8 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtRes
     // Hold the vault lock across the look-up, the last-manager guard, and the
     // removal so two concurrent removes can't both pass the guard and strand
     // management (close the TOCTOU).
-    let _vault = state.ca.lock();
-    let (kind, current) = match ca_vault::slot_policy(&ca_dir, &req.target) {
+    let mut guard = ca.lock();
+    let (kind, current) = match guard.vault.slot_policy(&req.target) {
         Ok(kp) => kp,
         Err(_) => return err(format!("no admin named {:?}", req.target)),
     };
@@ -3290,7 +3330,7 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtRes
         return err("remote admin management operates on role admins only".to_string());
     }
     if current.may_manage_admins {
-        match last_role_manager(&ca_dir, &req.target) {
+        match last_role_manager(&guard, &req.target) {
             Ok(true) => {
                 return err(format!(
                     "refusing to remove {:?}: it is the last role admin that can manage \
@@ -3302,9 +3342,9 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtRes
             Err(e) => return err(format!("checking admin roster: {e:#}")),
         }
     }
-    match ca_vault::remove_slot(&ca_dir, &req.target, false) {
+    match guard.vault.remove_slot(&req.target, false) {
         Ok(()) => {
-            audit(&ca_dir, &authd.admin, "remove-admin", &req.target, 0);
+            audit(guard.dir(), &authd.admin, "remove-admin", &req.target, 0);
             AdminMgmtResponse::Ok
         }
         Err(e) => err(format!("{e:#}")),
@@ -3315,14 +3355,13 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest) -> AdminMgmtRes
 /// a lower-tier role can't read everyone's capabilities).
 fn handle_list_admins(state: &Server, req: &ListAdminsRequest) -> AdminListResponse {
     let err = |reason: String| AdminListResponse::Err { reason };
-    let ca_dir = match state.ca_dir() {
-        Some(d) => d.to_path_buf(),
-        None => return err("admin management must be sent to the CA host".to_string()),
+    let Some(ca) = state.ca.as_ref() else {
+        return err("admin management must be sent to the CA host".to_string());
     };
-    if let Err(reason) = authorize_admin_mgmt(&ca_dir, &req.admin, &req.password.0) {
+    if let Err(reason) = authorize_admin_mgmt(ca, &req.admin, &req.password.0) {
         return err(reason);
     }
-    match ca_vault::list_admins(&ca_dir) {
+    match ca.lock().vault.list_admins() {
         Ok(admins) => AdminListResponse::Ok { admins },
         Err(e) => err(format!("listing admins: {e:#}")),
     }
@@ -3355,7 +3394,8 @@ fn approve_delegation_prepare(
                  config to edit + its address)"
                 .to_string())
         })?;
-    let authd = authenticate(&ca_dir, &req.admin, &req.password.0).map_err(err)?;
+    let ca = state.ca.as_ref().expect("CA role held");
+    let authd = authenticate(ca, &req.admin, &req.password.0).map_err(err)?;
     // The resolver edit + commit happen under this lock — mutually
     // exclusive with deny and other approves.
     let _guard = state.resolver_edit_lock.lock();
@@ -3623,11 +3663,10 @@ mod tests {
     /// A fresh in-process issuer seeded from the CA dir exactly as
     /// [`Server::new`] does — the direct-call handler tests pass `&this`
     /// where the daemon would pass its own `Server::ca`.
-    fn issuer(dir: &Path) -> Mutex<CaIssuer> {
-        Mutex::new(CaIssuer {
-            next_serial: ca_store::next_serial(dir).unwrap(),
-            autorenew_pw: read_test_autorenew(dir),
-        })
+    fn issuer(dir: &Path) -> Mutex<ca_store::CaDir> {
+        let mut ca = ca_store::CaDir::open(dir).unwrap();
+        ca.autorenew_pw = read_test_autorenew(dir);
+        Mutex::new(ca)
     }
 
     /// Issue the daemon's TLS serving cert from the (vault-protected)
@@ -3636,11 +3675,23 @@ mod tests {
     /// (its serial seeds the daemon's counter, and it can verify-renew
     /// itself). Returns `([leaf_pem ++ ca_pem], serving_key_pem)`.
     fn issue_serving_cert(dir: &Path) -> (Vec<u8>, Vec<u8>) {
-        let unlocked = ca_vault::unlock(dir, "apw").unwrap();
+        let mut cadir = ca_store::CaDir::open(dir).unwrap();
+        issue_serving_cert_into(&mut cadir)
+    }
+
+    /// Mint + record a serving cert against an already-open CA dir — the
+    /// one whose exclusive lock the caller already holds (a running CA
+    /// server's `state.ca`, or a transient one [`issue_serving_cert`]
+    /// opened). A second `CaDir::open` of the same dir would deadlock the
+    /// flock, so a peer minted while a CA server is up must route through
+    /// this, not open its own.
+    fn issue_serving_cert_into(cadir: &mut ca_store::CaDir) -> (Vec<u8>, Vec<u8>) {
+        let dir = cadir.dir().to_path_buf();
+        let unlocked = cadir.vault.unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
-        let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
+        let ca = Ca::from_pem(dir.clone(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
-        let serial = ca_store::next_serial(dir).unwrap();
+        let serial = cadir.store.next_serial().unwrap();
         let leaf = ca
             .sign_request(
                 kc.csr_pem.as_bytes(),
@@ -3658,15 +3709,16 @@ mod tests {
             None,
             None,
         );
-        ca_store::commit_issuance(
-            dir,
-            &req,
-            serial,
-            SERVING_SAN,
-            std::str::from_utf8(&leaf).unwrap(),
-            &[],
-        )
-        .unwrap();
+        cadir
+            .store
+            .commit_issuance(
+                &req,
+                serial,
+                SERVING_SAN,
+                std::str::from_utf8(&leaf).unwrap(),
+                &[],
+            )
+            .unwrap();
         let mut chain = leaf;
         chain.extend_from_slice(&ca_cert);
         (chain, kc.private_key_pem.as_bytes().to_vec())
@@ -3675,7 +3727,7 @@ mod tests {
     /// Issue an arbitrary leaf (chain `[leaf, ca]`) — for serving certs
     /// and for the "wrong client cert" authz test.
     fn issue_client_cert(dir: &Path, san: &str) -> (Vec<u8>, Vec<u8>) {
-        let unlocked = ca_vault::unlock(dir, "apw").unwrap();
+        let unlocked = ca_vault::CAVault::new(dir.to_path_buf()).unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(san).unwrap();
@@ -3692,11 +3744,12 @@ mod tests {
     /// approval re-checks this serial is still live, so the originating
     /// cert must really be in the index.)
     fn commit_live_cert(dir: &Path, san: &str) -> u64 {
-        let unlocked = ca_vault::unlock(dir, "apw").unwrap();
+        let mut cadir = ca_store::CaDir::open(dir).unwrap();
+        let unlocked = cadir.vault.unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(san).unwrap();
-        let serial = ca_store::next_serial(dir).unwrap();
+        let serial = cadir.store.next_serial().unwrap();
         let leaf = ca
             .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], 365, serial)
             .unwrap();
@@ -3709,15 +3762,16 @@ mod tests {
             None,
             None,
         );
-        ca_store::commit_issuance(
-            dir,
-            &req,
-            serial,
-            san,
-            std::str::from_utf8(&leaf).unwrap(),
-            &[],
-        )
-        .unwrap();
+        cadir
+            .store
+            .commit_issuance(
+                &req,
+                serial,
+                san,
+                std::str::from_utf8(&leaf).unwrap(),
+                &[],
+            )
+            .unwrap();
         serial
     }
 
@@ -3744,6 +3798,22 @@ mod tests {
         peers: Vec<SocketAddr>,
     ) -> (SocketAddr, Arc<Server>) {
         let (cert, key) = issue_serving_cert(ca_dir);
+        spawn_server_at_with_cert(ca_dir, bind, roles, peers, cert, key).await
+    }
+
+    /// Like [`spawn_server_at`] but takes a pre-minted serving cert + key
+    /// instead of opening the CA dir to mint one. A peer spawned while a CA
+    /// server already holds the dir's exclusive flock can't open it again,
+    /// so the caller mints (or reuses) the cert via the held `CaDir` and
+    /// hands it in here.
+    async fn spawn_server_at_with_cert(
+        ca_dir: &Path,
+        bind: &str,
+        roles: Roles,
+        peers: Vec<SocketAddr>,
+        cert: Vec<u8>,
+        key: Vec<u8>,
+    ) -> (SocketAddr, Arc<Server>) {
         let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let cfg = ConfServerConfig {
@@ -3789,6 +3859,9 @@ mod tests {
     async fn register_then_get_map_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
+        // Mint the resolver conf server's serving cert BEFORE the CA daemon
+        // takes the dir's exclusive flock (it holds it for the test's life).
+        let (cert, key) = issue_serving_cert(dir.path());
         let (ca_addr, ca_state) = spawn_ca_server(dir.path()).await;
         let roots = ca_state.roots.clone();
 
@@ -3799,7 +3872,6 @@ mod tests {
         let v0 = map0.version;
 
         // A resolver conf server registers its facts (peer-cert-gated).
-        let (cert, key) = issue_serving_cert(dir.path());
         let target: SocketAddr = "10.9.9.9:4565".parse().unwrap();
         let req = RegisterRequest { addr: target, roles: vec![Role::Resolver], cluster: None };
         let v1 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await.unwrap();
@@ -3834,24 +3906,36 @@ mod tests {
         setup_ca(dir.path());
 
         // Issue a peer serving cert, capture its serial, revoke it, and
-        // publish the CRL — all BEFORE the CA conf server starts, so its
-        // acceptor loads the CRL with this serial already revoked.
-        let victim_serial = ca_store::next_serial(dir.path()).unwrap();
+        // publish the CRL — all BEFORE the CA conf server starts (it holds
+        // the dir's exclusive flock for the test's life), so its acceptor
+        // loads the CRL with this serial already revoked. `next_serial` goes
+        // through a transient CaDir that drops before `issue_serving_cert`
+        // opens its own (a second live open of the same dir would deadlock).
+        let victim_serial =
+            ca_store::CaDir::open(dir.path()).unwrap().store.next_serial().unwrap();
         let (vcert, vkey) = issue_serving_cert(dir.path());
         let now = ca_store::now_unix();
-        let revoked = ca_store::revoke(
-            dir.path(),
-            victim_serial,
-            ca_store::Revocation {
-                serial: victim_serial,
-                revoked_unix: now,
-                reason: "test".into(),
-            },
-        )
-        .unwrap();
-        assert!(revoked, "the issued serial should be live, then revoked");
-        let unlocked = ca_vault::unlock(dir.path(), "apw").unwrap();
-        crate::ca_index::write_crl(dir.path(), &unlocked.ca_key_pem).unwrap();
+        let unlocked = ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
+        {
+            let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+            let revoked = cadir
+                .store
+                .revoke(
+                    victim_serial,
+                    ca_store::Revocation {
+                        serial: victim_serial,
+                        revoked_unix: now,
+                        reason: "test".into(),
+                    },
+                )
+                .unwrap();
+            assert!(revoked, "the issued serial should be live, then revoked");
+            cadir.store.write_crl(&unlocked.ca_key_pem).unwrap();
+        }
+        // A fresh (un-revoked) serving cert — also minted before the daemon
+        // takes the lock; it must still be accepted (the CRL only adds
+        // denials).
+        let (gcert, gkey) = issue_serving_cert(dir.path());
 
         let (ca_addr, ca_state) = spawn_ca_server(dir.path()).await;
         let roots = ca_state.roots.clone();
@@ -3868,7 +3952,6 @@ mod tests {
 
         // A fresh (un-revoked) serving cert is still accepted — the CRL adds
         // denials without locking valid peers out.
-        let (gcert, gkey) = issue_serving_cert(dir.path());
         conf_client::register(ca_addr, &gcert, &gkey, roots, &req)
             .await
             .expect("a valid peer cert is still accepted");
@@ -3905,28 +3988,30 @@ mod tests {
         };
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
+        let mut vault = ca_vault::CAVault::new(dir.to_path_buf());
         // "alice" stands in for the recovery / first signing admin; the
         // requester in signing tests authenticates as her.
-        ca_vault::create(dir, &key, "alice", "apw", policy).unwrap();
+        vault.create(&key, "alice", "apw", policy).unwrap();
         std::fs::remove_file(dir.join("private.key")).unwrap();
         // The box's autorenew signing slot + its keytab — the credential the
         // server signs with. Empty policy (it only unlocks; authorization is
         // the requester's).
-        ca_vault::add_signing_slot(
-            dir,
-            "apw",
-            AUTORENEW_ADMIN,
-            AUTORENEW_PW,
-            Policy {
+        vault
+            .add_signing_slot(
+                "apw",
+                AUTORENEW_ADMIN,
+                AUTORENEW_PW,
+                Policy {
                 allowed_san: vec![],
                 max_validity_days: 730,
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         std::fs::write(autorenew_keytab(dir), AUTORENEW_PW).unwrap();
     }
 
@@ -3947,7 +4032,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let req = request("resolver.ryu-oh.org", "alice", "apw", 30);
-        let signed = handle_sign_request(&issuer(dir.path()), dir.path(), &req);
+        let signed = handle_sign_request(&issuer(dir.path()), &req);
         match signed.resp {
             SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
                 assert!(signed_cert_pem.contains("BEGIN CERTIFICATE"));
@@ -3962,11 +4047,11 @@ mod tests {
                 assert!(log.contains("name=resolver.ryu-oh.org"));
                 // And the issuance landed in the index (revoke-by-name /
                 // duplicate-refusal source of truth).
-                let live = ca_store::live_for_name(
-                    dir.path(),
-                    "resolver.ryu-oh.org",
-                )
-                .unwrap();
+                let live = ca_store::CaDir::open(dir.path())
+                    .unwrap()
+                    .store
+                    .live_for_name("resolver.ryu-oh.org")
+                    .unwrap();
                 assert_eq!(live.len(), 1);
                 assert!(!live[0].spki_fp.is_empty());
             }
@@ -3999,14 +4084,14 @@ mod tests {
         // request's choice, not the whole policy.
         let mut req = request("a.ryu-oh.org", "alice", "apw", 30);
         req.id_map_groups = vec!["dev".to_string()];
-        let signed = handle_sign_request(&iss, dir.path(), &req);
+        let signed = handle_sign_request(&iss, &req);
         assert!(matches!(signed.resp, SignResponse::Ok { .. }));
         assert_eq!(signed.push.unwrap().groups, vec!["dev".to_string()]);
         // Choosing no groups skips registration without failing the
         // sign.
         let mut req = request("b.ryu-oh.org", "alice", "apw", 30);
         req.id_map_groups = vec![];
-        let signed = handle_sign_request(&iss, dir.path(), &req);
+        let signed = handle_sign_request(&iss, &req);
         assert!(matches!(signed.resp, SignResponse::Ok { .. }));
         assert!(signed.push.is_none());
         // Choosing a group outside the allowed set refuses the whole
@@ -4014,7 +4099,7 @@ mod tests {
         // node whose cert works but whose perms mysteriously don't.
         let mut req = request("c.ryu-oh.org", "alice", "apw", 30);
         req.id_map_groups = vec!["wheel".to_string()];
-        let signed = handle_sign_request(&iss, dir.path(), &req);
+        let signed = handle_sign_request(&iss, &req);
         assert!(signed.push.is_none());
         match signed.resp {
             SignResponse::Err { reason } => {
@@ -4029,7 +4114,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let req = request("resolver.ryu-oh.org", "alice", "WRONG", 30);
-        let signed = handle_sign_request(&issuer(dir.path()), dir.path(), &req);
+        let signed = handle_sign_request(&issuer(dir.path()), &req);
         assert!(signed.push.is_none());
         match signed.resp {
             SignResponse::Err { reason } => assert!(reason.contains("authentication")),
@@ -4042,7 +4127,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let req = request("evil.example.com", "alice", "apw", 30);
-        match handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp {
+        match handle_sign_request(&issuer(dir.path()), &req).resp {
             SignResponse::Err { reason } => assert!(reason.contains("not permitted")),
             SignResponse::Ok { .. } => panic!("out-of-policy name was signed"),
         }
@@ -4055,7 +4140,7 @@ mod tests {
         // Ask for 9999 days; policy caps at 30. Should still succeed.
         let req = request("a.ryu-oh.org", "alice", "apw", 9999);
         let SignResponse::Ok { signed_cert_pem, .. } =
-            handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp
+            handle_sign_request(&issuer(dir.path()), &req).resp
         else {
             panic!("expected Ok");
         };
@@ -4084,7 +4169,7 @@ mod tests {
                 service_control_scopes: vec![],            },
         );
         let req = request(SERVING_SAN, "alice", "apw", 30);
-        match handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp {
+        match handle_sign_request(&issuer(dir.path()), &req).resp {
             SignResponse::Err { reason } => assert!(reason.contains("reserved")),
             SignResponse::Ok { .. } => panic!("issued the reserved serving name"),
         }
@@ -4098,7 +4183,7 @@ mod tests {
         // on the (name, password) pair, so a name with no matching slot is
         // rejected outright.
         let req = request("a.ryu-oh.org", "bob", "apw", 30);
-        match handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp {
+        match handle_sign_request(&issuer(dir.path()), &req).resp {
             SignResponse::Err { reason } => assert!(reason.contains("authentication failed")),
             SignResponse::Ok { .. } => panic!("admin/password mismatch accepted"),
         }
@@ -4110,8 +4195,7 @@ mod tests {
         setup_ca(dir.path());
         // A ROLE admin: it carries an issuance scope but wraps no MK, so its
         // password can never unlock the CA key.
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "eu-ops",
             "eupw",
             Policy {
@@ -4124,18 +4208,18 @@ mod tests {
                 service_control_scopes: vec![],            },
         )
         .unwrap();
-        assert!(ca_vault::unlock(dir.path(), "eupw").is_err(), "role can't unlock the key");
+        assert!(ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("eupw").is_err(), "role can't unlock the key");
 
         // Yet the SERVER signs an in-scope name on its behalf.
         let ok = request("host.eu.ryu-oh.org", "eu-ops", "eupw", 30);
         assert!(matches!(
-            handle_sign_request(&issuer(dir.path()), dir.path(), &ok).resp,
+            handle_sign_request(&issuer(dir.path()), &ok).resp,
             SignResponse::Ok { .. }
         ));
         // Out of scope is still refused (the authz gate is the whole boundary).
         let bad = request("host.us.ryu-oh.org", "eu-ops", "eupw", 30);
         assert!(matches!(
-            handle_sign_request(&issuer(dir.path()), dir.path(), &bad).resp,
+            handle_sign_request(&issuer(dir.path()), &bad).resp,
             SignResponse::Err { .. }
         ));
         // The audit names the REQUESTER, not the server's autorenew credential.
@@ -4150,12 +4234,10 @@ mod tests {
         setup_ca(dir.path());
         // An issuer holding NO signing credential (a CA whose keytab is
         // missing) authenticates + authorizes but cannot reach the key.
-        let iss = Mutex::new(CaIssuer {
-            next_serial: ca_store::next_serial(dir.path()).unwrap(),
-            autorenew_pw: None,
-        });
+        // `CaDir::open` leaves `autorenew_pw` None — exactly that state.
+        let iss = Mutex::new(ca_store::CaDir::open(dir.path()).unwrap());
         let req = request("host.ryu-oh.org", "alice", "apw", 30);
-        match handle_sign_request(&iss, dir.path(), &req).resp {
+        match handle_sign_request(&iss, &req).resp {
             SignResponse::Err { reason } => assert!(reason.contains("cannot sign"), "{reason}"),
             SignResponse::Ok { .. } => panic!("a CA with no signing credential must not sign"),
         }
@@ -4171,8 +4253,7 @@ mod tests {
     fn revoke_is_scope_bound() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path()); // alice = signing slot (broad)
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "eu-ops",
             "eupw",
             Policy {
@@ -4186,8 +4267,7 @@ mod tests {
         )
         .unwrap();
         // A perms-only role admin with no issuance authority at all.
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "pat",
             "patpw",
             Policy {
@@ -4204,7 +4284,10 @@ mod tests {
         let eu = commit_live_cert(dir.path(), "host.eu.ryu-oh.org");
         let serving = commit_live_cert(dir.path(), SERVING_SAN);
         let revoked = |serial: u64| {
-            ca_store::list_signed(dir.path())
+            ca_store::CaDir::open(dir.path())
+                .unwrap()
+                .store
+                .list_signed()
                 .unwrap()
                 .into_iter()
                 .find(|r| r.serial == serial)
@@ -4216,7 +4299,6 @@ mod tests {
         // A perms-only admin can't revoke anything — rejected up front.
         let pat = handle_revoke(
             &issuer(dir.path()),
-            dir.path(),
             &RevokeRequest {
                 admin: "pat".to_string(),
                 password: Secret("patpw".to_string()),
@@ -4230,7 +4312,6 @@ mod tests {
         // eu-ops asks to revoke all three; only its in-scope leaf is revoked.
         let resp = handle_revoke(
             &issuer(dir.path()),
-            dir.path(),
             &RevokeRequest {
                 admin: "eu-ops".to_string(),
                 password: Secret("eupw".to_string()),
@@ -4247,7 +4328,6 @@ mod tests {
         // The broad signing admin (alice) can revoke the *.us leaf.
         let resp = handle_revoke(
             &issuer(dir.path()),
-            dir.path(),
             &RevokeRequest {
                 admin: "alice".to_string(),
                 password: Secret("apw".to_string()),
@@ -4266,8 +4346,7 @@ mod tests {
     fn deny_is_scope_bound() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "eu-ops",
             "eupw",
             Policy {
@@ -4290,7 +4369,7 @@ mod tests {
                 requested_validity_days: 30,
                 enroll_listen: None,
             };
-            match handle_enqueue(dir.path(), &req, peer, None) {
+            match handle_enqueue(&issuer(dir.path()), &req, peer, None) {
                 EnqueueResponse::Ok { request_id } => request_id,
                 EnqueueResponse::Err { reason } => panic!("enqueue {name}: {reason}"),
             }
@@ -4301,7 +4380,6 @@ mod tests {
         // Out of scope: refused, and the request stays pending.
         let denied = handle_deny(
             &issuer(dir.path()),
-            dir.path(),
             &DenyRequest {
                 admin: "eu-ops".to_string(),
                 password: Secret("eupw".to_string()),
@@ -4311,14 +4389,13 @@ mod tests {
         );
         assert!(matches!(denied, DenyResponse::Err { reason } if reason.contains("not authorized")));
         assert!(matches!(
-            ca_store::status(dir.path(), &us_id).unwrap(),
+            ca_store::CaDir::open(dir.path()).unwrap().store.status(&us_id).unwrap(),
             ca_store::Status::Pending(_)
         ));
 
         // In scope: eu-ops may deny its own region's request.
         let ok = handle_deny(
             &issuer(dir.path()),
-            dir.path(),
             &DenyRequest {
                 admin: "eu-ops".to_string(),
                 password: Secret("eupw".to_string()),
@@ -4328,7 +4405,7 @@ mod tests {
         );
         assert!(matches!(ok, DenyResponse::Ok));
         assert!(matches!(
-            ca_store::status(dir.path(), &eu_id).unwrap(),
+            ca_store::CaDir::open(dir.path()).unwrap().store.status(&eu_id).unwrap(),
             ca_store::Status::Denied(_)
         ));
     }
@@ -4344,7 +4421,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
-        let fp = ca_store::list_signed(dir.path())
+        let fp = ca_store::CaDir::open(dir.path())
+            .unwrap()
+            .store
+            .list_signed()
             .unwrap()
             .into_iter()
             .find(|r| r.serial == orig)
@@ -4364,32 +4444,36 @@ mod tests {
             serial: Some(orig),
             spki_fp: Some(fp),
         };
-        let rid = match handle_enqueue(dir.path(), &enq, "1.2.3.4:5".parse().unwrap(), Some(&pid)) {
+        let rid = match handle_enqueue(&issuer(dir.path()), &enq, "1.2.3.4:5".parse().unwrap(), Some(&pid)) {
             EnqueueResponse::Ok { request_id } => request_id,
             EnqueueResponse::Err { reason } => panic!("renewal enqueue: {reason}"),
         };
         assert!(
-            ca_store::pending(dir.path())
+            ca_store::CaDir::open(dir.path())
+                .unwrap()
+                .store
+                .pending()
                 .unwrap()
                 .iter()
                 .any(|q| q.id == rid && q.renewal_of == Some(orig)),
             "must be queued as a verified renewal"
         );
         // The admin revokes the originating cert (laptop stolen).
-        ca_store::revoke(
-            dir.path(),
-            orig,
-            ca_store::Revocation {
-                serial: orig,
-                revoked_unix: ca_store::now_unix(),
-                reason: "stolen".to_string(),
-            },
-        )
-        .unwrap();
+        ca_store::CaDir::open(dir.path())
+            .unwrap()
+            .store
+            .revoke(
+                orig,
+                ca_store::Revocation {
+                    serial: orig,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: "stolen".to_string(),
+                },
+            )
+            .unwrap();
         // The in-flight renewal is now refused, not silently re-minted.
         let approved = handle_approve(
             &issuer(dir.path()),
-            dir.path(),
             &ApproveRequest {
                 admin: "alice".to_string(),
                 password: Secret("apw".to_string()),
@@ -4405,7 +4489,7 @@ mod tests {
             SignResponse::Ok { .. } => panic!("a renewal of a revoked cert must be refused"),
         }
         assert!(matches!(
-            ca_store::status(dir.path(), &rid).unwrap(),
+            ca_store::CaDir::open(dir.path()).unwrap().store.status(&rid).unwrap(),
             ca_store::Status::Pending(_)
         ));
     }
@@ -4418,7 +4502,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
-        let real_fp = ca_store::list_signed(dir.path())
+        let real_fp = ca_store::CaDir::open(dir.path())
+            .unwrap()
+            .store
+            .list_signed()
             .unwrap()
             .into_iter()
             .find(|r| r.serial == orig)
@@ -4441,7 +4528,7 @@ mod tests {
             serial: Some(orig),
             spki_fp: Some("AAAA BBBB CCCC".to_string()),
         };
-        match handle_enqueue(dir.path(), &enq, peer, Some(&foreign)) {
+        match handle_enqueue(&issuer(dir.path()), &enq, peer, Some(&foreign)) {
             EnqueueResponse::Err { reason } => assert!(reason.contains("already exists"), "{reason}"),
             EnqueueResponse::Ok { .. } => {
                 panic!("a foreign cert with a colliding serial must not renew")
@@ -4453,11 +4540,14 @@ mod tests {
             serial: Some(orig),
             spki_fp: Some(real_fp),
         };
-        let rid = match handle_enqueue(dir.path(), &enq, peer, Some(&ours)) {
+        let rid = match handle_enqueue(&issuer(dir.path()), &enq, peer, Some(&ours)) {
             EnqueueResponse::Ok { request_id } => request_id,
             EnqueueResponse::Err { reason } => panic!("our own cert should renew: {reason}"),
         };
-        assert!(ca_store::pending(dir.path())
+        assert!(ca_store::CaDir::open(dir.path())
+            .unwrap()
+            .store
+            .pending()
             .unwrap()
             .iter()
             .any(|q| q.id == rid && q.renewal_of == Some(orig)));
@@ -4484,7 +4574,7 @@ mod tests {
             csr_pem: kc.csr_pem,
             listen: "127.0.0.1:4565".parse().unwrap(),
         };
-        match handle_enroll_request(&issuer(dir.path()), dir.path(), &req) {
+        match handle_enroll_request(&issuer(dir.path()), &req) {
             SignResponse::Err { reason } => assert!(reason.contains("may not enroll")),
             SignResponse::Ok { .. } => panic!("enrolled without the policy bit"),
         }
@@ -4502,7 +4592,7 @@ mod tests {
             listen: "127.0.0.1:4565".parse().unwrap(),
         };
         let SignResponse::Ok { signed_cert_pem, .. } =
-            handle_enroll_request(&issuer(dir.path()), dir.path(), &req)
+            handle_enroll_request(&issuer(dir.path()), &req)
         else {
             panic!("expected Ok");
         };
@@ -4756,8 +4846,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         // bob may sign but not enroll.
-        ca_vault::add_signing_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_signing_slot(
             "apw",
             "bob",
             "bpw",
@@ -4994,21 +5083,24 @@ mod tests {
         );
         let renew_id = renew_req.id.clone();
         let fresh_id = fresh_req.id.clone();
-        ca_store::enqueue(dir.path(), &renew_req).unwrap();
-        ca_store::enqueue(dir.path(), &fresh_req).unwrap();
+        {
+            let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+            cadir.store.enqueue(&renew_req).unwrap();
+            cadir.store.enqueue(&fresh_req).unwrap();
+        }
 
-        let approved = autorenew_sweep(&issuer(dir.path()), dir.path(), "renew-secret");
+        let approved = autorenew_sweep(&issuer(dir.path()), "renew-secret");
         assert_eq!(approved, 1, "only the verified renewal is auto-approved");
         assert!(
             matches!(
-                ca_store::status(dir.path(), &renew_id).unwrap(),
+                ca_store::CaDir::open(dir.path()).unwrap().store.status(&renew_id).unwrap(),
                 ca_store::Status::Signed(_)
             ),
             "the verified renewal should now be signed",
         );
         assert!(
             matches!(
-                ca_store::status(dir.path(), &fresh_id).unwrap(),
+                ca_store::CaDir::open(dir.path()).unwrap().store.status(&fresh_id).unwrap(),
                 ca_store::Status::Pending(_)
             ),
             "the ordinary request must still wait for a human",
@@ -5028,7 +5120,7 @@ mod tests {
     async fn approve_and_deny_are_mutually_exclusive() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
 
@@ -5050,7 +5142,7 @@ mod tests {
             .unwrap_err();
         assert!(format!("{derr:#}").contains("already approved"), "got: {derr:#}");
         assert!(matches!(
-            ca_store::status(dir.path(), &a.request_id).unwrap(),
+            state.ca.as_ref().unwrap().lock().store.status(&a.request_id).unwrap(),
             ca_store::Status::Signed(_)
         ));
 
@@ -5074,7 +5166,7 @@ mod tests {
                 .unwrap_err();
         assert!(format!("{aerr:#}").contains("already denied"), "got: {aerr:#}");
         assert!(matches!(
-            ca_store::status(dir.path(), &b.request_id).unwrap(),
+            state.ca.as_ref().unwrap().lock().store.status(&b.request_id).unwrap(),
             ca_store::Status::Denied(_)
         ));
     }
@@ -5146,7 +5238,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let restricted = Policy { may_enroll_servers: false, ..policy() };
-        ca_vault::add_signing_slot(dir.path(), "apw", "bob", "bpw", restricted).unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_signing_slot("apw", "bob", "bpw", restricted)
+            .unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
@@ -5312,34 +5406,37 @@ mod tests {
         let iss = issuer(dir.path());
         let req = request("eric.ryu-oh.org", "alice", "apw", 30);
         assert!(matches!(
-            handle_sign_request(&iss, dir.path(), &req).resp,
+            handle_sign_request(&iss, &req).resp,
             SignResponse::Ok { .. }
         ));
         // Same name again: refused while the first cert lives — the
         // impostor race on an existing identity is closed.
         let req2 = request("eric.ryu-oh.org", "alice", "apw", 30);
-        match handle_sign_request(&iss, dir.path(), &req2).resp {
+        match handle_sign_request(&iss, &req2).resp {
             SignResponse::Err { reason } => {
                 assert!(reason.contains("already exists"), "got: {reason}")
             }
             SignResponse::Ok { .. } => panic!("duplicate name was signed"),
         }
-        // Revoking clears the way — the rebuilt-laptop flow.
+        // Revoking clears the way — the rebuilt-laptop flow. Route through
+        // the one `iss` CaDir the test already holds (a fresh `CaDir::open`
+        // of the same dir would deadlock its flock).
         let serial =
-            ca_store::live_for_name(dir.path(), "eric.ryu-oh.org").unwrap()[0].serial;
-        ca_store::revoke(
-            dir.path(),
-            serial,
-            ca_store::Revocation {
+            iss.lock().store.live_for_name("eric.ryu-oh.org").unwrap()[0].serial;
+        iss.lock()
+            .store
+            .revoke(
                 serial,
-                revoked_unix: ca_store::now_unix(),
-                reason: "laptop rebuilt".into(),
-            },
-        )
-        .unwrap();
+                ca_store::Revocation {
+                    serial,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: "laptop rebuilt".into(),
+                },
+            )
+            .unwrap();
         let req3 = request("eric.ryu-oh.org", "alice", "apw", 30);
         assert!(matches!(
-            handle_sign_request(&iss, dir.path(), &req3).resp,
+            handle_sign_request(&iss, &req3).resp,
             SignResponse::Ok { .. }
         ));
     }
@@ -5350,7 +5447,7 @@ mod tests {
         setup_ca(dir.path());
         let req = request("eric.ryu-oh.org", "alice", "apw", 30);
         assert!(matches!(
-            handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp,
+            handle_sign_request(&issuer(dir.path()), &req).resp,
             SignResponse::Ok { .. }
         ));
         let (addr, _state) = spawn_ca_server(dir.path()).await;
@@ -5374,7 +5471,12 @@ mod tests {
         use x509_parser::prelude::{CertificateRevocationList, FromDer};
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let (addr, state) = spawn_ca_server(dir.path()).await;
+        // The CA daemon holds the dir's exclusive flock; route every direct
+        // store/sign op through its `state.ca` (a second `CaDir::open` would
+        // deadlock). Each `lock()` here is a short, awaitless critical section
+        // — never held across a wire call that the server itself must lock.
+        let ca = state.ca.as_ref().expect("CA role held");
         let identity =
             conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         // Nothing revoked yet ⇒ no CRL.
@@ -5385,23 +5487,24 @@ mod tests {
         // Sign a victim, revoke it, sign the CRL with the vault key.
         let req = request("victim.ryu-oh.org", "alice", "apw", 30);
         assert!(matches!(
-            handle_sign_request(&issuer(dir.path()), dir.path(), &req).resp,
+            handle_sign_request(ca, &req).resp,
             SignResponse::Ok { .. }
         ));
         let serial =
-            ca_store::live_for_name(dir.path(), "victim.ryu-oh.org").unwrap()[0].serial;
-        ca_store::revoke(
-            dir.path(),
-            serial,
-            ca_store::Revocation {
+            ca.lock().store.live_for_name("victim.ryu-oh.org").unwrap()[0].serial;
+        ca.lock()
+            .store
+            .revoke(
                 serial,
-                revoked_unix: ca_store::now_unix(),
-                reason: "test".into(),
-            },
-        )
-        .unwrap();
-        let unlocked = ca_vault::unlock(dir.path(), "apw").unwrap();
-        crate::ca_index::write_crl(dir.path(), &unlocked.ca_key_pem).unwrap();
+                ca_store::Revocation {
+                    serial,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: "test".into(),
+                },
+            )
+            .unwrap();
+        let unlocked = ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
+        ca.lock().store.write_crl(&unlocked.ca_key_pem).unwrap();
         // The daemon serves it; it parses; the revoked serial is on it;
         // and it is genuinely signed by the CA.
         let pem = conf_client::get_crl(addr, NodeKind::Client, &identity)
@@ -5433,10 +5536,8 @@ mod tests {
         crl.verify_signature(ca_cert.public_key())
             .expect("CRL must verify against the CA");
         // nextUpdate is ~CRL_VALIDITY out.
-        let nu = crate::ca_index::crl_next_update(&crate::ca_index::crl_path(dir.path()))
-            .unwrap()
-            .unwrap();
-        let expect = ca_store::now_unix() + crate::ca_index::CRL_VALIDITY.as_secs();
+        let nu = ca.lock().store.crl_next_update().unwrap().unwrap();
+        let expect = ca_store::now_unix() + ca_store::CRL_VALIDITY.as_secs();
         assert!(nu.abs_diff(expect) < 3600, "nextUpdate {nu} vs expected {expect}");
     }
 
@@ -5446,8 +5547,7 @@ mod tests {
         setup_ca(dir.path());
         // An autorenew-shaped admin: empty issuance scope. It must be
         // able to approve *renewals* and nothing else.
-        ca_vault::add_signing_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_signing_slot(
             "apw",
             "bot",
             "botpw",
@@ -5461,7 +5561,7 @@ mod tests {
                 service_control_scopes: vec![],            },
         )
         .unwrap();
-        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
         // 1. Initial enrollment (the trust ceremony happened here).
@@ -5531,7 +5631,7 @@ mod tests {
         assert!(san.iter().any(|n| n.dnsname() == Some("eric.ryu-oh.org")));
         // Both generations are live in the index until revoked/expired.
         assert_eq!(
-            ca_store::live_for_name(dir.path(), "eric.ryu-oh.org").unwrap().len(),
+            state.ca.as_ref().unwrap().lock().store.live_for_name("eric.ryu-oh.org").unwrap().len(),
             2
         );
         // The audit trail distinguishes renewals.
@@ -5628,7 +5728,7 @@ mod tests {
     async fn a_revoked_certificate_cannot_self_renew() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        let (addr, _state) = spawn_ca_server(dir.path()).await;
+        let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
         let issued = conf_client::request_cert(
@@ -5643,19 +5743,21 @@ mod tests {
         )
         .await
         .unwrap();
-        // Revoke it (e.g. the laptop was stolen).
+        // Revoke it (e.g. the laptop was stolen). Route through the running
+        // CA daemon's held `state.ca` (it owns the dir's exclusive flock).
         let serial =
-            ca_store::live_for_name(dir.path(), "eric.ryu-oh.org").unwrap()[0].serial;
-        ca_store::revoke(
-            dir.path(),
-            serial,
-            ca_store::Revocation {
+            state.ca.as_ref().unwrap().lock().store.live_for_name("eric.ryu-oh.org").unwrap()[0].serial;
+        state.ca.as_ref().unwrap().lock()
+            .store
+            .revoke(
                 serial,
-                revoked_unix: ca_store::now_unix(),
-                reason: "stolen".into(),
-            },
-        )
-        .unwrap();
+                ca_store::Revocation {
+                    serial,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: "stolen".into(),
+                },
+            )
+            .unwrap();
         // The thief still holds cert+key; the TLS handshake may even
         // succeed (this test installs no CRL beside the server's trust
         // bundle) — but the index says the serial is dead, so the
@@ -5850,8 +5952,12 @@ mod tests {
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
             service_control_scopes: vec![],        };
-        ca_vault::add_role_slot(dir.path(), "eve", "epw", role("/eu")).unwrap();
-        ca_vault::add_role_slot(dir.path(), "rod", "rpw", role("/")).unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot("eve", "epw", role("/eu"))
+            .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot("rod", "rpw", role("/"))
+            .unwrap();
 
         std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
         let rpath = write_resolver_with_perms(dir.path());
@@ -6057,12 +6163,23 @@ mod tests {
             resolver: Some(ResolverRole { config: rb.clone() }),
             id_map: None,
         };
-        let (addr_a, _a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
+        let (addr_a, a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
         // B shares A's conf port on the other loopback IP — the cluster
         // push derives a peer's conf address as member.ip : my_conf_port.
+        // A (the CA) already holds the dir's exclusive flock, so B can't open
+        // it to mint its own serving cert; it reuses A's (every conf server
+        // shares the reserved serving SAN, so A's cert is a valid identity
+        // for B too).
         let port = addr_a.port();
-        let (addr_b, _b) =
-            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles_b, vec![]).await;
+        let (addr_b, _b) = spawn_server_at_with_cert(
+            ca_dir,
+            &format!("127.0.0.3:{port}"),
+            roles_b,
+            vec![],
+            a.serving_cert_pem.clone(),
+            a.serving_key_pem.clone(),
+        )
+        .await;
 
         let identity =
             conf_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
@@ -6105,7 +6222,7 @@ mod tests {
             resolver: Some(ResolverRole { config: ra.clone() }),
             id_map: None,
         };
-        let (addr_a, _a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
+        let (addr_a, a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
         let port = addr_a.port();
 
         let identity =
@@ -6139,8 +6256,17 @@ mod tests {
             resolver: Some(ResolverRole { config: rb.clone() }),
             id_map: None,
         };
-        let (_addr_b, _b) =
-            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles_b, vec![]).await;
+        // A (the CA) holds the dir's exclusive flock; B reuses A's serving
+        // cert (shared reserved SAN) rather than opening the dir to mint one.
+        let (_addr_b, _b) = spawn_server_at_with_cert(
+            ca_dir,
+            &format!("127.0.0.3:{port}"),
+            roles_b,
+            vec![],
+            a.serving_cert_pem.clone(),
+            a.serving_key_pem.clone(),
+        )
+        .await;
         let peers =
             conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
                 .await
@@ -6484,16 +6610,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path()); // alice = signing slot (founding authority)
         // A role admin that can manage admins, scoped to *.ryu-oh.org and "/".
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "boss",
             "bosspw",
             full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
         )
         .unwrap();
         // A plain role admin with no management authority.
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "plain",
             "plainpw",
             full_policy(&[], 0, &[], false, &["/eu"], false),
@@ -6516,7 +6640,7 @@ mod tests {
             AdminMgmtResponse::Ok
         ));
         assert_eq!(
-            ca_vault::slot_policy(dir.path(), "eu-ops").unwrap().0,
+            ca_vault::CAVault::new(dir.path().to_path_buf()).slot_policy("eu-ops").unwrap().0,
             ca_vault::SlotKind::Role
         );
         // Out of scope is refused.
@@ -6539,8 +6663,7 @@ mod tests {
             AdminMgmtResponse::Err { reason } if reason.contains("not authorized")
         ));
         // A role that lacks may_enroll_servers can't grant it (no escalation).
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "eu-boss",
             "ebpw",
             full_policy(&["*.eu.ryu-oh.org"], 30, &[], false, &["/eu"], true),
@@ -6635,7 +6758,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let boss = full_policy(&["*.ryu-oh.org"], 30, &[], true, &["/"], true);
-        ca_vault::add_role_slot(dir.path(), "boss", "bosspw", boss.clone()).unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot("boss", "bosspw", boss.clone())
+            .unwrap();
         let (_addr, state) = spawn_ca_server(dir.path()).await;
 
         // boss is the only ROLE manager — it can't remove itself…
@@ -6672,8 +6797,7 @@ mod tests {
     async fn remote_add_role_admin_over_tls() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        ca_vault::add_role_slot(
-            dir.path(),
+        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
             "boss",
             "bosspw",
             full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
@@ -6700,6 +6824,6 @@ mod tests {
         assert_eq!(eu.kind, ca_vault::SlotKind::Role);
         assert_eq!(eu.policy.allowed_san, vec!["*.eu.ryu-oh.org".to_string()]);
         // The new admin authenticates and is scoped (can't unlock the key).
-        assert!(ca_vault::unlock(dir.path(), "eupw").is_err());
+        assert!(ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("eupw").is_err());
     }
 }

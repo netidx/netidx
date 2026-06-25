@@ -21,11 +21,19 @@
 //! - TLS identities for following TLS referrals are specified via
 //!   [`tls_identities`](WorkstationParams::tls_identities). Empty list
 //!   for non-TLS upstreams.
+//!
+//! **Unix-only.** The local resolver uses unix peer-credential
+//! (Local) auth and is run by the `#[cfg(unix)]` activation
+//! supervisor, so on non-unix [`workstation`] errors and points the
+//! operator at the publisher role instead.
 
 use super::*;
+#[cfg(unix)]
 use crate::{client::ClientConfig, paths, resolver::ResolverConfig};
 use anyhow::Result;
-use std::{net::SocketAddr, path::PathBuf};
+#[cfg(unix)]
+use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// Parameters for [`workstation`].
 ///
@@ -123,21 +131,32 @@ pub struct WorkstationParams {
 /// exists, so they'll go away on their next restart.
 pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 
-/// Render the workstation template.
-///
-/// Platform note: the workstation's local resolver auth is **Local
-/// (unix-socket peer credentials) on unix**, **Anonymous on
-/// everything else**. Local auth requires a unix socket, which
-/// Windows doesn't have, and the netidx resolver-server's Local-auth
-/// path is itself `#[cfg(unix)]`-only — so emitting a Local-auth
-/// config on Windows would produce a config that fails to load.
-/// Anonymous keeps the workstation usable on Windows; the perms
-/// file's owner row is then keyed on the empty-string entity (the
-/// internal name for ANONYMOUS) so the auto-seed grant still
-/// applies.
+/// Why the workstation role refuses on non-unix, and what to do
+/// instead. Single source of truth for the message, shared by the
+/// [`workstation`] stub and the CLI's early guard.
+#[cfg(not(unix))]
+pub const UNSUPPORTED_MSG: &str =
+    "the workstation role is unix-only for now: it installs a Local-auth \
+     local resolver supervised by netidx-activation, neither of which \
+     exists on this platform. To put this host on a network, install a \
+     publisher instead: `netidx conf publisher install`. Full Windows \
+     workstation support is planned for a future release.";
+
+/// Non-unix stub: the workstation role can't be rendered here — its
+/// local resolver needs unix Local auth and the activation supervisor
+/// that runs it is `#[cfg(unix)]`. Errors with [`UNSUPPORTED_MSG`],
+/// steering the operator to the publisher role.
+#[cfg(not(unix))]
+pub fn workstation(_p: &WorkstationParams) -> Result<RenderedTemplate> {
+    bail!("{UNSUPPORTED_MSG}")
+}
+
+/// Render the workstation template. Unix-only — the local resolver
+/// uses Local (peer-credential) auth and is supervised by the
+/// `#[cfg(unix)]` activation runtime.
+#[cfg(unix)]
 pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     let listen_port = p.listen_port.unwrap_or(DEFAULT_LISTEN_PORT);
-    #[cfg(unix)]
     let local_sock_path = match &p.local_socket {
         Some(p) => p.clone(),
         None => default_auth_sock()?,
@@ -174,8 +193,7 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
         listen_port,
     ));
 
-    // -- Resolver member auth: Local on unix, Anonymous elsewhere --------
-    #[cfg(unix)]
+    // -- Resolver member auth: Local (unix peer credentials) ------------
     let (resolver_auth, client_addr_auth) = {
         let local_auth_arc =
             ArcStr::from(local_sock_path.to_string_lossy().as_ref());
@@ -184,9 +202,6 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
             cfile::Auth::Local(local_auth_arc),
         )
     };
-    #[cfg(not(unix))]
-    let (resolver_auth, client_addr_auth) =
-        (rfile::Auth::Anonymous, cfile::Auth::Anonymous);
 
     let resolver_member = rfile::MemberServerBuilder::default()
         .addr(listen_addr)
@@ -200,17 +215,10 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     // otherwise the seed file would sit on disk inert.
     //
     // Default behaviour: emit a perms file unless `with_perms_file`
-    // is explicitly false. When no explicit seed was supplied:
-    //
-    // - On unix, auto-seed `<base>` → `<owner>` → `swlpd` (when an
-    //   owner was supplied). The workstation resolver uses Local
-    //   auth and the entity name is the unix username.
-    // - On non-unix, auto-seed `<base>` → `""` → `swlpd`. The empty
-    //   entity name is netidx's internal handle for ANONYMOUS (see
-    //   `PMap::from_file` in resolver_server/auth.rs); the
-    //   workstation uses Anonymous auth on non-unix so this is the
-    //   only entity that ever connects. `owner` is ignored — there
-    //   is no per-user auth mechanism to attach it to.
+    // is explicitly false. When no explicit seed was supplied,
+    // auto-seed `<base>` → `<owner>` → `swlpd` (when an owner was
+    // supplied). The workstation resolver uses Local auth, so the
+    // entity name is the unix username.
     let perms_file = if p.with_perms_file {
         let path = match &p.perms_path {
             Some(p) => p.clone(),
@@ -261,27 +269,15 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     // resolver hands back beyond its local store — which means
     // *the parent's namespace*). So the right default is "whatever
     // the parent uses". With no parent, the client only ever talks
-    // to the local loopback resolver, so the right default is the
-    // local-machine convention: `Local` on unix (the resolver runs
-    // Local-auth over a unix socket), `Anonymous` on non-unix
-    // (where Local-auth isn't available and the resolver is
-    // Anonymous-only).
+    // to the local loopback resolver, whose convention is Local
+    // (peer-credential) auth.
     let default_auth = match &p.default_auth {
         Some(d) => d.clone(),
         None => match &p.parent {
             Some(parent) => {
                 derive_default_auth(parent.addrs.iter().map(|(_, a)| a))
             }
-            None => {
-                #[cfg(unix)]
-                {
-                    DefaultAuthMech::Local
-                }
-                #[cfg(not(unix))]
-                {
-                    DefaultAuthMech::Anonymous
-                }
-            }
+            None => DefaultAuthMech::Local,
         },
     };
     if matches!(default_auth, DefaultAuthMech::Tls) && p.tls_identities.is_empty()
@@ -369,18 +365,6 @@ fn default_auto_seed(base: &str, owner: &Option<ArcStr>) -> crate::perms::PMap {
     s
 }
 
-#[cfg(not(unix))]
-fn default_auto_seed(base: &str, _owner: &Option<ArcStr>) -> crate::perms::PMap {
-    // Non-unix workstation uses Anonymous auth; grant full rights to
-    // the empty-string entity (the internal handle for ANONYMOUS).
-    // `owner` is ignored — no per-user identity exists on this
-    // platform.
-    let mut s = crate::perms::empty();
-    crate::perms::add_entry(&mut s, base, "", "swlpd")
-        .expect("workstation anonymous seed must validate");
-    s
-}
-
 #[cfg(unix)]
 fn default_auth_sock() -> Result<PathBuf> {
     let mut p = dirs::config_dir().ok_or_else(|| {
@@ -391,7 +375,9 @@ fn default_auth_sock() -> Result<PathBuf> {
     Ok(p)
 }
 
-#[cfg(test)]
+// Unix-only: these exercise the Local-auth resolver the template
+// renders, and `workstation()` itself is `#[cfg(unix)]`.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::str::FromStr;

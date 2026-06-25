@@ -11,7 +11,7 @@
 //! extensions so the resulting certs validate through netidx's
 //! existing `tls::load_certs` / `tls::get_names`.
 //!
-//! Revocation + CRLs live in [`crate::ca_index`]; the issuance index
+//! Revocation + CRLs live in [`crate::ca_store`]; the issuance index
 //! is appended by [`Ca::sign_request`] itself. Still deferred:
 //! hardware-token backing, `Ca::trust_into_*` config-wiring helpers.
 
@@ -366,7 +366,7 @@ impl Ca {
 
     /// Build a CA from an in-memory **unencrypted** PKCS#8 key PEM and
     /// cert PEM, with `directory` providing the serial counter. Used by
-    /// the CA server: [`crate::ca_vault::unlock`] hands back the
+    /// the CA server: [`crate::ca_vault::CAVault::unlock`] hands back the
     /// decrypted key per request, and this turns it into a transient
     /// signer without the key ever touching disk in plaintext.
     pub fn from_pem(
@@ -1293,7 +1293,8 @@ mod tests {
         )
         .unwrap();
         let requested_days = 365u32;
-        let serial = ca_store::next_serial(dir.path()).unwrap();
+        let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+        let serial = cadir.store.next_serial().unwrap();
         let leaf = ca
             .sign_request(
                 &kr.csr_pem,
@@ -1311,17 +1312,18 @@ mod tests {
             None,
             None,
         );
-        ca_store::commit_issuance(
-            dir.path(),
-            &req,
-            serial,
-            name,
-            std::str::from_utf8(&leaf).unwrap(),
-            &[],
-        )
-        .unwrap();
+        cadir
+            .store
+            .commit_issuance(
+                &req,
+                serial,
+                name,
+                std::str::from_utf8(&leaf).unwrap(),
+                &[],
+            )
+            .unwrap();
         let now = ca_store::now_unix();
-        let rec = ca_store::live_for_name(dir.path(), name).unwrap();
+        let rec = cadir.store.live_for_name(name).unwrap();
         assert_eq!(rec.len(), 1, "the issuance should be recorded and live");
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record

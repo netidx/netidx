@@ -55,8 +55,6 @@ immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
 indexmap = "2"
 keyring = "3"
 log = "0.4"
-# Conf-server discovery (netidx-conf `discovery` module): pure-Rust
-# mDNS/DNS-SD — no avahi/Bonjour daemon dependency, works on Windows.
 mdns-sd = "0.20"
 memmap2 = "0.9"
 nix = { version = "0.31", features = ["process", "signal", "hostname", "user"] }
@@ -86,10 +84,6 @@ rust_decimal = { version = "1", features = [
 rustls = "0.23"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
-# Pure-Rust bindings to macOS Security.framework / CoreFoundation (no
-# C library — the frameworks ship with the OS). The -sys crate covers
-# the raw SecKey calls the wrapper doesn't expose; versions track
-# what security-framework 3.x itself uses.
 core-foundation = "0.10"
 security-framework = { version = "3", features = ["OSX_10_15"] }
 security-framework-sys = "2"
@@ -104,11 +98,7 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 syn = "2"
 tempdir = "0.3.7"
 tempfile = "3"
-# Timestamp type rcgen's CRL builder takes (netidx-conf revocation).
 time = "0.3"
-# Pure-Rust TPM 2.0 marshalling (Jarkko Sakkinen, the kernel TPM
-# subsystem maintainer), used by netidx-tpm. Pinned exactly: pre-1.0,
-# the API still moves.
 tpm2-protocol = "=0.19.0"
 tokio-rustls = "0.26"
 tokio = { version = "1", features = [

@@ -14,10 +14,6 @@ categories = ["network-programming"]
 
 [features]
 default = []
-# Deployment-environment network-shape detection for `conf install`
-# (the `netshape` module). Off by default because it pulls an HTTP
-# client (reqwest) + interface enumeration that config-only consumers
-# of this crate don't need; `netidx-tools` enables it.
 cloud-detect = ["dep:reqwest", "dep:if-addrs", "dep:futures"]
 
 [dependencies]
@@ -30,75 +26,35 @@ netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
 parking_lot = { workspace = true }
-# Cross-platform PEM-cert parsing for `tls::validate_pem_cert_file`.
-# Lighter than openssl and pure-Rust — works on Windows where openssl
-# doesn't, and netidx itself already pulls rustls-pemfile so no new
-# build cost.
 rustls-pemfile = { workspace = true }
-# Cross-platform DER X.509 parsing for `tls::extract_dns_san_from_pem`,
-# and (with the `verify` feature → ring) signature verification so the
-# CA join client can confirm the server's serving cert is signed by the
-# fingerprint-confirmed CA, on any platform, without openssl.
 x509-parser = { workspace = true, features = ["verify"] }
 log = { workspace = true }
-# mDNS/DNS-SD conf-server discovery (the `discovery` module). Pure
-# Rust, no system daemon — a Windows workstation can browse and the
-# unix conf-server daemon advertises with the same stack. The beacon
-# is a display/candidate hint only; trust comes from the TLS layer.
 mdns-sd = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-# CA-cert fingerprint (the `fingerprint` module). Pure-Rust SHA-256 so
-# the join client computes the same fingerprint on Windows, where
-# openssl isn't available. sha2 0.10 is already in the tree.
 sha2 = { workspace = true }
-# Wipe key material / passwords (vault + join client). Cross-platform.
 zeroize = { workspace = true }
-# SAN allow-list matching for per-admin issuance policy.
 globset = { workspace = true }
 base64 = { workspace = true }
 tempfile = { workspace = true }
-# CA-server / join-client network stack. The join client is
-# cross-platform (a Windows node joins a unix CA), so these are base
-# deps, not unix-gated: async TLS via rustls (never openssl on the
-# client), and rcgen for the client's pure-Rust key + CSR generation.
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-# `x509-parser` enables Issuer::from_ca_cert_pem, which signs CRLs with
-# the existing (openssl-generated) CA — see `ca_index::write_crl`.
 rcgen = { workspace = true, features = ["x509-parser"] }
-# Optional — only compiled with the `cloud-detect` feature (the
-# `netshape` / cloud-metadata detection used by `conf install`).
 reqwest = { workspace = true, optional = true }
 if-addrs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["user"] }
-# CA / CSR / cert handling (the `ca` module) is unix-only — netidx on
-# Windows uses rustls everywhere, and pulling in openssl-sys would
-# require a mingw build of OpenSSL that nobody on Windows wants to
-# install. Gate the entire `ca` module on `cfg(unix)` and keep
-# Windows lean.
 openssl = { workspace = true }
-# CA keyslot vault (LUKS-style): AES-256-GCM key wrapping + Argon2id
-# password KDF. Unix-only because the vault only ever protects a CA
-# private key, and the CA module itself is unix-only (openssl). Both are
-# pure-Rust, but gating them here keeps Windows builds lean.
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 rand = { workspace = true }
-# Timestamp type rcgen's CRL builder takes (`ca_index::write_crl`).
 time = { workspace = true }
 
 [dev-dependencies]
-# `tokio::test` + multi-thread runtime for the e2e harness in
-# `tests/e2e.rs`. The Publisher / Subscriber background tasks expect
-# to be able to make progress on a separate thread from the test's
-# `await`s, so single-threaded would deadlock on the first
-# unflushed-batch wait.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 env_logger = { workspace = true }

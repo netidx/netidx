@@ -806,7 +806,7 @@ pub struct AddRoleAdminRequest {
     pub password: Secret,
     pub name: String,
     pub new_password: Secret,
-    pub policy: crate::ca_vault::Policy,
+    pub policy: crate::ca_policy::Policy,
 }
 
 /// Admin → CA: replace role admin `target`'s policy with `policy` (same gate
@@ -816,7 +816,7 @@ pub struct SetAdminPolicyRequest {
     pub admin: String,
     pub password: Secret,
     pub target: String,
-    pub policy: crate::ca_vault::Policy,
+    pub policy: crate::ca_policy::Policy,
 }
 
 /// Admin → CA: remove role admin `target`.
@@ -847,7 +847,7 @@ pub enum AdminMgmtResponse {
 /// admin's name, tier, and full policy — including `may_manage_admins`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdminListResponse {
-    Ok { admins: Vec<crate::ca_vault::AdminInfo> },
+    Ok { admins: Vec<crate::ca_policy::AdminInfo> },
     Err { reason: String },
 }
 

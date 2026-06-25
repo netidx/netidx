@@ -6,7 +6,12 @@
 //! to it to drive a unit's start / stop / restart / status on a role admin's
 //! behalf. The conf plane carries the authentication and RBAC; this socket
 //! is purely the local, owner-only trust boundary (kernel-enforced by the
-//! 0600 mode, plus a `SO_PEERCRED` uid check). Unix-only by construction.
+//! 0600 mode, plus a `SO_PEERCRED` uid check).
+//!
+//! The message types and framing are cross-platform — a Windows conf client
+//! carries them in the conf-plane wire protocol when it asks a unix conf
+//! server to control a service. Only [`control`] itself (the local
+//! unix-socket connect) is `#[cfg(unix)]`.
 
 use anyhow::{bail, Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -77,6 +82,7 @@ pub fn socket_path(units_dir: &Path) -> PathBuf {
 }
 
 /// Connect to a local activation control socket and run one request.
+#[cfg(unix)]
 pub async fn control(socket: &Path, req: &ControlRequest) -> Result<ControlResponse> {
     let mut s = tokio::net::UnixStream::connect(socket).await.with_context(|| {
         format!("connecting to the activation control socket {}", socket.display())

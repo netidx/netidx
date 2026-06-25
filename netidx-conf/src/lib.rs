@@ -24,6 +24,10 @@ pub mod atomic;
 /// them from elsewhere.
 #[cfg(unix)]
 pub mod ca;
+/// The CA's RBAC policy model (`Policy`, `SlotKind`, `AdminInfo`) — pure
+/// data. Cross-platform: the unix vault stores it, but a Windows admin
+/// client carries these types over the conf plane (see [`conf_proto`]).
+pub mod ca_policy;
 /// LUKS-style keyslot vault protecting the CA private key (multiple
 /// revocable admin passwords). Unix-only — it only ever guards a CA
 /// key, and the CA module is unix-only. See [`design/ca-server.md`].
@@ -40,10 +44,6 @@ pub mod ca_store;
 /// Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod delegation_store;
-/// The CA's published CRL (`<ca-dir>/crl.pem`), built from
-/// [`ca_store`]'s revoked set. Unix-only — it lives in the CA dir.
-#[cfg(unix)]
-pub mod ca_index;
 /// Wire protocol (message types + framing) shared by the conf server
 /// and its clients. Cross-platform — a Windows node speaks it to a unix
 /// conf server. See [`design/ca-server.md`].

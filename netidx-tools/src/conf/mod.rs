@@ -9,6 +9,11 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+// `activation` (edit + control the supervisor's units) drives the
+// activation supervisor, whose runtime and local control socket are
+// unix-only. On Windows there is no supervisor, so the component is
+// simply not exposed.
+#[cfg(unix)]
 mod activation;
 // `ca` subcommand and its supporting CLI helpers depend on the
 // `netidx_conf::ca` engine module, which is unix-only (it pulls
@@ -37,8 +42,10 @@ mod resolver;
 mod roles;
 // `server` (the conf-server daemon CLI) depends on the
 // `netidx_conf::conf_server` engine module, which is unix-only (the
-// CA signer pulls openssl). Browsing/joining from Windows still works
-// via `workstation install` — only the daemon is unix-gated.
+// CA signer pulls openssl). On Windows, put a host on a network by
+// installing a publisher client config (`netidx conf publisher
+// install`); the `workstation` role is unix-only too (Local auth +
+// activation supervisor) until full Windows support lands.
 #[cfg(unix)]
 mod server;
 mod service;

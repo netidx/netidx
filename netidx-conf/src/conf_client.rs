@@ -398,7 +398,7 @@ pub async fn add_role_admin(
     password: &str,
     name: &str,
     new_password: &str,
-    policy: crate::ca_vault::Policy,
+    policy: crate::ca_policy::Policy,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     conf_proto::write_msg(
@@ -426,7 +426,7 @@ pub async fn set_admin_policy(
     admin: &str,
     password: &str,
     target: &str,
-    policy: crate::ca_vault::Policy,
+    policy: crate::ca_policy::Policy,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     conf_proto::write_msg(
@@ -477,7 +477,7 @@ pub async fn list_admins(
     expected: &CaIdentity,
     admin: &str,
     password: &str,
-) -> Result<Vec<crate::ca_vault::AdminInfo>> {
+) -> Result<Vec<crate::ca_policy::AdminInfo>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     conf_proto::write_msg(
         &mut tls,
