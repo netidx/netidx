@@ -44,7 +44,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use globset::Glob;
 use log::{debug, error, info, warn};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use rustls::{
     RootCertStore, ServerConfig as RustlsServerConfig, server::WebPkiClientVerifier,
 };
@@ -238,47 +238,17 @@ impl Server {
 /// process is killed.
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let cfg = ConfServerConfig::load(&cfg_path)?;
-    let serving_cert_pem = std::fs::read(&cfg.serving_cert).with_context(|| {
-        format!("reading serving cert {}", cfg.serving_cert.display())
-    })?;
-    let serving_key_pem = std::fs::read(&cfg.serving_key)
-        .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
-    // A TPM-sealed serving key: `<key>.tpm` holds the password, sealed
-    // to this machine. Unseal + decrypt here, in memory; failure is a
-    // hard error naming the fix (a conf server silently down means no
-    // discovery and no renewals for the whole network).
-    let serving_key_pem = {
-        let sidecar = crate::tls::sealed_sidecar(&cfg.serving_key);
-        if sidecar.exists() {
-            let blob = std::fs::read(&sidecar)
-                .with_context(|| format!("reading sealed password {sidecar:?}"))?;
-            let pw = netidx_tpm::unseal(&blob).with_context(|| {
-                format!(
-                    "unsealing {sidecar:?} — if this host's TPM was cleared or \
-                     the board was replaced, re-enroll this conf server"
-                )
-            })?;
-            let pw = std::str::from_utf8(&pw).context("sealed password is not utf8")?;
-            let pem = std::str::from_utf8(&serving_key_pem)
-                .context("serving key is not utf8")?;
-            netidx::tls::decrypt_private_key(pem, pw)
-                .context("decrypting the serving key")?
-                .as_bytes()
-                .to_vec()
-        } else {
-            serving_key_pem
-        }
-    };
+    // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
+    // this machine; `load_serving_keypair` unseals + decrypts in memory.
+    // Failure is a hard error (a conf server silently down means no discovery
+    // and no renewals for the whole network).
+    let (serving_cert_pem, serving_key_pem) =
+        load_serving_keypair(&cfg.serving_cert, &cfg.serving_key)?;
     let listen = cfg.listen;
     let mdns = cfg.mdns;
     let state = Server::new(cfg, Some(cfg_path), serving_cert_pem, serving_key_pem)?;
-    let crl = load_serving_crl(&state);
-    let acceptor = TlsAcceptor::from(Arc::new(build_server_config(
-        &state.serving_cert_pem,
-        &state.serving_key_pem,
-        state.roots.clone(),
-        crl.as_deref(),
-    )?));
+    let acceptor =
+        build_serving_acceptor(&state, &state.serving_cert_pem, &state.serving_key_pem)?;
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding conf server to {listen}"))?;
@@ -351,6 +321,11 @@ pub async fn serve_on(
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
     spawn_local_control(&state, signs.clone());
+    // Make the serving cert / CRL hot-reloadable: the watcher swaps in a
+    // freshly-built acceptor when the renewal daemon installs a new cert,
+    // so a long-running daemon never serves its expired startup cert.
+    let acceptor = Arc::new(RwLock::new(acceptor));
+    spawn_serving_reload(&state, acceptor.clone());
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -368,7 +343,7 @@ pub async fn serve_on(
                 continue;
             }
         };
-        let acceptor = acceptor.clone();
+        let acceptor = acceptor.read().clone();
         let state = state.clone();
         let signs = signs.clone();
         tokio::spawn(async move {
@@ -1410,11 +1385,15 @@ fn build_server_config(
 /// daemon places beside our trust bundle (the convention netidx's own
 /// acceptor watches). Absent ⇒ `None` — a missing CRL must never lock the
 /// conf plane out; it just means no revocation is enforced yet.
-fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
-    let path = match state.ca.as_ref() {
+fn serving_crl_path(state: &Server) -> PathBuf {
+    match state.ca.as_ref() {
         Some(ca) => ca.store.lock().crl_path(),
         None => state.cfg.lock().trusted.with_file_name("crl.pem"),
-    };
+    }
+}
+
+fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
+    let path = serving_crl_path(state);
     match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1423,6 +1402,103 @@ fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
             None
         }
     }
+}
+
+/// Read the serving cert + key from disk, decrypting a TPM-sealed key in
+/// memory. Shared by startup and the live reload below, so a renewed serving
+/// cert (and its possibly TPM-sealed key) is picked up identically either way.
+fn load_serving_keypair(
+    serving_cert: &Path,
+    serving_key: &Path,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let cert_pem = std::fs::read(serving_cert)
+        .with_context(|| format!("reading serving cert {}", serving_cert.display()))?;
+    let key_pem = std::fs::read(serving_key)
+        .with_context(|| format!("reading serving key {}", serving_key.display()))?;
+    let key_pem = {
+        let sidecar = crate::tls::sealed_sidecar(serving_key);
+        if sidecar.exists() {
+            let blob = std::fs::read(&sidecar)
+                .with_context(|| format!("reading sealed password {sidecar:?}"))?;
+            let pw = netidx_tpm::unseal(&blob).with_context(|| {
+                format!(
+                    "unsealing {sidecar:?} — if this host's TPM was cleared or \
+                     the board was replaced, re-enroll this conf server"
+                )
+            })?;
+            let pw = std::str::from_utf8(&pw).context("sealed password is not utf8")?;
+            let pem =
+                std::str::from_utf8(&key_pem).context("serving key is not utf8")?;
+            netidx::tls::decrypt_private_key(pem, pw)
+                .context("decrypting the serving key")?
+                .as_bytes()
+                .to_vec()
+        } else {
+            key_pem
+        }
+    };
+    Ok((cert_pem, key_pem))
+}
+
+/// Build the inbound TLS acceptor from a serving cert/key and the current
+/// CRL. Used at startup and on every live reload.
+fn build_serving_acceptor(
+    state: &Server,
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<TlsAcceptor> {
+    let crl = load_serving_crl(state);
+    Ok(TlsAcceptor::from(Arc::new(build_server_config(
+        cert_pem,
+        key_pem,
+        state.roots.clone(),
+        crl.as_deref(),
+    )?)))
+}
+
+/// How often the daemon re-stats its serving cert + CRL on disk. Both were
+/// previously read once at startup, so a serving cert the renewal daemon
+/// renewed *on disk* sat unused until the running daemon's in-memory copy
+/// expired — taking the conf plane down network-wide. Now a long-running
+/// daemon picks up a renewal (or a fresh CRL / revocation) within one poll,
+/// no restart needed. Cheap: a stat, and a rebuild only when an mtime moves.
+const SERVING_RELOAD_POLL: Duration = Duration::from_secs(30);
+
+/// Watch the serving cert + CRL files and swap a freshly-built acceptor into
+/// `acceptor` when either changes. New connections pick up the new acceptor;
+/// in-flight handshakes keep the one they started with.
+fn spawn_serving_reload(state: &Arc<Server>, acceptor: Arc<RwLock<TlsAcceptor>>) {
+    let cert_path = state.cfg.lock().serving_cert.clone();
+    let key_path = state.cfg.lock().serving_key.clone();
+    let crl_path = serving_crl_path(state);
+    let weak = Arc::downgrade(state);
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut last = (mtime(&cert_path), mtime(&crl_path));
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SERVING_RELOAD_POLL).await;
+            let Some(state) = weak.upgrade() else { break };
+            let now = (mtime(&cert_path), mtime(&crl_path));
+            if now == last {
+                continue;
+            }
+            match load_serving_keypair(&cert_path, &key_path)
+                .and_then(|(c, k)| build_serving_acceptor(&state, &c, &k))
+            {
+                Ok(acc) => {
+                    *acceptor.write() = acc;
+                    last = now;
+                    info!(
+                        "conf-server: reloaded serving cert / CRL from disk \
+                         (renewal or revocation installed, no restart)"
+                    );
+                }
+                Err(e) => warn!(
+                    "conf-server: serving cert/CRL reload failed, keeping current: {e:#}"
+                ),
+            }
+        }
+    });
 }
 
 /// A sign outcome: the wire response plus, on success, what the id-map
