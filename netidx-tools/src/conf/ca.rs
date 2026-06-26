@@ -1018,6 +1018,12 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         )?,
     };
     let need = if set_up_server {
+        // setup_server signs the serving cert through the offline issuance
+        // path, which takes the CA flock itself — so release ours first,
+        // then reacquire for the remaining slot setup. During init no daemon
+        // competes for the brand-new dir, so the brief unlock is safe; this
+        // is the same drop-and-reopen the offline `ca issue`/`sign` paths use.
+        drop(cadir);
         let need = super::server::setup_server(super::server::SetupArgs {
             ca_dir: &opts.dir,
             ca: &ca,
@@ -1026,6 +1032,8 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
             listen_hint: opts.listen_hint,
             units_dir: opts.units_dir.as_deref(),
         })?;
+        let cadir = netidx_conf::ca_store::CaDir::open(&opts.dir)
+            .context("reopening the CA directory after serving-cert setup")?;
         // The box's `autorenew` credential — the only signing key the
         // daemon ever holds, and what it signs on a role admin's behalf
         // with. Mandatory for a server CA. Authorized by the recovery
