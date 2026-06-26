@@ -419,7 +419,8 @@ impl CrlWatchingAcceptor {
     /// The current acceptor, rebuilt first if the cert set changed on disk.
     pub(crate) fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
         let t = &*self.0;
-        let mtimes = cert_set_mtimes(&t.certificate, &t.private_key, &t.root_certificates);
+        let mtimes =
+            cert_set_mtimes(&t.certificate, &t.private_key, &t.root_certificates);
         let mut state = t.state.lock();
         if mtimes != state.0 {
             match create_tls_acceptor(
@@ -593,5 +594,84 @@ mod test {
         assert_eq!(r, Some(1));
         let r = get_match(&m, "com.mydomain.qux.").copied();
         assert_eq!(r, Some(1));
+    }
+
+    // `f` is a bare fn pointer (can't capture), so the "build" counts through
+    // a module-level static. fetch_add returns the pre-increment value, so the
+    // first build yields token 0. Used only by the test below.
+    static BUILD_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_build(_: Option<&str>, _: &str, _: &str, _: &str) -> Result<usize> {
+        Ok(BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// A renewed cert on disk must actually reach a long-running process:
+    /// `Cached::load` rebuilds when any watched file's mtime moves, and
+    /// serves the cached value otherwise. This is the regression guard for
+    /// the class of bug where renewal silently did nothing until restart.
+    #[test]
+    fn cached_rebuilds_when_cert_set_changes() {
+        use std::{
+            fs,
+            io::Write,
+            sync::atomic::Ordering::SeqCst,
+            time::{Duration, SystemTime},
+        };
+        let count = || BUILD_COUNT.load(SeqCst);
+        BUILD_COUNT.store(0, SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        let trusted = dir.path().join("trusted.pem");
+        for p in [&cert, &key, &trusted] {
+            fs::File::create(p).unwrap().write_all(b"x").unwrap();
+        }
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let set_mtime = |p: &std::path::Path, t: SystemTime| {
+            fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+        };
+        for p in [&cert, &key, &trusted] {
+            set_mtime(p, t0);
+        }
+        // identities + cache are keyed by the reversed domain name.
+        let mut ids = BTreeMap::new();
+        ids.insert(
+            "com.example.foo.".to_string(),
+            TlsIdentity {
+                trusted: trusted.to_str().unwrap().to_string(),
+                name: "foo.example.com".to_string(),
+                certificate: cert.to_str().unwrap().to_string(),
+                private_key: key.to_str().unwrap().to_string(),
+            },
+        );
+        let tls = Tls {
+            default_identity: "com.example.foo.".to_string(),
+            identities: ids,
+            askpass: None,
+        };
+        let cached: Cached<usize> = Cached::new(tls);
+
+        // cold load builds (token 0)
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 0);
+        assert_eq!(count(), 1);
+        // unchanged: cache hit, f not called
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 0);
+        assert_eq!(count(), 1);
+        // a renewal bumps the cert mtime: rebuild (token 1)
+        set_mtime(&cert, t0 + Duration::from_secs(60));
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 1);
+        assert_eq!(count(), 2);
+        // unchanged again: cache hit
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 1);
+        assert_eq!(count(), 2);
+        // a CA renewal bumps the trust bundle: rebuild (token 2)
+        set_mtime(&trusted, t0 + Duration::from_secs(120));
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 2);
+        assert_eq!(count(), 3);
+        // a key rotation bumps the key: rebuild (token 3)
+        set_mtime(&key, t0 + Duration::from_secs(180));
+        assert_eq!(cached.load("foo.example.com", counting_build).unwrap(), 3);
+        assert_eq!(count(), 4);
     }
 }

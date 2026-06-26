@@ -232,6 +232,27 @@ impl Server {
     fn roles(&self) -> Vec<Role> {
         roles_of(&self.cfg.lock())
     }
+
+    /// The serving cert + key to present as a *client* on outbound
+    /// server-to-server pushes, re-read from disk so a renewal the renewal
+    /// daemon installed is used without a restart — the in-memory
+    /// `serving_cert_pem`/`serving_key_pem` are only the startup copy (kept
+    /// for the acceptor seed, the mDNS fingerprint, and as the fallback
+    /// here). Pushes are rare, so two file reads are cheap; reuses the same
+    /// `load_serving_keypair` (incl. TPM unseal) the inbound reloader uses.
+    fn outbound_identity(&self) -> (Vec<u8>, Vec<u8>) {
+        let (cert_path, key_path) = {
+            let cfg = self.cfg.lock();
+            (cfg.serving_cert.clone(), cfg.serving_key.clone())
+        };
+        load_serving_keypair(&cert_path, &key_path).unwrap_or_else(|e| {
+            warn!(
+                "conf-server: re-reading serving identity for push failed, \
+                 using startup copy: {e:#}"
+            );
+            (self.serving_cert_pem.clone(), self.serving_key_pem.clone())
+        })
+    }
 }
 
 /// Run the conf server described by the config at `cfg_path` until the
@@ -1266,17 +1287,20 @@ async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String>
     // Spawn the pushes so they run concurrently, then collect under a
     // single shared deadline — a dead host degrades the join to a
     // warning, never a connection timeout.
+    let (cert, key) = state.outbound_identity();
     let handles: Vec<(SocketAddr, tokio::task::JoinHandle<Result<Option<u32>>>)> =
         targets
             .into_iter()
             .map(|addr| {
                 let req = req.clone();
                 let state = state.clone();
+                let cert = cert.clone();
+                let key = key.clone();
                 let h = tokio::spawn(async move {
                     conf_client::push_identity(
                         addr,
-                        &state.serving_cert_pem,
-                        &state.serving_key_pem,
+                        &cert,
+                        &key,
                         state.roots.clone(),
                         &req,
                     )
@@ -1427,8 +1451,7 @@ fn load_serving_keypair(
                 )
             })?;
             let pw = std::str::from_utf8(&pw).context("sealed password is not utf8")?;
-            let pem =
-                std::str::from_utf8(&key_pem).context("serving key is not utf8")?;
+            let pem = std::str::from_utf8(&key_pem).context("serving key is not utf8")?;
             netidx::tls::decrypt_private_key(pem, pw)
                 .context("decrypting the serving key")?
                 .as_bytes()
@@ -2504,13 +2527,12 @@ fn spawn_map_refresh(state: &Arc<Server>) {
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { break };
-            let (req, cert, key, roots) = {
+            let (cert, key) = state.outbound_identity();
+            let (req, roots) = {
                 let cfg = state.cfg.lock();
                 let e = self_entry(&cfg);
                 (
                     RegisterRequest { addr: e.addr, roles: e.roles, cluster: e.cluster },
-                    state.serving_cert_pem.clone(),
-                    state.serving_key_pem.clone(),
                     state.roots.clone(),
                 )
             };
@@ -3150,14 +3172,10 @@ async fn push_perms_edit_to_peers(
     perms_json: &str,
     member_addrs: &[SocketAddr],
 ) -> Vec<PeerResult> {
-    let (my_listen, cert, key, roots) = {
+    let (cert, key) = state.outbound_identity();
+    let (my_listen, roots) = {
         let cfg = state.cfg.lock();
-        (
-            cfg.listen,
-            state.serving_cert_pem.clone(),
-            state.serving_key_pem.clone(),
-            state.roots.clone(),
-        )
+        (cfg.listen, state.roots.clone())
     };
     let conf_port = my_listen.port();
     let mut targets: Vec<SocketAddr> = Vec::new();
@@ -3330,14 +3348,10 @@ async fn handle_control_service(
             ));
         }
     }
-    let (my_listen, cert, key, roots) = {
+    let (cert, key) = state.outbound_identity();
+    let (my_listen, roots) = {
         let cfg = state.cfg.lock();
-        (
-            cfg.listen,
-            state.serving_cert_pem.clone(),
-            state.serving_key_pem.clone(),
-            state.roots.clone(),
-        )
+        (cfg.listen, state.roots.clone())
     };
     let conf_port = my_listen.port();
     // Audit the *intent* before acting: the ops take effect on the members
@@ -4051,12 +4065,13 @@ async fn push_to_cluster_peers(
     member_addrs: &[SocketAddr],
 ) -> Vec<PeerResult> {
     let my_listen = { state.cfg.lock().listen };
+    let (cert, key) = state.outbound_identity();
     push_referral_edit_to_peers(
         edit,
         member_addrs,
         my_listen,
-        &state.serving_cert_pem,
-        &state.serving_key_pem,
+        &cert,
+        &key,
         state.roots.clone(),
     )
     .await
