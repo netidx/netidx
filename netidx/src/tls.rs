@@ -11,7 +11,7 @@ use rustls_pki_types::{
 use smallvec::SmallVec;
 use std::{
     collections::BTreeMap,
-    fmt, mem,
+    fmt,
     sync::{Arc, LazyLock},
 };
 use x509_parser::prelude::GeneralName;
@@ -349,12 +349,12 @@ pub(crate) fn create_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
-/// A TLS acceptor that rebuilds itself when the CRL beside its trust
-/// bundle changes (appears, disappears, or is rewritten), so a
-/// revocation distributed by the conf plane takes effect on the next
-/// accepted connection — no daemon restart. One `stat` per accept;
-/// rebuilds are rare (revocations) and a failed rebuild keeps serving
-/// with the previous acceptor rather than going dark.
+/// A TLS acceptor that rebuilds itself when its serving cert, key, trust
+/// bundle, or CRL changes on disk (see [`cert_set_mtimes`]), so a renewal or
+/// revocation distributed by the conf plane takes effect on the next accepted
+/// connection — no daemon restart. A few `stat`s per accept; rebuilds are
+/// rare (renewals/revocations) and a failed rebuild keeps serving with the
+/// previous acceptor rather than going dark.
 ///
 /// Used by the resolver server — the enforcement choke point: a
 /// revoked cert that can't authenticate to the resolver gets no
@@ -367,7 +367,7 @@ struct CrlWatchingInner {
     root_certificates: String,
     certificate: String,
     private_key: String,
-    state: Mutex<(Option<std::time::SystemTime>, tokio_rustls::TlsAcceptor)>,
+    state: Mutex<(CertMtimes, tokio_rustls::TlsAcceptor)>,
 }
 
 impl fmt::Debug for CrlWatchingAcceptor {
@@ -376,8 +376,23 @@ impl fmt::Debug for CrlWatchingAcceptor {
     }
 }
 
-fn crl_mtime(root_certificates: &str) -> Option<std::time::SystemTime> {
-    std::fs::metadata(crl_path_for(root_certificates)).and_then(|m| m.modified()).ok()
+/// mtimes of the four files a TLS config is built from: the leaf cert, its
+/// key, the trust bundle, and the CRL beside the bundle. A leaf renewal (new
+/// cert + key), a CA renewal (new trusted.pem), or a revocation (new crl.pem)
+/// each move one of these — so a cached connector/acceptor is rebuilt when
+/// any of them changes. Without this, a long-running process keeps
+/// presenting (or serving) the cert it loaded at startup until it restarts,
+/// which silently defeats certificate renewal.
+type CertMtimes = [Option<std::time::SystemTime>; 4];
+
+fn cert_set_mtimes(certificate: &str, private_key: &str, trusted: &str) -> CertMtimes {
+    let m = |p: &std::path::Path| std::fs::metadata(p).and_then(|x| x.modified()).ok();
+    [
+        m(std::path::Path::new(certificate)),
+        m(std::path::Path::new(private_key)),
+        m(std::path::Path::new(trusted)),
+        m(&crl_path_for(trusted)),
+    ]
 }
 
 impl CrlWatchingAcceptor {
@@ -394,16 +409,19 @@ impl CrlWatchingAcceptor {
             root_certificates: String::from(root_certificates),
             certificate: String::from(certificate),
             private_key: String::from(private_key),
-            state: Mutex::new((crl_mtime(root_certificates), acceptor)),
+            state: Mutex::new((
+                cert_set_mtimes(certificate, private_key, root_certificates),
+                acceptor,
+            )),
         })))
     }
 
-    /// The current acceptor, rebuilt first if the CRL changed.
+    /// The current acceptor, rebuilt first if the cert set changed on disk.
     pub(crate) fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
         let t = &*self.0;
-        let mtime = crl_mtime(&t.root_certificates);
+        let mtimes = cert_set_mtimes(&t.certificate, &t.private_key, &t.root_certificates);
         let mut state = t.state.lock();
-        if mtime != state.0 {
+        if mtimes != state.0 {
             match create_tls_acceptor(
                 t.askpass.as_deref(),
                 &t.root_certificates,
@@ -411,15 +429,15 @@ impl CrlWatchingAcceptor {
                 &t.private_key,
             ) {
                 Ok(acceptor) => {
-                    info!("reloaded TLS acceptor (CRL changed)");
-                    *state = (mtime, acceptor);
+                    info!("reloaded TLS acceptor (serving cert or CRL changed)");
+                    *state = (mtimes, acceptor);
                 }
                 Err(e) => {
                     // Keep serving with the previous acceptor; don't
                     // re-attempt on every connection while the file is
                     // broken — wait for the next change.
-                    warn!("failed to reload TLS acceptor after CRL change: {e:#}");
-                    state.0 = mtime;
+                    warn!("failed to reload TLS acceptor after cert/CRL change: {e:#}");
+                    state.0 = mtimes;
                 }
             }
         }
@@ -437,8 +455,7 @@ pub(crate) fn get_match<'a: 'b, 'b, U>(
 }
 
 struct CachedInnerLocked<T> {
-    tmp: String,
-    cached: BTreeMap<String, T>,
+    cached: BTreeMap<String, (CertMtimes, T)>,
 }
 
 struct CachedInner<T> {
@@ -459,10 +476,7 @@ impl<T: Clone + 'static> Cached<T> {
     fn new(tls: Tls) -> Self {
         Self(Arc::new(CachedInner {
             tls,
-            t: Mutex::new(CachedInnerLocked {
-                tmp: String::with_capacity(256),
-                cached: BTreeMap::new(),
-            }),
+            t: Mutex::new(CachedInnerLocked { cached: BTreeMap::new() }),
         }))
     }
 
@@ -479,26 +493,50 @@ impl<T: Clone + 'static> Cached<T> {
         identity: &str,
         f: fn(Option<&str>, &str, &str, &str) -> Result<T>,
     ) -> Result<T> {
-        let rev_identity = {
-            let mut inner = self.0.t.lock();
-            inner.tmp.clear();
-            inner.tmp.push_str(&identity);
-            Tls::reverse_domain_name(&mut inner.tmp);
-            if let Some(v) = get_match(&inner.cached, &inner.tmp) {
+        let mut rev = String::with_capacity(identity.len() + 1);
+        rev.push_str(identity);
+        Tls::reverse_domain_name(&mut rev);
+        let TlsIdentity { name: _, trusted, certificate, private_key } =
+            match get_match(&self.0.tls.identities, &rev) {
+                None => bail!("no plausible identity matches {identity}"),
+                Some(id) => id,
+            };
+        // Rebuild whenever the cert set on disk has moved since this
+        // identity's connector/acceptor was cached — that's how a renewal
+        // the conf plane installed actually reaches a long-running process,
+        // rather than it presenting its startup cert forever.
+        let mtimes = cert_set_mtimes(certificate, private_key, trusted);
+        {
+            let inner = self.0.t.lock();
+            if let Some((m, v)) = get_match(&inner.cached, &rev)
+                && *m == mtimes
+            {
                 return Ok(v.clone());
             }
-            mem::replace(&mut inner.tmp, String::new())
-        };
-        match get_match(&self.0.tls.identities, &rev_identity) {
-            None => {
-                self.0.t.lock().tmp = rev_identity;
-                bail!("no plausible identity matches {}", identity)
+        }
+        let askpass = self.0.tls.askpass.as_deref();
+        match f(askpass, trusted, certificate, private_key) {
+            Ok(built) => {
+                self.0.t.lock().cached.insert(rev, (mtimes, built.clone()));
+                Ok(built)
             }
-            Some(TlsIdentity { name: _, trusted, certificate, private_key }) => {
-                let askpass = self.0.tls.askpass.as_ref().map(|s| s.as_str());
-                let con = f(askpass, trusted, certificate, private_key)?;
-                self.0.t.lock().cached.insert(rev_identity, con.clone());
-                Ok(con)
+            // A rebuild can fail transiently mid-renewal — e.g. the new cert
+            // is on disk but its matching key isn't written yet. Fall back to
+            // the previously cached config (still a valid, unexpired cert)
+            // rather than failing the connection; the next change (the key
+            // landing) retries. Only the very first build, with nothing
+            // cached, surfaces the error.
+            Err(e) => {
+                let inner = self.0.t.lock();
+                match get_match(&inner.cached, &rev) {
+                    Some((_, v)) => {
+                        let v = v.clone();
+                        drop(inner);
+                        warn!("tls: cert reload failed, using previous cert: {e:#}");
+                        Ok(v)
+                    }
+                    None => Err(e),
+                }
             }
         }
     }
