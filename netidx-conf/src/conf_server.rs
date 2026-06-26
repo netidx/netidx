@@ -1473,30 +1473,35 @@ fn spawn_serving_reload(state: &Arc<Server>, acceptor: Arc<RwLock<TlsAcceptor>>)
     let crl_path = serving_crl_path(state);
     let weak = Arc::downgrade(state);
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    let mut last = (mtime(&cert_path), mtime(&crl_path));
+    // Start from a sentinel and check before the first sleep, so the first
+    // pass always rebuilds from the *current* on-disk cert. The startup
+    // acceptor was built from content read earlier in `serve`, before this
+    // task captures its baseline; a renewal landing in that gap (which spans
+    // bind + mDNS + pending-push I/O) would otherwise be missed forever.
+    let mut last: (Option<SystemTime>, Option<SystemTime>) = (None, None);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(SERVING_RELOAD_POLL).await;
             let Some(state) = weak.upgrade() else { break };
             let now = (mtime(&cert_path), mtime(&crl_path));
-            if now == last {
-                continue;
-            }
-            match load_serving_keypair(&cert_path, &key_path)
-                .and_then(|(c, k)| build_serving_acceptor(&state, &c, &k))
-            {
-                Ok(acc) => {
-                    *acceptor.write() = acc;
-                    last = now;
-                    info!(
-                        "conf-server: reloaded serving cert / CRL from disk \
-                         (renewal or revocation installed, no restart)"
-                    );
+            if now != last {
+                match load_serving_keypair(&cert_path, &key_path)
+                    .and_then(|(c, k)| build_serving_acceptor(&state, &c, &k))
+                {
+                    Ok(acc) => {
+                        *acceptor.write() = acc;
+                        last = now;
+                        info!(
+                            "conf-server: reloaded serving cert / CRL from disk \
+                             (renewal or revocation installed, no restart)"
+                        );
+                    }
+                    Err(e) => warn!(
+                        "conf-server: serving cert/CRL reload failed, keeping current: {e:#}"
+                    ),
                 }
-                Err(e) => warn!(
-                    "conf-server: serving cert/CRL reload failed, keeping current: {e:#}"
-                ),
             }
+            drop(state);
+            tokio::time::sleep(SERVING_RELOAD_POLL).await;
         }
     });
 }
