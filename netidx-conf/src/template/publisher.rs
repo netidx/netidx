@@ -216,7 +216,7 @@ mod tests {
                 subject: ca::Subject::cn("test-ca"),
                 san: vec![],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -227,7 +227,7 @@ mod tests {
                 subject: ca::Subject::cn("client.example.com"),
                 san: vec![ca::SanEntry::Dns("client.example.com".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: id_src.path().to_path_buf(),
                 password: None,
                 serial: 2,

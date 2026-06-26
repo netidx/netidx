@@ -11,6 +11,7 @@ use clap::{Args, Subcommand};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use zeroize::Zeroizing;
 
@@ -147,9 +148,9 @@ pub(crate) struct AdminAddArgs {
     /// SAN glob this admin may issue (repeatable). Prompted when omitted.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
-    /// Max validity (days) this admin may issue. Default 730.
-    #[arg(long, default_value = "730")]
-    pub max_validity_days: u32,
+    /// Max validity this admin may issue (e.g. 730d, 10m). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub max_validity: Duration,
     /// id-map groups for identities signed by this admin (repeatable;
     /// first is primary). Prompted when omitted; an explicit empty
     /// string disables registration.
@@ -177,9 +178,9 @@ pub(crate) struct AdminAddRoleArgs {
     /// Prompted when omitted; empty for a role that issues nothing.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
-    /// Max validity (days) this role may issue. Default 730.
-    #[arg(long, default_value = "730")]
-    pub max_validity_days: u32,
+    /// Max validity this role may issue (e.g. 730d, 10m). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub max_validity: Duration,
     /// id-map groups this role may assign when enrolling (repeatable;
     /// first is primary). Prompted when omitted; empty disables it.
     #[arg(long = "id-map-group", num_args = 1)]
@@ -212,9 +213,9 @@ pub(crate) struct AdminSetPolicyArgs {
     /// list. Prompted when omitted, defaulting to `*.<ca-domain>`.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
-    /// Max validity (days) this admin may issue. Default 730.
-    #[arg(long, default_value = "730")]
-    pub max_validity_days: u32,
+    /// Max validity this admin may issue (e.g. 730d, 10m). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub max_validity: Duration,
     /// id-map groups for identities signed by this admin (repeatable;
     /// first is primary). Prompted when omitted; an explicit empty
     /// string disables registration.
@@ -273,9 +274,9 @@ pub(crate) struct JoinArgs {
     /// The admin name to authenticate as. Prompted when omitted.
     #[arg(long)]
     pub admin: Option<String>,
-    /// Validity (days) to request. Default 730 (capped by server policy).
-    #[arg(long, default_value = "730")]
-    pub validity_days: u32,
+    /// Validity to request (e.g. 730d, 10m). Default 730d (capped by server policy).
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub validity: Duration,
     /// id-map groups to register the identity with (repeatable; first
     /// is primary). Prompted when omitted; an explicit empty string
     /// skips registration.
@@ -311,8 +312,16 @@ pub(crate) struct InitParams {
     pub san: Vec<String>,
     #[arg(long, default_value = "4096")]
     pub key_bits: u32,
-    #[arg(long, default_value = "7300")]
-    pub validity_days: u32,
+    /// Validity for the CA cert itself. Default 7300d (20 years).
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "7300d")]
+    pub ca_validity: Duration,
+    /// Default validity for certs this CA issues (e.g. the conf server's
+    /// serving cert). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub leaf_validity: Duration,
+    /// Renew the CA cert once its remaining lifetime drops below this.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "820d")]
+    pub ca_renew_threshold: Duration,
     /// The superuser (role) admin's name. This is the founding admin who
     /// can mint other admins, edit perms, and enroll servers — but never
     /// unlocks the CA key (the server signs on its behalf). Prompted when
@@ -323,9 +332,9 @@ pub(crate) struct InitParams {
     /// Prompted when omitted — e.g. `*.example.com`.
     #[arg(long = "allow-san", num_args = 1)]
     pub allow_san: Vec<String>,
-    /// Max validity (days) the superuser may issue. Default 730.
-    #[arg(long, default_value = "730")]
-    pub max_validity_days: u32,
+    /// Max validity the superuser may issue (e.g. 730d, 10m). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub max_validity: Duration,
     /// id-map groups the superuser may assign when enrolling
     /// (repeatable; first is primary). Prompted when omitted.
     #[arg(long = "id-map-group", num_args = 1)]
@@ -386,8 +395,8 @@ pub(crate) struct IssueArgs {
     pub san: Vec<String>,
     #[arg(long, default_value = "4096")]
     pub key_bits: u32,
-    #[arg(long, default_value = "730")]
-    pub validity_days: u32,
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub validity: Duration,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -447,8 +456,8 @@ pub(crate) struct SignArgs {
     /// inherit-from-CSR decision explicit rather than implicit.
     #[arg(long)]
     pub accept_csr_san: bool,
-    #[arg(long, default_value = "730")]
-    pub validity_days: u32,
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    pub validity: Duration,
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -869,7 +878,12 @@ pub(super) struct NewCaOpts {
     /// Raw `--san` strings for the CA cert; empty ⇒ `dns:<cn>`.
     pub san: Vec<String>,
     pub key_bits: u32,
-    pub validity_days: u32,
+    /// Validity stamped on the CA cert itself.
+    pub ca_validity: Duration,
+    /// Default validity for leaves the CA issues (e.g. the serving cert).
+    pub leaf_validity: Duration,
+    /// Renew the CA cert once its remaining lifetime drops below this.
+    pub ca_renew_threshold: Duration,
     /// Superuser (role) admin name; `None` ⇒ prompt, defaulting to the
     /// current unix user. Created only when the conf server is set up
     /// (a role admin authenticates to the daemon; an offline CA has none).
@@ -877,7 +891,7 @@ pub(super) struct NewCaOpts {
     /// Superuser's server-signing scope globs; empty ⇒ prompt (default
     /// `*.<domain>` when `domain` is set, else derived from the CN).
     pub allowed_san: Vec<String>,
-    pub max_validity_days: u32,
+    pub max_validity: Duration,
     /// Superuser's id-map groups; empty ⇒ prompt (default `users`).
     pub id_map_groups: Vec<String>,
     /// Whether the superuser may enroll conf servers; `None` ⇒
@@ -951,7 +965,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         },
         san,
         key_bits: opts.key_bits,
-        validity_days: opts.validity_days,
+        validity: opts.ca_validity,
     })?;
     let recovery_pw = ca_vault::gen_recovery_password();
     // One flock for the whole init: the new dir is ours exclusively until
@@ -971,6 +985,13 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         let _ = std::fs::remove_file(opts.dir.join("serial"));
         return Err(e).context("sealing CA key into the vault");
     }
+    // Persist the CA's configurable lifetime policy under the same flock.
+    ca::CaLifetimes {
+        leaf_validity: opts.leaf_validity,
+        ca_renew_threshold: opts.ca_renew_threshold,
+    }
+    .store(&opts.dir)
+    .context("writing CA lifetimes")?;
 
     println!("created a new CA at {}", opts.dir.display());
     print_recovery_password(&recovery_pw);
@@ -1106,7 +1127,7 @@ fn setup_superuser(
     let mut policy = prompt_policy(
         &PolicyArgs {
             allow_san: &opts.allowed_san,
-            max_validity_days: opts.max_validity_days,
+            max_validity: opts.max_validity,
             id_map_groups: &opts.id_map_groups,
             may_enroll_servers: opts.may_enroll_servers,
             perms_scope: &[],
@@ -1238,10 +1259,12 @@ fn init(p: InitParams) -> Result<()> {
         organization: p.organization,
         san: p.san,
         key_bits: p.key_bits,
-        validity_days: p.validity_days,
+        ca_validity: p.ca_validity,
+        leaf_validity: p.leaf_validity,
+        ca_renew_threshold: p.ca_renew_threshold,
         admin: p.admin,
         allowed_san: p.allow_san,
-        max_validity_days: p.max_validity_days,
+        max_validity: p.max_validity,
         id_map_groups: p.id_map_groups,
         may_enroll_servers: p.may_enroll_servers,
         insecure_no_tpm: p.insecure_no_tpm,
@@ -1316,12 +1339,12 @@ fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
         };
         let pol = &info.policy;
         println!(
-            "{} [{tier}]: allowed_san={:?} max_validity_days={} id_map_groups={:?} \
+            "{} [{tier}]: allowed_san={:?} max_validity={} id_map_groups={:?} \
              may_enroll_servers={} may_manage_admins={} perms_edit_scopes={:?} \
              service_control_scopes={:?}",
             info.admin,
             pol.allowed_san,
-            pol.max_validity_days,
+            humantime::format_duration(pol.max_validity),
             pol.id_map_groups,
             pol.may_enroll_servers,
             pol.may_manage_admins,
@@ -1356,7 +1379,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             }
             let policy_args = PolicyArgs {
                 allow_san: &a.allow_san,
-                max_validity_days: a.max_validity_days,
+                max_validity: a.max_validity,
                 id_map_groups: &a.id_map_groups,
                 may_enroll_servers: a.may_enroll_servers,
                 perms_scope: &a.perms_scope,
@@ -1417,7 +1440,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             }
             let policy_args = PolicyArgs {
                 allow_san: &a.allow_san,
-                max_validity_days: a.max_validity_days,
+                max_validity: a.max_validity,
                 id_map_groups: &a.id_map_groups,
                 may_enroll_servers: a.may_enroll_servers,
                 perms_scope: &a.perms_scope,
@@ -1578,7 +1601,7 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
         &name,
         &admin,
         password,
-        p.validity_days,
+        p.validity,
         groups,
         &identity,
     ))?;
@@ -1628,7 +1651,7 @@ pub(super) fn env_user_name() -> Option<String> {
 /// CLI-provided policy inputs; whatever is absent gets prompted.
 struct PolicyArgs<'a> {
     allow_san: &'a [String],
-    max_validity_days: u32,
+    max_validity: Duration,
     id_map_groups: &'a [String],
     may_enroll_servers: Option<bool>,
     /// Netidx paths this admin may edit perms under. Taken straight from
@@ -1710,7 +1733,7 @@ fn prompt_policy(
     let service_control_scopes = trim_paths(args.service_scope);
     Ok(ca_vault::Policy {
         allowed_san,
-        max_validity_days: args.max_validity_days,
+        max_validity: args.max_validity,
         id_map_groups,
         may_enroll_servers,
         perms_edit_scopes,
@@ -1806,7 +1829,7 @@ fn issue(p: IssueArgs) -> Result<()> {
             },
             san,
             key_bits: p.key_bits,
-            validity_days: p.validity_days,
+            validity: p.validity,
             out_dir,
             // Leaf key encryption is wired through the install flow
             // (`netidx conf init`), where the engine knows how to plumb
@@ -1916,7 +1939,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
     let cert_pem =
-        sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, p.validity_days)?;
+        sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, p.validity)?;
     atomic::write_atomic(&out, &cert_pem, 0o644)
         .with_context(|| format!("writing certificate to {:?}", out))?;
     println!("\nsigned cert (0644): {}", out.display());
@@ -2206,8 +2229,8 @@ fn approve(p: ApproveArgs) -> Result<()> {
             None => {
                 println!("  name:     {}", entry.requested_name);
                 println!(
-                    "  validity: {} days (capped by your policy)",
-                    entry.requested_validity_days
+                    "  validity: {} (capped by your policy)",
+                    humantime::format_duration(entry.requested_validity)
                 );
             }
         }
@@ -2646,13 +2669,13 @@ pub(super) fn record_offline_issuance(
     name: &str,
     csr_pem: &str,
     cert_pem: &str,
-    validity_days: u32,
+    validity: Duration,
 ) -> Result<()> {
     let req = netidx_conf::ca_store::QueuedReq::new(
         kind,
         csr_pem.to_string(),
         name.to_string(),
-        validity_days,
+        validity,
         "(offline issue)".to_string(),
         None,
         None,
@@ -2672,11 +2695,11 @@ fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<
     // next, producing a duplicate X.509 serial.
     let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
         .context("cannot issue offline: a running conf server owns this CA")?;
-    let serial = cadir.store.next_serial()?;
+    let serial = cadir.store.lock().next_serial()?;
     params.serial = serial;
     let name = first_dns_san(&params.san)
         .unwrap_or_else(|| params.subject.common_name.clone());
-    let validity_days = params.validity_days;
+    let validity = params.validity;
     let issued = ca.issue(&params)?;
     let cert_pem = std::fs::read_to_string(&issued.certificate)
         .with_context(|| format!("reading issued cert {}", issued.certificate.display()))?;
@@ -2684,7 +2707,7 @@ fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<
     // issuance fails, roll those back: an un-recorded cert is invisible to
     // `next_serial`, so leaving it would let its serial be handed out again.
     if let Err(e) =
-        record_offline_issuance(&mut cadir.store.lock(), serial, kind, &name, "", &cert_pem, validity_days)
+        record_offline_issuance(&mut cadir.store.lock(), serial, kind, &name, "", &cert_pem, validity)
     {
         let _ = std::fs::remove_file(&issued.certificate);
         let _ = std::fs::remove_file(&issued.private_key);
@@ -2701,18 +2724,18 @@ pub(super) fn sign_and_record(
     csr_pem: &[u8],
     san: &[SanEntry],
     name: &str,
-    validity_days: u32,
+    validity: Duration,
 ) -> Result<Vec<u8>> {
     let ca_dir = ca.directory().to_path_buf();
     // See `issue_and_record`: hold the daemon's exclusive flock so offline
     // signing can't race the daemon's serial counter.
     let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
         .context("cannot sign offline: a running conf server owns this CA")?;
-    let serial = cadir.store.next_serial()?;
-    let cert = ca.sign_request(csr_pem, san, validity_days, serial)?;
+    let serial = cadir.store.lock().next_serial()?;
+    let cert = ca.sign_request(csr_pem, san, validity, serial)?;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
     let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
-    record_offline_issuance(&mut cadir.store.lock(), serial, kind, name, csr_str, cert_str, validity_days)?;
+    record_offline_issuance(&mut cadir.store.lock(), serial, kind, name, csr_str, cert_str, validity)?;
     Ok(cert)
 }
 
@@ -2744,7 +2767,7 @@ fn issue_identity_into(
             // netidx TLS validator requires of a member-server cert.
             san: vec![SanEntry::Dns(name.to_string())],
             key_bits,
-            validity_days: ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            validity: ca::DEFAULT_LEAF_VALIDITY,
             out_dir,
             password: password.map(|s| s.to_string()),
             serial: 0, // assigned by issue_and_record
@@ -2868,7 +2891,7 @@ mod tests {
                 subject: Subject::cn("test-ca"),
                 san: vec![SanEntry::Dns("test-ca".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -2880,7 +2903,7 @@ mod tests {
             // Explicit accept: the round trip flow simulates the admin
             // who has looked at the CSR and is happy to sign as-is.
             accept_csr_san: true,
-            validity_days: 30,            ca_dir: Some(ca_dir.clone()),
+            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir.clone()),
             out: Some(cert_path.clone()),
             no_id_map: true,
         })
@@ -2924,7 +2947,7 @@ mod tests {
                 subject: Subject::cn("strict-ca"),
                 san: vec![SanEntry::Dns("strict-ca".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -2934,7 +2957,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity_days: 30,            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
             out: Some(out_cert.clone()),
             no_id_map: true,
         })
@@ -2970,7 +2993,7 @@ mod tests {
                 subject: Subject::cn("strict-ca"),
                 san: vec![SanEntry::Dns("strict-ca".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -2979,7 +3002,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity_days: 30,            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })
@@ -3012,7 +3035,7 @@ mod tests {
                 subject: Subject::cn("conflict-ca"),
                 san: vec![SanEntry::Dns("conflict-ca".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -3021,7 +3044,7 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec!["dns:x.example.com".into()],
             accept_csr_san: true,
-            validity_days: 30,            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })
@@ -3078,7 +3101,7 @@ mod tests {
                 subject: Subject::cn("test-ca"),
                 san: vec![SanEntry::Dns("test-ca".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -3150,10 +3173,12 @@ mod tests {
             organization: None,
             san: vec![],
             key_bits: 2048, // test speed; production is 4096
-            validity_days: 30,
+            ca_validity: Duration::from_secs(30 * 86400),
+            leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
+            ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
             admin: Some("super".into()),
             allowed_san: vec!["*.example.com".into()],
-            max_validity_days: 730,
+            max_validity: Duration::from_secs(730 * 86400),
             id_map_groups: vec!["users".into()],
             may_enroll_servers: Some(true),
             insecure_no_tpm: true,
@@ -3192,7 +3217,7 @@ mod tests {
         let r = admin(AdminCmd::Add(AdminAddArgs {
             name: Some("x".into()),
             allow_san: vec![],
-            max_validity_days: 730,
+            max_validity: Duration::from_secs(730 * 86400),
             id_map_groups: vec![],
             may_enroll_servers: None,
             perms_scope: vec![],

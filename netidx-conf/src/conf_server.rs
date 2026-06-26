@@ -4025,7 +4025,7 @@ mod tests {
     fn policy() -> Policy {
         Policy {
             allowed_san: vec!["*.ryu-oh.org".to_string()],
-            max_validity_days: 30,
+            max_validity: std::time::Duration::from_secs(30 * 86400),
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: true,
             perms_edit_scopes: vec![],
@@ -4069,7 +4069,7 @@ mod tests {
             .sign_request(
                 kc.csr_pem.as_bytes(),
                 &[SanEntry::Dns(SERVING_SAN.into())],
-                365,
+                std::time::Duration::from_secs(365 * 86400),
                 serial,
             )
             .unwrap();
@@ -4077,7 +4077,7 @@ mod tests {
             NodeKind::ConfServer,
             kc.csr_pem.clone(),
             SERVING_SAN.to_string(),
-            365,
+            std::time::Duration::from_secs(365 * 86400),
             "(test serving cert)".to_string(),
             None,
             None,
@@ -4105,7 +4105,7 @@ mod tests {
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(san).unwrap();
         let leaf = ca
-            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], 365, 1000)
+            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], std::time::Duration::from_secs(365 * 86400), 1000)
             .unwrap();
         let mut chain = leaf;
         chain.extend_from_slice(&ca_cert);
@@ -4117,20 +4117,20 @@ mod tests {
     /// approval re-checks this serial is still live, so the originating
     /// cert must really be in the index.)
     fn commit_live_cert(dir: &Path, san: &str) -> u64 {
-        let mut cadir = ca_store::CaDir::open(dir).unwrap();
+        let cadir = ca_store::CaDir::open(dir).unwrap();
         let unlocked = cadir.vault.read().unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(san).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
-            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], 365, serial)
+            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], std::time::Duration::from_secs(365 * 86400), serial)
             .unwrap();
         let req = ca_store::QueuedReq::new(
             NodeKind::Workstation,
             kc.csr_pem.clone(),
             san.to_string(),
-            365,
+            std::time::Duration::from_secs(365 * 86400),
             "(test live cert)".to_string(),
             None,
             None,
@@ -4290,7 +4290,7 @@ mod tests {
         let now = ca_store::now_unix();
         let unlocked = ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
         {
-            let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+            let cadir = ca_store::CaDir::open(dir.path()).unwrap();
             let revoked = cadir
                 .store.lock()
                 .revoke(
@@ -4357,7 +4357,7 @@ mod tests {
             subject: Subject::cn("Test CA".to_string()),
             san: vec![],
             key_bits: MIN_KEY_BITS,
-            validity_days: 30,
+            validity: std::time::Duration::from_secs(30 * 86400),
         };
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
@@ -4376,7 +4376,7 @@ mod tests {
                 AUTORENEW_PW,
                 Policy {
                 allowed_san: vec![],
-                max_validity_days: 730,
+                max_validity: std::time::Duration::from_secs(730 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -4395,7 +4395,7 @@ mod tests {
             password: Secret(pw.to_string()),
             csr_pem: kc.csr_pem,
             requested_name: name.to_string(),
-            requested_validity_days: days,
+            requested_validity: std::time::Duration::from_secs(days as u64 * 86400),
             id_map_groups: vec!["users".to_string()],
         }
     }
@@ -4444,7 +4444,7 @@ mod tests {
             dir.path(),
             Policy {
                 allowed_san: vec!["*.ryu-oh.org".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 // The *allowed set* — what this admin may assign.
                 id_map_groups: vec!["users".to_string(), "dev".to_string()],
                 may_enroll_servers: false,
@@ -4534,7 +4534,7 @@ mod tests {
             dir.path(),
             Policy {
                 allowed_san: vec!["*".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: true,
                 perms_edit_scopes: vec![],
@@ -4573,7 +4573,7 @@ mod tests {
             "eupw",
             Policy {
                 allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec!["users".to_string()],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -4631,7 +4631,7 @@ mod tests {
             "eupw",
             Policy {
                 allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -4645,7 +4645,7 @@ mod tests {
             "patpw",
             Policy {
                 allowed_san: vec![],
-                max_validity_days: 0,
+                max_validity: std::time::Duration::from_secs(0 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec!["/eu".to_string()],
@@ -4724,7 +4724,7 @@ mod tests {
             "eupw",
             Policy {
                 allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -4739,7 +4739,7 @@ mod tests {
                 kind: NodeKind::Client,
                 csr_pem: kc.csr_pem,
                 requested_name: name.to_string(),
-                requested_validity_days: 30,
+                requested_validity: std::time::Duration::from_secs(30 * 86400),
                 enroll_listen: None,
             };
             match handle_enqueue(&issuer(dir.path()), &req, peer, None) {
@@ -4809,7 +4809,7 @@ mod tests {
             kind: NodeKind::Client,
             csr_pem: kc.csr_pem,
             requested_name: "host.ryu-oh.org".to_string(),
-            requested_validity_days: 30,
+            requested_validity: std::time::Duration::from_secs(30 * 86400),
             enroll_listen: None,
         };
         let pid = PeerIdent {
@@ -4889,7 +4889,7 @@ mod tests {
             kind: NodeKind::Client,
             csr_pem: kc.csr_pem,
             requested_name: "host.ryu-oh.org".to_string(),
-            requested_validity_days: 30,
+            requested_validity: std::time::Duration::from_secs(30 * 86400),
             enroll_listen: None,
         };
         let peer = "1.2.3.4:5".parse().unwrap();
@@ -4933,7 +4933,7 @@ mod tests {
             dir.path(),
             Policy {
                 allowed_san: vec!["*".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -4996,7 +4996,7 @@ mod tests {
             "resolver.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec!["users".to_string()],
             &identity,
         )
@@ -5031,7 +5031,7 @@ mod tests {
             "resolver.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec![],
             &identity,
         )
@@ -5054,7 +5054,7 @@ mod tests {
             "resolver.ryu-oh.org",
             "alice",
             Zeroizing::new("WRONG".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec![],
             &identity,
         )
@@ -5132,7 +5132,7 @@ mod tests {
             "eric.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec!["users".to_string()],
             &identity,
         )
@@ -5171,7 +5171,7 @@ mod tests {
             "eric.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec!["users".to_string()],
             &identity,
         )
@@ -5225,7 +5225,7 @@ mod tests {
             "bpw",
             Policy {
                 allowed_san: vec!["*".to_string()],
-                max_validity_days: 30,
+                max_validity: std::time::Duration::from_secs(30 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -5349,7 +5349,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5440,7 +5440,7 @@ mod tests {
             NodeKind::Workstation,
             renew.csr_pem,
             "host.ryu-oh.org".to_string(),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             "test".to_string(),
             Some(orig_serial),
             None,
@@ -5449,7 +5449,7 @@ mod tests {
             NodeKind::Workstation,
             fresh.csr_pem,
             "newcomer.ryu-oh.org".to_string(),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             "test".to_string(),
             None,
             None,
@@ -5457,7 +5457,7 @@ mod tests {
         let renew_id = renew_req.id.clone();
         let fresh_id = fresh_req.id.clone();
         {
-            let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+            let cadir = ca_store::CaDir::open(dir.path()).unwrap();
             cadir.store.lock().enqueue(&renew_req).unwrap();
             cadir.store.lock().enqueue(&fresh_req).unwrap();
         }
@@ -5502,7 +5502,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "approved.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5524,7 +5524,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "denied.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5657,7 +5657,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "mallory.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5696,7 +5696,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5765,7 +5765,7 @@ mod tests {
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
         let err =
-            conf_client::enqueue(addr, NodeKind::ConfServer, SERVING_SAN, 30, &identity)
+            conf_client::enqueue(addr, NodeKind::ConfServer, SERVING_SAN, std::time::Duration::from_secs(30 * 86400), &identity)
                 .await
                 .map(|_| ())
                 .unwrap_err();
@@ -5829,7 +5829,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -5924,7 +5924,7 @@ mod tests {
             "botpw",
             Policy {
                 allowed_san: vec![],
-                max_validity_days: 730,
+                max_validity: std::time::Duration::from_secs(730 * 86400),
                 id_map_groups: vec![],
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
@@ -5942,7 +5942,7 @@ mod tests {
             "eric.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec![],
             &identity,
         )
@@ -5965,7 +5965,7 @@ mod tests {
             addr,
             NodeKind::Client,
             "eric.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             issued.cert_pem.as_bytes(),
             key,
             roots.clone(),
@@ -6014,7 +6014,7 @@ mod tests {
             addr,
             NodeKind::Workstation,
             "bob.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             &identity,
         )
         .await
@@ -6057,7 +6057,7 @@ mod tests {
             addr,
             NodeKind::ConfServer,
             SERVING_SAN,
-            365,
+            std::time::Duration::from_secs(365 * 86400),
             &state.serving_cert_pem,
             key,
             roots.clone(),
@@ -6108,7 +6108,7 @@ mod tests {
             "eric.ryu-oh.org",
             "alice",
             Zeroizing::new("apw".to_string()),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             vec![],
             &identity,
         )
@@ -6149,7 +6149,7 @@ mod tests {
             addr,
             NodeKind::Client,
             "eric.ryu-oh.org",
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             issued.cert_pem.as_bytes(),
             key,
             roots,
@@ -6316,7 +6316,7 @@ mod tests {
         // Mint two role keyslots off the signing admin (apw).
         let role = |scope: &str| ca_vault::Policy {
             allowed_san: vec![],
-            max_validity_days: 0,
+            max_validity: std::time::Duration::from_secs(0 * 86400),
             id_map_groups: vec![],
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
@@ -6882,7 +6882,7 @@ mod tests {
     ) -> Policy {
         Policy {
             allowed_san: sans.iter().map(|s| s.to_string()).collect(),
-            max_validity_days: days,
+            max_validity: std::time::Duration::from_secs(days as u64 * 86400),
             id_map_groups: groups.iter().map(|s| s.to_string()).collect(),
             may_enroll_servers: enroll,
             perms_edit_scopes: scopes.iter().map(|s| s.to_string()).collect(),
@@ -6908,7 +6908,7 @@ mod tests {
             assert!(e.contains(needle), "got: {e}");
         };
         bad(full_policy(&["*.us.example.com"], 30, &[], false, &[], false), "issuance scope");
-        bad(full_policy(&[], 31, &[], false, &[], false), "max_validity_days");
+        bad(full_policy(&[], 31, &[], false, &[], false), "max_validity");
         bad(full_policy(&[], 30, &["admins"], false, &[], false), "id-map group");
         bad(full_policy(&[], 30, &[], false, &["/us"], false), "perms scope");
         // Booleans only when the caller has them.

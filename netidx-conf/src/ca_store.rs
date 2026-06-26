@@ -808,7 +808,7 @@ mod tests {
             NodeKind::Workstation,
             "CSR".to_string(),
             name.to_string(),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             "10.0.0.7:51000".to_string(),
             None,
             None,
@@ -846,7 +846,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Need a CA cert for the trust bundle in the Signed outcome.
         std::fs::write(dir.path().join("certificate.pem"), b"CA-CERT").unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         let r = req("alice.example.com");
         ca.store.lock().enqueue(&r).unwrap();
         assert_eq!(ca.store.lock().pending().unwrap().len(), 1);
@@ -871,7 +871,7 @@ mod tests {
     #[test]
     fn deny_moves_out_and_status_is_denied() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         let r = req("bob.example.com");
         ca.store.lock().enqueue(&r).unwrap();
         ca.store.lock().deny(&r, "ask your manager").unwrap();
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn one_live_and_revoke_and_crl() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let a = req("eric.ryu-oh.org");
         ca.store.lock()
@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn push_done_recovery_set() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let r = req("u.example.com");
         let mut rec = issued(r.clone(), 7, "u.example.com", now + 1000);
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn prune_keeps_issued_clears_old_queue_and_denied() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         let old = now_unix() - TTL.as_secs() - 10;
         let mut stale = req("stale.example.com");
         stale.received_unix = old;
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn queue_cap_enforced() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ca = CaDir::open(dir.path()).unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
         for i in 0..MAX_PENDING {
             ca.store.lock().enqueue(&req(&format!("n{i}.example.com"))).unwrap();
         }

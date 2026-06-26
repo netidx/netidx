@@ -964,7 +964,7 @@ mod tests {
                 },
                 san: vec![SanEntry::Dns("test-ca".into())],
                 key_bits: 2048, // smaller for test speed
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
             },
             password,
         )
@@ -988,7 +988,7 @@ mod tests {
                 subject: Subject::cn("ignored"),
                 san: vec![SanEntry::Dns("alice.example.com".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: leaf_dir.path().to_path_buf(),
                 password: None,
                 serial: 2,
@@ -1019,7 +1019,7 @@ mod tests {
                 subject: Subject::cn("leaf"),
                 san: vec![SanEntry::Dns("leaf".into())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: leaf_dir.path().to_path_buf(),
                 password: None,
                 serial: 2,
@@ -1050,7 +1050,7 @@ mod tests {
                 subject: Subject::cn("weak"),
                 san: vec![],
                 key_bits: 1024, // below MIN_KEY_BITS
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -1077,7 +1077,7 @@ mod tests {
                     SanEntry::Dns("alice-alt.example.com".into()),
                 ],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
                 serial: 2,
@@ -1096,7 +1096,7 @@ mod tests {
                 subject: Subject::cn("alice"),
                 san: vec![SanEntry::Ip("127.0.0.1".parse().unwrap())],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
                 serial: 2,
@@ -1115,7 +1115,7 @@ mod tests {
                 subject: Subject::cn("test-ca"),
                 san: vec![],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
             },
             None,
         )
@@ -1145,7 +1145,7 @@ mod tests {
                 .unwrap()
                 .csr_pem,
                 &[SanEntry::Dns("h.example.com".into())],
-                30,
+                std::time::Duration::from_secs(30 * 86400),
                 2,
             )
             .unwrap();
@@ -1332,7 +1332,7 @@ mod tests {
             .sign_request(
                 &kr.csr_pem,
                 &[SanEntry::Dns("host.example.com".into())],
-                30,
+                std::time::Duration::from_secs(30 * 86400),
                 2,
             )
             .unwrap();
@@ -1374,14 +1374,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let requested_days = 365u32;
-        let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+        let requested_validity = std::time::Duration::from_secs(365 * 86400);
+        let cadir = ca_store::CaDir::open(dir.path()).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
             .sign_request(
                 &kr.csr_pem,
                 &[SanEntry::Dns(name.into())],
-                requested_days,
+                requested_validity,
                 serial,
             )
             .unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
             NodeKind::Workstation,
             String::from_utf8(kr.csr_pem.clone()).unwrap(),
             name.to_string(),
-            requested_days,
+            requested_validity,
             "test".to_string(),
             None,
             None,
@@ -1410,10 +1410,11 @@ mod tests {
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record
         // must track that, nowhere near the old `now + 365d` it used to store.
-        assert!(
+                let requested = humantime::format_duration(requested_validity);
+assert!(
             not_after > now + 20 * 86_400 && not_after < now + 35 * 86_400,
             "recorded notAfter {not_after} should track the clamped (~28d) \
-             cert, not the {requested_days}d request (now = {now})"
+             cert, not the {requested} request (now = {now})"
         );
     }
 
@@ -1431,7 +1432,7 @@ mod tests {
                     SanEntry::Ip("127.0.0.1".parse().unwrap()),
                 ],
                 key_bits: 2048,
-                validity_days: 30,
+                validity: std::time::Duration::from_secs(30 * 86400),
                 out_dir: id_dir.path().to_path_buf(),
                 password: None,
                 serial: 2,
@@ -1474,7 +1475,7 @@ mod tests {
                     subject: Subject::cn(format!("host-{i}.example.com")),
                     san: vec![SanEntry::Dns(format!("host-{i}.example.com"))],
                     key_bits: 2048,
-                    validity_days: 30,
+                    validity: std::time::Duration::from_secs(30 * 86400),
                     out_dir: id_dir.path().to_path_buf(),
                     password: None,
                     serial: 2 + i as u64,

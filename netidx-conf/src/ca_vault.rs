@@ -626,7 +626,7 @@ mod tests {
     fn pol(san: &str) -> Policy {
         Policy {
             allowed_san: vec![san.to_string()],
-            max_validity_days: 365,
+            max_validity: std::time::Duration::from_secs(365 * 86400),
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: false,
             perms_edit_scopes: vec![],
@@ -638,7 +638,7 @@ mod tests {
     fn role_pol(scope: &str) -> Policy {
         Policy {
             allowed_san: vec![],
-            max_validity_days: 0,
+            max_validity: std::time::Duration::from_secs(0 * 86400),
             id_map_groups: vec![],
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],

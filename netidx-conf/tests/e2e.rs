@@ -345,7 +345,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
             subject: ca::Subject::cn("e2e-test-ca"),
             san: vec![],
             key_bits: 2048,
-            validity_days: 30,
+            validity: std::time::Duration::from_secs(30 * 86400),
         },
         None,
     )?;
@@ -360,7 +360,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
         subject: ca::Subject::cn("resolver.example.com"),
         san: vec![ca::SanEntry::Dns("resolver.example.com".into())],
         key_bits: 2048,
-        validity_days: 30,
+        validity: std::time::Duration::from_secs(30 * 86400),
         out_dir: resolver_id_src.clone(),
         password: None,
         serial: 2,
@@ -462,7 +462,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
             subject: ca::Subject::cn("e2e-revocation-ca"),
             san: vec![],
             key_bits: 2048,
-            validity_days: 30,
+            validity: std::time::Duration::from_secs(30 * 86400),
         },
         None,
     )?;
@@ -475,7 +475,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
         subject: ca::Subject::cn("resolver.revoked.example"),
         san: vec![ca::SanEntry::Dns("resolver.revoked.example".into())],
         key_bits: 2048,
-        validity_days: 30,
+        validity: std::time::Duration::from_secs(30 * 86400),
         out_dir: resolver_id_src.clone(),
         password: None,
         serial: 2,
@@ -520,13 +520,13 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     //    acceptor watches. The resolver keeps running throughout.
     let cert_pem = std::fs::read_to_string(&resolver_issued.certificate)?;
     let now = ca_store::now_unix();
-    let mut cadir = ca_store::CaDir::open(ca_dir.clone())?;
+    let cadir = ca_store::CaDir::open(ca_dir.clone())?;
     cadir.store.lock().commit_signed(&ca_store::IssuedRecord {
         req: ca_store::QueuedReq::new(
             netidx_conf::conf_proto::NodeKind::Resolver,
             String::new(),
             "resolver.revoked.example".into(),
-            30,
+            std::time::Duration::from_secs(30 * 86400),
             "(e2e)".into(),
             None,
             None,

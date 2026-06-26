@@ -1004,7 +1004,7 @@ mod tests {
             password: Secret("pw".to_string()),
             csr_pem: "CSR".to_string(),
             requested_name: "resolver.example.com".to_string(),
-            requested_validity_days: 365,
+            requested_validity: std::time::Duration::from_secs(365 * 86400),
             id_map_groups: vec!["users".to_string()],
         });
         write_msg(&mut a, &req).await.unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
             "password": "pw",
             "csr_pem": "CSR",
             "requested_name": "a.example.com",
-            "requested_validity_days": 30
+            "requested_validity": "30days"
         }"#;
         let req: SignRequest = serde_json::from_str(json).unwrap();
         assert!(req.id_map_groups.is_empty());
