@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
 use rustls_pki_types::{
-    pem::{PemObject, SectionKind},
     PrivateKeyDer,
+    pem::{PemObject, SectionKind},
 };
 use smallvec::SmallVec;
 use std::{
@@ -132,8 +132,8 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
                 netidx_tpm::MECHANISM
             )
         })?;
-        let password = String::from_utf8(secret.to_vec())
-            .context("sealed password is not utf8")?;
+        let password =
+            String::from_utf8(secret.to_vec()).context("sealed password is not utf8")?;
         cache.insert(path.into(), password.clone());
         return Ok(password);
     }
@@ -149,10 +149,7 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
                 bail!("password isn't in the keychain and no askpass specified")
             }
             Some(askpass) => {
-                info!(
-                    "failed to find password entry for netidx {}, error {}",
-                    path, e
-                );
+                info!("failed to find password entry for netidx {}, error {}", path, e);
                 let res = Command::new(askpass).arg(path).output()?;
                 let password = String::from_utf8_lossy(&res.stdout);
                 let password = password.trim_matches(|c| c == '\r' || c == '\n');
@@ -186,8 +183,8 @@ pub fn decrypt_private_key(
     password: &str,
 ) -> Result<pkcs8::der::zeroize::Zeroizing<String>> {
     use pkcs8::{
-        der::pem::PemLabel, EncryptedPrivateKeyInfo, LineEnding, PrivateKeyInfo,
-        SecretDocument,
+        EncryptedPrivateKeyInfo, LineEnding, PrivateKeyInfo, SecretDocument,
+        der::pem::PemLabel,
     };
     let (label, doc) = SecretDocument::from_pem(enc_pem)
         .map_err(|e| anyhow!("parsing private key pem: {e}"))?;
@@ -210,8 +207,8 @@ pub fn decrypt_private_key(
 /// ([`sealed_password_path`]).
 pub fn encrypt_private_key(plain_pem: &str, password: &str) -> Result<String> {
     use pkcs8::{
-        der::pem::PemLabel, rand_core::OsRng, EncryptedPrivateKeyInfo, LineEnding,
-        PrivateKeyInfo, SecretDocument,
+        EncryptedPrivateKeyInfo, LineEnding, PrivateKeyInfo, SecretDocument,
+        der::pem::PemLabel, rand_core::OsRng,
     };
     let (label, doc) = SecretDocument::from_pem(plain_pem)
         .map_err(|e| anyhow!("parsing private key pem: {e}"))?;
@@ -235,8 +232,8 @@ pub fn load_private_key(
     path: &str,
 ) -> Result<PrivateKeyDer<'static>> {
     use pkcs8::{
-        der::{pem::PemLabel, zeroize::Zeroize},
         EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
+        der::{pem::PemLabel, zeroize::Zeroize},
     };
     debug!("reading key from {}", path);
     let doc = std::fs::read_to_string(path)?;
@@ -326,8 +323,7 @@ pub(crate) fn create_tls_acceptor(
         for cert in load_certs(root_certificates)? {
             root_store.add(cert)?;
         }
-        let builder =
-            rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store));
+        let builder = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store));
         // A `crl.pem` beside the trust bundle turns on revocation
         // checking: a serial on the list is refused at the handshake.
         // Unknown status stays permitted — a federated bundle may
@@ -436,11 +432,7 @@ pub(crate) fn get_match<'a: 'b, 'b, U>(
     identity: &'b str,
 ) -> Option<&'a U> {
     m.iter().find_map(|(k, v)| {
-        if k == identity || identity.starts_with(k) {
-            Some(v)
-        } else {
-            None
-        }
+        if k == identity || identity.starts_with(k) { Some(v) } else { None }
     })
 }
 

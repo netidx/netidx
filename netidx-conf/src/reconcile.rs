@@ -94,14 +94,12 @@ impl EditPlan {
     /// write touches disk.
     pub fn apply(&self) -> Result<()> {
         if let Some((path, cfg)) = &self.resolver_edit {
-            cfg.save(path).with_context(|| {
-                format!("saving resolver config {}", path.display())
-            })?;
+            cfg.save(path)
+                .with_context(|| format!("saving resolver config {}", path.display()))?;
         }
         if let Some((path, cfg)) = &self.client_edit {
-            cfg.save(path).with_context(|| {
-                format!("saving client config {}", path.display())
-            })?;
+            cfg.save(path)
+                .with_context(|| format!("saving client config {}", path.display()))?;
         }
         Ok(())
     }
@@ -484,8 +482,10 @@ mod tests {
             &dir.path(),
             r#"["10.0.0.1:4564", "Anonymous"], ["10.9.9.9:4564", "Anonymous"]"#,
         );
-        let network =
-            net(vec![ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous }]);
+        let network = net(vec![ResolverAddr {
+            addr: addr("10.0.0.1:4564"),
+            auth: InfoAuth::Anonymous,
+        }]);
         let plan = reconcile_resolver_peers(&path, &network).unwrap();
         // Nothing to add (A present); X is NOT removed.
         assert!(plan.is_empty());
@@ -505,8 +505,10 @@ mod tests {
             1,
         );
         std::fs::write(&path, json).unwrap();
-        let network =
-            net(vec![ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous }]);
+        let network = net(vec![ResolverAddr {
+            addr: addr("10.0.0.1:4564"),
+            auth: InfoAuth::Anonymous,
+        }]);
         assert!(reconcile_resolver_peers(&path, &network).is_err());
     }
 
@@ -519,7 +521,10 @@ mod tests {
             cluster: Some(ClusterFacts {
                 members: members
                     .iter()
-                    .map(|m| ResolverAddr { addr: m.parse().unwrap(), auth: InfoAuth::Anonymous })
+                    .map(|m| ResolverAddr {
+                        addr: m.parse().unwrap(),
+                        auth: InfoAuth::Anonymous,
+                    })
                     .collect(),
                 base: base.to_string(),
                 parent: None,
@@ -536,7 +541,9 @@ mod tests {
         use netidx::config::file::{Auth, ConfigBuilder};
         let cfg = ClientConfig(
             ConfigBuilder::default()
-                .addrs(addrs.iter().map(|a| (addr(a), Auth::Anonymous)).collect::<Vec<_>>())
+                .addrs(
+                    addrs.iter().map(|a| (addr(a), Auth::Anonymous)).collect::<Vec<_>>(),
+                )
                 .build()
                 .unwrap(),
         );
@@ -574,16 +581,26 @@ mod tests {
         // Client points at one /eu member plus a stale addr the cluster
         // no longer lists.
         let path = write_client(&dir.path(), &["10.0.0.15:4564", "10.0.0.99:4564"]);
-        let m = map_of(vec![srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"])]);
+        let m = map_of(vec![srv(
+            "10.0.0.15:4565",
+            "/eu",
+            &["10.0.0.15:4564", "10.0.0.16:4564"],
+        )]);
         let plan = reconcile_client_peers(&path, &m).unwrap();
         assert_eq!(plan.changes.len(), 2, "add .16, remove .99");
         // .16 is the addition, .99 is the removal — and the verbs must match.
-        assert!(plan.changes.iter().any(
-            |c| matches!(c, Change::Add(_)) && c.text().contains("10.0.0.16:4564")
-        ));
-        assert!(plan.changes.iter().any(
-            |c| matches!(c, Change::Del(_)) && c.text().contains("10.0.0.99:4564")
-        ));
+        assert!(
+            plan.changes
+                .iter()
+                .any(|c| matches!(c, Change::Add(_))
+                    && c.text().contains("10.0.0.16:4564"))
+        );
+        assert!(
+            plan.changes
+                .iter()
+                .any(|c| matches!(c, Change::Del(_))
+                    && c.text().contains("10.0.0.99:4564"))
+        );
         // The preview must label each edit by its real direction — a stale
         // peer being removed must read "- remove", never "+ add".
         let body = plan.describe();
@@ -608,7 +625,11 @@ mod tests {
         assert!(plan.changes.is_empty());
         assert!(!plan.warnings.is_empty(), "warns rather than wiping");
         plan.apply().unwrap();
-        assert_eq!(ClientConfig::load(&path).unwrap().as_file().addrs.len(), 1, "untouched");
+        assert_eq!(
+            ClientConfig::load(&path).unwrap().as_file().addrs.len(),
+            1,
+            "untouched"
+        );
     }
 
     #[test]
@@ -618,13 +639,24 @@ mod tests {
             &dir.path(),
             r#"["10.0.0.11:4564", "Anonymous"], ["10.0.0.99:4564", "Anonymous"]"#,
         );
-        let m = map_of(vec![srv("10.0.0.11:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"])]);
+        let m = map_of(vec![srv(
+            "10.0.0.11:4565",
+            "/",
+            &["10.0.0.11:4564", "10.0.0.12:4564"],
+        )]);
         let plan = reconcile_parent_peers(&path, &m).unwrap();
         assert_eq!(plan.changes.len(), 2, "add .12, remove .99");
         plan.apply().unwrap();
         let cfg = ResolverConfig::load(&path).unwrap();
-        let addrs: Vec<_> =
-            cfg.as_file().parent.as_ref().unwrap().addrs.iter().map(|(a, _)| *a).collect();
+        let addrs: Vec<_> = cfg
+            .as_file()
+            .parent
+            .as_ref()
+            .unwrap()
+            .addrs
+            .iter()
+            .map(|(a, _)| *a)
+            .collect();
         assert!(addrs.contains(&addr("10.0.0.12:4564")));
         assert!(!addrs.contains(&addr("10.0.0.99:4564")));
         assert!(reconcile_parent_peers(&path, &m).unwrap().is_empty(), "idempotent");

@@ -1,6 +1,6 @@
 use crate::protocol::{Request, Response, Update};
 use ahash::AHashMap;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures::{
     channel::mpsc,
     prelude::*,
@@ -19,18 +19,14 @@ use netidx_protocols::rpc::client::Proc;
 use nohash::IntMap;
 use poolshark::global::{GPooled, Pool};
 use std::{
-    collections::hash_map::Entry,
-    net::SocketAddr,
-    pin::Pin,
-    result,
-    sync::LazyLock,
+    collections::hash_map::Entry, net::SocketAddr, pin::Pin, result, sync::LazyLock,
     time::Duration,
 };
 use tokio::time;
 use warp::{
+    Filter, Reply,
     filters::BoxedFilter,
     ws::{Message, WebSocket, Ws},
-    Filter, Reply,
 };
 pub mod config;
 mod protocol;

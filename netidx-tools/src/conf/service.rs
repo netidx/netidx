@@ -9,10 +9,8 @@
 //! prompts the elevated process would otherwise re-ask.
 
 use anyhow::{Context, Result};
-use netidx_conf::service::{
-    self, ServiceParams, ServiceScope, ServiceStatus,
-};
 use clap::{Args, Subcommand};
+use netidx_conf::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{io::IsTerminal, path::PathBuf};
 // `Command` only drives the unix sudo re-exec path.
 #[cfg(unix)]
@@ -331,8 +329,9 @@ pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
 
 #[cfg(windows)]
 pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
-    provided.or_else(|| std::env::var("USERNAME").ok())
-        .ok_or_else(|| anyhow!("could not determine current Windows user; pass --for-user"))
+    provided.or_else(|| std::env::var("USERNAME").ok()).ok_or_else(|| {
+        anyhow!("could not determine current Windows user; pass --for-user")
+    })
 }
 
 /// Re-exec ourselves under sudo to do the install. We resolve
@@ -346,18 +345,24 @@ fn escalate_for_install(a: &InstallArgs, binary: &std::path::Path) -> Result<()>
     let mut cmd = Command::new(elevator());
     cmd.arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf").arg("service").arg("install")
-        .arg("--scope").arg("system")
-        .arg("--for-user").arg(&for_user)
-        .arg("--service-name").arg(&a.common.service_name)
-        .arg("--netidx-binary").arg(binary)
+        .arg("conf")
+        .arg("service")
+        .arg("install")
+        .arg("--scope")
+        .arg("system")
+        .arg("--for-user")
+        .arg(&for_user)
+        .arg("--service-name")
+        .arg(&a.common.service_name)
+        .arg("--netidx-binary")
+        .arg(binary)
         .env(ELEVATED_ENV, "1");
     if let Some(dir) = &a.activation_dir {
         cmd.arg("--activation-dir").arg(dir);
     }
-    let status = cmd.status().with_context(|| {
-        format!("spawning `{}` for privilege escalation", elevator())
-    })?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("spawning `{}` for privilege escalation", elevator()))?;
     if !status.success() {
         bail!("escalation failed: {status}");
     }
@@ -372,10 +377,15 @@ fn escalate_for_uninstall(a: &CommonArgs) -> Result<()> {
     let status = Command::new(elevator())
         .arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf").arg("service").arg("uninstall")
-        .arg("--scope").arg("system")
-        .arg("--for-user").arg(&for_user)
-        .arg("--service-name").arg(&a.service_name)
+        .arg("conf")
+        .arg("service")
+        .arg("uninstall")
+        .arg("--scope")
+        .arg("system")
+        .arg("--for-user")
+        .arg(&for_user)
+        .arg("--service-name")
+        .arg(&a.service_name)
         .env(ELEVATED_ENV, "1")
         .status()
         .with_context(|| format!("spawning `{}` for privilege escalation", elevator()))?;

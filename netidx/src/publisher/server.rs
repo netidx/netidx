@@ -1,6 +1,6 @@
 use super::{
-    ClId, Client, Event, PublisherInner, PublisherWeak, SendResult, Update, WriteRequest,
-    BATCHES,
+    BATCHES, ClId, Client, Event, PublisherInner, PublisherWeak, SendResult, Update,
+    WriteRequest,
 };
 use crate::{
     channel::{self, Channel, K5CtxWrap, ReadChannel, WriteChannel},
@@ -17,13 +17,13 @@ use crate::{
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use ahash::AHashMap;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use arcstr::literal;
 use bytes::Bytes;
 use cross_krb5::ServerCtx;
 use futures::{
     channel::{
-        mpsc::{channel, Receiver, Sender},
+        mpsc::{Receiver, Sender, channel},
         oneshot,
     },
     prelude::*,
@@ -37,7 +37,7 @@ use poolshark::global::GPooled;
 use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
 use std::{
     boxed::Box,
-    collections::{hash_map::Entry, BTreeSet, Bound, HashMap, HashSet},
+    collections::{BTreeSet, Bound, HashMap, HashSet, hash_map::Entry},
     convert::From,
     default::Default,
     iter::{self, FromIterator},
@@ -633,21 +633,13 @@ impl ClientCtx {
         mut updates: Receiver<(Option<Duration>, Update)>,
     ) -> Result<()> {
         async fn flush(c: &mut WriteChannel) -> Result<()> {
-            if c.bytes_queued() > 0 {
-                c.flush().await
-            } else {
-                future::pending().await
-            }
+            if c.bytes_queued() > 0 { c.flush().await } else { future::pending().await }
         }
         async fn read_updates(
             flushing: bool,
             c: &mut Receiver<(Option<Duration>, Update)>,
         ) -> Option<(Option<Duration>, Update)> {
-            if flushing {
-                future::pending().await
-            } else {
-                c.next().await
-            }
+            if flushing { future::pending().await } else { c.next().await }
         }
         async fn read_from_subscriber(
             con: &mut ReadChannel,

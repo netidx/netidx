@@ -1,6 +1,6 @@
 use crate::{
     config::{RecordConfig, RotateDirective},
-    logfile::{BatchItem, Id, BATCH_POOL},
+    logfile::{BATCH_POOL, BatchItem, Id},
     logfile_collection::ArchiveCollectionWriter,
     recorder::{BCastMsg, ShardId, Shards},
 };
@@ -85,7 +85,7 @@ async fn list_task(
     resolver: ResolverRead,
     spec: GlobSet,
 ) -> Result<()> {
-    use rand::{rng, RngExt};
+    use rand::{RngExt, rng};
     let mut cts = CTS::new(&spec);
     let max_jitter = interval.as_secs_f64() * 0.1;
     while let Some(reply) = rx.next().await {

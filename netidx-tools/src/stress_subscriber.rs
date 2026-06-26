@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::Args;
 use futures::channel::mpsc;
 use futures::{prelude::*, select_biased};
 use netidx::{
@@ -7,7 +8,6 @@ use netidx::{
     resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Subscriber, UpdatesFlags},
 };
-use clap::Args;
 use std::time::Duration;
 use tokio::time::{self, Instant};
 

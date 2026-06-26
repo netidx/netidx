@@ -1,19 +1,19 @@
-use crate::{pbuf::PBytes, Abstract, ValArray, Value};
+use crate::{Abstract, ValArray, Value, pbuf::PBytes};
 use arcstr::ArcStr;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use combine::{
-    attempt, between, choice, eof, from_str, look_ahead, many1, none_of, not_followed_by,
-    one_of, optional, parser, satisfy,
+    EasyParser, ParseError, Parser, RangeStream, attempt, between, choice, eof, from_str,
+    look_ahead, many1, none_of, not_followed_by, one_of, optional, parser,
     parser::{
         char::{alpha_num, digit, spaces, string},
         combinator::recognize,
         range::{take_while, take_while1},
         repeat::escaped,
     },
-    sep_by, sep_by1,
-    stream::{position, Range},
-    token, unexpected_any, EasyParser, ParseError, Parser, RangeStream,
+    satisfy, sep_by, sep_by1,
+    stream::{Range, position},
+    token, unexpected_any,
 };
 use compact_str::CompactString;
 use escaping::Escape;
@@ -209,16 +209,12 @@ where
     I::Error: ParseError<I::Token, I::Range, I::Position>,
     I::Range: Range,
 {
-    choice((
-        radix_prefix(),
-        many1(digit()).map(|s: CompactString| (10u32, s)),
-    ))
-    .then(|(radix, digits): (u32, CompactString)| {
-        match T::from_str_radix(&digits, radix) {
+    choice((radix_prefix(), many1(digit()).map(|s: CompactString| (10u32, s)))).then(
+        |(radix, digits): (u32, CompactString)| match T::from_str_radix(&digits, radix) {
             Ok(i) => combine::value(i).right(),
             Err(_) => unexpected_any("invalid unsigned integer").left(),
-        }
-    })
+        },
+    )
 }
 
 pub fn int<I, T: FromStrRadix + Clone + Copy>() -> impl Parser<I, Output = T>

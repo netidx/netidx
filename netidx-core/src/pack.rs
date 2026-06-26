@@ -55,7 +55,7 @@
 
 use arcstr::ArcStr;
 use arrayvec::{ArrayString, ArrayVec};
-use bytes::{buf, Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut, buf};
 use chrono::{
     naive::{NaiveDate, NaiveDateTime},
     prelude::*,
@@ -63,9 +63,9 @@ use chrono::{
 use compact_str::CompactString;
 use indexmap::{IndexMap, IndexSet};
 use poolshark::{
-    global::{take_any, GPooled},
-    local::LPooled,
     Poolable,
+    global::{GPooled, take_any},
+    local::LPooled,
 };
 use rust_decimal::Decimal;
 use std::{
@@ -1851,7 +1851,7 @@ where
     }
 }
 
-use enumflags2::{BitFlag, BitFlags, _internal::RawBitFlags};
+use enumflags2::{_internal::RawBitFlags, BitFlag, BitFlags};
 
 impl<T> Pack for BitFlags<T>
 where

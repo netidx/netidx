@@ -6,15 +6,15 @@ use crate::{
     config::{Config, PublishConfig},
     logfile::Seek,
     recorder::{
-        publish::{controls::parse_filter, session::Session},
         Shards, State,
+        publish::{controls::parse_filter, session::Session},
     },
 };
 use anyhow::Result;
-use arcstr::{literal, ArcStr};
+use arcstr::{ArcStr, literal};
 use chrono::prelude::*;
 use controls::{
-    NewSessionConfig, END_DOC, FILTER_DOC, PLAY_AFTER_DOC, POS_DOC, SPEED_DOC, START_DOC,
+    END_DOC, FILTER_DOC, NewSessionConfig, PLAY_AFTER_DOC, POS_DOC, SPEED_DOC, START_DOC,
     STATE_DOC,
 };
 use futures::{channel::mpsc, prelude::*, select_biased};
@@ -27,7 +27,7 @@ use netidx::{
 use netidx_derive::Pack;
 use netidx_protocols::rpc::server::{RpcCall, RpcReply};
 use netidx_protocols::{
-    cluster::{uuid_string, Cluster},
+    cluster::{Cluster, uuid_string},
     define_rpc,
     rpc::server::{ArgSpec, Proc},
     rpc_err,
@@ -37,8 +37,8 @@ use parking_lot::Mutex;
 use std::{
     ops::Bound,
     sync::{
-        atomic::{AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, Ordering},
     },
     time::Duration,
 };

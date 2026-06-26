@@ -22,7 +22,7 @@
 //! computes the identical fingerprint on every platform — Windows
 //! included, where the openssl-backed `ca` module isn't available.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 /// A SHA-256 digest rendered for human comparison.
@@ -293,7 +293,8 @@ mod tests {
             for col in 0..8 {
                 let mirror = 7 - col;
                 assert_eq!(
-                    cells[col * 2], cells[mirror * 2],
+                    cells[col * 2],
+                    cells[mirror * 2],
                     "column {col} not mirrored"
                 );
             }

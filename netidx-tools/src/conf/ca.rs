@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use clap::{Args, Subcommand};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
@@ -7,7 +8,6 @@ use netidx_conf::{
     fingerprint::{ColorMode, Fingerprint},
     paths, tls,
 };
-use clap::{Args, Subcommand};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -580,8 +580,12 @@ pub(super) fn setup_autorenew_slot(
                 "WARNING: the autorenew keytab is PLAINTEXT ({} sealing failed: {e:#}).",
                 netidx_tpm::MECHANISM
             );
-            eprintln!("Any backup or disk image of this machine now contains a credential");
-            eprintln!("that unlocks the CA key. You accepted this with --insecure-no-tpm.");
+            eprintln!(
+                "Any backup or disk image of this machine now contains a credential"
+            );
+            eprintln!(
+                "that unlocks the CA key. You accepted this with --insecure-no-tpm."
+            );
             eprintln!("================================================================");
         }
         Err(e) => {
@@ -621,7 +625,9 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
         && rt.block_on(conf_local::daemon_running(cfg))
     {
         let warning = rt.block_on(conf_local::rotate_autorenew(cfg))?;
-        println!("auto-approve rotated (hot-swapped on the running conf server, no downtime)");
+        println!(
+            "auto-approve rotated (hot-swapped on the running conf server, no downtime)"
+        );
         if let Some(w) = warning {
             eprintln!("WARNING: {w}");
         }
@@ -642,8 +648,9 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
          autorenew credential)",
     )?);
     let recovery = ca_vault::normalize_recovery_password(&typed);
-    let cadir = netidx_conf::ca_store::CaDir::open(&dir)
-        .context("setting up autorenew needs exclusive access; the conf server must be stopped")?;
+    let cadir = netidx_conf::ca_store::CaDir::open(&dir).context(
+        "setting up autorenew needs exclusive access; the conf server must be stopped",
+    )?;
     let keytab = setup_autorenew_slot(&cadir, &recovery, p.insecure_no_tpm)?;
     let verb = if p.rotate { "rotated" } else { "enabled" };
     println!("auto-approve {verb}:");
@@ -1115,14 +1122,20 @@ fn setup_superuser(
     cn: &str,
 ) -> Result<()> {
     let name = match env_user_name() {
-        Some(user) => prompt::string_with_default("superuser admin name", opts.admin.clone(), &user)?,
+        Some(user) => prompt::string_with_default(
+            "superuser admin name",
+            opts.admin.clone(),
+            &user,
+        )?,
         None => prompt::required_string("superuser admin name", opts.admin.clone())?,
     };
     if name.trim().is_empty() {
         bail!("superuser name must not be empty");
     }
     if ca_vault::is_reserved_admin(&name) {
-        bail!("{name:?} is a reserved signing-slot name; choose another for the superuser");
+        bail!(
+            "{name:?} is a reserved signing-slot name; choose another for the superuser"
+        );
     }
     let mut policy = prompt_policy(
         &PolicyArgs {
@@ -1195,8 +1208,9 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
                 keytab.display()
             )
         })?;
-    let cadir = netidx_conf::ca_store::CaDir::open(&dir)
-        .context("rotating recovery needs exclusive access; stop the conf server first")?;
+    let cadir = netidx_conf::ca_store::CaDir::open(&dir).context(
+        "rotating recovery needs exclusive access; stop the conf server first",
+    )?;
     // Confirm the keytab credential actually unlocks this CA BEFORE removing
     // the old recovery slot — a stale keytab must not leave the CA with no
     // recovery slot. (The recovered key is dropped/zeroized immediately.)
@@ -1278,11 +1292,14 @@ fn init(p: InitParams) -> Result<()> {
 
     // Single end-of-process hook — the same one the `conf install`
     // templates use.
-    service::offer(need, service::ServiceGate {
-        dry_run: false,
-        no_service: p.no_service,
-        with_service: p.with_service,
-    })
+    service::offer(
+        need,
+        service::ServiceGate {
+            dry_run: false,
+            no_service: p.no_service,
+            with_service: p.with_service,
+        },
+    )
 }
 
 // -- ca admin -----------------------------------------------------------------
@@ -1295,7 +1312,8 @@ fn init(p: InitParams) -> Result<()> {
 pub(super) fn remote_admin_preamble(
     server: SocketAddr,
     ca_dir: Option<PathBuf>,
-) -> Result<(tokio::runtime::Runtime, conf_client::CaIdentity, String, Zeroizing<String>)> {
+) -> Result<(tokio::runtime::Runtime, conf_client::CaIdentity, String, Zeroizing<String>)>
+{
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let identity = rt
         .block_on(conf_client::fetch_identity(server, NodeKind::Client))
@@ -1424,14 +1442,16 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
                 None,
             )?;
-            let new_pw =
-                collect_required_password(&format!("password for new role admin {name:?}"))?;
+            let new_pw = collect_required_password(&format!(
+                "password for new role admin {name:?}"
+            ))?;
             rt.block_on(conf_local::add_role_admin(&cfg_path, &name, &new_pw, policy))?;
             println!("added role admin {name:?} (via the local conf server)");
             Ok(())
         }
         AdminCmd::SetPolicy(a) => {
-            let name = prompt::required_string("admin whose policy to set", a.name.clone())?;
+            let name =
+                prompt::required_string("admin whose policy to set", a.name.clone())?;
             if ca_vault::is_reserved_admin(&name) {
                 bail!(
                     "{name:?} is a system-managed signing slot; its narrow policy is \
@@ -1608,7 +1628,11 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
     let dir = tls::identity_dir(&name)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
-    atomic::write_atomic(&dir.join("certificate.pem"), issued.cert_pem.as_bytes(), 0o644)?;
+    atomic::write_atomic(
+        &dir.join("certificate.pem"),
+        issued.cert_pem.as_bytes(),
+        0o644,
+    )?;
     atomic::write_atomic(
         &dir.join("private.key"),
         issued.private_key_pem.as_bytes(),
@@ -1712,11 +1736,7 @@ fn prompt_policy(
             None,
             "users",
         )?;
-        entry
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        entry.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     };
     let may_enroll_servers = match args.may_enroll_servers {
         Some(b) => b,
@@ -1781,9 +1801,7 @@ fn existing_ca_cn(dir: &Path) -> String {
 fn collect_required_password(label: &str) -> Result<Zeroizing<String>> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
-        return Err(anyhow!(
-            "{label}: a password is required but stdin is not a TTY"
-        ));
+        return Err(anyhow!("{label}: a password is required but stdin is not a TTY"));
     }
     loop {
         let pw = Zeroizing::new(rpassword::prompt_password(format!("{label}: "))?);
@@ -1902,8 +1920,7 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
 }
 
 fn sign(mut p: SignArgs) -> Result<()> {
-    let csr_path =
-        prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
+    let csr_path = prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
     let directory = ca_dir_for(p.ca_dir.take())?;
     let ca = open_ca(&directory)?;
     let csr_pem = std::fs::read(&csr_path)
@@ -1935,9 +1952,8 @@ fn sign(mut p: SignArgs) -> Result<()> {
     for entry in &san {
         println!("    - {}", san_display(entry));
     }
-    let name = first_dns_san(&san)
-        .or_else(|| summary.common_name.clone())
-        .unwrap_or_default();
+    let name =
+        first_dns_san(&san).or_else(|| summary.common_name.clone()).unwrap_or_default();
     let cert_pem =
         sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, p.validity)?;
     atomic::write_atomic(&out, &cert_pem, 0o644)
@@ -2015,8 +2031,7 @@ fn maybe_register_in_id_map(
     }
     // List groups so the operator knows what's valid; sorted for
     // readable output and stable across runs.
-    let mut group_names: Vec<&str> =
-        map.groups.keys().map(|k| k.as_str()).collect();
+    let mut group_names: Vec<&str> = map.groups.keys().map(|k| k.as_str()).collect();
     group_names.sort_unstable();
     println!("available groups: {}", group_names.join(", "));
     let groups_str = prompt::string_with_default(
@@ -2027,17 +2042,13 @@ fn maybe_register_in_id_map(
     let groups: Vec<&str> =
         groups_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
     if groups.is_empty() {
-        bail!(
-            "no groups specified — at least the primary group is required"
-        );
+        bail!("no groups specified — at least the primary group is required");
     }
     let (primary, secondary): (&str, &[&str]) = (groups[0], &groups[1..]);
-    let uid: u32 = prompt::parsed_with_default(
-        "uid",
-        None,
-        &id_map::next_uid(&map).to_string(),
-    )?;
-    let prev = id_map::upsert_identity(&mut map, &identity_name, uid, primary, secondary)?;
+    let uid: u32 =
+        prompt::parsed_with_default("uid", None, &id_map::next_uid(&map).to_string())?;
+    let prev =
+        id_map::upsert_identity(&mut map, &identity_name, uid, primary, secondary)?;
     id_map::save(&map_path, &map)?;
     match prev {
         Some(old) => println!(
@@ -2062,8 +2073,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Where's the conf server? `--server`, else this host's own conf
     // server, else discovery (browse → confirm → aggregate).
-    let (server, discovered_identity) = match p.server.or_else(local_conf_server_listen)
-    {
+    let (server, discovered_identity) = match p.server.or_else(local_conf_server_listen) {
         Some(s) => (s, None),
         None => match init::discover_network(NodeKind::Client)? {
             ConfServers::Have(net) => {
@@ -2243,8 +2253,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
         // same code; the requester sent it over a channel the admin
         // trusts. A mismatch means the queue entry is NOT the request
         // the admin thinks it is.
-        if !prompt::confirm("does this code match what the requester sent you?", false)?
-        {
+        if !prompt::confirm("does this code match what the requester sent you?", false)? {
             if prompt::confirm("deny this request?", true)? {
                 let reason = prompt::string_with_default(
                     "denial reason (shown to the requester)",
@@ -2478,7 +2487,9 @@ fn list() -> Result<()> {
                     println!("  key:    keyslot vault — admins: {}", admins.join(", "));
                 }
             }
-            _ => println!("  key:    keyslot vault (start the conf server to list admins)"),
+            _ => {
+                println!("  key:    keyslot vault (start the conf server to list admins)")
+            }
         }
     } else if dir.join("private.key").is_file() {
         println!("  key:    private.key (legacy single-key format)");
@@ -2542,10 +2553,8 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
         // to the recovery password only when the keytab is absent or doesn't
         // unlock this CA (an offline CA with no autorenew, a different CA dir,
         // or a dead TPM).
-        let from_keytab = autorenew_keytab_path()
-            .ok()
-            .filter(|k| k.exists())
-            .and_then(|keytab| {
+        let from_keytab =
+            autorenew_keytab_path().ok().filter(|k| k.exists()).and_then(|keytab| {
                 match netidx_conf::conf_server::read_autorenew_password(&keytab) {
                     Ok(pw) => match cadir.vault.read().unlock(&pw) {
                         Ok(u) => Some(u),
@@ -2581,8 +2590,9 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
                     "the CA recovery password (from your safe; printed once at init)",
                 )?);
                 let pw = ca_vault::normalize_recovery_password(&typed);
-                cadir.vault.read().unlock(&pw)
-                    .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?
+                cadir.vault.read().unlock(&pw).with_context(|| {
+                    format!("unlocking the CA vault at {}", dir.display())
+                })?
             }
         };
         let cert = std::fs::read(dir.join("certificate.pem"))
@@ -2685,7 +2695,11 @@ pub(super) fn record_offline_issuance(
 
 /// Issue a leaf offline, allocating a fresh serial and recording the
 /// issuance (see [`record_offline_issuance`]). Returns the written files.
-fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<IssuedFiles> {
+fn issue_and_record(
+    ca: &Ca,
+    kind: NodeKind,
+    mut params: IssueParams,
+) -> Result<IssuedFiles> {
     let ca_dir = ca.directory().to_path_buf();
     // Take the same exclusive flock the daemon holds: offline issuance is
     // only legitimate before the daemon owns the CA, and the serial is
@@ -2697,18 +2711,25 @@ fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<
         .context("cannot issue offline: a running conf server owns this CA")?;
     let serial = cadir.store.lock().next_serial()?;
     params.serial = serial;
-    let name = first_dns_san(&params.san)
-        .unwrap_or_else(|| params.subject.common_name.clone());
+    let name =
+        first_dns_san(&params.san).unwrap_or_else(|| params.subject.common_name.clone());
     let validity = params.validity;
     let issued = ca.issue(&params)?;
-    let cert_pem = std::fs::read_to_string(&issued.certificate)
-        .with_context(|| format!("reading issued cert {}", issued.certificate.display()))?;
+    let cert_pem = std::fs::read_to_string(&issued.certificate).with_context(|| {
+        format!("reading issued cert {}", issued.certificate.display())
+    })?;
     // `ca.issue` already wrote the key + cert to disk. If recording the
     // issuance fails, roll those back: an un-recorded cert is invisible to
     // `next_serial`, so leaving it would let its serial be handed out again.
-    if let Err(e) =
-        record_offline_issuance(&mut cadir.store.lock(), serial, kind, &name, "", &cert_pem, validity)
-    {
+    if let Err(e) = record_offline_issuance(
+        &mut cadir.store.lock(),
+        serial,
+        kind,
+        &name,
+        "",
+        &cert_pem,
+        validity,
+    ) {
         let _ = std::fs::remove_file(&issued.certificate);
         let _ = std::fs::remove_file(&issued.private_key);
         return Err(e);
@@ -2735,7 +2756,15 @@ pub(super) fn sign_and_record(
     let cert = ca.sign_request(csr_pem, san, validity, serial)?;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
     let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
-    record_offline_issuance(&mut cadir.store.lock(), serial, kind, name, csr_str, cert_str, validity)?;
+    record_offline_issuance(
+        &mut cadir.store.lock(),
+        serial,
+        kind,
+        name,
+        csr_str,
+        cert_str,
+        validity,
+    )?;
     Ok(cert)
 }
 
@@ -2793,8 +2822,7 @@ fn parse_san_one(s: &str) -> Result<SanEntry> {
     Ok(match kind {
         "dns" => SanEntry::Dns(val.to_string()),
         "ip" => SanEntry::Ip(
-            val.parse::<IpAddr>()
-                .map_err(|e| anyhow!("invalid SAN ip {val:?}: {e}"))?,
+            val.parse::<IpAddr>().map_err(|e| anyhow!("invalid SAN ip {val:?}: {e}"))?,
         ),
         "uri" => SanEntry::Uri(val.to_string()),
         "email" => SanEntry::Email(val.to_string()),
@@ -2812,7 +2840,9 @@ mod tests {
         assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_string())]).is_err());
         // DNS is case-insensitive — an upper/mixed-case variant is the
         // same reserved name and must also be refused.
-        assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_uppercase())]).is_err());
+        assert!(
+            ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_uppercase())]).is_err()
+        );
         // A normal name (and a non-DNS SAN type) is fine.
         assert!(
             ensure_san_not_reserved(&[SanEntry::Dns("resolver.example.com".to_string())])
@@ -2903,7 +2933,8 @@ mod tests {
             // Explicit accept: the round trip flow simulates the admin
             // who has looked at the CSR and is happy to sign as-is.
             accept_csr_san: true,
-            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir.clone()),
+            validity: Duration::from_secs(30 * 86400),
+            ca_dir: Some(ca_dir.clone()),
             out: Some(cert_path.clone()),
             no_id_map: true,
         })
@@ -2957,7 +2988,8 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),
+            ca_dir: Some(ca_dir),
             out: Some(out_cert.clone()),
             no_id_map: true,
         })
@@ -2977,13 +3009,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         // Build a CSR with no SAN by going through generate_csr directly
         // (request() always wires up dns:<cn> by default).
-        let kr = ca::generate_csr(
-            &Subject::cn("no-san"),
-            &[],
-            2048,
-            None,
-        )
-        .unwrap();
+        let kr = ca::generate_csr(&Subject::cn("no-san"), &[], 2048, None).unwrap();
         let csr_path = scratch.path().join("no-san.csr");
         std::fs::write(&csr_path, &kr.csr_pem).unwrap();
         let ca_dir = scratch.path().join("ca");
@@ -3002,7 +3028,8 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
-            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),
+            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })
@@ -3044,7 +3071,8 @@ mod tests {
             csr_path: Some(csr_path),
             san: vec!["dns:x.example.com".into()],
             accept_csr_san: true,
-            validity: Duration::from_secs(30 * 86400),            ca_dir: Some(ca_dir),
+            validity: Duration::from_secs(30 * 86400),
+            ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
         })
@@ -3078,15 +3106,9 @@ mod tests {
             PathBuf::from("alice.example.com.pem"),
         );
         // CN-less CSR falls back to a fixed name.
-        assert_eq!(
-            default_cert_filename(None),
-            PathBuf::from("certificate.pem"),
-        );
+        assert_eq!(default_cert_filename(None), PathBuf::from("certificate.pem"),);
         // Slashes in the CN can't produce a traversing path.
-        assert_eq!(
-            default_csr_filename("../sneaky"),
-            PathBuf::from(".._sneaky.csr"),
-        );
+        assert_eq!(default_csr_filename("../sneaky"), PathBuf::from(".._sneaky.csr"),);
     }
 
     #[test]
@@ -3148,10 +3170,7 @@ mod tests {
         let r = prompt::required_string("test prompt", None);
         assert!(r.is_err());
         let msg = format!("{:#}", r.unwrap_err());
-        assert!(
-            msg.contains("not a TTY"),
-            "should report non-TTY context: {msg}"
-        );
+        assert!(msg.contains("not a TTY"), "should report non-TTY context: {msg}");
     }
 
     /// An offline CA (no conf server) is minted with exactly one signing

@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use arcstr::literal;
 use bytes::BytesMut;
 use chrono::prelude::*;
+use clap::{Args, Subcommand};
 use netidx::{
     path::Path,
     resolver_client::{Glob, GlobSet},
@@ -12,10 +13,9 @@ use netidx_archive::{
     logfile::{self, AlreadyCompressed, ArchiveReader, BatchItem, Cursor, Seek},
     recorder_client::{Client, OneshotReplyShard},
 };
-use clap::{Args, Subcommand};
 use netidx_tools_core::ClientParams;
 use std::{collections::HashSet, future, path::PathBuf};
-use tokio::io::{stdout, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, stdout};
 use triomphe::Arc;
 
 #[derive(Args, Debug)]
@@ -293,11 +293,7 @@ fn dump(file: PathBuf, metadata: bool, check_index: bool) -> Result<()> {
 
 fn compressed(file: PathBuf) -> Result<()> {
     let hdr = logfile::read_file_header(file)?;
-    if hdr.compressed {
-        std::process::exit(0)
-    } else {
-        std::process::exit(1)
-    }
+    if hdr.compressed { std::process::exit(0) } else { std::process::exit(1) }
 }
 
 #[tokio::main]

@@ -8,7 +8,7 @@ use crate::{
     control::{self, ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus},
     file::{ProcessCfg, Restart, Trigger, Unit},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
 use netidx::{
@@ -26,10 +26,10 @@ use tokio::{
     fs,
     net::{UnixListener, UnixStream},
     process::{Child, Command},
-    signal::unix::{signal, SignalKind},
+    signal::unix::{SignalKind, signal},
     sync::{mpsc, oneshot},
     task,
-    time::{sleep, timeout, Instant},
+    time::{Instant, sleep, timeout},
 };
 
 /// Runtime helpers on `ProcessCfg`. Imported by callers that need to
@@ -103,11 +103,7 @@ pub fn default_units_dir() -> Option<PathBuf> {
         }
     }
     let p = PathBuf::from("/etc/netidx/activation");
-    if std::path::Path::is_dir(&p) {
-        Some(p)
-    } else {
-        None
-    }
+    if std::path::Path::is_dir(&p) { Some(p) } else { None }
 }
 
 /// Load every `*.unit` file from `dir` (or the default location). Keys
@@ -121,9 +117,7 @@ pub async fn load_units(dir: Option<&PathBuf>) -> Result<HashMap<String, Unit>> 
     let path = dir
         .cloned()
         .or_else(|| task::block_in_place(default_units_dir))
-        .ok_or_else(|| {
-            anyhow!("no unit directory specified and no default was found")
-        })?;
+        .ok_or_else(|| anyhow!("no unit directory specified and no default was found"))?;
     let mut hm: HashMap<String, Unit> = HashMap::new();
     let mut dirs = fs::read_dir(path).await?;
     while let Some(ent) = dirs.next_entry().await? {
@@ -147,9 +141,7 @@ pub async fn load_units(dir: Option<&PathBuf>) -> Result<HashMap<String, Unit>> 
     for unit in hm.values() {
         unit.process.validate().await?;
     }
-    crate::file::check_trigger_conflicts(
-        hm.iter().map(|(name, u)| (name.as_str(), u)),
-    )?;
+    crate::file::check_trigger_conflicts(hm.iter().map(|(name, u)| (name.as_str(), u)))?;
     Ok(hm)
 }
 
@@ -168,7 +160,10 @@ enum ToProcess {
     Reconfigure(Unit),
     /// A control-socket op; the resulting [`UnitStatus`] is sent back on
     /// `reply` so the caller can report what happened.
-    Control { op: ControlOp, reply: oneshot::Sender<UnitStatus> },
+    Control {
+        op: ControlOp,
+        reply: oneshot::Sender<UnitStatus>,
+    },
 }
 
 /// Snapshot a process's runtime state for the control protocol.
@@ -523,8 +518,9 @@ async fn handle_control_conn(
             match senders.keys().find(|k| unit_key(k) == unit_key(want)) {
                 Some(k) => out.push(k.clone()),
                 None => {
-                    let resp =
-                        ControlResponse::Err { reason: format!("no unit matching {want:?}") };
+                    let resp = ControlResponse::Err {
+                        reason: format!("no unit matching {want:?}"),
+                    };
                     return control::write_msg(&mut stream, &resp).await;
                 }
             }
@@ -543,7 +539,12 @@ async fn handle_control_conn(
                 let (rtx, rrx) = oneshot::channel();
                 // tx.send only fails if the supervisor task vanished (e.g. a
                 // concurrent reload removed the unit); report it, don't hang.
-                pending.push((display, tx.send(ToProcess::Control { op: req.op, reply: rtx }).ok().map(|()| rrx)));
+                pending.push((
+                    display,
+                    tx.send(ToProcess::Control { op: req.op, reply: rtx })
+                        .ok()
+                        .map(|()| rrx),
+                ));
             }
         }
     }
@@ -615,8 +616,11 @@ impl Server {
         // the conf server (same host, same user / root) drive a unit's
         // start/stop/restart/status on a role admin's behalf. Best-effort: a
         // bind failure logs and the supervisor still serves units.
-        let control_socket =
-            self.units_dir.clone().or_else(default_units_dir).map(|d| control::socket_path(&d));
+        let control_socket = self
+            .units_dir
+            .clone()
+            .or_else(default_units_dir)
+            .map(|d| control::socket_path(&d));
         let control_listener = control_socket.as_deref().and_then(bind_control);
         loop {
             select_biased! {
@@ -660,4 +664,3 @@ impl Server {
         Ok(())
     }
 }
-

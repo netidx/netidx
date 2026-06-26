@@ -1,6 +1,6 @@
 use crate::{
     config::NetidxConfig,
-    error::{clear_error, set_error, NetidxError},
+    error::{NetidxError, clear_error, set_error},
     path::NetidxPath,
     runtime::NetidxRuntime,
     timeout_from_millis,

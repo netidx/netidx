@@ -13,10 +13,11 @@
 
 use crate::conf_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
-    ListAdminsRequest, NodeKind, RemoveAdminRequest, Request, RotateAutorenewResponse,
-    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, PROTOCOL_VERSION,
+    ListAdminsRequest, NodeKind, PROTOCOL_VERSION, RemoveAdminRequest, Request,
+    RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
+    SetAdminPolicyRequest,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
@@ -135,8 +136,11 @@ pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
 pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminInfo>> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(&mut s, &Request::ListAdmins(ListAdminsRequest { admin, password }))
-        .await?;
+    conf_proto::write_msg(
+        &mut s,
+        &Request::ListAdmins(ListAdminsRequest { admin, password }),
+    )
+    .await?;
     match conf_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),

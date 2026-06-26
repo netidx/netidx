@@ -1,11 +1,11 @@
 use crate::{
-    error::{clear_error, set_error, NetidxError},
+    error::{NetidxError, clear_error, set_error},
     path::NetidxPath,
     publisher::NetidxPublisher,
     runtime::NetidxRuntime,
     subscriber::NetidxSubscriber,
-    value::NetidxValue,
     timeout_from_millis,
+    value::NetidxValue,
 };
 use netidx_protocols::channel;
 
@@ -33,7 +33,9 @@ pub extern "C" fn netidx_channel_listener_new(
     let path = unsafe { &*path }.inner.clone();
     let timeout = timeout_from_millis(timeout_ms);
     match rt.rt.block_on(channel::server::Listener::new(&pub_.inner, timeout, path)) {
-        Ok(listener) => Box::into_raw(Box::new(NetidxChannelListener { inner: listener })),
+        Ok(listener) => {
+            Box::into_raw(Box::new(NetidxChannelListener { inner: listener }))
+        }
         Err(e) => {
             unsafe { set_error(err, e) };
             std::ptr::null_mut()
@@ -54,7 +56,12 @@ pub extern "C" fn netidx_channel_listener_accept(
     unsafe { clear_error(err) };
     let rt = unsafe { &*rt };
     let listener = unsafe { &mut *listener };
-    match crate::block_on_timeout(&rt.rt, timeout_ms, "accept timed out", listener.inner.accept()) {
+    match crate::block_on_timeout(
+        &rt.rt,
+        timeout_ms,
+        "accept timed out",
+        listener.inner.accept(),
+    ) {
         Ok(conn) => Box::into_raw(Box::new(NetidxChannelServerConn { inner: conn })),
         Err(e) => {
             unsafe { set_error(err, e) };
@@ -88,10 +95,7 @@ pub extern "C" fn netidx_channel_server_conn_send_one(
 ) -> bool {
     unsafe { clear_error(err) };
     let v = unsafe { Box::from_raw(value) }.inner;
-    match unsafe { &*rt }
-        .rt
-        .block_on(unsafe { &*conn }.inner.send_one(v))
-    {
+    match unsafe { &*rt }.rt.block_on(unsafe { &*conn }.inner.send_one(v)) {
         Ok(()) => true,
         Err(e) => unsafe { set_error(err, e) },
     }
@@ -110,7 +114,12 @@ pub extern "C" fn netidx_channel_server_conn_recv_one(
     unsafe { clear_error(err) };
     let rt = unsafe { &*rt };
     let conn = unsafe { &*conn };
-    match crate::block_on_timeout(&rt.rt, timeout_ms, "recv timed out", conn.inner.recv_one()) {
+    match crate::block_on_timeout(
+        &rt.rt,
+        timeout_ms,
+        "recv timed out",
+        conn.inner.recv_one(),
+    ) {
         Ok(v) => Box::into_raw(Box::new(NetidxValue { inner: v })),
         Err(e) => {
             unsafe { set_error(err, e) };
@@ -129,9 +138,7 @@ pub extern "C" fn netidx_channel_server_conn_is_dead(
 
 /// Destroy a server connection.
 #[unsafe(no_mangle)]
-pub extern "C" fn netidx_channel_server_conn_destroy(
-    conn: *mut NetidxChannelServerConn,
-) {
+pub extern "C" fn netidx_channel_server_conn_destroy(conn: *mut NetidxChannelServerConn) {
     if !conn.is_null() {
         drop(unsafe { Box::from_raw(conn) });
     }
@@ -192,10 +199,7 @@ pub extern "C" fn netidx_channel_client_conn_flush(
     err: *mut NetidxError,
 ) -> bool {
     unsafe { clear_error(err) };
-    match unsafe { &*rt }
-        .rt
-        .block_on(unsafe { &*conn }.inner.flush())
-    {
+    match unsafe { &*rt }.rt.block_on(unsafe { &*conn }.inner.flush()) {
         Ok(()) => true,
         Err(e) => unsafe { set_error(err, e) },
     }
@@ -214,7 +218,12 @@ pub extern "C" fn netidx_channel_client_conn_recv_one(
     unsafe { clear_error(err) };
     let rt = unsafe { &*rt };
     let conn = unsafe { &*conn };
-    match crate::block_on_timeout(&rt.rt, timeout_ms, "recv timed out", conn.inner.recv_one()) {
+    match crate::block_on_timeout(
+        &rt.rt,
+        timeout_ms,
+        "recv timed out",
+        conn.inner.recv_one(),
+    ) {
         Ok(v) => Box::into_raw(Box::new(NetidxValue { inner: v })),
         Err(e) => {
             unsafe { set_error(err, e) };
@@ -233,9 +242,7 @@ pub extern "C" fn netidx_channel_client_conn_is_dead(
 
 /// Destroy a client connection.
 #[unsafe(no_mangle)]
-pub extern "C" fn netidx_channel_client_conn_destroy(
-    conn: *mut NetidxChannelClientConn,
-) {
+pub extern "C" fn netidx_channel_client_conn_destroy(conn: *mut NetidxChannelClientConn) {
     if !conn.is_null() {
         drop(unsafe { Box::from_raw(conn) });
     }

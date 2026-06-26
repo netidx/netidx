@@ -1,19 +1,19 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use futures::{SinkExt, StreamExt};
 use netidx::{
+    InternalOnly,
     path::Path,
     protocol::value::Value,
     publisher::{PublisherBuilder, Val},
     subscriber::SubscriberBuilder,
-    InternalOnly,
 };
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use std::{
     net::SocketAddr,
     time::{Duration, Instant},
 };
 use tokio::{net::TcpSocket, task::JoinHandle, time};
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(3);

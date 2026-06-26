@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
     path::Path,

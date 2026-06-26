@@ -14,8 +14,8 @@ use arcstr::ArcStr;
 use std::path::{Path, PathBuf};
 
 pub use netidx_id_map::file::{
-    check_name_chars, Group, GroupBuilder, IdMap, IdMapBuilder, Identity,
-    IdentityBuilder, Query, parse_bytes,
+    Group, GroupBuilder, IdMap, IdMapBuilder, Identity, IdentityBuilder, Query,
+    check_name_chars, parse_bytes,
 };
 
 /// Canonical user path for the id-map JSON
@@ -45,8 +45,8 @@ pub fn user_id_map_socket() -> Result<PathBuf> {
 /// first lookup.
 pub fn load<P: AsRef<Path>>(path: P) -> Result<IdMap> {
     let path = path.as_ref();
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading id-map {path:?}"))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading id-map {path:?}"))?;
     parse_bytes(&bytes)
 }
 
@@ -176,11 +176,7 @@ pub fn add_group_member(map: &mut IdMap, name: &str, group: &str) -> Result<()> 
 /// Drop `group` from `name`'s secondary group list. No-op if absent.
 /// Refuses to remove the primary group — change that via
 /// [`upsert_identity`] instead.
-pub fn remove_group_member(
-    map: &mut IdMap,
-    name: &str,
-    group: &str,
-) -> Result<()> {
+pub fn remove_group_member(map: &mut IdMap, name: &str, group: &str) -> Result<()> {
     let ident = map
         .identities
         .get_mut(name)
@@ -284,8 +280,7 @@ mod tests {
         let mut m = empty();
         upsert_group(&mut m, "users", 100);
         upsert_group(&mut m, "wheel", 10);
-        upsert_identity(&mut m, "alice.example.com", 1000, "users", &["wheel"])
-            .unwrap();
+        upsert_identity(&mut m, "alice.example.com", 1000, "users", &["wheel"]).unwrap();
         m
     }
 
@@ -325,19 +320,11 @@ mod tests {
     fn upsert_identity_validates_groups() {
         let mut m = seed();
         // Unknown primary.
-        assert!(
-            upsert_identity(&mut m, "bob.example.com", 1001, "ghost", &[]).is_err()
-        );
+        assert!(upsert_identity(&mut m, "bob.example.com", 1001, "ghost", &[]).is_err());
         // Unknown secondary.
         assert!(
-            upsert_identity(
-                &mut m,
-                "bob.example.com",
-                1001,
-                "users",
-                &["ghost"]
-            )
-            .is_err()
+            upsert_identity(&mut m, "bob.example.com", 1001, "users", &["ghost"])
+                .is_err()
         );
     }
 
@@ -353,8 +340,7 @@ mod tests {
     #[test]
     fn remove_group_member_refuses_primary() {
         let mut m = seed();
-        let err = remove_group_member(&mut m, "alice.example.com", "users")
-            .unwrap_err();
+        let err = remove_group_member(&mut m, "alice.example.com", "users").unwrap_err();
         assert!(format!("{err:#}").contains("primary group"));
     }
 
@@ -381,8 +367,7 @@ mod tests {
         assert_ne!(m.groups["users"].gid, m.groups["wheel"].gid);
         m.validate().unwrap();
         // Re-registration (a node re-joining) keeps the uid.
-        let again =
-            register_identity(&mut m, "eric.ryu-oh.org", "users", &[]).unwrap();
+        let again = register_identity(&mut m, "eric.ryu-oh.org", "users", &[]).unwrap();
         assert_eq!(again, uid);
         // A second identity gets the next uid.
         let bob = register_identity(&mut m, "bob.ryu-oh.org", "users", &[]).unwrap();
@@ -439,11 +424,7 @@ mod tests {
         let mut m = IdMap::default();
         m.identities.insert(
             ArcStr::from("alice"),
-            Identity {
-                uid: 1000,
-                primary_group: ArcStr::from("ghost"),
-                groups: vec![],
-            },
+            Identity { uid: 1000, primary_group: ArcStr::from("ghost"), groups: vec![] },
         );
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("id-map.json");

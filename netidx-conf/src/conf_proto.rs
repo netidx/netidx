@@ -13,7 +13,7 @@
 //! confirmation, password entry) from ever holding a connection — and
 //! the server's connection timeout — open.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -548,8 +548,12 @@ pub enum DelegationPollResponse {
     Pending,
     /// Approved — the parent resolver cluster's address(es), to write
     /// into the child's `parent` referral.
-    Approved { parent: Vec<ResolverAddr> },
-    Denied { reason: String },
+    Approved {
+        parent: Vec<ResolverAddr>,
+    },
+    Denied {
+        reason: String,
+    },
     /// Never seen, expired, or already cleaned up.
     Unknown,
 }
@@ -951,7 +955,8 @@ where
     // Zeroize the serialized frame on drop: admin passwords and the recovery
     // password ride these messages as `Secret`, so the plaintext JSON buffer
     // is a credential too. Cheap on a control plane (not a data path).
-    let body = zeroize::Zeroizing::new(serde_json::to_vec(msg).context("serializing message")?);
+    let body =
+        zeroize::Zeroizing::new(serde_json::to_vec(msg).context("serializing message")?);
     if body.len() as u64 > MAX_MSG as u64 {
         bail!("outgoing message too large ({} bytes)", body.len());
     }

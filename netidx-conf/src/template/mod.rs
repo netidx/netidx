@@ -19,8 +19,8 @@
 //! is documented in design/netidx-conf-future.md.
 
 use crate::{
-    activation, client, id_map as id_map_engine, perms,
-    resolver as resolver_engine, tls as tlsmod,
+    activation, client, id_map as id_map_engine, perms, resolver as resolver_engine,
+    tls as tlsmod,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -118,7 +118,6 @@ impl ReferralAuth {
             Self::Tls(n) => cfile::Auth::Tls(n),
         }
     }
-
 }
 
 /// One TLS identity to install and reference from `tls.identities`.
@@ -260,8 +259,7 @@ impl RenderedTemplate {
         // configs that reference it via `include_permissions` would
         // otherwise fail to validate on first apply.
         if let Some((p, m)) = &self.perms_file {
-            perms::save_perms(p, m)
-                .with_context(|| format!("saving perms to {p:?}"))?;
+            perms::save_perms(p, m).with_context(|| format!("saving perms to {p:?}"))?;
         }
 
         // 3.5) Drop the starter id-map JSON in place, but only when
@@ -280,8 +278,7 @@ impl RenderedTemplate {
             c.save(p).with_context(|| format!("saving client config to {p:?}"))?;
         }
         if let Some((p, r)) = &self.resolver_config {
-            r.save(p)
-                .with_context(|| format!("saving resolver config to {p:?}"))?;
+            r.save(p).with_context(|| format!("saving resolver config to {p:?}"))?;
         }
 
         // 5) Save activation units.
@@ -290,8 +287,7 @@ impl RenderedTemplate {
         {
             let ad = activation::ActivationDir::open(Some(dir.as_path()))?;
             for (name, unit) in &self.units {
-                ad.save(name, unit)
-                    .with_context(|| format!("saving unit {name}"))?;
+                ad.save(name, unit).with_context(|| format!("saving unit {name}"))?;
             }
         }
 
@@ -308,7 +304,8 @@ impl RenderedTemplate {
             // the right auth?" rather than just naming the output file.
             let cfg = &c.0;
             for (addr, auth) in &cfg.addrs {
-                let _ = writeln!(out, "    resolver {addr} ({})", describe_client_auth(auth));
+                let _ =
+                    writeln!(out, "    resolver {addr} ({})", describe_client_auth(auth));
             }
             if let Some(bind) = &cfg.default_bind_config {
                 let _ = writeln!(out, "    publisher bind: {bind}");
@@ -344,7 +341,10 @@ impl RenderedTemplate {
             let _ = writeln!(out, "perms file → {p:?} ({} entries)", m.0.len());
         }
         if let Some((p, _)) = &self.id_map_file {
-            let _ = writeln!(out, "id-map JSON → {p:?} (starter; preserved if file already exists)");
+            let _ = writeln!(
+                out,
+                "id-map JSON → {p:?} (starter; preserved if file already exists)"
+            );
         }
         if let Some(dir) = &self.units_dir {
             for name in self.units.keys() {
@@ -406,10 +406,8 @@ pub fn attach_to_network(
     }
 
     rt.client_config = Some((client_config_path.to_path_buf(), ccfg));
-    rt.tls_install = tls_identities
-        .iter()
-        .map(|s| s.install_job())
-        .collect::<Result<Vec<_>>>()?;
+    rt.tls_install =
+        tls_identities.iter().map(|s| s.install_job()).collect::<Result<Vec<_>>>()?;
     Ok(rt)
 }
 
@@ -486,10 +484,7 @@ pub fn describe_ref_auth(auth: &rfile::RefAuth) -> String {
 /// installs into `tls_dest` before the resolver tries to load the
 /// cert. Used by `standalone_resolver`, where the resolver owns its
 /// identity.
-pub(crate) fn resolver_auth_from(
-    choice: &AuthChoice,
-    tls_dest: &Path,
-) -> rfile::Auth {
+pub(crate) fn resolver_auth_from(choice: &AuthChoice, tls_dest: &Path) -> rfile::Auth {
     match choice {
         AuthChoice::Anonymous => rfile::Auth::Anonymous,
         AuthChoice::Local { path } => {
@@ -570,30 +565,19 @@ pub(crate) fn client_tls_section_from(
             default = Some(key.clone());
         }
         if askpass.is_none() {
-            askpass = spec
-                .askpass
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned());
+            askpass = spec.askpass.as_ref().map(|p| p.to_string_lossy().into_owned());
         }
         map.insert(key, identity);
     }
-    Ok(Some(cfile::Tls {
-        default_identity: default,
-        identities: map,
-        askpass,
-    }))
+    Ok(Some(cfile::Tls { default_identity: default, identities: map, askpass }))
 }
 
 /// Build a TLS section for the *resolver-side* identity (used by
 /// `standalone_resolver` when its `auth` is `AuthChoice::Tls`). Same
 /// as the resolver's `Auth::Tls { ... }` but the install job is
 /// produced separately.
-pub(crate) fn resolver_tls_copy_job(
-    choice: &AuthChoice,
-) -> Result<Option<TlsCopyJob>> {
-    let AuthChoice::Tls {
-        name, certificate, private_key, trusted, askpass: _,
-    } = choice
+pub(crate) fn resolver_tls_copy_job(choice: &AuthChoice) -> Result<Option<TlsCopyJob>> {
+    let AuthChoice::Tls { name, certificate, private_key, trusted, askpass: _ } = choice
     else {
         return Ok(None);
     };
@@ -662,7 +646,6 @@ pub(crate) fn parent_into_file(p: ParentRef) -> rfile::Referral {
             .collect(),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

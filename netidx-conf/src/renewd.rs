@@ -26,7 +26,7 @@
 //! renewal is continuation under trust already established.
 
 use crate::{atomic, conf_client, conf_proto::NodeKind, paths};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
 use std::{
@@ -96,8 +96,7 @@ pub fn host_identities() -> Vec<Identity> {
             Ok(cfg) => {
                 use netidx::resolver_server::config::file::Auth;
                 for m in &cfg.0.member_servers {
-                    if let Auth::Tls { trusted, certificate, private_key, .. } = &m.auth
-                    {
+                    if let Auth::Tls { trusted, certificate, private_key, .. } = &m.auth {
                         push(Identity {
                             certificate: PathBuf::from(certificate.as_str()),
                             private_key: PathBuf::from(private_key.as_str()),
@@ -271,7 +270,7 @@ fn load_pending(certificate: &Path) -> Result<Option<conf_client::PendingRenewal
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(e).with_context(|| format!("reading {}", meta_path.display()))
+            return Err(e).with_context(|| format!("reading {}", meta_path.display()));
         }
     };
     let meta: PersistedRenewal =
@@ -331,10 +330,7 @@ async fn renew_identity(
     let ca_addr = find_ca_addr(server, &roots).await?;
     let pending = match load_pending(&id.certificate)? {
         Some(pending) => {
-            info!(
-                "renewd: resuming renewal of {name} (request {})",
-                pending.request_id
-            );
+            info!("renewd: resuming renewal of {name} (request {})", pending.request_id);
             pending
         }
         None => {
@@ -348,8 +344,7 @@ async fn renew_identity(
             // approving admin's policy server-side). Kept at second
             // resolution so a short-lived cert renews to the same short
             // window rather than silently rounding up to a day.
-            let validity =
-                Duration::from_secs(na.saturating_sub(nb).max(1));
+            let validity = Duration::from_secs(na.saturating_sub(nb).max(1));
             let pending = conf_client::enqueue_renewal(
                 ca_addr,
                 NodeKind::Client,
@@ -393,9 +388,7 @@ async fn renew_identity(
             conf_client::PollOutcome::Issued(issued) => {
                 install(id, &issued)?;
                 clear_pending(&id.certificate);
-                info!(
-                    "renewd: renewed {name}; running processes pick it up on restart"
-                );
+                info!("renewd: renewed {name}; running processes pick it up on restart");
                 return Ok("renewed");
             }
             conf_client::PollOutcome::Denied(reason) => {
@@ -460,8 +453,9 @@ fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
         atomic::write_atomic(&id.private_key, issued.private_key_pem.as_bytes(), 0o600)?;
     }
     atomic::write_atomic(&id.certificate, cert_payload.as_bytes(), 0o644)?;
-    let installed_pem = std::fs::read_to_string(&id.trusted)
-        .with_context(|| format!("reading current trust bundle {}", id.trusted.display()))?;
+    let installed_pem = std::fs::read_to_string(&id.trusted).with_context(|| {
+        format!("reading current trust bundle {}", id.trusted.display())
+    })?;
     let reconciled =
         conf_client::reconcile_trusted_bundle(&installed_pem, &issued.trusted_pem)
             .context("reconciling the renewed trust bundle")?;

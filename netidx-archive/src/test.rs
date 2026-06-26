@@ -1,6 +1,6 @@
 use crate::{
     config::{ConfigBuilder, PublishConfigBuilder, RecordConfigBuilder},
-    logfile::{BatchItem, Seek, BATCH_POOL},
+    logfile::{BATCH_POOL, BatchItem, Seek},
     recorder::{Recorder, State},
     recorder_client::{Client, Speed},
 };
@@ -14,17 +14,17 @@ use futures::{
 };
 use netidx::{
     config::{
-        file::{self as client, Auth as CAuth},
         Config as CConfig, DefaultAuthMech,
+        file::{self as client, Auth as CAuth},
     },
     path::Path,
     publisher::{Publisher, PublisherBuilder, Value},
     resolver_server::{
-        config::{
-            file::{self as server, Auth as SAuth},
-            Config as SConfig,
-        },
         Server,
+        config::{
+            Config as SConfig,
+            file::{self as server, Auth as SAuth},
+        },
     },
     subscriber::{Event, Subscriber, SubscriberBuilder, UpdatesFlags},
 };
@@ -41,12 +41,14 @@ struct Ctx {
 impl Ctx {
     async fn new() -> Result<Self> {
         let server_cfg = server::ConfigBuilder::default()
-            .member_servers(vec![server::MemberServerBuilder::default()
-                .addr("127.0.0.1:0".parse().context("parsing addr")?)
-                .bind_addr("127.0.0.1".parse().context("parsing ip addr")?)
-                .auth(SAuth::Anonymous)
-                .build()
-                .context("member server config")?])
+            .member_servers(vec![
+                server::MemberServerBuilder::default()
+                    .addr("127.0.0.1:0".parse().context("parsing addr")?)
+                    .bind_addr("127.0.0.1".parse().context("parsing ip addr")?)
+                    .auth(SAuth::Anonymous)
+                    .build()
+                    .context("member server config")?,
+            ])
             .build()
             .context("server config")?;
         let server_cfg =

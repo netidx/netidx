@@ -14,8 +14,8 @@ use crate::{
 };
 use ahash::AHashMap;
 use anyhow::{Context, Result};
-use arcstr::{literal, ArcStr};
-use auth::{UserInfo, ANONYMOUS};
+use arcstr::{ArcStr, literal};
+use auth::{ANONYMOUS, UserInfo};
 use config::{Config, MemberServer};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
@@ -24,7 +24,7 @@ use netidx_core::{pack::BoundedBytes, utils::make_sha3_token};
 use nohash::IntSet;
 use parking_lot::Mutex as SyncMutex;
 use poolshark::global::{GPooled, Pool};
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
@@ -809,7 +809,10 @@ async fn hello_client_read(
         AuthRead::Tls => match &ctx.secctx {
             SecCtx::Tls(a) => {
                 let tls =
-                    a.0.acceptor().accept(con).await.context("accepting tls connection")?;
+                    a.0.acceptor()
+                        .accept(con)
+                        .await
+                        .context("accepting tls connection")?;
                 let uifo =
                     get_tls_uifo(ctx.id, &tls, a).await.context("getting tls info")?;
                 let mut con = Channel::new::<

@@ -8,11 +8,11 @@ mod resolver {
         protocol::glob::{Glob, GlobSet},
         publisher::PublishFlags,
         resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
-        resolver_server::{config::Config as ServerConfig, Server},
+        resolver_server::{Server, config::Config as ServerConfig},
     };
     use arcstr::literal;
     use netidx_netproto::resolver::{PublisherPriority, TargetAuth};
-    use rand::{rng, RngExt};
+    use rand::{RngExt, rng};
     use std::{iter, net::SocketAddr, time::Duration};
     use tokio::time;
 
@@ -409,7 +409,7 @@ mod publisher {
             PublisherBuilder, Val,
         },
         resolver_client::ResolverRead,
-        resolver_server::{config::Config as ServerConfig, Server},
+        resolver_server::{Server, config::Config as ServerConfig},
         subscriber::{Event, SubId, Subscriber, SubscriberBuilder, UpdatesFlags, Value},
     };
     use anyhow::Result;
@@ -637,11 +637,11 @@ mod publisher {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn krb5_publish_subscribe() {
-        use crate::resolver_server::config::{self as sconfig, file as sfile, PMap};
-        use crate::config::{self as cconfig, file as cfile, DefaultAuthMech};
+        use super::kdc::TestKdc;
+        use crate::config::{self as cconfig, DefaultAuthMech, file as cfile};
+        use crate::resolver_server::config::{self as sconfig, PMap, file as sfile};
         use arcstr::ArcStr;
         use std::collections::HashMap;
-        use super::kdc::TestKdc;
 
         let _ = env_logger::try_init();
 
@@ -677,13 +677,15 @@ mod publisher {
         let mut paths = HashMap::new();
         paths.insert(ArcStr::from("/"), entity_perms);
         let server_cfg = sfile::ConfigBuilder::default()
-            .member_servers(vec![sfile::MemberServerBuilder::default()
-                .auth(sfile::Auth::Krb5(ArcStr::from(RESOLVER_SPN)))
-                .addr("127.0.0.1:0".parse().unwrap())
-                .bind_addr("127.0.0.1".parse().unwrap())
-                .id_map_type(sfile::IdMapType::DoNotMap)
-                .build()
-                .unwrap()])
+            .member_servers(vec![
+                sfile::MemberServerBuilder::default()
+                    .auth(sfile::Auth::Krb5(ArcStr::from(RESOLVER_SPN)))
+                    .addr("127.0.0.1:0".parse().unwrap())
+                    .bind_addr("127.0.0.1".parse().unwrap())
+                    .id_map_type(sfile::IdMapType::DoNotMap)
+                    .build()
+                    .unwrap(),
+            ])
             .perms(PMap(paths))
             .build()
             .unwrap();
@@ -708,8 +710,7 @@ mod publisher {
             upn: Some(USER_UPN.to_string()),
             spn: Some(PUBLISHER_SPN.to_string()),
         };
-        let sub_auth =
-            DesiredAuth::Krb5 { upn: Some(USER_UPN.to_string()), spn: None };
+        let sub_auth = DesiredAuth::Krb5 { upn: Some(USER_UPN.to_string()), spn: None };
         task::spawn(run_publisher(
             client_cfg.clone(),
             default_destroyed.clone(),
@@ -728,18 +729,20 @@ mod publisher {
         let resolver = {
             use crate::resolver_server::config::{self, file};
             let cfg = file::ConfigBuilder::default()
-                .member_servers(vec![file::MemberServerBuilder::default()
-                    .auth(file::Auth::Anonymous)
-                    .addr("127.0.0.1:0".parse()?)
-                    .bind_addr("127.0.0.1".parse()?)
-                    .build()?])
+                .member_servers(vec![
+                    file::MemberServerBuilder::default()
+                        .auth(file::Auth::Anonymous)
+                        .addr("127.0.0.1:0".parse()?)
+                        .bind_addr("127.0.0.1".parse()?)
+                        .build()?,
+                ])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
             crate::resolver_server::Server::new(cfg, false, 0).await?
         };
         let addr = *resolver.local_addr();
         let cfg = {
-            use crate::config::{self, file, DefaultAuthMech};
+            use crate::config::{self, DefaultAuthMech, file};
             let cfg = file::ConfigBuilder::default()
                 .addrs(vec![(addr, file::Auth::Anonymous)])
                 .default_auth(DefaultAuthMech::Anonymous)
@@ -886,18 +889,20 @@ mod publisher {
         let resolver = {
             use crate::resolver_server::config::{self, file};
             let cfg = file::ConfigBuilder::default()
-                .member_servers(vec![file::MemberServerBuilder::default()
-                    .auth(file::Auth::Anonymous)
-                    .addr("127.0.0.1:0".parse()?)
-                    .bind_addr("127.0.0.1".parse()?)
-                    .build()?])
+                .member_servers(vec![
+                    file::MemberServerBuilder::default()
+                        .auth(file::Auth::Anonymous)
+                        .addr("127.0.0.1:0".parse()?)
+                        .bind_addr("127.0.0.1".parse()?)
+                        .build()?,
+                ])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
             crate::resolver_server::Server::new(cfg, false, 0).await?
         };
         let addr = *resolver.local_addr();
         let cfg = {
-            use crate::config::{self, file, DefaultAuthMech};
+            use crate::config::{self, DefaultAuthMech, file};
             let cfg = file::ConfigBuilder::default()
                 .addrs(vec![(addr, file::Auth::Anonymous)])
                 .default_auth(DefaultAuthMech::Anonymous)

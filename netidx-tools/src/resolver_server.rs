@@ -9,12 +9,12 @@ use extended_notify::{
 };
 use log::{info, warn};
 use netidx::resolver_server::{
-    config::{self, file, Config},
     Server,
+    config::{self, Config, file},
 };
 use std::path::PathBuf;
 #[cfg(unix)]
-use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 
 #[derive(Args, Debug)]

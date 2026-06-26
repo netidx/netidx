@@ -26,9 +26,8 @@ pub fn path(ca_dir: &Path) -> PathBuf {
 pub fn load(ca_dir: &Path) -> Result<NetworkMap> {
     let p = path(ca_dir);
     match std::fs::read(&p) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("parsing network map {p:?}"))
-        }
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing network map {p:?}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NetworkMap::default()),
         Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
     }
@@ -123,7 +122,10 @@ mod tests {
     fn load_missing_is_empty_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), NetworkMap::default());
-        let mut m = NetworkMap { ca_addr: Some("10.0.0.1:4565".parse().unwrap()), ..Default::default() };
+        let mut m = NetworkMap {
+            ca_addr: Some("10.0.0.1:4565".parse().unwrap()),
+            ..Default::default()
+        };
         upsert(&mut m, entry("10.0.0.1:4565", vec![Role::Ca]));
         save(dir.path(), &m).unwrap();
         assert_eq!(load(dir.path()).unwrap(), m);

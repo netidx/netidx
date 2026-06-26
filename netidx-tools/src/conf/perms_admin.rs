@@ -159,8 +159,9 @@ fn edit(f: Flags) -> Result<()> {
         Some(user) => prompt::string_with_default("admin name", None, &user)?,
         None => prompt::required_string("admin name", None)?,
     };
-    let password =
-        Zeroizing::new(collect_existing_password(&format!("CA password for admin {admin:?}"))?);
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
     let peers = with_same_ca(&bs, ca_addr, |id| {
         bs.rt.block_on(conf_client::edit_perms(
             ca_addr,
@@ -184,7 +185,9 @@ fn validate(s: &str) -> Result<String> {
     let pmap: perms::PMap = serde_json::from_str(s).context("not valid perms JSON")?;
     for (path, entity, bits) in perms::iter(&pmap) {
         netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
-            .with_context(|| format!("invalid permission bits {bits:?} for {entity} at {path}"))?;
+            .with_context(|| {
+                format!("invalid permission bits {bits:?} for {entity} at {path}")
+            })?;
     }
     serde_json::to_string(&pmap).context("serializing perms")
 }

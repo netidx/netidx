@@ -41,7 +41,8 @@ pub(crate) fn detect_public_ip() -> Option<Ipv4Addr> {
 
 async fn detect_public_ip_async() -> Option<Ipv4Addr> {
     use futures::future::FutureExt;
-    let mut futs = vec![detect_aws().boxed(), detect_gcp().boxed(), detect_azure().boxed()];
+    let mut futs =
+        vec![detect_aws().boxed(), detect_gcp().boxed(), detect_azure().boxed()];
     while !futs.is_empty() {
         let (result, _, remaining) = futures::future::select_all(futs).await;
         futs = remaining;
@@ -240,11 +241,7 @@ mod tests {
         let cgroup = dir.path().join("cgroup");
         // Typical /proc/1/cgroup on a host running systemd: no
         // container runtime markers anywhere in the slice path.
-        std::fs::write(
-            &cgroup,
-            b"0::/init.scope\n",
-        )
-        .unwrap();
+        std::fs::write(&cgroup, b"0::/init.scope\n").unwrap();
         assert!(!detect_container_at(
             dir.path().join("no-docker").to_str().unwrap(),
             dir.path().join("no-podman").to_str().unwrap(),

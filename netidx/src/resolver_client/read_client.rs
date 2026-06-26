@@ -1,6 +1,6 @@
 use super::common::{
-    krb5_authentication, DesiredAuth, Response, ResponseChan, FROMREADPOOL, HELLO_TO,
-    PUBLISHERPOOL, RAWFROMREADPOOL,
+    DesiredAuth, FROMREADPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMREADPOOL, Response,
+    ResponseChan, krb5_authentication,
 };
 use crate::{
     channel::{self, Channel, K5CtxWrap},
@@ -20,7 +20,7 @@ use futures::{
 };
 use log::{info, warn};
 use poolshark::{global::GPooled, local::LPooled};
-use rand::{rng, seq::SliceRandom, RngExt};
+use rand::{RngExt, rng, seq::SliceRandom};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, task, time};
 

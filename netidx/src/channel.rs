@@ -1,7 +1,7 @@
 use crate::{pack::Pack, utils};
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{buf::UninitSlice, Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut, buf::UninitSlice};
 use cross_krb5::K5Ctx;
 use futures::{
     channel::{
@@ -132,10 +132,7 @@ async fn flush_buf<B: Buf, S: AsyncWrite + Send + 'static>(
     Ok(())
 }
 
-fn flush_task<
-    C: K5Ctx + Debug + Send + 'static,
-    S: AsyncWrite + Send + 'static,
->(
+fn flush_task<C: K5Ctx + Debug + Send + 'static, S: AsyncWrite + Send + 'static>(
     ctx: Option<K5CtxWrap<C>>,
     mut soc: WriteHalf<S>,
 ) -> Sender<BytesMut> {

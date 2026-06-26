@@ -1,6 +1,6 @@
 //! Hierarchical path handling and manipulation.
 use crate::pack::{Pack, PackError};
-use arcstr::{literal, ArcStr};
+use arcstr::{ArcStr, literal};
 use bytes::{Buf, BufMut};
 use escaping::Escape;
 use std::{
@@ -130,21 +130,13 @@ impl<'a> From<&'a String> for Path {
 
 impl From<ArcStr> for Path {
     fn from(s: ArcStr) -> Path {
-        if is_canonical(&*s) {
-            Path(s)
-        } else {
-            Path(ArcStr::from(canonize(&*s)))
-        }
+        if is_canonical(&*s) { Path(s) } else { Path(ArcStr::from(canonize(&*s))) }
     }
 }
 
 impl From<&ArcStr> for Path {
     fn from(s: &ArcStr) -> Path {
-        if is_canonical(s) {
-            Path(s.clone())
-        } else {
-            Path(ArcStr::from(canonize(s)))
-        }
+        if is_canonical(s) { Path(s.clone()) } else { Path(ArcStr::from(canonize(s))) }
     }
 }
 

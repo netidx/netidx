@@ -5,7 +5,7 @@ use netidx::{
     protocol::resolver::PublisherPriority,
     publisher::Publisher,
     resolver_client::DesiredAuth,
-    resolver_server::{config::Config as ServerConfig, Server},
+    resolver_server::{Server, config::Config as ServerConfig},
     subscriber::{Subscriber, Value},
 };
 use std::{sync::Arc, time::Duration};

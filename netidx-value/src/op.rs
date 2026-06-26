@@ -323,27 +323,43 @@ macro_rules! apply_op_mixed_decimal {
             Value::I8(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
             Value::U16(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
             Value::I16(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
-            Value::U32(r) | Value::V32(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
-            Value::I32(r) | Value::Z32(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
-            Value::U64(r) | Value::V64(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
-            Value::I64(r) | Value::Z64(r) => checked_decimal!($lhs, $dec_method, Decimal::from(r)),
+            Value::U32(r) | Value::V32(r) => {
+                checked_decimal!($lhs, $dec_method, Decimal::from(r))
+            }
+            Value::I32(r) | Value::Z32(r) => {
+                checked_decimal!($lhs, $dec_method, Decimal::from(r))
+            }
+            Value::U64(r) | Value::V64(r) => {
+                checked_decimal!($lhs, $dec_method, Decimal::from(r))
+            }
+            Value::I64(r) | Value::Z64(r) => {
+                checked_decimal!($lhs, $dec_method, Decimal::from(r))
+            }
             Value::F32(r) => {
                 let d = match Decimal::try_from(r) {
-                    Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
-                    Ok(d) => d
+                    Err(e) => {
+                        return Value::error(format!(
+                            "could not convert {e:?} to decimal"
+                        ));
+                    }
+                    Ok(d) => d,
                 };
                 checked_decimal!($lhs, $dec_method, d)
-            },
+            }
             Value::F64(r) => {
                 let d = match Decimal::try_from(r) {
-                    Err(e) => return Value::error(format!("could not convert {e:?} to decimal")),
-                    Ok(d) => d
+                    Err(e) => {
+                        return Value::error(format!(
+                            "could not convert {e:?} to decimal"
+                        ));
+                    }
+                    Ok(d) => d,
                 };
                 checked_decimal!($lhs, $dec_method, d)
             }
             _ => unreachable!(),
         }
-    }
+    };
 }
 
 macro_rules! number {

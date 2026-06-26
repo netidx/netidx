@@ -6,11 +6,14 @@ use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
 // Qualified `conf_proto::` uses are all in the unix-only conf-server
 // enrollment path; the items below are cross-platform.
+use clap::Args;
 #[cfg(unix)]
 use netidx_conf::conf_proto;
+use netidx_conf::tls;
 use netidx_conf::{
-    conf_client, discovery,
+    conf_client,
     conf_proto::{InfoAuth, NodeKind, Role},
+    discovery,
     fingerprint::ColorMode,
     netshape::NetShape,
     paths,
@@ -20,8 +23,6 @@ use netidx_conf::{
         resolver::IdMapMode,
     },
 };
-use zeroize::Zeroizing;
-use netidx_conf::tls;
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
@@ -29,7 +30,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use clap::Args;
+use zeroize::Zeroizing;
 
 // `ca` submodule depends on netidx_conf::ca which is unix-only.
 #[cfg(unix)]
@@ -126,24 +127,23 @@ impl TlsIdentityFlags {
         }
         let cert = self.cert.as_ref().context("--tls-cert required")?.clone();
         let key = self.key.as_ref().context("--tls-key required")?.clone();
-        let trusted =
-            self.trusted.as_ref().context("--tls-trusted required")?.clone();
+        let trusted = self.trusted.as_ref().context("--tls-trusted required")?.clone();
         // Default `our_name` to the cert's DNS SAN — same trick the
         // interactive cascade uses for BYO certs. Asking the
         // operator to type the SAN that's already in the cert just
         // lets them get it wrong; reading it is always correct.
         let our_name = match &self.our_name {
             Some(s) => s.clone(),
-            None => netidx_conf::tls::extract_dns_san_from_pem(&cert).with_context(
-                || {
+            None => {
+                netidx_conf::tls::extract_dns_san_from_pem(&cert).with_context(|| {
                     format!(
                         "deriving --tls-our-name from {} — supply a cert with a \
                          DNS SubjectAlternativeName entry, or pass \
                          --tls-our-name explicitly",
                         cert.display(),
                     )
-                },
-            )?,
+                })?
+            }
         };
         // Default `server_pattern` to the *domain* part of the SAN.
         // netidx keys `tls.identities` by trust domain (one entry
@@ -282,10 +282,7 @@ impl ParentFlags {
                     .context("--parent-tls-name required for parent-auth tls")?,
             )),
         };
-        let path = self
-            .parent_path
-            .as_deref()
-            .unwrap_or(default_path);
+        let path = self.parent_path.as_deref().unwrap_or(default_path);
         Ok(Some(ParentRef {
             path: ArcStr::from(path),
             ttl: self.parent_ttl,
@@ -611,11 +608,8 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
             },
         }
     };
-    let owner = if f.no_perms {
-        None
-    } else {
-        resolve_workstation_owner(f.owner.clone())?
-    };
+    let owner =
+        if f.no_perms { None } else { resolve_workstation_owner(f.owner.clone())? };
     // Struct-literal construction so adding a field to
     // WorkstationParams forces a compile error here rather than
     // silently leaving the new field defaulted (14th commandment).
@@ -794,10 +788,7 @@ fn prompt_parent_referral(
         AuthKind::Anonymous => (ReferralAuth::Anonymous, None),
         AuthKind::Local => {
             let socket = prompt::required_path("parent local-auth socket path", None)?;
-            (
-                ReferralAuth::Local(ArcStr::from(socket.to_string_lossy().as_ref())),
-                None,
-            )
+            (ReferralAuth::Local(ArcStr::from(socket.to_string_lossy().as_ref())), None)
         }
         AuthKind::Krb5 => {
             let spn = prompt::required_string(
@@ -807,11 +798,8 @@ fn prompt_parent_referral(
             (ReferralAuth::Krb5(ArcStr::from(spn.as_str())), None)
         }
         AuthKind::Tls => {
-            let server_name = prompt_resolver_tls_name(
-                Some(addr),
-                "parent TLS server name",
-                None,
-            )?;
+            let server_name =
+                prompt_resolver_tls_name(Some(addr), "parent TLS server name", None)?;
             // identity is required for TLS — either bring one or
             // (the generate path diverges via `bail!`). Suggest our own
             // SAN as `<user>.<domain>`, the domain taken from the
@@ -900,7 +888,10 @@ fn maybe_join_ca_server(
 
 /// Print a confirmed-or-not network identity: domain, claimed roles,
 /// fingerprint text + identicon.
-pub(super) fn show_network_identity(addr: SocketAddr, identity: &conf_client::CaIdentity) {
+pub(super) fn show_network_identity(
+    addr: SocketAddr,
+    identity: &conf_client::CaIdentity,
+) {
     println!(
         "The conf server at {addr} serves network {:?} (roles: {}) and presented \
          this identity:",
@@ -1114,11 +1105,7 @@ pub(super) fn prompt_id_map_groups(
         .map(|s| s.to_string())
         .collect()
     };
-    Ok(raw
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect())
+    Ok(raw.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
 }
 
 /// How long the install flows browse mDNS for conf servers.
@@ -1452,10 +1439,8 @@ fn prompt_tls_client_identity(
         }
         let certificate = PathBuf::from(cert_choice);
         let private_key = prompt::required_path("your TLS private key path", None)?;
-        let trusted = prompt::required_path(
-            "trusted CA bundle (signs the parent's cert)",
-            None,
-        )?;
+        let trusted =
+            prompt::required_path("trusted CA bundle (signs the parent's cert)", None)?;
         // Extract the identity name from the cert's DNS SAN rather
         // than asking the operator. netidx's runtime keys identities
         // by the cert's `alt_name` at TLS-load time, so the on-disk
@@ -1494,10 +1479,7 @@ fn prompt_tls_client_identity(
     // certs don't clobber each other on disk.
     let server_pattern = netidx_conf::tls::domain_from_san(our_name.as_str())
         .with_context(|| {
-            format!(
-                "deriving identity domain from cert SAN {:?}",
-                our_name
-            )
+            format!("deriving identity domain from cert SAN {:?}", our_name)
         })?;
     // These paths are already at (or, for BYO, point directly at) their
     // final home, so no staging tempdir is needed.
@@ -1712,7 +1694,11 @@ fn choose_key_protection(
         Some(KeyProtArg::Password) => "password".to_string(),
         Some(KeyProtArg::None) => "none".to_string(),
         None if !prompt::stdin_is_tty() => {
-            if tpm { "seal".to_string() } else { "none".to_string() }
+            if tpm {
+                "seal".to_string()
+            } else {
+                "none".to_string()
+            }
         }
         None => {
             let (options, default): (&[&str], &str) = if tpm {
@@ -1760,9 +1746,8 @@ fn choose_key_protection(
             // Name the identity so an operator setting up several
             // certs in one session knows which key this password is
             // for.
-            let pw = rpassword::prompt_password(format!(
-                "private key password for {name}: "
-            ))?;
+            let pw =
+                rpassword::prompt_password(format!("private key password for {name}: "))?;
             if pw.is_empty() {
                 bail!("empty password; choose 'none' for an unprotected key");
             }
@@ -1842,9 +1827,8 @@ fn generate_csr_and_wait_for_cert(
     kp: Option<KeyProtArg>,
 ) -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     let dest_dir = tls::identity_dir(name)?;
-    std::fs::create_dir_all(&dest_dir).with_context(|| {
-        format!("creating identity dir {}", dest_dir.display())
-    })?;
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("creating identity dir {}", dest_dir.display()))?;
     let key_path = dest_dir.join("private.key");
     let cert_path = dest_dir.join("certificate.pem");
     let trusted_path = dest_dir.join("trusted.pem");
@@ -1886,7 +1870,9 @@ fn generate_csr_and_wait_for_cert(
             );
         }
         KeyProtection::Password { .. } => {
-            println!("  private key is encrypted; password saved to the system keychain.");
+            println!(
+                "  private key is encrypted; password saved to the system keychain."
+            );
         }
         KeyProtection::None => (),
     }
@@ -2054,11 +2040,8 @@ fn prompt_resolver_own_tls_name(provided: Option<String>) -> Result<String> {
         None,
         DEFAULT_TLS_DOMAIN,
     )?;
-    let name = prompt::string_with_default(
-        "this resolver's name",
-        None,
-        DEFAULT_RESOLVER_NAME,
-    )?;
+    let name =
+        prompt::string_with_default("this resolver's name", None, DEFAULT_RESOLVER_NAME)?;
     let (name, domain) = (name.trim(), domain.trim());
     if name.is_empty() {
         bail!("resolver name must not be empty");
@@ -2314,10 +2297,18 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         }
         None => {
             if f.auth.is_none() && prompt::stdin_is_tty() {
-                println!("auth scheme — how clients prove who they are to this resolver:");
-                println!("  anonymous  no authentication; any client may connect (labs, trusted LANs)");
-                println!("  tls        certificate-based identity — the recommended default for a network");
-                println!("  krb5       Kerberos; choose this only if your site already runs it");
+                println!(
+                    "auth scheme — how clients prove who they are to this resolver:"
+                );
+                println!(
+                    "  anonymous  no authentication; any client may connect (labs, trusted LANs)"
+                );
+                println!(
+                    "  tls        certificate-based identity — the recommended default for a network"
+                );
+                println!(
+                    "  krb5       Kerberos; choose this only if your site already runs it"
+                );
             }
             prompt::choice_with_default(
                 "auth scheme",
@@ -2410,13 +2401,12 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // resolver/id-map units so the one supervisor (and the one system
     // service we offer below) runs them all.
     let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
-    let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } =
-        match probe.have() {
-            Some(net) => resolver_auth_from_network(&f, net, kind)?,
-            None => {
-                resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?
-            }
-        };
+    let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } = match probe
+        .have()
+    {
+        Some(net) => resolver_auth_from_network(&f, net, kind)?,
+        None => resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?,
+    };
     // First server of a new network with a non-TLS data plane: the
     // conf plane still needs its trust root (it is always TLS — the
     // glyph confirm, enrollment, and server-to-server pushes all hang
@@ -2570,7 +2560,9 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
                     ttl: None,
                     addrs: parent_addrs
                         .into_iter()
-                        .map(|r| (r.addr, super::delegation::info_to_referral_auth(&r.auth)))
+                        .map(|r| {
+                            (r.addr, super::delegation::info_to_referral_auth(&r.auth))
+                        })
                         .collect(),
                 })
             }
@@ -2712,13 +2704,21 @@ fn resolve_id_map_choice(auth: &AuthChoice, no_id_map: bool) -> Result<IdMapMode
         }
         AuthChoice::Krb5 { .. } => {
             if prompt::stdin_is_tty() {
-                println!("how to map kerberos principals to unix ids for permission checks:");
-                println!("  platform  the system's `id`/nsswitch resolves full principals \
-                          — use this with a site IdM (FreeIPA, AD, sssd)");
-                println!("  netidx    run the netidx id-mapper and map principals yourself \
-                          (no system IdM needed)");
-                println!("  none      don't map — permissions are keyed on the raw \
-                          principal (simplest; no IdM, no daemon)");
+                println!(
+                    "how to map kerberos principals to unix ids for permission checks:"
+                );
+                println!(
+                    "  platform  the system's `id`/nsswitch resolves full principals \
+                          — use this with a site IdM (FreeIPA, AD, sssd)"
+                );
+                println!(
+                    "  netidx    run the netidx id-mapper and map principals yourself \
+                          (no system IdM needed)"
+                );
+                println!(
+                    "  none      don't map — permissions are keyed on the raw \
+                          principal (simplest; no IdM, no daemon)"
+                );
             }
             let choice: String = prompt::choice_with_default(
                 "principal mapping",
@@ -3140,7 +3140,9 @@ fn resolver_tls_generate(
             );
         }
         KeyProtection::Password { .. } => {
-            println!("  private key is encrypted; password saved to the system keychain.");
+            println!(
+                "  private key is encrypted; password saved to the system keychain."
+            );
         }
         KeyProtection::None => (),
     }
@@ -3186,12 +3188,13 @@ fn resolver_auth_from_network(
              host-local by definition)"
         ),
         AuthKind::Krb5 => {
-            if let Some(example) = net.info.resolvers.iter().find_map(|r| match &r.auth
-            {
+            if let Some(example) = net.info.resolvers.iter().find_map(|r| match &r.auth {
                 InfoAuth::Krb5 { spn } => Some(spn.as_str()),
                 _ => None,
             }) {
-                println!("note: an existing resolver on this network uses SPN {example:?}");
+                println!(
+                    "note: an existing resolver on this network uses SPN {example:?}"
+                );
             }
             Ok(ResolvedAuth::external(AuthChoice::Krb5 {
                 spn: ArcStr::from(
@@ -3215,8 +3218,7 @@ fn resolver_auth_from_network(
                 Some(n) => n.clone(),
                 None => format!("{DEFAULT_RESOLVER_NAME}.{}", net.identity.domain),
             };
-            let rt =
-                tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let (j, staging) = join_network(
                 &rt,
                 ca_addr,
@@ -3261,13 +3263,15 @@ fn post_apply_conf_server(
         // roles into that config — never enroll a fresh conf server, whose
         // join-shape config drops the `ca` role and silently disables signing
         // (observed in the lab). Same handling as the fresh-network arm below.
-        Some(net) if host_holds_ca(net) => match conf_plane_decision(kind, no_conf_server) {
-            // Honor an explicit `--no-conf-server` (and Local auth) the same way
-            // the enroll arm does — don't advertise this resolver — even though
-            // the conf server itself keeps running here (it's the CA).
-            ConfPlane::Skip => Ok(()),
-            _ => merge_resolver_roles(resolver_config, id_map),
-        },
+        Some(net) if host_holds_ca(net) => {
+            match conf_plane_decision(kind, no_conf_server) {
+                // Honor an explicit `--no-conf-server` (and Local auth) the same way
+                // the enroll arm does — don't advertise this resolver — even though
+                // the conf server itself keeps running here (it's the CA).
+                ConfPlane::Skip => Ok(()),
+                _ => merge_resolver_roles(resolver_config, id_map),
+            }
+        }
         Some(net) => enroll_conf_server(
             net,
             kind,
@@ -3402,7 +3406,13 @@ fn enroll_conf_server(
         let password = Zeroizing::new(rpassword::prompt_password(format!(
             "CA password for admin {admin}: "
         ))?);
-        rt.block_on(conf_client::enroll(ca_addr, &admin, password, listen, &net.identity))?
+        rt.block_on(conf_client::enroll(
+            ca_addr,
+            &admin,
+            password,
+            listen,
+            &net.identity,
+        ))?
     } else {
         let pending =
             rt.block_on(conf_client::enqueue_enroll(ca_addr, listen, &net.identity))?;
@@ -3452,7 +3462,8 @@ fn enroll_conf_server(
     // receive the CA cert at the end of the chain, exactly like the CA
     // host's own conf server.
     let dir = paths::user_config_root()?.join("conf-server");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let mut chain = issued.cert_pem.clone().into_bytes();
     chain.extend_from_slice(net.identity.ca_pem().as_bytes());
     let serving_cert = dir.join("cert.pem");
@@ -3819,11 +3830,14 @@ fn finish_with(
     // Single end-of-process hook: offer the OS service (or print the
     // dry-run note). Sub-steps with their own units merge their needs
     // into `need` before we get here, so this fires exactly once.
-    service::offer(need, service::ServiceGate {
-        dry_run: common.dry_run,
-        no_service: common.no_service,
-        with_service: common.with_service,
-    })
+    service::offer(
+        need,
+        service::ServiceGate {
+            dry_run: common.dry_run,
+            no_service: common.no_service,
+            with_service: common.with_service,
+        },
+    )
 }
 
 #[cfg(test)]

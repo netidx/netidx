@@ -1,7 +1,7 @@
 use anyhow::Result;
 use netidx::{
     path::Path,
-    publisher::{Publisher, UpdateBatch, Val, Value, DefaultHandle},
+    publisher::{DefaultHandle, Publisher, UpdateBatch, Val, Value},
 };
 use std::collections::BTreeMap;
 

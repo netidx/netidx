@@ -3,7 +3,7 @@ use crate::{
     recorder::State,
 };
 use anyhow::Result;
-use arcstr::{literal, ArcStr};
+use arcstr::{ArcStr, literal};
 use chrono::prelude::*;
 use futures::{channel::mpsc, prelude::*};
 use netidx::{

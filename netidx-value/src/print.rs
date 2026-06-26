@@ -1,6 +1,6 @@
-use crate::{parser, Value};
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use crate::{Value, parser};
+use anyhow::{Result, anyhow};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use bytes::BytesMut;
 use compact_str::CompactString;
 use escaping::Escape;
@@ -26,11 +26,7 @@ impl fmt::Display for DecimalFmt {
             use std::fmt::Write;
             buf.clear();
             write!(buf, "{}", self.0)?;
-            if buf.contains('.') {
-                write!(f, "{buf}")
-            } else {
-                write!(f, "{buf}.")
-            }
+            if buf.contains('.') { write!(f, "{buf}") } else { write!(f, "{buf}.") }
         })
     }
 }
@@ -59,8 +55,8 @@ impl fmt::Display for Value {
 }
 
 pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
-    use compact_str::{format_compact, CompactString};
-    use fish_printf::{printf_c_locale, Arg, ToArg};
+    use compact_str::{CompactString, format_compact};
+    use fish_printf::{Arg, ToArg, printf_c_locale};
     use rust_decimal::prelude::ToPrimitive;
     use smallvec::SmallVec;
     enum T<'a> {
@@ -144,11 +140,7 @@ impl Value {
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let v = v.as_secs_f64();
-                if v.fract() == 0. {
-                    write!(f, "{}.s", v)
-                } else {
-                    write!(f, "{}s", v)
-                }
+                if v.fract() == 0. { write!(f, "{}.s", v) } else { write!(f, "{}s", v) }
             }
             Value::String(s) => write!(f, "\"{}\"", parser::VAL_ESC.escape(s)),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),

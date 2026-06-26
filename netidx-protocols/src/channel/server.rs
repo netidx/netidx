@@ -10,20 +10,20 @@ use std::{
     collections::VecDeque,
     result,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 use tokio::{
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
     task::{self, JoinHandle},
     time,
 };
 
 /// Generate a random session name ${base}/uuid
 pub fn session(base: &Path) -> Path {
-    use uuid::{fmt::Simple, Uuid};
+    use uuid::{Uuid, fmt::Simple};
     let id = Uuid::new_v4();
     let mut buf = [0u8; Simple::LENGTH];
     base.append(Simple::from_uuid(id).encode_lower(&mut buf))
@@ -61,11 +61,7 @@ impl Receiver {
     ) -> Result<()> {
         match r {
             Some(mut batch) => self.queued.extend(batch.drain(..).filter_map(|req| {
-                if req.client == client {
-                    Some(req.value)
-                } else {
-                    None
-                }
+                if req.client == client { Some(req.value) } else { None }
             })),
             None => {
                 dead.store(true, Ordering::Relaxed);

@@ -1,4 +1,4 @@
-use crate::error::{clear_error, set_error, NetidxError};
+use crate::error::{NetidxError, clear_error, set_error};
 use tokio::runtime::Runtime;
 
 /// Opaque handle to a tokio runtime.

@@ -41,8 +41,7 @@ impl ResolverConfig {
     /// same config that the server happily loads.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let path = path.as_ref();
-        self.validate_for_path(path)
-            .context("resolver config failed validation")?;
+        self.validate_for_path(path).context("resolver config failed validation")?;
         atomic::write_atomic_pretty_json(path, &self.0)
     }
 
@@ -249,10 +248,7 @@ mod tests {
     fn validate_rejects_bad_config() {
         // No member servers → invalid.
         let cfg = ResolverConfig(
-            file::ConfigBuilder::default()
-                .member_servers(vec![])
-                .build()
-                .unwrap(),
+            file::ConfigBuilder::default().member_servers(vec![]).build().unwrap(),
         );
         assert!(cfg.validate().is_err());
     }

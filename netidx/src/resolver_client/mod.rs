@@ -21,8 +21,8 @@ use anyhow::Result;
 use arcstr::ArcStr;
 pub use common::DesiredAuth;
 use common::{
-    ResponseChan, FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PATHPOOL, PUBLISHERPOOL,
-    RAWFROMREADPOOL, RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL,
+    FROMREADPOOL, FROMWRITEPOOL, LISTPOOL, PATHPOOL, PUBLISHERPOOL, RAWFROMREADPOOL,
+    RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL, ResponseChan,
     TOREADPOOL, TOWRITEPOOL,
 };
 use futures::future;
@@ -36,10 +36,10 @@ use poolshark::{
 use read_client::ReadClient;
 use std::{
     collections::{
-        hash_map::Entry,
         BTreeMap,
         Bound::{self, Included, Unbounded},
         HashMap,
+        hash_map::Entry,
     },
     iter::IntoIterator,
     marker::PhantomData,
@@ -504,7 +504,7 @@ impl ResolverRead {
         while pending.len() > 0 {
             let mut waiters = Vec::new();
             {
-                let mut inner = self.0 .0.lock();
+                let mut inner = self.0.0.lock();
                 for referral in pending.drain(..) {
                     let referral = referral.unwrap_or_else(|| inner.default.clone());
                     if !done.contains(&referral) {

@@ -1,14 +1,14 @@
 use super::{
-    reader::ArchiveIndex, scan_file, ArchiveReader, BatchItem, CompressionHeader,
-    FileHeader, Id, MonotonicTimestamper, PathMapping, RecordHeader, RecordIndex,
-    RecordTooLarge, RecordTyp, Timestamp, COMMITTED_OFFSET, FILE_VERSION, MAX_RECORD_LEN,
-    PM_POOL,
+    ArchiveReader, BatchItem, COMMITTED_OFFSET, CompressionHeader, FILE_VERSION,
+    FileHeader, Id, MAX_RECORD_LEN, MonotonicTimestamper, PM_POOL, PathMapping,
+    RecordHeader, RecordIndex, RecordTooLarge, RecordTyp, Timestamp,
+    reader::ArchiveIndex, scan_file,
 };
 use ahash::AHashMap;
 use anyhow::Result;
 use bytes::BufMut;
 use chrono::prelude::*;
-use fs3::{allocation_granularity, FileExt};
+use fs3::{FileExt, allocation_granularity};
 use indexmap::IndexMap;
 use log::warn;
 use memmap2::{Mmap, MmapMut};
@@ -25,8 +25,8 @@ use std::{
     ops::Drop,
     path::Path as FilePath,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 

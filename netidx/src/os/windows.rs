@@ -1,6 +1,6 @@
 use crate::resolver_server::config::{Config, IdMap, MemberServer};
 use anyhow::bail;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arcstr::ArcStr;
 use tokio::process::Command;
 
@@ -41,7 +41,7 @@ impl Mapper {
             Mapper::Command(cmd) => {
                 let out = Command::new(&**cmd).arg(user).output().await?;
                 parse(String::from_utf8_lossy(&out.stdout).as_ref())
-            },
+            }
         }
     }
 
@@ -56,7 +56,7 @@ impl Mapper {
                         None => {
                             return Err(anyhow!(
                                 "invalid id command output, expected ')'"
-                            ))
+                            ));
                         }
                         Some(i_cp) => {
                             groups.push(ArcStr::from(&s[i_op + 1..i_cp]));

@@ -30,7 +30,7 @@
 //! override, never as a security decision.
 
 use crate::tls_tofu::TofuVerifier;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use netidx::{
     protocol::resolver::{AuthRead, ClientHello},
     read_raw, write_raw,
@@ -102,7 +102,9 @@ async fn probe_inner(addr: SocketAddr) -> Result<Option<String>> {
     match verifier.captured_leaf() {
         Some(leaf) => Ok(crate::tls::first_dns_san_from_der(leaf.as_ref())),
         None => Err(connect_res.err().map(anyhow::Error::new).unwrap_or_else(|| {
-            anyhow!("resolver {addr} completed the handshake but presented no certificate")
+            anyhow!(
+                "resolver {addr} completed the handshake but presented no certificate"
+            )
         }))
         .with_context(|| format!("TLS handshake with resolver {addr}")),
     }

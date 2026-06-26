@@ -1,13 +1,13 @@
 use super::{
-    controls::NewSessionConfig, AtomicState, ClusterCmd, SessionBCastMsg, SessionUpdate,
-    Speed,
+    AtomicState, ClusterCmd, SessionBCastMsg, SessionUpdate, Speed,
+    controls::NewSessionConfig,
 };
 use crate::{
     config::Config,
     logfile::{ArchiveReader, BatchItem, Id, Seek},
     logfile_collection::index::ArchiveIndex,
     logfile_collection::reader::ArchiveCollectionReader,
-    recorder::{oneshot::FILTER, BCastMsg, ShardId, Shards, State},
+    recorder::{BCastMsg, ShardId, Shards, State, oneshot::FILTER},
 };
 use anyhow::Result;
 use arcstr::ArcStr;
@@ -70,11 +70,7 @@ impl SessionShard {
         })?;
         let mut filterset = FILTER.take();
         filterset.extend(pathindex.index().iter_pathmap().filter_map(|(id, path)| {
-            if filter.is_match(path) {
-                Some(*id)
-            } else {
-                None
-            }
+            if filter.is_match(path) { Some(*id) } else { None }
         }));
         let used =
             pathindex.index().iter_pathmap().any(|(_, path)| filter.is_match(path));

@@ -16,38 +16,38 @@
 
 use crate::{
     ca::{Ca, SanEntry},
-    ca_store, ca_vault, conf_client, delegation_store,
+    ca_store, ca_vault, conf_client,
     conf_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, ApplyReferralEditRequest,
-        ApplyReferralEditResponse, ApproveDelegationRequest, ApproveDelegationResponse,
-        ApproveRequest, ApproveResponse, ClientHello, ReferralEdit,
+        self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
+        AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
+        ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
+        ApplyServiceControlRequest, ApplyServiceControlResponse,
+        ApproveDelegationRequest, ApproveDelegationResponse, ApproveRequest,
+        ApproveResponse, ClientHello, ControlServiceRequest, ControlServiceResponse,
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        EnqueueRequest, EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse,
-        ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
-        GetPermsResponse,
-        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
-        RemoveAdminRequest, SetAdminPolicyRequest,
-        ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceRequest,
-        ControlServiceResponse, ServiceControlResult,
-        DeregisterRequest, GetMapResponse, GetMapVersionResponse, NetworkMap, NodeKind,
-        RegisterRequest, RegisterResponse, RemoveServerRequest, RemoveServerResponse, ServerEntry,
-        InfoAuth, IssuedEntry, ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, PollRequest,
-        ListQueueResponse, PeerResult, PollResponse, QueueEntry, Request, ResolverAddr,
-        RevokeRequest,
-        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse, Secret,
-        ServerHello, SignRequest, SignResponse, PROTOCOL_VERSION,
-        SERVING_SAN,
+        DeregisterRequest, EditPermsRequest, EditPermsResponse, EnqueueRequest,
+        EnqueueResponse, EnrollRequest, GetCrlResponse, GetInfoResponse, GetMapResponse,
+        GetMapVersionResponse, GetPermsResponse, InfoAuth, IssuedEntry,
+        ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
+        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
+        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
+        QueueEntry, ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
+        RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
+        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
+        SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceControlResult,
+        SetAdminPolicyRequest, SignRequest, SignResponse,
     },
     conf_server_config::ConfServerConfig,
-    discovery, id_map, netmap,
+    delegation_store, discovery, id_map, netmap,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use globset::Glob;
 use log::{debug, error, info, warn};
 use parking_lot::Mutex;
-use rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig as RustlsServerConfig};
+use rustls::{
+    RootCertStore, ServerConfig as RustlsServerConfig, server::WebPkiClientVerifier,
+};
 use rustls_pki_types::CertificateDer;
 use std::{
     fs::OpenOptions,
@@ -238,8 +238,9 @@ impl Server {
 /// process is killed.
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let cfg = ConfServerConfig::load(&cfg_path)?;
-    let serving_cert_pem = std::fs::read(&cfg.serving_cert)
-        .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
+    let serving_cert_pem = std::fs::read(&cfg.serving_cert).with_context(|| {
+        format!("reading serving cert {}", cfg.serving_cert.display())
+    })?;
     let serving_key_pem = std::fs::read(&cfg.serving_key)
         .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
     // A TPM-sealed serving key: `<key>.tpm` holds the password, sealed
@@ -329,9 +330,7 @@ pub async fn serve_on(
     if state.ca.is_some() {
         match tokio::task::spawn_blocking({
             let state = state.clone();
-            move || {
-                state.ca.as_ref().expect("CA role held").store.lock().pending_pushes()
-            }
+            move || state.ca.as_ref().expect("CA role held").store.lock().pending_pushes()
         })
         .await
         {
@@ -443,7 +442,10 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
     let listener = match bind_local_control(&path) {
         Ok(l) => l,
         Err(e) => {
-            warn!("conf-server: local control socket disabled ({}): {e:#}", path.display());
+            warn!(
+                "conf-server: local control socket disabled ({}): {e:#}",
+                path.display()
+            );
             return;
         }
     };
@@ -461,7 +463,9 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
                 }
             };
             if !local_peer_allowed(&stream) {
-                debug!("conf-server: refusing local control peer (uid not root / daemon)");
+                debug!(
+                    "conf-server: refusing local control peer (uid not root / daemon)"
+                );
                 continue;
             }
             let signs = signs.clone();
@@ -473,7 +477,9 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
                 .await
                 {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => debug!("conf-server: local control connection ended: {e:#}"),
+                    Ok(Err(e)) => {
+                        debug!("conf-server: local control connection ended: {e:#}")
+                    }
                     Err(_) => debug!("conf-server: local control connection timed out"),
                 }
             });
@@ -567,11 +573,7 @@ where
     let domain = state.cfg.lock().domain.clone();
     conf_proto::write_msg(
         &mut tls,
-        &ServerHello {
-            protocol_version: PROTOCOL_VERSION,
-            domain,
-            roles: state.roles(),
-        },
+        &ServerHello { protocol_version: PROTOCOL_VERSION, domain, roles: state.roles() },
     )
     .await
     .context("writing ServerHello")?;
@@ -584,7 +586,9 @@ where
     match req {
         Request::GetInfo => {
             let resp = get_info(state);
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetInfoResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing GetInfoResponse")
         }
         Request::Sign(req) => {
             let resp = match ca_dir(state) {
@@ -604,7 +608,11 @@ where
                         (resp @ SignResponse::Err { .. }, _) => resp,
                         (resp @ SignResponse::Ok { .. }, None) => resp,
                         (
-                            SignResponse::Ok { signed_cert_pem, trusted_pem, mut warnings },
+                            SignResponse::Ok {
+                                signed_cert_pem,
+                                trusted_pem,
+                                mut warnings,
+                            },
                             Some(plan),
                         ) => {
                             warnings.extend(push_registrations(state, &plan).await);
@@ -646,7 +654,8 @@ where
                         .to_string(),
                 }
             } else {
-                let map_path = { state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone()) };
+                let map_path =
+                    { state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone()) };
                 match map_path {
                     None => AddIdentityResponse::Err {
                         reason: "this host has no id-map role".to_string(),
@@ -685,7 +694,9 @@ where
                     .context("enqueue task panicked")?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing EnqueueResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing EnqueueResponse")
         }
         Request::Poll(req) => {
             let resp = match ca_dir(state) {
@@ -817,18 +828,24 @@ where
                     }
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing ApproveResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApproveResponse")
         }
         Request::Deny(req) => {
             let resp = match ca_dir(state) {
                 None => DenyResponse::Err {
                     reason: "this host does not hold the CA".to_string(),
                 },
-                Some(_) => run_signing(&signs, {
-                    let state = state.clone();
-                    move || handle_deny(state.ca.as_ref().expect("CA role held"), &req)
-                })
-                .await?,
+                Some(_) => {
+                    run_signing(&signs, {
+                        let state = state.clone();
+                        move || {
+                            handle_deny(state.ca.as_ref().expect("CA role held"), &req)
+                        }
+                    })
+                    .await?
+                }
             };
             conf_proto::write_msg(&mut tls, &resp).await.context("writing DenyResponse")
         }
@@ -936,9 +953,11 @@ where
                 }
             } else {
                 let state = state.clone();
-                tokio::task::spawn_blocking(move || handle_apply_referral_edit(&state, &req))
-                    .await
-                    .context("apply referral edit task panicked")?
+                tokio::task::spawn_blocking(move || {
+                    handle_apply_referral_edit(&state, &req)
+                })
+                .await
+                .context("apply referral edit task panicked")?
             };
             conf_proto::write_msg(&mut tls, &resp)
                 .await
@@ -950,8 +969,13 @@ where
                 Some(_) => {
                     let state = state.clone();
                     tokio::task::spawn_blocking(move || {
-                        let path =
-                            state.ca.as_ref().expect("CA role held").store.lock().crl_path();
+                        let path = state
+                            .ca
+                            .as_ref()
+                            .expect("CA role held")
+                            .store
+                            .lock()
+                            .crl_path();
                         match std::fs::read_to_string(path) {
                             Ok(pem) => GetCrlResponse { crl_pem: Some(pem) },
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -972,7 +996,8 @@ where
         Request::Register(req) => {
             let resp = if !peer_is_conf_server {
                 RegisterResponse::Err {
-                    reason: "register requires a conf-server peer certificate".to_string(),
+                    reason: "register requires a conf-server peer certificate"
+                        .to_string(),
                 }
             } else {
                 let state = state.clone();
@@ -980,12 +1005,15 @@ where
                     .await
                     .context("register task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing RegisterResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing RegisterResponse")
         }
         Request::Deregister(req) => {
             let resp = if !peer_is_conf_server {
                 RegisterResponse::Err {
-                    reason: "deregister requires a conf-server peer certificate".to_string(),
+                    reason: "deregister requires a conf-server peer certificate"
+                        .to_string(),
                 }
             } else {
                 let state = state.clone();
@@ -993,7 +1021,9 @@ where
                     .await
                     .context("deregister task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing RegisterResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing RegisterResponse")
         }
         Request::GetMapVersion => {
             let resp = GetMapVersionResponse::Ok { version: state.map.lock().version };
@@ -1008,7 +1038,8 @@ where
         Request::RemoveServer(req) => {
             // Argon2-bound (vault auth) — keep it under the sign semaphore.
             let state = state.clone();
-            let resp = run_signing(&signs, move || handle_remove_server(&state, &req)).await?;
+            let resp =
+                run_signing(&signs, move || handle_remove_server(&state, &req)).await?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RemoveServerResponse")
@@ -1018,16 +1049,21 @@ where
             let resp = tokio::task::spawn_blocking(move || handle_get_perms(&state))
                 .await
                 .context("get-perms task panicked")?;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetPermsResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing GetPermsResponse")
         }
         Request::EditPerms(req) => {
             let resp = handle_edit_perms(state, &signs, &req).await;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing EditPermsResponse")
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing EditPermsResponse")
         }
         Request::ApplyPermsEdit(req) => {
             let resp = if !peer_is_conf_server {
                 ApplyPermsEditResponse::Err {
-                    reason: "a perms edit requires a conf-server peer certificate".to_string(),
+                    reason: "a perms edit requires a conf-server peer certificate"
+                        .to_string(),
                 }
             } else {
                 let state = state.clone();
@@ -1045,26 +1081,38 @@ where
             // let an anonymous flood pin unbounded 64 MiB derivations.
             let state = state.clone();
             let resp =
-                run_signing(&signs, move || handle_add_role_admin(&state, &req, local)).await?;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+                run_signing(&signs, move || handle_add_role_admin(&state, &req, local))
+                    .await?;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing AdminMgmtResponse")
         }
         Request::SetAdminPolicy(req) => {
             let state = state.clone();
             let resp =
-                run_signing(&signs, move || handle_set_admin_policy(&state, &req, local)).await?;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+                run_signing(&signs, move || handle_set_admin_policy(&state, &req, local))
+                    .await?;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing AdminMgmtResponse")
         }
         Request::RemoveAdmin(req) => {
             let state = state.clone();
             let resp =
-                run_signing(&signs, move || handle_remove_admin(&state, &req, local)).await?;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminMgmtResponse")
+                run_signing(&signs, move || handle_remove_admin(&state, &req, local))
+                    .await?;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing AdminMgmtResponse")
         }
         Request::ListAdmins(req) => {
             let state = state.clone();
             let resp =
-                run_signing(&signs, move || handle_list_admins(&state, &req, local)).await?;
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing AdminListResponse")
+                run_signing(&signs, move || handle_list_admins(&state, &req, local))
+                    .await?;
+            conf_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing AdminListResponse")
         }
         Request::ControlService(req) => {
             let resp = handle_control_service(state, &signs, &req).await;
@@ -1089,8 +1137,8 @@ where
             // Argon2-bound (recover_mk + a fresh slot KDF), so run it under
             // the sign semaphore like the other vault-write handlers.
             let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_rotate_recovery(&state, local)).await?;
+            let resp = run_signing(&signs, move || handle_rotate_recovery(&state, local))
+                .await?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RotateRecoveryResponse")
@@ -1098,7 +1146,8 @@ where
         Request::RotateAutorenew => {
             let state = state.clone();
             let resp =
-                run_signing(&signs, move || handle_rotate_autorenew(&state, local)).await?;
+                run_signing(&signs, move || handle_rotate_autorenew(&state, local))
+                    .await?;
             conf_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RotateAutorenewResponse")
@@ -1156,8 +1205,8 @@ fn record_peer(state: &Server, peer: SocketAddr) {
 /// show up without a daemon restart; everything else is our own config.
 fn get_info(state: &Server) -> GetInfoResponse {
     let cfg = state.cfg.lock();
-    let resolver = cfg.roles.resolver.as_ref().and_then(|r| {
-        match resolver_info(&r.config) {
+    let resolver =
+        cfg.roles.resolver.as_ref().and_then(|r| match resolver_info(&r.config) {
             Ok(x) => x,
             Err(e) => {
                 warn!(
@@ -1166,8 +1215,7 @@ fn get_info(state: &Server) -> GetInfoResponse {
                 );
                 None
             }
-        }
-    });
+        });
     GetInfoResponse {
         domain: cfg.domain.clone(),
         ca_addr: if cfg.roles.ca.is_some() { Some(cfg.listen) } else { cfg.ca_addr },
@@ -1329,14 +1377,18 @@ fn build_server_config(
     // CRL must not lock the plane out, presence on one must. (The CRL is read
     // when the acceptor is built; a revocation takes effect on the next
     // conf-server restart, the same coarseness as a serving-cert rotation.)
-    let crls: Vec<rustls_pki_types::CertificateRevocationListDer<'static>> = match crl_pem {
+    let crls: Vec<rustls_pki_types::CertificateRevocationListDer<'static>> = match crl_pem
+    {
         Some(pem) => rustls_pemfile::crls(&mut std::io::Cursor::new(pem))
             .collect::<std::result::Result<_, _>>()
             .context("parsing CRL")?,
         None => Vec::new(),
     };
     let verifier = if crls.is_empty() {
-        builder.allow_unauthenticated().build().context("building client cert verifier")?
+        builder
+            .allow_unauthenticated()
+            .build()
+            .context("building client cert verifier")?
     } else {
         builder
             .with_crls(crls)
@@ -1450,10 +1502,7 @@ fn server_unlock(
 /// policy failures become a `SignResponse::Err` carrying a safe reason
 /// for the client; only an internal fault (e.g. the CA cert can't be
 /// read) maps to a generic error response — never a panic.
-pub fn handle_sign_request(
-    ca: &ca_store::CaDir,
-    req: &SignRequest,
-) -> Signed {
+pub fn handle_sign_request(ca: &ca_store::CaDir, req: &SignRequest) -> Signed {
     // A direct Sign has no queue entry; synthesize a request to carry in
     // the issued record (its fresh id keys the `issued/` file).
     let record_req = ca_store::QueuedReq::new(
@@ -1561,7 +1610,16 @@ fn try_handle(
     // The one-live-cert check, serial allocation, sign, and atomic record
     // commit are one critical section under the issuance lock.
     issue_locked(
-        ca, &signing, &authd.admin, record_req, name, validity, groups, true, None, op,
+        ca,
+        &signing,
+        &authd.admin,
+        record_req,
+        name,
+        validity,
+        groups,
+        true,
+        None,
+        op,
         recheck_id,
     )
 }
@@ -1608,7 +1666,7 @@ fn issue_locked(
                         reason: "that request was already approved".to_string(),
                     },
                     push: None,
-                })
+                });
             }
             Ok(ca_store::Status::Denied(_)) => {
                 return Ok(Signed {
@@ -1616,7 +1674,7 @@ fn issue_locked(
                         reason: "that request was already denied".to_string(),
                     },
                     push: None,
-                })
+                });
             }
             Ok(ca_store::Status::Unknown) => {
                 return Ok(Signed {
@@ -1625,14 +1683,13 @@ fn issue_locked(
                             .to_string(),
                     },
                     push: None,
-                })
+                });
             }
             Err(e) => return Err(e).context("re-checking the queue under the lock"),
         }
     }
     if one_live {
-        let live = store.live_for_name(name)
-            .context("checking the issuance index")?;
+        let live = store.live_for_name(name).context("checking the issuance index")?;
         if !live.is_empty() {
             return Ok(Signed {
                 resp: reject(&format!(
@@ -1651,8 +1708,7 @@ fn issue_locked(
     // SAN). Refusing here also covers the auto-renew sweep, which signs
     // through this same path.
     if let Some(serial) = renewal_of {
-        let live = store.live_for_name(name)
-            .context("checking the issuance index")?;
+        let live = store.live_for_name(name).context("checking the issuance index")?;
         if !live.iter().any(|r| r.serial == serial) {
             return Ok(Signed {
                 resp: reject(&format!(
@@ -1711,29 +1767,20 @@ fn issue_locked(
 /// Handle a conf-server enrollment: authenticate the admin, require the
 /// `may_enroll_servers` policy bit, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
-pub fn handle_enroll_request(
-    ca: &ca_store::CaDir,
-    req: &EnrollRequest,
-) -> SignResponse {
+pub fn handle_enroll_request(ca: &ca_store::CaDir, req: &EnrollRequest) -> SignResponse {
     match try_enroll(ca, req) {
         Ok(resp) => resp,
         Err(e) => SignResponse::Err { reason: format!("internal error: {e:#}") },
     }
 }
 
-fn try_enroll(
-    ca: &ca_store::CaDir,
-    req: &EnrollRequest,
-) -> Result<SignResponse> {
+fn try_enroll(ca: &ca_store::CaDir, req: &EnrollRequest) -> Result<SignResponse> {
     let authd = match ca.vault.read().authenticate(&req.admin, &req.password.0) {
         Ok(a) => a,
         Err(_) => return Ok(reject("authentication failed")),
     };
     if !authd.policy.may_enroll_servers {
-        return Ok(reject(&format!(
-            "admin {} may not enroll conf servers",
-            authd.admin
-        )));
+        return Ok(reject(&format!("admin {} may not enroll conf servers", authd.admin)));
     }
     let record_req = ca_store::QueuedReq::new(
         conf_proto::NodeKind::ConfServer,
@@ -1798,14 +1845,17 @@ fn sign_csr(
 /// missing file starts from the seeded empty map — zero-touch joins
 /// must work on a host whose id-map daemon hasn't registered anyone
 /// yet. The caller holds the id-map lock.
-pub fn handle_add_identity(map_path: &Path, req: &AddIdentityRequest) -> AddIdentityResponse {
+pub fn handle_add_identity(
+    map_path: &Path,
+    req: &AddIdentityRequest,
+) -> AddIdentityResponse {
     let mut map = if map_path.exists() {
         match id_map::load(map_path) {
             Ok(m) => m,
             Err(e) => {
                 return AddIdentityResponse::Err {
                     reason: format!("loading id-map: {e:#}"),
-                }
+                };
             }
         }
     } else {
@@ -1815,7 +1865,9 @@ pub fn handle_add_identity(map_path: &Path, req: &AddIdentityRequest) -> AddIden
     match id_map::register_identity(&mut map, &req.san, &req.primary_group, &groups) {
         Ok(uid) => match id_map::save(map_path, &map) {
             Ok(()) => AddIdentityResponse::Ok { uid },
-            Err(e) => AddIdentityResponse::Err { reason: format!("saving id-map: {e:#}") },
+            Err(e) => {
+                AddIdentityResponse::Err { reason: format!("saving id-map: {e:#}") }
+            }
         },
         Err(e) => AddIdentityResponse::Err { reason: format!("{e:#}") },
     }
@@ -1884,9 +1936,7 @@ fn handle_enqueue(
         return EnqueueResponse::Err { reason: "requested name is empty".to_string() };
     }
     if req.requested_validity.is_zero() {
-        return EnqueueResponse::Err {
-            reason: "validity must be > 0".to_string(),
-        };
+        return EnqueueResponse::Err { reason: "validity must be > 0".to_string() };
     }
     // A renewal must prove possession of *our* live cert for this exact
     // name: the presented leaf's serial AND its key fingerprint must match
@@ -1937,13 +1987,13 @@ fn handle_enqueue(
                         "an unexpired certificate already exists for {name:?}; an \
                          admin must revoke it first (`netidx conf ca revoke`)"
                     ),
-                }
+                };
             }
             Ok(_) => (),
             Err(e) => {
                 return EnqueueResponse::Err {
                     reason: format!("checking the issuance index: {e:#}"),
-                }
+                };
             }
         }
     }
@@ -1970,10 +2020,7 @@ fn handle_enqueue(
 }
 
 /// List the pending queue for an authenticated admin.
-fn handle_list_queue(
-    ca: &ca_store::CaDir,
-    req: &ListQueueRequest,
-) -> ListQueueResponse {
+fn handle_list_queue(ca: &ca_store::CaDir, req: &ListQueueRequest) -> ListQueueResponse {
     if let Err(reason) = authenticate(ca, &req.admin, &req.password.0) {
         return ListQueueResponse::Err { reason };
     }
@@ -2006,7 +2053,7 @@ fn handle_revoke(ca: &ca_store::CaDir, req: &RevokeRequest) -> RevokeResponse {
     let authd = match ca.vault.read().authenticate(&req.admin, &req.password.0) {
         Ok(a) => a,
         Err(_) => {
-            return RevokeResponse::Err { reason: "authentication failed".to_string() }
+            return RevokeResponse::Err { reason: "authentication failed".to_string() };
         }
     };
     // Revocation is privileged — revoking serving certs or another region's
@@ -2018,7 +2065,10 @@ fn handle_revoke(ca: &ca_store::CaDir, req: &RevokeRequest) -> RevokeResponse {
         || authd.policy.may_manage_admins;
     if !broad && authd.policy.allowed_san.is_empty() && !authd.policy.may_enroll_servers {
         return RevokeResponse::Err {
-            reason: format!("admin {} is not authorized to revoke certificates", authd.admin),
+            reason: format!(
+                "admin {} is not authorized to revoke certificates",
+                authd.admin
+            ),
         };
     }
     if req.serials.is_empty() {
@@ -2030,13 +2080,13 @@ fn handle_revoke(ca: &ca_store::CaDir, req: &RevokeRequest) -> RevokeResponse {
     // the issuer lock.
     let names: std::collections::HashMap<u64, String> =
         match ca.store.lock().list_signed() {
-        Ok(records) => records.into_iter().map(|r| (r.serial, r.name)).collect(),
-        Err(e) => {
-            return RevokeResponse::Err {
-                reason: format!("reading the issuance index: {e:#}"),
+            Ok(records) => records.into_iter().map(|r| (r.serial, r.name)).collect(),
+            Err(e) => {
+                return RevokeResponse::Err {
+                    reason: format!("reading the issuance index: {e:#}"),
+                };
             }
-        }
-    };
+        };
     let now = ca_store::now_unix();
     let mut warnings = Vec::new();
     // Each revocation is a read-modify-write of an `issued/<id>` record.
@@ -2124,7 +2174,9 @@ fn handle_list_issued(
                 })
                 .collect(),
         },
-        Err(e) => ListIssuedResponse::Err { reason: format!("listing issued certs: {e:#}") },
+        Err(e) => {
+            ListIssuedResponse::Err { reason: format!("listing issued certs: {e:#}") }
+        }
     }
 }
 
@@ -2152,13 +2204,13 @@ fn handle_approve(
     let queued = match ca.store.lock().status(&req.request_id) {
         Ok(ca_store::Status::Pending(q)) => q,
         Ok(ca_store::Status::Signed(_)) => {
-            return Err("that request was already approved".to_string())
+            return Err("that request was already approved".to_string());
         }
         Ok(ca_store::Status::Denied(_)) => {
-            return Err("that request was already denied".to_string())
+            return Err("that request was already denied".to_string());
         }
         Ok(ca_store::Status::Unknown) => {
-            return Err("no such pending request (expired or never queued)".to_string())
+            return Err("no such pending request (expired or never queued)".to_string());
         }
         Err(e) => return Err(format!("reading the queue: {e:#}")),
     };
@@ -2257,18 +2309,9 @@ fn approve_locked(
         requested_validity: queued.requested_validity,
         id_map_groups: req.id_map_groups.clone(),
     };
-    let signed = handle_sign_request_op(
-        ca,
-        &sign_req,
-        "approve",
-        &queued,
-        Some(&req.request_id),
-    );
-    Ok(Approved {
-        resp: signed.resp,
-        push: signed.push,
-        enroll_listen: None,
-    })
+    let signed =
+        handle_sign_request_op(ca, &sign_req, "approve", &queued, Some(&req.request_id));
+    Ok(Approved { resp: signed.resp, push: signed.push, enroll_listen: None })
 }
 
 /// Read the autorenew slot's password from its keytab, unsealing if this
@@ -2293,8 +2336,9 @@ pub fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
                 .context("sealed autorenew keytab payload is not utf8")?,
         ))
     } else {
-        let pw = String::from_utf8(raw)
-            .with_context(|| format!("autorenew keytab {} is not utf8", keytab.display()))?;
+        let pw = String::from_utf8(raw).with_context(|| {
+            format!("autorenew keytab {} is not utf8", keytab.display())
+        })?;
         Ok(Zeroizing::new(pw.trim().to_string()))
     }
 }
@@ -2331,10 +2375,16 @@ fn autorenew_sweep(ca: &ca_store::CaDir, password: &str) -> usize {
                 info!("autorenew: approved renewal of {:?}", q.requested_name);
             }
             Ok(Approved { resp: SignResponse::Err { reason }, .. }) => {
-                warn!("autorenew: signing renewal of {:?} failed: {reason}", q.requested_name)
+                warn!(
+                    "autorenew: signing renewal of {:?} failed: {reason}",
+                    q.requested_name
+                )
             }
             Err(reason) => {
-                warn!("autorenew: approving renewal of {:?} failed: {reason}", q.requested_name)
+                warn!(
+                    "autorenew: approving renewal of {:?} failed: {reason}",
+                    q.requested_name
+                )
             }
         }
     }
@@ -2387,14 +2437,24 @@ fn spawn_map_refresh(state: &Arc<Server>) {
             if let Err(e) =
                 conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await
             {
-                warn!("conf-server: registering with the CA {ca_addr} failed (will retry): {e:#}");
+                warn!(
+                    "conf-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
+                );
             }
             // Refresh the cache: cheap version check, full pull only when changed.
-            match conf_client::get_map_version(ca_addr, roots.clone(), NodeKind::ConfServer).await {
+            match conf_client::get_map_version(
+                ca_addr,
+                roots.clone(),
+                NodeKind::ConfServer,
+            )
+            .await
+            {
                 Ok(v) => {
                     let stale = state.map.lock().version != v;
                     if stale {
-                        match conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await {
+                        match conf_client::get_map(ca_addr, roots, NodeKind::ConfServer)
+                            .await
+                        {
                             Ok(map) => *state.map.lock() = map,
                             Err(e) => warn!(
                                 "conf-server: pulling the network map from {ca_addr} failed \
@@ -2424,7 +2484,9 @@ fn spawn_autorenew(state: &Arc<Server>) {
     if state.ca.as_ref().expect("CA role held").autorenew_pw.read().is_none() {
         return;
     }
-    info!("conf-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})");
+    info!(
+        "conf-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})"
+    );
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
@@ -2463,19 +2525,21 @@ fn handle_deny(ca: &ca_store::CaDir, req: &DenyRequest) -> DenyResponse {
         Ok(ca_store::Status::Signed(_)) => {
             return DenyResponse::Err {
                 reason: "that request was already approved".to_string(),
-            }
+            };
         }
         Ok(ca_store::Status::Denied(_)) => {
             return DenyResponse::Err {
                 reason: "that request was already denied".to_string(),
-            }
+            };
         }
         Ok(ca_store::Status::Unknown) => {
             return DenyResponse::Err {
                 reason: "no such pending request (expired or never queued)".to_string(),
-            }
+            };
         }
-        Err(e) => return DenyResponse::Err { reason: format!("reading the queue: {e:#}") },
+        Err(e) => {
+            return DenyResponse::Err { reason: format!("reading the queue: {e:#}") };
+        }
     };
     let authd = match authenticate(ca, &req.admin, &req.password.0) {
         Ok(a) => a,
@@ -2492,12 +2556,10 @@ fn handle_deny(ca: &ca_store::CaDir, req: &DenyRequest) -> DenyResponse {
                     "admin {} is not authorized to deny requests for {:?}",
                     authd.admin, queued.requested_name
                 ),
-            }
+            };
         }
         Err(e) => {
-            return DenyResponse::Err {
-                reason: format!("evaluating authority: {e:#}"),
-            }
+            return DenyResponse::Err { reason: format!("evaluating authority: {e:#}") };
         }
     }
     let mut store = ca.store.lock();
@@ -2508,19 +2570,21 @@ fn handle_deny(ca: &ca_store::CaDir, req: &DenyRequest) -> DenyResponse {
         Ok(ca_store::Status::Signed(_)) => {
             return DenyResponse::Err {
                 reason: "that request was already approved".to_string(),
-            }
+            };
         }
         Ok(ca_store::Status::Denied(_)) => {
             return DenyResponse::Err {
                 reason: "that request was already denied".to_string(),
-            }
+            };
         }
         Ok(ca_store::Status::Unknown) => {
             return DenyResponse::Err {
                 reason: "no such pending request (expired or never queued)".to_string(),
-            }
+            };
         }
-        Err(e) => return DenyResponse::Err { reason: format!("reading the queue: {e:#}") },
+        Err(e) => {
+            return DenyResponse::Err { reason: format!("reading the queue: {e:#}") };
+        }
     }
     match store.deny(&queued, &req.reason) {
         Ok(()) => {
@@ -2631,10 +2695,14 @@ fn handle_deny_delegation(
         None => {
             return DenyDelegationResponse::Err {
                 reason: "this host does not hold the CA".to_string(),
-            }
+            };
         }
     };
-    let authd = match authenticate(state.ca.as_ref().expect("CA role held"), &req.admin, &req.password.0) {
+    let authd = match authenticate(
+        state.ca.as_ref().expect("CA role held"),
+        &req.admin,
+        &req.password.0,
+    ) {
         Ok(a) => a,
         Err(reason) => return DenyDelegationResponse::Err { reason },
     };
@@ -2704,8 +2772,11 @@ fn apply_referral_edit_local(
                 .iter()
                 .map(|r| (r.addr, info_to_refauth(&r.auth)))
                 .collect::<Vec<_>>();
-            rc.as_file_mut().parent =
-                Some(Referral { path: arcstr::ArcStr::from(path.as_str()), ttl: None, addrs });
+            rc.as_file_mut().parent = Some(Referral {
+                path: arcstr::ArcStr::from(path.as_str()),
+                ttl: None,
+                addrs,
+            });
         }
     }
     rc.save(resolver_config_path)
@@ -2719,15 +2790,14 @@ fn handle_apply_referral_edit(
     state: &Server,
     req: &ApplyReferralEditRequest,
 ) -> ApplyReferralEditResponse {
-    let path =
-        match state.cfg.lock().roles.resolver.as_ref().map(|r| r.config.clone()) {
-            Some(p) => p,
-            None => {
-                return ApplyReferralEditResponse::Err {
-                    reason: "this host has no resolver role to edit".to_string(),
-                }
-            }
-        };
+    let path = match state.cfg.lock().roles.resolver.as_ref().map(|r| r.config.clone()) {
+        Some(p) => p,
+        None => {
+            return ApplyReferralEditResponse::Err {
+                reason: "this host has no resolver role to edit".to_string(),
+            };
+        }
+    };
     let _guard = state.resolver_edit_lock.lock();
     match apply_referral_edit_local(&path, &req.edit) {
         Ok(()) => ApplyReferralEditResponse::Ok,
@@ -2776,13 +2846,17 @@ fn handle_register(state: &Server, req: &RegisterRequest) -> RegisterResponse {
         Some(d) => d.to_path_buf(),
         None => {
             return RegisterResponse::Err {
-                reason: "this host does not hold the CA — register with the CA".to_string(),
-            }
+                reason: "this host does not hold the CA — register with the CA"
+                    .to_string(),
+            };
         }
     };
     let mut map = state.map.lock();
-    let entry =
-        ServerEntry { addr: req.addr, roles: req.roles.clone(), cluster: req.cluster.clone() };
+    let entry = ServerEntry {
+        addr: req.addr,
+        roles: req.roles.clone(),
+        cluster: req.cluster.clone(),
+    };
     if netmap::upsert(&mut map, entry) {
         if let Err(e) = netmap::save(&ca_dir, &map) {
             return RegisterResponse::Err {
@@ -2800,7 +2874,7 @@ fn handle_deregister(state: &Server, req: &DeregisterRequest) -> RegisterRespons
         None => {
             return RegisterResponse::Err {
                 reason: "this host does not hold the CA".to_string(),
-            }
+            };
         }
     };
     let mut map = state.map.lock();
@@ -2817,16 +2891,23 @@ fn handle_deregister(state: &Server, req: &DeregisterRequest) -> RegisterRespons
 /// CA-side: admin-authenticated removal of a (dead) conf server from the
 /// map — for a machine that never ran `uninstall`. Cascades via the
 /// dropped entry, which carries that host's resolver-cluster facts.
-fn handle_remove_server(state: &Server, req: &RemoveServerRequest) -> RemoveServerResponse {
+fn handle_remove_server(
+    state: &Server,
+    req: &RemoveServerRequest,
+) -> RemoveServerResponse {
     let ca_dir = match state.ca_dir() {
         Some(d) => d.to_path_buf(),
         None => {
             return RemoveServerResponse::Err {
                 reason: "this host does not hold the CA".to_string(),
-            }
+            };
         }
     };
-    let authd = match authenticate(state.ca.as_ref().expect("CA role held"), &req.admin, &req.password.0) {
+    let authd = match authenticate(
+        state.ca.as_ref().expect("CA role held"),
+        &req.admin,
+        &req.password.0,
+    ) {
         Ok(a) => a,
         Err(reason) => return RemoveServerResponse::Err { reason },
     };
@@ -2900,7 +2981,9 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
     // written and only blow up when the resolver next loads it.
     for (p, e, bits) in crate::perms::iter(&pmap) {
         netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
-            .with_context(|| format!("invalid permission bits {bits:?} for {e:?} at {p:?}"))?;
+            .with_context(|| {
+                format!("invalid permission bits {bits:?} for {e:?} at {p:?}")
+            })?;
     }
     let rconfig = state
         .cfg
@@ -2923,13 +3006,13 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
         let rolled_back = match &backup {
             Some(old) => crate::atomic::write_atomic(&path, old, 0o644)
                 .context("restoring the previous perms file"),
-            None => std::fs::remove_file(&path)
-                .context("removing the rejected perms file"),
+            None => {
+                std::fs::remove_file(&path).context("removing the rejected perms file")
+            }
         };
         return match rolled_back {
-            Ok(()) => {
-                Err(e).context("the edited perms made the resolver config invalid; reverted")
-            }
+            Ok(()) => Err(e)
+                .context("the edited perms made the resolver config invalid; reverted"),
             Err(re) => Err(e).context(format!(
                 "the edited perms made the resolver config invalid AND the revert \
                  failed ({re:#}); the perms file at {} may be left invalid",
@@ -2941,7 +3024,10 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
 }
 
 /// Server-to-server receive side of a perms edit (peer-cert-gated).
-fn handle_apply_perms_edit(state: &Server, req: &ApplyPermsEditRequest) -> ApplyPermsEditResponse {
+fn handle_apply_perms_edit(
+    state: &Server,
+    req: &ApplyPermsEditRequest,
+) -> ApplyPermsEditResponse {
     match apply_perms_local(state, &req.perms_json) {
         Ok(()) => ApplyPermsEditResponse::Ok,
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
@@ -2985,7 +3071,12 @@ async fn push_perms_edit_to_peers(
 ) -> Vec<PeerResult> {
     let (my_listen, cert, key, roots) = {
         let cfg = state.cfg.lock();
-        (cfg.listen, state.serving_cert_pem.clone(), state.serving_key_pem.clone(), state.roots.clone())
+        (
+            cfg.listen,
+            state.serving_cert_pem.clone(),
+            state.serving_key_pem.clone(),
+            state.roots.clone(),
+        )
     };
     let conf_port = my_listen.port();
     let mut targets: Vec<SocketAddr> = Vec::new();
@@ -2997,7 +3088,9 @@ async fn push_perms_edit_to_peers(
     }
     let mut results = Vec::new();
     for addr in targets {
-        let res = conf_client::push_perms_edit(addr, &cert, &key, roots.clone(), perms_json).await;
+        let res =
+            conf_client::push_perms_edit(addr, &cert, &key, roots.clone(), perms_json)
+                .await;
         results.push(PeerResult { addr, error: res.err().map(|e| format!("{e:#}")) });
     }
     results
@@ -3062,7 +3155,7 @@ async fn handle_edit_perms(
                 return err(format!(
                     "no resolver cluster serving {:?} in the network map",
                     req.target_path
-                ))
+                ));
             }
         }
     };
@@ -3141,7 +3234,7 @@ async fn handle_control_service(
                 return err(format!(
                     "no resolver cluster serving {:?} in the network map",
                     req.target_path
-                ))
+                ));
             }
         }
     };
@@ -3204,8 +3297,12 @@ async fn handle_control_service(
         let addr = SocketAddr::new(m.ip(), conf_port);
         let (cert, key, roots, op) = (cert.clone(), key.clone(), roots.clone(), req.op);
         set.spawn(async move {
-            match conf_client::push_service_control(addr, &cert, &key, roots, units, op).await {
-                Ok(units) => ServiceControlResult { member: idx as u32, addr, error: None, units },
+            match conf_client::push_service_control(addr, &cert, &key, roots, units, op)
+                .await
+            {
+                Ok(units) => {
+                    ServiceControlResult { member: idx as u32, addr, error: None, units }
+                }
                 Err(e) => ServiceControlResult {
                     member: idx as u32,
                     addr,
@@ -3253,13 +3350,16 @@ async fn handle_apply_service_control(
         Some(dir) => control::socket_path(&dir),
         None => {
             return err(
-                "no activation supervisor on this host (no unit directory found)".to_string(),
-            )
+                "no activation supervisor on this host (no unit directory found)"
+                    .to_string(),
+            );
         }
     };
     let creq = control::ControlRequest { op: req.op, units: req.units.clone() };
     match control::control(&socket, &creq).await {
-        Ok(control::ControlResponse::Ok { units }) => ApplyServiceControlResponse::Ok { units },
+        Ok(control::ControlResponse::Ok { units }) => {
+            ApplyServiceControlResponse::Ok { units }
+        }
         Ok(control::ControlResponse::Err { reason }) => err(reason),
         Err(e) => err(format!("contacting the local activation supervisor: {e:#}")),
     }
@@ -3286,7 +3386,8 @@ fn authorize_admin_mgmt(
         .read()
         .authenticate(admin, password)
         .map_err(|_| "authentication failed".to_string())?;
-    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins {
+    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins
+    {
         Ok(authd)
     } else {
         Err(format!(
@@ -3401,12 +3502,17 @@ fn last_role_manager(vault: &ca_vault::CAVault, target: &str) -> Result<bool> {
         a.kind == ca_vault::SlotKind::Role && a.policy.may_manage_admins
     };
     let managers = admins.iter().filter(|a| is_role_manager(a)).count();
-    let target_is_manager = admins.iter().any(|a| a.admin == target && is_role_manager(a));
+    let target_is_manager =
+        admins.iter().any(|a| a.admin == target && is_role_manager(a));
     Ok(target_is_manager && managers <= 1)
 }
 
 /// `AddRoleAdmin`: mint a new role admin (CA-only, admin-authenticated).
-fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest, local: bool) -> AdminMgmtResponse {
+fn handle_add_role_admin(
+    state: &Server,
+    req: &AddRoleAdminRequest,
+    local: bool,
+) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
     let Some(ca) = state.ca.as_ref() else {
         return err("admin management must be sent to the CA host".to_string());
@@ -3446,7 +3552,11 @@ fn handle_add_role_admin(state: &Server, req: &AddRoleAdminRequest, local: bool)
 }
 
 /// `SetAdminPolicy`: rescope an existing role admin (CA-only).
-fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest, local: bool) -> AdminMgmtResponse {
+fn handle_set_admin_policy(
+    state: &Server,
+    req: &SetAdminPolicyRequest,
+    local: bool,
+) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
     let Some(ca) = state.ca.as_ref() else {
         return err("admin management must be sent to the CA host".to_string());
@@ -3486,7 +3596,7 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest, local: b
                      admin that can manage admins (restoring it would need the recovery \
                      password)",
                     req.target
-                ))
+                ));
             }
             Ok(false) => (),
             Err(e) => return err(format!("checking admin roster: {e:#}")),
@@ -3494,7 +3604,13 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest, local: b
     }
     match vault.set_policy(&req.target, req.policy.clone()) {
         Ok(()) => {
-            audit(ca.dir(), &authd.admin, "set-admin-policy", &req.target, Duration::ZERO);
+            audit(
+                ca.dir(),
+                &authd.admin,
+                "set-admin-policy",
+                &req.target,
+                Duration::ZERO,
+            );
             AdminMgmtResponse::Ok
         }
         Err(e) => err(format!("{e:#}")),
@@ -3502,7 +3618,11 @@ fn handle_set_admin_policy(state: &Server, req: &SetAdminPolicyRequest, local: b
 }
 
 /// `RemoveAdmin`: remove a role admin (CA-only).
-fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest, local: bool) -> AdminMgmtResponse {
+fn handle_remove_admin(
+    state: &Server,
+    req: &RemoveAdminRequest,
+    local: bool,
+) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
     let Some(ca) = state.ca.as_ref() else {
         return err("admin management must be sent to the CA host".to_string());
@@ -3536,7 +3656,7 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest, local: bool) ->
                     "refusing to remove {:?}: it is the last role admin that can manage \
                      admins (restoring it would need the recovery password)",
                     req.target
-                ))
+                ));
             }
             Ok(false) => (),
             Err(e) => return err(format!("checking admin roster: {e:#}")),
@@ -3553,7 +3673,11 @@ fn handle_remove_admin(state: &Server, req: &RemoveAdminRequest, local: bool) ->
 
 /// `ListAdmins`: the admin roster (CA-only; gated on management authority so
 /// a lower-tier role can't read everyone's capabilities).
-fn handle_list_admins(state: &Server, req: &ListAdminsRequest, local: bool) -> AdminListResponse {
+fn handle_list_admins(
+    state: &Server,
+    req: &ListAdminsRequest,
+    local: bool,
+) -> AdminListResponse {
     let err = |reason: String| AdminListResponse::Err { reason };
     let Some(ca) = state.ca.as_ref() else {
         return err("admin management must be sent to the CA host".to_string());
@@ -3669,7 +3793,10 @@ fn handle_rotate_autorenew(state: &Server, local: bool) -> RotateAutorenewRespon
     let current = match std::fs::read(&keytab) {
         Ok(b) => b,
         Err(e) => {
-            return err(format!("reading the autorenew keytab {}: {e:#}", keytab.display()))
+            return err(format!(
+                "reading the autorenew keytab {}: {e:#}",
+                keytab.display()
+            ));
         }
     };
     let sealed = netidx_tpm::is_sealed(&current);
@@ -3687,7 +3814,7 @@ fn handle_rotate_autorenew(state: &Server, local: bool) -> RotateAutorenewRespon
                     "resealing the autorenew keytab to this host's {} failed: {e:#}; the \
                      credential was left unchanged",
                     netidx_tpm::MECHANISM
-                ))
+                ));
             }
         }
     } else {
@@ -3754,18 +3881,14 @@ fn approve_delegation_prepare(
         .ca_dir()
         .map(|d| d.to_path_buf())
         .ok_or_else(|| err("this host does not hold the CA".to_string()))?;
-    let resolver_path = state
-        .cfg
-        .lock()
-        .roles
-        .resolver
-        .as_ref()
-        .map(|r| r.config.clone())
-        .ok_or_else(|| {
-            err("approving a delegation requires a resolver role on this host (the \
+    let resolver_path =
+        state.cfg.lock().roles.resolver.as_ref().map(|r| r.config.clone()).ok_or_else(
+            || {
+                err("approving a delegation requires a resolver role on this host (the \
                  config to edit + its address)"
-                .to_string())
-        })?;
+                    .to_string())
+            },
+        )?;
     let ca = state.ca.as_ref().expect("CA role held");
     let authd = authenticate(ca, &req.admin, &req.password.0).map_err(err)?;
     // The resolver edit + commit happen under this lock — mutually
@@ -3782,13 +3905,13 @@ fn approve_delegation_prepare(
             }
         }
         Ok(delegation_store::Status::Denied { .. }) => {
-            return Err(err("that delegation was already denied".to_string()))
+            return Err(err("that delegation was already denied".to_string()));
         }
         Ok(delegation_store::Status::Unknown) => {
             return Err(err(
                 "no such pending delegation request (expired or never queued)"
                     .to_string(),
-            ))
+            ));
         }
         Err(e) => return Err(err(format!("{e:#}"))),
     };
@@ -3823,7 +3946,13 @@ fn approve_delegation_prepare(
     if commit {
         delegation_store::approve(&ca_dir, &pending, parent)
             .map_err(|e| err(format!("committing the approval: {e:#}")))?;
-        audit(&ca_dir, &authd.admin, "approve-delegation", &pending.proposed_path, Duration::ZERO);
+        audit(
+            &ca_dir,
+            &authd.admin,
+            "approve-delegation",
+            &pending.proposed_path,
+            Duration::ZERO,
+        );
     }
     Ok((edit, member_addrs))
 }
@@ -3922,7 +4051,8 @@ async fn handle_approve_delegation(
 ) -> ApproveDelegationResponse {
     let prepared = {
         let state = state.clone();
-        tokio::task::spawn_blocking(move || approve_delegation_prepare(&state, &req)).await
+        tokio::task::spawn_blocking(move || approve_delegation_prepare(&state, &req))
+            .await
     };
     let (edit, member_addrs) = match prepared {
         Ok(Ok(p)) => p,
@@ -3930,7 +4060,7 @@ async fn handle_approve_delegation(
         Err(e) => {
             return ApproveDelegationResponse::Err {
                 reason: format!("approve delegation task panicked: {e}"),
-            }
+            };
         }
     };
     let peers = push_to_cluster_peers(state, &edit, &member_addrs).await;
@@ -3963,7 +4093,8 @@ fn name_permitted(name: &str, allowed: &[String]) -> Result<bool> {
 /// - Any other name must fall within the admin's issuance scope
 ///   (`allowed_san`).
 fn admin_authority_over(authd: &ca_vault::Authenticated, name: &str) -> Result<bool> {
-    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins {
+    if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins
+    {
         return Ok(true);
     }
     if name.eq_ignore_ascii_case(SERVING_SAN) {
@@ -3991,10 +4122,8 @@ fn reject(reason: &str) -> SignResponse {
 /// must not fail the operation it records). Public because the CLI's
 /// revoke writes the same trail the daemon's sign/approve/deny do.
 pub fn audit(ca_dir: &Path, admin: &str, op: &str, name: &str, validity: Duration) {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let ts =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let validity = humantime::format_duration(validity);
     let line = format!("ts={ts} admin={admin} op={op} name={name} validity={validity}\n");
     let r = OpenOptions::new()
@@ -4012,7 +4141,7 @@ pub fn audit(ca_dir: &Path, admin: &str, op: &str, name: &str, validity: Duratio
 mod tests {
     use super::*;
     use crate::{
-        ca::{Ca, CaParams, Subject, MIN_KEY_BITS},
+        ca::{Ca, CaParams, MIN_KEY_BITS, Subject},
         ca_vault::{self, Policy},
         conf_client,
         conf_proto::{NodeKind, Secret},
@@ -4030,7 +4159,8 @@ mod tests {
             may_enroll_servers: true,
             perms_edit_scopes: vec![],
             may_manage_admins: false,
-            service_control_scopes: vec![],        }
+            service_control_scopes: vec![],
+        }
     }
 
     /// A fresh in-process issuer seeded from the CA dir exactly as
@@ -4083,7 +4213,8 @@ mod tests {
             None,
         );
         cadir
-            .store.lock()
+            .store
+            .lock()
             .commit_issuance(
                 &req,
                 serial,
@@ -4105,7 +4236,12 @@ mod tests {
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
         let kc = conf_client::generate_key_and_csr(san).unwrap();
         let leaf = ca
-            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], std::time::Duration::from_secs(365 * 86400), 1000)
+            .sign_request(
+                kc.csr_pem.as_bytes(),
+                &[SanEntry::Dns(san.into())],
+                std::time::Duration::from_secs(365 * 86400),
+                1000,
+            )
             .unwrap();
         let mut chain = leaf;
         chain.extend_from_slice(&ca_cert);
@@ -4124,7 +4260,12 @@ mod tests {
         let kc = conf_client::generate_key_and_csr(san).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
-            .sign_request(kc.csr_pem.as_bytes(), &[SanEntry::Dns(san.into())], std::time::Duration::from_secs(365 * 86400), serial)
+            .sign_request(
+                kc.csr_pem.as_bytes(),
+                &[SanEntry::Dns(san.into())],
+                std::time::Duration::from_secs(365 * 86400),
+                serial,
+            )
             .unwrap();
         let req = ca_store::QueuedReq::new(
             NodeKind::Workstation,
@@ -4136,14 +4277,9 @@ mod tests {
             None,
         );
         cadir
-            .store.lock()
-            .commit_issuance(
-                &req,
-                serial,
-                san,
-                std::str::from_utf8(&leaf).unwrap(),
-                &[],
-            )
+            .store
+            .lock()
+            .commit_issuance(&req, serial, san, std::str::from_utf8(&leaf).unwrap(), &[])
             .unwrap();
         serial
     }
@@ -4219,12 +4355,14 @@ mod tests {
     }
 
     async fn spawn_ca_server(dir: &Path) -> (SocketAddr, Arc<Server>) {
-        let roles =
-            Roles {
-                ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: Some(autorenew_keytab(dir)) }),
-                resolver: None,
-                id_map: None,
-            };
+        let roles = Roles {
+            ca: Some(CaRole {
+                dir: dir.to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir)),
+            }),
+            resolver: None,
+            id_map: None,
+        };
         spawn_server_with(dir, roles, vec![]).await
     }
 
@@ -4239,25 +4377,34 @@ mod tests {
         let roots = ca_state.roots.clone();
 
         // The CA seeded its own entry + address.
-        let map0 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer).await.unwrap();
+        let map0 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer)
+            .await
+            .unwrap();
         assert_eq!(map0.servers.len(), 1);
         assert_eq!(map0.ca_addr, Some(ca_addr));
         let v0 = map0.version;
 
         // A resolver conf server registers its facts (peer-cert-gated).
         let target: SocketAddr = "10.9.9.9:4565".parse().unwrap();
-        let req = RegisterRequest { addr: target, roles: vec![Role::Resolver], cluster: None };
-        let v1 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await.unwrap();
+        let req =
+            RegisterRequest { addr: target, roles: vec![Role::Resolver], cluster: None };
+        let v1 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req)
+            .await
+            .unwrap();
         assert!(v1 > v0);
 
         // Served whole to a plain reader: both servers now present.
-        let map1 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer).await.unwrap();
+        let map1 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer)
+            .await
+            .unwrap();
         assert_eq!(map1.servers.len(), 2);
         assert!(map1.servers.iter().any(|s| s.addr == target));
         assert_eq!(map1.version, v1);
 
         // Idempotent re-register of identical facts: no version churn.
-        let v2 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await.unwrap();
+        let v2 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req)
+            .await
+            .unwrap();
         assert_eq!(v2, v1);
 
         // Deregister drops it and bumps.
@@ -4265,7 +4412,8 @@ mod tests {
             .await
             .unwrap();
         assert!(v3 > v1);
-        let map2 = conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await.unwrap();
+        let map2 =
+            conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await.unwrap();
         assert_eq!(map2.servers.len(), 1);
     }
 
@@ -4284,15 +4432,21 @@ mod tests {
         // loads the CRL with this serial already revoked. `next_serial` goes
         // through a transient CaDir that drops before `issue_serving_cert`
         // opens its own (a second live open of the same dir would deadlock).
-        let victim_serial =
-            ca_store::CaDir::open(dir.path()).unwrap().store.lock().next_serial().unwrap();
+        let victim_serial = ca_store::CaDir::open(dir.path())
+            .unwrap()
+            .store
+            .lock()
+            .next_serial()
+            .unwrap();
         let (vcert, vkey) = issue_serving_cert(dir.path());
         let now = ca_store::now_unix();
-        let unlocked = ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
+        let unlocked =
+            ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
         {
             let cadir = ca_store::CaDir::open(dir.path()).unwrap();
             let revoked = cadir
-                .store.lock()
+                .store
+                .lock()
                 .revoke(
                     victim_serial,
                     ca_store::Revocation {
@@ -4320,7 +4474,8 @@ mod tests {
 
         // The revoked cert is refused at the TLS handshake — Register never
         // reaches the app layer.
-        let denied = conf_client::register(ca_addr, &vcert, &vkey, roots.clone(), &req).await;
+        let denied =
+            conf_client::register(ca_addr, &vcert, &vkey, roots.clone(), &req).await;
         assert!(denied.is_err(), "a revoked peer cert must be refused at the handshake");
 
         // A fresh (un-revoked) serving cert is still accepted — the CRL adds
@@ -4375,11 +4530,11 @@ mod tests {
                 AUTORENEW_ADMIN,
                 AUTORENEW_PW,
                 Policy {
-                allowed_san: vec![],
-                max_validity: std::time::Duration::from_secs(730 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
+                    allowed_san: vec![],
+                    max_validity: std::time::Duration::from_secs(730 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
                     may_manage_admins: false,
                     service_control_scopes: vec![],
                 },
@@ -4422,7 +4577,8 @@ mod tests {
                 // duplicate-refusal source of truth).
                 let live = ca_store::CaDir::open(dir.path())
                     .unwrap()
-                    .store.lock()
+                    .store
+                    .lock()
                     .live_for_name("resolver.ryu-oh.org")
                     .unwrap();
                 assert_eq!(live.len(), 1);
@@ -4450,7 +4606,8 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-                service_control_scopes: vec![],            },
+                service_control_scopes: vec![],
+            },
         );
         let iss = issuer(dir.path());
         // Choosing an allowed subset works, and the plan carries the
@@ -4539,7 +4696,8 @@ mod tests {
                 may_enroll_servers: true,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-                service_control_scopes: vec![],            },
+                service_control_scopes: vec![],
+            },
         );
         let req = request(SERVING_SAN, "alice", "apw", 30);
         match handle_sign_request(&issuer(dir.path()), &req).resp {
@@ -4557,7 +4715,9 @@ mod tests {
         // rejected outright.
         let req = request("a.ryu-oh.org", "bob", "apw", 30);
         match handle_sign_request(&issuer(dir.path()), &req).resp {
-            SignResponse::Err { reason } => assert!(reason.contains("authentication failed")),
+            SignResponse::Err { reason } => {
+                assert!(reason.contains("authentication failed"))
+            }
             SignResponse::Ok { .. } => panic!("admin/password mismatch accepted"),
         }
     }
@@ -4568,20 +4728,25 @@ mod tests {
         setup_ca(dir.path());
         // A ROLE admin: it carries an issuance scope but wraps no MK, so its
         // password can never unlock the CA key.
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "eu-ops",
-            "eupw",
-            Policy {
-                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity: std::time::Duration::from_secs(30 * 86400),
-                id_map_groups: vec!["users".to_string()],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
-        assert!(ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("eupw").is_err(), "role can't unlock the key");
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "eu-ops",
+                "eupw",
+                Policy {
+                    allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                    max_validity: std::time::Duration::from_secs(30 * 86400),
+                    id_map_groups: vec!["users".to_string()],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
+        assert!(
+            ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("eupw").is_err(),
+            "role can't unlock the key"
+        );
 
         // Yet the SERVER signs an in-scope name on its behalf.
         let ok = request("host.eu.ryu-oh.org", "eu-ops", "eupw", 30);
@@ -4598,7 +4763,10 @@ mod tests {
         // The audit names the REQUESTER, not the server's autorenew credential.
         let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
         assert!(log.contains("admin=eu-ops"), "audit names the requester: {log}");
-        assert!(!log.contains("admin=autorenew"), "audit must not name the server cred: {log}");
+        assert!(
+            !log.contains("admin=autorenew"),
+            "audit must not name the server cred: {log}"
+        );
     }
 
     #[test]
@@ -4611,8 +4779,12 @@ mod tests {
         let iss = ca_store::CaDir::open(dir.path()).unwrap();
         let req = request("host.ryu-oh.org", "alice", "apw", 30);
         match handle_sign_request(&iss, &req).resp {
-            SignResponse::Err { reason } => assert!(reason.contains("cannot sign"), "{reason}"),
-            SignResponse::Ok { .. } => panic!("a CA with no signing credential must not sign"),
+            SignResponse::Err { reason } => {
+                assert!(reason.contains("cannot sign"), "{reason}")
+            }
+            SignResponse::Ok { .. } => {
+                panic!("a CA with no signing credential must not sign")
+            }
         }
     }
 
@@ -4626,40 +4798,45 @@ mod tests {
     fn revoke_is_scope_bound() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path()); // alice = signing slot (broad)
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "eu-ops",
-            "eupw",
-            Policy {
-                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity: std::time::Duration::from_secs(30 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "eu-ops",
+                "eupw",
+                Policy {
+                    allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                    max_validity: std::time::Duration::from_secs(30 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         // A perms-only role admin with no issuance authority at all.
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "pat",
-            "patpw",
-            Policy {
-                allowed_san: vec![],
-                max_validity: std::time::Duration::from_secs(0 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec!["/eu".to_string()],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "pat",
+                "patpw",
+                Policy {
+                    allowed_san: vec![],
+                    max_validity: std::time::Duration::from_secs(0 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec!["/eu".to_string()],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         let us = commit_live_cert(dir.path(), "host.us.ryu-oh.org");
         let eu = commit_live_cert(dir.path(), "host.eu.ryu-oh.org");
         let serving = commit_live_cert(dir.path(), SERVING_SAN);
         let revoked = |serial: u64| {
             ca_store::CaDir::open(dir.path())
                 .unwrap()
-                .store.lock()
+                .store
+                .lock()
                 .list_signed()
                 .unwrap()
                 .into_iter()
@@ -4679,7 +4856,9 @@ mod tests {
                 reason: "x".to_string(),
             },
         );
-        assert!(matches!(pat, RevokeResponse::Err { reason } if reason.contains("not authorized")));
+        assert!(
+            matches!(pat, RevokeResponse::Err { reason } if reason.contains("not authorized"))
+        );
         assert!(!revoked(eu), "a rejected revoke must not have revoked anything");
 
         // eu-ops asks to revoke all three; only its in-scope leaf is revoked.
@@ -4692,11 +4871,17 @@ mod tests {
                 reason: "x".to_string(),
             },
         );
-        let RevokeResponse::Ok { warnings } = resp else { panic!("expected Ok with warnings") };
+        let RevokeResponse::Ok { warnings } = resp else {
+            panic!("expected Ok with warnings")
+        };
         assert!(revoked(eu), "eu-ops may revoke its own *.eu leaf");
         assert!(!revoked(us), "eu-ops must NOT revoke another region's *.us leaf");
         assert!(!revoked(serving), "eu-ops must NOT revoke a serving cert");
-        assert_eq!(warnings.len(), 2, "the two out-of-scope serials are reported: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            2,
+            "the two out-of-scope serials are reported: {warnings:?}"
+        );
 
         // The broad signing admin (alice) can revoke the *.us leaf.
         let resp = handle_revoke(
@@ -4719,19 +4904,21 @@ mod tests {
     fn deny_is_scope_bound() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "eu-ops",
-            "eupw",
-            Policy {
-                allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
-                max_validity: std::time::Duration::from_secs(30 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "eu-ops",
+                "eupw",
+                Policy {
+                    allowed_san: vec!["*.eu.ryu-oh.org".to_string()],
+                    max_validity: std::time::Duration::from_secs(30 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         let peer = "1.2.3.4:5".parse().unwrap();
         let enqueue = |name: &str| -> String {
             let kc = conf_client::generate_key_and_csr(name).unwrap();
@@ -4760,9 +4947,16 @@ mod tests {
                 reason: "x".to_string(),
             },
         );
-        assert!(matches!(denied, DenyResponse::Err { reason } if reason.contains("not authorized")));
+        assert!(
+            matches!(denied, DenyResponse::Err { reason } if reason.contains("not authorized"))
+        );
         assert!(matches!(
-            ca_store::CaDir::open(dir.path()).unwrap().store.lock().status(&us_id).unwrap(),
+            ca_store::CaDir::open(dir.path())
+                .unwrap()
+                .store
+                .lock()
+                .status(&us_id)
+                .unwrap(),
             ca_store::Status::Pending(_)
         ));
 
@@ -4778,7 +4972,12 @@ mod tests {
         );
         assert!(matches!(ok, DenyResponse::Ok));
         assert!(matches!(
-            ca_store::CaDir::open(dir.path()).unwrap().store.lock().status(&eu_id).unwrap(),
+            ca_store::CaDir::open(dir.path())
+                .unwrap()
+                .store
+                .lock()
+                .status(&eu_id)
+                .unwrap(),
             ca_store::Status::Denied(_)
         ));
     }
@@ -4796,7 +4995,8 @@ mod tests {
         let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
         let fp = ca_store::CaDir::open(dir.path())
             .unwrap()
-            .store.lock()
+            .store
+            .lock()
             .list_signed()
             .unwrap()
             .into_iter()
@@ -4817,14 +5017,20 @@ mod tests {
             serial: Some(orig),
             spki_fp: Some(fp),
         };
-        let rid = match handle_enqueue(&issuer(dir.path()), &enq, "1.2.3.4:5".parse().unwrap(), Some(&pid)) {
+        let rid = match handle_enqueue(
+            &issuer(dir.path()),
+            &enq,
+            "1.2.3.4:5".parse().unwrap(),
+            Some(&pid),
+        ) {
             EnqueueResponse::Ok { request_id } => request_id,
             EnqueueResponse::Err { reason } => panic!("renewal enqueue: {reason}"),
         };
         assert!(
             ca_store::CaDir::open(dir.path())
                 .unwrap()
-                .store.lock()
+                .store
+                .lock()
                 .pending()
                 .unwrap()
                 .iter()
@@ -4834,7 +5040,8 @@ mod tests {
         // The admin revokes the originating cert (laptop stolen).
         ca_store::CaDir::open(dir.path())
             .unwrap()
-            .store.lock()
+            .store
+            .lock()
             .revoke(
                 orig,
                 ca_store::Revocation {
@@ -4859,7 +5066,9 @@ mod tests {
             SignResponse::Err { reason } => {
                 assert!(reason.contains("no longer live"), "{reason}")
             }
-            SignResponse::Ok { .. } => panic!("a renewal of a revoked cert must be refused"),
+            SignResponse::Ok { .. } => {
+                panic!("a renewal of a revoked cert must be refused")
+            }
         }
         assert!(matches!(
             ca_store::CaDir::open(dir.path()).unwrap().store.lock().status(&rid).unwrap(),
@@ -4877,7 +5086,8 @@ mod tests {
         let orig = commit_live_cert(dir.path(), "host.ryu-oh.org");
         let real_fp = ca_store::CaDir::open(dir.path())
             .unwrap()
-            .store.lock()
+            .store
+            .lock()
             .list_signed()
             .unwrap()
             .into_iter()
@@ -4902,7 +5112,9 @@ mod tests {
             spki_fp: Some("AAAA BBBB CCCC".to_string()),
         };
         match handle_enqueue(&issuer(dir.path()), &enq, peer, Some(&foreign)) {
-            EnqueueResponse::Err { reason } => assert!(reason.contains("already exists"), "{reason}"),
+            EnqueueResponse::Err { reason } => {
+                assert!(reason.contains("already exists"), "{reason}")
+            }
             EnqueueResponse::Ok { .. } => {
                 panic!("a foreign cert with a colliding serial must not renew")
             }
@@ -4915,15 +5127,20 @@ mod tests {
         };
         let rid = match handle_enqueue(&issuer(dir.path()), &enq, peer, Some(&ours)) {
             EnqueueResponse::Ok { request_id } => request_id,
-            EnqueueResponse::Err { reason } => panic!("our own cert should renew: {reason}"),
+            EnqueueResponse::Err { reason } => {
+                panic!("our own cert should renew: {reason}")
+            }
         };
-        assert!(ca_store::CaDir::open(dir.path())
-            .unwrap()
-            .store.lock()
-            .pending()
-            .unwrap()
-            .iter()
-            .any(|q| q.id == rid && q.renewal_of == Some(orig)));
+        assert!(
+            ca_store::CaDir::open(dir.path())
+                .unwrap()
+                .store
+                .lock()
+                .pending()
+                .unwrap()
+                .iter()
+                .any(|q| q.id == rid && q.renewal_of == Some(orig))
+        );
     }
 
     #[test]
@@ -4938,7 +5155,8 @@ mod tests {
                 may_enroll_servers: false,
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
-                service_control_scopes: vec![],            },
+                service_control_scopes: vec![],
+            },
         );
         let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let req = EnrollRequest {
@@ -4984,8 +5202,7 @@ mod tests {
 
         // Inspect first — the operator is shown the CA fingerprint plus
         // the TLS-attested domain and roles.
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         assert!(!identity.fingerprint.text().is_empty());
         assert_eq!(identity.domain, "ryu-oh.org");
         assert_eq!(identity.roles, vec![Role::Ca]);
@@ -5046,8 +5263,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, _state) = spawn_ca_server(dir.path()).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let err = conf_client::request_cert(
             addr,
             NodeKind::Resolver,
@@ -5070,14 +5286,17 @@ mod tests {
         setup_ca(dir.path());
         let peer: SocketAddr = "192.168.0.9:4565".parse().unwrap();
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![peer]).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
-        let info = conf_client::get_info(addr, NodeKind::Client, &identity).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let info =
+            conf_client::get_info(addr, NodeKind::Client, &identity).await.unwrap();
         assert_eq!(info.domain, "ryu-oh.org");
         assert_eq!(info.ca_addr, Some(addr));
         assert_eq!(info.peers, vec![peer]);
@@ -5091,7 +5310,10 @@ mod tests {
         // B: a roleless stepping stone; A: the CA, which knows about B.
         let (b_addr, _b) = spawn_server_with(dir.path(), Roles::default(), vec![]).await;
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: None,
         };
@@ -5119,7 +5341,10 @@ mod tests {
         let (b_addr, _b) = spawn_server_with(dir.path(), roles_b, vec![]).await;
         // A: the CA, with B as a configured peer.
         let roles_a = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: None,
         };
@@ -5158,7 +5383,10 @@ mod tests {
             l.local_addr().unwrap()
         };
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: None,
         };
@@ -5219,20 +5447,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         // bob may sign but not enroll.
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_signing_slot(
-            "apw",
-            "bob",
-            "bpw",
-            Policy {
-                allowed_san: vec!["*".to_string()],
-                max_validity: std::time::Duration::from_secs(30 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_signing_slot(
+                "apw",
+                "bob",
+                "bpw",
+                Policy {
+                    allowed_san: vec!["*".to_string()],
+                    max_validity: std::time::Duration::from_secs(30 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         let (a_addr, a_state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(a_addr, NodeKind::ConfServer).await.unwrap();
@@ -5283,7 +5513,9 @@ mod tests {
         .await
         .unwrap();
         let _: ServerHello = conf_proto::read_msg(&mut tls).await.unwrap();
-        conf_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await.unwrap();
+        conf_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone()))
+            .await
+            .unwrap();
         conf_proto::read_msg(&mut tls).await.unwrap()
     }
 
@@ -5308,7 +5540,9 @@ mod tests {
             AddIdentityResponse::Err { reason } => {
                 assert!(reason.contains("peer certificate"), "got: {reason}")
             }
-            AddIdentityResponse::Ok { .. } => panic!("unauthenticated AddIdentity accepted"),
+            AddIdentityResponse::Ok { .. } => {
+                panic!("unauthenticated AddIdentity accepted")
+            }
         }
         // 2. A CA-issued client cert that is NOT a conf-server serving
         //    cert (an ordinary node identity) must also be refused —
@@ -5337,7 +5571,10 @@ mod tests {
         // One server wearing both hats: signs the queue AND hosts the
         // id-map the approval registers into.
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: Some(IdMapRole { map: map_path.clone() }),
         };
@@ -5363,9 +5600,8 @@ mod tests {
         // Admin lists the queue and matches the request code — computed
         // locally from the queued CSR, equal to the one the enrollee
         // displays.
-        let queue = conf_client::list_queue(addr, "alice", "apw", &identity)
-            .await
-            .unwrap();
+        let queue =
+            conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].requested_name, "eric.ryu-oh.org");
         assert_eq!(
@@ -5386,13 +5622,14 @@ mod tests {
         .unwrap();
         assert!(warnings.is_empty(), "local id-map push should succeed: {warnings:?}");
         // The waiting enrollee's next poll delivers the verified cert.
-        let issued = match conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
-            .await
-            .unwrap()
-        {
-            conf_client::PollOutcome::Issued(i) => i,
-            _ => panic!("expected Issued after approval"),
-        };
+        let issued =
+            match conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+                .await
+                .unwrap()
+            {
+                conf_client::PollOutcome::Issued(i) => i,
+                _ => panic!("expected Issued after approval"),
+            };
         let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
         let san = cert.subject_alt_names().unwrap();
         assert!(san.iter().any(|n| n.dnsname() == Some("eric.ryu-oh.org")));
@@ -5466,14 +5703,24 @@ mod tests {
         assert_eq!(approved, 1, "only the verified renewal is auto-approved");
         assert!(
             matches!(
-                ca_store::CaDir::open(dir.path()).unwrap().store.lock().status(&renew_id).unwrap(),
+                ca_store::CaDir::open(dir.path())
+                    .unwrap()
+                    .store
+                    .lock()
+                    .status(&renew_id)
+                    .unwrap(),
                 ca_store::Status::Signed(_)
             ),
             "the verified renewal should now be signed",
         );
         assert!(
             matches!(
-                ca_store::CaDir::open(dir.path()).unwrap().store.lock().status(&fresh_id).unwrap(),
+                ca_store::CaDir::open(dir.path())
+                    .unwrap()
+                    .store
+                    .lock()
+                    .status(&fresh_id)
+                    .unwrap(),
                 ca_store::Status::Pending(_)
             ),
             "the ordinary request must still wait for a human",
@@ -5510,9 +5757,10 @@ mod tests {
         conf_client::approve(addr, "alice", "apw", &a.request_id, vec![], &identity)
             .await
             .unwrap();
-        let derr = conf_client::deny(addr, "alice", "apw", &a.request_id, "no", &identity)
-            .await
-            .unwrap_err();
+        let derr =
+            conf_client::deny(addr, "alice", "apw", &a.request_id, "no", &identity)
+                .await
+                .unwrap_err();
         assert!(format!("{derr:#}").contains("already approved"), "got: {derr:#}");
         assert!(matches!(
             state.ca.as_ref().unwrap().store.lock().status(&a.request_id).unwrap(),
@@ -5558,8 +5806,7 @@ mod tests {
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
         let listen: SocketAddr = "10.0.0.9:4565".parse().unwrap();
-        let pending =
-            conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        let pending = conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
         assert!(matches!(
             conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
                 .await
@@ -5581,18 +5828,14 @@ mod tests {
         conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
             .await
             .unwrap();
-        let issued = match conf_client::poll(
-            addr,
-            NodeKind::ConfServer,
-            &pending,
-            &identity,
-        )
-        .await
-        .unwrap()
-        {
-            conf_client::PollOutcome::Issued(i) => i,
-            _ => panic!("expected Issued after approval"),
-        };
+        let issued =
+            match conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+                .await
+                .unwrap()
+            {
+                conf_client::PollOutcome::Issued(i) => i,
+                _ => panic!("expected Issued after approval"),
+            };
         let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
         let san = cert.subject_alt_names().unwrap();
         assert!(san.iter().any(|n| n.dnsname() == Some(SERVING_SAN)));
@@ -5618,10 +5861,8 @@ mod tests {
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
         let listen: SocketAddr = "10.0.0.10:4565".parse().unwrap();
-        let pending =
-            conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
-        let queue =
-            conf_client::list_queue(addr, "bob", "bpw", &identity).await.unwrap();
+        let pending = conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        let queue = conf_client::list_queue(addr, "bob", "bpw", &identity).await.unwrap();
         let err =
             conf_client::approve(addr, "bob", "bpw", &queue[0].id, vec![], &identity)
                 .await
@@ -5764,11 +6005,16 @@ mod tests {
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
-        let err =
-            conf_client::enqueue(addr, NodeKind::ConfServer, SERVING_SAN, std::time::Duration::from_secs(30 * 86400), &identity)
-                .await
-                .map(|_| ())
-                .unwrap_err();
+        let err = conf_client::enqueue(
+            addr,
+            NodeKind::ConfServer,
+            SERVING_SAN,
+            std::time::Duration::from_secs(30 * 86400),
+            &identity,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
         assert!(format!("{err:#}").contains("reserved"));
     }
 
@@ -5778,10 +6024,7 @@ mod tests {
         setup_ca(dir.path());
         let iss = issuer(dir.path());
         let req = request("eric.ryu-oh.org", "alice", "apw", 30);
-        assert!(matches!(
-            handle_sign_request(&iss, &req).resp,
-            SignResponse::Ok { .. }
-        ));
+        assert!(matches!(handle_sign_request(&iss, &req).resp, SignResponse::Ok { .. }));
         // Same name again: refused while the first cert lives — the
         // impostor race on an existing identity is closed.
         let req2 = request("eric.ryu-oh.org", "alice", "apw", 30);
@@ -5794,9 +6037,9 @@ mod tests {
         // Revoking clears the way — the rebuilt-laptop flow. Route through
         // the one `iss` CaDir the test already holds (a fresh `CaDir::open`
         // of the same dir would deadlock its flock).
-        let serial =
-            iss.store.lock().live_for_name("eric.ryu-oh.org").unwrap()[0].serial;
-        iss.store.lock()
+        let serial = iss.store.lock().live_for_name("eric.ryu-oh.org").unwrap()[0].serial;
+        iss.store
+            .lock()
             .revoke(
                 serial,
                 ca_store::Revocation {
@@ -5807,10 +6050,7 @@ mod tests {
             )
             .unwrap();
         let req3 = request("eric.ryu-oh.org", "alice", "apw", 30);
-        assert!(matches!(
-            handle_sign_request(&iss, &req3).resp,
-            SignResponse::Ok { .. }
-        ));
+        assert!(matches!(handle_sign_request(&iss, &req3).resp, SignResponse::Ok { .. }));
     }
 
     #[tokio::test]
@@ -5849,22 +6089,21 @@ mod tests {
         // deadlock). Each `lock()` here is a short, awaitless critical section
         // — never held across a wire call that the server itself must lock.
         let ca = state.ca.as_ref().expect("CA role held");
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         // Nothing revoked yet ⇒ no CRL.
-        assert!(conf_client::get_crl(addr, NodeKind::Client, &identity)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            conf_client::get_crl(addr, NodeKind::Client, &identity)
+                .await
+                .unwrap()
+                .is_none()
+        );
         // Sign a victim, revoke it, sign the CRL with the vault key.
         let req = request("victim.ryu-oh.org", "alice", "apw", 30);
-        assert!(matches!(
-            handle_sign_request(ca, &req).resp,
-            SignResponse::Ok { .. }
-        ));
+        assert!(matches!(handle_sign_request(ca, &req).resp, SignResponse::Ok { .. }));
         let serial =
             ca.store.lock().live_for_name("victim.ryu-oh.org").unwrap()[0].serial;
-        ca.store.lock()
+        ca.store
+            .lock()
             .revoke(
                 serial,
                 ca_store::Revocation {
@@ -5874,7 +6113,8 @@ mod tests {
                 },
             )
             .unwrap();
-        let unlocked = ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
+        let unlocked =
+            ca_vault::CAVault::new(dir.path().to_path_buf()).unlock("apw").unwrap();
         ca.store.lock().write_crl(&unlocked.ca_key_pem).unwrap();
         // The daemon serves it; it parses; the revoked serial is on it;
         // and it is genuinely signed by the CA.
@@ -5918,20 +6158,22 @@ mod tests {
         setup_ca(dir.path());
         // An autorenew-shaped admin: empty issuance scope. It must be
         // able to approve *renewals* and nothing else.
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_signing_slot(
-            "apw",
-            "bot",
-            "botpw",
-            Policy {
-                allowed_san: vec![],
-                max_validity: std::time::Duration::from_secs(730 * 86400),
-                id_map_groups: vec![],
-                may_enroll_servers: false,
-                perms_edit_scopes: vec![],
-                may_manage_admins: false,
-                service_control_scopes: vec![],            },
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_signing_slot(
+                "apw",
+                "bot",
+                "botpw",
+                Policy {
+                    allowed_san: vec![],
+                    max_validity: std::time::Duration::from_secs(730 * 86400),
+                    id_map_groups: vec![],
+                    may_enroll_servers: false,
+                    perms_edit_scopes: vec![],
+                    may_manage_admins: false,
+                    service_control_scopes: vec![],
+                },
+            )
+            .unwrap();
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
             conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
@@ -5951,9 +6193,9 @@ mod tests {
         // 2. Renewal: enqueue over a connection authenticated by the
         //    live cert — fully unattended, PKI-verified, no TOFU.
         let mut roots = RootCertStore::empty();
-        for der in
-            rustls_pemfile::certs(&mut std::io::Cursor::new(issued.trusted_pem.as_bytes()))
-        {
+        for der in rustls_pemfile::certs(&mut std::io::Cursor::new(
+            issued.trusted_pem.as_bytes(),
+        )) {
             roots.add(der.unwrap()).unwrap();
         }
         let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(
@@ -5980,9 +6222,16 @@ mod tests {
         // 4. The empty-scope bot approves it — renewals skip the SAN
         //    globs (the name was approved at enrollment; this is
         //    continuation).
-        conf_client::approve(addr, "bot", "botpw", &pending.request_id, vec![], &identity)
-            .await
-            .unwrap();
+        conf_client::approve(
+            addr,
+            "bot",
+            "botpw",
+            &pending.request_id,
+            vec![],
+            &identity,
+        )
+        .await
+        .unwrap();
         let renewed = match conf_client::poll_renewal(
             addr,
             NodeKind::Client,
@@ -6002,7 +6251,15 @@ mod tests {
         assert!(san.iter().any(|n| n.dnsname() == Some("eric.ryu-oh.org")));
         // Both generations are live in the index until revoked/expired.
         assert_eq!(
-            state.ca.as_ref().unwrap().store.lock().live_for_name("eric.ryu-oh.org").unwrap().len(),
+            state
+                .ca
+                .as_ref()
+                .unwrap()
+                .store
+                .lock()
+                .live_for_name("eric.ryu-oh.org")
+                .unwrap()
+                .len(),
             2
         );
         // The audit trail distinguishes renewals.
@@ -6066,9 +6323,16 @@ mod tests {
         .unwrap();
         let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert!(q[0].verified_renewal, "serving-cert renewal must verify");
-        conf_client::approve(addr, "alice", "apw", &pending.request_id, vec![], &identity)
-            .await
-            .unwrap();
+        conf_client::approve(
+            addr,
+            "alice",
+            "apw",
+            &pending.request_id,
+            vec![],
+            &identity,
+        )
+        .await
+        .unwrap();
         let installed_pem = std::str::from_utf8(&ca_pem).unwrap();
         let renewed = match conf_client::poll_renewal(
             addr,
@@ -6086,8 +6350,8 @@ mod tests {
         // The chain rebuild: leaf + the issuing CA from the returned
         // bundle parses back as a ≥2-cert chain — what `split_chain`
         // on every future enrollee requires.
-        let ca = conf_client::issuing_ca_pem(&renewed.trusted_pem, &renewed.cert_pem)
-            .unwrap();
+        let ca =
+            conf_client::issuing_ca_pem(&renewed.trusted_pem, &renewed.cert_pem).unwrap();
         let chain = format!("{}{}", renewed.cert_pem, ca);
         let n = rustls_pemfile::certs(&mut std::io::Cursor::new(chain.as_bytes()))
             .flatten()
@@ -6116,9 +6380,21 @@ mod tests {
         .unwrap();
         // Revoke it (e.g. the laptop was stolen). Route through the running
         // CA daemon's held `state.ca` (it owns the dir's exclusive flock).
-        let serial =
-            state.ca.as_ref().unwrap().store.lock().live_for_name("eric.ryu-oh.org").unwrap()[0].serial;
-        state.ca.as_ref().unwrap().store.lock()
+        let serial = state
+            .ca
+            .as_ref()
+            .unwrap()
+            .store
+            .lock()
+            .live_for_name("eric.ryu-oh.org")
+            .unwrap()[0]
+            .serial;
+        state
+            .ca
+            .as_ref()
+            .unwrap()
+            .store
+            .lock()
             .revoke(
                 serial,
                 ca_store::Revocation {
@@ -6135,9 +6411,9 @@ mod tests {
         // the name it falls through to the normal queue: glyph-gated,
         // admin's eyes open.
         let mut roots = RootCertStore::empty();
-        for der in
-            rustls_pemfile::certs(&mut std::io::Cursor::new(issued.trusted_pem.as_bytes()))
-        {
+        for der in rustls_pemfile::certs(&mut std::io::Cursor::new(
+            issued.trusted_pem.as_bytes(),
+        )) {
             roots.add(der.unwrap()).unwrap();
         }
         let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(
@@ -6232,7 +6508,10 @@ mod tests {
     async fn spawn_anon_parent(dir: &Path) -> (SocketAddr, PathBuf, Arc<Server>) {
         let rpath = write_anon_resolver_cfg(dir, "resolver.json");
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.to_path_buf(), autorenew: Some(autorenew_keytab(dir)) }),
+            ca: Some(CaRole {
+                dir: dir.to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir)),
+            }),
             resolver: Some(ResolverRole { config: rpath.clone() }),
             id_map: None,
         };
@@ -6263,10 +6542,14 @@ mod tests {
     async fn perms_edit_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#)
+            .unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -6280,10 +6563,17 @@ mod tests {
         // Edit the root cluster's perms (admin-authed at the CA, propagated
         // to the cluster — here a single self-member loopback push).
         let new_perms = r#"{"/foo":{"bob":"swl"}}"#;
-        let peers =
-            conf_client::edit_perms(addr, NodeKind::Client, &id, "alice", "apw", "/", new_perms)
-                .await
-                .unwrap();
+        let peers = conf_client::edit_perms(
+            addr,
+            NodeKind::Client,
+            &id,
+            "alice",
+            "apw",
+            "/",
+            new_perms,
+        )
+        .await
+        .unwrap();
         assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
 
         // The edit is reflected.
@@ -6291,17 +6581,19 @@ mod tests {
         assert!(p1.contains("bob") && !p1.contains("users"), "got {p1}");
 
         // Wrong password is refused (the file is unchanged).
-        assert!(conf_client::edit_perms(
-            addr,
-            NodeKind::Client,
-            &id,
-            "alice",
-            "wrong",
-            "/",
-            new_perms
-        )
-        .await
-        .is_err());
+        assert!(
+            conf_client::edit_perms(
+                addr,
+                NodeKind::Client,
+                &id,
+                "alice",
+                "wrong",
+                "/",
+                new_perms
+            )
+            .await
+            .is_err()
+        );
     }
 
     /// A role keyslot may edit perms only within its granted scope, and
@@ -6321,7 +6613,8 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
-            service_control_scopes: vec![],        };
+            service_control_scopes: vec![],
+        };
         ca_vault::CAVault::new(dir.path().to_path_buf())
             .add_role_slot("eve", "epw", role("/eu"))
             .unwrap();
@@ -6329,10 +6622,14 @@ mod tests {
             .add_role_slot("rod", "rpw", role("/"))
             .unwrap();
 
-        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#)
+            .unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -6343,25 +6640,49 @@ mod tests {
         // eve's scope `/eu` does not cover the `/` cluster — refused on
         // authorization, before the map is even consulted, and the file
         // is untouched.
-        let denied =
-            conf_client::edit_perms(addr, NodeKind::Client, &id, "eve", "epw", "/", new_perms)
-                .await;
+        let denied = conf_client::edit_perms(
+            addr,
+            NodeKind::Client,
+            &id,
+            "eve",
+            "epw",
+            "/",
+            new_perms,
+        )
+        .await;
         let msg = format!("{:#}", denied.unwrap_err());
         assert!(msg.contains("not authorized"), "got {msg}");
         let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p.contains("users") && !p.contains("bob"), "deny must not mutate: {p}");
 
         // A wrong password for a real role admin is also refused.
-        assert!(conf_client::edit_perms(addr, NodeKind::Client, &id, "eve", "nope", "/eu", new_perms)
+        assert!(
+            conf_client::edit_perms(
+                addr,
+                NodeKind::Client,
+                &id,
+                "eve",
+                "nope",
+                "/eu",
+                new_perms
+            )
             .await
-            .is_err());
+            .is_err()
+        );
 
         // rod's scope `/` covers the root cluster — authorized, and the
         // edit propagates (a role admin edits perms with no CA key).
-        let peers =
-            conf_client::edit_perms(addr, NodeKind::Client, &id, "rod", "rpw", "/", new_perms)
-                .await
-                .unwrap();
+        let peers = conf_client::edit_perms(
+            addr,
+            NodeKind::Client,
+            &id,
+            "rod",
+            "rpw",
+            "/",
+            new_perms,
+        )
+        .await
+        .unwrap();
         assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
         let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p.contains("bob") && !p.contains("users"), "in-scope edit applied: {p}");
@@ -6374,10 +6695,14 @@ mod tests {
     async fn invalid_perms_edit_is_rejected_and_reverted() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#)
+            .unwrap();
         let rpath = write_resolver_with_perms(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: Some(ResolverRole { config: rpath }),
             id_map: None,
         };
@@ -6387,10 +6712,17 @@ mod tests {
         // Valid JSON, but `xyz` are not permission bits (only `!swlpd`).
         // The peer writes it, validation fails, and it rolls back.
         let bad = r#"{"/foo":{"bob":"xyz"}}"#;
-        let peers =
-            conf_client::edit_perms(addr, NodeKind::Client, &id, "alice", "apw", "/", bad)
-                .await
-                .unwrap();
+        let peers = conf_client::edit_perms(
+            addr,
+            NodeKind::Client,
+            &id,
+            "alice",
+            "apw",
+            "/",
+            bad,
+        )
+        .await
+        .unwrap();
         assert!(
             peers.iter().any(|p| p.error.is_some()),
             "peer must reject the invalid perms: {peers:?}"
@@ -6398,7 +6730,10 @@ mod tests {
 
         // The prior perms survive — the bad edit was reverted.
         let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
-        assert!(p.contains("users") && !p.contains("bob"), "reverted to prior perms: {p}");
+        assert!(
+            p.contains("users") && !p.contains("bob"),
+            "reverted to prior perms: {p}"
+        );
     }
 
     /// End-to-end delegation over the real pinned-TLS protocol: a conf
@@ -6412,8 +6747,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
 
         // The child site queues a request for /eu carrying its own
         // (concrete) resolver address.
@@ -6524,7 +6858,10 @@ mod tests {
 
         // Peer A holds the CA (it approves); peer B only receives pushes.
         let roles_a = Roles {
-            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: Some(autorenew_keytab(ca_dir)) }),
+            ca: Some(CaRole {
+                dir: ca_dir.to_path_buf(),
+                autorenew: Some(autorenew_keytab(ca_dir)),
+            }),
             resolver: Some(ResolverRole { config: ra.clone() }),
             id_map: None,
         };
@@ -6557,12 +6894,18 @@ mod tests {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
-        let request_id =
-            conf_client::request_delegation(addr_a, "/eu", child, &identity).await.unwrap();
-        let peers =
-            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
-                .await
-                .unwrap();
+        let request_id = conf_client::request_delegation(addr_a, "/eu", child, &identity)
+            .await
+            .unwrap();
+        let peers = conf_client::approve_delegation(
+            addr_a,
+            "alice",
+            "apw",
+            &request_id,
+            &identity,
+        )
+        .await
+        .unwrap();
         // Exactly one remote peer (B), pushed cleanly.
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].addr, addr_b);
@@ -6588,7 +6931,10 @@ mod tests {
         let rb = write_cluster_cfg(ca_dir, "resolver_b.json");
 
         let roles_a = Roles {
-            ca: Some(CaRole { dir: ca_dir.to_path_buf(), autorenew: Some(autorenew_keytab(ca_dir)) }),
+            ca: Some(CaRole {
+                dir: ca_dir.to_path_buf(),
+                autorenew: Some(autorenew_keytab(ca_dir)),
+            }),
             resolver: Some(ResolverRole { config: ra.clone() }),
             id_map: None,
         };
@@ -6601,15 +6947,21 @@ mod tests {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
-        let request_id =
-            conf_client::request_delegation(addr_a, "/eu", child, &identity).await.unwrap();
+        let request_id = conf_client::request_delegation(addr_a, "/eu", child, &identity)
+            .await
+            .unwrap();
 
         // Peer B is down — approve still commits locally on A, but the
         // push to B is reported as a failure (the cluster is now split).
-        let peers =
-            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
-                .await
-                .unwrap();
+        let peers = conf_client::approve_delegation(
+            addr_a,
+            "alice",
+            "apw",
+            &request_id,
+            &identity,
+        )
+        .await
+        .unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].addr.port(), port);
         assert!(peers[0].error.is_some(), "a down peer must be reported as failed");
@@ -6637,10 +6989,15 @@ mod tests {
             a.serving_key_pem.clone(),
         )
         .await;
-        let peers =
-            conf_client::approve_delegation(addr_a, "alice", "apw", &request_id, &identity)
-                .await
-                .unwrap();
+        let peers = conf_client::approve_delegation(
+            addr_a,
+            "alice",
+            "apw",
+            &request_id,
+            &identity,
+        )
+        .await
+        .unwrap();
         assert_eq!(peers.len(), 1);
         assert!(peers[0].error.is_none(), "re-sync push failed: {:?}", peers[0].error);
         let rc_b = crate::resolver::ResolverConfig::load(&rb).unwrap();
@@ -6672,9 +7029,13 @@ mod tests {
         let (addr_a, state_a) =
             spawn_server_at(ca_dir, "127.0.0.2:0", roles(ra.clone()), vec![]).await;
         let port = addr_a.port();
-        let (_addr_b, _b) =
-            spawn_server_at(ca_dir, &format!("127.0.0.3:{port}"), roles(rb.clone()), vec![])
-                .await;
+        let (_addr_b, _b) = spawn_server_at(
+            ca_dir,
+            &format!("127.0.0.3:{port}"),
+            roles(rb.clone()),
+            vec![],
+        )
+        .await;
 
         let member_addrs = vec![
             "127.0.0.2:4564".parse::<SocketAddr>().unwrap(),
@@ -6700,7 +7061,8 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert!(peers[0].error.is_none(), "push to B failed: {:?}", peers[0].error);
         let rc_b = crate::resolver::ResolverConfig::load(&rb).unwrap();
-        let par = rc_b.as_file().parent.as_ref().expect("B should have a parent referral");
+        let par =
+            rc_b.as_file().parent.as_ref().expect("B should have a parent referral");
         assert_eq!(&*par.path, "/eu");
         assert_eq!(par.addrs[0].0, "203.0.113.1:4564".parse::<SocketAddr>().unwrap());
         let rc_a = crate::resolver::ResolverConfig::load(&ra).unwrap();
@@ -6718,13 +7080,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let roles = Roles {
-            ca: Some(CaRole { dir: dir.path().to_path_buf(), autorenew: Some(autorenew_keytab(dir.path())) }),
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
             resolver: None,
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
@@ -6746,8 +7110,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         // First child mounts /eu.
         let a = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
@@ -6766,10 +7129,9 @@ mod tests {
         }];
         let id_b =
             conf_client::request_delegation(addr, "/eu/sub", b, &identity).await.unwrap();
-        let err =
-            conf_client::approve_delegation(addr, "alice", "apw", &id_b, &identity)
-                .await
-                .unwrap_err();
+        let err = conf_client::approve_delegation(addr, "alice", "apw", &id_b, &identity)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").to_lowercase().contains("below"), "got: {err:#}");
         // The parent's mount table is unchanged: still just /eu.
         let rc = crate::resolver::ResolverConfig::load(&rpath).unwrap();
@@ -6785,8 +7147,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, _rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
@@ -6887,7 +7248,8 @@ mod tests {
             may_enroll_servers: enroll,
             perms_edit_scopes: scopes.iter().map(|s| s.to_string()).collect(),
             may_manage_admins: manage,
-            service_control_scopes: vec![],        }
+            service_control_scopes: vec![],
+        }
     }
 
     /// `policy_within` enforces the no-escalation rule on every field.
@@ -6895,40 +7257,60 @@ mod tests {
     fn policy_within_enforces_every_field() {
         let caller = full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/eu"], true);
         // A strict subset is allowed.
-        assert!(policy_within(
-            &caller,
-            &full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false)
-        )
-        .is_ok());
+        assert!(
+            policy_within(
+                &caller,
+                &full_policy(
+                    &["*.eu.ryu-oh.org"],
+                    30,
+                    &["users"],
+                    false,
+                    &["/eu"],
+                    false
+                )
+            )
+            .is_ok()
+        );
         // The empty policy is a subset of anything.
-        assert!(policy_within(&caller, &full_policy(&[], 0, &[], false, &[], false)).is_ok());
+        assert!(
+            policy_within(&caller, &full_policy(&[], 0, &[], false, &[], false)).is_ok()
+        );
         // Each field, widened past the caller, is refused:
         let bad = |p: Policy, needle: &str| {
             let e = policy_within(&caller, &p).unwrap_err();
             assert!(e.contains(needle), "got: {e}");
         };
-        bad(full_policy(&["*.us.example.com"], 30, &[], false, &[], false), "issuance scope");
+        bad(
+            full_policy(&["*.us.example.com"], 30, &[], false, &[], false),
+            "issuance scope",
+        );
         bad(full_policy(&[], 31, &[], false, &[], false), "max_validity");
         bad(full_policy(&[], 30, &["admins"], false, &[], false), "id-map group");
         bad(full_policy(&[], 30, &[], false, &["/us"], false), "perms scope");
         // Booleans only when the caller has them.
         let no_enroll = full_policy(&["*.ryu-oh.org"], 30, &[], false, &[], true);
-        assert!(policy_within(&no_enroll, &full_policy(&[], 30, &[], true, &[], false))
-            .unwrap_err()
-            .contains("may_enroll_servers"));
+        assert!(
+            policy_within(&no_enroll, &full_policy(&[], 30, &[], true, &[], false))
+                .unwrap_err()
+                .contains("may_enroll_servers")
+        );
         let no_manage = full_policy(&["*.ryu-oh.org"], 30, &[], false, &[], false);
-        assert!(policy_within(&no_manage, &full_policy(&[], 30, &[], false, &[], true))
-            .unwrap_err()
-            .contains("may_manage_admins"));
+        assert!(
+            policy_within(&no_manage, &full_policy(&[], 30, &[], false, &[], true))
+                .unwrap_err()
+                .contains("may_manage_admins")
+        );
         // service-control scope is bounded the same way as perms scope.
         let base = full_policy(&[], 0, &[], false, &[], false);
         let caller_svc =
             Policy { service_control_scopes: vec!["/eu".to_string()], ..base.clone() };
         let too_wide =
             Policy { service_control_scopes: vec!["/us".to_string()], ..base.clone() };
-        assert!(policy_within(&caller_svc, &too_wide)
-            .unwrap_err()
-            .contains("service-control scope"));
+        assert!(
+            policy_within(&caller_svc, &too_wide)
+                .unwrap_err()
+                .contains("service-control scope")
+        );
         let in_scope =
             Policy { service_control_scopes: vec!["/eu/west".to_string()], ..base };
         assert!(policy_within(&caller_svc, &in_scope).is_ok());
@@ -6980,37 +7362,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path()); // alice = signing slot (founding authority)
         // A role admin that can manage admins, scoped to *.ryu-oh.org and "/".
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "boss",
-            "bosspw",
-            full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "boss",
+                "bosspw",
+                full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
+            )
+            .unwrap();
         // A plain role admin with no management authority.
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "plain",
-            "plainpw",
-            full_policy(&[], 0, &[], false, &["/eu"], false),
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "plain",
+                "plainpw",
+                full_policy(&[], 0, &[], false, &["/eu"], false),
+            )
+            .unwrap();
         let (_addr, state) = spawn_ca_server(dir.path()).await;
 
-        let in_scope = full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false);
-        let add = |admin: &str, pw: &str, name: &str, policy: Policy| AddRoleAdminRequest {
-            admin: admin.to_string(),
-            password: Secret(pw.to_string()),
-            name: name.to_string(),
-            new_password: Secret("np".to_string()),
-            policy,
-        };
+        let in_scope =
+            full_policy(&["*.eu.ryu-oh.org"], 30, &["users"], false, &["/eu"], false);
+        let add =
+            |admin: &str, pw: &str, name: &str, policy: Policy| AddRoleAdminRequest {
+                admin: admin.to_string(),
+                password: Secret(pw.to_string()),
+                name: name.to_string(),
+                new_password: Secret("np".to_string()),
+                policy,
+            };
 
         // boss mints an in-scope sub-role.
         assert!(matches!(
-            handle_add_role_admin(&state, &add("boss", "bosspw", "eu-ops", in_scope.clone()), false),
+            handle_add_role_admin(
+                &state,
+                &add("boss", "bosspw", "eu-ops", in_scope.clone()),
+                false
+            ),
             AdminMgmtResponse::Ok
         ));
         assert_eq!(
-            ca_vault::CAVault::new(dir.path().to_path_buf()).slot_policy("eu-ops").unwrap().0,
+            ca_vault::CAVault::new(dir.path().to_path_buf())
+                .slot_policy("eu-ops")
+                .unwrap()
+                .0,
             ca_vault::SlotKind::Role
         );
         // Out of scope is refused.
@@ -7034,12 +7427,13 @@ mod tests {
             AdminMgmtResponse::Err { reason } if reason.contains("not authorized")
         ));
         // A role that lacks may_enroll_servers can't grant it (no escalation).
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "eu-boss",
-            "ebpw",
-            full_policy(&["*.eu.ryu-oh.org"], 30, &[], false, &["/eu"], true),
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "eu-boss",
+                "ebpw",
+                full_policy(&["*.eu.ryu-oh.org"], 30, &[], false, &["/eu"], true),
+            )
+            .unwrap();
         assert!(matches!(
             handle_add_role_admin(
                 &state,
@@ -7053,8 +7447,12 @@ mod tests {
         assert!(matches!(
             handle_add_role_admin(
                 &state,
-                &add("alice", "apw", "broadrole",
-                     full_policy(&["*"], 9999, &["anything"], true, &["/"], true)),
+                &add(
+                    "alice",
+                    "apw",
+                    "broadrole",
+                    full_policy(&["*"], 9999, &["anything"], true, &["/"], true)
+                ),
                 false,
             ),
             AdminMgmtResponse::Ok
@@ -7177,12 +7575,13 @@ mod tests {
     async fn remote_add_role_admin_over_tls() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        ca_vault::CAVault::new(dir.path().to_path_buf()).add_role_slot(
-            "boss",
-            "bosspw",
-            full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
-        )
-        .unwrap();
+        ca_vault::CAVault::new(dir.path().to_path_buf())
+            .add_role_slot(
+                "boss",
+                "bosspw",
+                full_policy(&["*.ryu-oh.org"], 30, &["users"], true, &["/"], true),
+            )
+            .unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         conf_client::add_role_admin(
@@ -7197,9 +7596,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let admins = conf_client::list_admins(addr, NodeKind::Client, &identity, "boss", "bosspw")
-            .await
-            .unwrap();
+        let admins =
+            conf_client::list_admins(addr, NodeKind::Client, &identity, "boss", "bosspw")
+                .await
+                .unwrap();
         let eu = admins.iter().find(|a| a.admin == "eu-ops").expect("eu-ops minted");
         assert_eq!(eu.kind, ca_vault::SlotKind::Role);
         assert_eq!(eu.policy.allowed_san, vec!["*.eu.ryu-oh.org".to_string()]);
@@ -7229,9 +7629,13 @@ mod tests {
             AdminMgmtResponse::Err { .. }
         ));
         // Local path: no password needed, authorized as a signing-tier superuser.
-        assert!(matches!(handle_add_role_admin(&state, &req, true), AdminMgmtResponse::Ok));
+        assert!(matches!(
+            handle_add_role_admin(&state, &req, true),
+            AdminMgmtResponse::Ok
+        ));
         // It still mints a scoped ROLE slot (never an MK-wrapping signing slot).
-        let admins = ca_vault::CAVault::new(dir.path().to_path_buf()).list_admins().unwrap();
+        let admins =
+            ca_vault::CAVault::new(dir.path().to_path_buf()).list_admins().unwrap();
         let eu = admins.iter().find(|a| a.admin == "eu-ops").expect("eu-ops minted");
         assert_eq!(eu.kind, ca_vault::SlotKind::Role);
     }
@@ -7249,7 +7653,9 @@ mod tests {
             RotateRecoveryResponse::Err { reason } if reason.contains("local control socket")
         ));
         let pw = match handle_rotate_recovery(&state, true) {
-            RotateRecoveryResponse::Ok { recovery_password } => recovery_password.0.clone(),
+            RotateRecoveryResponse::Ok { recovery_password } => {
+                recovery_password.0.clone()
+            }
             RotateRecoveryResponse::Err { reason } => panic!("{reason}"),
         };
         let ca = state.ca.as_ref().unwrap();

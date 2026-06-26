@@ -34,29 +34,28 @@
 
 use crate::{
     conf_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, ApplyReferralEditRequest,
-        ApplyReferralEditResponse, ApproveDelegationRequest, ApproveDelegationResponse,
-        ApproveRequest, ApproveResponse, ClientHello, DelegationEntry,
-        DelegationPollResponse, DelegationRequest, DelegationResponse,
+        self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
+        AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
+        ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
+        ApplyServiceControlRequest, ApplyServiceControlResponse,
+        ApproveDelegationRequest, ApproveDelegationResponse, ApproveRequest,
+        ApproveResponse, ClientHello, ControlServiceRequest, ControlServiceResponse,
+        DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        DeregisterRequest, EnqueueRequest, EnqueueResponse, EnrollRequest, GetInfoResponse,
-        ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest, EditPermsResponse,
-        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ListAdminsRequest,
-        RemoveAdminRequest, SetAdminPolicyRequest,
-        ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceRequest,
-        ControlServiceResponse,
-        GetMapResponse, GetMapVersionResponse, GetPermsResponse, NetworkMap, RegisterRequest,
-        RegisterResponse, IssuedEntry,
+        DeregisterRequest, EditPermsRequest, EditPermsResponse, EnqueueRequest,
+        EnqueueResponse, EnrollRequest, GetInfoResponse, GetMapResponse,
+        GetMapVersionResponse, GetPermsResponse, IssuedEntry, ListAdminsRequest,
         ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NodeKind, PeerResult,
-        PollRequest, PollResponse, QueueEntry, ReferralEdit, Request, ResolverAddr,
-        RevokeRequest, RevokeResponse, Role, Secret, ServerHello, SignRequest,
-        SignResponse, PROTOCOL_VERSION, SERVING_SAN,
+        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NetworkMap, NodeKind,
+        PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse, QueueEntry,
+        ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest, Request,
+        ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
+        ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
 use rustls::ClientConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -147,8 +146,8 @@ fn der_to_pem(der: &[u8]) -> String {
 pub fn issuing_ca_pem(bundle: &str, leaf_pem: &str) -> Result<String> {
     use x509_parser::prelude::{FromDer, X509Certificate};
     let leaf_der = pem_to_der(leaf_pem, "CERTIFICATE")?;
-    let (_, leaf) = X509Certificate::from_der(&leaf_der)
-        .map_err(|e| anyhow!("parsing leaf: {e}"))?;
+    let (_, leaf) =
+        X509Certificate::from_der(&leaf_der).map_err(|e| anyhow!("parsing leaf: {e}"))?;
     let mut rd = std::io::Cursor::new(bundle.as_bytes());
     for der in rustls_pemfile::certs(&mut rd).flatten() {
         if let Ok((_, ca)) = X509Certificate::from_der(der.as_ref())
@@ -334,22 +333,31 @@ pub async fn push_perms_edit(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
     conf_proto::write_msg(
         &mut tls,
-        &Request::ApplyPermsEdit(ApplyPermsEditRequest { perms_json: perms_json.to_string() }),
+        &Request::ApplyPermsEdit(ApplyPermsEditRequest {
+            perms_json: perms_json.to_string(),
+        }),
     )
     .await?;
     match conf_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
         ApplyPermsEditResponse::Ok => Ok(()),
-        ApplyPermsEditResponse::Err { reason } => bail!("peer refused the perms edit: {reason}"),
+        ApplyPermsEditResponse::Err { reason } => {
+            bail!("peer refused the perms edit: {reason}")
+        }
     }
 }
 
 /// Read a conf server's local perms, pinned to the confirmed CA (perms are
 /// readable within the trust domain). The client routes to a member of the
 /// cluster it wants.
-pub async fn get_perms(addr: SocketAddr, kind: NodeKind, expected: &CaIdentity) -> Result<String> {
+pub async fn get_perms(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+) -> Result<String> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     conf_proto::write_msg(&mut tls, &Request::GetPerms).await?;
     match conf_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
@@ -382,7 +390,9 @@ pub async fn edit_perms(
     .await?;
     match conf_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
         EditPermsResponse::Ok { peers } => Ok(peers),
-        EditPermsResponse::Err { reason } => bail!("the CA refused the perms edit: {reason}"),
+        EditPermsResponse::Err { reason } => {
+            bail!("the CA refused the perms edit: {reason}")
+        }
     }
 }
 
@@ -539,7 +549,8 @@ pub async fn push_service_control(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
     conf_proto::write_msg(
         &mut tls,
         &Request::ApplyServiceControl(ApplyServiceControlRequest { units, op }),
@@ -605,11 +616,7 @@ pub async fn aggregate(
         // A server bound to 0.0.0.0 reports itself with an unspecified
         // IP — substitute the address we actually reached it at.
         let fixup = |a: SocketAddr| {
-            if a.ip().is_unspecified() {
-                SocketAddr::new(addr.ip(), a.port())
-            } else {
-                a
-            }
+            if a.ip().is_unspecified() { SocketAddr::new(addr.ip(), a.port()) } else { a }
         };
         if info.ca_addr.is_none() {
             info.ca_addr = resp.ca_addr.map(fixup);
@@ -1081,7 +1088,9 @@ pub async fn approve_delegation(
     .await?;
     match conf_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
         ApproveDelegationResponse::Ok { peers } => Ok(peers),
-        ApproveDelegationResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        ApproveDelegationResponse::Err { reason } => {
+            bail!("conf server refused: {reason}")
+        }
     }
 }
 
@@ -1211,13 +1220,9 @@ pub async fn push_identity(
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
         .context("parsing client key")?
         .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
-    let (mut tls, hello) = connect_pki(
-        addr,
-        roots,
-        Some((client_cert_pem, key)),
-        NodeKind::ConfServer,
-    )
-    .await?;
+    let (mut tls, hello) =
+        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
     if !hello.roles.contains(&Role::IdMap) {
         return Ok(None);
     }
@@ -1244,11 +1249,14 @@ pub async fn register(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
     conf_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
     match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
-        RegisterResponse::Err { reason } => bail!("the CA refused the registration: {reason}"),
+        RegisterResponse::Err { reason } => {
+            bail!("the CA refused the registration: {reason}")
+        }
     }
 }
 
@@ -1264,12 +1272,18 @@ pub async fn deregister(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer).await?;
-    conf_proto::write_msg(&mut tls, &Request::Deregister(DeregisterRequest { addr: own_addr }))
-        .await?;
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+            .await?;
+    conf_proto::write_msg(
+        &mut tls,
+        &Request::Deregister(DeregisterRequest { addr: own_addr }),
+    )
+    .await?;
     match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
-        RegisterResponse::Err { reason } => bail!("the CA refused the deregistration: {reason}"),
+        RegisterResponse::Err { reason } => {
+            bail!("the CA refused the deregistration: {reason}")
+        }
     }
 }
 
@@ -1284,7 +1298,9 @@ pub async fn get_map_version(
     conf_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
     match conf_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
         GetMapVersionResponse::Ok { version } => Ok(version),
-        GetMapVersionResponse::Err { reason } => bail!("map version query refused: {reason}"),
+        GetMapVersionResponse::Err { reason } => {
+            bail!("map version query refused: {reason}")
+        }
     }
 }
 
@@ -1412,8 +1428,7 @@ pub async fn enqueue_renewal(
     let kc = generate_key_and_csr(name)?;
     let our_spki = csr_spki(&kc.csr_pem)?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((current_cert_pem, current_key)), kind)
-            .await?;
+        connect_pki(addr, roots, Some((current_cert_pem, current_key)), kind).await?;
     conf_proto::write_msg(
         &mut tls,
         &Request::Enqueue(EnqueueRequest {
@@ -1426,12 +1441,9 @@ pub async fn enqueue_renewal(
     )
     .await?;
     match conf_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
-        EnqueueResponse::Ok { request_id } => Ok(PendingRenewal {
-            request_id,
-            name: name.to_string(),
-            our_spki,
-            kc,
-        }),
+        EnqueueResponse::Ok { request_id } => {
+            Ok(PendingRenewal { request_id, name: name.to_string(), our_spki, kc })
+        }
         EnqueueResponse::Err { reason } => {
             bail!("conf server refused to queue the renewal: {reason}")
         }
@@ -1539,7 +1551,10 @@ fn verify_issued_any(
 /// (with a warning): introducing a new trust anchor is an out-of-band
 /// admin action, never something an arbitrary renewal peer can do. An
 /// installed root the peer omitted is kept.
-pub fn reconcile_trusted_bundle(installed_pem: &str, returned_pem: &str) -> Result<String> {
+pub fn reconcile_trusted_bundle(
+    installed_pem: &str,
+    returned_pem: &str,
+) -> Result<String> {
     use x509_parser::prelude::{FromDer, X509Certificate};
     // Installed roots, in order, keyed by SPKI fingerprint so a returned
     // refresh can replace the matching entry in place.
@@ -1551,7 +1566,10 @@ pub fn reconcile_trusted_bundle(installed_pem: &str, returned_pem: &str) -> Resu
             .context("fingerprinting an installed trust anchor")?;
         roots.push((fp, der.as_ref().to_vec()));
     }
-    anyhow::ensure!(!roots.is_empty(), "the installed trust bundle contains no certificates");
+    anyhow::ensure!(
+        !roots.is_empty(),
+        "the installed trust bundle contains no certificates"
+    );
     for der in rustls_pemfile::certs(&mut std::io::Cursor::new(returned_pem.as_bytes()))
         .flatten()
     {
@@ -1630,8 +1648,8 @@ fn verify_issued_leaf(
 ) -> Result<()> {
     use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
     let leaf_der = pem_to_der(leaf_pem, "CERTIFICATE")?;
-    let (_, leaf) =
-        X509Certificate::from_der(&leaf_der).map_err(|e| anyhow!("parsing issued cert: {e}"))?;
+    let (_, leaf) = X509Certificate::from_der(&leaf_der)
+        .map_err(|e| anyhow!("parsing issued cert: {e}"))?;
     let (_, ca) = X509Certificate::from_der(ca_der.as_ref())
         .map_err(|e| anyhow!("parsing CA cert: {e}"))?;
     leaf.verify_signature(Some(ca.public_key()))
@@ -1696,9 +1714,10 @@ fn verify_serving_cert(
     ca_der: &CertificateDer<'_>,
 ) -> Result<()> {
     use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
-    let (_, ca) = X509Certificate::from_der(ca_der.as_ref()).context("parsing CA cert")?;
-    let (_, leaf) =
-        X509Certificate::from_der(serving_der.as_ref()).context("parsing serving cert")?;
+    let (_, ca) =
+        X509Certificate::from_der(ca_der.as_ref()).context("parsing CA cert")?;
+    let (_, leaf) = X509Certificate::from_der(serving_der.as_ref())
+        .context("parsing serving cert")?;
     leaf.verify_signature(Some(ca.public_key()))
         .map_err(|e| anyhow!("serving cert is not signed by the confirmed CA: {e}"))?;
     let mut has_san = false;

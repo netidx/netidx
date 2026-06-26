@@ -18,16 +18,13 @@ use std::{io::Write, path::Path};
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let raw_dir = path.parent().ok_or_else(|| {
-        anyhow!("atomic write target {:?} has no parent dir", path)
-    })?;
+    let raw_dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("atomic write target {:?} has no parent dir", path))?;
     // Normalize an empty parent (`path` is a bare filename) to "." so
     // tempfile creation and the directory fsync below don't trip.
-    let dir: &Path = if raw_dir.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        raw_dir
-    };
+    let dir: &Path =
+        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating parent dir {dir:?}"))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)

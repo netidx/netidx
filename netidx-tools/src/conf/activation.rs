@@ -1,7 +1,9 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use arcstr::ArcStr;
 use netidx::path::Path as NetidxPath;
-use netidx_activation::control::{ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus};
+use netidx_activation::control::{
+    ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus,
+};
 use netidx_conf::{
     activation::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
@@ -257,7 +259,10 @@ fn parse_unit_targets(toks: &[String]) -> Result<Vec<conf_proto::UnitTarget>> {
                 let member = idx
                     .parse::<u32>()
                     .with_context(|| format!("invalid member index in {t:?}"))?;
-                Ok(conf_proto::UnitTarget { unit: unit.to_string(), member: Some(member) })
+                Ok(conf_proto::UnitTarget {
+                    unit: unit.to_string(),
+                    member: Some(member),
+                })
             }
             None => Ok(conf_proto::UnitTarget { unit: t.clone(), member: None }),
         })
@@ -368,8 +373,9 @@ fn add_generic(a: GenericAddArgs) -> Result<()> {
 fn add_container(a: ContainerAddArgs) -> Result<()> {
     let netidx_binary = match a.netidx_binary {
         Some(p) => p,
-        None => std::env::current_exe()
-            .context("could not determine current netidx binary path; pass --netidx-binary")?,
+        None => std::env::current_exe().context(
+            "could not determine current netidx binary path; pass --netidx-binary",
+        )?,
     };
     let api_path = match a.api_path {
         Some(p) => ArcStr::from(p),
@@ -431,8 +437,9 @@ fn api_path_for_base(raw_base: Option<&str>) -> String {
 fn add_id_map(a: IdMapAddArgs) -> Result<()> {
     let netidx_binary = match a.netidx_binary {
         Some(p) => p,
-        None => std::env::current_exe()
-            .context("could not determine current netidx binary path; pass --netidx-binary")?,
+        None => std::env::current_exe().context(
+            "could not determine current netidx binary path; pass --netidx-binary",
+        )?,
     };
     let socket = match a.socket {
         Some(p) => p,
@@ -489,9 +496,7 @@ fn parse_restart(s: &str) -> Result<Restart> {
                     .parse()
                     .map_err(|e| anyhow!("invalid rate-limit seconds {rest:?}: {e}"))?;
                 if !secs.is_finite() || secs <= 0.0 {
-                    bail!(
-                        "rate-limit seconds must be finite and positive, got {secs}"
-                    );
+                    bail!("rate-limit seconds must be finite and positive, got {secs}");
                 }
                 Ok(Restart::RateLimited(secs))
             } else {
@@ -516,10 +521,7 @@ mod tests {
         // Trailing slash trimmed.
         assert_eq!(api_path_for_base(Some("/local/")), "/local/container/api");
         // Nested base.
-        assert_eq!(
-            api_path_for_base(Some("/sites/east")),
-            "/sites/east/container/api"
-        );
+        assert_eq!(api_path_for_base(Some("/sites/east")), "/sites/east/container/api");
         // Malformed: missing leading slash → fallback (the runtime
         // would reject this; emitting "local/container/api" would be
         // a footgun).
@@ -577,8 +579,7 @@ mod tests {
         let path = dir.path().join("id-map.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_conf::activation::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_conf::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         // `-f` is mandatory under the activation supervisor; see the
         // regression note on `template::services::id_map::unit`.
@@ -618,8 +619,7 @@ mod tests {
         let path = dir.path().join("container.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_conf::activation::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_conf::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         assert_eq!(
             u.process.args,

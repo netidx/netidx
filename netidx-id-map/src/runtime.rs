@@ -53,7 +53,7 @@
 //! length but small enough to make a slow-loris flood cheap to shed.
 
 use crate::file::{self, IdMap, Query};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use enumflags2::make_bitflags;
 use extended_notify::{
     ArcPath, EventBatch, Interest, Watched, Watcher, WatcherConfigBuilder,
@@ -63,15 +63,15 @@ use poolshark::local::LPooled;
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    signal::unix::{signal, Signal, SignalKind},
+    signal::unix::{Signal, SignalKind, signal},
     sync::{mpsc, oneshot},
     task::JoinHandle,
     time::timeout,

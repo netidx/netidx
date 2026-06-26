@@ -5,13 +5,13 @@
 //! See `netidx-id-map` for the protocol and config.
 
 use anyhow::{Context, Result};
+use clap::Args;
 use daemonize::Daemonize;
 use log::info;
 use netidx_conf::id_map as id_map_engine;
 use netidx_id_map::runtime::{Server, ServerParams};
-use clap::Args;
 use std::path::PathBuf;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Args, Debug)]
 pub(crate) struct Params {
@@ -85,10 +85,8 @@ async fn tokio_run(params: ServerParams) -> Result<()> {
     // Block on SIGINT/SIGTERM so the daemon stays alive when run in
     // the foreground; the activation supervisor sends SIGTERM on
     // shutdown.
-    let mut sigterm =
-        signal(SignalKind::terminate()).context("registering SIGTERM")?;
-    let mut sigint =
-        signal(SignalKind::interrupt()).context("registering SIGINT")?;
+    let mut sigterm = signal(SignalKind::terminate()).context("registering SIGTERM")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("registering SIGINT")?;
     tokio::select! {
         _ = sigterm.recv() => info!("id-map: SIGTERM"),
         _ = sigint.recv()  => info!("id-map: SIGINT"),

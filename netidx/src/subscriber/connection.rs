@@ -1,7 +1,7 @@
 use super::{
-    ConId, DvDead, DvState, Event, NoSuchValue, PermissionDenied, SubId, SubStatus,
-    SubscribeValRequest, Subscriber, SubscriberInner, SubscriberWeak, ToCon,
-    UpdatesFlags, Val, ValInner, ValWeak, WUpdateChan, BATCHES, DECODE_BATCHES,
+    BATCHES, ConId, DECODE_BATCHES, DvDead, DvState, Event, NoSuchValue,
+    PermissionDenied, SubId, SubStatus, SubscribeValRequest, Subscriber, SubscriberInner,
+    SubscriberWeak, ToCon, UpdatesFlags, Val, ValInner, ValWeak, WUpdateChan,
 };
 pub use crate::protocol::value::{FromValue, Value};
 pub use crate::resolver_client::DesiredAuth;
@@ -19,7 +19,7 @@ use crate::{
     utils::{ChanId, ChanWrap},
 };
 use ahash::AHashMap;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use cross_krb5::ClientCtx;
 use futures::{
     channel::{
@@ -497,7 +497,10 @@ impl ConnectionCtx {
                                 }));
                                 match req.finished.send(Ok(s.clone())) {
                                     Err(e) => {
-                                        trace!("could not deliver finished subscription {:?}", e);
+                                        trace!(
+                                            "could not deliver finished subscription {:?}",
+                                            e
+                                        );
                                         con.queue_send(&To::Unsubscribe(id))?
                                     }
                                     Ok(()) => {

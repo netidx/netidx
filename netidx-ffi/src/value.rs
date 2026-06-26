@@ -1,4 +1,4 @@
-use crate::error::{clear_error, set_error, NetidxError};
+use crate::error::{NetidxError, clear_error, set_error};
 use netidx::subscriber::Value;
 use std::os::raw::c_char;
 use std::ptr;
@@ -160,10 +160,10 @@ pub unsafe extern "C" fn netidx_value_string(
     data: *const c_char,
     len: usize,
 ) -> *mut NetidxValue {
-    let s = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
-    Box::into_raw(Box::new(NetidxValue {
-        inner: Value::String(arcstr::ArcStr::from(s)),
-    }))
+    let s = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len))
+    };
+    Box::into_raw(Box::new(NetidxValue { inner: Value::String(arcstr::ArcStr::from(s)) }))
 }
 
 /// Create a Value::Bytes from a raw byte range.
@@ -194,7 +194,8 @@ pub unsafe extern "C" fn netidx_value_array(
     len: usize,
 ) -> *mut NetidxValue {
     let slice = unsafe { std::slice::from_raw_parts(values, len) };
-    let vec: Vec<Value> = slice.iter().map(|p| unsafe { Box::from_raw(*p) }.inner).collect();
+    let vec: Vec<Value> =
+        slice.iter().map(|p| unsafe { Box::from_raw(*p) }.inner).collect();
     Box::into_raw(Box::new(NetidxValue { inner: Value::from(vec) }))
 }
 
@@ -270,8 +271,10 @@ pub unsafe extern "C" fn netidx_value_map_entries_clone(
             }
             unsafe {
                 *out_len = len;
-                *out_keys = Box::into_raw(keys_vec.into_boxed_slice()) as *mut *mut NetidxValue;
-                *out_values = Box::into_raw(vals_vec.into_boxed_slice()) as *mut *mut NetidxValue;
+                *out_keys =
+                    Box::into_raw(keys_vec.into_boxed_slice()) as *mut *mut NetidxValue;
+                *out_values =
+                    Box::into_raw(vals_vec.into_boxed_slice()) as *mut *mut NetidxValue;
             }
             true
         }
@@ -445,8 +448,8 @@ pub unsafe extern "C" fn netidx_value_abstract_decode(
     len: usize,
     err: *mut NetidxError,
 ) -> *mut NetidxValue {
-    use netidx_core::pack::Pack;
     use netidx::protocol::value::Abstract;
+    use netidx_core::pack::Pack;
     unsafe { clear_error(err) };
     let slice = unsafe { std::slice::from_raw_parts(data, len) };
     let mut cursor = std::io::Cursor::new(slice);
@@ -481,7 +484,10 @@ pub extern "C" fn netidx_value_type(val: *const NetidxValue) -> ValueType {
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_u8(val: *const NetidxValue, out: *mut u8) -> bool {
     match unsafe { &(*val).inner } {
-        Value::U8(v) => { unsafe { *out = *v }; true }
+        Value::U8(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -489,7 +495,10 @@ pub extern "C" fn netidx_value_get_u8(val: *const NetidxValue, out: *mut u8) -> 
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_i8(val: *const NetidxValue, out: *mut i8) -> bool {
     match unsafe { &(*val).inner } {
-        Value::I8(v) => { unsafe { *out = *v }; true }
+        Value::I8(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -497,7 +506,10 @@ pub extern "C" fn netidx_value_get_i8(val: *const NetidxValue, out: *mut i8) -> 
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_u16(val: *const NetidxValue, out: *mut u16) -> bool {
     match unsafe { &(*val).inner } {
-        Value::U16(v) => { unsafe { *out = *v }; true }
+        Value::U16(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -505,7 +517,10 @@ pub extern "C" fn netidx_value_get_u16(val: *const NetidxValue, out: *mut u16) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_i16(val: *const NetidxValue, out: *mut i16) -> bool {
     match unsafe { &(*val).inner } {
-        Value::I16(v) => { unsafe { *out = *v }; true }
+        Value::I16(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -513,7 +528,10 @@ pub extern "C" fn netidx_value_get_i16(val: *const NetidxValue, out: *mut i16) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_u32(val: *const NetidxValue, out: *mut u32) -> bool {
     match unsafe { &(*val).inner } {
-        Value::U32(v) | Value::V32(v) => { unsafe { *out = *v }; true }
+        Value::U32(v) | Value::V32(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -521,7 +539,10 @@ pub extern "C" fn netidx_value_get_u32(val: *const NetidxValue, out: *mut u32) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_i32(val: *const NetidxValue, out: *mut i32) -> bool {
     match unsafe { &(*val).inner } {
-        Value::I32(v) | Value::Z32(v) => { unsafe { *out = *v }; true }
+        Value::I32(v) | Value::Z32(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -529,7 +550,10 @@ pub extern "C" fn netidx_value_get_i32(val: *const NetidxValue, out: *mut i32) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_u64(val: *const NetidxValue, out: *mut u64) -> bool {
     match unsafe { &(*val).inner } {
-        Value::U64(v) | Value::V64(v) => { unsafe { *out = *v }; true }
+        Value::U64(v) | Value::V64(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -537,7 +561,10 @@ pub extern "C" fn netidx_value_get_u64(val: *const NetidxValue, out: *mut u64) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_i64(val: *const NetidxValue, out: *mut i64) -> bool {
     match unsafe { &(*val).inner } {
-        Value::I64(v) | Value::Z64(v) => { unsafe { *out = *v }; true }
+        Value::I64(v) | Value::Z64(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -545,7 +572,10 @@ pub extern "C" fn netidx_value_get_i64(val: *const NetidxValue, out: *mut i64) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_f32(val: *const NetidxValue, out: *mut f32) -> bool {
     match unsafe { &(*val).inner } {
-        Value::F32(v) => { unsafe { *out = *v }; true }
+        Value::F32(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -553,7 +583,10 @@ pub extern "C" fn netidx_value_get_f32(val: *const NetidxValue, out: *mut f32) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_f64(val: *const NetidxValue, out: *mut f64) -> bool {
     match unsafe { &(*val).inner } {
-        Value::F64(v) => { unsafe { *out = *v }; true }
+        Value::F64(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -561,7 +594,10 @@ pub extern "C" fn netidx_value_get_f64(val: *const NetidxValue, out: *mut f64) -
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_get_bool(val: *const NetidxValue, out: *mut bool) -> bool {
     match unsafe { &(*val).inner } {
-        Value::Bool(v) => { unsafe { *out = *v }; true }
+        Value::Bool(v) => {
+            unsafe { *out = *v };
+            true
+        }
         _ => false,
     }
 }
@@ -677,9 +713,7 @@ pub extern "C" fn netidx_str_free(s: *mut c_char) {
 /// Clone a Value. Returns a new owned handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn netidx_value_clone(val: *const NetidxValue) -> *mut NetidxValue {
-    Box::into_raw(Box::new(NetidxValue {
-        inner: unsafe { &*val }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxValue { inner: unsafe { &*val }.inner.clone() }))
 }
 
 /// Destroy a Value, freeing its memory.

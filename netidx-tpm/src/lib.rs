@@ -103,23 +103,25 @@ pub trait Transport {
 #[cfg(not(target_os = "macos"))]
 mod ops {
     use super::Transport;
-    use anyhow::{anyhow, bail, Context, Result};
+    use anyhow::{Context, Result, anyhow, bail};
     use tpm2_protocol::{
+        TpmMarshal, TpmResult, TpmSized, TpmWriter,
         basic::TpmHandle,
         constant::TPM_MAX_COMMAND_SIZE,
         data::{
-            Tpm2bAuth, Tpm2bData, Tpm2bDigest, Tpm2bNonce, Tpm2bPublic, Tpm2bSensitiveCreate,
-            Tpm2bSensitiveData, TpmAlgId, TpmCc, TpmEccCurve, TpmRc, TpmRcBase, TpmRh, TpmSt,
-            TpmaObject, TpmaSession, TpmlPcrSelection, TpmsAuthCommand, TpmsEccParms,
-            TpmsEccPoint, TpmsKeyedhashParms, TpmsSensitiveCreate, TpmtEccScheme, TpmtKdfScheme,
-            TpmtKeyedhashScheme, TpmtPublic, TpmtSymDefObject, TpmuAsymScheme, TpmuKdfScheme,
-            TpmuKeyedhashScheme, TpmuPublicId, TpmuPublicParms, TpmuSymKeyBits, TpmuSymMode,
+            Tpm2bAuth, Tpm2bData, Tpm2bDigest, Tpm2bNonce, Tpm2bPublic,
+            Tpm2bSensitiveCreate, Tpm2bSensitiveData, TpmAlgId, TpmCc, TpmEccCurve,
+            TpmRc, TpmRcBase, TpmRh, TpmSt, TpmaObject, TpmaSession, TpmlPcrSelection,
+            TpmsAuthCommand, TpmsEccParms, TpmsEccPoint, TpmsKeyedhashParms,
+            TpmsSensitiveCreate, TpmtEccScheme, TpmtKdfScheme, TpmtKeyedhashScheme,
+            TpmtPublic, TpmtSymDefObject, TpmuAsymScheme, TpmuKdfScheme,
+            TpmuKeyedhashScheme, TpmuPublicId, TpmuPublicParms, TpmuSymKeyBits,
+            TpmuSymMode,
         },
         frame::{
-            tpm_marshal_command, TpmCreateCommand, TpmCreatePrimaryCommand,
-            TpmFlushContextCommand, TpmFrame, TpmMarshalBody, TpmResponse, TpmUnsealCommand,
+            TpmCreateCommand, TpmCreatePrimaryCommand, TpmFlushContextCommand, TpmFrame,
+            TpmMarshalBody, TpmResponse, TpmUnsealCommand, tpm_marshal_command,
         },
-        TpmMarshal, TpmResult, TpmSized, TpmWriter,
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -169,7 +171,10 @@ mod ops {
                     details: TpmuAsymScheme::Null,
                 },
                 curve_id: TpmEccCurve::NistP256,
-                kdf: TpmtKdfScheme { scheme: TpmAlgId::Null, details: TpmuKdfScheme::Null },
+                kdf: TpmtKdfScheme {
+                    scheme: TpmAlgId::Null,
+                    details: TpmuKdfScheme::Null,
+                },
             }),
             unique: TpmuPublicId::Ecc(TpmsEccPoint::default()),
         }
@@ -256,7 +261,8 @@ mod ops {
         let mut buf = vec![0u8; TPM_MAX_COMMAND_SIZE];
         let len = {
             let mut writer = TpmWriter::new(&mut buf);
-            let tag = if sessions.is_empty() { TpmSt::NoSessions } else { TpmSt::Sessions };
+            let tag =
+                if sessions.is_empty() { TpmSt::NoSessions } else { TpmSt::Sessions };
             tpm_marshal_command(cmd, tag, sessions, &mut writer)
                 .map_err(|e| anyhow!("marshalling {cc}: {e}"))?;
             writer.len()
@@ -265,7 +271,8 @@ mod ops {
             .exchange(&buf[..len])
             .with_context(|| format!("exchanging {cc} with the TPM"))?;
         buf.zeroize();
-        let frame = TpmResponse::cast(&resp).map_err(|e| anyhow!("parsing {cc} response: {e}"))?;
+        let frame = TpmResponse::cast(&resp)
+            .map_err(|e| anyhow!("parsing {cc} response: {e}"))?;
         let rc = frame.rc().map_err(|e| anyhow!("parsing {cc} return code: {e}"))?;
         if !matches!(rc, TpmRc::Fmt0(TpmRcBase::Success)) {
             bail!("TPM {cc} failed: {rc}");
@@ -277,7 +284,8 @@ mod ops {
     /// area), skipping the parameter-size word present when the
     /// command carried sessions.
     fn response_areas(resp: &[u8], nhandles: usize) -> Result<(&[u8], &[u8])> {
-        let frame = TpmResponse::cast(resp).map_err(|e| anyhow!("response reparse: {e}"))?;
+        let frame =
+            TpmResponse::cast(resp).map_err(|e| anyhow!("response reparse: {e}"))?;
         let body = frame.body();
         let hlen = nhandles * 4;
         if body.len() < hlen {
@@ -368,7 +376,8 @@ mod ops {
             };
             let resp = transmit(dev, &cmd, &[pw_session()])?;
             let (_, params) = response_areas(&resp, 0)?;
-            let (private, rest) = take_tpm2b(params).context("TPM2_Create out_private")?;
+            let (private, rest) =
+                take_tpm2b(params).context("TPM2_Create out_private")?;
             let (public, _) = take_tpm2b(rest).context("TPM2_Create out_public")?;
             let mut blob =
                 Vec::with_capacity(super::MAGIC.len() + private.len() + public.len());
@@ -398,7 +407,11 @@ mod ops {
         }
         let primary = create_primary(dev)?;
         let result = (|| {
-            let cmd = RawLoadCommand { parent: primary, in_private: private, in_public: public };
+            let cmd = RawLoadCommand {
+                parent: primary,
+                in_private: private,
+                in_public: public,
+            };
             let resp = transmit(dev, &cmd, &[pw_session()])?;
             let (handles, _) = response_areas(&resp, 1)?;
             let loaded: TpmHandle =
@@ -459,7 +472,7 @@ pub fn available() -> bool {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::Transport;
-    use anyhow::{bail, Context, Result};
+    use anyhow::{Context, Result, bail};
     use std::{
         fs::{File, OpenOptions},
         io::{Read, Write},
@@ -473,13 +486,14 @@ mod platform {
     pub struct LinuxDevice(File);
 
     pub fn transport() -> Result<LinuxDevice> {
-        let file =
-            OpenOptions::new().read(true).write(true).open(DEVICE).with_context(|| {
+        let file = OpenOptions::new().read(true).write(true).open(DEVICE).with_context(
+            || {
                 format!(
                     "opening {DEVICE} (no TPM 2.0, or this user lacks access — \
                      the device node is conventionally root:tss)"
                 )
-            })?;
+            },
+        )?;
         Ok(LinuxDevice(file))
     }
 
@@ -515,7 +529,7 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::Transport;
-    use anyhow::{anyhow, bail, Error, Result};
+    use anyhow::{Error, Result, anyhow, bail};
     use std::ffi::c_void;
     use tpm2_protocol::constant::TPM_MAX_COMMAND_SIZE;
     use windows::Win32::System::TpmBaseServices::{
@@ -595,7 +609,9 @@ mod platform {
             0x80284008 => {
                 "the TPM Base Services service is not running (TBS_E_SERVICE_NOT_RUNNING)"
             }
-            0x8028400B => "TPM Base Services is still starting (TBS_E_SERVICE_START_PENDING)",
+            0x8028400B => {
+                "TPM Base Services is still starting (TBS_E_SERVICE_START_PENDING)"
+            }
             0x80284010 => "TPM Base Services is disabled (TBS_E_SERVICE_DISABLED)",
             0x80284012 => "access to the TPM was denied (TBS_E_ACCESS_DENIED)",
             0x80280400 => {
@@ -609,7 +625,7 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use anyhow::{anyhow, bail, Result};
+    use anyhow::{Result, anyhow, bail};
     use core_foundation::{
         base::TCFType, data::CFData, dictionary::CFDictionary, string::CFString,
     };
@@ -620,7 +636,8 @@ mod platform {
     use security_framework_sys::{
         item::{
             kSecAttrKeyClass, kSecAttrKeyClassPrivate, kSecAttrKeyType,
-            kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID, kSecAttrTokenIDSecureEnclave,
+            kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID,
+            kSecAttrTokenIDSecureEnclave,
         },
         key::{SecKeyCopyAttributes, SecKeyCreateWithData},
     };
@@ -630,7 +647,8 @@ mod platform {
     /// X9.63-SHA256 KDF + AES-GCM) — what CryptoKit uses underneath.
     /// Encryption needs only the public half; the enclave is touched
     /// at decrypt.
-    const ALGORITHM: Algorithm = Algorithm::ECIESEncryptionCofactorVariableIVX963SHA256AESGCM;
+    const ALGORITHM: Algorithm =
+        Algorithm::ECIESEncryptionCofactorVariableIVX963SHA256AESGCM;
 
     /// kSecAccessControlPrivateKeyUsage — mandatory for Secure
     /// Enclave keys; the access control governs private-key use.
@@ -679,10 +697,9 @@ mod platform {
     /// Pull the SEP-wrapped key material out of a transient SE key.
     fn extract_toid(key: &SecKey) -> Result<Vec<u8>> {
         unsafe {
-            let attrs: CFDictionary =
-                CFDictionary::wrap_under_create_rule(SecKeyCopyAttributes(
-                    key.as_concrete_TypeRef(),
-                ) as _);
+            let attrs: CFDictionary = CFDictionary::wrap_under_create_rule(
+                SecKeyCopyAttributes(key.as_concrete_TypeRef()) as _,
+            );
             let toid_key = CFString::from_static_string(TOID);
             let v = attrs
                 .find(toid_key.as_concrete_TypeRef() as *const _)
@@ -698,11 +715,13 @@ mod platform {
             let attrs = CFDictionary::from_CFType_pairs(&[
                 (
                     CFString::wrap_under_get_rule(kSecAttrTokenID).as_CFType(),
-                    CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave).as_CFType(),
+                    CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave)
+                        .as_CFType(),
                 ),
                 (
                     CFString::wrap_under_get_rule(kSecAttrKeyType).as_CFType(),
-                    CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
+                    CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom)
+                        .as_CFType(),
                 ),
                 (
                     CFString::wrap_under_get_rule(kSecAttrKeyClass).as_CFType(),
@@ -799,12 +818,14 @@ mod platform {
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 mod platform {
     use super::Transport;
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
 
     pub struct NoDevice;
 
     pub fn transport() -> Result<NoDevice> {
-        bail!("no sealing mechanism for this platform yet (supported: linux, windows, macos)")
+        bail!(
+            "no sealing mechanism for this platform yet (supported: linux, windows, macos)"
+        )
     }
 
     impl Transport for NoDevice {

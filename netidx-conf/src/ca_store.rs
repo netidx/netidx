@@ -382,8 +382,8 @@ impl CAStore {
         let bundle = self.dir.join("trusted.pem");
         let path =
             if bundle.exists() { bundle } else { self.dir.join("certificate.pem") };
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         String::from_utf8(bytes).context("trust bundle is not utf8")
     }
 
@@ -418,7 +418,9 @@ impl CAStore {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+            Err(e) => {
+                return Err(e).with_context(|| format!("listing {}", dir.display()));
+            }
         };
         let mut out = Vec::new();
         for entry in entries {
@@ -428,7 +430,9 @@ impl CAStore {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&path) else { continue };
-            let Ok(rec) = serde_json::from_slice::<IssuedRecord>(&bytes) else { continue };
+            let Ok(rec) = serde_json::from_slice::<IssuedRecord>(&bytes) else {
+                continue;
+            };
             out.push(rec);
         }
         Ok(out)
@@ -446,7 +450,8 @@ impl CAStore {
             self.pending()?.len() < MAX_PENDING,
             "the signing queue is full ({MAX_PENDING} pending requests)"
         );
-        let bytes = serde_json::to_vec_pretty(req).context("serializing queued request")?;
+        let bytes =
+            serde_json::to_vec_pretty(req).context("serializing queued request")?;
         atomic::write_atomic(&self.queue_path(&req.id), &bytes, 0o644)
     }
 
@@ -457,7 +462,9 @@ impl CAStore {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+            Err(e) => {
+                return Err(e).with_context(|| format!("listing {}", dir.display()));
+            }
         };
         let now = now_unix();
         let mut out: Vec<QueuedReq> = Vec::new();
@@ -470,8 +477,7 @@ impl CAStore {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             let Ok(req) = serde_json::from_slice::<QueuedReq>(&bytes) else { continue };
             let expired = now.saturating_sub(req.received_unix) > TTL.as_secs();
-            let terminal =
-                self.issued_path(id).exists() || self.denied_path(id).exists();
+            let terminal = self.issued_path(id).exists() || self.denied_path(id).exists();
             if !expired && !terminal {
                 out.push(req);
             }
@@ -518,7 +524,8 @@ impl CAStore {
         let dir = self.issued_dir();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
-        let bytes = serde_json::to_vec_pretty(rec).context("serializing issued record")?;
+        let bytes =
+            serde_json::to_vec_pretty(rec).context("serializing issued record")?;
         atomic::write_atomic(&self.issued_path(&rec.req.id), &bytes, 0o644)?;
         let _ = std::fs::remove_file(self.queue_path(&rec.req.id));
         Ok(())
@@ -531,7 +538,8 @@ impl CAStore {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
         let rec = DeniedRecord { req: req.clone(), reason: reason.to_string() };
-        let bytes = serde_json::to_vec_pretty(&rec).context("serializing denied record")?;
+        let bytes =
+            serde_json::to_vec_pretty(&rec).context("serializing denied record")?;
         atomic::write_atomic(&self.denied_path(&req.id), &bytes, 0o644)?;
         let _ = std::fs::remove_file(self.queue_path(&req.id));
         Ok(())
@@ -663,7 +671,9 @@ impl CAStore {
         if let Ok(entries) = std::fs::read_dir(self.queue_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
                 if !valid_id(id) {
                     continue;
                 }
@@ -684,13 +694,17 @@ impl CAStore {
         if let Ok(entries) = std::fs::read_dir(self.denied_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
                 if !valid_id(id) {
                     continue;
                 }
                 let expired = match std::fs::read(&path) {
                     Ok(b) => match serde_json::from_slice::<DeniedRecord>(&b) {
-                        Ok(rec) => now.saturating_sub(rec.req.received_unix) > TTL.as_secs(),
+                        Ok(rec) => {
+                            now.saturating_sub(rec.req.received_unix) > TTL.as_secs()
+                        }
                         Err(_) => true,
                     },
                     Err(_) => true,
@@ -735,9 +749,10 @@ impl CAStore {
         let pkey = openssl::pkey::PKey::private_key_from_pem(ca_key_pem)
             .context("parsing CA key")?;
         let pkcs8 = pkey.private_key_to_pem_pkcs8().context("normalizing CA key")?;
-        let key =
-            KeyPair::from_pem(std::str::from_utf8(&pkcs8).context("CA key pem not utf8")?)
-                .context("loading CA key for CRL signing")?;
+        let key = KeyPair::from_pem(
+            std::str::from_utf8(&pkcs8).context("CA key pem not utf8")?,
+        )
+        .context("loading CA key for CRL signing")?;
         let ca_cert_pem = std::fs::read_to_string(self.dir.join("certificate.pem"))
             .context("reading CA certificate")?;
         let issuer =
@@ -852,7 +867,8 @@ mod tests {
         assert_eq!(ca.store.lock().pending().unwrap().len(), 1);
         assert!(matches!(ca.store.lock().status(&r.id).unwrap(), Status::Pending(_)));
 
-        ca.store.lock()
+        ca.store
+            .lock()
             .commit_signed(&issued(r.clone(), 5, "alice.example.com", now_unix() + 1000))
             .unwrap();
         // Moved out of the active queue, status now Signed with the cert + bundle.
@@ -889,13 +905,18 @@ mod tests {
         let ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let a = req("eric.ryu-oh.org");
-        ca.store.lock()
+        ca.store
+            .lock()
             .commit_signed(&issued(a.clone(), 2, "eric.ryu-oh.org", now + 1000))
             .unwrap();
         let b = req("bob.ryu-oh.org");
-        ca.store.lock().commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000)).unwrap();
+        ca.store
+            .lock()
+            .commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000))
+            .unwrap();
         let old = req("old.ryu-oh.org");
-        ca.store.lock()
+        ca.store
+            .lock()
             .commit_signed(&issued(old, 4, "old.ryu-oh.org", now.saturating_sub(10)))
             .unwrap();
 
@@ -903,23 +924,42 @@ mod tests {
         assert!(ca.store.lock().live_for_name("old.ryu-oh.org").unwrap().is_empty());
         assert!(ca.store.lock().revoked_unexpired().unwrap().is_empty());
 
-        assert!(ca.store.lock()
-            .revoke(
-                2,
-                Revocation { serial: 2, revoked_unix: now, reason: "laptop stolen".into() }
-            )
-            .unwrap());
+        assert!(
+            ca.store
+                .lock()
+                .revoke(
+                    2,
+                    Revocation {
+                        serial: 2,
+                        revoked_unix: now,
+                        reason: "laptop stolen".into()
+                    }
+                )
+                .unwrap()
+        );
         assert!(ca.store.lock().live_for_name("eric.ryu-oh.org").unwrap().is_empty());
         let crl = ca.store.lock().revoked_unexpired().unwrap();
         assert_eq!(crl.len(), 1);
         assert_eq!(crl[0].serial, 2);
         // Revoking an unknown / already-revoked serial is a no-op false.
-        assert!(!ca.store.lock()
-            .revoke(2, Revocation { serial: 2, revoked_unix: now, reason: "x".into() })
-            .unwrap());
-        assert!(!ca.store.lock()
-            .revoke(999, Revocation { serial: 999, revoked_unix: now, reason: "x".into() })
-            .unwrap());
+        assert!(
+            !ca.store
+                .lock()
+                .revoke(
+                    2,
+                    Revocation { serial: 2, revoked_unix: now, reason: "x".into() }
+                )
+                .unwrap()
+        );
+        assert!(
+            !ca.store
+                .lock()
+                .revoke(
+                    999,
+                    Revocation { serial: 999, revoked_unix: now, reason: "x".into() }
+                )
+                .unwrap()
+        );
 
         assert_eq!(ca.store.lock().max_serial().unwrap(), Some(4));
     }
@@ -955,8 +995,14 @@ mod tests {
         .unwrap();
         // A live issued record survives prune.
         let live = req("live.example.com");
-        ca.store.lock()
-            .commit_signed(&issued(live.clone(), 9, "live.example.com", now_unix() + 1000))
+        ca.store
+            .lock()
+            .commit_signed(&issued(
+                live.clone(),
+                9,
+                "live.example.com",
+                now_unix() + 1000,
+            ))
             .unwrap();
         ca.store.lock().prune().unwrap();
         assert!(!ca.store.lock().queue_path(&stale.id).exists());

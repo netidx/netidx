@@ -17,7 +17,7 @@ use crate::{
     utils::{BatchItem, Batched, ChanWrap},
 };
 use ahash::AHashMap;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use bytes::{Buf, BufMut, Bytes};
 use futures::{
     channel::{
@@ -28,7 +28,7 @@ use futures::{
     select_biased,
     stream::FuturesUnordered,
 };
-use if_addrs::{get_if_addrs, IfAddr, Interface as NetworkInterface};
+use if_addrs::{IfAddr, Interface as NetworkInterface, get_if_addrs};
 use log::{info, trace, warn};
 use netidx_netproto::resolver::{PublisherPriority, PublisherRef, UserInfo};
 use nohash::IntMap;
@@ -40,8 +40,8 @@ use smallvec::SmallVec;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;
 use std::{
-    cmp::{max, Eq, PartialEq},
-    collections::{hash_map::Entry, VecDeque},
+    cmp::{Eq, PartialEq, max},
+    collections::{VecDeque, hash_map::Entry},
     error, fmt,
     hash::Hash,
     iter, mem,

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
+use clap::Args;
 use futures::{prelude::*, select};
 use netidx::{
     config::Config,
     path::Path,
     publisher::{BindCfg, DesiredAuth, PublisherBuilder, Value},
 };
-use clap::Args;
 use std::time::{Duration, Instant};
 use tokio::{signal, task, time};
 

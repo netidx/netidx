@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    logfile::{ArchiveReader, BatchItem, Cursor, Id, Seek, IMG_POOL},
+    logfile::{ArchiveReader, BatchItem, Cursor, IMG_POOL, Id, Seek},
     logfile_collection::{
         index::{ArchiveIndex, File},
         to_name,
@@ -16,7 +16,7 @@ use nohash::{IntMap, IntSet};
 use parking_lot::Mutex;
 use poolshark::global::GPooled;
 use std::{
-    collections::{hash_map::Entry, VecDeque},
+    collections::{VecDeque, hash_map::Entry},
     ops::Bound,
     path::PathBuf,
     sync::{Arc, LazyLock},
@@ -263,7 +263,7 @@ impl ArchiveCollectionReader {
                             match self.pos.end() {
                                 Bound::Unbounded => (),
                                 Bound::Excluded(t) | Bound::Included(t) if t <= &end => {
-                                    break Ok(empty)
+                                    break Ok(empty);
                                 }
                                 Bound::Excluded(_) | Bound::Included(_) => (),
                             }

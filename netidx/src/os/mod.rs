@@ -10,9 +10,7 @@ pub(crate) mod local_auth {
     use super::*;
     use arcstr::ArcStr;
     use bytes::{Buf, BufMut, Bytes};
-    use netidx_core::{
-        pack::{Pack, PackError},
-    };
+    use netidx_core::pack::{Pack, PackError};
     use netidx_netproto::resolver::HashMethod;
 
     pub(crate) struct Credential {

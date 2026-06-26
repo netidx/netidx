@@ -4,12 +4,12 @@
 /// words, while only paying the cost of a double indirection when
 /// accessing a Bytes.
 use bytes::{Buf, BufMut, Bytes};
-use netidx_core::pack::{decode_varint, encode_varint, varint_len, Pack, PackError};
+use netidx_core::pack::{Pack, PackError, decode_varint, encode_varint, varint_len};
 use poolshark::{
-    global::{arc::TArc as PArc, RawPool},
     Poolable,
+    global::{RawPool, arc::TArc as PArc},
 };
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Visitor};
 use std::{borrow::Borrow, mem, ops::Deref, sync::LazyLock};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

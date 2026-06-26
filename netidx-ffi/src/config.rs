@@ -1,4 +1,4 @@
-use crate::error::{clear_error, set_error, NetidxError};
+use crate::error::{NetidxError, clear_error, set_error};
 use netidx::config::Config;
 use std::os::raw::c_char;
 
@@ -32,7 +32,10 @@ pub unsafe extern "C" fn netidx_config_load(
 ) -> *mut NetidxConfig {
     unsafe { clear_error(err) };
     let s = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(path as *const u8, path_len))
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            path as *const u8,
+            path_len,
+        ))
     };
     match Config::load(s) {
         Ok(cfg) => Box::into_raw(Box::new(NetidxConfig { inner: cfg })),

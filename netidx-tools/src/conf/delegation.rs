@@ -12,7 +12,8 @@ use clap::Args;
 use netidx_conf::{
     conf_client,
     conf_proto::{
-        DelegationPollResponse, InfoAuth, NodeKind, PeerResult, ReferralEdit, ResolverAddr,
+        DelegationPollResponse, InfoAuth, NodeKind, PeerResult, ReferralEdit,
+        ResolverAddr,
     },
     conf_server, conf_server_config,
     fingerprint::ColorMode,
@@ -126,8 +127,9 @@ pub(crate) struct AddParentFlags {
 /// `resolver add-parent` — attach an existing standalone resolver under a
 /// parent by delegation, then write its `parent` referral.
 pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
-    let rpath = paths::discover_resolver_config()
-        .context("no resolver config found — `add-parent` operates on an installed resolver")?;
+    let rpath = paths::discover_resolver_config().context(
+        "no resolver config found — `add-parent` operates on an installed resolver",
+    )?;
     let rcfg = ResolverConfig::load(&rpath)?;
     if rcfg.as_file().parent.is_some() {
         bail!(
@@ -160,10 +162,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     let parent_ref = ParentRef {
         path: ArcStr::from(proposed_path.as_str()),
         ttl: None,
-        addrs: parent
-            .iter()
-            .map(|r| (r.addr, info_to_referral_auth(&r.auth)))
-            .collect(),
+        addrs: parent.iter().map(|r| (r.addr, info_to_referral_auth(&r.auth))).collect(),
     };
     let rt = template::set_parent_referral(&rpath, parent_ref)?;
     println!("{}", rt.describe());
@@ -175,9 +174,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     if n_members > 1 {
         propagate_parent_to_child_cluster(&rcfg, &proposed_path, &parent)?;
     }
-    println!(
-        "ok — restart your resolver server(s) to attach under {proposed_path:?}"
-    );
+    println!("ok — restart your resolver server(s) to attach under {proposed_path:?}");
     Ok(())
 }
 
@@ -206,10 +203,12 @@ fn propagate_parent_to_child_cluster(
             return Ok(());
         }
     };
-    let cfg = conf_server_config::ConfServerConfig::load(&conf_path)
-        .context("loading this host's conf-server config to propagate the parent referral")?;
-    let cert = std::fs::read(&cfg.serving_cert)
-        .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
+    let cfg = conf_server_config::ConfServerConfig::load(&conf_path).context(
+        "loading this host's conf-server config to propagate the parent referral",
+    )?;
+    let cert = std::fs::read(&cfg.serving_cert).with_context(|| {
+        format!("reading serving cert {}", cfg.serving_cert.display())
+    })?;
     let key = std::fs::read(&cfg.serving_key)
         .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
     let trusted = std::fs::read(&cfg.trusted)
@@ -309,8 +308,9 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
         Some(user) => prompt::string_with_default("admin name", None, &user)?,
         None => prompt::required_string("admin name", None)?,
     };
-    let password =
-        Zeroizing::new(collect_existing_password(&format!("CA password for admin {admin:?}"))?);
+    let password = Zeroizing::new(collect_existing_password(&format!(
+        "CA password for admin {admin:?}"
+    ))?);
     loop {
         let queue = rt.block_on(conf_client::list_delegations(
             server,
@@ -356,10 +356,8 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
         println!("  request code:");
         println!("  SHA256  {}", code.text());
         println!("{}", code.identicon(ColorMode::detect()));
-        if !prompt::confirm(
-            "does this code match what the child admin sent you?",
-            false,
-        )? {
+        if !prompt::confirm("does this code match what the child admin sent you?", false)?
+        {
             if prompt::confirm("deny this request?", true)? {
                 let reason = prompt::string_with_default(
                     "denial reason (shown to the child admin)",

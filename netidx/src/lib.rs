@@ -205,18 +205,20 @@ impl InternalOnly {
         let resolver = {
             use resolver_server::config::{self, file};
             let cfg = file::ConfigBuilder::default()
-                .member_servers(vec![file::MemberServerBuilder::default()
-                    .auth(file::Auth::Anonymous)
-                    .addr("127.0.0.1:0".parse()?)
-                    .bind_addr("127.0.0.1".parse()?)
-                    .build()?])
+                .member_servers(vec![
+                    file::MemberServerBuilder::default()
+                        .auth(file::Auth::Anonymous)
+                        .addr("127.0.0.1:0".parse()?)
+                        .bind_addr("127.0.0.1".parse()?)
+                        .build()?,
+                ])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
             resolver_server::Server::new(cfg.clone(), false, 0).await?
         };
         let addr = *resolver.local_addr();
         let cfg = {
-            use config::{self, file, DefaultAuthMech};
+            use config::{self, DefaultAuthMech, file};
             let cfg = file::ConfigBuilder::default()
                 .addrs(vec![(addr, file::Auth::Anonymous)])
                 .default_auth(DefaultAuthMech::Anonymous)

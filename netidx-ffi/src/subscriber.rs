@@ -1,6 +1,6 @@
 use crate::{
     config::NetidxConfig,
-    error::{clear_error, set_error, NetidxError},
+    error::{NetidxError, clear_error, set_error},
     path::NetidxPath,
     runtime::NetidxRuntime,
     value::NetidxValue,
@@ -41,7 +41,8 @@ pub extern "C" fn netidx_update_channel_new(
     channel_buffer: usize,
     rx_out: *mut *mut NetidxUpdateReceiver,
 ) -> *mut NetidxUpdateChannel {
-    let buf = if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
+    let buf =
+        if channel_buffer == 0 { crate::FFI_CHANNEL_BUFFER } else { channel_buffer };
     let (tx, rx) = mpsc::channel(buf);
     unsafe {
         *rx_out = Box::into_raw(Box::new(NetidxUpdateReceiver { inner: rx }));
@@ -54,9 +55,7 @@ pub extern "C" fn netidx_update_channel_new(
 pub extern "C" fn netidx_update_channel_clone(
     ch: *const NetidxUpdateChannel,
 ) -> *mut NetidxUpdateChannel {
-    Box::into_raw(Box::new(NetidxUpdateChannel {
-        inner: unsafe { &*ch }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxUpdateChannel { inner: unsafe { &*ch }.inner.clone() }))
 }
 
 /// Destroy an update channel sender. The receiver remains valid until dropped separately.
@@ -157,7 +156,6 @@ pub extern "C" fn netidx_subscriber_subscribe(
     let dval = unsafe { &*sub }.inner.subscribe(path);
     Box::into_raw(Box::new(NetidxDval { inner: dval }))
 }
-
 
 /// Clone a subscriber handle (cheap Arc clone).
 #[unsafe(no_mangle)]

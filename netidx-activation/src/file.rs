@@ -5,7 +5,7 @@
 //! are exposed (via `derive_builder`) so the schema can be constructed
 //! programmatically by configuration tooling.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use derive_builder::Builder;
 use netidx_core::path::Path;
 use std::{
@@ -216,7 +216,9 @@ mod tests {
         let json = serde_json::to_string(&u).unwrap();
         let back: Unit = serde_json::from_str(&json).unwrap();
         assert!(matches!(back.trigger, Trigger::OnStart));
-        assert!(matches!(back.process.restart, Restart::RateLimited(s) if (s - 1.0).abs() < f64::EPSILON));
+        assert!(
+            matches!(back.process.restart, Restart::RateLimited(s) if (s - 1.0).abs() < f64::EPSILON)
+        );
     }
 
     #[test]

@@ -17,9 +17,9 @@
 
 use parking_lot::Mutex;
 use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider},
     DigitallySignedStruct, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
 };
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::sync::Arc;

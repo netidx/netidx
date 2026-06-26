@@ -61,9 +61,7 @@ pub enum KeepReason {
 impl KeepReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            KeepReason::CaPreserved => {
-                "CA root key (pass --with-ca to remove)"
-            }
+            KeepReason::CaPreserved => "CA root key (pass --with-ca to remove)",
         }
     }
 }
@@ -91,9 +89,7 @@ impl UninstallReport {
     /// True if both the service and the config root were already
     /// gone — `uninstall` had nothing to do.
     pub fn is_empty(&self) -> bool {
-        !self.service_was_installed
-            && self.removed.is_empty()
-            && self.kept.is_empty()
+        !self.service_was_installed && self.removed.is_empty() && self.kept.is_empty()
     }
 }
 
@@ -140,8 +136,7 @@ pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
     let entries: Vec<PathBuf> = std::fs::read_dir(&root)
         .with_context(|| format!("listing {root:?}"))?
         .map(|e| {
-            e.with_context(|| format!("reading entry in {root:?}"))
-                .map(|e| e.path())
+            e.with_context(|| format!("reading entry in {root:?}")).map(|e| e.path())
         })
         .collect::<Result<_>>()?;
 
@@ -178,20 +173,17 @@ pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
 }
 
 fn remove_any(path: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(path)
-        .with_context(|| format!("stat {path:?}"))?;
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("stat {path:?}"))?;
     if meta.file_type().is_symlink() {
         // Always unlink symlinks rather than walking through them —
         // a symlink pointing at /home or / would otherwise be a
         // catastrophic remove_dir_all target.
-        std::fs::remove_file(path)
-            .with_context(|| format!("removing symlink {path:?}"))
+        std::fs::remove_file(path).with_context(|| format!("removing symlink {path:?}"))
     } else if meta.is_dir() {
-        std::fs::remove_dir_all(path)
-            .with_context(|| format!("removing {path:?}"))
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {path:?}"))
     } else {
-        std::fs::remove_file(path)
-            .with_context(|| format!("removing {path:?}"))
+        std::fs::remove_file(path).with_context(|| format!("removing {path:?}"))
     }
 }
 
@@ -212,17 +204,10 @@ mod tests {
         fs::write(root.join("client.json"), b"{}").unwrap();
         fs::write(root.join("id-map.json"), b"{}").unwrap();
         fs::create_dir_all(root.join("activation")).unwrap();
-        fs::write(
-            root.join("activation").join("resolver.unit"),
-            b"unit",
-        )
-        .unwrap();
+        fs::write(root.join("activation").join("resolver.unit"), b"unit").unwrap();
         fs::create_dir_all(root.join("tls").join("resolver")).unwrap();
-        fs::write(
-            root.join("tls").join("resolver").join("certificate.pem"),
-            b"cert",
-        )
-        .unwrap();
+        fs::write(root.join("tls").join("resolver").join("certificate.pem"), b"cert")
+            .unwrap();
         fs::create_dir_all(root.join("ca")).unwrap();
         fs::write(root.join("ca").join("certificate.pem"), b"ca cert").unwrap();
         fs::write(root.join("ca").join("private.key"), b"ca key").unwrap();

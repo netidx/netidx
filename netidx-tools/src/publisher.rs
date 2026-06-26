@@ -1,5 +1,6 @@
 use ahash::AHashMap;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use clap::Args;
 use futures::{
     channel::mpsc::{self, Receiver},
     prelude::*,
@@ -16,10 +17,9 @@ use netidx::{
 use nohash::IntMap;
 use parking_lot::Mutex;
 use poolshark::global::GPooled;
-use clap::Args;
 use std::{convert::From, sync::Arc, time::Duration};
 use tokio::{
-    io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout},
     signal, task,
 };
 

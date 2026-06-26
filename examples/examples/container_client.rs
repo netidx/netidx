@@ -35,7 +35,7 @@ extern crate netidx_protocols;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use netidx::{
     config::Config,
     path::Path,

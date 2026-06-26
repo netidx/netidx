@@ -10,7 +10,11 @@ use netidx::{
     resolver_client::{DesiredAuth, GlobSet},
 };
 use serde_derive::{Deserialize, Serialize};
-use std::{collections::HashMap, path::{PathBuf, Path as FilePath}, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path as FilePath, PathBuf},
+    time::Duration,
+};
 
 pub mod file {
     use arcstr::literal;

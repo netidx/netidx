@@ -7,16 +7,19 @@
 //! `--yes`).
 
 use anyhow::Result;
+use clap::Args;
 use netidx_conf::{
     paths,
     provenance::InstallRecord,
     service::ServiceScope,
     uninstall::{self, UninstallParams, UninstallReport},
 };
-use clap::Args;
 use std::path::PathBuf;
 
-use super::{prompt, service::{self as svc_cli, ScopeArg}};
+use super::{
+    prompt,
+    service::{self as svc_cli, ScopeArg},
+};
 // Only the unix sudo re-exec path builds commands or adds error
 // context.
 #[cfg(unix)]
@@ -151,10 +154,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     if let Some(root) = &root {
         deregister_conf_server(root, false);
     }
-    let report = uninstall::uninstall(&UninstallParams {
-        dry_run: false,
-        ..base
-    })?;
+    let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
     print_report(&report, true);
     Ok(())
 }
@@ -287,9 +287,7 @@ fn load_install_record(p: &Params, scope: ServiceScope) -> Option<InstallRecord>
 }
 
 fn plan_contains_ca(r: &UninstallReport) -> bool {
-    r.removed
-        .iter()
-        .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
+    r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
 }
 
 /// The config root this teardown targets (honouring `--config-dir`).
@@ -326,10 +324,12 @@ fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
         return;
     }
     let result = (|| -> Result<()> {
-        let cert = std::fs::read(&cfg.serving_cert)
-            .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
-        let key = std::fs::read(&cfg.serving_key)
-            .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
+        let cert = std::fs::read(&cfg.serving_cert).with_context(|| {
+            format!("reading serving cert {}", cfg.serving_cert.display())
+        })?;
+        let key = std::fs::read(&cfg.serving_key).with_context(|| {
+            format!("reading serving key {}", cfg.serving_key.display())
+        })?;
         let trusted = std::fs::read(&cfg.trusted)
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
         let roots = conf_server::load_roots(&trusted)?;
@@ -338,7 +338,9 @@ fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
         Ok(())
     })();
     match result {
-        Ok(()) => println!("conf server: deregistered {} from the CA at {ca_addr}", cfg.listen),
+        Ok(()) => {
+            println!("conf server: deregistered {} from the CA at {ca_addr}", cfg.listen)
+        }
         Err(e) => eprintln!(
             "conf server: could not deregister from the CA at {ca_addr} ({e:#}); \
              the CA will keep this server in its map until `netidx conf ca remove-server`"
@@ -455,10 +457,7 @@ fn escalate_for_system_offer(p: &Params) -> Result<()> {
         cmd.arg("--with-ca");
     }
     let status = cmd.status().with_context(|| {
-        format!(
-            "spawning `{}` for system-scope uninstall",
-            svc_cli::elevator()
-        )
+        format!("spawning `{}` for system-scope uninstall", svc_cli::elevator())
     })?;
     if !status.success() {
         bail!("system-scope escalation failed: {status}");

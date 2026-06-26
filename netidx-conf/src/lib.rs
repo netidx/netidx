@@ -28,26 +28,21 @@ pub mod ca;
 /// data. Cross-platform: the unix vault stores it, but a Windows admin
 /// client carries these types over the conf plane (see [`conf_proto`]).
 pub mod ca_policy;
-/// LUKS-style keyslot vault protecting the CA private key (multiple
-/// revocable admin passwords). Unix-only — it only ever guards a CA
-/// key, and the CA module is unix-only. See [`design/ca-server.md`].
-#[cfg(unix)]
-pub mod ca_vault;
 /// The CA's request store — one atomic JSON record per request, owned by
 /// the daemon (`queue/`, `issued/`, `denied/` under the CA dir). Backs
 /// the conf server's Enqueue / Poll / Approve / Deny, revoke-by-name, and
 /// duplicate-name refusal. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod ca_store;
-/// The conf server's resolver-hierarchy delegation request store (the
-/// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
-/// Unix-only — it lives in the CA dir.
+/// LUKS-style keyslot vault protecting the CA private key (multiple
+/// revocable admin passwords). Unix-only — it only ever guards a CA
+/// key, and the CA module is unix-only. See [`design/ca-server.md`].
 #[cfg(unix)]
-pub mod delegation_store;
-/// Wire protocol (message types + framing) shared by the conf server
-/// and its clients. Cross-platform — a Windows node speaks it to a unix
-/// conf server. See [`design/ca-server.md`].
-pub mod conf_proto;
+pub mod ca_vault;
+pub mod client;
+/// Internal cloud-metadata / container detection backing [`netshape`].
+#[cfg(feature = "cloud-detect")]
+mod cloud;
 /// Conf-server client: fetch a network's identity and info, join it
 /// (key + CSR + signature over TLS), and enroll new conf servers —
 /// verifying the CA identity by fingerprint first. Cross-platform
@@ -59,6 +54,10 @@ pub mod conf_client;
 /// daemon feature and the daemon is unix.
 #[cfg(unix)]
 pub mod conf_local;
+/// Wire protocol (message types + framing) shared by the conf server
+/// and its clients. Cross-platform — a Windows node speaks it to a unix
+/// conf server. See [`design/ca-server.md`].
+pub mod conf_proto;
 /// Conf server: answers network-info queries, validates sign/enroll
 /// requests against per-admin policy, and pushes id-map registrations
 /// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].
@@ -69,42 +68,43 @@ pub mod conf_server;
 /// only the daemon and its installer read or write it.
 #[cfg(unix)]
 pub mod conf_server_config;
+/// The conf server's resolver-hierarchy delegation request store (the
+/// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
+/// Unix-only — it lives in the CA dir.
+#[cfg(unix)]
+pub mod delegation_store;
 /// mDNS/DNS-SD advertisement + browsing for conf servers. The beacon is
 /// a *hint* (candidate addresses, display grouping) — nothing
 /// security-relevant is decided from it. Cross-platform: a Windows
 /// workstation browses; the unix daemon advertises.
 pub mod discovery;
-/// The certificate renewal daemon: queues verified renewals for this
-/// host's TLS identities and distributes the CRL. Cross-platform —
-/// Windows workstations renew too.
-pub mod renewd;
-pub mod client;
-/// Internal cloud-metadata / container detection backing [`netshape`].
-#[cfg(feature = "cloud-detect")]
-mod cloud;
 /// Human-comparable CA-cert fingerprint (base32 text + colored
 /// identicon) for out-of-band CA identity verification. Cross-platform
 /// and openssl-free so the join client renders the same artifact
 /// everywhere — see [`design/ca-server.md`].
 pub mod fingerprint;
 pub mod id_map;
+pub mod netmap;
 /// Deployment-environment network-shape detection (`--listen` /
 /// `--bind` suggestions) for the `conf install` flow. Behind the
 /// `cloud-detect` feature because it pulls an HTTP client + interface
 /// enumeration that config-only consumers don't need.
 #[cfg(feature = "cloud-detect")]
 pub mod netshape;
-pub mod netmap;
 pub mod paths;
+pub mod perms;
 pub mod provenance;
 pub mod reconcile;
-pub mod service;
-pub mod perms;
+/// The certificate renewal daemon: queues verified renewals for this
+/// host's TLS identities and distributes the CRL. Cross-platform —
+/// Windows workstations renew too.
+pub mod renewd;
 pub mod resolver;
 /// Probe a running resolver's served TLS name (its cert's DNS SAN) to
 /// prefill the "resolver TLS name" setup prompt. Cross-platform (rustls,
 /// no openssl).
 pub mod resolver_probe;
+pub mod service;
 pub mod template;
 pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`conf_client`] and

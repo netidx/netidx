@@ -20,7 +20,7 @@ use anyhow::Result;
 use chrono::prelude::*;
 use futures::{
     channel::{
-        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
         oneshot::{self, Canceled},
     },
     future::join_all,

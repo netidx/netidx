@@ -12,8 +12,7 @@ use std::time::Duration;
 /// any leaf is the CA-remaining clamp in `Ca::sign_request` (a leaf can never
 /// outlive its issuer), so this only needs to be wide enough never to clip a
 /// legitimate renewal of a long-lived leaf — which a hardcoded 730 days did.
-const SIGNING_SLOT_MAX_VALIDITY: Duration =
-    Duration::from_secs(100 * 365 * 86400);
+const SIGNING_SLOT_MAX_VALIDITY: Duration = Duration::from_secs(100 * 365 * 86400);
 
 /// An admin's capabilities, stored in their slot and returned by
 /// `authenticate` so the server can authorize a request against exactly

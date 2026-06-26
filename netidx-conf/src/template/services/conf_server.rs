@@ -54,10 +54,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             u.process.args,
-            ["conf", "component", "server", "run", "-c", "/etc/netidx/conf-server.json", "-f"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>(),
+            [
+                "conf",
+                "component",
+                "server",
+                "run",
+                "-c",
+                "/etc/netidx/conf-server.json",
+                "-f"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>(),
         );
     }
 }

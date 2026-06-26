@@ -15,10 +15,10 @@ use crate::{
     utils::{self, ChanId, ChanWrap},
 };
 use ahash::{AHashMap, AHashSet};
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use futures::{
     channel::{
-        mpsc::{unbounded, Sender, UnboundedReceiver, UnboundedSender},
+        mpsc::{Sender, UnboundedReceiver, UnboundedSender, unbounded},
         oneshot,
     },
     prelude::*,
@@ -33,7 +33,7 @@ use poolshark::global::{GPooled, Pool};
 use rand::{self, RngExt};
 use std::{
     boxed::Box,
-    collections::{hash_map::Entry, BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, hash_map::Entry},
     convert::{From, Into, TryInto},
     default::Default,
     fmt, iter, mem,
@@ -240,22 +240,14 @@ impl BindCfg {
                     let masked = Ipv4Addr::from(
                         u32::from_be_bytes(ip.octets()) & u32::from_be_bytes(nm.octets()),
                     );
-                    if &masked == addr {
-                        Some(IpAddr::V4(ip))
-                    } else {
-                        None
-                    }
+                    if &masked == addr { Some(IpAddr::V4(ip)) } else { None }
                 }
                 (IpAddr::V6(ip), IpAddr::V6(addr), IpAddr::V6(nm)) => {
                     let masked = Ipv6Addr::from(
                         u128::from_be_bytes(ip.octets())
                             & u128::from_be_bytes(nm.octets()),
                     );
-                    if &masked == addr {
-                        Some(IpAddr::V6(ip))
-                    } else {
-                        None
-                    }
+                    if &masked == addr { Some(IpAddr::V6(ip)) } else { None }
                 }
                 (_, _, _) => None,
             })

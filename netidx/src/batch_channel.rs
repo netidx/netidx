@@ -33,7 +33,7 @@ impl<T: Send + Sync + 'static> Clone for BatchSender<T> {
 
 impl<T: Send + Sync + 'static> BatchSender<T> {
     pub(crate) fn send(&self, m: T) -> bool {
-        let mut inner = self.0 .0.lock();
+        let mut inner = self.0.0.lock();
         if inner.recv_closed {
             false
         } else {

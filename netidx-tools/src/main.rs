@@ -13,9 +13,9 @@ mod wsproxy;
 #[cfg(unix)]
 mod activation;
 mod conf;
+mod container;
 #[cfg(unix)]
 mod id_map;
-mod container;
 #[cfg(unix)]
 mod recorder;
 mod resolver_server;
@@ -26,8 +26,8 @@ extern crate anyhow;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use netidx_tools_core::ClientParams;
 use clap::{Parser, Subcommand};
+use netidx_tools_core::ClientParams;
 
 #[derive(Subcommand, Debug)]
 enum Stress {

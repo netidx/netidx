@@ -135,8 +135,7 @@ pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 /// instead. Single source of truth for the message, shared by the
 /// [`workstation`] stub and the CLI's early guard.
 #[cfg(not(unix))]
-pub const UNSUPPORTED_MSG: &str =
-    "the workstation role is unix-only for now: it installs a Local-auth \
+pub const UNSUPPORTED_MSG: &str = "the workstation role is unix-only for now: it installs a Local-auth \
      local resolver supervised by netidx-activation, neither of which \
      exists on this platform. To put this host on a network, install a \
      publisher instead: `netidx conf publisher install`. Full Windows \
@@ -182,25 +181,15 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
         );
     }
 
-    let base = if p.base.is_empty() {
-        ArcStr::from("/local")
-    } else {
-        p.base.clone()
-    };
+    let base = if p.base.is_empty() { ArcStr::from("/local") } else { p.base.clone() };
 
-    let listen_addr: SocketAddr = SocketAddr::from((
-        std::net::Ipv4Addr::LOCALHOST,
-        listen_port,
-    ));
+    let listen_addr: SocketAddr =
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, listen_port));
 
     // -- Resolver member auth: Local (unix peer credentials) ------------
     let (resolver_auth, client_addr_auth) = {
-        let local_auth_arc =
-            ArcStr::from(local_sock_path.to_string_lossy().as_ref());
-        (
-            rfile::Auth::Local(local_auth_arc.clone()),
-            cfile::Auth::Local(local_auth_arc),
-        )
+        let local_auth_arc = ArcStr::from(local_sock_path.to_string_lossy().as_ref());
+        (rfile::Auth::Local(local_auth_arc.clone()), cfile::Auth::Local(local_auth_arc))
     };
 
     let resolver_member = rfile::MemberServerBuilder::default()
@@ -236,9 +225,8 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     let mut rcfg_builder = rfile::ConfigBuilder::default();
     rcfg_builder.member_servers(vec![resolver_member]);
     if let Some((path, _)) = &perms_file {
-        rcfg_builder.include_permissions(vec![ArcStr::from(
-            path.to_string_lossy().as_ref(),
-        )]);
+        rcfg_builder
+            .include_permissions(vec![ArcStr::from(path.to_string_lossy().as_ref())]);
     }
     if let Some(parent) = &p.parent {
         // Reject the silent footgun: a TLS-auth parent address with
@@ -261,9 +249,7 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     //    default_auth: derived from parent.addrs (or override).
     //    tls section: built from tls_identities (one entry per spec).
     let mut ccfg_builder = cfile::ConfigBuilder::default();
-    ccfg_builder
-        .addrs(vec![(listen_addr, client_addr_auth)])
-        .base(base.as_str());
+    ccfg_builder.addrs(vec![(listen_addr, client_addr_auth)]).base(base.as_str());
     // `default_auth` is what the client uses when it follows a
     // referral that doesn't pin auth (i.e. for any address the
     // resolver hands back beyond its local store — which means
@@ -274,14 +260,11 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     let default_auth = match &p.default_auth {
         Some(d) => d.clone(),
         None => match &p.parent {
-            Some(parent) => {
-                derive_default_auth(parent.addrs.iter().map(|(_, a)| a))
-            }
+            Some(parent) => derive_default_auth(parent.addrs.iter().map(|(_, a)| a)),
             None => DefaultAuthMech::Local,
         },
     };
-    if matches!(default_auth, DefaultAuthMech::Tls) && p.tls_identities.is_empty()
-    {
+    if matches!(default_auth, DefaultAuthMech::Tls) && p.tls_identities.is_empty() {
         bail!(
             "default_auth=Tls requires at least one tls_identity (the netidx config validator rejects otherwise)"
         );
@@ -323,22 +306,20 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
             let trimmed = base.trim_end_matches('/');
             compact_str::format_compact!("{trimmed}/container/api").as_str().into()
         };
-        let unit = services::container::unit(&services::container::ContainerServiceParams {
-            netidx_binary: netidx_binary.clone(),
-            api_path,
-            db: None,
-            compress: false,
-            bind: None,
-        })?;
+        let unit =
+            services::container::unit(&services::container::ContainerServiceParams {
+                netidx_binary: netidx_binary.clone(),
+                api_path,
+                db: None,
+                compress: false,
+                bind: None,
+            })?;
         units.insert("container".to_string(), unit);
     }
 
     // -- TLS install jobs (one per identity) --------------------------------
-    let tls_install = p
-        .tls_identities
-        .iter()
-        .map(|s| s.install_job())
-        .collect::<Result<Vec<_>>>()?;
+    let tls_install =
+        p.tls_identities.iter().map(|s| s.install_job()).collect::<Result<Vec<_>>>()?;
 
     Ok(RenderedTemplate {
         client_config: Some((client_cfg_path, client_cfg)),
@@ -420,8 +401,7 @@ mod tests {
         // The unit must point at the workstation's binary and pass
         // an api-path scoped to the base.
         let bytes = std::fs::read(&unit_path).unwrap();
-        let unit: netidx_activation::file::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let unit: netidx_activation::file::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(unit.process.exe, "/usr/local/bin/netidx");
         let args = unit.process.args.clone();
         assert!(args.contains(&"container".to_string()));
@@ -450,10 +430,8 @@ mod tests {
         p.base = ArcStr::from("/sites/east");
         let rt = workstation(&p).unwrap();
         rt.apply().unwrap();
-        let bytes =
-            std::fs::read(out.path().join("activation/container.unit")).unwrap();
-        let unit: netidx_activation::file::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let bytes = std::fs::read(out.path().join("activation/container.unit")).unwrap();
+        let unit: netidx_activation::file::Unit = serde_json::from_slice(&bytes).unwrap();
         let args = unit.process.args;
         let api_idx = args.iter().position(|s| s == "--api-path").unwrap();
         assert_eq!(args[api_idx + 1], "/sites/east/container/api");
@@ -493,10 +471,8 @@ mod tests {
         // shape drift (`$[user]` rules) and any tls / referral
         // cross-checks Config::load performs.
         rt.apply().unwrap();
-        netidx::resolver_server::config::Config::load(
-            out.path().join("resolver.json"),
-        )
-        .expect("workstation with auto-seeded perms must validate");
+        netidx::resolver_server::config::Config::load(out.path().join("resolver.json"))
+            .expect("workstation with auto-seeded perms must validate");
     }
 
     #[test]
@@ -538,8 +514,7 @@ mod tests {
         let rt = workstation(&base_params(&out)).unwrap();
         rt.apply().unwrap();
 
-        let r = ResolverConfig::load(out.path().join("resolver.json"))
-            .unwrap();
+        let r = ResolverConfig::load(out.path().join("resolver.json")).unwrap();
         assert!(r.0.parent.is_none());
         assert!(matches!(r.0.member_servers[0].auth, rfile::Auth::Local(_)));
 
@@ -569,8 +544,7 @@ mod tests {
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Anonymous));
         assert!(c.0.tls.is_none());
 
-        let r = ResolverConfig::load(out.path().join("resolver.json"))
-            .unwrap();
+        let r = ResolverConfig::load(out.path().join("resolver.json")).unwrap();
         let parent = r.0.parent.as_ref().unwrap();
         assert!(matches!(parent.addrs[0].1, rfile::RefAuth::Anonymous));
     }
@@ -584,9 +558,7 @@ mod tests {
             ttl: None,
             addrs: vec![(
                 parent_addr(),
-                ReferralAuth::Krb5(ArcStr::from(
-                    "host/resolver.example.com@REALM",
-                )),
+                ReferralAuth::Krb5(ArcStr::from("host/resolver.example.com@REALM")),
             )],
         });
         let rt = workstation(&p).unwrap();
@@ -598,8 +570,7 @@ mod tests {
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Krb5));
         assert!(c.0.tls.is_none());
 
-        let r = ResolverConfig::load(out.path().join("resolver.json"))
-            .unwrap();
+        let r = ResolverConfig::load(out.path().join("resolver.json")).unwrap();
         let parent = r.0.parent.as_ref().unwrap();
         assert!(matches!(parent.addrs[0].1, rfile::RefAuth::Krb5(_)));
     }

@@ -1,6 +1,6 @@
 use super::common::{
-    krb5_authentication, DesiredAuth, Response, ResponseChan, FROMWRITEPOOL, HELLO_TO,
-    PUBLISHERPOOL, RAWFROMWRITEPOOL,
+    DesiredAuth, FROMWRITEPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMWRITEPOOL, Response,
+    ResponseChan, krb5_authentication,
 };
 use crate::{
     channel::{self, Channel, K5CtxWrap},
@@ -13,7 +13,7 @@ use crate::{
     tls, utils,
 };
 use ahash::{AHashMap, AHasher};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arcstr::ArcStr;
 use cross_krb5::{ClientCtx, K5Ctx};
 use futures::{
@@ -27,7 +27,7 @@ use log::{debug, info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
 use poolshark::global::GPooled;
-use rand::{rng, RngExt};
+use rand::{RngExt, rng};
 use std::{
     cmp::max, fmt::Debug, hash::BuildHasherDefault, net::SocketAddr, sync::Arc,
     time::Duration,
@@ -124,7 +124,10 @@ impl Connection {
                     | ToWrite::PublishDefaultWithFlags(_, _) => match reply {
                         FromWrite::Published | FromWrite::Referral(_) => success += 1,
                         r => {
-                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                            warn!(
+                                "republish unexpected response to {:?} from resolver {:?}",
+                                msg, r
+                            )
                         }
                     },
                     ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => match reply {
@@ -133,7 +136,10 @@ impl Connection {
                             to_remove.push(Some(p.clone()));
                         }
                         r => {
-                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                            warn!(
+                                "republish unexpected response to {:?} from resolver {:?}",
+                                msg, r
+                            )
                         }
                     },
                     ToWrite::Clear => match reply {
@@ -143,7 +149,10 @@ impl Connection {
                             to_remove.push(None);
                         }
                         r => {
-                            warn!("republish unexpected response to {:?} from resolver {:?}", msg, r)
+                            warn!(
+                                "republish unexpected response to {:?} from resolver {:?}",
+                                msg, r
+                            )
                         }
                     },
                     ToWrite::Heartbeat => (),

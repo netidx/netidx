@@ -26,8 +26,7 @@ pub(super) async fn run(
                 .build()
                 .await
                 .context("creating publisher")?;
-            let subscriber =
-                Subscriber::new(cfg, auth).context("creating subscriber")?;
+            let subscriber = Subscriber::new(cfg, auth).context("creating subscriber")?;
             Ok((publisher, subscriber))
         }
     };

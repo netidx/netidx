@@ -119,16 +119,13 @@ impl TestKdc {
                 "kdb5_util create",
             ),
             Impl::Heimdal => run_assert(
-                Command::new("kadmin")
-                    .arg("-c")
-                    .arg(&config_path)
-                    .args([
-                        "-l",
-                        "init",
-                        "--realm-max-ticket-life=1h",
-                        "--realm-max-renewable-life=1h",
-                        &realm,
-                    ]),
+                Command::new("kadmin").arg("-c").arg(&config_path).args([
+                    "-l",
+                    "init",
+                    "--realm-max-ticket-life=1h",
+                    "--realm-max-renewable-life=1h",
+                    &realm,
+                ]),
                 "kadmin init",
             ),
         }

@@ -101,19 +101,11 @@ impl ArchiveIndex {
     }
 
     pub fn first(&self) -> File {
-        if self.0.len() == 0 {
-            File::Head
-        } else {
-            *self.0.first().unwrap()
-        }
+        if self.0.len() == 0 { File::Head } else { *self.0.first().unwrap() }
     }
 
     pub fn last(&self) -> File {
-        if self.0.len() == 0 {
-            File::Head
-        } else {
-            *self.0.last().unwrap()
-        }
+        if self.0.len() == 0 { File::Head } else { *self.0.last().unwrap() }
     }
 
     pub fn find(&self, ts: DateTime<Utc>) -> File {

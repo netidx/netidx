@@ -172,10 +172,7 @@ fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
 
 fn init(file: PathBuf, default_uid: u32, default_gid: u32) -> Result<()> {
     if file.exists() {
-        bail!(
-            "{} already exists; refusing to overwrite",
-            file.display()
-        );
+        bail!("{} already exists; refusing to overwrite", file.display());
     }
     let mut m = id_map::empty();
     id_map::set_defaults(&mut m, default_uid, default_gid);
@@ -229,8 +226,7 @@ fn list(file: PathBuf) -> Result<()> {
         println!("# identities:");
         let w = m.identities.keys().map(|k| k.len()).max().unwrap_or(0);
         for (name, ident) in &m.identities {
-            let extra: Vec<&str> =
-                ident.groups.iter().map(|g| g.as_str()).collect();
+            let extra: Vec<&str> = ident.groups.iter().map(|g| g.as_str()).collect();
             println!(
                 "  {:<w$}  uid={}  primary={}  groups=[{}]",
                 name.as_str(),
@@ -245,11 +241,7 @@ fn list(file: PathBuf) -> Result<()> {
 }
 
 fn load_or_empty(file: &std::path::Path) -> Result<id_map::IdMap> {
-    if file.exists() {
-        id_map::load(file)
-    } else {
-        Ok(id_map::empty())
-    }
+    if file.exists() { id_map::load(file) } else { Ok(id_map::empty()) }
 }
 
 /// Next free id above the conventional Linux user floor of 1000 and
@@ -273,10 +265,7 @@ fn next_group_gid(m: &id_map::IdMap) -> u32 {
 /// groups (so the operator sees the legal set) and offer `users` as
 /// the default if it exists — that's the group seeded by `init` and
 /// the conventional Linux primary for human accounts.
-fn prompt_primary_group(
-    m: &id_map::IdMap,
-    provided: Option<String>,
-) -> Result<String> {
+fn prompt_primary_group(m: &id_map::IdMap, provided: Option<String>) -> Result<String> {
     if let Some(g) = provided {
         return Ok(g);
     }
@@ -319,23 +308,14 @@ fn add_user(
 ) -> Result<()> {
     let mut m = load_or_empty(&file)?;
     let group_refs: Vec<&str> = groups.iter().map(|s| s.as_str()).collect();
-    let prev = id_map::upsert_identity(
-        &mut m,
-        &name,
-        uid,
-        &primary_group,
-        &group_refs,
-    )?;
+    let prev = id_map::upsert_identity(&mut m, &name, uid, &primary_group, &group_refs)?;
     id_map::save(&file, &m)?;
     match prev {
         Some(old) => println!(
             "updated {name} (was uid={} primary={} groups={:?})",
             old.uid,
             old.primary_group.as_str(),
-            old.groups
-                .iter()
-                .map(|g| g.as_str())
-                .collect::<Vec<_>>(),
+            old.groups.iter().map(|g| g.as_str()).collect::<Vec<_>>(),
         ),
         None => println!("added identity {name} (uid={uid})"),
     }
@@ -399,12 +379,7 @@ mod tests {
         // Add-member is idempotent; remove-member won't drop the primary.
         add_member(f.clone(), "alice.example.com".into(), "wheel".into()).unwrap();
         assert!(
-            remove_member(
-                f.clone(),
-                "alice.example.com".into(),
-                "users".into()
-            )
-            .is_err(),
+            remove_member(f.clone(), "alice.example.com".into(), "users".into()).is_err(),
             "removing primary via remove-member must error",
         );
 
@@ -432,17 +407,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("id-map.json");
         init(f.clone(), 65534, 65534).unwrap();
-        let err = add_user(
-            f,
-            "alice".into(),
-            1000,
-            "ghost".into(),
-            vec![],
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("primary_group"),
-            "got {err:#}",
-        );
+        let err = add_user(f, "alice".into(), 1000, "ghost".into(), vec![]).unwrap_err();
+        assert!(format!("{err:#}").contains("primary_group"), "got {err:#}",);
     }
 }

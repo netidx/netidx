@@ -2,8 +2,8 @@ use super::{ClusterCmd, NewSessionConfig, SessionBCastMsg};
 use crate::{
     config::{Config, PublishConfig},
     recorder::{
-        publish::{controls::Controls, session_shard::SessionShard},
         Shards,
+        publish::{controls::Controls, session_shard::SessionShard},
     },
 };
 use anyhow::Result;
@@ -17,7 +17,7 @@ use netidx::{
 };
 use netidx_protocols::cluster::Cluster;
 use poolshark::global::GPooled;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 use tokio::{sync::broadcast, task::JoinSet};
 use uuid::Uuid;

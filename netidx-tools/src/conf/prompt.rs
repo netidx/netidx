@@ -19,7 +19,7 @@
 //! Kept in the CLI layer per the project convention that the
 //! `netidx-conf` library stays free of user-IO.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::{
     fmt::Display,
     io::{BufRead, IsTerminal, Write},
@@ -112,10 +112,7 @@ pub fn required_string(label: &str, provided: Option<String>) -> Result<String> 
 /// Prompt for a required filesystem path. Same semantics as
 /// [`required_string`].
 pub fn required_path(label: &str, provided: Option<PathBuf>) -> Result<PathBuf> {
-    let s = required_string(
-        label,
-        provided.map(|p| p.to_string_lossy().into_owned()),
-    )?;
+    let s = required_string(label, provided.map(|p| p.to_string_lossy().into_owned()))?;
     Ok(PathBuf::from(s))
 }
 
@@ -220,9 +217,7 @@ where
     loop {
         match read_line(&format!("{label} [{default}]: "))? {
             None => return parse_default(label, default),
-            Some(line) if line.is_empty() => {
-                return parse_default(label, default)
-            }
+            Some(line) if line.is_empty() => return parse_default(label, default),
             Some(line) => match line.parse::<T>() {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -264,9 +259,7 @@ where
     loop {
         match read_line(&hint)? {
             None => return parse_default(label, default),
-            Some(line) if line.is_empty() => {
-                return parse_default(label, default)
-            }
+            Some(line) if line.is_empty() => return parse_default(label, default),
             // The displayed options are authoritative: validate against
             // them before parsing. `T` is often `String` (whose `FromStr`
             // never fails), so without this an off-list answer would slip
@@ -313,9 +306,7 @@ where
             Some(line) => match line.parse::<T>() {
                 Ok(v) => return Ok(Some(v)),
                 Err(e) => {
-                    eprintln!(
-                        "invalid {label}: {e}; try again (or blank for none)"
-                    );
+                    eprintln!("invalid {label}: {e}; try again (or blank for none)");
                     continue;
                 }
             },
@@ -369,23 +360,14 @@ mod tests {
 
     #[test]
     fn provided_value_short_circuits_every_level() {
-        assert_eq!(
-            required_string("x", Some("v".into())).unwrap(),
-            "v"
-        );
+        assert_eq!(required_string("x", Some("v".into())).unwrap(), "v");
         assert_eq!(
             required_path("x", Some(PathBuf::from("/p"))).unwrap(),
             PathBuf::from("/p"),
         );
         assert_eq!(required_parsed::<u32>("x", Some(7)).unwrap(), 7);
-        assert_eq!(
-            string_with_default("x", Some("v".into()), "d").unwrap(),
-            "v",
-        );
-        assert_eq!(
-            parsed_with_default::<u32>("x", Some(7), "9").unwrap(),
-            7,
-        );
+        assert_eq!(string_with_default("x", Some("v".into()), "d").unwrap(), "v",);
+        assert_eq!(parsed_with_default::<u32>("x", Some(7), "9").unwrap(), 7,);
         assert_eq!(
             choice_with_default::<u32>("x", Some(7), &["7", "9"], "9").unwrap(),
             7,
@@ -401,14 +383,8 @@ mod tests {
 
     #[test]
     fn level_1_uses_default_without_tty() {
-        assert_eq!(
-            string_with_default("flag", None, "deflt").unwrap(),
-            "deflt",
-        );
-        assert_eq!(
-            parsed_with_default::<u32>("flag", None, "65534").unwrap(),
-            65534,
-        );
+        assert_eq!(string_with_default("flag", None, "deflt").unwrap(), "deflt",);
+        assert_eq!(parsed_with_default::<u32>("flag", None, "65534").unwrap(), 65534,);
         assert_eq!(
             choice_with_default::<u32>("flag", None, &["1", "2"], "2").unwrap(),
             2,
@@ -417,10 +393,7 @@ mod tests {
 
     #[test]
     fn optional_parsed_provided_round_trips() {
-        assert_eq!(
-            optional_parsed::<u32>("flag", Some(42)).unwrap(),
-            Some(42),
-        );
+        assert_eq!(optional_parsed::<u32>("flag", Some(42)).unwrap(), Some(42),);
     }
 
     #[test]

@@ -23,8 +23,8 @@
 //! On-disk: `<ca-dir>/vault.json`, mode 0600.
 
 use crate::atomic;
-use aes_gcm::{aead::Aead, Aes256Gcm, Key, KeyInit, Nonce};
-use anyhow::{anyhow, bail, Context, Result};
+use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
+use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
 use rand::Rng;
@@ -480,7 +480,8 @@ impl CAVault {
             );
         }
         let policy = vault.slots[idx].policy.clone();
-        vault.slots[idx] = make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
+        vault.slots[idx] =
+            make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
         write_vault(&path, &vault)
     }
 }
@@ -611,8 +612,8 @@ fn write_vault(path: &Path, vault: &VaultFile) -> Result<()> {
 fn read_vault(path: &Path) -> Result<VaultFile> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading vault {}", path.display()))?;
-    let vault: VaultFile =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    let vault: VaultFile = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))?;
     if vault.version != VAULT_VERSION {
         bail!("unsupported vault version {} (expected {VAULT_VERSION})", vault.version);
     }
@@ -631,7 +632,8 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![],
             may_manage_admins: false,
-            service_control_scopes: vec![],        }
+            service_control_scopes: vec![],
+        }
     }
 
     /// A role policy: no issuance, just a perms-edit scope.
@@ -643,10 +645,12 @@ mod tests {
             may_enroll_servers: false,
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
-            service_control_scopes: vec![],        }
+            service_control_scopes: vec![],
+        }
     }
 
-    const KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\nMOCKKEYBYTES\n-----END PRIVATE KEY-----\n";
+    const KEY: &[u8] =
+        b"-----BEGIN PRIVATE KEY-----\nMOCKKEYBYTES\n-----END PRIVATE KEY-----\n";
 
     #[test]
     fn create_unlock_round_trip() {
@@ -765,10 +769,13 @@ mod tests {
         let mut admins = v.list_admins().unwrap();
         admins.sort_by(|a, b| a.admin.cmp(&b.admin));
         let kinds: Vec<_> = admins.iter().map(|a| (a.admin.clone(), a.kind)).collect();
-        assert_eq!(kinds, vec![
-            ("eve".to_string(), SlotKind::Role),
-            ("recovery".to_string(), SlotKind::Signing),
-        ]);
+        assert_eq!(
+            kinds,
+            vec![
+                ("eve".to_string(), SlotKind::Role),
+                ("recovery".to_string(), SlotKind::Signing),
+            ]
+        );
         // Only the signing slot is an MK-holder.
         assert_eq!(v.signing_slot_names().unwrap(), vec!["recovery".to_string()]);
     }
@@ -850,8 +857,7 @@ mod tests {
         let ct = v["key_enc"]["ct"].as_str().unwrap().to_string();
         let mut bytes = base64::engine::general_purpose::STANDARD.decode(&ct).unwrap();
         bytes[0] ^= 0xff;
-        v["key_enc"]["ct"] =
-            serde_json::Value::String(b64e(&bytes));
+        v["key_enc"]["ct"] = serde_json::Value::String(b64e(&bytes));
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
         // The password still unlocks a slot (MK recovered), but the CA
         // key AEAD now fails its tag → clean error, not garbage.

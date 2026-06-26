@@ -60,9 +60,10 @@ impl NetworkIdentity {
     /// stored fingerprint is an error (refuse to trust), not a silent
     /// mismatch.
     pub fn matches(&self, presented: &Fingerprint) -> Result<bool> {
-        let pinned = Fingerprint::parse_text(&self.ca_fingerprint).with_context(|| {
-            format!("parsing pinned CA fingerprint {:?}", self.ca_fingerprint)
-        })?;
+        let pinned =
+            Fingerprint::parse_text(&self.ca_fingerprint).with_context(|| {
+                format!("parsing pinned CA fingerprint {:?}", self.ca_fingerprint)
+            })?;
         Ok(&pinned == presented)
     }
 }

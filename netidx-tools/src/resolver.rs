@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
+use clap::Subcommand;
 use netidx::{
     config::Config,
     path::Path,
@@ -10,7 +11,6 @@ use netidx::{
     resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
 };
 use std::{collections::HashSet, iter, net::SocketAddr, time::Duration};
-use clap::Subcommand;
 use tokio::time;
 
 #[derive(Subcommand, Debug)]
@@ -69,11 +69,7 @@ pub(super) async fn run(
             let pat = {
                 let path =
                     path.map(|p| Path::from(ArcStr::from(p))).unwrap_or(Path::root());
-                if !Glob::is_glob(&*path) {
-                    path.append("*")
-                } else {
-                    path
-                }
+                if !Glob::is_glob(&*path) { path.append("*") } else { path }
             };
             let glob = Glob::new(pat.into()).unwrap();
             let mut ct = ChangeTracker::new(Path::from(ArcStr::from(glob.base())));

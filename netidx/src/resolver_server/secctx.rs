@@ -5,14 +5,14 @@ use super::{
 use crate::{
     channel::K5CtxWrap,
     os::{
-        local_auth::{AuthServer, Credential},
         Mapper,
+        local_auth::{AuthServer, Credential},
     },
     path::Path,
     protocol::resolver::{PublisherId, Referral},
     tls,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use arcstr::ArcStr;
 use cross_krb5::{K5Ctx, ServerCtx};
 use log::debug;
@@ -214,8 +214,12 @@ impl SecCtx {
                 // CRL-watching: a `crl.pem` dropped beside the trusted
                 // bundle (by the conf plane) takes effect on the next
                 // accept — the resolver is the revocation choke point.
-                let auth =
-                    tls::CrlWatchingAcceptor::new(None, trusted, certificate, private_key)?;
+                let auth = tls::CrlWatchingAcceptor::new(
+                    None,
+                    trusted,
+                    certificate,
+                    private_key,
+                )?;
                 let store = RwLock::new(SecCtxData::new(cfg, member).await?);
                 SecCtx::Tls(Arc::new((auth, store)))
             }

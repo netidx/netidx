@@ -6,7 +6,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-pub mod file;
 pub mod control;
+pub mod file;
 #[cfg(unix)]
 pub mod runtime;

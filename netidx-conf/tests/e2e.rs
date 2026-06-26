@@ -302,8 +302,7 @@ async fn workstation_template_local_round_trip() -> Result<()> {
     let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
 
     let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
-    round_trip(client_cfg, "/local/e2e/workstation", Value::String("hi".into()))
-        .await?;
+    round_trip(client_cfg, "/local/e2e/workstation", Value::String("hi".into())).await?;
     Ok(())
 }
 
@@ -408,8 +407,8 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // Start the id-map daemon in-process. The resolver's auth check
     // will connect to this socket every time it needs to resolve a
     // TLS SAN → unix uid + group.
-    let _id_map_daemon = IdMapServer::start(IdMapParams::new(id_map_sock, id_map_json))
-        .await?;
+    let _id_map_daemon =
+        IdMapServer::start(IdMapParams::new(id_map_sock, id_map_json)).await?;
 
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
     let server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
@@ -429,8 +428,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // `/users/$[user]` dynamic entry with $[user]=resolver.example.com
     // (the TLS-cert entry at base "/" would also cover it).
     let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
-    round_trip(client_cfg, "/users/resolver.example.com/e2e", Value::I64(99))
-        .await?;
+    round_trip(client_cfg, "/users/resolver.example.com/e2e", Value::I64(99)).await?;
     Ok(())
 }
 
@@ -500,7 +498,13 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     rt.apply()?;
 
     let mut map = id_map_engine::empty();
-    id_map_engine::upsert_identity(&mut map, "resolver.revoked.example", 1000, "users", &[])?;
+    id_map_engine::upsert_identity(
+        &mut map,
+        "resolver.revoked.example",
+        1000,
+        "users",
+        &[],
+    )?;
     id_map_engine::save(&id_map_json, &map)?;
     let _id_map_daemon =
         IdMapServer::start(IdMapParams::new(id_map_sock, id_map_json)).await?;
@@ -544,16 +548,13 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     })?;
     let revoked = cadir.store.lock().revoke(
         2,
-        ca_store::Revocation {
-            serial: 2,
-            revoked_unix: now,
-            reason: "e2e test".into(),
-        },
+        ca_store::Revocation { serial: 2, revoked_unix: now, reason: "e2e test".into() },
     )?;
     assert!(revoked, "the issued serial should be live, then revoked");
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
     cadir.store.lock().write_crl(&ca_key)?;
-    let rcfg = netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
+    let rcfg =
+        netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
     let mut installed = false;
     for member in &rcfg.0.member_servers {
         if let cfg_resolver::file::Auth::Tls { trusted, .. } = &member.auth {
@@ -606,11 +607,13 @@ async fn publisher_template_anonymous_round_trip() -> Result<()> {
     // resolver to point the publisher template at.
     let bare_resolver = {
         let cfg = cfg_resolver::file::ConfigBuilder::default()
-            .member_servers(vec![cfg_resolver::file::MemberServerBuilder::default()
-                .auth(cfg_resolver::file::Auth::Anonymous)
-                .addr("127.0.0.1:0".parse()?)
-                .bind_addr("127.0.0.1".parse()?)
-                .build()?])
+            .member_servers(vec![
+                cfg_resolver::file::MemberServerBuilder::default()
+                    .auth(cfg_resolver::file::Auth::Anonymous)
+                    .addr("127.0.0.1:0".parse()?)
+                    .bind_addr("127.0.0.1".parse()?)
+                    .build()?,
+            ])
             .build()?;
         let cfg = cfg_resolver::Config::from_file(cfg)?;
         resolver_server::Server::new(cfg, false, 0).await?

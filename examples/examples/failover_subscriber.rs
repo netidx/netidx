@@ -35,7 +35,7 @@
 //! fail to LOW not HIGH.
 
 use anyhow::Result;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use netidx::{
     config::Config,
     path::Path,

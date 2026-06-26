@@ -145,7 +145,10 @@ pub(crate) fn workstation_status() -> Result<()> {
                 Ok(info) => {
                     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
                     if plan.is_empty() {
-                        println!("  sync: in sync ({} network resolver(s))", info.resolvers.len());
+                        println!(
+                            "  sync: in sync ({} network resolver(s))",
+                            info.resolvers.len()
+                        );
                     } else {
                         println!(
                             "  sync: behind by {} resolver peer(s) — run \
@@ -240,7 +243,11 @@ fn fetch_map_pinned(
 
 /// Apply a reconcile plan (or just describe it) — the shared tail of every
 /// map-driven `update`.
-fn run_update(plan: reconcile::EditPlan, dry_run: bool, restart_hint: &str) -> Result<()> {
+fn run_update(
+    plan: reconcile::EditPlan,
+    dry_run: bool,
+    restart_hint: &str,
+) -> Result<()> {
     if plan.is_empty() {
         println!("already in sync — nothing to do");
         return Ok(());
@@ -287,7 +294,10 @@ pub(crate) fn resolver_status() -> Result<()> {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => {
                     if let Ok(cpath) = client_config_path() {
-                        report_drift("client", reconcile::reconcile_client_peers(&cpath, &map));
+                        report_drift(
+                            "client",
+                            reconcile::reconcile_client_peers(&cpath, &map),
+                        );
                     }
                     if has_parent {
                         report_drift(
@@ -320,7 +330,11 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
     if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
         plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
     }
-    run_update(plan, flags.dry_run, "restart the resolver / re-run clients to use the new peers")
+    run_update(
+        plan,
+        flags.dry_run,
+        "restart the resolver / re-run clients to use the new peers",
+    )
 }
 
 // -- publisher ----------------------------------------------------------------
@@ -336,9 +350,10 @@ pub(crate) fn publisher_status() -> Result<()> {
             match fetch_map_pinned(net_id, rec.conf_server, NodeKind::Publisher) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => match client_config_path() {
-                    Ok(cpath) => {
-                        report_drift("client", reconcile::reconcile_client_peers(&cpath, &map))
-                    }
+                    Ok(cpath) => report_drift(
+                        "client",
+                        reconcile::reconcile_client_peers(&cpath, &map),
+                    ),
                     Err(e) => println!("  client config: {e:#}"),
                 },
             }

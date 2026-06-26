@@ -1,7 +1,7 @@
 // not Packled channel :P
 
-pub mod server;
 pub mod client;
+pub mod server;
 
 #[cfg(test)]
 mod test;

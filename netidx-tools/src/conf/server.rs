@@ -4,7 +4,7 @@
 //! is the CLI shell plus [`setup_server`], the shared "stand up a conf
 //! server on this host" step used by `ca init` and the install flows.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use netidx_conf::{
     atomic,
@@ -225,9 +225,7 @@ pub(super) fn install_unit(units_dir: &Path, cfg_path: &Path) -> Result<()> {
 /// install flows call this after standing up the resolver / id-map so
 /// the daemon advertises what actually runs here. A missing config is
 /// an error: roles only make sense on a host that has one.
-pub(super) fn update_roles(
-    update: impl FnOnce(&mut Roles),
-) -> Result<PathBuf> {
+pub(super) fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
     let cfg_path = paths::discover_conf_server_config()?;
     let mut cfg = ConfServerConfig::load(&cfg_path)?;
     update(&mut cfg.roles);
@@ -242,11 +240,9 @@ pub(super) fn update_roles(
 pub(super) fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
     let cfg_path = paths::discover_conf_server_config()?;
     let mut cfg = ConfServerConfig::load(&cfg_path)?;
-    let ca = cfg
-        .roles
-        .ca
-        .as_mut()
-        .ok_or_else(|| anyhow!("conf-server config {} has no CA role", cfg_path.display()))?;
+    let ca = cfg.roles.ca.as_mut().ok_or_else(|| {
+        anyhow!("conf-server config {} has no CA role", cfg_path.display())
+    })?;
     ca.autorenew = Some(keytab.to_path_buf());
     cfg.save(&cfg_path)?;
     Ok(cfg_path)

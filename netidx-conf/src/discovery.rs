@@ -109,9 +109,16 @@ pub fn advertise(
         ("fp", fp_short),
     ];
     let info = if listen.ip().is_unspecified() {
-        ServiceInfo::new(SERVICE_TYPE, &instance, &host_name, (), listen.port(), &props[..])
-            .context("building mDNS service info")?
-            .enable_addr_auto()
+        ServiceInfo::new(
+            SERVICE_TYPE,
+            &instance,
+            &host_name,
+            (),
+            listen.port(),
+            &props[..],
+        )
+        .context("building mDNS service info")?
+        .enable_addr_auto()
     } else {
         ServiceInfo::new(
             SERVICE_TYPE,
@@ -164,16 +171,13 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
         }
         match receiver.recv_timeout(deadline - now) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let domain = info
-                    .get_property_val_str("domain")
-                    .unwrap_or_default()
-                    .to_string();
-                let roles =
-                    roles_from_txt(info.get_property_val_str("roles").unwrap_or_default());
-                let fp_short = info
-                    .get_property_val_str("fp")
-                    .unwrap_or_default()
-                    .to_string();
+                let domain =
+                    info.get_property_val_str("domain").unwrap_or_default().to_string();
+                let roles = roles_from_txt(
+                    info.get_property_val_str("roles").unwrap_or_default(),
+                );
+                let fp_short =
+                    info.get_property_val_str("fp").unwrap_or_default().to_string();
                 let addrs: Vec<IpAddr> =
                     info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
                 if domain.is_empty() || addrs.is_empty() {

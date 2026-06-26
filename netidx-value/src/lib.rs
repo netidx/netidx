@@ -73,7 +73,7 @@ use anyhow::Result;
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use chrono::prelude::*;
-use compact_str::{format_compact, CompactString};
+use compact_str::{CompactString, format_compact};
 use immutable_chunkmap::map;
 use netidx_core::{
     pack::{self, Pack, PackError},
@@ -103,7 +103,7 @@ pub use abstract_type::Abstract;
 pub use array::ValArray;
 pub use convert::FromValue;
 pub use pbuf::PBytes;
-pub use print::{printf, NakedValue};
+pub use print::{NakedValue, printf};
 pub use typ::Typ;
 
 #[macro_export]
@@ -973,22 +973,24 @@ impl Value {
             Value::Array(elts) => {
                 let mut stack: SmallVec<[(ValArray, usize); 8]> = SmallVec::new();
                 stack.push((elts, 0));
-                Either::Left(iter::from_fn(move || loop {
-                    match stack.last_mut() {
-                        None => break None,
-                        Some((elts, pos)) => {
-                            if *pos >= elts.len() {
-                                stack.pop();
-                            } else {
-                                match &elts[*pos] {
-                                    Value::Array(elts) => {
-                                        *pos += 1;
-                                        let elts = elts.clone();
-                                        stack.push((elts, 0));
-                                    }
-                                    val => {
-                                        *pos += 1;
-                                        break Some(val.clone());
+                Either::Left(iter::from_fn(move || {
+                    loop {
+                        match stack.last_mut() {
+                            None => break None,
+                            Some((elts, pos)) => {
+                                if *pos >= elts.len() {
+                                    stack.pop();
+                                } else {
+                                    match &elts[*pos] {
+                                        Value::Array(elts) => {
+                                            *pos += 1;
+                                            let elts = elts.clone();
+                                            stack.push((elts, 0));
+                                        }
+                                        val => {
+                                            *pos += 1;
+                                            break Some(val.clone());
+                                        }
                                     }
                                 }
                             }

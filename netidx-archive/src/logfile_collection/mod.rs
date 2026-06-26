@@ -5,11 +5,11 @@ pub mod writer;
 #[cfg(test)]
 mod test;
 
-pub use reader::ArchiveCollectionReader;
-pub use writer::ArchiveCollectionWriter;
-pub use index::{ArchiveIndex, File};
 use anyhow::Result;
 use chrono::prelude::*;
+pub use index::{ArchiveIndex, File};
+pub use reader::ArchiveCollectionReader;
+pub use writer::ArchiveCollectionWriter;
 
 #[cfg(unix)]
 fn parse_name(s: &str) -> Result<DateTime<Utc>> {

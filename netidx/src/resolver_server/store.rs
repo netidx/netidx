@@ -20,9 +20,9 @@ use poolshark::global::{GPooled, Pool};
 use std::{
     clone::Clone,
     collections::{
-        hash_map::Entry,
         BTreeMap,
         Bound::{self, Excluded, Included, Unbounded},
+        hash_map::Entry,
     },
     convert::AsRef,
     hash::Hash,
@@ -95,20 +95,12 @@ impl<T: 'static + Ord + Clone + Hash> HCSet<T> {
 
     fn add(&mut self, current: &Set<T>, v: T) -> Set<T> {
         let (new, existed) = current.insert(v);
-        if existed {
-            new
-        } else {
-            self.hashcons(new)
-        }
+        if existed { new } else { self.hashcons(new) }
     }
 
     fn remove(&mut self, current: &Set<T>, v: &T) -> Option<Set<T>> {
         let (new, _) = current.remove(v);
-        if new.len() == 0 {
-            None
-        } else {
-            Some(self.hashcons(new))
-        }
+        if new.len() == 0 { None } else { Some(self.hashcons(new)) }
     }
 
     fn gc(&mut self) {

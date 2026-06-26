@@ -1,5 +1,5 @@
 use crate::{
-    error::{clear_error, set_error, NetidxError},
+    error::{NetidxError, clear_error, set_error},
     path::NetidxPath,
     publisher::NetidxPublisher,
     runtime::NetidxRuntime,
@@ -29,8 +29,9 @@ pub struct NetidxArgSpec {
 /// `userdata` is the opaque pointer passed at registration.
 /// `call` is the RPC call handle — the handler must call netidx_rpc_call_reply
 /// to send a response. The call is consumed by reply.
-pub type NetidxRpcHandler =
-    Option<unsafe extern "C" fn(userdata: *mut std::ffi::c_void, call: *mut NetidxRpcCall)>;
+pub type NetidxRpcHandler = Option<
+    unsafe extern "C" fn(userdata: *mut std::ffi::c_void, call: *mut NetidxRpcCall),
+>;
 
 pub struct NetidxRpcProc {
     _inner: rpc::server::Proc,
@@ -79,11 +80,7 @@ pub unsafe extern "C" fn netidx_rpc_proc_new(
                 ));
                 let doc = Box::from_raw(a.doc).inner;
                 let default_value = Box::from_raw(a.default_value).inner;
-                rpc::server::ArgSpec {
-                    name: ArcStr::from(name),
-                    doc,
-                    default_value,
-                }
+                rpc::server::ArgSpec { name: ArcStr::from(name), doc, default_value }
             })
             .collect()
     };
@@ -96,17 +93,16 @@ pub unsafe extern "C" fn netidx_rpc_proc_new(
             (self.0)(c)
         }
     }
-    let mut send_map = SendMap(Box::new(move |mut call: rpc::server::RpcCall| -> Option<()> {
-        let ffi_call = Box::into_raw(Box::new(NetidxRpcCall {
-            args: call.args.drain().collect(),
-            reply: call.reply,
+    let mut send_map =
+        SendMap(Box::new(move |mut call: rpc::server::RpcCall| -> Option<()> {
+            let ffi_call = Box::into_raw(Box::new(NetidxRpcCall {
+                args: call.args.drain().collect(),
+                reply: call.reply,
+            }));
+            unsafe { handler(userdata, ffi_call) };
+            None
         }));
-        unsafe { handler(userdata, ffi_call) };
-        None
-    }));
-    let map = move |call: rpc::server::RpcCall| -> Option<()> {
-        send_map.call(call)
-    };
+    let map = move |call: rpc::server::RpcCall| -> Option<()> { send_map.call(call) };
     match rpc::server::Proc::new(
         &unsafe { &*pub_ }.inner,
         path,
@@ -135,7 +131,10 @@ pub unsafe extern "C" fn netidx_rpc_call_take_arg(
         return std::ptr::null_mut();
     }
     let name = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(name as *const u8, name_len))
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            name as *const u8,
+            name_len,
+        ))
     };
     let call = unsafe { &mut *call };
     match call.args.remove(name) {
@@ -240,7 +239,9 @@ pub unsafe extern "C" fn netidx_rpc_client_call(
             .collect()
     };
     match crate::block_on_timeout(
-        &rt.rt, timeout_ms, "rpc call timed out",
+        &rt.rt,
+        timeout_ms,
+        "rpc call timed out",
         client.inner.call(call_args),
     ) {
         Ok(v) => Box::into_raw(Box::new(NetidxValue { inner: v })),
@@ -256,9 +257,7 @@ pub unsafe extern "C" fn netidx_rpc_client_call(
 pub extern "C" fn netidx_rpc_client_clone(
     client: *const NetidxRpcClient,
 ) -> *mut NetidxRpcClient {
-    Box::into_raw(Box::new(NetidxRpcClient {
-        inner: unsafe { &*client }.inner.clone(),
-    }))
+    Box::into_raw(Box::new(NetidxRpcClient { inner: unsafe { &*client }.inner.clone() }))
 }
 
 /// Destroy an RPC client.

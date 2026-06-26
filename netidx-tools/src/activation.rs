@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
+use clap::Args;
 use daemonize::Daemonize;
 use netidx::{
     config::Config,
     publisher::{BindCfg, DesiredAuth},
 };
-use clap::Args;
 use netidx_activation::runtime::{Server, ServerParams};
 use std::path::PathBuf;
 
@@ -25,11 +25,7 @@ pub(super) struct Params {
 }
 
 #[tokio::main]
-async fn tokio_run(
-    cfg: Config,
-    auth: DesiredAuth,
-    params: ServerParams,
-) -> Result<()> {
+async fn tokio_run(cfg: Config, auth: DesiredAuth, params: ServerParams) -> Result<()> {
     let server = Server::new(cfg, auth, params).await.context("activation startup")?;
     server.run().await.context("activation")
 }
@@ -43,7 +39,6 @@ pub(super) fn run(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> 
         }
         d.start().context("failed to daemonize")?
     }
-    let server_params =
-        ServerParams { bind: params.bind, units_dir: params.units };
+    let server_params = ServerParams { bind: params.bind, units_dir: params.units };
     tokio_run(cfg, auth, server_params)
 }

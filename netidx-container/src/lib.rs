@@ -7,8 +7,9 @@ mod stats;
 
 use crate::rpcs::RpcApi;
 use ahash::AHashMap;
-use anyhow::{bail, Result};
-use arcstr::{literal, ArcStr};
+use anyhow::{Result, bail};
+use arcstr::{ArcStr, literal};
+use clap::Args;
 pub use db::{Datum, DatumKind, Db, Reply, Sendable, Txn};
 use derive_builder::Builder;
 use futures::{
@@ -46,7 +47,6 @@ use std::{
     pin::Pin,
     time::Duration,
 };
-use clap::Args;
 use tokio::task;
 use triomphe::Arc;
 
@@ -251,11 +251,7 @@ impl ContainerInner {
     }
 
     fn check_path(&self, path: Path) -> Result<Path> {
-        if self.get_root(&path).is_some() {
-            Ok(path)
-        } else {
-            bail!("non root path")
-        }
+        if self.get_root(&path).is_some() { Ok(path) } else { bail!("non root path") }
     }
 
     fn publish_data(&mut self, path: Path, value: Value) -> Result<()> {

@@ -37,7 +37,9 @@ where
             Err(e) => {
                 eprintln!("\nvalidation failed: {e:#}\n");
                 if !std::io::stdin().is_terminal() {
-                    bail!("validation failed and stdin is not a TTY; cannot prompt for re-edit");
+                    bail!(
+                        "validation failed and stdin is not a TTY; cannot prompt for re-edit"
+                    );
                 }
                 if !confirm("re-edit? [Y/n] ") {
                     bail!("edit aborted; temp file discarded");

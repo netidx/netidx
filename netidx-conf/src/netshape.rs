@@ -87,11 +87,7 @@ pub enum NetShape {
     /// service told us the public IP that NAT routes onto it.
     /// Publishers need `BindCfg::Elastic` (`<public>@<private>/<n>`);
     /// the resolver needs `addr=<public>`, `bind_addr=<private>`.
-    CloudElastic {
-        public: Ipv4Addr,
-        private: Ipv4Addr,
-        netmask: Ipv4Addr,
-    },
+    CloudElastic { public: Ipv4Addr, private: Ipv4Addr, netmask: Ipv4Addr },
     /// Container with no public-IP hint: we have a private NIC but
     /// no `NETIDX_PUBLIC_IP` env var, no reachable cloud metadata,
     /// and `/.dockerenv` / cgroup markers tell us we're in a
@@ -279,7 +275,8 @@ mod tests {
     #[test]
     fn pick_advertised_interface_returns_subnet() {
         // Public wins; netmask carried through unchanged.
-        let ifs = [iface("192.168.1.5", "255.255.255.0"), iface("8.8.8.8", "255.255.255.252")];
+        let ifs =
+            [iface("192.168.1.5", "255.255.255.0"), iface("8.8.8.8", "255.255.255.252")];
         assert_eq!(
             pick_advertised_v4_interface(&ifs),
             Some((v4("8.8.8.8"), v4("255.255.255.252"))),
@@ -300,7 +297,8 @@ mod tests {
         // Directly-attached public NIC → no need to ask metadata.
         // The cloud probe must NOT be called (panics if it is).
         let ifs = [iface("8.8.8.8", "255.255.255.0")];
-        let shape = NetShape::from_interfaces(&ifs, None, || panic!("cloud probe ran"), false);
+        let shape =
+            NetShape::from_interfaces(&ifs, None, || panic!("cloud probe ran"), false);
         assert_eq!(
             shape,
             NetShape::Public { ip: v4("8.8.8.8"), netmask: v4("255.255.255.0") },
@@ -310,7 +308,8 @@ mod tests {
     #[test]
     fn netshape_private_with_cloud_metadata_is_elastic() {
         let ifs = [iface("10.0.0.5", "255.255.255.0")];
-        let shape = NetShape::from_interfaces(&ifs, None, || Some(v4("54.32.224.1")), false);
+        let shape =
+            NetShape::from_interfaces(&ifs, None, || Some(v4("54.32.224.1")), false);
         assert_eq!(
             shape,
             NetShape::CloudElastic {
@@ -323,10 +322,7 @@ mod tests {
         assert_eq!(shape.resolver_bind_override(), Some(v4("10.0.0.5")));
         // Publisher BindCfg::Elastic — masked subnet on the right
         // side, public IP on the left.
-        assert_eq!(
-            shape.publisher_bind_suggestion(),
-            "54.32.224.1@10.0.0.0/24",
-        );
+        assert_eq!(shape.publisher_bind_suggestion(), "54.32.224.1@10.0.0.0/24",);
     }
 
     #[test]
@@ -349,7 +345,8 @@ mod tests {
         // Cloud probe MUST NOT run when there's no routable NIC to
         // pair a public IP with — gating on "private NIC found" is
         // the cheap-out-on-non-cloud-hosts optimization.
-        let shape = NetShape::from_interfaces(&ifs, None, || panic!("cloud probe ran"), false);
+        let shape =
+            NetShape::from_interfaces(&ifs, None, || panic!("cloud probe ran"), false);
         assert_eq!(shape, NetShape::Loopback);
         assert_eq!(shape.advertised_ip(), Ipv4Addr::LOCALHOST);
         assert_eq!(shape.resolver_bind_override(), None);
@@ -364,7 +361,12 @@ mod tests {
     fn netshape_container_private_emits_placeholder_suggestion() {
         // Typical Docker bridge: 172.17.0.0/16.
         let ifs = [iface("172.17.0.2", "255.255.0.0")];
-        let shape = NetShape::from_interfaces(&ifs, None, || None, /* in_container = */ true);
+        let shape = NetShape::from_interfaces(
+            &ifs,
+            None,
+            || None,
+            /* in_container = */ true,
+        );
         assert_eq!(
             shape,
             NetShape::ContainerPrivate {
@@ -373,10 +375,7 @@ mod tests {
             },
         );
         assert!(shape.needs_operator_hint());
-        assert_eq!(
-            shape.publisher_bind_suggestion(),
-            "<PUBLIC_IP>@172.17.0.0/16",
-        );
+        assert_eq!(shape.publisher_bind_suggestion(), "<PUBLIC_IP>@172.17.0.0/16",);
         // Resolver bind override stays None — the resolver template
         // doesn't get a special elastic hint here; the CLI warns
         // instead so the operator knows to override --listen.

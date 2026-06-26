@@ -1,11 +1,13 @@
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{Context, Error, Result, anyhow};
 use arcstr::ArcStr;
 use bytes::BytesMut;
+use clap::Args;
 use combine::{
+    EasyParser, ParseError, Parser, RangeStream,
     parser::char::spaces,
     sep_by,
-    stream::{position, Range},
-    token, EasyParser, ParseError, Parser, RangeStream,
+    stream::{Range, position},
+    token,
 };
 use escaping::Escape;
 use futures::{
@@ -17,7 +19,7 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
-    protocol::value_parser::{escaped_string, value, VAL_ESC, VAL_MUST_ESC},
+    protocol::value_parser::{VAL_ESC, VAL_MUST_ESC, escaped_string, value},
     resolver_client::DesiredAuth,
     subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
     utils::{BatchItem, Batched},
@@ -32,7 +34,6 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use clap::Args;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
     time,

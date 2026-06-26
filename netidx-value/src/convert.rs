@@ -1,6 +1,6 @@
 use crate::{Typ, ValArray, Value};
 use ahash::{AHashMap, AHashSet};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use arcstr::ArcStr;
 use bytes::Bytes;
 use chrono::prelude::*;
@@ -58,11 +58,7 @@ impl<T: Into<Value> + Copy> From<&T> for Value {
 impl FromValue for u8 {
     fn from_value(v: Value) -> Result<Self> {
         let v = v.cast_to::<u32>()?;
-        if v <= u8::MAX as u32 {
-            Ok(v as u8)
-        } else {
-            bail!("can't cast")
-        }
+        if v <= u8::MAX as u32 { Ok(v as u8) } else { bail!("can't cast") }
     }
 
     fn get(v: Value) -> Option<Self> {
@@ -112,11 +108,7 @@ impl From<i8> for Value {
 impl FromValue for u16 {
     fn from_value(v: Value) -> Result<Self> {
         let v = v.cast_to::<u32>()?;
-        if v <= u16::MAX as u32 {
-            Ok(v as u16)
-        } else {
-            bail!("can't cast")
-        }
+        if v <= u16::MAX as u32 { Ok(v as u16) } else { bail!("can't cast") }
     }
 
     fn get(v: Value) -> Option<Self> {

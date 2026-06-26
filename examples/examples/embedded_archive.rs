@@ -26,7 +26,7 @@ use netidx::{
 };
 use netidx_archive::{
     config::{ConfigBuilder, PublishConfigBuilder, RecordConfigBuilder},
-    logfile::{BatchItem, Seek, BATCH_POOL},
+    logfile::{BATCH_POOL, BatchItem, Seek},
     logfile_collection::ArchiveCollectionWriter,
     recorder::{BCastMsg, Recorder, State},
     recorder_client::{Client, Speed},

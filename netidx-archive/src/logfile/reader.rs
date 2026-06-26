@@ -1,7 +1,7 @@
 use super::{
-    arraymap::ArrayMap, scan_file, scan_header, scan_records, ArchiveWriter, BatchItem,
-    Cursor, FileHeader, Id, PathMapping, RecordHeader, Seek, CURSOR_BATCH_POOL, IMG_POOL,
-    PM_POOL,
+    ArchiveWriter, BatchItem, CURSOR_BATCH_POOL, Cursor, FileHeader, IMG_POOL, Id,
+    PM_POOL, PathMapping, RecordHeader, Seek, arraymap::ArrayMap, scan_file, scan_header,
+    scan_records,
 };
 use ahash::AHashMap;
 use anyhow::{Context, Result};
@@ -12,14 +12,14 @@ use indexmap::IndexMap;
 use log::{error, info};
 use memmap2::Mmap;
 use netidx::{
-    pack::{decode_varint, varint_len, Pack},
+    pack::{Pack, decode_varint, varint_len},
     path::Path,
     subscriber::Event,
 };
 use nohash::{IntMap, IntSet};
 use parking_lot::{
-    lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
     Mutex, RwLock, RwLockReadGuard,
+    lock_api::{RwLockUpgradableReadGuard, RwLockWriteGuard},
 };
 use poolshark::global::GPooled;
 use std::{
@@ -34,8 +34,8 @@ use std::{
     ops::Bound,
     path::Path as FilePath,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use tokio::task::{self, JoinSet};

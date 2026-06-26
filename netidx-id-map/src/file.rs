@@ -277,10 +277,8 @@ impl IdMap {
         let mut groups_field =
             format!(" groups={primary_gid}({pg})", pg = ident.primary_group.as_str());
         for g in &ident.groups {
-            let gid =
-                self.groups.get(g).map(|x| x.gid).unwrap_or(self.default_gid);
-            groups_field
-                .push_str(&format!(",{gid}({name})", name = g.as_str()));
+            let gid = self.groups.get(g).map(|x| x.gid).unwrap_or(self.default_gid);
+            groups_field.push_str(&format!(",{gid}({name})", name = g.as_str()));
         }
         out.push_str(&groups_field);
         out.push('\n');
@@ -332,12 +330,7 @@ mod tests {
                 groups: vec![ArcStr::from("wheel")],
             },
         );
-        IdMap {
-            default_uid: 65534,
-            default_gid: 65534,
-            groups,
-            identities,
-        }
+        IdMap { default_uid: 65534, default_gid: 65534, groups, identities }
     }
 
     #[test]
@@ -362,11 +355,7 @@ mod tests {
         let mut m = sample();
         m.identities.insert(
             ArcStr::from("alice) gid=0(root"),
-            Identity {
-                uid: 1,
-                primary_group: ArcStr::from("users"),
-                groups: vec![],
-            },
+            Identity { uid: 1, primary_group: ArcStr::from("users"), groups: vec![] },
         );
         let err = m.validate().unwrap_err();
         assert!(format!("{err:#}").contains("forbidden character"));
@@ -387,11 +376,7 @@ mod tests {
         // doesn't fire first; the delimiter check runs ahead of it.
         m.identities.insert(
             ArcStr::from("bob.example.com"),
-            Identity {
-                uid: 2,
-                primary_group: ArcStr::from("ev(il"),
-                groups: vec![],
-            },
+            Identity { uid: 2, primary_group: ArcStr::from("ev(il"), groups: vec![] },
         );
         let err = m.validate().unwrap_err();
         assert!(format!("{err:#}").contains("forbidden character"));
@@ -406,11 +391,7 @@ mod tests {
         let mut m = sample();
         m.identities.insert(
             ArcStr::from("1000"),
-            Identity {
-                uid: 2000,
-                primary_group: ArcStr::from("users"),
-                groups: vec![],
-            },
+            Identity { uid: 2000, primary_group: ArcStr::from("users"), groups: vec![] },
         );
         let err = m.validate().unwrap_err();
         let msg = format!("{err:#}");
@@ -427,11 +408,7 @@ mod tests {
         // claiming the same uid.
         m.identities.insert(
             ArcStr::from("bob.example.com"),
-            Identity {
-                uid: 1000,
-                primary_group: ArcStr::from("users"),
-                groups: vec![],
-            },
+            Identity { uid: 1000, primary_group: ArcStr::from("users"), groups: vec![] },
         );
         let err = m.validate().unwrap_err();
         let msg = format!("{err:#}");
@@ -446,11 +423,7 @@ mod tests {
         let mut m = sample();
         m.identities.insert(
             ArcStr::from(""),
-            Identity {
-                uid: 1,
-                primary_group: ArcStr::from("users"),
-                groups: vec![],
-            },
+            Identity { uid: 1, primary_group: ArcStr::from("users"), groups: vec![] },
         );
         assert!(m.validate().is_err());
     }

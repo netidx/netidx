@@ -1,12 +1,12 @@
 use crate::config::Config;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::{
     env,
     fs::{File, OpenOptions},
     future,
-    io::{stdin, ErrorKind},
+    io::{ErrorKind, stdin},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::PathBuf,
     process::Command,
@@ -31,7 +31,7 @@ fn get_env_as<T: FromStr>(name: &str, default: T) -> T {
 }
 
 fn client_cfg_for_addr(addr: SocketAddr) -> Result<Config> {
-    use crate::config::{self, file, DefaultAuthMech};
+    use crate::config::{self, DefaultAuthMech, file};
     let cfg = file::ConfigBuilder::default()
         .addrs(vec![(addr, file::Auth::Anonymous)])
         .default_auth(DefaultAuthMech::Anonymous)
@@ -49,7 +49,7 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
     // lazy initialization may not work correctly.
     #[cfg(windows)]
     {
-        use windows::Win32::Networking::WinSock::{WSAStartup, WSADATA};
+        use windows::Win32::Networking::WinSock::{WSADATA, WSAStartup};
         unsafe {
             let mut wsa_data: WSADATA = std::mem::zeroed();
             let result = WSAStartup(0x0202, &mut wsa_data); // Request Winsock 2.2
@@ -85,11 +85,13 @@ pub(super) fn maybe_run_local_resolver() -> Result<()> {
             let listener = TcpListener::from_std(listener)?;
             let addr = listener.local_addr()?;
             let cfg = file::ConfigBuilder::default()
-                .member_servers(vec![file::MemberServerBuilder::default()
-                    .auth(file::Auth::Anonymous)
-                    .addr(addr)
-                    .bind_addr("127.0.0.1".parse()?)
-                    .build()?])
+                .member_servers(vec![
+                    file::MemberServerBuilder::default()
+                        .auth(file::Auth::Anonymous)
+                        .addr(addr)
+                        .bind_addr("127.0.0.1".parse()?)
+                        .build()?,
+                ])
                 .build()?;
             let cfg = config::Config::from_file(cfg)?;
             let _server = resolver_server::Server::new_local_only(cfg, listener).await?;
@@ -114,7 +116,7 @@ fn start_local_resolver(l: TcpListener) -> Result<()> {
         },
         process::Stdio,
     };
-    use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows::Win32::Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
     let raw_handle = l.as_raw_socket() as *mut c_void;
     // Make the handle inheritable

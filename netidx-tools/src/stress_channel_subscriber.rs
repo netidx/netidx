@@ -1,6 +1,7 @@
 use crate::stress_channel_publisher::BatchHeader;
 use anyhow::Result;
 use chrono::prelude::*;
+use clap::Args;
 use futures::{prelude::*, select_biased};
 use hdrhistogram::Histogram;
 use netidx::{
@@ -9,7 +10,6 @@ use netidx::{
     subscriber::{DesiredAuth, Subscriber},
 };
 use netidx_protocols::pack_channel::client::Connection;
-use clap::Args;
 use std::{sync::Arc, time::Duration};
 use tokio::time::{self, Instant};
 
@@ -35,11 +35,7 @@ async fn can_send(flushed: bool, delayed: bool) {
 }
 
 async fn maybe_flush(con: &Connection, latency: bool) -> Result<()> {
-    if !latency && con.dirty() {
-        con.flush().await
-    } else {
-        future::pending().await
-    }
+    if !latency && con.dirty() { con.flush().await } else { future::pending().await }
 }
 
 async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> {

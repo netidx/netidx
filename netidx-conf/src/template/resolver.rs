@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::{
-    client::ClientConfig, id_map as id_map_engine, paths,
-    resolver::ResolverConfig, tls as tlsmod,
+    client::ClientConfig, id_map as id_map_engine, paths, resolver::ResolverConfig,
+    tls as tlsmod,
 };
 use anyhow::Result;
 use netidx::resolver_server::config::file::IdMapType;
@@ -181,7 +181,8 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // non-anonymous operations. `DoNotMap` (None) keys perms on the SAN
     // directly and is coherent; `Netidx` translates it. So only
     // Platform is a trap for TLS.
-    if matches!(p.auth, AuthChoice::Tls { .. }) && matches!(p.id_map, IdMapMode::Platform) {
+    if matches!(p.auth, AuthChoice::Tls { .. }) && matches!(p.id_map, IdMapMode::Platform)
+    {
         warnings.push(arcstr::literal!(
             "TLS auth with platform id-mapping: certificate identities \
              (e.g. user.domain) have no /bin/id translation, so they map to \
@@ -265,17 +266,12 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
             _ if p.base.is_empty() => "/",
             _ => p.base.as_str(),
         };
-        let mut seed = p
-            .perms_seed
-            .clone()
-            .unwrap_or_else(|| crate::perms::default_seed(base_str));
+        let mut seed =
+            p.perms_seed.clone().unwrap_or_else(|| crate::perms::default_seed(base_str));
         if let Some(entity) = resolver_self_entity(&p.auth) {
-            crate::perms::add_entry(&mut seed, base_str, entity, "swlpd")
-                .with_context(|| {
-                    format!(
-                        "seeding resolver self perms ({base_str} → {entity} → swlpd)"
-                    )
-                })?;
+            crate::perms::add_entry(&mut seed, base_str, entity, "swlpd").with_context(
+                || format!("seeding resolver self perms ({base_str} → {entity} → swlpd)"),
+            )?;
         }
         Some((path, seed))
     } else {
@@ -305,9 +301,8 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         // Point the resolver at the seed perms file. Apply() writes the
         // perms file before re-validating the resolver config, so the
         // include path will exist when `Config::from_file` opens it.
-        rcfg_builder.include_permissions(vec![ArcStr::from(
-            path.to_string_lossy().as_ref(),
-        )]);
+        rcfg_builder
+            .include_permissions(vec![ArcStr::from(path.to_string_lossy().as_ref())]);
     }
     let resolver_cfg = ResolverConfig::from(rcfg_builder.build()?);
 
@@ -430,9 +425,7 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
         ccfg.tls(cfile::Tls {
             default_identity: Some(identity_key),
             identities,
-            askpass: askpass
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
+            askpass: askpass.as_ref().map(|p| p.to_string_lossy().into_owned()),
         });
     }
     Ok(ClientConfig::from(ccfg.build()?))
@@ -611,10 +604,7 @@ mod tests {
         p.local_client_bind = Some("54.32.224.1@10.0.0.0/24".to_string());
         let rt = resolver(&p).unwrap();
         let (_, c) = rt.client_config.as_ref().unwrap();
-        assert_eq!(
-            c.0.default_bind_config.as_deref(),
-            Some("54.32.224.1@10.0.0.0/24"),
-        );
+        assert_eq!(c.0.default_bind_config.as_deref(), Some("54.32.224.1@10.0.0.0/24"),);
 
         // Without override: fall back to bind/32, NOT listen/32. The
         // previous code used listen here and produced an unbindable
@@ -703,7 +693,8 @@ mod tests {
         assert_eq!(tls.default_identity.as_deref(), Some("example.com"));
         // The cert install path *is* what the resolver-side rfile::Auth
         // points at; this is the "same cert" guarantee in code form.
-        let resolver_auth = &rt.resolver_config.as_ref().unwrap().1.0.member_servers[0].auth;
+        let resolver_auth =
+            &rt.resolver_config.as_ref().unwrap().1.0.member_servers[0].auth;
         match resolver_auth {
             rfile::Auth::Tls { certificate, .. } => {
                 assert_eq!(certificate.as_str(), identity.certificate.as_str());
@@ -754,16 +745,13 @@ mod tests {
         // Validate the on-disk shape after apply — must parse back
         // into the same map.
         rt.apply().unwrap();
-        let loaded =
-            crate::perms::load_perms(out.path().join("perms.json")).unwrap();
+        let loaded = crate::perms::load_perms(out.path().join("perms.json")).unwrap();
         assert_eq!(collect(&loaded), collect(&crate::perms::default_seed("/")));
         // And the round-trip-through-resolver-validation step
         // accepts it (the $[user] dynamic entry shape can trip up
         // PMap::from_file if the seed is malformed).
-        netidx::resolver_server::config::Config::load(
-            out.path().join("resolver.json"),
-        )
-        .expect("resolver config including auto-seed perms must validate");
+        netidx::resolver_server::config::Config::load(out.path().join("resolver.json"))
+            .expect("resolver config including auto-seed perms must validate");
     }
 
     #[test]
@@ -785,9 +773,7 @@ mod tests {
         let (_, r) = rt.resolver_config.as_ref().unwrap();
         let perms_path_str = out.path().join("perms.json").to_string_lossy().into_owned();
         assert!(
-            r.0.include_permissions
-                .iter()
-                .any(|p| p.as_str() == perms_path_str.as_str()),
+            r.0.include_permissions.iter().any(|p| p.as_str() == perms_path_str.as_str()),
             "perms_path was not wired into include_permissions: {:?}",
             r.0.include_permissions,
         );
@@ -807,11 +793,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            live.perms()
-                .0
-                .get("/")
-                .and_then(|m| m.get("alice"))
-                .map(|s| s.as_str()),
+            live.perms().0.get("/").and_then(|m| m.get("alice")).map(|s| s.as_str()),
             Some("swlpd"),
         );
     }
@@ -1126,10 +1108,8 @@ mod tests {
         // entry from the default seed can trip up PMap::from_file if
         // the file shape is wrong).
         rt.apply().unwrap();
-        netidx::resolver_server::config::Config::load(
-            out.path().join("resolver.json"),
-        )
-        .expect("resolver config including krb5-SPN perms must validate");
+        netidx::resolver_server::config::Config::load(out.path().join("resolver.json"))
+            .expect("resolver config including krb5-SPN perms must validate");
     }
 
     /// Anonymous auth enforces no permissions (the resolver allows every

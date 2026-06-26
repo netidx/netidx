@@ -2,7 +2,7 @@ use crate::Value;
 use anyhow::{anyhow, bail};
 use arcstr::ArcStr;
 use chrono::prelude::*;
-use enumflags2::{bitflags, BitFlags};
+use enumflags2::{BitFlags, bitflags};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -237,7 +237,9 @@ impl FromStr for Typ {
             "Null" | "null" => Ok(Typ::Null),
             "Abstract" | "abstract" => Ok(Typ::Abstract),
             s => Err(anyhow!(
-                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, map, null", s))
+                "invalid type, {}, valid types: u32, i32, u64, i64, f32, f64, bool, string, bytes, error, array, map, null",
+                s
+            )),
         }
     }
 }

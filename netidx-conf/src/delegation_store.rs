@@ -20,7 +20,7 @@
 
 use crate::{
     atomic,
-    ca_store::{new_id, now_unix, valid_id, TTL},
+    ca_store::{TTL, new_id, now_unix, valid_id},
     conf_proto::ResolverAddr,
 };
 use anyhow::{Context, Result};
@@ -79,8 +79,12 @@ pub struct DeniedRecord {
 #[derive(Debug, Clone)]
 pub enum Status {
     Pending(PendingDelegation),
-    Approved { parent: Vec<ResolverAddr> },
-    Denied { reason: String },
+    Approved {
+        parent: Vec<ResolverAddr>,
+    },
+    Denied {
+        reason: String,
+    },
     /// Never seen, expired, or already cleaned up.
     Unknown,
 }
@@ -112,13 +116,15 @@ fn denied_path(ca_dir: &Path, id: &str) -> PathBuf {
 pub fn enqueue(ca_dir: &Path, req: &PendingDelegation) -> Result<()> {
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
     let dir = queue_dir(ca_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     prune(ca_dir)?;
     anyhow::ensure!(
         pending(ca_dir)?.len() < MAX_PENDING,
         "the delegation queue is full ({MAX_PENDING} pending requests)"
     );
-    let bytes = serde_json::to_vec_pretty(req).context("serializing delegation request")?;
+    let bytes =
+        serde_json::to_vec_pretty(req).context("serializing delegation request")?;
     atomic::write_atomic(&queue_path(ca_dir, &req.id), &bytes, 0o644)
 }
 
@@ -140,7 +146,9 @@ pub fn pending(ca_dir: &Path) -> Result<Vec<PendingDelegation>> {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(req) = serde_json::from_slice::<PendingDelegation>(&bytes) else { continue };
+        let Ok(req) = serde_json::from_slice::<PendingDelegation>(&bytes) else {
+            continue;
+        };
         let expired = now.saturating_sub(req.received_unix) > TTL.as_secs();
         let terminal =
             approved_path(ca_dir, id).exists() || denied_path(ca_dir, id).exists();
@@ -210,12 +218,18 @@ pub fn read_approved(ca_dir: &Path, id: &str) -> Result<Option<ApprovedRecord>> 
 
 /// Commit an approval: write the `approved/` record (the atomic commit),
 /// then remove the `queue/` entry. The single write is the transaction.
-pub fn approve(ca_dir: &Path, req: &PendingDelegation, parent: Vec<ResolverAddr>) -> Result<()> {
+pub fn approve(
+    ca_dir: &Path,
+    req: &PendingDelegation,
+    parent: Vec<ResolverAddr>,
+) -> Result<()> {
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
     let dir = approved_dir(ca_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let rec = ApprovedRecord { req: req.clone(), parent, approved_unix: now_unix() };
-    let bytes = serde_json::to_vec_pretty(&rec).context("serializing approved delegation")?;
+    let bytes =
+        serde_json::to_vec_pretty(&rec).context("serializing approved delegation")?;
     atomic::write_atomic(&approved_path(ca_dir, &req.id), &bytes, 0o644)?;
     let _ = std::fs::remove_file(queue_path(ca_dir, &req.id));
     Ok(())
@@ -226,9 +240,11 @@ pub fn approve(ca_dir: &Path, req: &PendingDelegation, parent: Vec<ResolverAddr>
 pub fn deny(ca_dir: &Path, req: &PendingDelegation, reason: &str) -> Result<()> {
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
     let dir = denied_dir(ca_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let rec = DeniedRecord { req: req.clone(), reason: reason.to_string() };
-    let bytes = serde_json::to_vec_pretty(&rec).context("serializing denied delegation")?;
+    let bytes =
+        serde_json::to_vec_pretty(&rec).context("serializing denied delegation")?;
     atomic::write_atomic(&denied_path(ca_dir, &req.id), &bytes, 0o644)?;
     let _ = std::fs::remove_file(queue_path(ca_dir, &req.id));
     Ok(())
@@ -263,7 +279,9 @@ pub fn prune(ca_dir: &Path) -> Result<()> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
                 if !valid_id(id) {
                     continue;
                 }

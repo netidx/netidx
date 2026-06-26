@@ -1,10 +1,10 @@
 use super::Params;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use arcstr::ArcStr;
 use bytes::{Buf, BufMut};
 use futures::{
     channel::{
-        mpsc::{unbounded, UnboundedReceiver, UnboundedSender},
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded},
         oneshot,
     },
     prelude::*,
@@ -28,8 +28,8 @@ use std::{
     path::PathBuf,
     str,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         LazyLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };

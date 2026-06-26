@@ -1,7 +1,7 @@
 use super::*;
 use crate::channel::test::Ctx;
 use netidx::subscriber::Value;
-use tokio::{task, select};
+use tokio::{select, task};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_ping_pong() {

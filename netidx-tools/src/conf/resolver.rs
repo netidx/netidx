@@ -55,9 +55,7 @@ fn edit(file: Option<PathBuf>) -> Result<()> {
         let file: netidx::resolver_server::config::file::Config =
             serde_json::from_str(s).context("parsing edited JSON")?;
         let wrapped = ResolverConfig::from(file);
-        wrapped
-            .validate_for_path(&target)
-            .context("config failed validation")?;
+        wrapped.validate_for_path(&target).context("config failed validation")?;
         Ok(wrapped)
     })?;
     validated.save(&target)?;

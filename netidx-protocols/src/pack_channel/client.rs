@@ -22,7 +22,7 @@ impl Batch {
 
     /// returns the number of bytes queued in this batch
     pub fn len(&self) -> usize {
-	self.data.len()
+        self.data.len()
     }
 }
 

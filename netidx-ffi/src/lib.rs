@@ -40,7 +40,9 @@ where
         if timeout_ms < 0 {
             fut.await
         } else {
-            match tokio::time::timeout(Duration::from_millis(timeout_ms as u64), fut).await {
+            match tokio::time::timeout(Duration::from_millis(timeout_ms as u64), fut)
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => Err(anyhow::anyhow!("{}", msg)),
             }
@@ -125,7 +127,12 @@ mod tests {
         let mut data: *const c_char = ptr::null();
         let mut len: usize = 0;
         netidx_path_as_str(path, &mut data, &mut len);
-        let result = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let result = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(result, "/hello/world");
 
         netidx_path_destroy(path);
@@ -136,12 +143,18 @@ mod tests {
         let s = "/hello";
         let path = unsafe { netidx_path_new(s.as_ptr() as *const c_char, s.len()) };
         let seg = "world";
-        let appended = unsafe { netidx_path_append(path, seg.as_ptr() as *const c_char, seg.len()) };
+        let appended =
+            unsafe { netidx_path_append(path, seg.as_ptr() as *const c_char, seg.len()) };
 
         let mut data: *const c_char = ptr::null();
         let mut len: usize = 0;
         netidx_path_as_str(appended, &mut data, &mut len);
-        let result = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let result = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(result, "/hello/world");
 
         netidx_path_destroy(path);
@@ -164,11 +177,21 @@ mod tests {
         let mut data: *const c_char = ptr::null();
         let mut len: usize = 0;
         assert!(netidx_path_basename(path, &mut data, &mut len));
-        let bn = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let bn = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(bn, "c");
 
         assert!(netidx_path_dirname(path, &mut data, &mut len));
-        let dn = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let dn = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(dn, "/a/b");
 
         netidx_path_destroy(path);
@@ -184,7 +207,12 @@ mod tests {
         let mut data: *const c_char = ptr::null();
         let mut len: usize = 0;
         netidx_path_as_str(cloned, &mut data, &mut len);
-        let result = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let result = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(result, "/test");
 
         netidx_path_destroy(path);
@@ -336,7 +364,12 @@ mod tests {
         let mut data: *const c_char = ptr::null();
         let mut len: usize = 0;
         assert!(netidx_value_get_string(v, &mut data, &mut len));
-        let result = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+        let result = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                data as *const u8,
+                len,
+            ))
+        };
         assert_eq!(result, "hello world");
 
         // wrong type accessor
@@ -462,7 +495,12 @@ mod tests {
         let mut out_vals: *mut *mut NetidxValue = ptr::null_mut();
         let mut out_len: usize = 0;
         assert!(unsafe {
-            netidx_value_map_entries_clone(map, &mut out_keys, &mut out_vals, &mut out_len)
+            netidx_value_map_entries_clone(
+                map,
+                &mut out_keys,
+                &mut out_vals,
+                &mut out_len,
+            )
         });
         assert_eq!(out_len, 2);
         // Clean up entries
@@ -484,7 +522,9 @@ mod tests {
     fn value_decimal() {
         let s = "3.14";
         let mut err = netidx_error_init();
-        let v = unsafe { netidx_value_decimal(s.as_ptr() as *const c_char, s.len(), &mut err) };
+        let v = unsafe {
+            netidx_value_decimal(s.as_ptr() as *const c_char, s.len(), &mut err)
+        };
         assert!(!v.is_null());
         assert!(netidx_error_message(&err).is_null());
         assert_eq!(netidx_value_type(v), ValueType::Decimal);
@@ -499,7 +539,9 @@ mod tests {
 
         // Invalid decimal
         let bad = "not_a_number";
-        let v = unsafe { netidx_value_decimal(bad.as_ptr() as *const c_char, bad.len(), &mut err) };
+        let v = unsafe {
+            netidx_value_decimal(bad.as_ptr() as *const c_char, bad.len(), &mut err)
+        };
         assert!(v.is_null());
         assert!(!netidx_error_message(&err).is_null());
         netidx_error_free(&mut err);

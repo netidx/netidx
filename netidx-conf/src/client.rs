@@ -93,10 +93,7 @@ mod tests {
     fn minimal() -> ClientConfig {
         ClientConfig(
             file::ConfigBuilder::default()
-                .addrs(vec![(
-                    "127.0.0.1:4564".parse().unwrap(),
-                    Auth::Anonymous,
-                )])
+                .addrs(vec![("127.0.0.1:4564".parse().unwrap(), Auth::Anonymous)])
                 .build()
                 .unwrap(),
         )
@@ -121,9 +118,8 @@ mod tests {
     fn validate_rejects_bad_config() {
         // An empty addrs list is not valid (Config::from_file enforces
         // at least one address).
-        let cfg = ClientConfig(
-            file::ConfigBuilder::default().addrs(vec![]).build().unwrap(),
-        );
+        let cfg =
+            ClientConfig(file::ConfigBuilder::default().addrs(vec![]).build().unwrap());
         assert!(cfg.validate().is_err());
     }
 }

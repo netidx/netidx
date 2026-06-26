@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, ConfigBuilder, RecordConfigBuilder},
-    logfile::{BatchItem, Id, Seek, BATCH_POOL},
+    logfile::{BATCH_POOL, BatchItem, Id, Seek},
     logfile_collection::{
         ArchiveCollectionReader, ArchiveCollectionWriter, ArchiveIndex,
     },

@@ -20,8 +20,7 @@ use std::{
 };
 
 pub use netidx_activation::file::{
-    Environment, ProcessCfg, ProcessCfgBuilder, Restart, Trigger, Unit,
-    UnitBuilder,
+    Environment, ProcessCfg, ProcessCfgBuilder, Restart, Trigger, Unit, UnitBuilder,
 };
 
 const UNIT_SUFFIX: &str = ".unit";
@@ -96,8 +95,8 @@ impl ActivationDir {
     /// Read a single unit by basename (without the `.unit` suffix).
     pub fn get(&self, name: &str) -> Result<Unit> {
         let path = self.unit_path(name);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading {:?}", path))?;
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("reading {:?}", path))?;
         let unit = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {:?}", path))?;
         Ok(unit)

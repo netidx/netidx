@@ -1,17 +1,17 @@
 use crate::Value;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytes::{Buf, BufMut};
 use netidx_core::pack::{
-    decode_varint, encode_varint, varint_len, Pack, PackError, MAX_VEC,
+    MAX_VEC, Pack, PackError, decode_varint, encode_varint, varint_len,
 };
 use poolshark::{
-    global::{arc::TArc as PArc, RawPool, WeakPool},
-    local::LPooled,
     Poolable, RawPoolable,
+    global::{RawPool, WeakPool, arc::TArc as PArc},
+    local::LPooled,
 };
 use seq_macro::seq;
-use serde::{de::Visitor, ser::SerializeSeq, Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
+use serde::{Deserialize, Serialize, de::Visitor, ser::SerializeSeq};
+use smallvec::{SmallVec, smallvec};
 use std::{
     borrow::Borrow,
     fmt::Debug,

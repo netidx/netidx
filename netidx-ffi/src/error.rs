@@ -19,8 +19,8 @@ impl NetidxError {
 pub(crate) unsafe fn set_error(err: *mut NetidxError, e: anyhow::Error) -> bool {
     if !err.is_null() {
         unsafe { clear_error(err) };
-        let msg =
-            CString::new(format!("{:#}", e)).unwrap_or_else(|_| CString::new("error").unwrap());
+        let msg = CString::new(format!("{:#}", e))
+            .unwrap_or_else(|_| CString::new("error").unwrap());
         unsafe {
             (*err).msg = msg.into_raw();
         }

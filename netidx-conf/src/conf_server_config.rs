@@ -8,7 +8,7 @@
 //! hosts mDNS can't see; on a flat LAN discovery makes it redundant.
 
 use crate::atomic;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -158,15 +158,14 @@ mod tests {
                 resolver: Some(ResolverRole {
                     config: PathBuf::from("/etc/netidx/resolver.json"),
                 }),
-                id_map: Some(IdMapRole {
-                    map: PathBuf::from("/etc/netidx/id-map.json"),
-                }),
+                id_map: Some(IdMapRole { map: PathBuf::from("/etc/netidx/id-map.json") }),
             },
             ca_addr: None,
             peers: vec!["192.168.0.6:4565".parse().unwrap()],
             mdns: true,
             activation_units_dir: None,
-            }    }
+        }
+    }
 
     #[test]
     fn round_trips() {

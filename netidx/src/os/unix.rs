@@ -1,5 +1,5 @@
 use crate::resolver_server::config::{Config, IdMap, MemberServer};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arcstr::ArcStr;
 use std::time::Duration;
 use tokio::{
@@ -154,7 +154,7 @@ impl Mapper {
                         None => {
                             return Err(anyhow!(
                                 "invalid id command output, expected ')'"
-                            ))
+                            ));
                         }
                         Some(i_cp) => {
                             groups.push(ArcStr::from(&s[i_op + 1..i_cp]));
@@ -182,14 +182,14 @@ pub(crate) mod local_auth {
     use netidx_core::utils::{make_sha3_token, pack};
     use netidx_netproto::resolver::HashMethod;
     use parking_lot::Mutex;
-    use rand::{rng, RngExt};
+    use rand::{RngExt, rng};
     use std::{
         collections::hash_map::Entry,
         fs::Permissions,
         os::unix::fs::PermissionsExt,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -336,11 +336,7 @@ pub(crate) mod local_auth {
                     break;
                 }
             }
-            if buf.len() == 0 {
-                bail!("empty token")
-            } else {
-                Ok(buf.freeze())
-            }
+            if buf.len() == 0 { bail!("empty token") } else { Ok(buf.freeze()) }
         }
 
         pub(crate) async fn token(path: &str) -> Result<Bytes> {

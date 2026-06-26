@@ -5,7 +5,7 @@ use crate::{
     protocol::{glob::Scope, resolver::Referral},
 };
 use ahash::AHashMap;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result, anyhow};
 use arcstr::ArcStr;
 use chrono::prelude::*;
 use netidx_netproto::resolver;
@@ -70,7 +70,7 @@ impl TryFrom<&str> for Permissions {
                     return Err(anyhow!(
                         "unrecognized permission bit {}, valid bits are !swlpd",
                         c
-                    ))
+                    ));
                 }
             }
         }
@@ -236,7 +236,9 @@ impl PMap {
                     None => bail!("$[group] with no parent"),
                     Some(ent) => {
                         if !ent.contains("$[group]") {
-                            bail!("group dynamic permissions basename must contain $[group]")
+                            bail!(
+                                "group dynamic permissions basename must contain $[group]"
+                            )
                         }
                     }
                 }
@@ -249,7 +251,9 @@ impl PMap {
                     if ent == "$[user]" {
                         dynamic = p;
                     } else {
-                        bail!("user dynamic permissions may only include the $[user] permission set")
+                        bail!(
+                            "user dynamic permissions may only include the $[user] permission set"
+                        )
                     }
                 }
                 user_dynamic.insert(path, dynamic);

@@ -31,7 +31,7 @@
 //! Then kill the primary (Ctrl+C) and watch subscriber automatically
 //! failover to backup without any interruption.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use arcstr::ArcStr;
 use netidx::{config::Config, path::Path, publisher::PublisherBuilder};
 use netidx_netproto::resolver::PublisherPriority;

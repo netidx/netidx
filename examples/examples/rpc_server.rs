@@ -18,7 +18,7 @@ extern crate netidx_protocols;
 
 use anyhow::Result;
 use arcstr::ArcStr;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use netidx::{config::Config, path::Path, publisher::PublisherBuilder};
 use netidx_protocols::rpc::server::{ArgSpec, Proc, RpcCall};
 use netidx_value::Value;

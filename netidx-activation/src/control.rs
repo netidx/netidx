@@ -13,7 +13,7 @@
 //! server to control a service. Only [`control`] itself (the local
 //! unix-socket connect) is `#[cfg(unix)]`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -131,8 +131,10 @@ mod tests {
     #[tokio::test]
     async fn framing_round_trips_request_and_response() {
         let (mut a, mut b) = tokio::io::duplex(4096);
-        let req =
-            ControlRequest { op: ControlOp::Restart, units: vec!["resolver".to_string()] };
+        let req = ControlRequest {
+            op: ControlOp::Restart,
+            units: vec!["resolver".to_string()],
+        };
         let resp = ControlResponse::Ok {
             units: vec![UnitStatus {
                 unit: "resolver".to_string(),
@@ -149,7 +151,9 @@ mod tests {
         let got_req: ControlRequest = read_msg(&mut b).await.unwrap();
         assert_eq!(got_req.op, ControlOp::Restart);
         assert_eq!(got_req.units, vec!["resolver".to_string()]);
-        write_msg(&mut b, &ControlResponse::Err { reason: "x".to_string() }).await.unwrap();
+        write_msg(&mut b, &ControlResponse::Err { reason: "x".to_string() })
+            .await
+            .unwrap();
         let got_resp: ControlResponse = read_msg(&mut b).await.unwrap();
         match got_resp {
             ControlResponse::Ok { units } => {

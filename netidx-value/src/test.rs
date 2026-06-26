@@ -1,11 +1,16 @@
-use crate::{abstract_type::Abstract, array::ValArray, Map, PBytes, Typ, Value};
-use anyhow::{anyhow, Result};
-use arcstr::{literal, ArcStr};
+use crate::{Map, PBytes, Typ, Value, abstract_type::Abstract, array::ValArray};
+use anyhow::{Result, anyhow};
+use arcstr::{ArcStr, literal};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use enumflags2::BitFlags;
 use rust_decimal::Decimal;
-use std::{fmt::Debug, ops::Bound, panic::{catch_unwind, AssertUnwindSafe}, time::Duration};
+use std::{
+    fmt::Debug,
+    ops::Bound,
+    panic::{AssertUnwindSafe, catch_unwind},
+    time::Duration,
+};
 use triomphe::Arc;
 
 #[test]
@@ -339,18 +344,24 @@ fn cast_datetime_to_float_preserves_subseconds() {
     // division that recovered the whole seconds and DOUBLE-COUNTED them, and
     // returned None for dates past ~2262 (nanos-since-epoch overflows i64).
     // The fix adds only the sub-second fraction via `timestamp_subsec_nanos`.
-    let dt = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap()));
+    let dt = Value::DateTime(Arc::new(
+        DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap(),
+    ));
     assert_eq!(dt.clone().cast(Typ::F64), Some(Value::F64(1.5)));
     assert_eq!(dt.cast(Typ::F32), Some(Value::F32(1.5)));
 
     // Sub-epoch: chrono stores floor-seconds with a non-negative subsec, so
     // -1.5s is (secs -2, nanos 5e8) and must still read back as -1.5.
-    let neg = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap()));
+    let neg = Value::DateTime(Arc::new(
+        DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap(),
+    ));
     assert_eq!(neg.cast(Typ::F64), Some(Value::F64(-1.5)));
 
     // A date past 2262 (whole nanos-since-epoch overflows i64) — the old
     // `timestamp_nanos_opt()?` returned None here; now it converts.
-    let far = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(10_000_000_000, 0).unwrap()));
+    let far = Value::DateTime(Arc::new(
+        DateTime::<Utc>::from_timestamp(10_000_000_000, 0).unwrap(),
+    ));
     assert_eq!(far.cast(Typ::F64), Some(Value::F64(10_000_000_000.0)));
 }
 
@@ -391,7 +402,9 @@ fn cast_float_to_datetime_preserves_fraction_and_guards() {
     let v = Value::F64(1.5).cast(Typ::DateTime).unwrap();
     assert_eq!(
         v,
-        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap()))
+        Value::DateTime(Arc::new(
+            DateTime::<Utc>::from_timestamp(1, 500_000_000).unwrap()
+        ))
     );
     assert_eq!(v.cast(Typ::F64), Some(Value::F64(1.5)));
 
@@ -399,7 +412,9 @@ fn cast_float_to_datetime_preserves_fraction_and_guards() {
     let n = Value::F64(-1.5).cast(Typ::DateTime).unwrap();
     assert_eq!(
         n,
-        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap()))
+        Value::DateTime(Arc::new(
+            DateTime::<Utc>::from_timestamp(-2, 500_000_000).unwrap()
+        ))
     );
     assert_eq!(n.cast(Typ::F64), Some(Value::F64(-1.5)));
 

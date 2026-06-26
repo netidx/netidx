@@ -64,12 +64,10 @@ fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn load_or_empty(file: &std::path::Path) -> Result<netidx::resolver_server::config::PMap> {
-    if file.exists() {
-        perms::load_perms(file)
-    } else {
-        Ok(perms::empty())
-    }
+fn load_or_empty(
+    file: &std::path::Path,
+) -> Result<netidx::resolver_server::config::PMap> {
+    if file.exists() { perms::load_perms(file) } else { Ok(perms::empty()) }
 }
 
 fn list(file: PathBuf, path_filter: Option<String>) -> Result<()> {

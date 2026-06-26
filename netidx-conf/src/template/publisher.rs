@@ -77,19 +77,12 @@ pub fn publisher(p: &PublisherParams) -> Result<RenderedTemplate> {
         Some(p) => p.clone(),
         None => paths::user_client_config()?,
     };
-    let base = if p.base.is_empty() {
-        ArcStr::from("/")
-    } else {
-        p.base.clone()
-    };
+    let base = if p.base.is_empty() { ArcStr::from("/") } else { p.base.clone() };
 
     let mut ccfg_builder = cfile::ConfigBuilder::default();
     ccfg_builder
         .addrs(
-            p.addrs
-                .iter()
-                .map(|(a, ac)| (*a, ac.clone().into_client_file()))
-                .collect(),
+            p.addrs.iter().map(|(a, ac)| (*a, ac.clone().into_client_file())).collect(),
         )
         .base(base.as_str())
         .default_auth(default_auth);
@@ -101,11 +94,8 @@ pub fn publisher(p: &PublisherParams) -> Result<RenderedTemplate> {
     }
     let client_cfg = ClientConfig::from(ccfg_builder.build()?);
 
-    let tls_install = p
-        .tls_identities
-        .iter()
-        .map(|s| s.install_job())
-        .collect::<Result<Vec<_>>>()?;
+    let tls_install =
+        p.tls_identities.iter().map(|s| s.install_job()).collect::<Result<Vec<_>>>()?;
 
     Ok(RenderedTemplate {
         client_config: Some((path, client_cfg)),
@@ -188,9 +178,7 @@ mod tests {
         let p = PublisherParams {
             addrs: vec![(
                 addr("10.0.0.1:4564"),
-                ReferralAuth::Krb5(ArcStr::from(
-                    "host/resolver.example.com@REALM",
-                )),
+                ReferralAuth::Krb5(ArcStr::from("host/resolver.example.com@REALM")),
             )],
             default_auth: Some(DefaultAuthMech::Krb5),
             tls_identities: vec![],
@@ -316,10 +304,7 @@ mod tests {
         let rt = publisher(&p).unwrap();
         let (_, c) = rt.client_config.as_ref().unwrap();
         let tls = c.0.tls.as_ref().expect("tls section");
-        assert_eq!(
-            tls.askpass.as_deref(),
-            Some(askpass_path.to_string_lossy().as_ref()),
-        );
+        assert_eq!(tls.askpass.as_deref(), Some(askpass_path.to_string_lossy().as_ref()),);
     }
 
     #[test]
@@ -341,10 +326,7 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         // Krb5 on the only addr ⇒ derived default_auth: Krb5.
         let p = PublisherParams {
-            addrs: vec![(
-                addr("10.0.0.1:4564"),
-                ReferralAuth::Krb5(ArcStr::from("svc")),
-            )],
+            addrs: vec![(addr("10.0.0.1:4564"), ReferralAuth::Krb5(ArcStr::from("svc")))],
             default_auth: None,
             tls_identities: vec![],
             base: ArcStr::from("/"),
@@ -384,10 +366,7 @@ mod tests {
         let p = PublisherParams {
             addrs: vec![
                 (addr("10.0.0.1:4564"), ReferralAuth::Anonymous),
-                (
-                    addr("10.0.0.2:4564"),
-                    ReferralAuth::Krb5(ArcStr::from("svc")),
-                ),
+                (addr("10.0.0.2:4564"), ReferralAuth::Krb5(ArcStr::from("svc"))),
             ],
             default_auth: Some(DefaultAuthMech::Krb5),
             tls_identities: vec![],

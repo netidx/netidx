@@ -12,8 +12,9 @@ pub unsafe extern "C" fn netidx_path_new(
     data: *const c_char,
     len: usize,
 ) -> *mut NetidxPath {
-    let s =
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len)) };
+    let s = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data as *const u8, len))
+    };
     Box::into_raw(Box::new(NetidxPath { inner: Path::from(String::from(s)) }))
 }
 
@@ -25,7 +26,10 @@ pub unsafe extern "C" fn netidx_path_append(
     segment_len: usize,
 ) -> *mut NetidxPath {
     let seg = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(segment as *const u8, segment_len))
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            segment as *const u8,
+            segment_len,
+        ))
     };
     let new_path = unsafe { &*base }.inner.append(seg);
     Box::into_raw(Box::new(NetidxPath { inner: new_path }))

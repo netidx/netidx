@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arcstr::{literal, ArcStr};
+use arcstr::{ArcStr, literal};
 use futures::{
     channel::{mpsc, oneshot},
     future,
@@ -26,7 +26,7 @@ use tokio::task;
 #[macro_use]
 pub mod server {
     use std::{
-        panic::{catch_unwind, AssertUnwindSafe},
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::LazyLock,
     };
 

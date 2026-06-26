@@ -27,8 +27,8 @@ use openssl::{
     x509::{
         X509, X509Builder, X509NameBuilder, X509Req, X509ReqBuilder,
         extension::{
-            AuthorityKeyIdentifier, BasicConstraints, KeyUsage,
-            SubjectAlternativeName, SubjectKeyIdentifier,
+            AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName,
+            SubjectKeyIdentifier,
         },
     },
 };
@@ -86,8 +86,7 @@ pub const DEFAULT_LEAF_VALIDITY: Duration = Duration::from_secs(730 * 86400);
 /// Default CA renewal threshold: renew once the CA can no longer cover a
 /// full default leaf validity plus a grace quarter (730 + 90 days), past
 /// which `sign_request`'s clamp starts shortening leaves.
-pub const DEFAULT_CA_RENEW_THRESHOLD: Duration =
-    Duration::from_secs((730 + 90) * 86400);
+pub const DEFAULT_CA_RENEW_THRESHOLD: Duration = Duration::from_secs((730 + 90) * 86400);
 
 fn unix_now() -> Result<i64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64)
@@ -148,18 +147,13 @@ impl CaLifetimes {
         match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Self::default())
-            }
-            Err(e) => {
-                Err(e).with_context(|| format!("reading {}", path.display()))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
     }
 
     pub fn store(&self, ca_dir: &Path) -> Result<()> {
-        let bytes =
-            serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
+        let bytes = serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
         atomic::write_atomic(&ca_dir.join(Self::FILE), &bytes, 0o644)
     }
 }
@@ -336,7 +330,8 @@ impl Ca {
     ) -> Result<(Self, zeroize::Zeroizing<Vec<u8>>)> {
         let (_key_path, cert_path) = Self::prepare_dir(params)?;
         let (cert, pkey) = Self::generate(params)?;
-        let key_pem = pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?;
+        let key_pem =
+            pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?;
         let cert_pem = cert.to_pem().context("encoding CA cert")?;
         atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
         let ca = Self { directory: params.directory.clone(), cert, pkey };
@@ -364,8 +359,7 @@ impl Ca {
     /// writes, so callers choose how to persist the key.
     fn generate(params: &CaParams) -> Result<(X509, PKey<Private>)> {
         check_key_bits(params.key_bits)?;
-        let rsa = Rsa::generate(params.key_bits)
-            .context("generating CA RSA key")?;
+        let rsa = Rsa::generate(params.key_bits).context("generating CA RSA key")?;
         let pkey = PKey::from_rsa(rsa).context("wrapping CA key")?;
 
         let name = build_name(&params.subject)?;
@@ -428,10 +422,7 @@ impl Ca {
     /// (including the empty string, which is a real — if pointless —
     /// passphrase). Mismatch (encrypted key + None, or unencrypted key
     /// + Some) returns a clear error.
-    pub fn open<P: AsRef<Path>>(
-        directory: P,
-        password: Option<&str>,
-    ) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(directory: P, password: Option<&str>) -> Result<Self> {
         let directory = directory.as_ref().to_path_buf();
         let key_path = directory.join("private.key");
         let cert_path = directory.join("certificate.pem");
@@ -451,11 +442,7 @@ impl Ca {
     /// the CA server: [`crate::ca_vault::CAVault::unlock`] hands back the
     /// decrypted key per request, and this turns it into a transient
     /// signer without the key ever touching disk in plaintext.
-    pub fn from_pem(
-        directory: PathBuf,
-        key_pem: &[u8],
-        cert_pem: &[u8],
-    ) -> Result<Self> {
+    pub fn from_pem(directory: PathBuf, key_pem: &[u8], cert_pem: &[u8]) -> Result<Self> {
         let pkey = parse_key_pem(key_pem, None).context("parsing CA key PEM")?;
         let cert = X509::from_pem(cert_pem).context("parsing CA cert PEM")?;
         Ok(Self { directory, cert, pkey })
@@ -509,9 +496,7 @@ impl Ca {
         let validity = {
             let remaining = remaining_secs(&self.cert)?;
             if remaining <= 0 {
-                bail!(
-                    "the CA certificate has expired; renew it before issuing leaves"
-                );
+                bail!("the CA certificate has expired; renew it before issuing leaves");
             }
             let cap = Duration::from_secs((remaining - 1).max(1) as u64);
             validity.min(cap)
@@ -519,8 +504,7 @@ impl Ca {
 
         let mut cert = X509Builder::new()?;
         cert.set_version(2)?;
-        let serial_asn1 =
-            BigNum::from_dec_str(&serial.to_string())?.to_asn1_integer()?;
+        let serial_asn1 = BigNum::from_dec_str(&serial.to_string())?.to_asn1_integer()?;
         cert.set_serial_number(&serial_asn1)?;
         cert.set_subject_name(req.subject_name())?;
         cert.set_issuer_name(self.cert.subject_name())?;
@@ -538,10 +522,7 @@ impl Ca {
             .key_encipherment()
             .build()?;
         let ski = SubjectKeyIdentifier::new().build(&ctx)?;
-        let aki = AuthorityKeyIdentifier::new()
-            .keyid(true)
-            .issuer(true)
-            .build(&ctx)?;
+        let aki = AuthorityKeyIdentifier::new().keyid(true).issuer(true).build(&ctx)?;
         let san_ext = build_san(san, &ctx)?;
         cert.append_extension(bc)?;
         cert.append_extension(ku)?;
@@ -568,12 +549,8 @@ impl Ca {
             params.key_bits,
             params.password.as_deref(),
         )?;
-        let cert_pem = self.sign_request(
-            &kr.csr_pem,
-            &params.san,
-            params.validity,
-            params.serial,
-        )?;
+        let cert_pem =
+            self.sign_request(&kr.csr_pem, &params.san, params.validity, params.serial)?;
         let key_path = params.out_dir.join("private.key");
         let cert_path = params.out_dir.join("certificate.pem");
         atomic::write_atomic(&key_path, &kr.private_key_pem, 0o600)?;
@@ -626,8 +603,7 @@ pub fn maybe_renew_ca_cert(
         return Ok(false);
     }
     let span = cert_span(&old)?;
-    let pkey =
-        PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
+    let pkey = PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
     // Rebuild: subject, SAN, and profile identical to `Ca::generate`;
     // the caller-allocated `serial` (the daemon's counter is shared with
     // leaf issuance — fine, serials just need uniqueness per issuer) and
@@ -746,11 +722,7 @@ pub fn inspect_csr(csr_pem: &[u8]) -> Result<CsrSummary> {
             }
         }
     }
-    Ok(CsrSummary {
-        common_name: cn,
-        key_bits: pubkey.bits(),
-        san,
-    })
+    Ok(CsrSummary { common_name: cn, key_bits: pubkey.bits(), san })
 }
 
 /// Round-trip the CSR through a throwaway self-signed X509 so we can
@@ -850,14 +822,9 @@ pub fn generate_csr(
 
     let private_key_pem = match password {
         Some(p) => pkey
-            .private_key_to_pem_pkcs8_passphrase(
-                Cipher::aes_256_cbc(),
-                p.as_bytes(),
-            )
+            .private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), p.as_bytes())
             .context("encrypting private key")?,
-        None => pkey
-            .private_key_to_pem_pkcs8()
-            .context("encoding private key")?,
+        None => pkey.private_key_to_pem_pkcs8().context("encoding private key")?,
     };
 
     Ok(KeyAndRequest { private_key_pem, csr_pem: req.to_pem()? })
@@ -914,9 +881,8 @@ fn parse_key_pem(pem: &[u8], password: Option<&str>) -> Result<PKey<Private>> {
     // false-positive on the string appearing in a comment or in
     // unrelated PEM-armored data concatenated into the same file.
     const ENC_HEADER: &[u8] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----";
-    let encrypted = pem
-        .split(|&b| b == b'\n')
-        .any(|line| line.trim_ascii() == ENC_HEADER);
+    let encrypted =
+        pem.split(|&b| b == b'\n').any(|line| line.trim_ascii() == ENC_HEADER);
     match (encrypted, password) {
         (true, Some(pw)) => PKey::private_key_from_pem_passphrase(pem, pw.as_bytes())
             .map_err(|e| anyhow!("decrypting CA private key: {e}")),
@@ -1349,9 +1315,7 @@ mod tests {
         let store = builder.build();
         let chain: Stack<X509> = Stack::new().unwrap();
         let mut ctx = openssl::x509::X509StoreContext::new().unwrap();
-        let ok = ctx
-            .init(&store, &leaf, &chain, |c| c.verify_cert())
-            .unwrap();
+        let ok = ctx.init(&store, &leaf, &chain, |c| c.verify_cert()).unwrap();
         assert!(ok, "leaf should verify against the CA store");
     }
 
@@ -1367,13 +1331,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ca = small_ca(dir.path()); // 30-day CA
         let name = "host.example.com";
-        let kr = generate_csr(
-            &Subject::cn(name),
-            &[SanEntry::Dns(name.into())],
-            2048,
-            None,
-        )
-        .unwrap();
+        let kr =
+            generate_csr(&Subject::cn(name), &[SanEntry::Dns(name.into())], 2048, None)
+                .unwrap();
         let requested_validity = std::time::Duration::from_secs(365 * 86400);
         let cadir = ca_store::CaDir::open(dir.path()).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
@@ -1395,14 +1355,9 @@ mod tests {
             None,
         );
         cadir
-            .store.lock()
-            .commit_issuance(
-                &req,
-                serial,
-                name,
-                std::str::from_utf8(&leaf).unwrap(),
-                &[],
-            )
+            .store
+            .lock()
+            .commit_issuance(&req, serial, name, std::str::from_utf8(&leaf).unwrap(), &[])
             .unwrap();
         let now = ca_store::now_unix();
         let rec = cadir.store.lock().live_for_name(name).unwrap();
@@ -1410,8 +1365,8 @@ mod tests {
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record
         // must track that, nowhere near the old `now + 365d` it used to store.
-                let requested = humantime::format_duration(requested_validity);
-assert!(
+        let requested = humantime::format_duration(requested_validity);
+        assert!(
             not_after > now + 20 * 86_400 && not_after < now + 35 * 86_400,
             "recorded notAfter {not_after} should track the clamped (~28d) \
              cert, not the {requested} request (now = {now})"
@@ -1445,20 +1400,18 @@ assert!(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &Path| {
-                std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-            };
+            let mode =
+                |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&out.private_key), 0o600);
             assert_eq!(mode(&out.certificate), 0o644);
         }
 
         // Issued cert validates against the CA.
-        let leaf =
-            X509::from_pem(&std::fs::read(&out.certificate).unwrap()).unwrap();
-        let ca_cert =
-            X509::from_pem(&std::fs::read(ca_dir.path().join("certificate.pem"))
-                .unwrap())
-            .unwrap();
+        let leaf = X509::from_pem(&std::fs::read(&out.certificate).unwrap()).unwrap();
+        let ca_cert = X509::from_pem(
+            &std::fs::read(ca_dir.path().join("certificate.pem")).unwrap(),
+        )
+        .unwrap();
         assert!(leaf.verify(&ca_cert.public_key().unwrap()).unwrap());
     }
 
@@ -1481,8 +1434,7 @@ assert!(
                     serial: 2 + i as u64,
                 })
                 .unwrap();
-            let leaf =
-                X509::from_pem(&std::fs::read(&out.certificate).unwrap()).unwrap();
+            let leaf = X509::from_pem(&std::fs::read(&out.certificate).unwrap()).unwrap();
             let serial = leaf.serial_number().to_bn().unwrap().to_dec_str().unwrap();
             assert!(seen.insert(serial.to_string()), "serial reused: {serial}");
         }

@@ -4,9 +4,9 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::conf::{init, lifecycle};
 #[cfg(unix)]
 use crate::conf::delegation;
+use crate::conf::{init, lifecycle};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {

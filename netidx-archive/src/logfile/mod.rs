@@ -19,7 +19,7 @@ use indexmap::IndexMap;
 use log::warn;
 use memmap2::Mmap;
 use netidx::{
-    pack::{decode_varint, encode_varint, varint_len, Pack, PackError},
+    pack::{Pack, PackError, decode_varint, encode_varint, varint_len},
     path::Path,
     subscriber::{Event, FromValue, Value},
 };
@@ -635,7 +635,7 @@ fn scan_records(
                     if let Some(old) = path_by_id.insert(pm.1, pm.0.clone()) {
                         warn!("duplicate id mapping for {}, {}, {:?}", &*pm.0, old, pm.1)
                     }
-                    *max_id = max(pm.1 .0, *max_id);
+                    *max_id = max(pm.1.0, *max_id);
                 }
             }
         }

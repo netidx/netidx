@@ -143,8 +143,8 @@ pub fn merge_perms_only(cfg: &file::Config) -> Result<PMap> {
 /// through here rather than re-implementing the read/parse.
 pub fn load_perms<P: AsRef<FsPath>>(path: P) -> Result<PMap> {
     let path = path.as_ref();
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading perms file {path:?}"))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading perms file {path:?}"))?;
     let pm: PMap = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing perms file {path:?}"))?;
     Ok(pm)
@@ -184,10 +184,8 @@ pub fn resolve_relative_includes(
     cfg: &mut file::Config,
     config_path: &FsPath,
 ) -> Result<()> {
-    let has_relative = cfg
-        .include_permissions
-        .iter()
-        .any(|e| FsPath::new(e.as_str()).is_relative());
+    let has_relative =
+        cfg.include_permissions.iter().any(|e| FsPath::new(e.as_str()).is_relative());
     if !has_relative {
         return Ok(());
     }
@@ -215,7 +213,7 @@ pub fn resolve_relative_includes(
 
 /// The on disk format, encoded as JSON
 pub mod file {
-    use super::{super::config::check_addrs, resolver, PMap};
+    use super::{super::config::check_addrs, PMap, resolver};
     use crate::path::Path;
     use anyhow::Result;
     use arcstr::ArcStr;
@@ -900,11 +898,17 @@ mod children_overlap_tests {
     #[test]
     fn nested_children_are_rejected() {
         // A child nested under another is an ambiguous mount table.
-        assert!(try_build(&[("/eu", "203.0.113.9"), ("/eu/sub", "203.0.113.10")]).is_err());
+        assert!(
+            try_build(&[("/eu", "203.0.113.9"), ("/eu/sub", "203.0.113.10")]).is_err()
+        );
         // Insertion order is irrelevant — validation sorts internally.
-        assert!(try_build(&[("/eu/sub", "203.0.113.10"), ("/eu", "203.0.113.9")]).is_err());
+        assert!(
+            try_build(&[("/eu/sub", "203.0.113.10"), ("/eu", "203.0.113.9")]).is_err()
+        );
         // Deeper nesting is caught too.
-        assert!(try_build(&[("/eu", "203.0.113.9"), ("/eu/a/b/c", "203.0.113.11")]).is_err());
+        assert!(
+            try_build(&[("/eu", "203.0.113.9"), ("/eu/a/b/c", "203.0.113.11")]).is_err()
+        );
     }
 
     #[test]
@@ -913,7 +917,9 @@ mod children_overlap_tests {
         assert!(try_build(&[("/eu", "203.0.113.9"), ("/asia", "203.0.113.10")]).is_ok());
         // A lexical prefix that is NOT a path-component prefix: `/european`
         // is not under `/eu`, so both may be delegated independently.
-        assert!(try_build(&[("/eu", "203.0.113.9"), ("/european", "203.0.113.10")]).is_ok());
+        assert!(
+            try_build(&[("/eu", "203.0.113.9"), ("/european", "203.0.113.10")]).is_ok()
+        );
     }
 
     #[test]

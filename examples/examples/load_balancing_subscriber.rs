@@ -25,7 +25,7 @@
 //! different publishers, demonstrating automatic load balancing.
 
 use anyhow::Result;
-use futures::{channel::mpsc, StreamExt};
+use futures::{StreamExt, channel::mpsc};
 use netidx::{
     config::Config,
     path::Path,

@@ -53,15 +53,12 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
     ensure_valid_cn(p.cn)?;
 
     let dir = p.dest_dir.to_path_buf();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating tls dir {dir:?}"))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating tls dir {dir:?}"))?;
 
-    let cert_bytes = std::fs::read(p.certificate_src).with_context(|| {
-        format!("reading certificate source {:?}", p.certificate_src)
-    })?;
-    let key_bytes = std::fs::read(p.private_key_src).with_context(|| {
-        format!("reading private key source {:?}", p.private_key_src)
-    })?;
+    let cert_bytes = std::fs::read(p.certificate_src)
+        .with_context(|| format!("reading certificate source {:?}", p.certificate_src))?;
+    let key_bytes = std::fs::read(p.private_key_src)
+        .with_context(|| format!("reading private key source {:?}", p.private_key_src))?;
     let ca_bytes = std::fs::read(p.trusted_src)
         .with_context(|| format!("reading trusted CA source {:?}", p.trusted_src))?;
 
@@ -230,9 +227,8 @@ pub fn validate_pem_cert_file(path: &Path) -> Result<()> {
     // so we count and bail if zero.
     let mut count = 0usize;
     for cert in rustls_pemfile::certs(&mut reader) {
-        let _ = cert.with_context(|| {
-            format!("parsing PEM X.509 from {}", path.display())
-        })?;
+        let _ =
+            cert.with_context(|| format!("parsing PEM X.509 from {}", path.display()))?;
         count += 1;
     }
     if count == 0 {
@@ -315,9 +311,7 @@ fn ensure_valid_cn(cn: &str) -> Result<()> {
         bail!("TLS identity name (cn) must not be empty");
     }
     if cn.contains('/') || cn.contains('\\') {
-        bail!(
-            "TLS identity name (cn) may not contain path separators: {cn:?}"
-        );
+        bail!("TLS identity name (cn) may not contain path separators: {cn:?}");
     }
     if cn == "." || cn == ".." {
         bail!("TLS identity name (cn) must not be a relative-dir marker");
@@ -443,9 +437,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &Path| {
-                std::fs::metadata(p).unwrap().permissions().mode() & 0o777
-            };
+            let mode =
+                |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&id.private_key), 0o600);
             assert_eq!(mode(&id.certificate), 0o644);
             assert_eq!(mode(&id.trusted), 0o644);
@@ -459,10 +452,7 @@ mod tests {
             std::fs::read(&id.private_key).unwrap(),
             std::fs::read(&key_src).unwrap()
         );
-        assert_eq!(
-            std::fs::read(&id.trusted).unwrap(),
-            std::fs::read(&ca_src).unwrap()
-        );
+        assert_eq!(std::fs::read(&id.trusted).unwrap(), std::fs::read(&ca_src).unwrap());
     }
 
     #[test]
@@ -533,14 +523,12 @@ mod tests {
         let (enc, blob) = seal_private_key(&kc.private_key_pem).unwrap();
         std::fs::write(&key, enc.as_bytes()).unwrap();
         std::fs::write(sealed_sidecar(&key), &blob).unwrap();
-        let loaded =
-            netidx::tls::load_private_key(None, &key.to_string_lossy()).unwrap();
-        let original =
-            rustls_pemfile::private_key(&mut std::io::Cursor::new(
-                kc.private_key_pem.as_bytes(),
-            ))
-            .unwrap()
-            .unwrap();
+        let loaded = netidx::tls::load_private_key(None, &key.to_string_lossy()).unwrap();
+        let original = rustls_pemfile::private_key(&mut std::io::Cursor::new(
+            kc.private_key_pem.as_bytes(),
+        ))
+        .unwrap()
+        .unwrap();
         assert_eq!(loaded.secret_der(), original.secret_der());
         // A corrupted sidecar must be a hard error, not a fallthrough
         // to a password prompt that would hang a daemon.

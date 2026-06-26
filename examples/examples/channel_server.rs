@@ -29,7 +29,8 @@ async fn tokio_main(cfg: Config) -> Result<()> {
 
     // Create a listener at the base path
     // The listener will accept connections from multiple clients
-    let mut listener = Listener::new(&publisher, Some(Duration::from_secs(30)), base.clone()).await?;
+    let mut listener =
+        Listener::new(&publisher, Some(Duration::from_secs(30)), base.clone()).await?;
 
     println!("Channel listener available at: {}", base);
     println!("Waiting for connections...\n");
@@ -47,7 +48,13 @@ async fn tokio_main(cfg: Config) -> Result<()> {
                     // Spawn a task to handle this connection
                     tokio::spawn(async move {
                         // Send a welcome message
-                        if let Err(e) = connection.send_one(Value::from(format!("Welcome, client {}!", client_id))).await {
+                        if let Err(e) = connection
+                            .send_one(Value::from(format!(
+                                "Welcome, client {}!",
+                                client_id
+                            )))
+                            .await
+                        {
                             eprintln!("Error sending welcome: {}", e);
                             return;
                         }
@@ -61,8 +68,13 @@ async fn tokio_main(cfg: Config) -> Result<()> {
                                     // Check for disconnect message
                                     if let Value::String(s) = &msg {
                                         if &**s == "quit" {
-                                            println!("Client {} requested disconnect", client_id);
-                                            let _ = connection.send_one(Value::from("Goodbye!")).await;
+                                            println!(
+                                                "Client {} requested disconnect",
+                                                client_id
+                                            );
+                                            let _ = connection
+                                                .send_one(Value::from("Goodbye!"))
+                                                .await;
                                             break;
                                         }
                                     }

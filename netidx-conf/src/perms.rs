@@ -38,12 +38,7 @@ pub fn save_perms<P: AsRef<Path>>(path: P, p: &PMap) -> Result<()> {
 /// Insert or replace a (path, entity, perm-string) entry. Validates the
 /// perm string before mutating. Empty `entity` (`""`) is the conventional
 /// anonymous identity in the file format.
-pub fn add_entry(
-    p: &mut PMap,
-    path: &str,
-    entity: &str,
-    perms: &str,
-) -> Result<()> {
+pub fn add_entry(p: &mut PMap, path: &str, entity: &str, perms: &str) -> Result<()> {
     Permissions::try_from(perms)?;
     let path = ArcStr::from(path);
     let entity = ArcStr::from(entity);
@@ -126,8 +121,7 @@ pub fn default_seed(base: &str) -> PMap {
     // collapse to `/`, and `Path::append` handles redundant
     // separators when we build the `<base>/users/$[user]` path
     // below.
-    let base_path =
-        if base.is_empty() { Path::root() } else { Path::from_str(base) };
+    let base_path = if base.is_empty() { Path::root() } else { Path::from_str(base) };
     // Group-wide read+write at the resolver's base. Not a `$[group]`
     // dynamic entry — that form requires the group name to appear in
     // the basename, and we want a fixed reference to the literal
@@ -173,10 +167,7 @@ mod tests {
         // — not the old root-level /users paths, which sit in a
         // different subtree and are useless to this resolver.
         let p = default_seed("/local");
-        assert_eq!(
-            lookup(&p, "/local", "users").map(|s| s.as_str()),
-            Some("swl"),
-        );
+        assert_eq!(lookup(&p, "/local", "users").map(|s| s.as_str()), Some("swl"),);
         assert_eq!(
             lookup(&p, "/local/users/$[user]", "$[user]").map(|s| s.as_str()),
             Some("swlpd"),
@@ -218,8 +209,7 @@ mod tests {
             .perms(p)
             .build()
             .unwrap();
-        config::Config::from_file(file)
-            .expect("default_seed must pass PMap::from_file");
+        config::Config::from_file(file).expect("default_seed must pass PMap::from_file");
     }
 
     #[test]

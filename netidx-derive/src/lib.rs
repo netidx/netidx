@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use proc_macro2::{token_stream, Delimiter, TokenStream, TokenTree};
-use quote::{format_ident, quote, ToTokens};
+use proc_macro2::{Delimiter, TokenStream, TokenTree, token_stream};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, AttrStyle, Attribute, Data, DeriveInput, Field,
-    Fields, GenericParam, Ident, Index,
+    AttrStyle, Attribute, Data, DeriveInput, Field, Fields, GenericParam, Ident, Index,
+    parse_macro_input, parse_quote,
 };
 
 fn parse_attr<R, F: FnMut(Ident, token_stream::IntoIter) -> R>(
@@ -944,8 +944,11 @@ fn from_value_body(name: &Ident, data: &Data) -> TokenStream {
                 }
             } else {
                 let enum_name = name.to_string();
-                let has_unit = en.variants.iter().any(|v| matches!(v.fields, Fields::Unit));
-                let unit_arms: Vec<_> = en.variants.iter()
+                let has_unit =
+                    en.variants.iter().any(|v| matches!(v.fields, Fields::Unit));
+                let unit_arms: Vec<_> = en
+                    .variants
+                    .iter()
                     .filter(|v| matches!(v.fields, Fields::Unit))
                     .map(|v| {
                         let ident = &v.ident;
