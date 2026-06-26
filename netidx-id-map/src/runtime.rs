@@ -752,6 +752,87 @@ mod tests {
         }
     }
 
+    /// Regression: the daemon must keep picking up *repeated* atomic
+    /// replacements of its config, not just the first. Every
+    /// `id-map.json` update (enrollment, `netidx conf id-map …`) writes
+    /// a sibling temp file and renames it over the target — a fresh
+    /// inode each time. A file watch that isn't re-armed after the
+    /// replace goes dead after the first one, leaving the daemon serving
+    /// a stale map: the first enrollment registers, every one after it
+    /// silently maps to the default uid (denied). `config_watcher_reloads_on_modify`
+    /// only did a single replace, so it passed while the bug was live.
+    #[tokio::test]
+    async fn config_watcher_reloads_on_repeated_modify() {
+        use std::collections::BTreeMap;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_sample(&cfg_path);
+        let _server = Server::start(ServerParams {
+            socket: sock_path.clone(),
+            socket_mode: 0o600,
+            config: cfg_path.clone(),
+        })
+        .await
+        .unwrap();
+        // Add identities one at a time via the same atomic-write pattern
+        // the tools use (temp + rename), polling the live socket for each
+        // before moving on. Each name is a *separate* replacement, so the
+        // watch has to survive being re-armed N times over.
+        let mut identities = BTreeMap::new();
+        identities.insert(
+            arcstr::ArcStr::from("alice.example.com"),
+            Identity {
+                uid: 1000,
+                primary_group: arcstr::ArcStr::from("users"),
+                groups: vec![],
+            },
+        );
+        for (i, name) in
+            ["bob", "carol", "dave", "erin", "frank"].into_iter().enumerate()
+        {
+            let uid = 1001 + i as u32;
+            let host = format!("{name}.example.com");
+            identities.insert(
+                arcstr::ArcStr::from(host.as_str()),
+                Identity {
+                    uid,
+                    primary_group: arcstr::ArcStr::from("users"),
+                    groups: vec![],
+                },
+            );
+            let mut groups = BTreeMap::new();
+            groups.insert(arcstr::ArcStr::from("users"), Group { gid: 100 });
+            let cfg = IdMap {
+                default_uid: 65534,
+                default_gid: 65534,
+                groups,
+                identities: identities.clone(),
+            };
+            let bytes = serde_json::to_vec_pretty(&cfg).unwrap();
+            let tmp = cfg_path.with_extension("json.tmp");
+            std::fs::write(&tmp, &bytes).unwrap();
+            std::fs::rename(&tmp, &cfg_path).unwrap();
+
+            let want = format!("uid={uid}({host})");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let s = query(&sock_path, &host).await;
+                if s.contains(&want) {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!(
+                        "replacement #{} ({host}) was never observed — the watch \
+                         went dead after an earlier atomic replace. last query: {s:?}",
+                        i + 1,
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn refuses_to_load_malformed_config_at_startup() {
         let dir = tempfile::tempdir().unwrap();
