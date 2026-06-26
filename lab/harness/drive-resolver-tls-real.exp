@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Drives a REAL (mutating) TLS resolver install with the built-in CA, as a
+# novice taking defaults. Domain = netidx.test (lab-coherent). Installs the
+# service. Guards: any rejection / unrecognized-required-prompt / 50-prompt
+# cap / 90s-per-step timeout stops cleanly — no possibility of a spin.
+set timeout 90
+log_user 1
+set n 0
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf install resolver
+expect {
+  -re {(must not be empty|did not match|please enter a value|is not a valid|invalid |; try again|please try again)[^\n]*} {
+    puts "\n<<<GUARD: input rejected -> stop>>>"; exit 3
+  }
+  -re {\[sudo\] password for [^\n]*: $}      { send -- "test123\r"; exp_continue }
+  -re {auth scheme[^\n]*: $}                 { send -- "tls\r"; exp_continue }
+  -re {TLS domain[^\n]*: $}                  { send -- "netidx.test\r"; exp_continue }
+  -re {set a CA password[^\n]*: $}           { send -- "$PW\r"; exp_continue }
+  -re {private key password[^\n]*: $}        { send -- "$PW\r"; exp_continue }
+  -re {again: $}                             { send -- "$PW\r"; exp_continue }
+  -re {service\?[^\n]*\[[yYnN/]+\][^\n]*$}   { send -- "y\r"; exp_continue }
+  -re {\?[^\n]*\][^\n]*$}                     { send -- "\r"; exp_continue }
+  -re {\[[^\]]*\][^\n]*: $} {
+    incr n
+    if {$n > 50} { puts "\n<<<GUARD: too many prompts -> stop>>>"; exit 3 }
+    send -- "\r"; exp_continue
+  }
+  -re {[^\n]*: $} { puts "\n<<<GUARD: unrecognized required prompt -> stop>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT (90s with no prompt)>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

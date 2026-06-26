@@ -1,0 +1,12 @@
+#!/usr/bin/expect -f
+# perms-show.exp <path> <server>  — drive `conf perms show`, auto-confirm the glyph
+set timeout 40
+set path   [lindex $argv 0]
+set server [lindex $argv 1]
+spawn netidx conf perms show --at $path --server $server
+expect {
+  -re {is this your network.s conf server} { send "y\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

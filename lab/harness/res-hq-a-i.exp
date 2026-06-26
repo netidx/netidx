@@ -1,0 +1,27 @@
+#!/usr/bin/expect -f
+# HQ resolver-a, INTERACTIVE (bare command, all answers typed). The HQ CA already
+# exists (ca init), so this must ISSUE from it — never create a second CA.
+set timeout 300
+log_user 1
+spawn netidx conf resolver install
+expect {
+  -re {creating the network's CA[^\n]*} { puts "\n<<<UNEXPECTED: creating a 2nd CA>>>"; exit 9 }
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it\?[^\n]*: ?$}                     { send -- "n\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}           { send -- "\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                    { send -- "tls\r"; exp_continue }
+  -re {built-in certificate authority[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {(own TLS name|resolver's own TLS name)[^\n]*: ?$} { send -- "resolver-a.hq.netidx.test\r"; exp_continue }
+  -re {domain[^\n]*: ?$}                         { send -- "hq.netidx.test\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}       { send -- "resolver-a.hq.netidx.test\r"; exp_continue }
+  -re {protected at rest[^\n]*: ?$}             { send -- "none\r"; exp_continue }
+  -re {(OS service|register netidx)[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}             { send -- "test123\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                  { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

@@ -1,0 +1,14 @@
+#!/usr/bin/expect -f
+# Peek the CA signing queue as eric WITHOUT approving: quit at the review prompt.
+set timeout 60
+log_user 1
+set PW "testpw12345"
+spawn netidx conf ca approve
+expect {
+  -re {admin name[^\n]*: ?$}            { send -- "eric\r"; exp_continue }
+  -re {password[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {request # to review[^\n]*: ?$}   { send -- "q\r"; exp_continue }
+  -re {[^\n]*: ?$}                       { send -- "\r"; exp_continue }
+  timeout { puts "\n<<<PEEK TIMEOUT>>>"; exit 0 }
+  eof     { puts "\n<<<PEEK DONE>>>" }
+}

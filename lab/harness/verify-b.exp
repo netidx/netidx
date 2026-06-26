@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# Verify fix B (choice_with_default validates against its option list) using
+# the auth-scheme prompt in --dry-run (non-mutating). Send a bogus value,
+# expect the rejection, then a valid one and let it finish.
+set timeout 25
+log_user 1
+set tries 0
+spawn /usr/local/bin/netidx conf install resolver --dry-run
+expect {
+  -re {auth scheme \[[^\]]*\]: $} {
+    incr tries
+    if {$tries == 1} { send -- "bogus\r" } else { send -- "anonymous\r" }
+    exp_continue
+  }
+  -re {\[[^\]]*\][^\n]*: $} { send -- "\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

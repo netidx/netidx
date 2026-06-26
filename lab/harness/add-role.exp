@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+# add-role.exp <name> <scope> <signing-pw> <new-pw>
+set timeout 40
+set name [lindex $argv 0]
+set scope [lindex $argv 1]
+set spw  [lindex $argv 2]
+set npw  [lindex $argv 3]
+spawn netidx conf ca admin add-role --name $name --perms-scope $scope
+expect {
+  -re {signing}                 { send "$spw\r"; exp_continue }
+  -re {new role}                { send "$npw\r"; exp_continue }
+  -re {again|[Rr]epeat|[Cc]onfirm} { send "$npw\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

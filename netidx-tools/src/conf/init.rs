@@ -831,9 +831,9 @@ fn prompt_parent_referral(
     )))
 }
 
-/// Validity (days) requested from a CA server. The server caps it to
-/// the admin's policy, so this is just an upper bound.
-const JOIN_VALIDITY_DAYS: u32 = 730;
+/// Validity requested from a CA server. The server caps it to the
+/// admin's policy, so this is just an upper bound.
+const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
 
 /// A TLS identity obtained from a CA server, with its files **staged**
 /// in a tempdir. `apply()` performs the (force-gated) install into the
@@ -984,7 +984,7 @@ fn join_network(
             &name,
             &admin,
             password,
-            JOIN_VALIDITY_DAYS,
+            JOIN_VALIDITY,
             groups,
             identity,
         ))?
@@ -993,7 +993,7 @@ fn join_network(
             addr,
             kind,
             &name,
-            JOIN_VALIDITY_DAYS,
+            JOIN_VALIDITY,
             identity,
         ))?;
         println!("request queued. Your request code is:");
@@ -2467,10 +2467,12 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             organization: None,
             san: vec![],
             key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
-            validity_days: netidx_conf::ca::DEFAULT_CA_VALIDITY_DAYS,
+            ca_validity: netidx_conf::ca::DEFAULT_CA_VALIDITY,
+            leaf_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
+            ca_renew_threshold: netidx_conf::ca::DEFAULT_CA_RENEW_THRESHOLD,
             admin: None,
             allowed_san: vec![],
-            max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
             id_map_groups: vec![],
             may_enroll_servers: None,
             insecure_no_tpm: false,
@@ -3077,10 +3079,12 @@ fn resolver_tls_generate(
             organization: None,
             san: vec![],
             key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
-            validity_days: netidx_conf::ca::DEFAULT_CA_VALIDITY_DAYS,
+            ca_validity: netidx_conf::ca::DEFAULT_CA_VALIDITY,
+            leaf_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
+            ca_renew_threshold: netidx_conf::ca::DEFAULT_CA_RENEW_THRESHOLD,
             admin: None,
             allowed_san,
-            max_validity_days: netidx_conf::ca::DEFAULT_LEAF_VALIDITY_DAYS,
+            max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: Some(true),
             insecure_no_tpm: false,

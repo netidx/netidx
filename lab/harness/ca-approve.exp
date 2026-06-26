@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# CA box (.11): work the enrollment queue as superuser eric. Reviews request 1,
+# confirms the glyph (controlled lab), approves with the default id-map group.
+# The server signs each on eric's behalf via the autorenew credential.
+set timeout 150
+log_user 1
+set PW "testpw12345"
+set reviewed 0
+spawn netidx conf ca approve
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|authentication failed|denied)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {pending signing requests:}      { exp_continue }
+  -re {request code:}                  { exp_continue }
+  -re {admin name[^\n]*: ?$}            { send -- "eric\r"; exp_continue }
+  -re {password[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {request # to review[^\n]*: ?$}   {
+      if {$reviewed} { send -- "q\r" } else { send -- "1\r"; set reviewed 1 }
+      exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {(approve|sign)[^\n]*\?[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {deny[^\n]*\?[^\n]*: ?$}          { send -- "n\r"; exp_continue }
+  -re {\[a\]pprove[^\n]*: ?$}           { send -- "a\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}          { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 0 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

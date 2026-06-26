@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+set timeout 480
+log_user 1
+spawn netidx conf publisher install
+expect {
+  -re {creating the network's CA} { puts "\n<<<GUARD second CA>>>"; exit 9 }
+  -re {(Error:|did not match|refusing to overwrite|no usable TPM|the request expired|denied this request)[^\n]*} { puts "\n<<<FIX: $expect_out(0,string)>>>"; exit 3 }
+  -re {your TLS cert[^\n]*generate[^\n]*: ?$} { puts "\n<<<FIX manual-PKI path reached (discovery failed)>>>"; exit 5 }
+  -re {found netidx network[^\n]*join it\?[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {existing conf server to join[^\n]*: ?$} { send -- "192.168.50.11:4565\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$} { send -- "publisher.netidx.test\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$} { send -- "tls\r"; exp_continue }
+  -re {cluster IP[^\n]*: ?$} { send -- "192.168.50.11\r"; exp_continue }
+  -re {private key protection[^\n]*: ?$} { send -- "none\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$} { send -- "n\r"; exp_continue }
+  -re {publisher bind[^\n]*: ?$} { send -- "192.168.50.17/24\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$} { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$} { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<FIX unknown prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 8 }
+  eof { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

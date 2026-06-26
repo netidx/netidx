@@ -1,0 +1,28 @@
+#!/usr/bin/expect -f
+# HQ resolver-A on .11, KRB5 data plane, co-located with CA. Interactive.
+# Conf plane stays TLS (the CA); data-plane auth = krb5 with the existing SPN.
+# Clobber fix must keep the ca role (merge path).
+set timeout 300
+log_user 1
+spawn netidx conf resolver install
+expect {
+  -re {creating the network's CA[^\n]*}      { puts "\n<<<FIX FAILED: 2nd CA>>>"; exit 9 }
+  -re {(is not one of|must not be empty|did not match what|please try again|Error:|refusing to overwrite|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {(Waiting for approval|request code|request queued|enrollment queued|issued from|got TLS identity|send this code|updated conf-server roles|conf server configured|installed service)[^\n]*} { exp_continue }
+  -re {found netidx network[^\n]*join it[^\n]*: ?$}   { send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                  { send -- "krb5\r"; exp_continue }
+  -re {advertised IP[^\n]*: ?$}                { send -- "192.168.50.11\r"; exp_continue }
+  -re {resolver port[^\n]*: ?$}                { send -- "\r"; exp_continue }
+  -re {kerberos SPN[^\n]*: ?$}                 { send -- "netidx/resolver.netidx.test@NETIDX.TEST\r"; exp_continue }
+  -re {principal mapping[^\n]*: ?$}            { send -- "platform\r"; exp_continue }
+  -re {private key protection[^\n]*: ?$}       { send -- "none\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}          { send -- "y\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                  { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

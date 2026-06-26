@@ -1,0 +1,27 @@
+#!/usr/bin/expect -f
+# DRY-RUN probe: what does `resolver install` propose when joining an existing
+# network (.11's conf server) as a 2nd resolver? Nothing is written (--dry-run).
+# Guard discipline: stop at any unrecognized prompt so we learn the real flow.
+set timeout 60
+log_user 1
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf resolver install --dry-run
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {conf server to join[^\n]*: ?$}              { send -- "192.168.50.11:4565\r"; exp_continue }
+  -re {does this match[^\n]*: ?$}                  { send -- "y\r"; exp_continue }
+  -re {is this your[^\n]*: ?$}                     { send -- "y\r"; exp_continue }
+  -re {trust this[^\n]*: ?$}                       { send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                      { send -- "anonymous\r"; exp_continue }
+  -re {conf server for this network[^\n]*: ?$}     { send -- "y\r"; exp_continue }
+  -re {set a CA password[^\n]*: ?$}                { send -- "$PW\r"; exp_continue }
+  -re {CA password[^\n]*: ?$}                      { send -- "$PW\r"; exp_continue }
+  -re {again: ?$}                                  { send -- "$PW\r"; exp_continue }
+  -re {approve certificate renewals[^\n]*: ?$}     { send -- "n\r"; exp_continue }
+  -re {OS service[^\n]*: ?$}                       { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                      { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

@@ -53,6 +53,12 @@ pub mod conf_proto;
 /// verifying the CA identity by fingerprint first. Cross-platform
 /// (rcgen + rustls, no openssl).
 pub mod conf_client;
+/// Local control-socket client: the on-box `ca` CLI drives the running conf
+/// daemon over its `0600` unix socket (no TLS / no password — the daemon
+/// trusts the local peer by `SO_PEERCRED`). Unix-only — the socket is a
+/// daemon feature and the daemon is unix.
+#[cfg(unix)]
+pub mod conf_local;
 /// Conf server: answers network-info queries, validates sign/enroll
 /// requests against per-admin policy, and pushes id-map registrations
 /// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].

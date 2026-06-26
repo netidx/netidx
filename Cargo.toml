@@ -50,6 +50,8 @@ graphix-compiler = { version = "0.9.0", path = "../graphix/graphix-compiler" }
 graphix-package = { version = "0.9.0", path = "../graphix/graphix-package" }
 graphix-package-core = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-core" }
 hdrhistogram = "7"
+humantime = "2"
+humantime-serde = "1"
 if-addrs = "0.15"
 immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
 indexmap = "2"

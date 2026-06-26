@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+set timeout 90
+log_user 1
+set PW "testpw12345"
+set name [lindex $argv 0]
+spawn netidx conf ca revoke --name $name --reason superseded
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|authentication failed|denied|no certificate)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {admin name[^\n]*: ?$}            { send -- "eric\r"; exp_continue }
+  -re {password[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {(revoke|confirm|proceed)[^\n]*\?[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}          { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 0 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

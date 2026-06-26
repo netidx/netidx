@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+set timeout 120
+log_user 1
+spawn netidx conf ca recovery rotate
+expect {
+  -re {(Error:|locked|another process|already (held|locked)|in use|denied)[^\n]*} {
+      puts "\n<<<ISSUE: $expect_out(0,string)>>>"; }
+  -re {recovery password[^\n]*: ?$}  { send -- "697C SCF7 7NQW VGZ7 4YRW VJX7 7EXJ K0XP\r"; exp_continue }
+  -re {password[^\n]*: ?$}           { send -- "697C SCF7 7NQW VGZ7 4YRW VJX7 7EXJ K0XP\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}        { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$}                    { send -- "\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 0 }
+  eof { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

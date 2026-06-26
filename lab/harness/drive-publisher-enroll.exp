@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# Enrollee side: publisher install that discovers the conf server via mDNS,
+# queues a signing request (answers "admin here? No"), and polls for approval.
+# Generous timeout to survive the cross-host approval. Guards as usual.
+set timeout 300
+log_user 1
+spawn /usr/local/bin/netidx conf install publisher
+expect {
+  -re {(must not be empty|did not match|invalid )[^\n]*} { puts "\n<<<GUARD: reject>>>"; exit 3 }
+  -re {is a CA admin at this machine[^\n]*\][^\n]*$} { send -- "n\r"; exp_continue }
+  -re {\[sudo\] password for [^\n]*: $}              { send -- "test123\r"; exp_continue }
+  -re {\?[^\n]*\][^\n]*$}                            { send -- "y\r"; exp_continue }
+  -re {\[[^\]]*\][^\n]*: $}                          { send -- "\r"; exp_continue }
+  -re {[^\n]*: $} { puts "\n<<<GUARD: unrecognized required prompt>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

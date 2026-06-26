@@ -73,6 +73,7 @@ triomphe = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 zeroize = { workspace = true }
+humantime = { workspace = true }
 
 [dev-dependencies]
 graphix-package-core = { workspace = true }

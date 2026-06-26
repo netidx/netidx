@@ -1,0 +1,20 @@
+127.0.0.1	localhost
+::1		localhost ip6-localhost ip6-loopback
+
+# netidx 3-segment lab — HQ (50) / EU (60) / AP (70)
+192.168.50.2	router-hq router
+192.168.60.2	router-eu
+192.168.70.2	router-ap
+192.168.50.11	resolver-hq-a
+192.168.50.12	resolver-hq-b
+192.168.50.13	workstation-hq
+192.168.50.14	devbox
+192.168.50.17	publisher-hq
+192.168.60.15	resolver-eu-a
+192.168.60.16	resolver-eu-b
+192.168.60.17	publisher-eu
+192.168.60.18	workstation-eu
+192.168.70.11	resolver-ap-a
+192.168.70.12	resolver-ap-b
+192.168.70.13	publisher-ap
+192.168.70.14	workstation-ap

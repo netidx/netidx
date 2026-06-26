@@ -24,6 +24,7 @@
 
 use crate::{atomic, conf_proto::NodeKind};
 use anyhow::{Context, Result};
+use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -50,7 +51,8 @@ pub struct QueuedReq {
     pub kind: NodeKind,
     pub csr_pem: String,
     pub requested_name: String,
-    pub requested_validity_days: u32,
+    #[serde(with = "humantime_serde")]
+    pub requested_validity: Duration,
     /// Unix seconds when the request was queued.
     pub received_unix: u64,
     /// Socket address the request arrived from (display context).
@@ -74,7 +76,7 @@ impl QueuedReq {
         kind: NodeKind,
         csr_pem: String,
         requested_name: String,
-        requested_validity_days: u32,
+        requested_validity: Duration,
         peer: String,
         renewal_of: Option<u64>,
         enroll_listen: Option<SocketAddr>,
@@ -84,7 +86,7 @@ impl QueuedReq {
             kind,
             csr_pem,
             requested_name,
-            requested_validity_days,
+            requested_validity,
             received_unix: now_unix(),
             peer,
             renewal_of,
@@ -183,31 +185,40 @@ pub const CRL_VALIDITY: Duration = Duration::from_secs(90 * 24 * 3600);
 /// Re-sign the CRL when less than this much of its validity remains.
 pub const CRL_REFRESH: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// An exclusively-locked CA directory: the request store and the key vault
+/// An exclusively-locked CA directory. The request store and the key vault
 /// both live under one `<ca-dir>/ca.lock` flock, taken by [`CaDir::open`]
-/// and held for this value's lifetime (dropping it releases the lock). The
-/// daemon owns one for its whole life; a CLI op opens one transiently. A
+/// and held for this value's lifetime (dropping it releases the lock). A
 /// second opener for the same dir fails at `open`.
 ///
-/// Access goes through the [`store`](Self::store) / [`vault`](Self::vault)
-/// fields, whose methods take `&self` to read and `&mut self` to write — so
-/// the borrow checker, not a remembered global mutex, enforces exclusion.
-/// The daemon shares one across tasks via `Arc<Mutex<CaDir>>`; a CLI op
-/// opens one transiently.
+/// In-process the store and vault have SEPARATE locks, chosen for their
+/// different access patterns. Issuance is inherently sequential (one serial
+/// counter, one atomic commit), so [`store`](Self::store) is a `Mutex`. The
+/// vault's expensive ops — `authenticate` / `unlock` (Argon2) — are *reads*
+/// of the vault file, so [`vault`](Self::vault) is an `RwLock`: they run
+/// concurrently and never serialize issuance; only the admin writes
+/// (`add_*` / `remove_slot` / `set_policy`) take the write lock. Read
+/// methods take `&self`, writes `&mut self` — the lock guard's `Deref`
+/// makes the compiler enforce that. The daemon shares one via `Arc<Server>`
+/// (CaDir is `Sync`); a CLI op holds one transiently.
 pub struct CaDir {
-    pub store: CAStore,
-    pub vault: crate::ca_vault::CAVault,
-    /// The next X.509 serial to mint, seeded from the store at [`open`] and
-    /// bumped by [`alloc_serial`]. In-memory — the committed record's serial
-    /// is the persistent source, so a fresh `open` re-seeds past it.
-    ///
-    /// [`open`]: Self::open
-    /// [`alloc_serial`]: Self::alloc_serial
-    pub next_serial: u64,
+    pub store: Mutex<CAStore>,
+    pub vault: RwLock<crate::ca_vault::CAVault>,
     /// The server's signing credential — the box-held `autorenew` password,
-    /// set by the daemon after [`open`](Self::open). `None` for offline/CLI
-    /// use and for a read-only CA (no credential ⇒ the server cannot sign).
-    pub autorenew_pw: Option<Zeroizing<String>>,
+    /// set by the daemon after [`open`](Self::open). Behind a lock because
+    /// `ca recovery`/`auto-approve` rotate it live over the local control
+    /// socket (the daemon hot-swaps the in-process credential after
+    /// re-wrapping the slot), while the issuance path reads it on every sign.
+    /// `None` for offline/CLI use and for a read-only CA (no credential ⇒ the
+    /// server cannot sign).
+    pub autorenew_pw: RwLock<Option<Zeroizing<String>>>,
+    /// The CA's configured lifetime policy (default leaf validity, CA renewal
+    /// threshold), read from `lifetimes.json` at open. Defaults when absent,
+    /// so a CA predating the file keeps today's behaviour. A daemon picks up
+    /// edits on restart.
+    pub lifetimes: crate::ca::CaLifetimes,
+    /// The CA directory path — a lockless accessor for the netmap, the CA
+    /// cert, and other files that are neither the store nor the vault.
+    dir: PathBuf,
     /// The exclusive flock; released on drop. Never read — its lifetime is
     /// the contract.
     _lock: std::fs::File,
@@ -221,13 +232,13 @@ impl CaDir {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating {}", dir.display()))?;
         let _lock = exclusive_lock(&dir)?;
-        let store = CAStore { dir: dir.clone() };
-        let next_serial = store.next_serial()?;
+        let lifetimes = crate::ca::CaLifetimes::load(&dir)?;
         Ok(CaDir {
-            store,
-            vault: crate::ca_vault::CAVault::new(dir),
-            next_serial,
-            autorenew_pw: None,
+            store: Mutex::new(CAStore::open(dir.clone())?),
+            vault: RwLock::new(crate::ca_vault::CAVault::new(dir.clone())),
+            autorenew_pw: RwLock::new(None),
+            lifetimes,
+            dir,
             _lock,
         })
     }
@@ -235,14 +246,7 @@ impl CaDir {
     /// The CA directory path — for the netmap, the CA cert, and other
     /// files in the dir that are neither the request store nor the vault.
     pub fn dir(&self) -> &Path {
-        self.store.dir()
-    }
-
-    /// Allocate the next serial, bumping the in-memory counter.
-    pub fn alloc_serial(&mut self) -> u64 {
-        let s = self.next_serial;
-        self.next_serial += 1;
-        s
+        &self.dir
     }
 }
 
@@ -325,9 +329,29 @@ fn crl_next_update_at(path: &Path) -> Result<Option<u64>> {
 /// methods take `&self`, write methods `&mut self`.
 pub struct CAStore {
     dir: PathBuf,
+    /// In-memory next-serial counter, seeded from disk at [`open`](Self::open)
+    /// and bumped by [`alloc_serial`](Self::alloc_serial). The committed
+    /// record's serial is the persistent source; a fresh open re-seeds past
+    /// it.
+    serial_counter: u64,
 }
 
 impl CAStore {
+    /// Open the store rooted at `dir`, seeding the in-memory serial counter
+    /// from disk.
+    fn open(dir: PathBuf) -> Result<Self> {
+        let mut s = CAStore { dir, serial_counter: 0 };
+        s.serial_counter = s.next_serial()?;
+        Ok(s)
+    }
+
+    /// Allocate the next serial, bumping the in-memory counter.
+    pub fn alloc_serial(&mut self) -> u64 {
+        let s = self.serial_counter;
+        self.serial_counter += 1;
+        s
+    }
+
     /// The CA directory this store is rooted at.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -824,24 +848,24 @@ mod tests {
         std::fs::write(dir.path().join("certificate.pem"), b"CA-CERT").unwrap();
         let mut ca = CaDir::open(dir.path()).unwrap();
         let r = req("alice.example.com");
-        ca.store.enqueue(&r).unwrap();
-        assert_eq!(ca.store.pending().unwrap().len(), 1);
-        assert!(matches!(ca.store.status(&r.id).unwrap(), Status::Pending(_)));
+        ca.store.lock().enqueue(&r).unwrap();
+        assert_eq!(ca.store.lock().pending().unwrap().len(), 1);
+        assert!(matches!(ca.store.lock().status(&r.id).unwrap(), Status::Pending(_)));
 
-        ca.store
+        ca.store.lock()
             .commit_signed(&issued(r.clone(), 5, "alice.example.com", now_unix() + 1000))
             .unwrap();
         // Moved out of the active queue, status now Signed with the cert + bundle.
-        assert!(ca.store.pending().unwrap().is_empty());
-        match ca.store.status(&r.id).unwrap() {
+        assert!(ca.store.lock().pending().unwrap().is_empty());
+        match ca.store.lock().status(&r.id).unwrap() {
             Status::Signed(o) => {
                 assert_eq!(o.signed_cert_pem, "CERT5");
                 assert_eq!(o.trusted_pem, "CA-CERT");
             }
             _ => panic!("expected Signed"),
         }
-        assert!(!ca.store.queue_path(&r.id).exists());
-        assert!(ca.store.issued_path(&r.id).exists());
+        assert!(!ca.store.lock().queue_path(&r.id).exists());
+        assert!(ca.store.lock().issued_path(&r.id).exists());
     }
 
     #[test]
@@ -849,14 +873,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ca = CaDir::open(dir.path()).unwrap();
         let r = req("bob.example.com");
-        ca.store.enqueue(&r).unwrap();
-        ca.store.deny(&r, "ask your manager").unwrap();
-        assert!(ca.store.pending().unwrap().is_empty());
-        match ca.store.status(&r.id).unwrap() {
+        ca.store.lock().enqueue(&r).unwrap();
+        ca.store.lock().deny(&r, "ask your manager").unwrap();
+        assert!(ca.store.lock().pending().unwrap().is_empty());
+        match ca.store.lock().status(&r.id).unwrap() {
             Status::Denied(d) => assert_eq!(d.reason, "ask your manager"),
             _ => panic!("expected Denied"),
         }
-        assert!(!ca.store.queue_path(&r.id).exists());
+        assert!(!ca.store.lock().queue_path(&r.id).exists());
     }
 
     #[test]
@@ -865,39 +889,39 @@ mod tests {
         let mut ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let a = req("eric.ryu-oh.org");
-        ca.store
+        ca.store.lock()
             .commit_signed(&issued(a.clone(), 2, "eric.ryu-oh.org", now + 1000))
             .unwrap();
         let b = req("bob.ryu-oh.org");
-        ca.store.commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000)).unwrap();
+        ca.store.lock().commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000)).unwrap();
         let old = req("old.ryu-oh.org");
-        ca.store
+        ca.store.lock()
             .commit_signed(&issued(old, 4, "old.ryu-oh.org", now.saturating_sub(10)))
             .unwrap();
 
-        assert_eq!(ca.store.live_for_name("ERIC.RYU-OH.ORG").unwrap().len(), 1);
-        assert!(ca.store.live_for_name("old.ryu-oh.org").unwrap().is_empty());
-        assert!(ca.store.revoked_unexpired().unwrap().is_empty());
+        assert_eq!(ca.store.lock().live_for_name("ERIC.RYU-OH.ORG").unwrap().len(), 1);
+        assert!(ca.store.lock().live_for_name("old.ryu-oh.org").unwrap().is_empty());
+        assert!(ca.store.lock().revoked_unexpired().unwrap().is_empty());
 
-        assert!(ca.store
+        assert!(ca.store.lock()
             .revoke(
                 2,
                 Revocation { serial: 2, revoked_unix: now, reason: "laptop stolen".into() }
             )
             .unwrap());
-        assert!(ca.store.live_for_name("eric.ryu-oh.org").unwrap().is_empty());
-        let crl = ca.store.revoked_unexpired().unwrap();
+        assert!(ca.store.lock().live_for_name("eric.ryu-oh.org").unwrap().is_empty());
+        let crl = ca.store.lock().revoked_unexpired().unwrap();
         assert_eq!(crl.len(), 1);
         assert_eq!(crl[0].serial, 2);
         // Revoking an unknown / already-revoked serial is a no-op false.
-        assert!(!ca.store
+        assert!(!ca.store.lock()
             .revoke(2, Revocation { serial: 2, revoked_unix: now, reason: "x".into() })
             .unwrap());
-        assert!(!ca.store
+        assert!(!ca.store.lock()
             .revoke(999, Revocation { serial: 999, revoked_unix: now, reason: "x".into() })
             .unwrap());
 
-        assert_eq!(ca.store.max_serial().unwrap(), Some(4));
+        assert_eq!(ca.store.lock().max_serial().unwrap(), Some(4));
     }
 
     #[test]
@@ -908,11 +932,11 @@ mod tests {
         let r = req("u.example.com");
         let mut rec = issued(r.clone(), 7, "u.example.com", now + 1000);
         rec.groups = vec!["users".into()];
-        ca.store.commit_signed(&rec).unwrap();
+        ca.store.lock().commit_signed(&rec).unwrap();
         // Has groups, not pushed → in the recovery set.
-        assert_eq!(ca.store.pending_pushes().unwrap().len(), 1);
-        ca.store.set_push_done(&r.id).unwrap();
-        assert!(ca.store.pending_pushes().unwrap().is_empty());
+        assert_eq!(ca.store.lock().pending_pushes().unwrap().len(), 1);
+        ca.store.lock().set_push_done(&r.id).unwrap();
+        assert!(ca.store.lock().pending_pushes().unwrap().is_empty());
     }
 
     #[test]
@@ -922,21 +946,21 @@ mod tests {
         let old = now_unix() - TTL.as_secs() - 10;
         let mut stale = req("stale.example.com");
         stale.received_unix = old;
-        std::fs::create_dir_all(ca.store.queue_dir()).unwrap();
+        std::fs::create_dir_all(ca.store.lock().queue_dir()).unwrap();
         atomic::write_atomic(
-            &ca.store.queue_path(&stale.id),
+            &ca.store.lock().queue_path(&stale.id),
             &serde_json::to_vec_pretty(&stale).unwrap(),
             0o644,
         )
         .unwrap();
         // A live issued record survives prune.
         let live = req("live.example.com");
-        ca.store
+        ca.store.lock()
             .commit_signed(&issued(live.clone(), 9, "live.example.com", now_unix() + 1000))
             .unwrap();
-        ca.store.prune().unwrap();
-        assert!(!ca.store.queue_path(&stale.id).exists());
-        assert!(ca.store.issued_path(&live.id).exists());
+        ca.store.lock().prune().unwrap();
+        assert!(!ca.store.lock().queue_path(&stale.id).exists());
+        assert!(ca.store.lock().issued_path(&live.id).exists());
     }
 
     #[test]
@@ -944,9 +968,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ca = CaDir::open(dir.path()).unwrap();
         for i in 0..MAX_PENDING {
-            ca.store.enqueue(&req(&format!("n{i}.example.com"))).unwrap();
+            ca.store.lock().enqueue(&req(&format!("n{i}.example.com"))).unwrap();
         }
-        let err = ca.store.enqueue(&req("overflow.example.com")).unwrap_err();
+        let err = ca.store.lock().enqueue(&req("overflow.example.com")).unwrap_err();
         assert!(format!("{err:#}").contains("full"));
     }
 }

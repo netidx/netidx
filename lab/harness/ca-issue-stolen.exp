@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# Attempt offline issuance from the STOLEN CA copy (no keytab). Password via $env(PW).
+set timeout 60
+log_user 1
+set PW $env(PW)
+set sent 0
+spawn netidx conf ca issue --ca-dir /tmp/stolen-ca --cn attacker.netidx.test --san dns:attacker.netidx.test --out $env(OUTDIR)
+expect {
+  -re {(Error:|failed to|incorrect|invalid pass|could not unlock|no slot|wrong)[^\n]*} {
+      puts "\n<<<UNLOCK FAILED: $expect_out(0,string)>>>"; }
+  -re {: ?$} { if {!$sent} { send -- "$PW\r"; set sent 1; exp_continue } else { exp_continue } }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { }
+}
+catch wait result
+puts "RC=[lindex $result 3]"
+exit [lindex $result 3]

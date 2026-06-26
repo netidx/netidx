@@ -1,0 +1,13 @@
+#!/usr/bin/expect -f
+# ca-issue.exp <out-dir> <password>
+set timeout 60
+set out [lindex $argv 0]
+set pw  [lindex $argv 1]
+spawn netidx conf ca issue --cn test.local --san test.local --out $out --key-bits 2048
+expect {
+  -re {admin name}  { send "root\r"; exp_continue }
+  -re {[Pp]assword} { send "$pw\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

@@ -15,7 +15,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_derive::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const PROTOCOL_VERSION: u32 = 3;
@@ -240,6 +240,19 @@ pub enum Request {
     /// [`Request::ApplyPermsEdit`]. Answered with
     /// [`ApplyServiceControlResponse`].
     ApplyServiceControl(ApplyServiceControlRequest),
+    /// Mint a fresh recovery (off-box break-glass) password. Carries no
+    /// credentials: it is **local-control-socket only** — the daemon refuses
+    /// it over the network conf plane, because anyone who can reach the local
+    /// socket already has on-box authority. The daemon rewraps the master key
+    /// under a new recovery slot using its own in-process autorenew
+    /// credential. Answered with [`RotateRecoveryResponse`] (the new
+    /// password, shown once).
+    RotateRecovery,
+    /// Rotate the box's own autorenew signing credential and reseal its
+    /// keytab, hot-swapping the in-process credential with no downtime.
+    /// Carries no credentials: **local-control-socket only**, like
+    /// [`Request::RotateRecovery`]. Answered with [`RotateAutorenewResponse`].
+    RotateAutorenew,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,7 +319,8 @@ pub struct SignRequest {
     /// pins identities to exactly one DNS SAN). The CA overrides
     /// whatever the CSR claims, so this is the authoritative request.
     pub requested_name: String,
-    pub requested_validity_days: u32,
+    #[serde(with = "humantime_serde")]
+    pub requested_validity: Duration,
     /// id-map groups to register the new identity with (first is
     /// primary) — chosen by the admin at enrollment time, validated
     /// against the allowed set in their policy. Empty ⇒ don't
@@ -385,7 +399,8 @@ pub struct EnqueueRequest {
     /// The DNS name the leaf should carry (validated against the
     /// approving admin's policy at approval time).
     pub requested_name: String,
-    pub requested_validity_days: u32,
+    #[serde(with = "humantime_serde")]
+    pub requested_validity: Duration,
     /// `Some` ⇒ this queues a **conf-server enrollment**: the cert is
     /// the reserved [`SERVING_SAN`] (whatever `requested_name` says)
     /// and the value is where the new conf server will listen — the CA
@@ -440,7 +455,8 @@ pub struct QueueEntry {
     pub id: String,
     pub kind: NodeKind,
     pub requested_name: String,
-    pub requested_validity_days: u32,
+    #[serde(with = "humantime_serde")]
+    pub requested_validity: Duration,
     /// Seconds since the request was queued (server-computed; no
     /// clock-sync assumptions on the wire).
     pub age_secs: u64,
@@ -905,13 +921,37 @@ pub enum ApplyServiceControlResponse {
     Err { reason: String },
 }
 
+// -- local control socket (CA box only) ---------------------------------------
+
+/// Response to [`Request::RotateRecovery`]: the freshly minted recovery
+/// password, in grouped display form (shown to the operator once, never
+/// stored). On the wire it is a [`Secret`] so it is redacted in logs and
+/// zeroized after use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RotateRecoveryResponse {
+    Ok { recovery_password: Secret },
+    Err { reason: String },
+}
+
+/// Response to [`Request::RotateAutorenew`]: success, optionally with a
+/// warning (e.g. the keytab was resealed in plaintext because the existing
+/// one was), or a safe failure reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RotateAutorenewResponse {
+    Ok { warning: Option<String> },
+    Err { reason: String },
+}
+
 /// Write a length-prefixed JSON message and flush.
 pub async fn write_msg<S, T>(stream: &mut S, msg: &T) -> Result<()>
 where
     S: AsyncWriteExt + Unpin,
     T: serde::Serialize,
 {
-    let body = serde_json::to_vec(msg).context("serializing message")?;
+    // Zeroize the serialized frame on drop: admin passwords and the recovery
+    // password ride these messages as `Secret`, so the plaintext JSON buffer
+    // is a credential too. Cheap on a control plane (not a data path).
+    let body = zeroize::Zeroizing::new(serde_json::to_vec(msg).context("serializing message")?);
     if body.len() as u64 > MAX_MSG as u64 {
         bail!("outgoing message too large ({} bytes)", body.len());
     }
@@ -936,7 +976,9 @@ where
     if len > MAX_MSG {
         bail!("incoming message length {len} exceeds maximum {MAX_MSG}");
     }
-    let mut body = vec![0u8; len as usize];
+    // Zeroize the decoded frame on drop (it may hold a `Secret` password in
+    // plaintext JSON) — see `write_msg`.
+    let mut body = zeroize::Zeroizing::new(vec![0u8; len as usize]);
     stream.read_exact(&mut body).await.context("reading message body")?;
     serde_json::from_slice(&body).context("deserializing message")
 }

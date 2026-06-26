@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# Non-mutating dry-run of the krb5 resolver wizard, to read every prompt
+# and its default as a novice would see them. Answers "krb5" to auth,
+# default-takes the rest. Leftmost-match discipline: the auth-scheme
+# rule precedes the bracketed-default rule so it wins the tie.
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf install resolver --dry-run
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "krb5\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

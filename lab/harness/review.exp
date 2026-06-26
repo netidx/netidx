@@ -1,0 +1,28 @@
+#!/usr/bin/expect -f
+# Parent admin (.11) reviews + approves the pending delegation. ANSI-tolerant
+# question-text matchers (default options are rendered bold). Auth root/PW,
+# pick request 1, confirm code matches (y), approve (y), retry down peers (y).
+set timeout 90
+log_user 1
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf resolver review-delegation
+expect {
+  -re {(Error:|no pending|No pending|nothing to review)[^\n]*} { puts "\n<<<RESULT: $expect_out(0,string)>>>"; exp_continue }
+  -re {identity: ?$}                       { exp_continue }
+  -re {[Pp]assword[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {request #[^\n]*: ?$}                { send -- "1\r"; exp_continue }
+  -re {request[^\n]*review[^\n]*: ?$}      { send -- "1\r"; exp_continue }
+  -re {which[^\n]*request[^\n]*: ?$}       { send -- "1\r"; exp_continue }
+  -re {[Cc]ode match[^\n]*: ?$}            { send -- "y\r"; exp_continue }
+  -re {code[^\n]*match[^\n]*: ?$}          { send -- "y\r"; exp_continue }
+  -re {match[^\n]*sent[^\n]*: ?$}          { send -- "y\r"; exp_continue }
+  -re {is this your[^\n]*: ?$}             { send -- "y\r"; exp_continue }
+  -re {[Aa]pprove[^\n]*: ?$}               { send -- "y\r"; exp_continue }
+  -re {[Rr]etry[^\n]*: ?$}                 { send -- "y\r"; exp_continue }
+  -re {admin name[^\n]*: ?$}               { send -- "\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}             { send -- "\r"; exp_continue }
+  -re {[^\n]*\? ?$}  { puts "\n<<<GUARD bare-question: $expect_out(0,string)>>>"; exit 5 }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>" }
+  eof     { puts "\n<<<DONE>>>" }
+}

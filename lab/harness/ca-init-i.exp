@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# HQ CA + conf-server bootstrap, driven as a user. ONLY structural flag is
+# --insecure-no-tpm (the VMs have no TPM; there is no interactive bypass).
+# Every policy answer is typed at its prompt. Recovery quads are PRINTED and
+# captured from this transcript. Superuser = eric / testpw12345.
+set timeout 240
+log_user 1
+set PW "testpw12345"
+spawn netidx conf ca init --insecure-no-tpm
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite|already exists|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {CA common name[^\n]*: ?$}              { send -- "ca.netidx.test\r"; exp_continue }
+  -re {set up the conf server[^\n]*: ?$}      { send -- "y\r"; exp_continue }
+  -re {conf server listen IP[^\n]*: ?$}       { send -- "192.168.50.11\r"; exp_continue }
+  -re {conf server listen port[^\n]*: ?$}     { send -- "\r"; exp_continue }
+  -re {SAN names this admin may issue[^\n]*: ?$} { send -- "\r"; exp_continue }
+  -re {id-map groups this admin[^\n]*: ?$}    { send -- "\r"; exp_continue }
+  -re {may this admin enroll new conf servers[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {superuser admin name[^\n]*: ?$}        { send -- "eric\r"; exp_continue }
+  -re {[Pp]assword[^\n]*: ?$}                 { send -- "$PW\r"; exp_continue }
+  -re {(again|confirm|repeat|retype|verify)[^\n]*: ?$} { send -- "$PW\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

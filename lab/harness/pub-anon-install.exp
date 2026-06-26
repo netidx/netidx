@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# Anonymous PUBLISHER install on .12, novice flow (no flags). No SPN, no
+# TLS => no service offer. Leftmost-match discipline.
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf install publisher
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it[^\n]*: ?$}                     { send -- "n\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}         { send -- "\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "anonymous\r"; exp_continue }
+  -re {cluster IP[^\n]*: ?$}                  { send -- "192.168.50.13\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

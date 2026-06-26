@@ -1,0 +1,35 @@
+#!/usr/bin/expect -f
+# Satellite 2 (.16) interactive install: TLS, enroll cert from HQ CA (NEVER mint
+# a local CA), delegate /sat2 under parent 192.168.50.11:4565. Blocks at each
+# queue for remote approval on .11. Validates: (1) one-CA — must NOT create a
+# local CA; (2) single glyph-confirm — parent glyph asked exactly ONCE.
+set timeout 800
+log_user 1
+set confirms 0
+spawn netidx conf resolver install --parent-conf-server 192.168.50.11:4565
+expect {
+  -re {creating the network's CA[^\n]*} { puts "\n<<<GUARD FAILED: created a LOCAL CA>>>"; exit 9 }
+  -re {(Error:|did not match what|denied this request|expired before|was not confirmed|no conf server could|refusing to overwrite|no usable TPM|is not one of|must not be empty)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {does this[^\n]*match[^\n]*: ?$}        { incr confirms; puts "\n\[\[GLYPH CONFIRM #$confirms\]\]"; send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "tls\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}    { send -- "sat2.netidx.test\r"; exp_continue }
+  -re {subtree[^\n]*: ?$}                     { send -- "/sat2\r"; exp_continue }
+  -re {advertised IP[^\n]*: ?$}               { send -- "192.168.60.16\r"; exp_continue }
+  -re {resolver port[^\n]*: ?$}               { send -- "\r"; exp_continue }
+  -re {private key protection[^\n]*: ?$}      { send -- "none\r"; exp_continue }
+  -re {protected at rest[^\n]*: ?$}           { send -- "none\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}    { send -- "n\r"; exp_continue }
+  -re {conf server[^\n]*host[^\n]*: ?$}       { send -- "y\r"; exp_continue }
+  -re {TLS domain[^\n]*: ?$}                  { send -- "netidx.test\r"; exp_continue }
+  -re {this resolver's name[^\n]*: ?$}        { send -- "sat2\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}           { send -- "test123\r"; exp_continue }
+  -re {(Waiting for approval|request code|request queued|delegation requested|enrollment queued|got TLS identity|send this code)[^\n]*} { exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { puts "\n=== TOTAL GLYPH CONFIRMS: $confirms ===\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

@@ -1,0 +1,23 @@
+#!/usr/bin/expect -f
+# Parent admin DENIES the request (simulates a code mismatch): answer the
+# code-match confirm with N, confirm deny, give a reason.
+set timeout 60
+log_user 1
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf resolver review-delegation
+expect {
+  -re {(Error:|no pending|No pending)[^\n]*}   { puts "\n<<<RESULT: $expect_out(0,string)>>>"; exp_continue }
+  -re {identity: ?$}                       { exp_continue }
+  -re {[Pp]assword[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {request #[^\n]*: ?$}                { send -- "1\r"; exp_continue }
+  -re {request[^\n]*review[^\n]*: ?$}      { send -- "1\r"; exp_continue }
+  -re {[Cc]ode match[^\n]*: ?$}            { send -- "n\r"; exp_continue }
+  -re {match[^\n]*sent[^\n]*: ?$}          { send -- "n\r"; exp_continue }
+  -re {is this your[^\n]*: ?$}             { send -- "y\r"; exp_continue }
+  -re {[Dd]eny[^\n]*: ?$}                  { send -- "y\r"; exp_continue }
+  -re {reason[^\n]*: ?$}                   { send -- "code did not match (deny test)\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}             { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>" }
+  eof     { puts "\n<<<DONE>>>" }
+}

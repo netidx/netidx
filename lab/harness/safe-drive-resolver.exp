@@ -1,0 +1,41 @@
+#!/usr/bin/expect -f
+# Guarded driver for the resolver wizard (always --dry-run, non-mutating).
+# argv0 = auth scheme to answer at the first prompt.
+# Safety: a validation/rejection line, a repeated prompt, an unrecognized
+# REQUIRED prompt, or >40 prompts all cause an immediate clean exit — so a
+# required-no-default prompt can never spin the box.
+set scheme [lindex $argv 0]
+set timeout 25
+log_user 1
+set last ""
+set n 0
+spawn /usr/local/bin/netidx conf install resolver --dry-run
+expect {
+  -re {(must not be empty|please enter a value|is not |invalid|try again)[^\n]*} {
+    puts "\n<<<GUARD: answer rejected -> stop>>>"; exit 3
+  }
+  -re {auth scheme[^\n]*: $} {
+    if {$last eq "auth"} { puts "\n<<<GUARD repeat auth>>>"; exit 3 }
+    set last "auth"; send -- "$scheme\r"; exp_continue
+  }
+  -re {[Kk]erberos SPN[^\n]*: $} {
+    if {$last eq "spn"} { puts "\n<<<GUARD repeat spn>>>"; exit 3 }
+    set last "spn"; send -- "\r"; exp_continue
+  }
+  -re {[Pp]assword[^\n]*: $}  { send -- "testpw12345\r"; exp_continue }
+  -re {[Cc]onfirm[^\n]*: $}   { send -- "testpw12345\r"; exp_continue }
+  -re {\?[^\n]*\][^\n]*$}     { send -- "\r"; exp_continue }
+  -re {(\[[^\]]*\])[^\n]*: $} {
+    set this $expect_out(0,string)
+    if {$this eq $last} { puts "\n<<<GUARD repeat default-prompt -> stop>>>"; exit 3 }
+    set last $this; incr n
+    if {$n > 40} { puts "\n<<<GUARD too many prompts>>>"; exit 3 }
+    send -- "\r"; exp_continue
+  }
+  -re {[^\n]*: $} {
+    puts "\n<<<GUARD: unrecognized REQUIRED prompt -> stop (needs a handler)>>>"
+    exit 4
+  }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

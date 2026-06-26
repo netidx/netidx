@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+# Anonymous RESOLVER install on .13, novice flow (no flags). Exercises the
+# anonymous-only conf-server "Ask" branch (answer n => plain anonymous
+# resolver, no CA) and declines the OS service (we run it by hand).
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf install resolver
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it[^\n]*: ?$}                     { send -- "n\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}         { send -- "\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "anonymous\r"; exp_continue }
+  -re {conf server for this network[^\n]*: ?$} { send -- "n\r"; exp_continue }
+  -re {OS service[^\n]*: ?$}                  { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

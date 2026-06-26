@@ -1,0 +1,28 @@
+#!/usr/bin/expect -f
+# EU resolver-a, INTERACTIVE delegation child of HQ. Validates: (1) one-CA — must
+# NOT create a local CA; (2) single glyph-confirm — the parent's glyph is asked
+# exactly ONCE (enhancement #1). Blocks at each queue for remote approval.
+set timeout 800
+log_user 1
+set confirms 0
+spawn netidx conf resolver install --parent-conf-server 192.168.50.11:4565
+expect {
+  -re {creating the network's CA[^\n]*} { puts "\n<<<FIX FAILED: created a LOCAL CA>>>"; exit 9 }
+  -re {(is not one of|must not be empty|did not match what|denied this request|expired before|was not confirmed|no conf server could|Error:|refusing to overwrite|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {does this[^\n]*match[^\n]*: ?$}        { incr confirms; puts "\n\[\[GLYPH CONFIRM #$confirms\]\]"; send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "tls\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}    { send -- "resolver-a.eu.netidx.test\r"; exp_continue }
+  -re {subtree[^\n]*: ?$}                     { send -- "/eu\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}    { send -- "n\r"; exp_continue }
+  -re {conf server[^\n]*(host|this)[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {protected at rest[^\n]*: ?$}           { send -- "none\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}           { send -- "test123\r"; exp_continue }
+  -re {(request code|request queued|delegation requested|enrollment queued|Waiting for approval|send this code)[^\n]*} { exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { puts "\n=== TOTAL GLYPH CONFIRMS: $confirms ===\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

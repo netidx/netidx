@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# resolver-eu-a, INTERACTIVE (no answer-flags): only --parent-conf-server is the
+# structural "I am a child of this parent" pointer. Everything else is answered
+# at the prompt. With the one-CA fix the probe confirms the parent up front and
+# the install ENROLLS from HQ's CA — it must NOT create a local CA.
+set timeout 600
+log_user 1
+spawn netidx conf resolver install --parent-conf-server 192.168.50.11:4565
+expect {
+  -re {creating the network's CA[^\n]*} {
+      puts "\n<<<FIX FAILED: still creating a LOCAL CA>>>"; exit 9 }
+  -re {(is not one of|must not be empty|did not match|please try again|denied this request|expired before|could not be reached|was not confirmed|no conf server could|Error:|refusing to overwrite|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {does this[^\n]*match[^\n]*: ?$}        { send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "tls\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}    { send -- "resolver-a.eu.netidx.test\r"; exp_continue }
+  -re {(own TLS name|TLS name.*e\.g)[^\n]*: ?$} { send -- "resolver-a.eu.netidx.test\r"; exp_continue }
+  -re {domain[^\n]*: ?$}                      { send -- "eu.netidx.test\r"; exp_continue }
+  -re {subtree[^\n]*: ?$}                     { send -- "/eu\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}    { send -- "n\r"; exp_continue }
+  -re {conf server[^\n]*(host|this)[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {protected at rest[^\n]*: ?$}           { send -- "none\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}           { send -- "test123\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

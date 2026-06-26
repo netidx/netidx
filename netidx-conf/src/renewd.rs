@@ -345,13 +345,16 @@ async fn renew_identity(
                         format!("loading private key {}", id.private_key.display())
                     })?;
             // The original validity is what we re-request (capped by the
-            // approving admin's policy server-side).
-            let validity_days = ((na.saturating_sub(nb)) / 86_400).max(1) as u32;
+            // approving admin's policy server-side). Kept at second
+            // resolution so a short-lived cert renews to the same short
+            // window rather than silently rounding up to a day.
+            let validity =
+                Duration::from_secs(na.saturating_sub(nb).max(1));
             let pending = conf_client::enqueue_renewal(
                 ca_addr,
                 NodeKind::Client,
                 &name,
-                validity_days,
+                validity,
                 &cert_pem,
                 key,
                 roots.clone(),

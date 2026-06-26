@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# resolver-eu-a (.60.15): install as a CHILD of the HQ network via install-time
+# delegation. Enrolls resolver-a.eu.netidx.test from the shared HQ CA (explicit
+# addr, no mDNS), serves /eu, requests delegation of /eu. Queues for approval.
+set timeout 600
+log_user 1
+spawn netidx conf resolver install \
+  --parent-conf-server 192.168.50.11:4565 --delegate-subtree /eu \
+  --tls-name resolver-a.eu.netidx.test --tls-cert generate \
+  --listen 192.168.60.15:4564 --base /eu --key-protection none --with-service
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|denied this request|expired before|could not be reached|was not confirmed|no conf server could|Error:|refusing to overwrite|conflicts with)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {does this[^\n]*match[^\n]*: ?$}       { send -- "y\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}   { send -- "n\r"; exp_continue }
+  -re {conf server[^\n]*host[^\n]*: ?$}      { send -- "y\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}          { send -- "test123\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}               { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

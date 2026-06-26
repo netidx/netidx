@@ -521,7 +521,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     let cert_pem = std::fs::read_to_string(&resolver_issued.certificate)?;
     let now = ca_store::now_unix();
     let mut cadir = ca_store::CaDir::open(ca_dir.clone())?;
-    cadir.store.commit_signed(&ca_store::IssuedRecord {
+    cadir.store.lock().commit_signed(&ca_store::IssuedRecord {
         req: ca_store::QueuedReq::new(
             netidx_conf::conf_proto::NodeKind::Resolver,
             String::new(),
@@ -542,7 +542,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
         revoked: None,
         push_done: true,
     })?;
-    let revoked = cadir.store.revoke(
+    let revoked = cadir.store.lock().revoke(
         2,
         ca_store::Revocation {
             serial: 2,
@@ -552,13 +552,13 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     )?;
     assert!(revoked, "the issued serial should be live, then revoked");
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
-    cadir.store.write_crl(&ca_key)?;
+    cadir.store.lock().write_crl(&ca_key)?;
     let rcfg = netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
     let mut installed = false;
     for member in &rcfg.0.member_servers {
         if let cfg_resolver::file::Auth::Tls { trusted, .. } = &member.auth {
             let dest = std::path::Path::new(trusted.as_str()).with_file_name("crl.pem");
-            std::fs::copy(cadir.store.crl_path(), &dest)?;
+            std::fs::copy(cadir.store.lock().crl_path(), &dest)?;
             installed = true;
         }
     }

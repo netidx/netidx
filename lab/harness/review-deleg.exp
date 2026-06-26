@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Parent admin (eric) reviews + approves the EU /eu delegation request.
+set timeout 150
+log_user 1
+set PW "testpw12345"
+spawn netidx conf resolver review-delegation
+expect {
+  -re {(is not one of|must not be empty|did not match|Error:|authentication failed|denied|no pending|nothing to)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {pending[^\n]*requests?:?[^\n]*$}  { exp_continue }
+  -re {request code:?[^\n]*$}            { exp_continue }
+  -re {admin name[^\n]*: ?$}             { send -- "eric\r"; exp_continue }
+  -re {password[^\n]*: ?$}               { send -- "$PW\r"; exp_continue }
+  -re {(is this your network|does this[^\n]*match|match the requester)[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {request # to review[^\n]*: ?$}    { send -- "1\r"; exp_continue }
+  -re {action[^\n]*: ?$}                 { send -- "\r"; exp_continue }
+  -re {(approve|sign)[^\n]*\?[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {deny[^\n]*\?[^\n]*: ?$}           { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}           { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 0 }
+  eof { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

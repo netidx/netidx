@@ -69,6 +69,16 @@ const CROCKFORD32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// it renders to exactly 32 base32 chars with no padding).
 const RECOVERY_ENTROPY_BYTES: usize = 20;
 
+/// A long random password for a **signing** slot (the box-held `autorenew`
+/// credential), kept in a `Zeroizing` buffer that wipes on drop. Unlike a
+/// recovery password this is never read by a human — it lives only in the
+/// sealed keytab and in process memory — so it is plain hex with no
+/// confusable-character handling. Any signing-slot password unlocks MK, so
+/// treat it like the CA key.
+pub fn random_signing_password() -> Zeroizing<String> {
+    Zeroizing::new(format!("{}{}", crate::ca_store::new_id(), crate::ca_store::new_id()))
+}
+
 /// Generate a fresh recovery-slot password: 160 bits rendered as 32
 /// Crockford base32 characters. This canonical string is the actual slot
 /// password; [`group_recovery_password`] renders it in quads for the
@@ -206,13 +216,15 @@ pub struct CAVault {
 }
 
 impl CAVault {
-    /// A lock-free, file-backed handle to the vault at `dir`. The vault is
-    /// stateless (every method re-reads the file), so this constructor takes
-    /// no lock and never conflicts — use it for standalone vault ops (admin
-    /// management, unlock) that don't also touch the request store. Ops that
-    /// must stay consistent with the store go through [`crate::ca_store::CaDir`],
-    /// which holds the dir's exclusive lock.
-    pub fn new(dir: PathBuf) -> Self {
+    /// A file-backed handle to the vault at `dir`. `pub(crate)` on purpose:
+    /// the only way to reach a vault from outside this crate is through
+    /// [`crate::ca_store::CaDir`], which holds the dir's exclusive flock. That
+    /// makes the daemon (and `ca init` / offline issuance, which open a
+    /// `CaDir` themselves) the only writers — no CLI can touch the vault
+    /// behind the daemon's back. The vault is stateless (every method re-reads
+    /// the file), so the handle itself takes no lock; the flock lives on the
+    /// `CaDir` that owns it.
+    pub(crate) fn new(dir: PathBuf) -> Self {
         CAVault { dir }
     }
 
@@ -437,6 +449,39 @@ impl CAVault {
             .find(|s| s.admin == admin)
             .map(|s| (s.kind, s.policy.clone()))
             .ok_or_else(|| anyhow!("no admin named {admin:?}"))
+    }
+
+    /// Re-wrap a **signing** slot's master key under a fresh password, in
+    /// place — the slot keeps its name, tier, and policy, and no slot is
+    /// added or removed. `old_password` must unlock the target signing slot:
+    /// holding the slot's current password IS the authority to rotate it.
+    ///
+    /// This is how the box rotates its OWN `autorenew` credential live, with
+    /// no second signing slot to authorize a remove-then-re-add — the daemon
+    /// holds only the autorenew password, recovers MK with it, and re-wraps
+    /// the same slot under a new password. Both MK-holders are preserved, so
+    /// the `recovery` backstop is untouched. Returns an error (and leaves the
+    /// vault unchanged) if the password unlocks a *different* slot, so a
+    /// caller can't rekey the wrong credential by mistake.
+    pub fn rekey_signing_slot(
+        &mut self,
+        target_admin: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        let (idx, mk) = recover_mk(&vault, old_password)?;
+        if vault.slots[idx].admin != target_admin {
+            bail!(
+                "that password unlocks {:?}, not {target_admin:?}; refusing to rekey a \
+                 different slot",
+                vault.slots[idx].admin
+            );
+        }
+        let policy = vault.slots[idx].policy.clone();
+        vault.slots[idx] = make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
+        write_vault(&path, &vault)
     }
 }
 

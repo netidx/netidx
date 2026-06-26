@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# Anonymous-data-plane resolver WITH a conf server + CA on the parent host
+# (.11). The conf plane is always TLS. Decline OS service + auto-renew (run
+# daemons by hand). Guard discipline: any unrecognized prompt -> stop.
+set timeout 120
+log_user 1
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf resolver install
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {conf server to join[^\n]*: ?$}              { send -- "\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                      { send -- "anonymous\r"; exp_continue }
+  -re {conf server for this network[^\n]*: ?$}     { send -- "y\r"; exp_continue }
+  -re {set a CA password[^\n]*: ?$}                { send -- "$PW\r"; exp_continue }
+  -re {private key password[^\n]*: ?$}             { send -- "$PW\r"; exp_continue }
+  -re {again: ?$}                                  { send -- "$PW\r"; exp_continue }
+  -re {approve certificate renewals[^\n]*: ?$}     { send -- "n\r"; exp_continue }
+  -re {OS service[^\n]*: ?$}                       { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                      { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

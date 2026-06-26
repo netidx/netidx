@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+# Drive `netidx conf workstation join` on .13 (a local-only workstation)
+# to attach to .12's discovered anonymous network. Confirm the glyph (y).
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf workstation join
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|not confirmed|already)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it[^\n]*: ?$}                     { send -- "y\r"; exp_continue }
+  -re {does this match[^\n]*: ?$}             { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

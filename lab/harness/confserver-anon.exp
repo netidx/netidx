@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Stand up an anonymous-data-plane resolver WITH a conf server + CA on .12
+# (the conf plane is always TLS). Decline the OS service (we run the
+# daemons by hand) and auto-renewal (no keytab on the lab). Leftmost-match
+# + ANSI-tolerant discipline.
+set timeout 90
+log_user 1
+set PW "testpw12345"
+spawn /usr/local/bin/netidx conf resolver install
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {conf server to join[^\n]*: ?$}              { send -- "\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                      { send -- "anonymous\r"; exp_continue }
+  -re {conf server for this network[^\n]*: ?$}     { send -- "y\r"; exp_continue }
+  -re {set a CA password[^\n]*: ?$}                { send -- "$PW\r"; exp_continue }
+  -re {private key password[^\n]*: ?$}             { send -- "$PW\r"; exp_continue }
+  -re {again: ?$}                                  { send -- "$PW\r"; exp_continue }
+  -re {approve certificate renewals[^\n]*: ?$}     { send -- "n\r"; exp_continue }
+  -re {OS service[^\n]*: ?$}                       { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                      { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

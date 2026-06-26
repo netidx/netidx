@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# Install a workstation on .13 that DISCOVERS and JOINS .12's anonymous
+# network (mDNS -> glyph-confirm -> aggregate). Answer the glyph match y
+# (its default is N). Decline the OS service (run the resolver by hand).
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf workstation install
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite|not confirmed)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it[^\n]*: ?$}                     { send -- "y\r"; exp_continue }
+  -re {does this match[^\n]*: ?$}             { send -- "y\r"; exp_continue }
+  -re {OS service[^\n]*: ?$}                  { send -- "n\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

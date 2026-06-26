@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Phase 1: server-only CA init on the HQ box (.11), TPM-less VM => --insecure-no-tpm.
+# Pre-seeds all policy via flags; only the superuser password is interactive,
+# and the recovery base32 quads are PRINTED (captured from this transcript).
+set timeout 180
+log_user 1
+set PW "testpw12345"
+spawn netidx conf ca init \
+  --domain netidx.test --cn ca.netidx.test \
+  --admin eric --allow-san *.netidx.test --max-validity-days 365 \
+  --id-map-group users --may-enroll-servers true \
+  --insecure-no-tpm --with-server --listen 192.168.50.11:4565 --no-service
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|refusing to overwrite|already exists)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {password for superuser[^\n]*: ?$}  { send -- "$PW\r"; exp_continue }
+  -re {again: ?$}                          { send -- "$PW\r"; exp_continue }
+  -re {confirm[^\n]*: ?$}                  { send -- "$PW\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}             { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+# krb5 resolver install on .11 (root, --no-conf-server) choosing the NEW
+# "none" principal-mapping option (DoNotMap). Leftmost-match discipline:
+# the named "principal mapping" rule precedes the bracketed-default rule
+# so it sends "none" instead of the default "platform".
+set timeout 120
+log_user 1
+spawn /usr/local/bin/netidx conf install resolver --no-conf-server
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "krb5\r"; exp_continue }
+  -re {principal mapping[^\n]*: ?$}           { send -- "none\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}         { send -- "\r"; exp_continue }
+  -re {OS service now[^\n]*: ?$}              { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

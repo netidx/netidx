@@ -33,6 +33,8 @@ mdns-sd = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 globset = { workspace = true }

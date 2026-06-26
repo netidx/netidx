@@ -1,0 +1,143 @@
+# netidx conf / CA test lab
+
+A libvirt VM lab for exercising the `netidx conf` setup wizards, the CA + conf
+server, resolver/publisher/workstation installs, delegation, remote service
+control, and cert auto-renewal — across the anonymous, TLS, and Kerberos auth
+schemes, over a WAN-shaped multi-site topology.
+
+These files were authored in `/tmp` on the host and are kept here so a host
+reboot doesn't lose them. **After a reboot, run `./restore-to-tmp.sh`** to
+re-stage everything into `/tmp` — the expect drivers and shell scripts call
+each other (and the deployed `/tmp/netidx.deploy` binary) by absolute `/tmp`
+paths, so they must live in `/tmp` to run as written.
+
+The stripped lab binary itself (`/tmp/netidx.deploy`, ~43 MB) is **not** kept
+in the tree — rebuild it with `scripts/redeploy.sh`.
+
+## libvirt
+
+Everything is on the **system** libvirt instance, not the session one:
+
+```sh
+export LIBVIRT_DEFAULT_URI=qemu:///system   # or: virsh -c qemu:///system ...
+```
+
+The three lab networks (`netidx-test`, `netidx-eu`, `netidx-ap`) are persistent
++ autostart and are **not** torn down between runs. Domain names contain spaces
+(`debian13 resolver0`), so quote them: `virsh start "debian13 resolver0"`.
+
+## Topology
+
+Three sites joined by one tri-homed netem WAN router (`scripts/wan` injects
+loss/latency/partitions). HQ serves `/`, EU serves `/eu`, AP serves `/ap`.
+
+| Domain                     | IP             | Role |
+|----------------------------|----------------|------|
+| `debian13 resolver0`       | 192.168.50.11  | **HQ keystone**: CA host + conf-server (:4565) + resolver member 0 + KDC. superuser `eric` / `testpw12345`. CA dir `/root/.config/netidx/ca` |
+| `debian13 publisher`       | 192.168.50.12  | HQ resolver member 1 (disk named "publisher", repurposed) |
+| `debian13 workstation`     | 192.168.50.13  | HQ workstation / subscriber |
+| `debian13 dev`             | 192.168.50.14  | devbox / build box (16 G); rsync+build target for `redeploy.sh` |
+| `debian13 hq-publisher`    | 192.168.50.17  | HQ publisher |
+| `debian13 resolver1`       | 192.168.60.15  | EU satellite resolver member 0 (serves `/eu`) |
+| `debian13 resolver2`       | 192.168.60.16  | EU satellite resolver member 1 |
+| `debian13 eu-publisher`    | 192.168.60.17  | EU publisher |
+| `debian13 eu-workstation`  | 192.168.60.18  | EU workstation |
+| `debian13 ap-resolver-a`   | 192.168.70.11  | AP satellite resolver member 0 (serves `/ap`) |
+| `debian13 ap-resolver-b`   | 192.168.70.12  | AP satellite resolver member 1 |
+| `debian13 ap-publisher`    | 192.168.70.13  | AP publisher |
+| `debian13 ap-workstation`  | 192.168.70.14  | AP workstation |
+| `debian13 router`          | .50.2/.60.2/.70.2 | tri-homed netem WAN router; hosts `wan` at `/usr/local/bin/wan` |
+
+Networks: `netidx-test` 192.168.50.0/24 (HQ, NAT), `netidx-eu` 192.168.60.0/24
+(isolated — router is the only path off-subnet), `netidx-ap` 192.168.70.0/24
+(isolated). HQ guests get a route to 60/70 via .50.2; EU/AP guests get their
+default gw from DHCP (router .60.2/.70.2).
+
+## Clean
+
+VMs are throwaway (snapshot/discard). Per-host reset over SSH (root key-auth):
+
+```sh
+ssh -n root@<ip> 'bash -s' < scripts/teardown2.sh   # thorough: units, procs,
+                                                     # ~/.config + ~/.local/share + /etc units
+ssh -n root@<ip> 'bash -s' < scripts/teardown.sh     # lighter: only ~/.config/netidx
+```
+
+Use `teardown2.sh` for a truly pristine box. The KDC on .11 (realm
+`NETIDX.TEST`) survives a reset. Networks are left alone — don't touch them.
+
+## Bring up
+
+1. `virsh start` the domains you need (router first for a WAN run). Start
+   `debian13 dev` for builds.
+2. Deploy the binary: `scripts/redeploy.sh <ip> [<ip> ...]` — rsyncs the host
+   repo to devbox .14, `cargo build -p netidx-tools --bin netidx`, strips, scps
+   to each `/usr/local/bin/netidx`. (`scripts/build2.sh` / `build-fixed.sh` are
+   convenience wrappers for specific host sets.)
+3. Bootstrap CA + conf-server on .11: `netidx conf ca init --insecure-no-tpm`
+   (harness `harness/ca-init-i.exp`). Recovery quad is **printed once** — capture
+   it. Two-slot vault = recovery + autorenew.
+4. Enroll the rest interactively, each approved on .11 with `netidx conf ca
+   approve` (`harness/ca-approve.exp`): resolver-B (`harness/res.exp` /
+   `res-b-install.exp`), publisher (`harness/pub.exp`), workstation
+   (`harness/ws.exp`). Satellites: `resolver install --parent-conf-server
+   192.168.50.11:4565` then `review-delegation` at HQ
+   (`harness/sat1-install.exp`, `sat2-install.exp`, `review-deleg.exp`).
+5. Run daemons by hand: `scripts/start-member.sh <id>` (resolver + conf server),
+   or `scripts/start-conf.sh` (conf server only). Both `nohup` into `/root/*.log`.
+
+## Daemon start commands
+
+```sh
+# conf server (CA + conf plane, :4565), foreground:
+netidx conf component server run -c /root/.config/netidx/conf-server.json -f
+# resolver member (:4564), --id selects the cluster member index:
+netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f
+# cert auto-renewal puller (NOT run by default — lab installs decline it):
+netidx conf component tls auto-renew run
+```
+
+## Harnesses (`harness/*.exp`)
+
+Grouped by function; names are prefixed so the directory listing sorts into
+these groups. Some are **iteration variants** (`-fixed`, `-full`, `-retry`,
+`-i`) kept for safety — prune to the canonical one once confirmed.
+
+- **CA bootstrap / ops**: `ca-init.exp`, `ca-init-i.exp`, `ca-approve.exp`,
+  `ca-peek.exp`, `ca-issue.exp`, `ca-issue-stolen.exp`, `ca-revoke.exp`,
+  `recovery-rotate.exp`
+- **Resolver installs**: `res.exp`, `res-install-11.exp`, `res-b-install.exp`,
+  `res-hq-a-i.exp`, `res-anon-11.exp`, `res-anon-install.exp`, `res-krb5-11.exp`,
+  `res-eu-a*.exp`, `install-resolver-krb5*.exp`, `install-anon-11.exp`,
+  `install-asia.exp`, `drive-resolver-tls-real.exp`, `safe-drive-resolver.exp`,
+  `dryrun-resolver-krb5.exp`
+- **Publisher installs**: `pub.exp`, `pub-install.exp`, `pub-install-hq.exp`,
+  `pub-anon-install.exp`, `pub-enroll-eric.exp`, `pub-krb5-install.exp`,
+  `pub-krb5-dryrun.exp`, `approve-pub.exp`, `revoke-pub.exp`,
+  `drive-publisher-enroll.exp`, `drive-ca-sign.exp`
+- **Workstation installs**: `ws.exp`, `ws-install-hq.exp`, `ws-join-anon.exp`,
+  `ws-join-cmd.exp`, `ws-krb5-install.exp`, `ws-krb5-dryrun.exp`,
+  `drive-workstation.exp`, `drive-uninstall.exp`
+- **Delegation**: `add-parent.exp`, `join-dryrun-12.exp`, `review-deleg.exp`,
+  `review-deleg-fixed.exp`, `review.exp`, `review-retry.exp`, `review-deny.exp`,
+  `sat1-install.exp`, `sat2-install.exp`, `verify-b.exp`
+- **Admin / RBAC**: `add-role.exp`, `add-role-euops.exp`, `ca-approve-euops.exp`,
+  `escalate-test.exp`
+- **Perms edit**: `perms-edit.exp`, `perms-show.exp` (paired with the fake
+  `$EDITOR` injectors `scripts/edit-add.sh` / `edit-inject.sh`)
+- **Service control**: `sc.exp`
+- **Anonymous conf**: `confserver-anon.exp`
+
+## Scripts (`scripts/`)
+
+- **Lifecycle**: `teardown.sh`, `teardown2.sh`, `start-member.sh`,
+  `start-conf.sh`, `inv.sh` (inventory probe), `redeploy.sh`, `build2.sh`,
+  `build-fixed.sh`, `capture.sh` (dump a host's configs), `probe2.sh` (net
+  probe), `launch-install.sh`, `launch-addparent.sh`, `runpub.sh`, `pub.sh`,
+  `pub-eu.sh`
+- **Topology / router**: `wan` (2-leg netem helper), `wan3.sh` (3-leg; deployed
+  to the router as `/usr/local/bin/wan`), `gendom.py` (domain XML generator),
+  `hosts3seg` (unified `/etc/hosts`), `netA-route.sh`, `router-setup.sh`,
+  `router-probe.sh`
+- **Delegation tamper tests**: `drop_peer.py`, `untamper.py`,
+  `verify_and_tamper.py`

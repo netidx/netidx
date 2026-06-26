@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# Approver as root on the CA host. Same leftmost-match discipline.
+set timeout 90
+log_user 1
+spawn /usr/local/bin/netidx conf ca sign
+expect {
+  -re {(queue is empty|only unapproved|enter a number)[^\n]*} {
+      puts "\n<<<NOTE: $expect_out(0,string)>>>"; exp_continue }
+  -re {does this code match[^\n]*: ?$}                { send -- "y\r"; exp_continue }
+  -re {request # to review[^\n]*: ?$}                 { send -- "1\r"; exp_continue }
+  -re {CA password for admin[^\n]*: ?$}               { send -- "testpw12345\r"; exp_continue }
+  -re {approved and signed[^\n]*}                     { puts "\n<<<APPROVED>>>"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                         { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

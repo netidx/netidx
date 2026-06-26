@@ -5,6 +5,15 @@
 //! the types must be cross-platform even though the vault is `#[cfg(unix)]`.
 
 use serde_derive::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// The `max_validity` for the system-managed signing slots (autorenew,
+/// recovery) and the local superuser. Deliberately huge: the real bound on
+/// any leaf is the CA-remaining clamp in `Ca::sign_request` (a leaf can never
+/// outlive its issuer), so this only needs to be wide enough never to clip a
+/// legitimate renewal of a long-lived leaf — which a hardcoded 730 days did.
+const SIGNING_SLOT_MAX_VALIDITY: Duration =
+    Duration::from_secs(100 * 365 * 86400);
 
 /// An admin's capabilities, stored in their slot and returned by
 /// `authenticate` so the server can authorize a request against exactly
@@ -19,7 +28,12 @@ pub struct Policy {
     /// Empty ⇒ may not cause any issuance (granted explicitly; no
     /// accidental allow-everything).
     pub allowed_san: Vec<String>,
-    pub max_validity_days: u32,
+    /// The longest leaf validity the server will sign on this admin's
+    /// behalf. A requested validity is capped to this (and then clamped to
+    /// the CA's own remaining lifetime). Stored human-readably
+    /// (`"730days"`, `"10m"`) in the vault and on the wire.
+    #[serde(with = "humantime_serde")]
+    pub max_validity: Duration,
     /// id-map groups this admin **may assign** when signing — the
     /// allowed set bounding the groups chosen at enrollment time in
     /// the `SignRequest`. Empty ⇒ this admin's signs never register
@@ -79,4 +93,51 @@ pub struct AdminInfo {
     pub admin: String,
     pub kind: SlotKind,
     pub policy: Policy,
+}
+
+/// The minimal policy carried by the box's `autorenew` signing slot. It
+/// holds the master key, so its authority is the signing tier — not this
+/// policy, which is deliberately empty (no issuance glob, no admin
+/// management): the slot exists to let the daemon sign verified renewals and
+/// unlock the key, nothing a glob would widen.
+///
+/// `max_validity` is the one field that must be wide enough: the autorenew
+/// sweep auto-approves *renewals*, each re-requesting its cert's original
+/// validity, so the cap has to admit any leaf this CA could have issued —
+/// see [`SIGNING_SLOT_MAX_VALIDITY`]. (A hardcoded 730d here silently clipped
+/// any longer-lived leaf's renewal.)
+pub fn autorenew_policy() -> Policy {
+    Policy {
+        allowed_san: vec![],
+        max_validity: SIGNING_SLOT_MAX_VALIDITY,
+        id_map_groups: vec![],
+        may_enroll_servers: false,
+        perms_edit_scopes: vec![],
+        may_manage_admins: false,
+        service_control_scopes: vec![],
+    }
+}
+
+/// The policy on the `recovery` (off-box break-glass) signing slot — the
+/// same minimal shape as [`autorenew_policy`]. Its power is the signing
+/// tier (it can unlock the key to mint/rotate admins), not the glob.
+pub fn recovery_policy() -> Policy {
+    autorenew_policy()
+}
+
+/// The policy attached to a synthetic local-control-socket superuser. A
+/// local request authorizes as a signing slot — the tier is what every
+/// admin-management gate checks — so these fields are mostly moot; they are
+/// set to full authority so any code that *reads* the policy (rather than
+/// the tier) also sees a superuser.
+pub fn superuser_policy() -> Policy {
+    Policy {
+        allowed_san: vec!["*".to_string()],
+        max_validity: SIGNING_SLOT_MAX_VALIDITY,
+        id_map_groups: vec![],
+        may_enroll_servers: true,
+        perms_edit_scopes: vec!["/".to_string()],
+        may_manage_admins: true,
+        service_control_scopes: vec!["/".to_string()],
+    }
 }

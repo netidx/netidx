@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+# Resolver-B (.12) interactive TLS install: discover HQ network, enroll
+# resolver-b.netidx.test, then enroll a conf server here (2 approvals).
+log_user 1
+set timeout 480
+spawn netidx conf resolver install
+expect {
+  -re {creating the network's CA} { puts "\n<<<GUARD: creating a CA>>>"; exit 9 }
+  -re {(Error:|did not match what|denied this request|expired before|refusing to overwrite|no usable TPM)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {(Waiting for approval|request code|request queued|enrollment queued|issued from|got TLS identity|send this code|searching for netidx|resolver\(s\)|importing auth scheme|installing the netidx id-mapper|enrolling a conf server|note: )} { exp_continue }
+  -re {join it\?[^\n]*: ?$}                          { send -- "y\r"; exp_continue }
+  -re {existing conf server to join[^\n]*: ?$}       { send -- "192.168.50.11:4565\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}               { send -- "y\r"; exp_continue }
+  -re {advertised IP[^\n]*: ?$}                      { send -- "192.168.50.12\r"; exp_continue }
+  -re {TLS domain[^\n]*: ?$}                         { send -- "netidx.test\r"; exp_continue }
+  -re {this resolver's name[^\n]*: ?$}               { send -- "resolver-b\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}           { send -- "resolver-b.netidx.test\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                        { send -- "tls\r"; exp_continue }
+  -re {private key protection[^\n]*: ?$}             { send -- "none\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}           { send -- "n\r"; exp_continue }
+  -re {conf server[^\n]*host[^\n]*: ?$}              { send -- "y\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$}    { send -- "y\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}                  { send -- "test123\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                        { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<FIX unknown prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 7 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

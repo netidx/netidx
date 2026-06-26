@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# eu-ops (no may_manage_admins, scope /eu) attempts to mint a BROAD admin.
+# The CA must refuse (authz gate / no-escalation). Denial = success here.
+set timeout 60
+log_user 1
+spawn netidx conf ca admin add-role --server 192.168.50.11:4565 --ca-dir /root/.config/netidx/ca \
+  --name rogue --allow-san *.netidx.test --max-validity-days 365 \
+  --id-map-group users --may-enroll-servers true --service-scope / --perms-scope /
+expect {
+  -re {(not authorized|denied|may_manage_admins|escalat|exceeds|not.*subset|refus|forbidden|Error:)[^\n]*} {
+      puts "\n<<<DENIED (expected): $expect_out(0,string)>>>"; }
+  -re {your admin name[^\n]*: ?$}       { send -- "eu-ops\r"; exp_continue }
+  -re {admin name[^\n]*: ?$}            { send -- "eu-ops\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {new role admin[^\n]*: ?$}        { send -- "roguepw123\r"; exp_continue }
+  -re {again[^\n]*: ?$}                 { send -- "roguepw123\r"; exp_continue }
+  -re {CA password for admin[^\n]*: ?$} { send -- "euops12345\r"; exp_continue }
+  -re {password[^\n]*: ?$}              { send -- "euops12345\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}          { send -- "\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { puts "\n<<<EOF>>>" }
+}
+catch wait result
+puts "RC=[lindex $result 3]"

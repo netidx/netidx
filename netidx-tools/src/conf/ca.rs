@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use netidx_conf::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    ca_vault, conf_client,
+    ca_vault, conf_client, conf_local,
     conf_proto::{self, NodeKind},
     fingerprint::{ColorMode, Fingerprint},
     paths, tls,
@@ -495,15 +495,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 pub(super) const AUTORENEW_ADMIN: &str = netidx_conf::conf_server::AUTORENEW_ADMIN;
 
 fn autorenew_policy() -> ca_vault::Policy {
-    ca_vault::Policy {
-        allowed_san: vec![],
-        max_validity_days: 730,
-        id_map_groups: vec![],
-        may_enroll_servers: false,
-        perms_edit_scopes: vec![],
-        may_manage_admins: false,
-        service_control_scopes: vec![],
-    }
+    netidx_conf::ca_policy::autorenew_policy()
 }
 
 /// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
@@ -517,11 +509,7 @@ fn autorenew_keytab_path() -> Result<PathBuf> {
 /// plaintext in a `Zeroizing` buffer that wipes on drop (it is dropped right
 /// after sealing / writing the keytab).
 fn random_password() -> Zeroizing<String> {
-    Zeroizing::new(format!(
-        "{}{}",
-        netidx_conf::ca_store::new_id(),
-        netidx_conf::ca_store::new_id()
-    ))
+    netidx_conf::ca_vault::random_signing_password()
 }
 
 /// Create (or replace) the autorenew slot + keytab. `recovery_password`
@@ -539,20 +527,22 @@ fn random_password() -> Zeroizing<String> {
 /// TPM (or a flaky one — setup must not dead-end) falls back to the
 /// plaintext keytab with a note saying what that costs.
 pub(super) fn setup_autorenew_slot(
-    ca_dir: &Path,
+    cadir: &netidx_conf::ca_store::CaDir,
     recovery_password: &str,
     insecure_no_tpm: bool,
 ) -> Result<PathBuf> {
     // Replace-not-fail: rotation and re-runs both land here.
-    let exists = ca_vault::CAVault::new(ca_dir.to_path_buf())
+    let exists = cadir
+        .vault
+        .read()
         .list_admins()?
         .iter()
         .any(|info| info.admin == AUTORENEW_ADMIN);
     if exists {
-        ca_vault::CAVault::new(ca_dir.to_path_buf()).remove_slot(AUTORENEW_ADMIN, false)?;
+        cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false)?;
     }
     let password = random_password();
-    ca_vault::CAVault::new(ca_dir.to_path_buf()).add_signing_slot(
+    cadir.vault.write().add_signing_slot(
         recovery_password,
         AUTORENEW_ADMIN,
         &password,
@@ -589,7 +579,7 @@ pub(super) fn setup_autorenew_slot(
             // Refuse: undo the slot we just minted so the vault is unchanged,
             // and don't write the plaintext keytab. The operator can fix the
             // TPM and re-run, or opt in with --insecure-no-tpm.
-            let _ = ca_vault::CAVault::new(ca_dir.to_path_buf()).remove_slot(AUTORENEW_ADMIN, false);
+            let _ = cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false);
             bail!(
                 "the autorenew credential could not be sealed to this host's {mech} \
                  ({e:#}). Writing it in plaintext would be equivalent to backing up the \
@@ -613,9 +603,26 @@ pub(super) fn setup_autorenew_slot(
 fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
-    // Same gate as init: refuse on a TPM-less host unless the operator opts
-    // into a plaintext keytab. (Re-minting the box credential here is exactly
-    // the moment a plaintext fallback would leak it.)
+    let cfg_path = paths::discover_conf_server_config().ok();
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Hot-swap path: the running daemon owns the CA, so it rotates the box
+    // credential in-process (re-wraps the slot, swaps the live key, rewrites
+    // the keytab) with no downtime — no flock, no recovery password.
+    if let Some(cfg) = &cfg_path
+        && rt.block_on(conf_local::daemon_running(cfg))
+    {
+        let warning = rt.block_on(conf_local::rotate_autorenew(cfg))?;
+        println!("auto-approve rotated (hot-swapped on the running conf server, no downtime)");
+        if let Some(w) = warning {
+            eprintln!("WARNING: {w}");
+        }
+        return Ok(());
+    }
+    // Offline / first-time setup: the daemon is down, so take the flock and
+    // mint the slot directly. Same gate as init: refuse on a TPM-less host
+    // unless the operator opts into a plaintext keytab. (Re-minting the box
+    // credential here is exactly the moment a plaintext fallback would leak
+    // it.)
     tpm_gate(p.insecure_no_tpm)?;
     // Re-minting autorenew removes the old slot first, so the recovery
     // password (not the old keytab) is what authorizes it — and after a TPM
@@ -626,7 +633,9 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
          autorenew credential)",
     )?);
     let recovery = ca_vault::normalize_recovery_password(&typed);
-    let keytab = setup_autorenew_slot(&dir, &recovery, p.insecure_no_tpm)?;
+    let cadir = netidx_conf::ca_store::CaDir::open(&dir)
+        .context("setting up autorenew needs exclusive access; the conf server must be stopped")?;
+    let keytab = setup_autorenew_slot(&cadir, &recovery, p.insecure_no_tpm)?;
     let verb = if p.rotate { "rotated" } else { "enabled" };
     println!("auto-approve {verb}:");
     println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
@@ -945,10 +954,14 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         validity_days: opts.validity_days,
     })?;
     let recovery_pw = ca_vault::gen_recovery_password();
+    // One flock for the whole init: the new dir is ours exclusively until
+    // every slot is minted. The helpers below borrow this same handle.
+    let cadir = netidx_conf::ca_store::CaDir::open(&opts.dir)
+        .context("opening the new CA directory")?;
     // Should sealing fail mid-write, roll back the cert + serial
     // `init_vaulted` committed so the dir isn't a keyless half-CA that
     // blocks a clean retry. The in-memory key zeroizes on the way out.
-    if let Err(e) = ca_vault::CAVault::new(opts.dir.clone()).create(
+    if let Err(e) = cadir.vault.write().create(
         &key_pem,
         ca_vault::RECOVERY_ADMIN,
         &recovery_pw,
@@ -990,7 +1003,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         // with. Mandatory for a server CA. Authorized by the recovery
         // password we just minted; sealed to the TPM (or plaintext under
         // --insecure-no-tpm, which the gate above already warned about).
-        let keytab = setup_autorenew_slot(&opts.dir, &recovery_pw, opts.insecure_no_tpm)?;
+        let keytab = setup_autorenew_slot(&cadir, &recovery_pw, opts.insecure_no_tpm)?;
         let cfg_path = super::server::set_ca_autorenew(&keytab)?;
         println!("automatic renewal approval enabled:");
         println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
@@ -1000,7 +1013,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         // The founding SUPERUSER role admin: it directs the server (mint
         // admins, edit perms, enroll servers) but wraps no MK, so its
         // password can NEVER unlock the CA key — only the server signs.
-        setup_superuser(&opts, &common_name)?;
+        setup_superuser(&cadir, &opts, &common_name)?;
         need
     } else {
         // An offline CA has no daemon to sign on anyone's behalf, so it
@@ -1018,7 +1031,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
 /// leaked-then-typed recovery password from issuing arbitrary certs over the
 /// wire (it can still revoke, which every signing slot can).
 fn recovery_policy() -> ca_vault::Policy {
-    autorenew_policy()
+    netidx_conf::ca_policy::recovery_policy()
 }
 
 /// Refuse to build a CA on a host with no usable TPM / Secure Enclave —
@@ -1075,7 +1088,11 @@ fn print_recovery_password(pw: &str) {
 /// edits perms anywhere, and manages other admins — yet it wraps no master
 /// key, so its password can never unlock the CA. Only minted for a server
 /// CA (a role admin authenticates to the daemon).
-fn setup_superuser(opts: &NewCaOpts, cn: &str) -> Result<()> {
+fn setup_superuser(
+    cadir: &netidx_conf::ca_store::CaDir,
+    opts: &NewCaOpts,
+    cn: &str,
+) -> Result<()> {
     let name = match env_user_name() {
         Some(user) => prompt::string_with_default("superuser admin name", opts.admin.clone(), &user)?,
         None => prompt::required_string("superuser admin name", opts.admin.clone())?,
@@ -1107,7 +1124,7 @@ fn setup_superuser(opts: &NewCaOpts, cn: &str) -> Result<()> {
     policy.service_control_scopes = vec!["/".to_string()];
     policy.may_manage_admins = true;
     let pw = collect_required_password(&format!("password for superuser {name:?}"))?;
-    ca_vault::CAVault::new(opts.dir.clone()).add_role_slot(&name, &pw, policy)?;
+    cadir.vault.write().add_role_slot(&name, &pw, policy)?;
     println!();
     println!("superuser role admin {name:?} created — it manages admins, edits perms,");
     println!("and enrolls servers, but never unlocks the CA key (the server signs).");
@@ -1125,13 +1142,28 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
 
 fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
+    let cfg_path = paths::discover_conf_server_config().ok();
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    // Prefer the running daemon: it owns the CA and re-wraps the recovery
+    // slot with its own on-box autorenew credential, so no flock contention
+    // and no offline keytab handling here.
+    if let Some(cfg) = &cfg_path
+        && rt.block_on(conf_local::daemon_running(cfg))
+    {
+        let new_pw = rt.block_on(conf_local::rotate_recovery(cfg))?;
+        println!("rotated the recovery password (via the running conf server)");
+        print_recovery_password(&new_pw);
+        return Ok(());
+    }
+    // Offline break-glass (daemon down): take the flock and rotate the slot
+    // directly. The autorenew keytab is the on-box authority: it holds a
+    // signing-slot password (sealed to this machine), and re-minting the
+    // recovery slot recovers MK to wrap it. This is why rotation works
+    // without the lost recovery password — but only on the box that holds
+    // the keytab.
     if !ca_vault::CAVault::exists(&dir) {
         bail!("no vault-protected CA at {}", dir.display());
     }
-    // The autorenew keytab is the on-box authority: it holds a signing-slot
-    // password (sealed to this machine), and re-minting the recovery slot
-    // recovers MK to wrap it. This is why rotation works without the lost
-    // recovery password — but only on the box that holds the keytab.
     let keytab = autorenew_keytab_path()?;
     let autorenew_pw = netidx_conf::conf_server::read_autorenew_password(&keytab)
         .with_context(|| {
@@ -1142,10 +1174,12 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
                 keytab.display()
             )
         })?;
+    let cadir = netidx_conf::ca_store::CaDir::open(&dir)
+        .context("rotating recovery needs exclusive access; stop the conf server first")?;
     // Confirm the keytab credential actually unlocks this CA BEFORE removing
     // the old recovery slot — a stale keytab must not leave the CA with no
     // recovery slot. (The recovered key is dropped/zeroized immediately.)
-    ca_vault::CAVault::new(dir.clone()).unlock(&autorenew_pw).with_context(|| {
+    cadir.vault.read().unlock(&autorenew_pw).with_context(|| {
         format!(
             "the autorenew keytab ({}) did not unlock this CA — its credential is \
              stale. Re-mint it with `netidx conf ca auto-approve --rotate` (needs the \
@@ -1157,15 +1191,17 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     // the signing slot throughout, so the master key is never orphaned; if
     // the re-mint fails, autorenew still unlocks and the rotate can be
     // retried.
-    let exists = ca_vault::CAVault::new(dir.clone())
+    let exists = cadir
+        .vault
+        .read()
         .list_admins()?
         .iter()
         .any(|i| i.admin == ca_vault::RECOVERY_ADMIN);
     if exists {
-        ca_vault::CAVault::new(dir.clone()).remove_slot(ca_vault::RECOVERY_ADMIN, false)?;
+        cadir.vault.write().remove_slot(ca_vault::RECOVERY_ADMIN, false)?;
     }
     let new_pw = ca_vault::gen_recovery_password();
-    ca_vault::CAVault::new(dir.clone()).add_signing_slot(
+    cadir.vault.write().add_signing_slot(
         &autorenew_pw,
         ca_vault::RECOVERY_ADMIN,
         &new_pw,
@@ -1353,23 +1389,22 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 println!("added role admin {name:?} on the CA at {server}");
                 return Ok(());
             }
-            // A role admin carries a full policy, just like the founding
-            // superuser. A role with no authority at all is allowed (a
-            // placeholder to scope later).
-            let dir = ca_dir_for(a.ca_dir)?;
-            let policy = prompt_policy(&policy_args, false, &existing_ca_cn(&dir), None)?;
-            let summary = format!(
-                "allowed_san={:?} may_enroll_servers={} perms_edit_scopes={:?} \
-                 service_control_scopes={:?}",
-                policy.allowed_san,
-                policy.may_enroll_servers,
-                policy.perms_edit_scopes,
-                policy.service_control_scopes
-            );
+            // Local: the running daemon owns the vault; it trusts this peer
+            // as a superuser over the control socket (no password). A role
+            // with no authority at all is allowed (a placeholder to scope
+            // later). The CN default is read from the local CA's public cert.
+            let cfg_path = paths::discover_conf_server_config()?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let policy = prompt_policy(
+                &policy_args,
+                false,
+                &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
+                None,
+            )?;
             let new_pw =
                 collect_required_password(&format!("password for new role admin {name:?}"))?;
-            ca_vault::CAVault::new(dir.clone()).add_role_slot(&name, &new_pw, policy)?;
-            println!("added role admin {name:?}: {summary}");
+            rt.block_on(conf_local::add_role_admin(&cfg_path, &name, &new_pw, policy))?;
+            println!("added role admin {name:?} (via the local conf server)");
             Ok(())
         }
         AdminCmd::SetPolicy(a) => {
@@ -1409,23 +1444,19 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 println!("updated policy for admin {name:?} on the CA at {server}");
                 return Ok(());
             }
-            let dir = ca_dir_for(a.ca_dir)?;
-            let policy = prompt_policy(&policy_args, false, &existing_ca_cn(&dir), None)?;
-            // Report the resolved policy (the prompt may have filled it).
-            let summary = format!(
-                "allowed_san={:?} max_validity_days={} id_map_groups={:?} \
-                 may_enroll_servers={} perms_edit_scopes={:?} service_control_scopes={:?}",
-                policy.allowed_san,
-                policy.max_validity_days,
-                policy.id_map_groups,
-                policy.may_enroll_servers,
-                policy.perms_edit_scopes,
-                policy.service_control_scopes
-            );
-            // On-box authority is filesystem access to the vault; rescoping
-            // touches only the slot's plaintext policy, never MK.
-            ca_vault::CAVault::new(dir.clone()).set_policy(&name, policy)?;
-            println!("updated policy for admin {name:?}: {summary}");
+            // Local: rescope through the daemon (superuser over the control
+            // socket). Rescoping touches only the slot's plaintext policy,
+            // never MK.
+            let cfg_path = paths::discover_conf_server_config()?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let policy = prompt_policy(
+                &policy_args,
+                false,
+                &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
+                None,
+            )?;
+            rt.block_on(conf_local::set_admin_policy(&cfg_path, &name, policy))?;
+            println!("updated policy for admin {name:?} (via the local conf server)");
             Ok(())
         }
         AdminCmd::Remove(a) => {
@@ -1452,12 +1483,14 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 println!("removed role admin {name:?} on the CA at {server}");
                 return Ok(());
             }
-            // On-box authority is filesystem access to the vault; you revoke
-            // a slot by name. The last-signing-slot guard prevents orphaning
-            // the CA key.
-            let dir = ca_dir_for(a.ca_dir)?;
-            ca_vault::CAVault::new(dir.clone()).remove_slot(&name, a.force)?;
-            println!("revoked admin {name:?}");
+            // Local: revoke through the daemon (superuser over the control
+            // socket). `a.force` is ignored here — the daemon's last-manager
+            // and reserved-slot guards still apply, preventing an orphaned CA
+            // key.
+            let cfg_path = paths::discover_conf_server_config()?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            rt.block_on(conf_local::remove_admin(&cfg_path, &name))?;
+            println!("removed role admin {name:?} (via the local conf server)");
             Ok(())
         }
         AdminCmd::List(a) => {
@@ -1474,8 +1507,9 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 print_admin_list(&admins);
                 return Ok(());
             }
-            let dir = ca_dir_for(a.ca_dir)?;
-            let admins = ca_vault::CAVault::new(dir.clone()).list_admins()?;
+            let cfg_path = paths::discover_conf_server_config()?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let admins = rt.block_on(conf_local::list_admins(&cfg_path))?;
             print_admin_list(&admins);
             Ok(())
         }
@@ -2404,14 +2438,24 @@ fn list() -> Result<()> {
     // `vault.json`, not `private.key`), so detect that before falling
     // back to the legacy single-key format.
     if ca_vault::CAVault::exists(&dir) {
-        let admins = ca_vault::CAVault::new(dir.clone())
-            .list_admins()
-            .map(|a| a.into_iter().map(|i| i.admin).collect::<Vec<_>>())
-            .unwrap_or_default();
-        if admins.is_empty() {
-            println!("  key:    keyslot vault");
-        } else {
-            println!("  key:    keyslot vault — admins: {}", admins.join(", "));
+        // The daemon owns the vault now, so the admin roster comes over the
+        // local control socket. Without a running daemon we can detect the
+        // vault format but not list its admins.
+        let cfg_path = paths::discover_conf_server_config().ok();
+        let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+        match &cfg_path {
+            Some(p) if rt.block_on(conf_local::daemon_running(p)) => {
+                let admins = rt
+                    .block_on(conf_local::list_admins(p))
+                    .map(|a| a.into_iter().map(|i| i.admin).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if admins.is_empty() {
+                    println!("  key:    keyslot vault");
+                } else {
+                    println!("  key:    keyslot vault — admins: {}", admins.join(", "));
+                }
+            }
+            _ => println!("  key:    keyslot vault (start the conf server to list admins)"),
         }
     } else if dir.join("private.key").is_file() {
         println!("  key:    private.key (legacy single-key format)");
@@ -2464,6 +2508,12 @@ pub(super) fn default_ca_present() -> bool {
 /// through it, so they all transparently handle vaulted CAs.
 pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
     if ca_vault::CAVault::exists(dir) {
+        // Offline issuance takes the CA flock for the whole unlock — a running
+        // conf server owns the CA, so this fails fast if one is up. The handle
+        // drops at the `return` below, releasing the flock before the issue /
+        // sign paths re-open their own CaDir for serial allocation.
+        let cadir = netidx_conf::ca_store::CaDir::open(dir)
+            .context("opening the CA to sign offline (a running conf server owns it — stop it first)")?;
         // Daily on-box use unlocks with the box's own autorenew credential —
         // read + unsealed from its keytab, no human secret typed. Fall back
         // to the recovery password only when the keytab is absent or doesn't
@@ -2474,7 +2524,7 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
             .filter(|k| k.exists())
             .and_then(|keytab| {
                 match netidx_conf::conf_server::read_autorenew_password(&keytab) {
-                    Ok(pw) => match ca_vault::CAVault::new(dir.to_path_buf()).unlock(&pw) {
+                    Ok(pw) => match cadir.vault.read().unlock(&pw) {
                         Ok(u) => Some(u),
                         Err(e) => {
                             eprintln!(
@@ -2508,7 +2558,7 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
                     "the CA recovery password (from your safe; printed once at init)",
                 )?);
                 let pw = ca_vault::normalize_recovery_password(&typed);
-                ca_vault::CAVault::new(dir.to_path_buf()).unlock(&pw)
+                cadir.vault.read().unlock(&pw)
                     .with_context(|| format!("unlocking the CA vault at {}", dir.display()))?
             }
         };
@@ -2620,7 +2670,7 @@ fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<
     // its in-memory counter from. Without this lock a `ca issue` run
     // against a live daemon would mint the serial the daemon allocates
     // next, producing a duplicate X.509 serial.
-    let mut cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
+    let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
         .context("cannot issue offline: a running conf server owns this CA")?;
     let serial = cadir.store.next_serial()?;
     params.serial = serial;
@@ -2634,7 +2684,7 @@ fn issue_and_record(ca: &Ca, kind: NodeKind, mut params: IssueParams) -> Result<
     // issuance fails, roll those back: an un-recorded cert is invisible to
     // `next_serial`, so leaving it would let its serial be handed out again.
     if let Err(e) =
-        record_offline_issuance(&mut cadir.store, serial, kind, &name, "", &cert_pem, validity_days)
+        record_offline_issuance(&mut cadir.store.lock(), serial, kind, &name, "", &cert_pem, validity_days)
     {
         let _ = std::fs::remove_file(&issued.certificate);
         let _ = std::fs::remove_file(&issued.private_key);
@@ -2656,13 +2706,13 @@ pub(super) fn sign_and_record(
     let ca_dir = ca.directory().to_path_buf();
     // See `issue_and_record`: hold the daemon's exclusive flock so offline
     // signing can't race the daemon's serial counter.
-    let mut cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
+    let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
         .context("cannot sign offline: a running conf server owns this CA")?;
     let serial = cadir.store.next_serial()?;
     let cert = ca.sign_request(csr_pem, san, validity_days, serial)?;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
     let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
-    record_offline_issuance(&mut cadir.store, serial, kind, name, csr_str, cert_str, validity_days)?;
+    record_offline_issuance(&mut cadir.store.lock(), serial, kind, name, csr_str, cert_str, validity_days)?;
     Ok(cert)
 }
 
@@ -3116,10 +3166,20 @@ mod tests {
         // Exactly the recovery signing slot, and nothing else — no autorenew
         // (no daemon), no superuser role (offline).
         assert_eq!(
-            ca_vault::CAVault::new(dir.clone()).signing_slot_names().unwrap(),
+            netidx_conf::ca_store::CaDir::open(&dir)
+                .unwrap()
+                .vault
+                .read()
+                .signing_slot_names()
+                .unwrap(),
             vec![ca_vault::RECOVERY_ADMIN.to_string()]
         );
-        let admins = ca_vault::CAVault::new(dir.clone()).list_admins().unwrap();
+        let admins = netidx_conf::ca_store::CaDir::open(&dir)
+            .unwrap()
+            .vault
+            .read()
+            .list_admins()
+            .unwrap();
         assert_eq!(admins.len(), 1, "offline CA has only the recovery slot");
         assert_eq!(admins[0].admin, ca_vault::RECOVERY_ADMIN);
         assert_eq!(admins[0].kind, ca_vault::SlotKind::Signing);

@@ -1,0 +1,11 @@
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf uninstall --with-ca
+expect {
+  -re {\[sudo\] password for [^\n]*: $}              { send -- "test123\r"; exp_continue }
+  -re {Also remove the system-scope[^\n]*\][^\n]*$}  { send -- "y\r"; exp_continue }
+  -re {[Pp]roceed[^\n]*\?[^\n]*\][^\n]*$}             { send -- "y\r"; exp_continue }
+  -re {\?[^\n]*\][^\n]*$}                             { send -- "y\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

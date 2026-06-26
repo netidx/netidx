@@ -101,7 +101,9 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
         kc.csr_pem.as_bytes(),
         &[SanEntry::Dns(SERVING_SAN.to_string())],
         SERVING_SAN,
-        ca::DEFAULT_LEAF_VALIDITY_DAYS,
+        ca::CaLifetimes::load(a.ca_dir)
+            .map(|l| l.leaf_validity)
+            .unwrap_or(ca::DEFAULT_LEAF_VALIDITY),
     )
     .context("signing the conf server's serving certificate")?;
     let ca_cert = std::fs::read(a.ca_dir.join("certificate.pem"))?;

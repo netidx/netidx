@@ -32,9 +32,11 @@ use openssl::{
         },
     },
 };
+use serde_derive::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// A DistinguishedName-ish subject. CN is required; the rest are
@@ -78,9 +80,89 @@ pub const DEFAULT_KEY_BITS: u32 = 4096;
 /// `openssl` directly.
 pub const MIN_KEY_BITS: u32 = 2048;
 /// Default CA validity — matches the shell scripts (20 years).
-pub const DEFAULT_CA_VALIDITY_DAYS: u32 = 7300;
+pub const DEFAULT_CA_VALIDITY: Duration = Duration::from_secs(7300 * 86400);
 /// Default leaf validity — matches the shell scripts (2 years).
-pub const DEFAULT_LEAF_VALIDITY_DAYS: u32 = 730;
+pub const DEFAULT_LEAF_VALIDITY: Duration = Duration::from_secs(730 * 86400);
+/// Default CA renewal threshold: renew once the CA can no longer cover a
+/// full default leaf validity plus a grace quarter (730 + 90 days), past
+/// which `sign_request`'s clamp starts shortening leaves.
+pub const DEFAULT_CA_RENEW_THRESHOLD: Duration =
+    Duration::from_secs((730 + 90) * 86400);
+
+fn unix_now() -> Result<i64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64)
+}
+
+/// An `Asn1Time` that is `d` from now, at one-second resolution. openssl's
+/// `Asn1Time::days_from_now` is day-granular — too coarse for the
+/// short-lived certs a renewal test mints — so we go through `from_unix`.
+fn time_from_now(d: Duration) -> Result<Asn1Time> {
+    Ok(Asn1Time::from_unix(unix_now()? + d.as_secs() as i64)?)
+}
+
+/// Seconds of validity left on `cert` from now (negative once expired).
+fn remaining_secs(cert: &X509) -> Result<i64> {
+    let diff = Asn1Time::days_from_now(0)?.diff(cert.not_after())?;
+    Ok(diff.days as i64 * 86400 + diff.secs as i64)
+}
+
+/// The validity span the cert was issued for (`not_after - not_before`).
+/// CA renewal re-stamps *this* window rather than a fixed constant, so a CA
+/// keeps the validity it was configured with across renewals.
+fn cert_span(cert: &X509) -> Result<Duration> {
+    let diff = cert.not_before().diff(cert.not_after())?;
+    let secs = diff.days as i64 * 86400 + diff.secs as i64;
+    Ok(Duration::from_secs(secs.max(0) as u64))
+}
+
+/// The CA's configurable lifetime policy, persisted as `lifetimes.json` in
+/// the CA directory and consulted by the daemon. A missing file yields the
+/// built-in defaults, so a CA created before this existed keeps today's
+/// behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaLifetimes {
+    /// Validity stamped on certs the CA issues itself without an explicit
+    /// request — notably the conf server's own serving cert.
+    #[serde(with = "humantime_serde")]
+    pub leaf_validity: Duration,
+    /// Renew the CA cert once its remaining lifetime drops below this.
+    #[serde(with = "humantime_serde")]
+    pub ca_renew_threshold: Duration,
+}
+
+impl Default for CaLifetimes {
+    fn default() -> Self {
+        Self {
+            leaf_validity: DEFAULT_LEAF_VALIDITY,
+            ca_renew_threshold: DEFAULT_CA_RENEW_THRESHOLD,
+        }
+    }
+}
+
+impl CaLifetimes {
+    pub const FILE: &'static str = "lifetimes.json";
+
+    /// Read the CA's lifetime policy, defaulting when the file is absent.
+    pub fn load(ca_dir: &Path) -> Result<Self> {
+        let path = ca_dir.join(Self::FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::default())
+            }
+            Err(e) => {
+                Err(e).with_context(|| format!("reading {}", path.display()))
+            }
+        }
+    }
+
+    pub fn store(&self, ca_dir: &Path) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
+        atomic::write_atomic(&ca_dir.join(Self::FILE), &bytes, 0o644)
+    }
+}
 
 fn check_key_bits(bits: u32) -> Result<()> {
     if bits < MIN_KEY_BITS {
@@ -164,7 +246,7 @@ pub struct CaParams {
     /// when empty (matching the shell scripts).
     pub san: Vec<SanEntry>,
     pub key_bits: u32,
-    pub validity_days: u32,
+    pub validity: Duration,
 }
 
 /// A PEM-encoded private key and the matching CSR.
@@ -182,7 +264,7 @@ pub struct IssueParams {
     pub subject: Subject,
     pub san: Vec<SanEntry>,
     pub key_bits: u32,
-    pub validity_days: u32,
+    pub validity: Duration,
     pub out_dir: PathBuf,
     /// Encrypt the on-disk private key with this passphrase. `None`
     /// writes an unencrypted PKCS#8 key; `Some(s)` writes a PKCS#8
@@ -296,7 +378,7 @@ impl Ca {
         cert.set_issuer_name(&name)?;
         cert.set_pubkey(&pkey)?;
         let not_before = Asn1Time::days_from_now(0)?;
-        let not_after = Asn1Time::days_from_now(params.validity_days)?;
+        let not_after = time_from_now(params.validity)?;
         cert.set_not_before(&not_before)?;
         cert.set_not_after(&not_after)?;
 
@@ -400,7 +482,7 @@ impl Ca {
         &self,
         csr_pem: &[u8],
         san: &[SanEntry],
-        validity_days: u32,
+        validity: Duration,
         serial: u64,
     ) -> Result<Vec<u8>> {
         let req = X509Req::from_pem(csr_pem).context("parsing CSR")?;
@@ -419,20 +501,20 @@ impl Ca {
         // P-256+, Edwards curves accepted.
         check_pubkey_strength(&req_pubkey)?;
         // A leaf must not outlive its CA — clamp to the CA's remaining
-        // lifetime (less a day of slack), and refuse outright when the
-        // CA itself is at death's door: the answer there is renewing
-        // the CA (automatic during admin sessions), not minting doomed
-        // leaves.
-        let validity_days = {
-            let now = Asn1Time::days_from_now(0)?;
-            let remaining = now.diff(self.cert.not_after())?.days;
-            if remaining < 2 {
+        // lifetime (less a second so the ordering is strict), and refuse
+        // outright when the CA has already expired: the answer there is
+        // renewing the CA (automatic during signing), not minting doomed
+        // leaves. Keeping the CA from getting near-dead is the job of the
+        // configurable renewal threshold, not an absolute floor here.
+        let validity = {
+            let remaining = remaining_secs(&self.cert)?;
+            if remaining <= 0 {
                 bail!(
-                    "the CA certificate expires in {remaining} day(s); renew it \
-                     before issuing leaves"
+                    "the CA certificate has expired; renew it before issuing leaves"
                 );
             }
-            validity_days.min((remaining - 1) as u32)
+            let cap = Duration::from_secs((remaining - 1).max(1) as u64);
+            validity.min(cap)
         };
 
         let mut cert = X509Builder::new()?;
@@ -444,7 +526,7 @@ impl Ca {
         cert.set_issuer_name(self.cert.subject_name())?;
         cert.set_pubkey(&req_pubkey)?;
         let not_before = Asn1Time::days_from_now(0)?;
-        let not_after = Asn1Time::days_from_now(validity_days)?;
+        let not_after = time_from_now(validity)?;
         cert.set_not_before(&not_before)?;
         cert.set_not_after(&not_after)?;
 
@@ -489,7 +571,7 @@ impl Ca {
         let cert_pem = self.sign_request(
             &kr.csr_pem,
             &params.san,
-            params.validity_days,
+            params.validity,
             params.serial,
         )?;
         let key_path = params.out_dir.join("private.key");
@@ -504,17 +586,15 @@ impl Ca {
     }
 }
 
-/// Renew the CA when its remaining lifetime can no longer cover a full
-/// default leaf validity plus a grace quarter — past this point
-/// `sign_request`'s clamp starts shortening leaves.
-pub const CA_RENEW_THRESHOLD_DAYS: u32 = DEFAULT_LEAF_VALIDITY_DAYS + 90;
-
-/// Re-sign the CA certificate **with the same key** if it is inside
-/// [`CA_RENEW_THRESHOLD_DAYS`]. Same key + same subject + same SAN
-/// means: existing leaves still chain, serving chains keep verifying,
-/// and the network glyph (a hash of the key) is unchanged — only the
-/// validity window moves. Called opportunistically wherever the vault
-/// is unlocked, because that's the only time the key exists.
+/// Re-sign the CA certificate **with the same key** if it is inside its
+/// renewal window. Same key + same subject + same SAN means: existing
+/// leaves still chain, serving chains keep verifying, and the network glyph
+/// (a hash of the key) is unchanged — only the validity window moves. The
+/// new window is the CA cert's **own original span** (`not_after -
+/// not_before`), so a CA keeps the validity it was configured with across
+/// renewals rather than jumping to a fixed default. Called opportunistically
+/// wherever the vault is unlocked, because that's the only time the key
+/// exists.
 ///
 /// `trusted.pem` (the served federation bundle, when maintained) has
 /// our old certificate replaced by the new one, matched by public key;
@@ -524,26 +604,28 @@ pub const CA_RENEW_THRESHOLD_DAYS: u32 = DEFAULT_LEAF_VALIDITY_DAYS + 90;
 /// inside its renewal window — the daemon calls this before allocating a
 /// serial for [`maybe_renew_ca_cert`], so the common "no renewal needed"
 /// path burns nothing.
-pub fn ca_cert_needs_renewal(ca_dir: &Path) -> bool {
+pub fn ca_cert_needs_renewal(ca_dir: &Path, threshold: Duration) -> bool {
     (|| -> Option<bool> {
         let cert_pem = std::fs::read(ca_dir.join("certificate.pem")).ok()?;
         let old = X509::from_pem(&cert_pem).ok()?;
-        let now = Asn1Time::days_from_now(0).ok()?;
-        let remaining = now.diff(old.not_after()).ok()?.days;
-        Some(remaining <= CA_RENEW_THRESHOLD_DAYS as i32)
+        Some(remaining_secs(&old).ok()? <= threshold.as_secs() as i64)
     })()
     .unwrap_or(false)
 }
 
-pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8], serial: u64) -> Result<bool> {
+pub fn maybe_renew_ca_cert(
+    ca_dir: &Path,
+    ca_key_pem: &[u8],
+    serial: u64,
+    threshold: Duration,
+) -> Result<bool> {
     let cert_pem = std::fs::read(ca_dir.join("certificate.pem"))
         .context("reading CA certificate")?;
     let old = X509::from_pem(&cert_pem).context("parsing CA certificate")?;
-    let now = Asn1Time::days_from_now(0)?;
-    let remaining = now.diff(old.not_after())?.days;
-    if remaining > CA_RENEW_THRESHOLD_DAYS as i32 {
+    if remaining_secs(&old)? > threshold.as_secs() as i64 {
         return Ok(false);
     }
+    let span = cert_span(&old)?;
     let pkey =
         PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
     // Rebuild: subject, SAN, and profile identical to `Ca::generate`;
@@ -558,7 +640,7 @@ pub fn maybe_renew_ca_cert(ca_dir: &Path, ca_key_pem: &[u8], serial: u64) -> Res
     cert.set_issuer_name(old.subject_name())?;
     cert.set_pubkey(&pkey)?;
     let not_before = Asn1Time::days_from_now(0)?;
-    let not_after = Asn1Time::days_from_now(DEFAULT_CA_VALIDITY_DAYS)?;
+    let not_after = time_from_now(span)?;
     cert.set_not_before(&not_before)?;
     cert.set_not_after(&not_after)?;
     let ctx = cert.x509v3_context(None, None);
@@ -1294,7 +1376,7 @@ mod tests {
         .unwrap();
         let requested_days = 365u32;
         let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
-        let serial = cadir.store.next_serial().unwrap();
+        let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
             .sign_request(
                 &kr.csr_pem,
@@ -1313,7 +1395,7 @@ mod tests {
             None,
         );
         cadir
-            .store
+            .store.lock()
             .commit_issuance(
                 &req,
                 serial,
@@ -1323,7 +1405,7 @@ mod tests {
             )
             .unwrap();
         let now = ca_store::now_unix();
-        let rec = cadir.store.live_for_name(name).unwrap();
+        let rec = cadir.store.lock().live_for_name(name).unwrap();
         assert_eq!(rec.len(), 1, "the issuance should be recorded and live");
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record

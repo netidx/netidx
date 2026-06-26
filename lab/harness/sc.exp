@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+# Remote service control as admin eric: restart a targeted cluster member's unit
+# over the conf plane. argv0 = target (e.g. resolver:0).
+set timeout 120
+log_user 1
+set PW "testpw12345"
+set target [lindex $argv 0]
+spawn netidx conf component activation restart --server 192.168.50.11:4565 --path / --ca-dir /root/.config/netidx/ca $target
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:|authentication failed|denied|refused|out of scope|not authorized)[^\n]*} {
+      puts "\n<<<GUARD: $expect_out(0,string)>>>"; exit 3 }
+  -re {admin name[^\n]*: ?$}            { send -- "eric\r"; exp_continue }
+  -re {password[^\n]*: ?$}              { send -- "$PW\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}          { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 0 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

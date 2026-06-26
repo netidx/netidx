@@ -1,0 +1,13 @@
+#!/usr/bin/expect -f
+set timeout 60
+log_user 1
+spawn netidx conf ca revoke --name publisher.netidx.test --reason "re-enroll as normal user eric"
+expect {
+  -re {admin name \[[^\]]*\]: ?$}            { send -- "\r"; exp_continue }
+  -re {CA password for admin[^\n]*: ?$}       { send -- "testpw12345\r"; exp_continue }
+  -re {password[^\n]*: ?$}                     { send -- "testpw12345\r"; exp_continue }
+  -re {(revoked|already revoked|no live|not found|Error|re-?signed|CRL)[^\n]*} { puts "\n<<<LINE>>>"; exp_continue }
+  -re {\?[^\n]*\][^\n]*$}                      { send -- "y\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof { puts "\n<<<DONE>>>" }
+}

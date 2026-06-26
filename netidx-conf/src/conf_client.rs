@@ -60,7 +60,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use log::warn;
 use rustls::ClientConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
@@ -645,7 +645,7 @@ pub async fn request_cert(
     name: &str,
     admin: &str,
     password: Zeroizing<String>,
-    validity_days: u32,
+    validity: Duration,
     id_map_groups: Vec<String>,
     expected: &CaIdentity,
 ) -> Result<Issued> {
@@ -656,7 +656,7 @@ pub async fn request_cert(
         password: Secret(password.as_str().to_string()),
         csr_pem: kc.csr_pem.clone(),
         requested_name: name.to_string(),
-        requested_validity_days: validity_days,
+        requested_validity: validity,
         id_map_groups,
     });
     submit_csr(addr, kind, name, kc, req, expected).await
@@ -784,10 +784,10 @@ pub async fn enqueue(
     addr: SocketAddr,
     kind: NodeKind,
     name: &str,
-    validity_days: u32,
+    validity: Duration,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
-    enqueue_inner(addr, kind, name, validity_days, None, expected).await
+    enqueue_inner(addr, kind, name, validity, None, expected).await
 }
 
 /// Queue a **conf-server enrollment** for asynchronous admin approval:
@@ -803,15 +803,22 @@ pub async fn enqueue_enroll(
     // The validity is decided server-side at approval (the standard
     // serving-cert validity); the value here is a well-formedness
     // placeholder.
-    enqueue_inner(addr, NodeKind::ConfServer, SERVING_SAN, 1, Some(listen), expected)
-        .await
+    enqueue_inner(
+        addr,
+        NodeKind::ConfServer,
+        SERVING_SAN,
+        Duration::from_secs(1),
+        Some(listen),
+        expected,
+    )
+    .await
 }
 
 async fn enqueue_inner(
     addr: SocketAddr,
     kind: NodeKind,
     name: &str,
-    validity_days: u32,
+    validity: Duration,
     enroll_listen: Option<SocketAddr>,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
@@ -825,7 +832,7 @@ async fn enqueue_inner(
             kind,
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
-            requested_validity_days: validity_days,
+            requested_validity: validity,
             enroll_listen,
         }),
     )
@@ -1397,7 +1404,7 @@ pub async fn enqueue_renewal(
     addr: SocketAddr,
     kind: NodeKind,
     name: &str,
-    validity_days: u32,
+    validity: Duration,
     current_cert_pem: &[u8],
     current_key: PrivateKeyDer<'static>,
     roots: rustls::RootCertStore,
@@ -1413,7 +1420,7 @@ pub async fn enqueue_renewal(
             kind,
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
-            requested_validity_days: validity_days,
+            requested_validity: validity,
             enroll_listen: None,
         }),
     )

@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+# workstation-hq (.13): full workstation (local resolver + referral to HQ),
+# TLS, enroll ws.hq.netidx.test via discovery (queued), run under the supervisor.
+set timeout 420
+log_user 1
+spawn netidx conf workstation install --key-protection none --with-service
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|denied this request|expired before|could not be reached|was not confirmed|no conf server could|Error:|refusing to overwrite)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {identity name to request[^\n]*: ?$}   { send -- "ws.hq.netidx.test\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}       { send -- "y\r"; exp_continue }
+  -re {CA admin at this machine[^\n]*: ?$}   { send -- "n\r"; exp_continue }
+  -re {join it\?[^\n]*: ?$}                  { send -- "y\r"; exp_continue }
+  -re {\[sudo\] password[^\n]*: ?$}          { send -- "test123\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}               { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized required prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

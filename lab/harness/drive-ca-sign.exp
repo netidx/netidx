@@ -1,0 +1,18 @@
+set timeout 90
+log_user 1
+set reviewed 0
+spawn /usr/local/bin/netidx conf ca sign
+expect {
+  -re {(must not be empty|did not match|authentication failed)[^\n]*} { puts "\n<<<GUARD: reject>>>"; exit 3 }
+  -re {CA password[^\n]*: $}         { send -- "testpw12345\r"; exp_continue }
+  -re {admin name[^\n]*: $}          { send -- "root\r"; exp_continue }
+  -re {request # to review[^\n]*: $} {
+    if {$reviewed} { send -- "q\r" } else { set reviewed 1; send -- "1\r" }
+    exp_continue
+  }
+  -re {\?[^\n]*\][^\n]*$}            { send -- "y\r"; exp_continue }
+  -re {\[[^\]]*\][^\n]*: $}          { send -- "\r"; exp_continue }
+  -re {[^\n]*: $} { puts "\n<<<unrecognized prompt -> stop>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

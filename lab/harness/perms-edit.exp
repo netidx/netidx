@@ -1,0 +1,17 @@
+#!/usr/bin/expect -f
+# perms-edit.exp <path> <server> <admin> <password>
+set timeout 60
+set path   [lindex $argv 0]
+set server [lindex $argv 1]
+set admin  [lindex $argv 2]
+set pw     [lindex $argv 3]
+spawn env EDITOR=/tmp/edit-inject.sh VISUAL=/tmp/edit-inject.sh netidx conf perms edit --at $path --server $server
+expect {
+  -re {is this your network.s conf server} { send "y\r"; exp_continue }
+  -re {re-edit}                            { send "n\r"; exp_continue }
+  -re {admin name}                         { send "$admin\r"; exp_continue }
+  -re {[Pp]assword}                        { send "$pw\r"; exp_continue }
+  eof
+}
+catch wait result
+exit [lindex $result 3]

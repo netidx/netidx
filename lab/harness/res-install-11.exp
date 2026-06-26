@@ -1,0 +1,32 @@
+#!/usr/bin/expect -f
+# HQ resolver-A on .11 (co-located with CA+conf-server). Driven as a user, no
+# answer-flags. TLS data plane. The local CA already exists, so this MUST enroll
+# / issue from it — the guard aborts if it ever tries to mint a 2nd CA.
+set timeout 300
+log_user 1
+spawn netidx conf resolver install
+expect {
+  -re {creating the network's CA[^\n]*}      { puts "\n<<<FIX FAILED: 2nd CA>>>"; exit 9 }
+  -re {(is not one of|must not be empty|did not match what|please try again|Error:|refusing to overwrite|no usable TPM|denied this request|expired before)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {(waiting for approval|request queued|request code|enrollment queued|still pending|approved|issued from|polling|send this code|show this code|got TLS identity)[^\n]*} { exp_continue }
+  -re {found netidx network[^\n]*join it[^\n]*: ?$}   { send -- "y\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                  { send -- "tls\r"; exp_continue }
+  -re {advertised IP[^\n]*: ?$}                { send -- "192.168.50.11\r"; exp_continue }
+  -re {resolver port[^\n]*: ?$}                { send -- "\r"; exp_continue }
+  -re {TLS domain[^\n]*: ?$}                   { send -- "netidx.test\r"; exp_continue }
+  -re {this resolver's name[^\n]*: ?$}         { send -- "resolver\r"; exp_continue }
+  -re {identity name to request[^\n]*: ?$}     { send -- "resolver.netidx.test\r"; exp_continue }
+  -re {built-in certificate authority[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {private key protection[^\n]*: ?$}       { send -- "none\r"; exp_continue }
+  -re {askpass[^\n]*: ?$}                       { send -- "\r"; exp_continue }
+  -re {does this[^\n]*match[^\n]*: ?$}          { send -- "y\r"; exp_continue }
+  -re {address of an existing conf server to join[^\n]*: ?$} { send -- "\r"; exp_continue }
+  -re {install netidx as an OS service[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                  { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}
+catch wait result
+exit [lindex $result 3]

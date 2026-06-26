@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+# Workstation install DRY-RUN on .13, novice flow, with a krb5 PARENT
+# referral to the network resolver. Exercises the parent cascade:
+# resolver IP -> port -> parent auth -> parent SPN.
+set timeout 60
+log_user 1
+spawn /usr/local/bin/netidx conf install workstation --dry-run
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {join it[^\n]*: ?$}                     { send -- "n\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}         { send -- "\r"; exp_continue }
+  -re {resolver IP[^\n]*: ?$}                 { send -- "192.168.50.11\r"; exp_continue }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "krb5\r"; exp_continue }
+  -re {[Kk]erberos SPN[^\n]*: ?$}                { send -- "netidx/resolver.netidx.test@NETIDX.TEST\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

@@ -1,0 +1,30 @@
+#!/bin/sh
+# wan — shape ONLY parent<->child transit on the router, both legs.
+#   enp1s0 = net A leg (192.168.50.0/24, HQ/root site)
+#   enp7s0 = net B leg (192.168.60.0/24, satellite site)
+# Transit is matched by SOURCE subnet and steered into a high prio band the
+# default priomap never uses, so the router's OWN traffic (src .50.2/.60.2 —
+# e.g. our management SSH, ARP) is never shaped. A 100% partition drops only
+# transit and will NOT lock you out of the router.
+# Each parent<->child packet crosses exactly one shaped leg, so a per-leg delay
+# D yields ~2*D round-trip.
+A=enp1s0; ASRC=192.168.60.0/24    # transit leaving net A leg is child->parent
+B=enp7s0; BSRC=192.168.50.0/24    # transit leaving net B leg is parent->child
+
+setup_leg() {   # $1=dev  $2=transit-src-subnet  $3=netem spec
+  tc qdisc del dev "$1" root 2>/dev/null
+  tc qdisc add dev "$1" root handle 1: prio bands 4
+  tc qdisc add dev "$1" parent 1:4 handle 40: netem $3
+  tc filter add dev "$1" parent 1:0 protocol ip u32 match ip src "$2" flowid 1:4
+}
+apply() { setup_leg "$A" "$ASRC" "$1"; setup_leg "$B" "$BSRC" "$1"; }
+
+case "$1" in
+  clear) tc qdisc del dev "$A" root 2>/dev/null; tc qdisc del dev "$B" root 2>/dev/null; echo "wan: cleared (clean link)";;
+  show)  for d in "$A" "$B"; do echo "## $d"; tc -s qdisc show dev "$d"; tc filter show dev "$d" 2>/dev/null; done;;
+  delay) if [ -n "$3" ]; then s="delay $2 $3 distribution normal"; else s="delay $2"; fi; apply "$s"; echo "wan: '$s' on transit (each leg)";;
+  loss)  apply "loss $2"; echo "wan: 'loss $2' on transit (each leg)";;
+  link)  apply "delay $2 $3 distribution normal loss $4"; echo "wan: 'delay $2 $3 + loss $4' on transit";;
+  raw)   apply "$2"; echo "wan: 'netem $2' on transit (each leg)";;
+  *) echo "usage: wan {clear | show | delay D [J] | loss P | link D J LOSS | raw \"<netem spec>\"}";;
+esac

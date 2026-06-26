@@ -1,0 +1,19 @@
+#!/usr/bin/expect -f
+# Real krb5 resolver install on .11 (as root, --no-conf-server for a
+# focused GSSAPI data-plane test). Answers krb5; no conf server to join;
+# id-mapper N; installs the system service. Leftmost-match discipline.
+set timeout 120
+log_user 1
+spawn /usr/local/bin/netidx conf install resolver --no-conf-server
+expect {
+  -re {(is not one of|must not be empty|did not match|please try again|Error:)[^\n]*} {
+      puts "\n<<<GUARD reject: $expect_out(0,string)>>>"; exit 3 }
+  -re {auth scheme[^\n]*: ?$}                 { send -- "krb5\r"; exp_continue }
+  -re {conf server to join[^\n]*: ?$}         { send -- "\r"; exp_continue }
+  -re {id-mapper daemon[^\n]*: ?$}            { send -- "n\r"; exp_continue }
+  -re {OS service now[^\n]*: ?$}              { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}                 { send -- "\r"; exp_continue }
+  -re {[^\n]*: ?$} { puts "\n<<<GUARD unrecognized prompt: $expect_out(0,string)>>>"; exit 4 }
+  timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
+  eof     { puts "\n<<<DONE>>>" }
+}

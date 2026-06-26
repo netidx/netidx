@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# Install-time child: a fresh resolver on .13 installs WITH delegation under the
+# parent (--parent-conf-server), requesting subtree /asia. Confirms the parent
+# glyph (y), then blocks until the parent admin approves; the parent referral is
+# baked into the rendered config (no restart).
+set timeout 150
+log_user 1
+spawn /usr/local/bin/netidx conf resolver install \
+  --auth anonymous \
+  --listen 192.168.50.13:4564 \
+  --base /asia \
+  --no-conf-server \
+  --parent-conf-server 192.168.50.11:4565 \
+  --delegate-subtree /asia \
+  --no-units --no-service --force
+expect {
+  -re {(denied|Denied|did not match|Error:)[^\n]*} { puts "\n<<<FAILED: $expect_out(0,string)>>>"; exp_continue }
+  -re {identity: ?$}               { exp_continue }
+  -re {does this match[^\n]*: ?$}  { send -- "y\r"; exp_continue }
+  -re {match[^\n]*glyph[^\n]*: ?$} { send -- "y\r"; exp_continue }
+  -re {[^\n]*\[[^\]\n]*\]: ?$}     { send -- "\r"; exp_continue }
+  timeout { puts "\n<<<TIMEOUT (polling?)>>>" }
+  eof     { puts "\n<<<EXITED>>>" }
+}
