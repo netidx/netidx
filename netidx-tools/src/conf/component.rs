@@ -10,8 +10,10 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+#[cfg(any(unix, windows))]
+use super::activation;
 #[cfg(unix)]
-use super::{activation, server};
+use super::server;
 use super::{client, id_map, perms, resolver, service, tls};
 
 #[derive(Subcommand, Debug)]
@@ -32,7 +34,7 @@ pub(crate) enum Cmd {
         cmd: perms::Cmd,
     },
     /// edit netidx-activation units
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Activation {
         #[command(subcommand)]
         cmd: activation::Cmd,
@@ -65,7 +67,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Client { cmd } => client::run(cmd),
         Cmd::Resolver { cmd } => resolver::run(cmd),
         Cmd::Perms { cmd } => perms::run(cmd),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         Cmd::Activation { cmd } => activation::run(cmd),
         #[cfg(unix)]
         Cmd::Server { cmd } => server::run(cmd),

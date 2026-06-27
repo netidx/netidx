@@ -10,14 +10,19 @@ use netidx_conf::{
         UnitBuilder,
     },
     client::ClientConfig,
-    conf_client,
-    conf_proto::{self, NodeKind},
     id_map as id_map_engine,
     template::services::{
         container::{self, ContainerServiceParams},
         id_map::{self as id_map_template, IdMapServiceParams},
     },
 };
+// Remote, conf-plane control is unix-only (see `service_control`).
+#[cfg(unix)]
+use netidx_conf::{conf_client, conf_proto::NodeKind};
+// `conf_proto` is also referenced by `parse_unit_targets`, which the test
+// module exercises on every platform.
+#[cfg(any(unix, test))]
+use netidx_conf::conf_proto;
 
 use super::prompt;
 use clap::{Args, Subcommand};
@@ -210,6 +215,10 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// supervisor's control socket (on-box).
 fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
     match a.server {
+        // Remote, conf-plane control is unix-only: the admin preamble needs
+        // the openssl-backed CA module. On Windows (workstation-only) the
+        // local control path below is the one that matters.
+        #[cfg(unix)]
         Some(server) => {
             let path = a.path.ok_or_else(|| {
                 anyhow!("--path <resolver-cluster-path> is required with --server")
@@ -230,6 +239,11 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
             print_service_results(&results);
             Ok(())
         }
+        #[cfg(not(unix))]
+        Some(_server) => bail!(
+            "remote activation control (--server) is unix-only; omit --server \
+             to control this host's local activation supervisor"
+        ),
         None => {
             // Local: talk straight to this host's activation control socket.
             let dir = a
@@ -251,6 +265,7 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
 
 /// Parse `unit[:member]` tokens into [`conf_proto::UnitTarget`]s. A trailing
 /// `:<n>` pins the unit to cluster member `n`; otherwise it hits every member.
+#[cfg(any(unix, test))]
 fn parse_unit_targets(toks: &[String]) -> Result<Vec<conf_proto::UnitTarget>> {
     toks.iter()
         .map(|t| match t.rsplit_once(':') {
@@ -287,6 +302,7 @@ fn print_unit_statuses(units: &[UnitStatus]) {
     }
 }
 
+#[cfg(unix)]
 fn print_service_results(results: &[conf_proto::ServiceControlResult]) {
     if results.is_empty() {
         println!("(no cluster members matched)");
