@@ -15,7 +15,7 @@ use windows::{
             NetApiBufferFree, NetUserGetLocalGroups,
         },
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation,
+            Authorization::ConvertSidToStringSidW, GetLengthSid, GetTokenInformation,
             LookupAccountSidW, PSID, RevertToSelf, SID_NAME_USE, TOKEN_QUERY,
             TOKEN_USER, TokenUser,
         },
@@ -109,6 +109,22 @@ fn with_token_user_sid<T>(token: HANDLE, f: impl FnOnce(PSID) -> Result<T>) -> R
     // SAFETY: the buffer holds a TOKEN_USER whose User.Sid points within it.
     let tu = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
     f(tu.User.Sid)
+}
+
+/// Copy a token's user SID into an owned, self-contained byte buffer so
+/// it stays valid after the thread reverts from an impersonation (the
+/// SID otherwise points into a buffer, and the lookup must run as the
+/// server, not the impersonated client).
+fn copy_token_user_sid(token: HANDLE) -> Result<Vec<u8>> {
+    with_token_user_sid(token, |sid| {
+        let len = unsafe { GetLengthSid(sid) } as usize;
+        if len == 0 {
+            bail!("GetLengthSid returned 0");
+        }
+        // SAFETY: `sid` is a valid SID of `len` contiguous bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(sid.0 as *const u8, len) };
+        Ok(bytes.to_vec())
+    })
 }
 
 /// The current process user's SID as a string (`S-1-5-…`), used to make
@@ -270,7 +286,7 @@ impl Mapper {
 }
 
 pub(crate) mod local_auth {
-    use super::{RevertGuard, as_handle, lookup_account_sid, pipe_name, with_token_user_sid};
+    use super::{RevertGuard, as_handle, copy_token_user_sid, lookup_account_sid, pipe_name};
     use crate::{
         os::local_auth::Credential,
         resolver_server::config::{Config, MemberServer},
@@ -302,27 +318,37 @@ pub(crate) mod local_auth {
     };
     use windows::Win32::{
         Foundation::HANDLE,
-        Security::TOKEN_QUERY,
+        Security::{PSID, TOKEN_QUERY},
         System::{
             Pipes::ImpersonateNamedPipeClient,
             Threading::{GetCurrentThread, OpenThreadToken},
         },
     };
 
-    /// Identify the pipe's connecting client as `DOMAIN\username` by
-    /// impersonating it and reading its token. Fully synchronous: the
-    /// impersonation is reverted (via [`RevertGuard`]) before returning, so
-    /// it never straddles an `.await`.
+    /// Identify the pipe's connecting client as `DOMAIN\username`. Fully
+    /// synchronous: the impersonation is reverted (via [`RevertGuard`])
+    /// before returning, so it never straddles an `.await`.
+    ///
+    /// The client's user SID is copied out *while impersonating*, then the
+    /// thread reverts before resolving it to a name — `LookupAccountSidW`
+    /// makes an LSA lookup the client's identification-level token isn't
+    /// permitted to perform, so the resolution must run as the server's own
+    /// identity.
     fn peer_user(pipe: &NamedPipeServer) -> Result<arcstr::ArcStr> {
         let h = HANDLE(pipe.as_raw_handle() as *mut c_void);
-        unsafe { ImpersonateNamedPipeClient(h) }.context("ImpersonateNamedPipeClient")?;
-        let _revert = RevertGuard;
-        let mut token = HANDLE::default();
-        unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
-            .context("OpenThreadToken")?;
-        // SAFETY: OpenThreadToken succeeded, so `token` is a valid owned handle.
-        let token = unsafe { OwnedHandle::from_raw_handle(token.0 as RawHandle) };
-        with_token_user_sid(as_handle(&token), lookup_account_sid)
+        let sid = {
+            unsafe { ImpersonateNamedPipeClient(h) }
+                .context("ImpersonateNamedPipeClient")?;
+            let _revert = RevertGuard;
+            let mut token = HANDLE::default();
+            unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
+                .context("OpenThreadToken")?;
+            // SAFETY: OpenThreadToken succeeded, so `token` is a valid owned handle.
+            let token = unsafe { OwnedHandle::from_raw_handle(token.0 as RawHandle) };
+            copy_token_user_sid(as_handle(&token))?
+            // `_revert` drops here → RevertToSelf before the lookup below.
+        };
+        lookup_account_sid(PSID(sid.as_ptr() as *mut c_void))
     }
 
     pub(crate) struct AuthServer {
