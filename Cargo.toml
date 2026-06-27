@@ -120,11 +120,19 @@ uuid = { version = "1", features = ["v4", "serde"] }
 warp = { version = "0.3", features = ["tls"] }
 windows = { version = "0.62.2", features = [
     "Win32",
+    "Win32_Foundation",
     "Win32_Storage",
     "Win32_Storage_FileSystem",
     "Win32_System",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 x509-parser = "0.18"
 zeroize = "1"

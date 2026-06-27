@@ -8,5 +8,8 @@ extern crate serde_derive;
 
 pub mod control;
 pub mod file;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
+mod platform;
+#[cfg(any(unix, windows))]
 pub mod runtime;
+pub mod shutdown;

@@ -22,11 +22,13 @@
 //!   `/Library/LaunchDaemons/<label>.plist` with the `UserName` key
 //!   set to `for_user`, and `launchctl bootstrap system`.
 //!
-//! - **Windows (SCM).** Stub: the install function returns an error
-//!   pointing the operator at the manual `sc.exe` recipe. A real
-//!   implementation needs to handle "log on as a service" rights for
-//!   per-user accounts (and the password capture that goes with it),
-//!   which is a different shape than systemd / launchd.
+//! - **Windows (Task Scheduler).** Windows is workstation-only and these
+//!   users typically lack local Administrator rights, so there is no
+//!   Windows Service / SCM. User scope registers a **per-user logon
+//!   Scheduled Task** (`schtasks /Create /XML`) that runs the supervisor
+//!   in the user's session — the analog of `systemctl --user enable`, no
+//!   elevation, no "log on as a service" password capture. System scope
+//!   is rejected (a Windows netidx server is out of scope).
 //!
 //! The unit-file *content* is pure (it's just a formatted string)
 //! and is what's covered by tests; the actual file write and the
@@ -48,7 +50,7 @@ mod platform;
 #[path = "launchd.rs"]
 mod platform;
 #[cfg(target_os = "windows")]
-#[path = "scm.rs"]
+#[path = "schtask.rs"]
 mod platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod platform {

@@ -10,7 +10,7 @@ mod stress_subscriber;
 mod subscriber;
 mod wsproxy;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod activation;
 mod conf;
 mod container;
@@ -117,7 +117,7 @@ enum Opt {
         cmd: record_client::Cmd,
     },
     /// manage netidx processes
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Activation {
         #[command(flatten)]
         common: ClientParams,
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
     netidx::config::Config::maybe_run_machine_local_resolver()?;
     match Opt::parse() {
         Opt::ResolverServer(p) => resolver_server::run(p),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         Opt::Activation { common, params } => {
             let (cfg, auth) = common.load();
             activation::run(cfg, auth, params)

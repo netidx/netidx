@@ -236,10 +236,9 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
                 .dir
                 .or_else(netidx_activation::runtime::default_units_dir)
                 .ok_or_else(|| anyhow!("no activation directory found on this host"))?;
-            let socket = netidx_activation::control::socket_path(&dir);
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let req = ControlRequest { op, units: a.units };
-            match rt.block_on(netidx_activation::control::control(&socket, &req))? {
+            match rt.block_on(netidx_activation::control::control(&dir, &req))? {
                 ControlResponse::Ok { units } => {
                     print_unit_statuses(&units);
                     Ok(())

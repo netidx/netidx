@@ -7,6 +7,7 @@
 use crate::{
     control::{self, ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus},
     file::{ProcessCfg, Restart, Trigger, Unit},
+    platform::{self, SigEvent},
 };
 use anyhow::{Result, anyhow, bail};
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
@@ -17,16 +18,13 @@ use netidx::{
 };
 use std::{
     collections::HashMap,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::ExitStatus,
     time::Duration,
 };
 use tokio::{
     fs,
-    net::{UnixListener, UnixStream},
-    process::{Child, Command},
-    signal::unix::{SignalKind, signal},
+    process::Command,
     sync::{mpsc, oneshot},
     task,
     time::{Instant, sleep, timeout},
@@ -50,9 +48,7 @@ impl ProcessCfgExt for ProcessCfg {
         if !md.is_file() {
             bail!("exe must be a file")
         }
-        if md.permissions().mode() & 0b0000_0000_0100_1001 == 0 {
-            bail!("exe must be executable")
-        }
+        platform::validate_exe(&md)?;
         Ok(())
     }
 
@@ -63,12 +59,7 @@ impl ProcessCfgExt for ProcessCfg {
         if let Some(dir) = self.working_directory.as_ref() {
             c.current_dir(dir);
         }
-        if let Some(uid) = self.uid {
-            c.uid(uid);
-        }
-        if let Some(gid) = self.gid {
-            c.gid(gid);
-        }
+        platform::configure_privileges(&mut c, self.uid, self.gid)?;
         if let Some(stdin) = &self.stdin {
             c.stdin(fs::File::open(stdin)?);
         }
@@ -102,8 +93,7 @@ pub fn default_units_dir() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let p = PathBuf::from("/etc/netidx/activation");
-    if std::path::Path::is_dir(&p) { Some(p) } else { None }
+    platform::system_units_dir()
 }
 
 /// Load every `*.unit` file from `dir` (or the default location). Keys
@@ -148,7 +138,7 @@ pub async fn load_units(dir: Option<&PathBuf>) -> Result<HashMap<String, Unit>> 
 enum ProcStatus {
     NotStarted,
     Died(Instant),
-    Running(Child),
+    Running(platform::Spawned),
     /// Explicitly stopped via the control socket — every auto-restart path
     /// (crash, OnAccess, reconfigure) treats this as "leave it alone" until
     /// an explicit `Start`.
@@ -172,7 +162,7 @@ fn unit_status(name: &str, proc: &ProcStatus) -> UnitStatus {
         ProcStatus::NotStarted => UnitState::NotStarted,
         ProcStatus::Stopped => UnitState::Stopped,
         ProcStatus::Died(_) => UnitState::Died,
-        ProcStatus::Running(child) => UnitState::Running { pid: child.id() },
+        ProcStatus::Running(spawned) => UnitState::Running { pid: spawned.id() },
     };
     UnitStatus { unit: name.to_string(), state }
 }
@@ -183,22 +173,17 @@ fn unit_status(name: &str, proc: &ProcStatus) -> UnitStatus {
 /// connection being dropped mid-shutdown and the op reported as failed).
 const CONTROL_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
-/// SIGTERM (then SIGKILL) a running child and reap it. A no-op for any
-/// non-running state.
-async fn stop_proc(proc: &mut ProcStatus) {
-    if let ProcStatus::Running(child) = proc {
-        match child.id() {
-            None => {
-                let _ = child.kill().await;
-            }
-            Some(pid) => {
-                let pid = nix::unistd::Pid::from_raw(pid as i32);
-                let term = nix::sys::signal::Signal::SIGTERM;
-                let _ = nix::sys::signal::kill(pid, Some(term));
-                let _ = timeout(CONTROL_SHUTDOWN_GRACE, child.wait()).await;
-                let _ = child.kill().await;
-            }
-        }
+/// Grace period a child gets on final supervisor shutdown before the hard
+/// kill. Longer than the control-op grace because a normal shutdown isn't
+/// racing a remote control reply.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Ask a running child to stop — gracefully first (SIGTERM on unix, the
+/// shutdown event on Windows), then a hard kill after `grace` — and reap
+/// it. A no-op for any non-running state.
+async fn stop_proc(proc: &mut ProcStatus, grace: Duration) {
+    if let ProcStatus::Running(spawned) = proc {
+        platform::stop_proc(spawned, grace).await;
     }
 }
 
@@ -213,6 +198,7 @@ impl Process {
         name: String,
         mut unit: Unit,
         mut rx: mpsc::UnboundedReceiver<ToProcess>,
+        job: platform::Job,
     ) -> Result<()> {
         let mut proc: ProcStatus = ProcStatus::NotStarted;
         let mut default: Option<SelectAll<DefaultHandle>> =
@@ -252,15 +238,16 @@ impl Process {
             proc: &mut ProcStatus,
             default: &mut Option<SelectAll<DefaultHandle>>,
             cfg: &ProcessCfg,
+            job: &platform::Job,
         ) {
             match task::block_in_place(|| cfg.command()) {
                 Err(e) => error!("failed to setup process {} failed with {}", cfg.exe, e),
-                Ok(mut c) => match c.spawn() {
+                Ok(c) => match platform::spawn(c, job) {
                     Err(e) => {
                         error!("failed to spawn process {} failed with {}", cfg.exe, e)
                     }
-                    Ok(child) => {
-                        *proc = ProcStatus::Running(child);
+                    Ok(spawned) => {
+                        *proc = ProcStatus::Running(spawned);
                         *default = None;
                     }
                 },
@@ -271,17 +258,18 @@ impl Process {
             default: &mut Option<SelectAll<DefaultHandle>>,
             unit: &Unit,
             when: Instant,
+            job: &platform::Job,
         ) {
             match &unit.process.restart {
                 Restart::No => (),
-                Restart::Yes => start(proc, default, &unit.process),
+                Restart::Yes => start(proc, default, &unit.process, job),
                 Restart::RateLimited(secs) => {
                     let elapsed = when.elapsed();
                     if elapsed.as_secs_f64() > *secs {
-                        start(proc, default, &unit.process)
+                        start(proc, default, &unit.process, job)
                     } else {
                         sleep(Duration::from_secs_f64(*secs) - elapsed).await;
-                        start(proc, default, &unit.process)
+                        start(proc, default, &unit.process, job)
                     }
                 }
             }
@@ -290,23 +278,24 @@ impl Process {
             proc: &mut ProcStatus,
             default: &mut Option<SelectAll<DefaultHandle>>,
             unit: &Unit,
+            job: &platform::Job,
         ) {
             match proc {
                 ProcStatus::Running(_) | ProcStatus::Stopped => (),
                 ProcStatus::NotStarted => match &unit.trigger {
                     Trigger::OnAccess(_) => (),
-                    Trigger::OnStart => start(proc, default, &unit.process),
+                    Trigger::OnStart => start(proc, default, &unit.process, job),
                 },
                 ProcStatus::Died(when) => match &unit.trigger {
                     Trigger::OnAccess(_) => (),
                     Trigger::OnStart => {
                         let when = *when;
-                        restart_proc(proc, default, unit, when).await
+                        restart_proc(proc, default, unit, when, job).await
                     }
                 },
             }
         }
-        maybe_restart(&mut proc, &mut default, &unit).await;
+        maybe_restart(&mut proc, &mut default, &unit, &job).await;
         loop {
             select_biased! {
                 m = rx.recv().fuse() => match m {
@@ -318,15 +307,18 @@ impl Process {
                             ProcStatus::Running(_) | ProcStatus::Stopped => (),
                             ProcStatus::NotStarted | ProcStatus::Died(_) => {
                                 default = publish(&publisher, &unit.trigger)?;
-                                maybe_restart(&mut proc, &mut default, &unit).await
+                                maybe_restart(&mut proc, &mut default, &unit, &job).await
                             }
                         }
                     }
                     Some(ToProcess::Control { op, reply }) => {
                         match op {
-                            ControlOp::Status => (),
+                            // Reload is supervisor-global; it's converted to a
+                            // per-unit Status before reaching here, so a unit
+                            // task never actually sees it.
+                            ControlOp::Status | ControlOp::Reload => (),
                             ControlOp::Stop => {
-                                stop_proc(&mut proc).await;
+                                stop_proc(&mut proc, CONTROL_SHUTDOWN_GRACE).await;
                                 proc = ProcStatus::Stopped;
                                 default = None;
                             }
@@ -339,35 +331,19 @@ impl Process {
                                     // paths here — the unit's own handles are
                                     // still live, so a re-publish would bail
                                     // ("already published") and kill the task.
-                                    start(&mut proc, &mut default, &unit.process);
+                                    start(&mut proc, &mut default, &unit.process, &job);
                                 }
                             }
                             ControlOp::Restart => {
-                                stop_proc(&mut proc).await;
-                                start(&mut proc, &mut default, &unit.process);
+                                stop_proc(&mut proc, CONTROL_SHUTDOWN_GRACE).await;
+                                start(&mut proc, &mut default, &unit.process, &job);
                             }
                         }
                         let _ = reply.send(unit_status(&name, &proc));
                     }
-                    None | Some(ToProcess::Shutdown) =>  match &mut proc {
-                        ProcStatus::NotStarted | ProcStatus::Died(_) | ProcStatus::Stopped => {
-                            break Ok(())
-                        }
-                        ProcStatus::Running(child) => {
-                            match child.id() {
-                                None => {
-                                    let _ = child.kill().await;
-                                }
-                                Some(pid) => {
-                                    let pid = nix::unistd::Pid::from_raw(pid as i32);
-                                    let term = nix::sys::signal::Signal::SIGTERM;
-                                    let _ = nix::sys::signal::kill(pid, Some(term));
-                                    let _ = timeout(Duration::from_secs(30), child.wait()).await;
-                                    let _ = child.kill().await;
-                                }
-                            }
-                            break Ok(())
-                        }
+                    None | Some(ToProcess::Shutdown) => {
+                        stop_proc(&mut proc, SHUTDOWN_GRACE).await;
+                        break Ok(())
                     }
                 },
                 e = wait_proc(&mut proc).fuse() => match e {
@@ -379,15 +355,15 @@ impl Process {
                         warn!("process for unit {} shutdown with {:?}", name, e);
                         proc = ProcStatus::Died(Instant::now());
                         default = publish(&publisher, &unit.trigger)?;
-                        maybe_restart(&mut proc, &mut default, &unit).await
+                        maybe_restart(&mut proc, &mut default, &unit, &job).await
                     }
                 },
                 () = wait_default(&mut default).fuse() => match &proc {
                     ProcStatus::Running(_) | ProcStatus::Stopped => (),
-                    ProcStatus::NotStarted => start(&mut proc, &mut default, &unit.process),
+                    ProcStatus::NotStarted => start(&mut proc, &mut default, &unit.process, &job),
                     ProcStatus::Died(when) => {
                         let when = *when;
-                        restart_proc(&mut proc, &mut default, &unit, when).await
+                        restart_proc(&mut proc, &mut default, &unit, when, &job).await
                     },
                 },
                 complete => bail!("default handle finished"),
@@ -395,10 +371,10 @@ impl Process {
         }
     }
 
-    fn new(publisher: Publisher, name: String, unit: Unit) -> Self {
+    fn new(publisher: Publisher, name: String, unit: Unit, job: platform::Job) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let join_handle = task::spawn(async move {
-            match Self::run(publisher, name.clone(), unit, rx).await {
+            match Self::run(publisher, name.clone(), unit, rx, job).await {
                 Err(e) => error!("unit {} failed with {}", name, e),
                 Ok(()) => info!("unit {} shutdown", name),
             }
@@ -420,6 +396,7 @@ async fn start_processes(
     publisher: &Publisher,
     units: &HashMap<String, Unit>,
     processes: &mut HashMap<String, Process>,
+    job: &platform::Job,
 ) {
     let to_kill = processes
         .keys()
@@ -436,7 +413,7 @@ async fn start_processes(
             None => {
                 processes.insert(
                     name.clone(),
-                    Process::new(publisher.clone(), name.clone(), unit.clone()),
+                    Process::new(publisher.clone(), name.clone(), unit.clone(), job.clone()),
                 );
             }
         }
@@ -448,73 +425,49 @@ fn unit_key(s: &str) -> &str {
     s.strip_suffix(".unit").unwrap_or(s)
 }
 
-/// Whether the connecting peer is allowed to control units: the same
-/// effective uid as the supervisor, or root. The 0600 socket mode already
-/// enforces this at the kernel — this is defense-in-depth and an audit point.
-fn peer_allowed(stream: &UnixStream) -> bool {
-    match stream.peer_cred() {
-        Ok(cred) => cred.uid() == 0 || cred.uid() == nix::unistd::geteuid().as_raw(),
-        Err(e) => {
-            error!("activation control: could not read peer credentials: {e}");
-            false
-        }
-    }
-}
-
-/// Bind the control socket at `path`, mode 0600. Returns `None` (logged) if
-/// it can't bind — the supervisor still runs, just without remote control.
-fn bind_control(path: &Path) -> Option<UnixListener> {
-    let _ = std::fs::remove_file(path); // clear a stale socket left by a crash
-    match UnixListener::bind(path) {
-        Ok(l) => {
-            if let Err(e) =
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            {
-                error!(
-                    "activation control: could not set perms on {}: {e}",
-                    path.display()
-                );
-            }
-            info!("activation control socket listening at {}", path.display());
-            Some(l)
-        }
-        Err(e) => {
-            error!("activation control: could not bind {}: {e}", path.display());
-            None
-        }
-    }
-}
-
-/// Pend forever when there is no listener, so the `select` arm is inert.
-async fn accept_control(listener: &Option<UnixListener>) -> Option<UnixStream> {
-    match listener {
-        Some(l) => match l.accept().await {
-            Ok((s, _)) => Some(s),
-            Err(e) => {
-                error!("activation control: accept failed: {e}");
-                None
-            }
-        },
-        None => future::pending().await,
-    }
-}
+/// A `Reload` request from a control connection to the supervisor loop. The
+/// loop reloads units from disk and replies with the new per-unit control
+/// channel snapshot, over which the handler then reports `Status`.
+type ReloadRequest = oneshot::Sender<HashMap<String, mpsc::UnboundedSender<ToProcess>>>;
 
 /// Handle one control connection: read the request, drive the named units'
 /// supervisor tasks, and reply with each unit's resulting status. `senders`
-/// is a snapshot of the per-unit control channels taken at accept time.
+/// is a snapshot of the per-unit control channels taken at accept time;
+/// `reload_tx` reaches the supervisor loop to service a `Reload`.
 async fn handle_control_conn(
-    mut stream: UnixStream,
+    mut stream: platform::ControlStream,
     senders: HashMap<String, mpsc::UnboundedSender<ToProcess>>,
+    reload_tx: mpsc::Sender<ReloadRequest>,
 ) -> Result<()> {
     let req: ControlRequest = control::read_msg(&mut stream).await?;
+    // A Reload is supervisor-global: ask the run loop to reload units from
+    // disk, then report Status over the fresh unit set (its `units` list is
+    // ignored). Every other op acts on the snapshot taken at accept time.
+    let (op, senders, units) = if let ControlOp::Reload = req.op {
+        let (tx, rx) = oneshot::channel();
+        if reload_tx.send(tx).await.is_err() {
+            let resp =
+                ControlResponse::Err { reason: "supervisor is shutting down".into() };
+            return control::write_msg(&mut stream, &resp).await;
+        }
+        match rx.await {
+            Ok(new_senders) => (ControlOp::Status, new_senders, Vec::new()),
+            Err(_) => {
+                let resp = ControlResponse::Err { reason: "reload failed".into() };
+                return control::write_msg(&mut stream, &resp).await;
+            }
+        }
+    } else {
+        (req.op, senders, req.units)
+    };
     // Empty target list ⇒ every unit. Otherwise resolve each requested name
     // (suffix-insensitive) to a known unit, failing the whole request on an
     // unknown name so a typo isn't reported as success.
-    let targets: Vec<String> = if req.units.is_empty() {
+    let targets: Vec<String> = if units.is_empty() {
         senders.keys().cloned().collect()
     } else {
         let mut out = Vec::new();
-        for want in &req.units {
+        for want in &units {
             match senders.keys().find(|k| unit_key(k) == unit_key(want)) {
                 Some(k) => out.push(k.clone()),
                 None => {
@@ -541,7 +494,7 @@ async fn handle_control_conn(
                 // concurrent reload removed the unit); report it, don't hang.
                 pending.push((
                     display,
-                    tx.send(ToProcess::Control { op: req.op, reply: rtx })
+                    tx.send(ToProcess::Control { op, reply: rtx })
                         .ok()
                         .map(|()| rrx),
                 ));
@@ -578,13 +531,14 @@ pub struct ServerParams {
 ///
 /// Construct with [`Server::new`]; that brings up the publisher,
 /// loads the unit directory, and spawns a supervisor task for each
-/// unit. Call [`Server::run`] to drive the SIGHUP / shutdown signal
-/// loop until the server is asked to terminate.
+/// unit. Call [`Server::run`] to drive the shutdown / reload loop
+/// until the server is asked to terminate.
 pub struct Server {
     publisher: Publisher,
     processes: HashMap<String, Process>,
     units: HashMap<String, Unit>,
     units_dir: Option<PathBuf>,
+    job: platform::Job,
 }
 
 impl Server {
@@ -599,53 +553,68 @@ impl Server {
             .bind_cfg(params.bind)
             .build()
             .await?;
+        let job = platform::Job::new()?;
         let units = load_units(params.units_dir.as_ref()).await?;
         let mut processes: HashMap<String, Process> = HashMap::new();
-        start_processes(&publisher, &units, &mut processes).await;
-        Ok(Self { publisher, processes, units, units_dir: params.units_dir })
+        start_processes(&publisher, &units, &mut processes, &job).await;
+        Ok(Self { publisher, processes, units, units_dir: params.units_dir, job })
     }
 
-    /// Run until SIGINT / SIGTERM / SIGQUIT. SIGHUP triggers a unit
-    /// reload from disk.
+    /// Reload the unit directory from disk and reconcile. Driven on unix
+    /// by SIGHUP and on every platform by the `Reload` control op.
+    async fn reload(&mut self) {
+        match load_units(self.units_dir.as_ref()).await {
+            Err(e) => error!("could not reconfigure, could not load units {}", e),
+            Ok(u) => {
+                self.units = u;
+                start_processes(&self.publisher, &self.units, &mut self.processes, &self.job)
+                    .await;
+                info!("units reloaded successfully")
+            }
+        }
+    }
+
+    /// Run until asked to shut down (SIGINT/SIGTERM/SIGQUIT on unix,
+    /// ctrl-c / ctrl-break on Windows). A reload signal (SIGHUP on unix)
+    /// triggers a unit reload from disk.
     pub async fn run(mut self) -> Result<()> {
-        let mut sighup = signal(SignalKind::hangup())?;
-        let mut sigint = signal(SignalKind::interrupt())?;
-        let mut sigterm = signal(SignalKind::terminate())?;
-        let mut sigquit = signal(SignalKind::quit())?;
-        // The local control socket — `<units_dir>/control.sock`, 0600. Lets
-        // the conf server (same host, same user / root) drive a unit's
-        // start/stop/restart/status on a role admin's behalf. Best-effort: a
-        // bind failure logs and the supervisor still serves units.
-        let control_socket = self
-            .units_dir
-            .clone()
-            .or_else(default_units_dir)
-            .map(|d| control::socket_path(&d));
-        let control_listener = control_socket.as_deref().and_then(bind_control);
+        let mut signals = platform::Signals::new()?;
+        // The local control endpoint (unix socket / named pipe) under the
+        // unit directory. Lets the conf server (same host, same user) drive
+        // a unit's start/stop/restart/status/reload on a role admin's
+        // behalf. Best-effort: a bind failure logs and the supervisor still
+        // serves units.
+        let units_dir = self.units_dir.clone().or_else(default_units_dir);
+        let mut control_listener =
+            units_dir.as_deref().and_then(platform::bind_control);
+        // Control handlers run in their own tasks; a `Reload` op reaches the
+        // loop back through this channel so the reload runs here (where `self`
+        // lives) and the handler gets the fresh unit set to report on.
+        let (reload_tx, mut reload_rx) = mpsc::channel::<ReloadRequest>(8);
         loop {
             select_biased! {
-                _ = sigint.recv().fuse() => break,
-                _ = sigterm.recv().fuse() => break,
-                _ = sigquit.recv().fuse() => break,
-                _ = sighup.recv().fuse() => {
-                    match load_units(self.units_dir.as_ref()).await {
-                        Err(e) => error!("could not reconfigure, could not load units {}", e),
-                        Ok(u) => {
-                            self.units = u;
-                            start_processes(&self.publisher, &self.units, &mut self.processes).await;
-                            info!("units reloaded successfully")
-                        }
+                ev = signals.next().fuse() => match ev {
+                    SigEvent::Shutdown => break,
+                    SigEvent::Reload => self.reload().await,
+                },
+                req = reload_rx.recv().fuse() => {
+                    if let Some(reply) = req {
+                        self.reload().await;
+                        let senders: HashMap<String, mpsc::UnboundedSender<ToProcess>> =
+                            self.processes.iter().map(|(k, p)| (k.clone(), p.tx.clone())).collect();
+                        let _ = reply.send(senders);
                     }
                 }
-                conn = accept_control(&control_listener).fuse() => {
+                conn = platform::accept_control(&mut control_listener).fuse() => {
                     if let Some(stream) = conn {
-                        if peer_allowed(&stream) {
+                        if platform::peer_allowed(&stream) {
                             // Snapshot the per-unit control channels so a slow
                             // client never stalls this loop.
                             let senders: HashMap<String, mpsc::UnboundedSender<ToProcess>> =
                                 self.processes.iter().map(|(k, p)| (k.clone(), p.tx.clone())).collect();
+                            let reload_tx = reload_tx.clone();
                             task::spawn(async move {
-                                if let Err(e) = handle_control_conn(stream, senders).await {
+                                if let Err(e) = handle_control_conn(stream, senders, reload_tx).await {
                                     warn!("activation control: connection error: {e}");
                                 }
                             });
@@ -657,9 +626,10 @@ impl Server {
                 complete => break,
             }
         }
-        start_processes(&self.publisher, &HashMap::default(), &mut self.processes).await;
-        if let Some(path) = &control_socket {
-            let _ = std::fs::remove_file(path);
+        start_processes(&self.publisher, &HashMap::default(), &mut self.processes, &self.job)
+            .await;
+        if let Some(d) = &units_dir {
+            platform::remove_control(d);
         }
         Ok(())
     }

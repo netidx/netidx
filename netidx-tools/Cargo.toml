@@ -26,6 +26,9 @@ path = "src/main.rs"
 daemonize = { workspace = true }
 nix = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
 [features]
 default = []
 krb5_iov = ["netidx/krb5_iov"]

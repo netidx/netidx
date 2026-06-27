@@ -145,6 +145,10 @@ async fn run_reload_loop(
 
     loop {
         let trigger = tokio::select! {
+            // A shutdown request (ctrl-c / SIGTERM, or the activation
+            // supervisor's Windows event) ends the loop cleanly, dropping
+            // the server rather than waiting to be hard-killed.
+            _ = netidx_activation::shutdown::wait() => break Ok(()),
             _ = sighup.recv() => Some("SIGHUP"),
             batch = events_rx.recv(), if watcher_alive => match batch {
                 None => {

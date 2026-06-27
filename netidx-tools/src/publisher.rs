@@ -20,7 +20,7 @@ use poolshark::global::GPooled;
 use std::{convert::From, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout},
-    signal, task,
+    task,
 };
 
 #[derive(Args, Debug)]
@@ -170,8 +170,8 @@ pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Re
         batch.commit(timeout).await
     };
     warn!("read loop exited {:?}, running until killed", res);
-    // run until we are killed even if stdin closes or ends
-    signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+    // run until we are asked to stop even if stdin closes or ends
+    netidx_activation::shutdown::wait().await;
     publisher.shutdown().await;
     Ok(())
 }

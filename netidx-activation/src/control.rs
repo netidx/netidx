@@ -36,6 +36,12 @@ pub enum ControlOp {
     Stop,
     Restart,
     Status,
+    /// Reload the supervisor's unit directory from disk (the control-plane
+    /// equivalent of unix SIGHUP, and the only reload trigger on Windows).
+    /// Supervisor-global — the `units` list is ignored — and replies with
+    /// the post-reload unit set and their states. Added after the original
+    /// four ops; an older peer that doesn't know it simply never sends it.
+    Reload,
 }
 
 /// A unit's runtime state.
@@ -81,12 +87,69 @@ pub fn socket_path(units_dir: &Path) -> PathBuf {
     units_dir.join(SOCKET_FILE)
 }
 
-/// Connect to a local activation control socket and run one request.
+/// The control endpoint name for a supervisor whose unit directory is
+/// `units_dir`, on Windows: a named pipe `\\.\pipe\netidx-activation-<h>`
+/// where `<h>` is a stable hash of the canonical, lowercased directory.
+///
+/// Pipes live in a flat kernel namespace (not under the directory), so
+/// the name is *derived* from the directory rather than placed inside it,
+/// and both the supervisor and a conf client resolve it the same way.
+/// The hash is FNV-1a (not `DefaultHasher`, whose output isn't stable
+/// across Rust versions) so a client built against a different netidx
+/// version derives the identical name. The directory is lowercased
+/// because Windows paths are case-insensitive.
+#[cfg(windows)]
+pub fn pipe_name(units_dir: &Path) -> String {
+    let canon =
+        std::fs::canonicalize(units_dir).unwrap_or_else(|_| units_dir.to_path_buf());
+    let s = canon.to_string_lossy().to_lowercase();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!(r"\\.\pipe\netidx-activation-{h:016x}")
+}
+
+/// Connect to a local activation control endpoint (the `<units_dir>`
+/// unix socket on unix, the derived named pipe on Windows) and run one
+/// request.
 #[cfg(unix)]
-pub async fn control(socket: &Path, req: &ControlRequest) -> Result<ControlResponse> {
-    let mut s = tokio::net::UnixStream::connect(socket).await.with_context(|| {
+pub async fn control(units_dir: &Path, req: &ControlRequest) -> Result<ControlResponse> {
+    let socket = socket_path(units_dir);
+    let mut s = tokio::net::UnixStream::connect(&socket).await.with_context(|| {
         format!("connecting to the activation control socket {}", socket.display())
     })?;
+    write_msg(&mut s, req).await?;
+    read_msg(&mut s).await
+}
+
+/// Connect to the local activation control named pipe and run one
+/// request. Retries briefly while every pipe instance is busy.
+#[cfg(windows)]
+pub async fn control(units_dir: &Path, req: &ControlRequest) -> Result<ControlResponse> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use windows::Win32::Foundation::ERROR_PIPE_BUSY;
+    let name = pipe_name(units_dir);
+    let mut tries = 0u32;
+    let mut s = loop {
+        match ClientOptions::new().open(&name) {
+            Ok(c) => break c,
+            // All instances are busy; the server creates the next instance
+            // right after each accept, so a short wait clears it.
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) && tries < 40 =>
+            {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("connecting to the activation control pipe {name}")
+                });
+            }
+        }
+    };
     write_msg(&mut s, req).await?;
     read_msg(&mut s).await
 }

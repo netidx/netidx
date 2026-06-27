@@ -3464,8 +3464,8 @@ async fn handle_apply_service_control(
         .activation_units_dir
         .clone()
         .or_else(netidx_activation::runtime::default_units_dir);
-    let socket = match units_dir {
-        Some(dir) => control::socket_path(&dir),
+    let dir = match units_dir {
+        Some(dir) => dir,
         None => {
             return err(
                 "no activation supervisor on this host (no unit directory found)"
@@ -3474,7 +3474,7 @@ async fn handle_apply_service_control(
         }
     };
     let creq = control::ControlRequest { op: req.op, units: req.units.clone() };
-    match control::control(&socket, &creq).await {
+    match control::control(&dir, &creq).await {
         Ok(control::ControlResponse::Ok { units }) => {
             ApplyServiceControlResponse::Ok { units }
         }
