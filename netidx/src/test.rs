@@ -628,6 +628,277 @@ mod publisher {
         drop(server)
     }
 
+    // Soak harness for cold one-shot subscribes: a fresh Subscriber (new
+    // resolver read connection + new publisher connection + new TLS handshake +
+    // new token each time) subscribes once to /app/v0 and is dropped. Hammered
+    // in a loop, counting failures. Ignored by default (it is a soak, ~50s);
+    // run with `cargo test -p netidx cold_subscribe_churn -- --ignored
+    // --nocapture`. The cold path is the one that broke under renewal: every
+    // fresh Subscriber builds its own empty-cache `CachedConnector`, unlike a
+    // persistent (durable) subscriber that builds its connector once.
+    async fn cold_subscribe_churn(
+        server_cfg: ServerConfig,
+        cfg: ClientConfig,
+        auth: DesiredAuth,
+        iters: usize,
+    ) {
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        let mut cfg = cfg;
+        cfg.addrs[0].0 = *server.local_addr();
+        let default_destroyed = Arc::new(Mutex::new(false));
+        let (tx, ready) = oneshot::channel();
+        task::spawn(run_publisher(cfg.clone(), default_destroyed, tx, auth.clone()));
+        time::timeout(Duration::from_secs(5), ready).await.unwrap().unwrap();
+        let mut ok = 0usize;
+        let mut fail = 0usize;
+        for i in 0..iters {
+            let sub = Subscriber::new(cfg.clone(), auth.clone()).unwrap();
+            let start = Instant::now();
+            let r = sub
+                .subscribe_nondurable_one("/app/v0".into(), Some(Duration::from_secs(5)))
+                .await;
+            match r {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    fail += 1;
+                    println!("FAIL iter={i} elapsed={:?} err={e}", start.elapsed());
+                }
+            }
+            drop(sub);
+            time::sleep(Duration::from_millis(250)).await;
+        }
+        println!("cold_subscribe_churn: ok={ok} fail={fail}");
+        drop(server);
+        assert_eq!(fail, 0, "cold subscribe stalled {fail} / {iters} times");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn cold_subscribe_churn_anon() {
+        let _ = env_logger::try_init();
+        let server_cfg = ServerConfig::load("../cfg/simple-server.json").unwrap();
+        let cfg = ClientConfig::load("../cfg/simple-client.json").unwrap();
+        cold_subscribe_churn(server_cfg, cfg, DesiredAuth::Anonymous, 200).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn cold_subscribe_churn_tls() {
+        let _ = env_logger::try_init();
+        #[cfg(unix)]
+        let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json").unwrap();
+        #[cfg(windows)]
+        let server_cfg =
+            ServerConfig::load("../cfg/tls/resolver/resolver-win.json").unwrap();
+        let cfg = ClientConfig::load("../cfg/tls/client/client.json").unwrap();
+        cold_subscribe_churn(server_cfg, cfg, DesiredAuth::Tls { identity: None }, 200)
+            .await;
+    }
+
+    // Mint a self-contained renewal lab in a tempdir: NGEN fresh CA-signed
+    // (cert, key) generations per identity plus initial "live" files, all
+    // chained to the repo's checked-in test CA, with server/client/publisher
+    // configs pointing at the live files. Returns None (test skips) if openssl
+    // or the CA material isn't available. The CA is copied into the tempdir so
+    // signing's serial file doesn't touch the source tree.
+    #[cfg(unix)]
+    fn mint_renew_lab() -> Option<std::path::PathBuf> {
+        use std::{path::Path, process::Command};
+        const NGEN: usize = 4;
+        let ca_src = Path::new("../cfg/tls/ca");
+        if !ca_src.join("certificate").exists()
+            || !Command::new("openssl")
+                .arg("version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("netidx-renewlab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::copy(ca_src.join("certificate"), dir.join("ca.pem")).ok()?;
+        std::fs::copy(ca_src.join("private.key"), dir.join("ca.key")).ok()?;
+        let ca = dir.join("ca.pem");
+        let cak = dir.join("ca.key");
+        let run = |args: &[&str]| {
+            Command::new("openssl")
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let s = |p: &Path| p.to_str().unwrap().to_string();
+        let mint = |id: &str, san: &str| -> bool {
+            let d = dir.join(id);
+            std::fs::create_dir_all(&d).ok();
+            let ext = d.join("ext.cnf");
+            std::fs::write(
+                &ext,
+                format!(
+                    "basicConstraints=critical,CA:FALSE\n\
+                     keyUsage=nonRepudiation,digitalSignature,keyEncipherment\n\
+                     subjectAltName=DNS:{san}\n"
+                ),
+            )
+            .ok();
+            for g in 0..NGEN {
+                let key = s(&d.join(format!("key{g}.pem")));
+                let req = s(&d.join(format!("req{g}")));
+                let cert = s(&d.join(format!("cert{g}.pem")));
+                let subj = format!("/CN={san}/C=US/ST=State/L=City/O=example");
+                let ok = run(&["genrsa", "-out", &key, "2048"])
+                    && run(&[
+                        "req", "-new", "-key", &key, "-sha512", "-out", &req, "-subj",
+                        &subj,
+                    ])
+                    && run(&[
+                        "x509", "-req", "-in", &req, "-CA", &s(&ca), "-CAkey", &s(&cak),
+                        "-CAcreateserial", "-out", &cert, "-days", "730", "-sha512",
+                        "-extfile", &s(&ext),
+                    ]);
+                if !ok {
+                    return false;
+                }
+            }
+            std::fs::copy(d.join("cert0.pem"), d.join("certificate.pem")).is_ok()
+                && std::fs::copy(d.join("key0.pem"), d.join("private.key")).is_ok()
+        };
+        if !(mint("resolver", "resolver.example.com")
+            && mint("publisher", "publisher.example.com")
+            && mint("client", "client.example.com"))
+        {
+            return None;
+        }
+        let live = |id: &str, f: &str| s(&dir.join(id).join(f));
+        let server = format!(
+            r#"{{"parent":null,"children":[],"member_servers":[{{"pid_file":"",
+            "id_map_command":"../cfg/tls/id","addr":"127.0.0.1:0","max_connections":768,
+            "hello_timeout":10,"reader_ttl":60,"writer_ttl":120,
+            "auth":{{"Tls":{{"name":"resolver.example.com","trusted":"{ca}",
+            "certificate":"{cert}","private_key":"{key}"}}}}}}],
+            "perms":{{"/":{{"user":"swlpd"}}}}}}"#,
+            ca = s(&ca),
+            cert = live("resolver", "certificate.pem"),
+            key = live("resolver", "private.key"),
+        );
+        let client = |id: &str| {
+            format!(
+                r#"{{"addrs":[["127.0.0.1:0",{{"Tls":"resolver.example.com"}}]],
+                "base":"/","default_auth":"Tls","tls":{{"identities":{{"example.com":{{
+                "trusted":"{ca}","certificate":"{cert}","private_key":"{key}"}}}}}}}}"#,
+                ca = s(&ca),
+                cert = live(id, "certificate.pem"),
+                key = live(id, "private.key"),
+            )
+        };
+        std::fs::write(dir.join("server.json"), server).ok()?;
+        std::fs::write(dir.join("client.json"), client("client")).ok()?;
+        std::fs::write(dir.join("publisher.json"), client("publisher")).ok()?;
+        Some(dir)
+    }
+
+    // Regression test for the cold-subscribe-under-renewal failure: cold
+    // subscribers churn while a background "renewer" rotates the resolver,
+    // publisher, AND client certs through fresh CA-signed generations — cert
+    // first, then (after a deliberately exaggerated skew window) key, exactly as
+    // `renewd` installs them as two separate files. Before the `Cached::load`
+    // retry fix a fresh Subscriber that built its connector during that window
+    // hit a rustls KeyMismatch with nothing cached to fall back to and failed
+    // the resolve outright (~6% here); persistent subscribers were immune. Must
+    // hold at 0 failures.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn cold_subscribe_under_renewal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _ = env_logger::try_init();
+        let lab = match mint_renew_lab() {
+            Some(d) => d,
+            None => {
+                println!("skipping: openssl or test CA unavailable");
+                return;
+            }
+        };
+        let labs = lab.to_str().unwrap().to_string();
+        let server_cfg = ServerConfig::load(lab.join("server.json")).unwrap();
+        let mut pub_cfg = ClientConfig::load(lab.join("publisher.json")).unwrap();
+        let mut sub_cfg = ClientConfig::load(lab.join("client.json")).unwrap();
+        let server = Server::new(server_cfg, false, 0).await.expect("start server");
+        pub_cfg.addrs[0].0 = *server.local_addr();
+        sub_cfg.addrs[0].0 = *server.local_addr();
+        let default_destroyed = Arc::new(Mutex::new(false));
+        let (tx, ready) = oneshot::channel();
+        task::spawn(run_publisher(
+            pub_cfg,
+            default_destroyed,
+            tx,
+            DesiredAuth::Tls { identity: None },
+        ));
+        time::timeout(Duration::from_secs(5), ready).await.unwrap().unwrap();
+        // Rotate each identity's cert then key as separate atomic renames, with
+        // a skew window in between, so a reader can momentarily see new-cert /
+        // old-key. The 40ms window is exaggerated (real renewd is sub-ms) to make
+        // the race reliably reproducible.
+        let stop = Arc::new(AtomicBool::new(false));
+        let renewer = task::spawn({
+            let stop = stop.clone();
+            async move {
+                let ids = ["resolver", "publisher", "client"];
+                let mut g = 1usize;
+                let mut n = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    let dir = format!("{labs}/{}", ids[n % ids.len()]);
+                    let swap = |src: String, live: String| {
+                        let tmp = format!("{live}.tmp");
+                        if std::fs::copy(&src, &tmp).is_ok() {
+                            let _ = std::fs::rename(&tmp, &live);
+                        }
+                    };
+                    swap(
+                        format!("{dir}/cert{g}.pem"),
+                        format!("{dir}/certificate.pem"),
+                    );
+                    time::sleep(Duration::from_millis(40)).await;
+                    swap(format!("{dir}/key{g}.pem"), format!("{dir}/private.key"));
+                    n += 1;
+                    if n % ids.len() == 0 {
+                        g = (g + 1) % 4;
+                    }
+                    time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        });
+        let mut ok = 0usize;
+        let mut fail = 0usize;
+        for i in 0..200 {
+            let sub =
+                Subscriber::new(sub_cfg.clone(), DesiredAuth::Tls { identity: None })
+                    .unwrap();
+            let start = Instant::now();
+            let r = sub
+                .subscribe_nondurable_one("/app/v0".into(), Some(Duration::from_secs(5)))
+                .await;
+            match r {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    fail += 1;
+                    println!("FAIL iter={i} elapsed={:?} err={e}", start.elapsed());
+                }
+            }
+            drop(sub);
+            time::sleep(Duration::from_millis(150)).await;
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = renewer.await;
+        println!("cold_subscribe_under_renewal: ok={ok} fail={fail}");
+        drop(server);
+        let _ = std::fs::remove_dir_all(&lab);
+        assert_eq!(fail, 0, "cold subscribe failed {fail}/200 under active renewal");
+    }
+
     /// Kerberos end-to-end test against an in-process KDC. Mirrors
     /// `tls_publish_subscribe` but uses real GSSAPI handshakes between
     /// resolver/publisher/subscriber. Held by `_env` for the duration to

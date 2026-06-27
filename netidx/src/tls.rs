@@ -455,6 +455,16 @@ pub(crate) fn get_match<'a: 'b, 'b, U>(
     })
 }
 
+/// How many times a cold cert build retries when it has no cached config to
+/// fall back to, and the delay between attempts. The product is the worst-case
+/// added latency before a genuinely broken cert surfaces its error; it only
+/// applies on the build-failure path (the steady state and the warm-fallback
+/// path are untouched). 8 × 25ms = 200ms comfortably covers a renewal's
+/// cert-then-key install window, which is sub-millisecond in practice.
+const CERT_BUILD_RETRIES: usize = 8;
+const CERT_BUILD_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(25);
+
 struct CachedInnerLocked<T> {
     cached: BTreeMap<String, (CertMtimes, T)>,
 }
@@ -516,27 +526,45 @@ impl<T: Clone + 'static> Cached<T> {
             }
         }
         let askpass = self.0.tls.askpass.as_deref();
-        match f(askpass, trusted, certificate, private_key) {
-            Ok(built) => {
-                self.0.t.lock().cached.insert(rev, (mtimes, built.clone()));
-                Ok(built)
-            }
-            // A rebuild can fail transiently mid-renewal — e.g. the new cert
-            // is on disk but its matching key isn't written yet. Fall back to
-            // the previously cached config (still a valid, unexpired cert)
-            // rather than failing the connection; the next change (the key
-            // landing) retries. Only the very first build, with nothing
-            // cached, surfaces the error.
-            Err(e) => {
-                let inner = self.0.t.lock();
-                match get_match(&inner.cached, &rev) {
-                    Some((_, v)) => {
-                        let v = v.clone();
-                        drop(inner);
-                        warn!("tls: cert reload failed, using previous cert: {e:#}");
-                        Ok(v)
+        // A rebuild can fail transiently mid-renewal: the certificate and key
+        // are two separate files, so a reader can momentarily observe a freshly
+        // installed cert whose matching key hasn't landed yet (rustls reports
+        // KeyMismatch). Two cases:
+        //
+        // - We have a previously cached config: serve it (a still-valid,
+        //   unexpired cert) immediately; the next mtime change retries.
+        // - Nothing cached — a fresh process, or a fresh `Subscriber`'s own
+        //   connector, which starts with an empty cache: there is nothing to
+        //   fall back to, so retry the build a few times. The matching key
+        //   lands within milliseconds. Without this, a cold subscriber that
+        //   happens to resolve during a renewal's install window fails outright
+        //   while warm/persistent subscribers (already cached) sail through.
+        let mut mtimes = mtimes;
+        let mut tries = 0;
+        loop {
+            match f(askpass, trusted, certificate, private_key) {
+                Ok(built) => {
+                    self.0.t.lock().cached.insert(rev, (mtimes, built.clone()));
+                    break Ok(built);
+                }
+                Err(e) => {
+                    {
+                        let inner = self.0.t.lock();
+                        if let Some((_, v)) = get_match(&inner.cached, &rev) {
+                            let v = v.clone();
+                            drop(inner);
+                            warn!("tls: cert reload failed, using previous cert: {e:#}");
+                            break Ok(v);
+                        }
                     }
-                    None => Err(e),
+                    tries += 1;
+                    if tries >= CERT_BUILD_RETRIES {
+                        break Err(e);
+                    }
+                    // load() always runs inside spawn_blocking, so a short
+                    // blocking sleep here is fine and bridges the install skew.
+                    std::thread::sleep(CERT_BUILD_RETRY_DELAY);
+                    mtimes = cert_set_mtimes(certificate, private_key, trusted);
                 }
             }
         }
