@@ -1655,7 +1655,7 @@ impl KeyProtection {
 /// interactive choice, but scriptable. `password` is inherently
 /// interactive (it prompts), so headless installs use seal or none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyProtArg {
+pub(crate) enum KeyProtArg {
     Seal,
     Password,
     None,
