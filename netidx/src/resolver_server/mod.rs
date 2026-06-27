@@ -490,7 +490,7 @@ async fn write_client_local_auth(
 ) -> AuthResult {
     let tok: BoundedBytes<TOKEN_MAX> = recv(ctx.cfg.hello_timeout, &mut con).await?;
     let cred = a.0.authenticate(&*tok)?;
-    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await?;
+    let uifo = secctx::user_info(&a.1, ctx.id, Some(&cred.user)).await?;
     info!("hello_write local auth succeeded");
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
@@ -518,7 +518,7 @@ async fn write_client_reuse_local(
     let wa = &hello.write_addr;
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
-    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&*d.user)).await?;
+    let uifo = secctx::user_info(&a.1, ctx.id, Some(&*d.user)).await?;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
     let (publisher, ttl_expired, rx_stop) =
@@ -564,7 +564,7 @@ async fn write_client_krb5_auth(
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
     let secret = ownership_check(&ctx, &mut con, hello.write_addr).await?;
     let client = k5ctx.lock().client()?;
-    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
+    let uifo = secctx::user_info(&a.1, ctx.id, Some(&client)).await?;
     info!("hello_write listener ownership check succeeded");
     let (publisher, _, rx_stop) =
         ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
@@ -583,7 +583,7 @@ async fn write_client_reuse_krb5(
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
     let d = a.1.read().await.get(&id).ok_or_else(|| anyhow!("missing"))?.clone();
     let client = d.ctx.lock().client()?;
-    let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
+    let uifo = secctx::user_info(&a.1, ctx.id, Some(&client)).await?;
     let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
@@ -620,13 +620,13 @@ async fn get_tls_uifo(
     match server_con.peer_certificates() {
         Some([cert, ..]) => {
             let names = tls::get_names(&*cert).context("getting tls names")?;
-            Ok(a.1
-                .write()
-                .await
-                .users
-                .ifo(id, names.as_ref().map(|names| names.cn.as_str()))
-                .await
-                .context("getting user info")?)
+            Ok(secctx::user_info(
+                &a.1,
+                id,
+                names.as_ref().map(|names| names.cn.as_str()),
+            )
+            .await
+            .context("getting user info")?)
         }
         Some(_) | None => bail!("tls handshake should be complete by now"),
     }
@@ -786,7 +786,7 @@ async fn hello_client_read(
                 let tok: BoundedBytes<TOKEN_MAX> =
                     recv(ctx.cfg.hello_timeout, &mut con).await?;
                 let cred = a.0.authenticate(&*tok)?;
-                let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await?;
+                let uifo = secctx::user_info(&a.1, ctx.id, Some(&cred.user)).await?;
                 send(ctx.cfg.hello_timeout, &mut con, &AuthRead::Local).await?;
                 (Channel::new::<ServerCtx, TcpStream>(None, con), uifo)
             }
@@ -801,7 +801,7 @@ async fn hello_client_read(
                 let k5ctx = K5CtxWrap::new(k5ctx);
                 let con = Channel::new::<ServerCtx, TcpStream>(Some(k5ctx.clone()), con);
                 let client = k5ctx.lock().client()?;
-                let uifo = a.1.write().await.users.ifo(ctx.id, Some(&client)).await?;
+                let uifo = secctx::user_info(&a.1, ctx.id, Some(&client)).await?;
                 (con, uifo)
             }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),

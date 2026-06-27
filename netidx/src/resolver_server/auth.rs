@@ -145,40 +145,49 @@ impl UserDb {
         }
     }
 
-    pub(crate) async fn ifo(
+    /// A still-fresh cached mapping for `user` (within id_map_timeout), if any.
+    pub(crate) fn fresh(&self, user: &str, now: DateTime<Utc>) -> Option<Arc<UserInfo>> {
+        self.users.get(user).filter(|u| now - u.timestamp < self.timeout).cloned()
+    }
+
+    /// Any cached mapping for `user`, even an expired one — the last-known-good
+    /// value to serve when the id-map mapper is transiently unavailable.
+    pub(crate) fn last_known(&self, user: &str) -> Option<Arc<UserInfo>> {
+        self.users.get(user).cloned()
+    }
+
+    /// A clone of the id-map mapper, so a (possibly slow) lookup can run
+    /// without the caller holding the store lock across it.
+    pub(crate) fn mapper(&self) -> Mapper {
+        self.mapper.clone()
+    }
+
+    /// Record a freshly looked-up mapping: intern its entities and cache it.
+    pub(crate) fn record(
         &mut self,
         resolver: SocketAddr,
-        user: Option<&str>,
-    ) -> Result<Arc<UserInfo>> {
-        let now = Utc::now();
-        match user {
-            None => Ok(ANONYMOUS.clone()),
-            Some(user) => match self.users.get(user) {
-                Some(user) if now - user.timestamp < self.timeout => Ok(user.clone()),
-                Some(_) | None => {
-                    let (primary_group_s, groups_s) = self.mapper.groups(user).await?;
-                    let primary_group = self.entity(&primary_group_s);
-                    let groups =
-                        groups_s.iter().map(|b| self.entity(b)).collect::<Vec<_>>();
-                    let id = self.entity(user);
-                    let ifo = Arc::new(UserInfo {
-                        timestamp: Utc::now(),
-                        id,
-                        primary_group,
-                        groups,
-                        user_info: Some(resolver::UserInfo {
-                            name: ArcStr::from(user),
-                            primary_group: primary_group_s,
-                            groups: groups_s.into(),
-                            resolver,
-                            token: bytes::Bytes::new(),
-                        }),
-                    });
-                    self.users.insert(self.names[&id].clone(), ifo.clone());
-                    Ok(ifo)
-                }
-            },
-        }
+        user: &str,
+        primary_group_s: ArcStr,
+        groups_s: Vec<ArcStr>,
+    ) -> Arc<UserInfo> {
+        let primary_group = self.entity(&primary_group_s);
+        let groups = groups_s.iter().map(|b| self.entity(b)).collect::<Vec<_>>();
+        let id = self.entity(user);
+        let ifo = Arc::new(UserInfo {
+            timestamp: Utc::now(),
+            id,
+            primary_group,
+            groups,
+            user_info: Some(resolver::UserInfo {
+                name: ArcStr::from(user),
+                primary_group: primary_group_s,
+                groups: groups_s.into(),
+                resolver,
+                token: bytes::Bytes::new(),
+            }),
+        });
+        self.users.insert(self.names[&id].clone(), ifo.clone());
+        ifo
     }
 }
 
