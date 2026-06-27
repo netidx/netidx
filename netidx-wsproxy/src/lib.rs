@@ -1,12 +1,11 @@
 use crate::protocol::{Request, Response, Update};
 use ahash::AHashMap;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures::{
     channel::mpsc,
     prelude::*,
     select_biased,
     stream::{FuturesUnordered, SplitSink},
-    StreamExt,
 };
 use log::warn;
 use netidx::{
@@ -19,16 +18,16 @@ use netidx::{
 use netidx_protocols::rpc::client::Proc;
 use nohash::IntMap;
 use poolshark::global::{GPooled, Pool};
-use std::time::Duration;
 use std::{
     collections::hash_map::Entry, net::SocketAddr, pin::Pin, result, sync::LazyLock,
+    time::Duration,
 };
+use tokio::time;
 use warp::{
+    Filter, Reply,
     filters::BoxedFilter,
     ws::{Message, WebSocket, Ws},
-    Filter, Reply,
 };
-
 pub mod config;
 mod protocol;
 
@@ -46,29 +45,22 @@ struct PubEntry {
 type PendingCall =
     Pin<Box<dyn Future<Output = (u64, Result<Value>)> + Send + Sync + 'static>>;
 
-async fn reply<'a>(
+/// Serialize and send a single response to the client. If `timeout` is set the
+/// send must complete within it or the client is disconnected. A full websocket
+/// send buffer pushes back here, which (because every client has its own
+/// subscriber) propagates back to the publishers this client is reading without
+/// touching any other client.
+async fn send(
     tx: &mut SplitSink<WebSocket, Message>,
     m: &Response,
     timeout: Option<Duration>,
 ) -> Result<()> {
     let s = serde_json::to_string(m)?;
-    // CR base1172 for estokes: Here we're only enforcing that the SplitSink write completes within
-    // [timeout], with no guarantee on how long it takes to actually flush the message to the client.
-    // In a perfect world we'd probably want a proper flush timeout (similar to what [WriteChannel] does).
-    // For now, just requiring that [tx.send(..)] completes within [timeout] is probably good enough.
-    // DUR
     let fut = tx.send(Message::text(s));
     match timeout {
         None => Ok(fut.await?),
-        Some(timeout) => Ok(tokio::time::timeout(timeout, fut).await??),
+        Some(timeout) => Ok(time::timeout(timeout, fut).await??),
     }
-}
-async fn err(
-    tx: &mut SplitSink<WebSocket, Message>,
-    message: impl Into<String>,
-    timeout: Option<Duration>,
-) -> Result<()> {
-    reply(tx, &Response::Error { error: message.into() }, timeout).await
 }
 
 struct ClientCtx {
@@ -202,72 +194,74 @@ impl ClientCtx {
     async fn process_from_client(
         &mut self,
         tx: &mut SplitSink<WebSocket, Message>,
-        queued: &mut Vec<result::Result<Message, warp::Error>>,
+        input_batch: &mut Vec<result::Result<Message, warp::Error>>,
         calls_pending: &mut FuturesUnordered<PendingCall>,
         timeout: Option<Duration>,
     ) -> Result<()> {
         let mut batch = self.publisher.start_batch();
-        for r in queued.drain(..) {
+        for r in input_batch.drain(..) {
             let m = r?;
             if m.is_ping() {
                 continue;
             }
-            match m.to_str() {
-                Err(_) => err(tx, "expected text", timeout).await?,
+            let resp = match m.to_str() {
+                Err(_) => Some(Response::Error { error: "expected text".into() }),
                 Ok(txt) => match serde_json::from_str::<Request>(txt) {
-                    Err(e) => {
-                        err(tx, format!("could not parse message {}", e), timeout).await?
-                    }
+                    Err(e) => Some(Response::Error {
+                        error: format!("could not parse message {e}"),
+                    }),
                     Ok(req) => match req {
                         Request::Subscribe { path } => {
-                            let id = self.subscribe(path);
-                            reply(tx, &Response::Subscribed { id }, timeout).await?
+                            Some(Response::Subscribed { id: self.subscribe(path) })
                         }
-                        Request::Unsubscribe { id } => match self.unsubscribe(id) {
-                            Err(e) => err(tx, e.to_string(), timeout).await?,
-                            Ok(()) => reply(tx, &Response::Unsubscribed, timeout).await?,
-                        },
-                        Request::Write { id, val } => match self.write(id, val) {
-                            Err(e) => err(tx, e.to_string(), timeout).await?,
-                            Ok(()) => reply(tx, &Response::Wrote, timeout).await?,
-                        },
-                        Request::Publish { path, init } => match self.publish(path, init)
-                        {
-                            Err(e) => err(tx, e.to_string(), timeout).await?,
-                            Ok(id) => {
-                                reply(tx, &Response::Published { id }, timeout).await?
-                            }
-                        },
-                        Request::Unpublish { id } => match self.unpublish(id) {
-                            Err(e) => err(tx, e.to_string(), timeout).await?,
-                            Ok(()) => reply(tx, &Response::Unpublished, timeout).await?,
-                        },
+                        Request::Unsubscribe { id } => Some(match self.unsubscribe(id) {
+                            Err(e) => Response::Error { error: e.to_string() },
+                            Ok(()) => Response::Unsubscribed,
+                        }),
+                        Request::Write { id, val } => Some(match self.write(id, val) {
+                            Err(e) => Response::Error { error: e.to_string() },
+                            Ok(()) => Response::Wrote,
+                        }),
+                        Request::Publish { path, init } => {
+                            Some(match self.publish(path, init) {
+                                Err(e) => Response::Error { error: e.to_string() },
+                                Ok(id) => Response::Published { id },
+                            })
+                        }
+                        Request::Unpublish { id } => Some(match self.unpublish(id) {
+                            Err(e) => Response::Error { error: e.to_string() },
+                            Ok(()) => Response::Unpublished,
+                        }),
                         Request::Update { updates } => {
-                            match self.update(&mut batch, updates) {
-                                Err(e) => err(tx, e.to_string(), timeout).await?,
-                                Ok(()) => reply(tx, &Response::Updated, timeout).await?,
-                            }
+                            Some(match self.update(&mut batch, updates) {
+                                Err(e) => Response::Error { error: e.to_string() },
+                                Ok(()) => Response::Updated,
+                            })
                         }
                         Request::Call { id, path, args } => {
                             match self.call(id, path, args) {
-                                Ok(pending) => calls_pending.push(pending),
-                                Err(e) => {
-                                    let error = format!("rpc call failed {}", e);
-                                    reply(
-                                        tx,
-                                        &Response::CallFailed { id, error },
-                                        timeout,
-                                    )
-                                    .await?
+                                Ok(pending) => {
+                                    calls_pending.push(pending);
+                                    None
                                 }
+                                Err(e) => Some(Response::CallFailed {
+                                    id,
+                                    error: format!("rpc call failed {e}"),
+                                }),
                             }
                         }
-                        Request::Unknown => err(tx, "unknown request", timeout).await?,
+                        Request::Unknown => {
+                            Some(Response::Error { error: "unknown request".into() })
+                        }
                     },
                 },
+            };
+            if let Some(resp) = resp {
+                send(tx, &resp, timeout).await?;
             }
         }
-        Ok(batch.commit(timeout).await)
+        batch.commit(timeout).await;
+        Ok(())
     }
 }
 
@@ -281,63 +275,74 @@ async fn handle_client(
     let (tx_up, mut rx_up) = mpsc::channel::<GPooled<Vec<(SubId, Event)>>>(3);
     let mut ctx = ClientCtx::new(publisher, subscriber, tx_up);
     let (mut tx_ws, rx_ws) = ws.split();
-    let mut queued: Vec<result::Result<Message, warp::Error>> = Vec::new();
+    let mut input_batch: Vec<result::Result<Message, warp::Error>> = Vec::new();
     let mut rx_ws = Batched::new(rx_ws.fuse(), 10_000);
     let mut calls_pending: FuturesUnordered<PendingCall> = FuturesUnordered::new();
     calls_pending.push(Box::pin(async { future::pending().await }) as PendingCall);
     loop {
         select_biased! {
-            (id, res) = calls_pending.select_next_some() => match res {
-                Ok(result) => {
-                    reply(&mut tx_ws, &Response::CallSuccess { id, result }, timeout).await?
-                }
-                Err(e) => {
-                    let error = format!("rpc call failed {}", e);
-                    reply(&mut tx_ws, &Response::CallFailed { id, error }, timeout).await?
-                }
-            },
-            r = rx_ws.select_next_some() => match r {
-                BatchItem::InBatch(r) => queued.push(r),
-                BatchItem::EndBatch => {
+            r = rx_ws.next() => match r {
+                None => return Ok(()),
+                Some(BatchItem::InBatch(r)) => input_batch.push(r),
+                Some(BatchItem::EndBatch) => {
                     ctx.process_from_client(
                         &mut tx_ws,
-                        &mut queued,
+                        &mut input_batch,
                         &mut calls_pending,
-                        timeout
-                    ).await?
+                        timeout,
+                    )
+                    .await?
                 }
+            },
+            (cid, res) = calls_pending.select_next_some() => {
+                let m = match res {
+                    Ok(result) => Response::CallSuccess { id: cid, result },
+                    Err(e) => Response::CallFailed {
+                        id: cid,
+                        error: format!("rpc call failed {e}"),
+                    },
+                };
+                send(&mut tx_ws, &m, timeout).await?;
             },
             mut batch = rx_up.select_next_some() => {
                 let mut updates = UPDATES.take();
                 for (id, event) in batch.drain(..) {
-                    updates.push(Update {id, event});
+                    updates.push(Update { id, event });
                 }
-                reply(&mut tx_ws, &Response::Update { updates }, timeout).await?
-            },
+                send(&mut tx_ws, &Response::Update { updates }, timeout).await?;
+            }
         }
     }
 }
 
-/// If you want to integrate the netidx api server into your own warp project
-/// this will return the filter path will be the http path where the websocket
-/// lives
-pub fn filter(
-    publisher: Publisher,
-    subscriber: Subscriber,
+/// Build a warp filter serving the netidx websocket api at `path`, minting a
+/// fresh publisher and subscriber for every client by calling `make`. Because
+/// each client gets its own netidx session, a slow client only pushes back on
+/// its own subscriptions and can never block another client, and you can give
+/// each client distinct credentials by capturing per connection state in
+/// `make`.
+pub fn filter_with<F, Fut>(
+    make: F,
     path: &'static str,
     timeout: Option<Duration>,
-) -> BoxedFilter<(impl Reply,)> {
+) -> BoxedFilter<(impl Reply,)>
+where
+    F: Fn() -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<(Publisher, Subscriber)>> + Send + 'static,
+{
     warp::path(path)
         .and(warp::ws())
         .map(move |ws: Ws| {
-            let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-            ws.on_upgrade(move |ws| {
-                let (publisher, subscriber) = (publisher.clone(), subscriber.clone());
-                async move {
-                    if let Err(e) =
-                        handle_client(publisher, subscriber, ws, timeout).await
-                    {
-                        warn!("client handler exited: {}", e)
+            let make = make.clone();
+            ws.on_upgrade(move |ws| async move {
+                match make().await {
+                    Err(e) => warn!("could not create netidx session for client: {e:#}"),
+                    Ok((publisher, subscriber)) => {
+                        if let Err(e) =
+                            handle_client(publisher, subscriber, ws, timeout).await
+                        {
+                            warn!("client handler exited: {e}")
+                        }
                     }
                 }
             })
@@ -345,17 +350,41 @@ pub fn filter(
         .boxed()
 }
 
-/// If you want to embed the websocket api in your own process, but you don't
-/// want to serve any other warp filters then you can just call this in a task.
-/// This will not return unless the server crashes, you should
-/// probably run it in a task.
-pub async fn run(
-    config: config::Config,
+/// Build a warp filter serving the netidx websocket api at `path`. Every client
+/// shares the passed in `publisher` and `subscriber` (they are cloned per
+/// client). Convenient when you already have a session to share, but note that
+/// a slow client can then push back on the shared subscriber; use [filter_with]
+/// if you need per client isolation.
+pub fn filter(
     publisher: Publisher,
     subscriber: Subscriber,
+    path: &'static str,
     timeout: Option<Duration>,
-) -> Result<()> {
-    let routes = filter(publisher, subscriber, "ws", timeout);
+) -> BoxedFilter<(impl Reply,)> {
+    filter_with(
+        move || {
+            let publisher = publisher.clone();
+            let subscriber = subscriber.clone();
+            async move { Ok((publisher, subscriber)) }
+        },
+        path,
+        timeout,
+    )
+}
+
+/// Serve the netidx websocket api on its own warp server, minting a fresh
+/// publisher and subscriber for each client via `make`. This does not return
+/// unless the server fails, so you probably want to run it in a task.
+pub async fn run<F, Fut>(
+    config: config::Config,
+    make: F,
+    timeout: Option<Duration>,
+) -> Result<()>
+where
+    F: Fn() -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<(Publisher, Subscriber)>> + Send + 'static,
+{
+    let routes = filter_with(make, "ws", timeout);
     match (&config.cert, &config.key) {
         (_, None) | (None, _) => {
             warp::serve(routes).run(config.listen.parse::<SocketAddr>()?).await

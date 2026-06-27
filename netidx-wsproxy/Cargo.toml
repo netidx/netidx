@@ -31,3 +31,6 @@ serde_json = { workspace = true }
 structopt = { workspace = true }
 tokio = { workspace = true }
 warp = { workspace = true }
+
+[dev-dependencies]
+tokio-tungstenite = { workspace = true }
