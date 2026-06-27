@@ -532,31 +532,16 @@ fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>>
 /// authenticated identity by construction (no env-var guessing).
 #[cfg(windows)]
 fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
-    use windows::{
-        Win32::Security::Authentication::Identity::{
-            GetUserNameExW, NameSamCompatible,
-        },
-        core::PWSTR,
-    };
-    if let Some(s) = provided {
-        return Ok(Some(ArcStr::from(s.as_str())));
+    match provided {
+        Some(s) => Ok(Some(ArcStr::from(s.as_str()))),
+        None => {
+            let name = super::windows_sam_name().context(
+                "resolving the workstation owner. Pass --owner <DOMAIN\\user> \
+                 explicitly, or --no-perms to skip perms generation.",
+            )?;
+            Ok(Some(ArcStr::from(name.as_str())))
+        }
     }
-    // DOMAIN\username fits comfortably (UNLEN 256 + DNLEN 15 + 1); one
-    // generously-sized call avoids the size-query dance.
-    let mut buf = vec![0u16; 1024];
-    let mut len = buf.len() as u32;
-    let ok =
-        unsafe { GetUserNameExW(NameSamCompatible, Some(PWSTR(buf.as_mut_ptr())), &mut len) };
-    if !ok {
-        bail!(
-            "could not determine the current Windows user via \
-             GetUserNameEx(NameSamCompatible). Pass --owner <DOMAIN\\user> to \
-             name the workstation owner explicitly, or --no-perms to skip \
-             perms generation entirely."
-        );
-    }
-    let name = String::from_utf16_lossy(&buf[..len as usize]);
-    Ok(Some(ArcStr::from(name.as_str())))
 }
 
 /// `workstation install` needs the activation supervisor + Local auth,

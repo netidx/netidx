@@ -9,6 +9,35 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+/// The current Windows user's canonical down-level (SAM-compatible) name,
+/// `DOMAIN\username`, from `GetUserNameEx(NameSamCompatible)`. This is the
+/// single source of truth for every place that must agree on the user's
+/// identity — the perms owner, the OS-service principal, and the logon
+/// task's `UserId`. It matches what the Local-auth resolver attributes to
+/// the peer (`LookupAccountSidW` yields the same string), and unlike the
+/// `%USERDOMAIN%`/`%USERNAME%` env vars it never names a stale or
+/// trust-broken domain (which makes `schtasks` reject the principal).
+#[cfg(windows)]
+pub(crate) fn windows_sam_name() -> Result<String> {
+    use windows::{
+        Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible},
+        core::PWSTR,
+    };
+    // DOMAIN\username fits comfortably (UNLEN 256 + DNLEN 15 + 1); one
+    // generously-sized call avoids the size-query dance.
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok =
+        unsafe { GetUserNameExW(NameSamCompatible, Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+    if !ok {
+        anyhow::bail!(
+            "could not determine the current Windows user via \
+             GetUserNameEx(NameSamCompatible)"
+        );
+    }
+    Ok(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
 // `activation` (edit + control the supervisor's units) drives the
 // activation supervisor and its local control transport, both available
 // on unix and Windows. The remote, conf-plane control path (`--server`)

@@ -329,9 +329,14 @@ pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
 
 #[cfg(windows)]
 pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
-    provided.or_else(|| std::env::var("USERNAME").ok()).ok_or_else(|| {
-        anyhow!("could not determine current Windows user; pass --for-user")
-    })
+    // The canonical down-level name (`GetUserNameEx`), NOT %USERNAME% — the
+    // schtask backend uses this as the logon-task principal, and a bare or
+    // stale-domain name makes `schtasks` reject it. See
+    // `super::windows_sam_name`.
+    match provided {
+        Some(u) => Ok(u),
+        None => super::windows_sam_name(),
+    }
 }
 
 /// Re-exec ourselves under sudo to do the install. We resolve
