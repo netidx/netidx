@@ -1522,7 +1522,7 @@ pub async fn get_crl_pki(
 /// the peer returned, so a leaf is only accepted if one of the CAs we
 /// already trust signed it (federated bundles carry several CAs; any of
 /// them may have signed).
-fn verify_issued_any(
+pub(crate) fn verify_issued_any(
     bundle: &str,
     name: &str,
     our_spki: &[u8],
@@ -1681,7 +1681,7 @@ fn verify_issued_leaf(
 }
 
 /// Extract the SubjectPublicKeyInfo DER from a PEM-encoded CSR.
-fn csr_spki(csr_pem: &str) -> Result<Vec<u8>> {
+pub(crate) fn csr_spki(csr_pem: &str) -> Result<Vec<u8>> {
     use x509_parser::certification_request::X509CertificationRequest;
     use x509_parser::prelude::FromDer;
     let der = pem_to_der(csr_pem, "CERTIFICATE REQUEST")?;

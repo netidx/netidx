@@ -13,12 +13,12 @@
 
 use crate::conf_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
-    ListAdminsRequest, NodeKind, PROTOCOL_VERSION, RemoveAdminRequest, Request,
-    RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
-    SetAdminPolicyRequest,
+    EnrollRequest, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, RemoveAdminRequest,
+    Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
+    SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::{net::SocketAddr, path::Path};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
 
@@ -61,6 +61,37 @@ pub async fn daemon_running(cfg_path: &Path) -> bool {
 /// local socket — the `SO_PEERCRED` check at accept is the authorization.
 fn no_creds() -> (String, Secret) {
     (String::new(), Secret(String::new()))
+}
+
+/// Re-mint the conf server's own serving cert (the reserved
+/// [`crate::conf_proto::SERVING_SAN`]) over the local control socket.
+/// renewd on the CA host uses this instead of a TLS enrollment to
+/// localhost: the serving cert is the linchpin of TLS-to-self, so once it
+/// expires a TLS renewal can never connect to renew it (a deadlock). The
+/// local socket is plain (no TLS), so it works regardless of the current
+/// serving cert's validity. `csr_pem` is a fresh CSR for the serving SAN;
+/// `listen` is the conf server's own listen address (the daemon no-ops
+/// recording itself as a peer). Auth is the `SO_PEERCRED` superuser check
+/// at accept — the admin/password fields are sent empty and ignored.
+pub async fn enroll(
+    cfg_path: &Path,
+    csr_pem: &str,
+    listen: SocketAddr,
+) -> Result<SignResponse> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    conf_proto::write_msg(
+        &mut s,
+        &Request::Enroll(EnrollRequest {
+            admin,
+            password,
+            csr_pem: csr_pem.to_string(),
+            listen,
+        }),
+    )
+    .await
+    .context("sending Enroll")?;
+    conf_proto::read_msg::<_, SignResponse>(&mut s).await.context("reading SignResponse")
 }
 
 /// Mint a new role admin `name` with `policy` and `new_password`.

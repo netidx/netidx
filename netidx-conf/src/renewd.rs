@@ -25,7 +25,13 @@
 //! No TOFU, no glyphs — those are for humans establishing trust;
 //! renewal is continuation under trust already established.
 
-use crate::{atomic, conf_client, conf_proto::NodeKind, paths};
+use crate::{
+    atomic, conf_client,
+    conf_proto::{self, NodeKind},
+    paths,
+};
+#[cfg(unix)]
+use crate::conf_local;
 use anyhow::{Context, Result, anyhow, bail};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
@@ -327,6 +333,52 @@ async fn renew_identity(
     let roots = load_roots(&id.trusted)?;
     let installed_pem = std::fs::read_to_string(&id.trusted)
         .with_context(|| format!("reading trust bundle {}", id.trusted.display()))?;
+    // Co-located serving-cert re-mint over the local control socket. The
+    // serving cert is the linchpin of TLS-to-self: once it expires, a TLS
+    // renewal to our own conf server can't connect to renew it — a permanent
+    // deadlock that bricks the whole renewal chain. On the CA host we re-mint
+    // it locally over conf.sock (SO_PEERCRED superuser, no TLS), which works
+    // even when the current serving cert is already expired. Scope is the
+    // serving cert only; every other co-located identity recovers on TLS
+    // once the serving cert is fresh again.
+    #[cfg(unix)]
+    {
+        if name == conf_proto::SERVING_SAN
+            && let Ok(cfg_path) = paths::discover_conf_server_config()
+            && let Ok(cfg) = crate::conf_server_config::ConfServerConfig::load(&cfg_path)
+            && cfg.roles.ca.is_some()
+            && conf_local::daemon_running(&cfg_path).await
+        {
+            let kc = conf_client::generate_key_and_csr(conf_proto::SERVING_SAN)?;
+            let our_spki = conf_client::csr_spki(&kc.csr_pem)?;
+            return match conf_local::enroll(&cfg_path, &kc.csr_pem, cfg.listen).await? {
+                conf_proto::SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
+                    conf_client::verify_issued_any(
+                        &installed_pem,
+                        name.as_str(),
+                        &our_spki,
+                        &signed_cert_pem,
+                    )
+                    .context("verifying the locally re-minted serving cert")?;
+                    install(
+                        id,
+                        &conf_client::Issued {
+                            cert_pem: signed_cert_pem,
+                            private_key_pem: kc.private_key_pem,
+                            trusted_pem,
+                            warnings,
+                        },
+                    )?;
+                    clear_pending(&id.certificate);
+                    info!("renewd: re-minted serving cert {name} locally over conf.sock");
+                    Ok("renewed (local)")
+                }
+                conf_proto::SignResponse::Err { reason } => {
+                    bail!("local re-mint of the serving cert was refused: {reason}")
+                }
+            };
+        }
+    }
     let ca_addr = find_ca_addr(server, &roots).await?;
     let pending = match load_pending(&id.certificate)? {
         Some(pending) => {

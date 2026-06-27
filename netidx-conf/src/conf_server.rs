@@ -630,6 +630,7 @@ where
                             handle_enroll_request(
                                 state.ca.as_ref().expect("CA role held"),
                                 &req,
+                                local,
                             )
                         }
                     })
@@ -1871,21 +1872,43 @@ fn issue_locked(
 /// Handle a conf-server enrollment: authenticate the admin, require the
 /// `may_enroll_servers` policy bit, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
-pub fn handle_enroll_request(ca: &ca_store::CaDir, req: &EnrollRequest) -> SignResponse {
-    match try_enroll(ca, req) {
+pub fn handle_enroll_request(
+    ca: &ca_store::CaDir,
+    req: &EnrollRequest,
+    local: bool,
+) -> SignResponse {
+    match try_enroll(ca, req, local) {
         Ok(resp) => resp,
         Err(e) => SignResponse::Err { reason: format!("internal error: {e:#}") },
     }
 }
 
-fn try_enroll(ca: &ca_store::CaDir, req: &EnrollRequest) -> Result<SignResponse> {
-    let authd = match ca.vault.read().authenticate(&req.admin, &req.password.0) {
-        Ok(a) => a,
-        Err(_) => return Ok(reject("authentication failed")),
+fn try_enroll(
+    ca: &ca_store::CaDir,
+    req: &EnrollRequest,
+    local: bool,
+) -> Result<SignResponse> {
+    // A request over the local control socket is already authorized as a
+    // signing-tier superuser (`SO_PEERCRED` root / the daemon's own uid),
+    // which carries `may_enroll_servers`. This is the path renewd uses to
+    // re-mint the conf server's OWN serving cert without TLS — the only way
+    // to recover from an already-expired serving cert, since renewing it
+    // over TLS-to-self can't connect once it's expired.
+    let authd = if local {
+        local_superuser()
+    } else {
+        let authd = match ca.vault.read().authenticate(&req.admin, &req.password.0) {
+            Ok(a) => a,
+            Err(_) => return Ok(reject("authentication failed")),
+        };
+        if !authd.policy.may_enroll_servers {
+            return Ok(reject(&format!(
+                "admin {} may not enroll conf servers",
+                authd.admin
+            )));
+        }
+        authd
     };
-    if !authd.policy.may_enroll_servers {
-        return Ok(reject(&format!("admin {} may not enroll conf servers", authd.admin)));
-    }
     let record_req = ca_store::QueuedReq::new(
         conf_proto::NodeKind::ConfServer,
         req.csr_pem.clone(),
@@ -5261,9 +5284,49 @@ mod tests {
             csr_pem: kc.csr_pem,
             listen: "127.0.0.1:4565".parse().unwrap(),
         };
-        match handle_enroll_request(&issuer(dir.path()), &req) {
+        match handle_enroll_request(&issuer(dir.path()), &req, false) {
             SignResponse::Err { reason } => assert!(reason.contains("may not enroll")),
             SignResponse::Ok { .. } => panic!("enrolled without the policy bit"),
+        }
+    }
+
+    /// A request over the local control socket (`local = true`) authorizes
+    /// as the `SO_PEERCRED` superuser, so it re-mints the reserved serving
+    /// SAN even with empty credentials and an admin that lacks
+    /// `may_enroll_servers`. This is the path renewd uses to recover an
+    /// expired serving cert locally without TLS (which would deadlock).
+    /// Counterpart to `enroll_requires_the_policy_bit`, which pins the TLS
+    /// (`local = false`) path.
+    #[test]
+    fn local_enroll_bypasses_admin_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca_with_policy(
+            dir.path(),
+            Policy {
+                allowed_san: vec!["*".to_string()],
+                max_validity: std::time::Duration::from_secs(30 * 86400),
+                id_map_groups: vec![],
+                may_enroll_servers: false,
+                perms_edit_scopes: vec![],
+                may_manage_admins: false,
+                service_control_scopes: vec![],
+            },
+        );
+        let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let req = EnrollRequest {
+            admin: String::new(),
+            password: Secret(String::new()),
+            csr_pem: kc.csr_pem,
+            listen: "127.0.0.1:4565".parse().unwrap(),
+        };
+        match handle_enroll_request(&issuer(dir.path()), &req, true) {
+            SignResponse::Ok { signed_cert_pem, .. } => assert!(
+                signed_cert_pem.contains("BEGIN CERTIFICATE"),
+                "expected a signed serving cert, got: {signed_cert_pem}"
+            ),
+            SignResponse::Err { reason } => {
+                panic!("local enroll refused despite SO_PEERCRED superuser: {reason}")
+            }
         }
     }
 
@@ -5279,7 +5342,7 @@ mod tests {
             listen: "127.0.0.1:4565".parse().unwrap(),
         };
         let SignResponse::Ok { signed_cert_pem, .. } =
-            handle_enroll_request(&issuer(dir.path()), &req)
+            handle_enroll_request(&issuer(dir.path()), &req, false)
         else {
             panic!("expected Ok");
         };
