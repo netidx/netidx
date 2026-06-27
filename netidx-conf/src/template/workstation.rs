@@ -22,16 +22,17 @@
 //!   [`tls_identities`](WorkstationParams::tls_identities). Empty list
 //!   for non-TLS upstreams.
 //!
-//! **Unix-only.** The local resolver uses unix peer-credential
-//! (Local) auth and is run by the `#[cfg(unix)]` activation
-//! supervisor, so on non-unix [`workstation`] errors and points the
-//! operator at the publisher role instead.
+//! **unix + Windows.** The local resolver uses Local (peer-credential)
+//! auth — unix-socket peer creds on unix, named-pipe impersonation on
+//! Windows — and is run by the per-user activation supervisor. On a
+//! platform with neither, [`workstation`] errors and points the operator
+//! at the publisher role instead.
 
 use super::*;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::{client::ClientConfig, paths, resolver::ResolverConfig};
 use anyhow::Result;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -131,29 +132,28 @@ pub struct WorkstationParams {
 /// exists, so they'll go away on their next restart.
 pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 
-/// Why the workstation role refuses on non-unix, and what to do
-/// instead. Single source of truth for the message, shared by the
-/// [`workstation`] stub and the CLI's early guard.
-#[cfg(not(unix))]
-pub const UNSUPPORTED_MSG: &str = "the workstation role is unix-only for now: it installs a Local-auth \
-     local resolver supervised by netidx-activation, neither of which \
-     exists on this platform. To put this host on a network, install a \
-     publisher instead: `netidx conf publisher install`. Full Windows \
-     workstation support is planned for a future release.";
+/// Why the workstation role refuses on platforms with no activation
+/// supervisor / Local auth, and what to do instead. Single source of
+/// truth for the message, shared by the [`workstation`] stub and the
+/// CLI's early guard.
+#[cfg(not(any(unix, windows)))]
+pub const UNSUPPORTED_MSG: &str = "the workstation role needs a Local-auth local resolver supervised by \
+     netidx-activation, neither of which exists on this platform. To put \
+     this host on a network, install a publisher instead: `netidx conf \
+     publisher install`.";
 
-/// Non-unix stub: the workstation role can't be rendered here — its
-/// local resolver needs unix Local auth and the activation supervisor
-/// that runs it is `#[cfg(unix)]`. Errors with [`UNSUPPORTED_MSG`],
-/// steering the operator to the publisher role.
-#[cfg(not(unix))]
+/// Unsupported-platform stub: the workstation role can't be rendered
+/// where there is no activation supervisor / Local auth. Errors with
+/// [`UNSUPPORTED_MSG`], steering the operator to the publisher role.
+#[cfg(not(any(unix, windows)))]
 pub fn workstation(_p: &WorkstationParams) -> Result<RenderedTemplate> {
     bail!("{UNSUPPORTED_MSG}")
 }
 
-/// Render the workstation template. Unix-only — the local resolver
-/// uses Local (peer-credential) auth and is supervised by the
-/// `#[cfg(unix)]` activation runtime.
-#[cfg(unix)]
+/// Render the workstation template. The local resolver uses Local
+/// (peer-credential) auth and is supervised by the per-user activation
+/// runtime — both available on unix and Windows.
+#[cfg(any(unix, windows))]
 pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
     let listen_port = p.listen_port.unwrap_or(DEFAULT_LISTEN_PORT);
     let local_sock_path = match &p.local_socket {
@@ -336,7 +336,7 @@ pub fn workstation(p: &WorkstationParams) -> Result<RenderedTemplate> {
 /// Auto-seed for the workstation perms file when no explicit seed
 /// was passed. See the perms-file block in `workstation` for the
 /// platform-specific rationale.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn default_auto_seed(base: &str, owner: &Option<ArcStr>) -> crate::perms::PMap {
     let mut s = crate::perms::empty();
     if let Some(owner) = owner {
@@ -354,6 +354,17 @@ fn default_auth_sock() -> Result<PathBuf> {
     p.push("netidx");
     p.push("auth.sock");
     Ok(p)
+}
+
+/// On Windows, `Auth::Local` is a named-pipe *seed*: at runtime
+/// `netidx`'s os layer expands `"<seed>"` to
+/// `\\.\pipe\netidx-local-<seed>-<user-sid>`, so the pipe is scoped to the
+/// logged-in user (RDS/Citrix-safe) without the template needing the SID.
+/// A short logical seed suffices — the resolver and the user's clients
+/// both read the same value from their configs.
+#[cfg(windows)]
+fn default_auth_sock() -> Result<PathBuf> {
+    Ok(PathBuf::from("ws"))
 }
 
 // Unix-only: these exercise the Local-auth resolver the template

@@ -524,16 +524,51 @@ fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>>
     }
 }
 
-/// `workstation install` is unix-only (Local auth + activation
-/// supervisor). Fail fast here with a pointer to the publisher role,
-/// rather than running the whole discovery/enrollment cascade and only
-/// erroring at template-render time.
-#[cfg(not(unix))]
+/// The owner is the identity the local resolver will attribute to this
+/// user under Local auth. On Windows that is the down-level
+/// (SAM-compatible) name `DOMAIN\username` produced by
+/// `LookupAccountSidW` on the pipe server side; `GetUserNameEx` with the
+/// same format yields exactly that string, so the perms owner matches the
+/// authenticated identity by construction (no env-var guessing).
+#[cfg(windows)]
+fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
+    use windows::{
+        Win32::Security::Authentication::Identity::{
+            GetUserNameExW, NameSamCompatible,
+        },
+        core::PWSTR,
+    };
+    if let Some(s) = provided {
+        return Ok(Some(ArcStr::from(s.as_str())));
+    }
+    // DOMAIN\username fits comfortably (UNLEN 256 + DNLEN 15 + 1); one
+    // generously-sized call avoids the size-query dance.
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok =
+        unsafe { GetUserNameExW(NameSamCompatible, Some(PWSTR(buf.as_mut_ptr())), &mut len) };
+    if !ok {
+        bail!(
+            "could not determine the current Windows user via \
+             GetUserNameEx(NameSamCompatible). Pass --owner <DOMAIN\\user> to \
+             name the workstation owner explicitly, or --no-perms to skip \
+             perms generation entirely."
+        );
+    }
+    let name = String::from_utf16_lossy(&buf[..len as usize]);
+    Ok(Some(ArcStr::from(name.as_str())))
+}
+
+/// `workstation install` needs the activation supervisor + Local auth,
+/// which exist on unix and Windows. On any other platform fail fast with
+/// a pointer to the publisher role, rather than running the whole
+/// discovery/enrollment cascade and only erroring at template-render time.
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn run_workstation(_f: WorkstationFlags) -> Result<()> {
     bail!("{}", netidx_conf::template::workstation::UNSUPPORTED_MSG)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let cli_tls_id = f.tls.to_spec()?;
     let mut tls_identities = vec![];
@@ -762,7 +797,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// surprise than asking the operator to re-run once they've had the
 /// CSR signed. The CLI flag path (`--parent-addr … --tls-cert …`)
 /// is always available for the non-interactive case.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn prompt_parent_referral(
     default_path: &str,
     kp: Option<KeyProtArg>,
