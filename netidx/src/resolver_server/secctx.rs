@@ -1,5 +1,5 @@
 use super::{
-    auth::{ANONYMOUS, PMap, UserDb, UserInfo},
+    auth::{PMap, UserDb},
     config::{self, Auth, Config, MemberServer},
 };
 use crate::{
@@ -14,75 +14,15 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use arcstr::ArcStr;
-use chrono::Utc;
 use cross_krb5::{K5Ctx, ServerCtx};
-use log::{debug, warn};
+use log::debug;
 use netidx_core::pack::Pack;
 use nohash::IntMap;
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
     sync::Arc,
-    time::Duration,
 };
-use tokio::{
-    sync::{RwLock, RwLockReadGuard},
-    time,
-};
-
-/// Upper bound on a single id-map lookup. The mapper normally answers a local
-/// socket in well under a millisecond; this only bites when the id-map daemon
-/// is hung. We never hold the store lock across the lookup, so a stall here
-/// slows only the one resolve that triggered it, not every other resolve.
-const ID_MAP_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Map an authenticated identity to its uid/groups for authorization.
-///
-/// Consults the id-map mapper only on a cold/expired cache, and crucially does
-/// so WITHOUT holding the store lock — a slow or hung id-map daemon must not be
-/// able to wedge every other resolve behind it. On a mapper error or timeout we
-/// serve the last-known-good mapping for this identity if we have one: the cache
-/// already serves mappings for up to `id_map_timeout`, so a little extra
-/// staleness during an outage is consistent with that trust model and far
-/// better than denying an identity we successfully mapped moments ago. Only a
-/// never-before-seen identity (no cached value at all) surfaces the error.
-pub(super) async fn user_info<S: 'static>(
-    store: &RwLock<SecCtxData<S>>,
-    resolver: SocketAddr,
-    user: Option<&str>,
-) -> Result<Arc<UserInfo>> {
-    let user = match user {
-        None => return Ok(ANONYMOUS.clone()),
-        Some(user) => user,
-    };
-    let mapper = {
-        let r = store.read().await;
-        if let Some(fresh) = r.users.fresh(user, Utc::now()) {
-            return Ok(fresh);
-        }
-        r.users.mapper()
-    };
-    match time::timeout(ID_MAP_CALL_TIMEOUT, mapper.groups(user)).await {
-        Ok(Ok((primary, groups))) => {
-            Ok(store.write().await.users.record(resolver, user, primary, groups))
-        }
-        failed => {
-            if let Some(stale) = store.read().await.users.last_known(user) {
-                warn!(
-                    "id-map lookup for {user:?} failed, serving last-known-good mapping"
-                );
-                return Ok(stale);
-            }
-            match failed {
-                Ok(Err(e)) => Err(e.context(format!("mapping identity {user:?}"))),
-                Ok(Ok(_)) => unreachable!(),
-                Err(_) => {
-                    bail!("id-map lookup for {user:?} timed out, no cached mapping")
-                }
-            }
-        }
-    }
-}
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub(super) struct LocalAuth(AuthServer);
 
