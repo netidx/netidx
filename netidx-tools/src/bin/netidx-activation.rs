@@ -1,36 +1,42 @@
-//! Windows background activation supervisor.
+//! Background activation supervisor binary.
 //!
 //! On Windows it is built as a GUI-subsystem binary
 //! (`#![windows_subsystem = "windows"]`) so the per-user logon Scheduled Task
 //! can start it with NO console window — regardless of whether the default
 //! terminal is the classic console host or Windows Terminal (under which the
-//! old `ShowWindow(SW_HIDE)` hack could not reach the window). On unix it runs
-//! the supervisor in the foreground (the same engine as
-//! `netidx activation --foreground`).
+//! old `ShowWindow(SW_HIDE)` hack could not reach the window). `netidx
+//! activation` delegates here on Windows when not run with `--foreground`; the
+//! logon task runs it directly.
 //!
-//! Built on every platform so `cargo install netidx-tools` always produces it
-//! — on Windows it must sit next to `netidx.exe` for the logon task. `netidx
-//! activation` stays the uniform entry point: embedded on unix, delegating to
-//! this binary on Windows when not run with `--foreground`.
+//! It is declared on every platform only because Cargo can't build a binary
+//! for just one OS (rust-lang/cargo#3138, #9208) and `cargo install
+//! netidx-tools` must drop `netidx-activation.exe` next to `netidx.exe` on
+//! Windows. On unix it is unused — `netidx activation` is the supervisor there,
+//! in-process — so the unix build is an inert stub that just points at it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
 use anyhow::Result;
+#[cfg(windows)]
 use clap::Parser;
+#[cfg(windows)]
 use netidx_tools_core::ClientParams;
 
 // Share the supervisor entry with the `netidx` binary verbatim — no source
-// duplication. `run`/`spawn_background_supervisor` are unused here (this
-// binary only needs `run_supervisor`), hence the dead_code allowance scoped
-// to this include.
+// duplication. `run`/`spawn_background_supervisor` are unused here (this binary
+// only needs `run_supervisor`), hence the dead_code allowance scoped to this
+// include.
+#[cfg(windows)]
 #[allow(dead_code)]
 #[path = "../activation.rs"]
 mod activation;
 
+#[cfg(windows)]
 #[derive(Parser, Debug)]
 #[command(
     name = "netidx-activation",
-    about = "netidx activation supervisor (standalone; windowless on Windows, \
-             foreground on unix). `netidx activation` is the usual entry point."
+    about = "netidx activation supervisor (Windows GUI-subsystem helper, started \
+             by the logon task; use `netidx activation` normally)"
 )]
 struct Opt {
     #[command(flatten)]
@@ -39,6 +45,7 @@ struct Opt {
     params: activation::Params,
 }
 
+#[cfg(windows)]
 fn main() -> Result<()> {
     let opt = Opt::parse();
     init_logging();
@@ -46,10 +53,8 @@ fn main() -> Result<()> {
     activation::run_supervisor(cfg, auth, opt.params)
 }
 
-/// On Windows this binary has no console (GUI subsystem), so env_logger's
-/// default stderr goes nowhere — append to a log file under
-/// `%LOCALAPPDATA%\netidx`. If the file can't be opened, fall back to the
-/// default initializer (harmless when there's no console).
+/// Windows: this binary has no console (GUI subsystem), so env_logger's default
+/// stderr goes nowhere — append to a log file under `%LOCALAPPDATA%\netidx`.
 #[cfg(windows)]
 fn init_logging() {
     use std::path::PathBuf;
@@ -71,7 +76,14 @@ fn init_logging() {
     }
 }
 
+// On unix the supervisor runs in-process as `netidx activation`; this binary
+// exists only so the Windows build/install produces it (see the header). Say so
+// rather than silently doing nothing.
 #[cfg(not(windows))]
-fn init_logging() {
-    env_logger::init();
+fn main() {
+    eprintln!(
+        "netidx-activation is the Windows-only background activation supervisor \
+         and is not used on unix — run `netidx activation` instead."
+    );
+    std::process::exit(2);
 }
