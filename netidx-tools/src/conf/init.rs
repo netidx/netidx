@@ -1178,6 +1178,18 @@ impl ConfServers {
 /// prompt cascade and never re-offer a network join.
 /// [`ConfServers::NotProbed`] is returned only on a non-TTY — scripted
 /// installs use CLI flags.
+/// Resolve an operator-typed conf-server address to a single socket
+/// address (the first [`resolve_conf_server_seeds`] yields). For the
+/// commands that contact one conf server directly (`add-parent`,
+/// `review-delegation`, remote `perms`) rather than peer-walking a set of
+/// discovery seeds.
+pub(super) fn resolve_conf_server_addr(input: &str) -> Result<SocketAddr> {
+    Ok(resolve_conf_server_seeds(input)?
+        .into_iter()
+        .next()
+        .expect("resolve_conf_server_seeds never returns an empty vec"))
+}
+
 /// Resolve an operator-typed conf-server address into seed socket
 /// addresses. Accepts a hostname or an IP, with or without a `:port`;
 /// when the port is omitted it defaults to the conventional conf-server
@@ -3936,6 +3948,12 @@ mod tests {
         // before reaching here, but the parser must not accept it either)
         assert!(resolve_conf_server_seeds("").is_err());
         assert!(resolve_conf_server_seeds("   ").is_err());
+        // the single-addr wrapper applies the same defaulting
+        assert_eq!(
+            resolve_conf_server_addr("1.2.3.4").unwrap(),
+            SocketAddr::from(([1, 2, 3, 4], dflt)),
+        );
+        assert!(resolve_conf_server_addr("").is_err());
     }
 
     #[test]

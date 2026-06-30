@@ -151,6 +151,41 @@ where
     }
 }
 
+/// Prompt for a required value parsed by a caller-supplied `parse`
+/// function — the level-2 analogue of [`optional_with`], and the
+/// closure-taking sibling of [`required_parsed`] for when turning the
+/// typed line into a value is more than a `FromStr` (e.g. resolving a
+/// hostname and defaulting an omitted port). Re-prompts on parse error
+/// (a typo is recoverable on a TTY); a non-TTY caller, or EOF at the
+/// prompt, bails. The error is shown with its full context chain.
+pub fn required_with<T>(
+    label: &str,
+    mut parse: impl FnMut(&str) -> Result<T>,
+) -> Result<T> {
+    if !stdin_is_tty() {
+        anyhow::bail!(
+            "{label} is required (stdin is not a TTY so I cannot prompt; \
+             pass the corresponding --flag)"
+        );
+    }
+    loop {
+        match read_line(&format!("{label}: "))? {
+            None => anyhow::bail!("{label} is required (got EOF at the prompt)"),
+            Some(line) if line.is_empty() => {
+                eprintln!("{label} must not be empty; please enter a value");
+                continue;
+            }
+            Some(line) => match parse(&line) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    eprintln!("invalid {label}: {e:#}; please try again");
+                    continue;
+                }
+            },
+        }
+    }
+}
+
 // ---- level 1: prompt, offer a default ----------------------------------
 
 /// Prompt for a string, offering `default`. Blank input (or EOF, or a

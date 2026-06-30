@@ -113,11 +113,11 @@ pub(crate) fn delegate_under_parent(
 
 #[derive(Args, Debug)]
 pub(crate) struct AddParentFlags {
-    /// The parent's conf-server address (`ip:port`, the conf port is
-    /// usually 4565). Prompted when omitted — over a WAN you type it
-    /// (no mDNS).
+    /// The parent's conf-server address: a hostname or IP, with or
+    /// without a `:port` (the conf port defaults to 4565). Prompted when
+    /// omitted — over a WAN you type it (no mDNS).
     #[arg(long = "server")]
-    server: Option<SocketAddr>,
+    server: Option<String>,
     /// The subtree this resolver will own under the parent (e.g. `/eu`).
     /// Prompted when omitted.
     #[arg(long = "path")]
@@ -146,10 +146,11 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     }
     let n_members = child.len();
     let server = match f.server {
-        Some(a) => a,
-        None => prompt::required_parsed::<SocketAddr>(
-            "parent conf-server address (ip:port, e.g. 203.0.113.1:4565)",
-            None,
+        Some(s) => init::resolve_conf_server_addr(&s)?,
+        None => prompt::required_with(
+            "parent conf-server address (host or ip, optional :port, e.g. \
+             203.0.113.1:4565)",
+            init::resolve_conf_server_addr,
         )?,
     };
     let proposed_path = prompt::required_string(
@@ -282,10 +283,11 @@ fn sync_cluster_peers(
 
 #[derive(Args, Debug)]
 pub(crate) struct ReviewFlags {
-    /// The conf server whose delegation queue to work. Defaults to this
-    /// host's own conf server.
+    /// The conf server whose delegation queue to work: a hostname or IP,
+    /// with or without a `:port` (the conf port defaults to 4565).
+    /// Defaults to this host's own conf server.
     #[arg(long = "server")]
-    server: Option<SocketAddr>,
+    server: Option<String>,
 }
 
 /// `resolver review-delegation` — the parent admin reviews pending
@@ -293,10 +295,11 @@ pub(crate) struct ReviewFlags {
 /// (cluster-wide) or denies.
 pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let server = f
-        .server
-        .or_else(local_conf_server_listen)
-        .context("no conf server found; pass --server <ip:port>")?;
+    let server = match f.server {
+        Some(s) => init::resolve_conf_server_addr(&s)?,
+        None => local_conf_server_listen()
+            .context("no conf server found; pass --server <host-or-ip[:port]>")?,
+    };
     let identity = rt
         .block_on(conf_client::fetch_identity(server, NodeKind::Client))
         .with_context(|| format!("contacting conf server {server}"))?;

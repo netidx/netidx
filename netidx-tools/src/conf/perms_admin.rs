@@ -31,11 +31,11 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct Flags {
-    /// A conf server to reach the network through (`ip:port`, the conf
-    /// port is usually 4565). Defaults to this host's own conf server,
-    /// else prompted.
+    /// A conf server to reach the network through: a hostname or IP, with
+    /// or without a `:port` (the conf port defaults to 4565). Defaults to
+    /// this host's own conf server, else prompted.
     #[arg(long = "server")]
-    server: Option<SocketAddr>,
+    server: Option<String>,
     /// The hierarchy path whose cluster's perms to act on (e.g. `/eu`, or
     /// `/` for the root cluster). Prompted when omitted.
     #[arg(long = "at")]
@@ -59,14 +59,18 @@ struct Bootstrap {
 
 /// Reach a conf server (flag, else this host's own, else prompted),
 /// confirm its CA glyph (the one human trust decision), and pull the map.
-fn bootstrap(server: Option<SocketAddr>) -> Result<Bootstrap> {
+fn bootstrap(server: Option<String>) -> Result<Bootstrap> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let addr = match server.or_else(local_conf_server_listen) {
-        Some(a) => a,
-        None => prompt::required_parsed::<SocketAddr>(
-            "conf-server address (ip:port, e.g. 203.0.113.1:4565)",
-            None,
-        )?,
+    let addr = match server {
+        Some(s) => init::resolve_conf_server_addr(&s)?,
+        None => match local_conf_server_listen() {
+            Some(a) => a,
+            None => prompt::required_with(
+                "conf-server address (host or ip, optional :port, e.g. \
+                 203.0.113.1:4565)",
+                init::resolve_conf_server_addr,
+            )?,
+        },
     };
     let id = rt
         .block_on(conf_client::fetch_identity(addr, NodeKind::Client))
