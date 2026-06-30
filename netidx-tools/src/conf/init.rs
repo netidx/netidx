@@ -1104,28 +1104,46 @@ pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
     }
 }
 
+/// Parse a typed id-map-groups answer into the group list. A bare `-`
+/// is the explicit "no groups" sentinel — blank input is taken by the
+/// prompt's default, so it can't double as "none"; otherwise the answer
+/// is the comma-separated list, trimmed of surrounding space and blanks.
+pub(super) fn parse_id_map_answer(answer: &str) -> Vec<String> {
+    if answer.trim() == "-" {
+        return Vec::new();
+    }
+    answer
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Prompt for the id-map groups to assign a new identity
 /// (comma-separated, first is primary). CLI-`provided` values
-/// short-circuit (`--id-map-group ''` is the explicit "none"); an
-/// empty answer means no registration.
+/// short-circuit (`--id-map-group ''` is the explicit "none").
+/// Interactively, a blank answer takes `default`; a bare `-` is the
+/// explicit "no groups" sentinel (since blank is taken by the default).
 pub(super) fn prompt_id_map_groups(
     provided: &[String],
     default: &str,
 ) -> Result<Vec<String>> {
-    let raw: Vec<String> = if !provided.is_empty() {
-        provided.to_vec()
-    } else {
-        prompt::string_with_default(
-            "id-map groups for this identity (comma-separated, first is \
-             primary; empty for none)",
-            None,
-            default,
-        )?
-        .split(',')
-        .map(|s| s.to_string())
-        .collect()
-    };
-    Ok(raw.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+    if !provided.is_empty() {
+        return Ok(provided
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect());
+    }
+    let answer = prompt::string_with_default(
+        "id-map groups for this identity (comma-separated, first is \
+         primary; Enter for default, '-' for no groups)",
+        None,
+        default,
+    )?;
+    Ok(parse_id_map_answer(&answer))
 }
 
 /// How long the install flows browse mDNS for conf servers.
@@ -3954,6 +3972,23 @@ mod tests {
             SocketAddr::from(([1, 2, 3, 4], dflt)),
         );
         assert!(resolve_conf_server_addr("").is_err());
+    }
+
+    #[test]
+    fn id_map_answer_sentinel_and_list() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // ordinary single / multi group lists, trimmed
+        assert_eq!(parse_id_map_answer("users"), v(&["users"]));
+        assert_eq!(parse_id_map_answer("wheel, users"), v(&["wheel", "users"]));
+        // blanks between commas are dropped
+        assert_eq!(parse_id_map_answer("a,,b"), v(&["a", "b"]));
+        // a bare '-' (with or without surrounding space) means no groups
+        assert_eq!(parse_id_map_answer("-"), Vec::<String>::new());
+        assert_eq!(parse_id_map_answer("  -  "), Vec::<String>::new());
+        // '-' is only a sentinel as the WHOLE answer — it can still be a
+        // group name within a list, and hyphenated names are untouched
+        assert_eq!(parse_id_map_answer("dev-team"), v(&["dev-team"]));
+        assert_eq!(parse_id_map_answer("a, -, b"), v(&["a", "-", "b"]));
     }
 
     #[test]

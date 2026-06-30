@@ -1736,15 +1736,16 @@ fn prompt_policy(
     } else {
         // The *allowed set*: which groups this admin may assign when
         // enrolling a node (the actual choice happens per-enrollment,
-        // in the SignRequest). Empty answer ⇒ this admin's signs never
-        // register id-map identities.
+        // in the SignRequest). Blank takes the default; a bare `-`
+        // disables registration entirely (this admin's signs never
+        // register id-map identities).
         let entry = prompt::string_with_default(
             "id-map groups this admin may assign when enrolling \
-             (comma-separated; empty for none)",
+             (comma-separated; Enter for default, '-' for none)",
             None,
             "users",
         )?;
-        entry.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        init::parse_id_map_answer(&entry)
     };
     let may_enroll_servers = match args.may_enroll_servers {
         Some(b) => b,
