@@ -1178,6 +1178,34 @@ impl ConfServers {
 /// prompt cascade and never re-offer a network join.
 /// [`ConfServers::NotProbed`] is returned only on a non-TTY — scripted
 /// installs use CLI flags.
+/// Resolve an operator-typed conf-server address into seed socket
+/// addresses. Accepts a hostname or an IP, with or without a `:port`;
+/// when the port is omitted it defaults to the conventional conf-server
+/// port. A hostname may resolve to several addresses — all are returned,
+/// which the peer walk in [`confirm_seeds`] tries in turn.
+fn resolve_conf_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let s = input.trim();
+    if s.is_empty() {
+        bail!("empty address");
+    }
+    // An explicit port (`ip:port`, `host:port`, `[ipv6]:port`) resolves
+    // directly. Without one, std's `&str` resolver errors for lack of a
+    // port; fall back to attaching the default conf-server port to the
+    // bare host / ip.
+    let seeds: Vec<SocketAddr> = match s.to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
+        Err(_) => (s, netidx_conf::conf_proto::DEFAULT_PORT)
+            .to_socket_addrs()
+            .with_context(|| format!("could not resolve conf server address {s:?}"))?
+            .collect(),
+    };
+    if seeds.is_empty() {
+        bail!("{s:?} resolved to no addresses");
+    }
+    Ok(seeds)
+}
+
 pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
     if !prompt::stdin_is_tty() {
         return Ok(ConfServers::NotProbed);
@@ -1194,11 +1222,11 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
         domains.entry(d.domain.clone()).or_default().push(d);
     }
     let manual_fallback = || -> Result<Option<Vec<SocketAddr>>> {
-        Ok(prompt::optional_parsed::<SocketAddr>(
-            "address of an existing conf server to join (ip:port), blank if there is none",
-            None,
-        )?
-        .map(|a| vec![a]))
+        prompt::optional_with(
+            "address of an existing conf server to join (host or ip, optional \
+             :port), blank if there is none",
+            resolve_conf_server_seeds,
+        )
     };
     let seeds: Vec<SocketAddr> = if domains.is_empty() {
         println!("no conf servers found.");
@@ -3873,6 +3901,42 @@ mod tests {
     use super::*;
     use netidx_conf::template::TlsCopyJob;
     use std::collections::BTreeMap;
+
+    // IP literals so the resolution is deterministic and needs no DNS;
+    // the hostname path is the same `ToSocketAddrs` call, just with a
+    // name on the left.
+    #[test]
+    fn conf_server_seeds_default_and_explicit_port() {
+        let dflt = netidx_conf::conf_proto::DEFAULT_PORT;
+        // bare ip → default conf port
+        assert_eq!(
+            resolve_conf_server_seeds("1.2.3.4").unwrap(),
+            vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
+        );
+        // explicit port wins
+        assert_eq!(
+            resolve_conf_server_seeds("1.2.3.4:9999").unwrap(),
+            vec![SocketAddr::from(([1, 2, 3, 4], 9999))],
+        );
+        // surrounding whitespace is trimmed
+        assert_eq!(
+            resolve_conf_server_seeds("  1.2.3.4  ").unwrap(),
+            vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
+        );
+        // bare ipv6 → default port; bracketed ipv6 carries an explicit port
+        assert_eq!(
+            resolve_conf_server_seeds("::1").unwrap(),
+            vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, dflt))],
+        );
+        assert_eq!(
+            resolve_conf_server_seeds("[::1]:9999").unwrap(),
+            vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9999))],
+        );
+        // empty / blank is rejected (the prompt treats blank as "none"
+        // before reaching here, but the parser must not accept it either)
+        assert!(resolve_conf_server_seeds("").is_err());
+        assert!(resolve_conf_server_seeds("   ").is_err());
+    }
 
     #[test]
     fn suggest_client_san_uses_resolver_domain() {

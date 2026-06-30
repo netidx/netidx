@@ -314,6 +314,34 @@ where
     }
 }
 
+/// Prompt for an optional value parsed by a caller-supplied `parse`
+/// function — for when turning the typed line into a value is more than
+/// a `FromStr` (e.g. resolving a hostname to addresses and defaulting an
+/// omitted port). Blank input / EOF / non-TTY returns `None`. A parse
+/// error on a TTY re-prompts (blank still escapes to `None`); the error
+/// is shown with its full context chain.
+pub fn optional_with<T>(
+    label: &str,
+    mut parse: impl FnMut(&str) -> Result<T>,
+) -> Result<Option<T>> {
+    if !stdin_is_tty() {
+        return Ok(None);
+    }
+    loop {
+        match read_line(&format!("{label} [none]: "))? {
+            None => return Ok(None),
+            Some(line) if line.is_empty() => return Ok(None),
+            Some(line) => match parse(&line) {
+                Ok(v) => return Ok(Some(v)),
+                Err(e) => {
+                    eprintln!("invalid {label}: {e:#}; try again (or blank for none)");
+                    continue;
+                }
+            },
+        }
+    }
+}
+
 // ---- yes/no confirmation ------------------------------------------------
 
 /// Ask a yes/no question. Blank input and EOF take `default`; a
