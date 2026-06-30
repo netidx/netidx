@@ -1836,9 +1836,11 @@ fn choose_key_protection(
                 bail!("passwords did not match");
             }
             // Search for an askpass program and prompt the operator to
-            // confirm or override it. A blank answer takes the
-            // default; an operator who explicitly wants no askpass can
-            // type an empty string when the default is itself empty.
+            // confirm or override it. A blank answer takes the default;
+            // a bare `-` is the explicit "no askpass" sentinel (blank
+            // can't double as none — it's taken by the discovered
+            // default, so without the sentinel "no askpass" would be
+            // unreachable whenever one was found).
             #[cfg(unix)]
             let discovered = find_askpass();
             #[cfg(not(unix))]
@@ -1848,12 +1850,15 @@ fn choose_key_protection(
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let answer = prompt::string_with_default(
-                "askpass program (used to ask for the key password at startup)",
+                "askpass program (Enter for default, '-' for none)",
                 None,
                 &default,
             )?;
-            let askpass =
-                if answer.is_empty() { None } else { Some(PathBuf::from(answer)) };
+            let askpass = if answer.is_empty() || answer.trim() == "-" {
+                None
+            } else {
+                Some(PathBuf::from(answer))
+            };
             // Save into the system keychain so the resolver server can
             // decrypt its key without an askpass at startup. Failure
             // here isn't fatal — the keychain might be locked,
