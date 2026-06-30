@@ -158,6 +158,9 @@ where
 /// hostname and defaulting an omitted port). Re-prompts on parse error
 /// (a typo is recoverable on a TTY); a non-TTY caller, or EOF at the
 /// prompt, bails. The error is shown with its full context chain.
+// Only the unix-only conf commands (delegation / perms admin) call this
+// today; keep it available cross-platform but don't warn on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn required_with<T>(
     label: &str,
     mut parse: impl FnMut(&str) -> Result<T>,

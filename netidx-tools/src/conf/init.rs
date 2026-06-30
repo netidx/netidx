@@ -1201,6 +1201,10 @@ impl ConfServers {
 /// commands that contact one conf server directly (`add-parent`,
 /// `review-delegation`, remote `perms`) rather than peer-walking a set of
 /// discovery seeds.
+// Those callers are all unix-only (they need the openssl-backed CA admin
+// path), so on Windows this has no non-test caller — keep it compiled
+// (the test below uses it on every platform) but don't warn there.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn resolve_conf_server_addr(input: &str) -> Result<SocketAddr> {
     Ok(resolve_conf_server_seeds(input)?
         .into_iter()

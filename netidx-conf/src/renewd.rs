@@ -25,13 +25,11 @@
 //! No TOFU, no glyphs — those are for humans establishing trust;
 //! renewal is continuation under trust already established.
 
-use crate::{
-    atomic, conf_client,
-    conf_proto::{self, NodeKind},
-    paths,
-};
+use crate::{atomic, conf_client, conf_proto::NodeKind, paths};
+// The `conf_proto` module alias is only needed by the unix-only renewal
+// path below (SERVING_SAN / SignResponse); `NodeKind` is cross-platform.
 #[cfg(unix)]
-use crate::conf_local;
+use crate::{conf_local, conf_proto};
 use anyhow::{Context, Result, anyhow, bail};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
