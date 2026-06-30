@@ -9,9 +9,15 @@
 //! The task definition is built as XML ([`render_task_xml`], pure and
 //! tested) and registered with `schtasks /Create /XML`, which cleanly
 //! separates the command from its arguments (no `/TR` quoting hazard) and
-//! lets us mark the task `Hidden`. The supervisor additionally hides its
-//! own console window (see `netidx-tools` `activation::hide_console_window`)
-//! so nothing flashes at logon.
+//! lets us mark the task `Hidden` (which only hides it in the Task Scheduler
+//! UI).
+//!
+//! The task runs `netidx-activation.exe` — a GUI-subsystem sibling of
+//! `netidx.exe` — rather than `netidx.exe activation`. A console-subsystem
+//! process started by the task always gets a console window (and under the
+//! Windows Terminal default an in-process `ShowWindow(SW_HIDE)` can't even
+//! reach it), whereas the GUI-subsystem binary never allocates a console, so
+//! nothing appears at logon regardless of the default terminal.
 
 use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
 use anyhow::{Context, Result, bail};
@@ -113,13 +119,15 @@ fn render_task_xml(principal: &str, command: &str, arguments: &str) -> String {
     )
 }
 
-/// The argument string the task runs: `activation` plus `--units "<dir>"`
-/// when an explicit activation directory is given (otherwise the
-/// supervisor's own per-user default applies).
+/// The argument string the task runs. The task launches
+/// `netidx-activation.exe` directly (not `netidx.exe activation`), so there
+/// is no subcommand token — just `--units "<dir>"` when an explicit
+/// activation directory is given, otherwise empty (the supervisor's own
+/// per-user default applies).
 fn task_arguments(p: &ServiceParams) -> String {
     match &p.activation_dir {
-        Some(dir) => format!("activation --units \"{}\"", dir.display()),
-        None => "activation".to_string(),
+        Some(dir) => format!("--units \"{}\"", dir.display()),
+        None => String::new(),
     }
 }
 
@@ -147,7 +155,19 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
         );
     }
     let principal = principal(p)?;
-    let command = p.binary.to_string_lossy().into_owned();
+    // The task launches the GUI-subsystem supervisor (no console window),
+    // installed alongside the netidx.exe the operator invoked.
+    let supervisor = p.binary.with_file_name("netidx-activation.exe");
+    if !supervisor.exists() {
+        bail!(
+            "background supervisor {} not found next to {}; install it alongside \
+             netidx.exe (build netidx-tools with \
+             `--features win-activation-supervisor`)",
+            supervisor.display(),
+            p.binary.display()
+        );
+    }
+    let command = supervisor.to_string_lossy().into_owned();
     let arguments = task_arguments(p);
     let xml = render_task_xml(&principal, &command, &arguments);
 
@@ -219,15 +239,33 @@ mod tests {
     fn task_xml_contains_command_args_and_principal() {
         let xml = render_task_xml(
             r"WS\alice",
-            r"C:\Program Files\netidx\netidx.exe",
-            r#"activation --units "C:\Users\alice\AppData\Roaming\netidx\activation""#,
+            r"C:\Program Files\netidx\netidx-activation.exe",
+            r#"--units "C:\Users\alice\AppData\Roaming\netidx\activation""#,
         );
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<UserId>WS\\alice</UserId>"));
         assert!(xml.contains("<Hidden>true</Hidden>"));
-        assert!(xml.contains(r"<Command>C:\Program Files\netidx\netidx.exe</Command>"));
+        assert!(xml.contains(
+            r"<Command>C:\Program Files\netidx\netidx-activation.exe</Command>"
+        ));
         // Inner quotes in the args are XML-escaped.
-        assert!(xml.contains("activation --units &quot;C:\\Users\\alice"));
+        assert!(xml.contains("--units &quot;C:\\Users\\alice"));
         assert!(xml.contains("InteractiveToken"));
+    }
+
+    #[test]
+    fn task_arguments_carry_no_subcommand_token() {
+        use std::path::PathBuf;
+        let mut p = ServiceParams {
+            scope: ServiceScope::User,
+            for_user: Some(r"WS\alice".into()),
+            binary: PathBuf::from(r"C:\netidx\netidx.exe"),
+            service_name: "netidx".into(),
+            activation_dir: None,
+        };
+        // No "activation" token — the task runs netidx-activation.exe directly.
+        assert_eq!(task_arguments(&p), "");
+        p.activation_dir = Some(PathBuf::from(r"C:\acts"));
+        assert_eq!(task_arguments(&p), r#"--units "C:\acts""#);
     }
 }

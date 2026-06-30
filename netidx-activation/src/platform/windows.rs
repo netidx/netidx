@@ -43,7 +43,7 @@ use windows::{
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
                 SetInformationJobObject,
             },
-            Threading::{CreateEventW, SetEvent},
+            Threading::{CREATE_NO_WINDOW, CreateEventW, SetEvent},
         },
     },
     core::PCWSTR,
@@ -137,6 +137,11 @@ pub(crate) fn spawn(mut cmd: Command, job: &Job) -> Result<Spawned> {
     // SAFETY: CreateEventW returned a valid, owned event handle.
     let shutdown_event = unsafe { OwnedHandle::from_raw_handle(handle.0 as RawHandle) };
     cmd.env(SHUTDOWN_EVENT_VAR, &name);
+    // The supervisor runs windowless (the Windows logon task starts the
+    // GUI-subsystem `netidx-activation.exe`, which has no console). A console
+    // child spawned with no flags would allocate — and show — its own console
+    // window; CREATE_NO_WINDOW gives it a console with no window instead.
+    cmd.creation_flags(CREATE_NO_WINDOW.0);
     let child = cmd.spawn()?;
     if let Some(h) = child.raw_handle() {
         // Best-effort: a child that crashes between spawn and assign

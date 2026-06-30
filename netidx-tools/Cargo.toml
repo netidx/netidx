@@ -22,6 +22,18 @@ debug = false
 name = "netidx"
 path = "src/main.rs"
 
+# The activation supervisor as a standalone binary, built on every platform.
+# On Windows it is a GUI-subsystem binary (no console window — see the file
+# header) that the per-user logon Scheduled Task launches; on unix it runs the
+# supervisor in the foreground. `netidx activation` stays the uniform entry
+# point (embedded on unix; delegates to this binary on Windows). It is built
+# unconditionally so `cargo install netidx-tools` always drops
+# netidx-activation(.exe) next to netidx(.exe) — which `netidx conf workstation
+# install` relies on to register the logon task on Windows.
+[[bin]]
+name = "netidx-activation"
+path = "src/bin/netidx-activation.rs"
+
 [target.'cfg(unix)'.dependencies]
 daemonize = { workspace = true }
 nix = { workspace = true }
