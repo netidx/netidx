@@ -2218,6 +2218,14 @@ pub(crate) struct ResolverFlags {
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-conf-server")]
     no_conf_server: bool,
+    /// Proceed even when this host has no usable TPM / Secure Enclave.
+    /// Only relevant when this install mints a new CA (the `--tls-cert
+    /// generate` path with no existing CA, or a conf plane on a
+    /// krb5/anonymous network). DANGER: the CA's autorenew credential is
+    /// then written in PLAINTEXT, so every backup or disk image of this
+    /// machine is a CA compromise. Test CAs only.
+    #[arg(long = "insecure-no-tpm")]
+    insecure_no_tpm: bool,
     /// Set this resolver up as a CHILD of an existing network: give the
     /// parent's conf-server address (`ip:port`). The install requests
     /// delegation of a subtree (`--delegate-subtree`) and, once the parent
@@ -2485,7 +2493,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
             id_map_groups: vec![],
             may_enroll_servers: None,
-            insecure_no_tpm: false,
+            insecure_no_tpm: f.insecure_no_tpm,
             setup_server: Some(true),
             listen: None,
             listen_hint: Some(listen.ip()),
@@ -3107,7 +3115,7 @@ fn resolver_tls_generate(
             max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
             id_map_groups: vec!["users".to_string()],
             may_enroll_servers: Some(true),
-            insecure_no_tpm: false,
+            insecure_no_tpm: f.insecure_no_tpm,
             setup_server,
             listen: None,
             // The CA co-locates with this resolver — suggest its IP for
