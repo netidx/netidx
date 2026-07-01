@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_conf::id_map;
+use netidx_admin::id_map;
 use std::path::PathBuf;
 
 use super::{editor, prompt};

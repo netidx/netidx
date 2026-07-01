@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_conf::{
+use netidx_admin::{
     conf_client::{self, NetworkInfo},
     conf_proto::{NetworkMap, NodeKind},
     discovery, paths,

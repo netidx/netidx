@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_conf::{paths, resolver::ResolverConfig};
+use netidx_admin::{paths, resolver::ResolverConfig};
 use std::path::PathBuf;
 
 use super::editor;

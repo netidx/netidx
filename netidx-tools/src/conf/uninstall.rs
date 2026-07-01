@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use clap::Args;
-use netidx_conf::{
+use netidx_admin::{
     paths,
     provenance::InstallRecord,
     service::ServiceScope,
@@ -310,7 +310,7 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
 /// conf-server daemon is, so only a unix host ever has one to deregister.
 #[cfg(unix)]
 fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
-    use netidx_conf::{conf_client, conf_server, conf_server_config::ConfServerConfig};
+    use netidx_admin::{conf_client, conf_server, conf_server_config::ConfServerConfig};
     let cfg = match ConfServerConfig::load(&root.join("conf-server.json")) {
         Ok(c) => c,
         Err(_) => return, // no conf server here (workstation/publisher/hand-rolled)

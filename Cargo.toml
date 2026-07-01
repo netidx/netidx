@@ -152,7 +152,7 @@ members = [
     "netidx-tools-core",
     "netidx-activation",
     "netidx-id-map",
-    "netidx-conf",
+    "netidx-admin",
     "netidx-tpm",
     "netidx-container",
     "netidx-derive",

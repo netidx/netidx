@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use netidx_conf::{
+use netidx_admin::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     ca_vault, conf_client, conf_local,
@@ -536,10 +536,10 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
-pub(super) const AUTORENEW_ADMIN: &str = netidx_conf::conf_server::AUTORENEW_ADMIN;
+pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::conf_server::AUTORENEW_ADMIN;
 
 fn autorenew_policy() -> ca_vault::Policy {
-    netidx_conf::ca_policy::autorenew_policy()
+    netidx_admin::ca_policy::autorenew_policy()
 }
 
 /// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
@@ -553,7 +553,7 @@ fn autorenew_keytab_path() -> Result<PathBuf> {
 /// plaintext in a `Zeroizing` buffer that wipes on drop (it is dropped right
 /// after sealing / writing the keytab).
 fn random_password() -> Zeroizing<String> {
-    netidx_conf::ca_vault::random_signing_password()
+    netidx_admin::ca_vault::random_signing_password()
 }
 
 /// Create (or replace) the autorenew slot + keytab. `recovery_password`
@@ -571,7 +571,7 @@ fn random_password() -> Zeroizing<String> {
 /// TPM (or a flaky one — setup must not dead-end) falls back to the
 /// plaintext keytab with a note saying what that costs.
 pub(super) fn setup_autorenew_slot(
-    cadir: &netidx_conf::ca_store::CaDir,
+    cadir: &netidx_admin::ca_store::CaDir,
     recovery_password: &str,
     insecure_no_tpm: bool,
 ) -> Result<PathBuf> {
@@ -683,7 +683,7 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
          autorenew credential)",
     )?);
     let recovery = ca_vault::normalize_recovery_password(&typed);
-    let cadir = netidx_conf::ca_store::CaDir::open(&dir).context(
+    let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
         "setting up autorenew needs exclusive access; the conf server must be stopped",
     )?;
     let keytab = setup_autorenew_slot(&cadir, &recovery, p.insecure_no_tpm)?;
@@ -966,9 +966,9 @@ fn seal_ca_recovery(
     dir: &Path,
     key_pem: &Zeroizing<Vec<u8>>,
     lifetimes: ca::CaLifetimes,
-) -> Result<(Zeroizing<String>, netidx_conf::ca_store::CaDir)> {
+) -> Result<(Zeroizing<String>, netidx_admin::ca_store::CaDir)> {
     let recovery_pw = ca_vault::gen_recovery_password();
-    let cadir = netidx_conf::ca_store::CaDir::open(dir)
+    let cadir = netidx_admin::ca_store::CaDir::open(dir)
         .context("opening the new CA directory")?;
     if let Err(e) = cadir.vault.write().create(
         key_pem,
@@ -1081,7 +1081,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
             listen_hint: opts.listen_hint,
             units_dir: opts.units_dir.as_deref(),
         })?;
-        let cadir = netidx_conf::ca_store::CaDir::open(&opts.dir)
+        let cadir = netidx_admin::ca_store::CaDir::open(&opts.dir)
             .context("reopening the CA directory after serving-cert setup")?;
         // The box's `autorenew` credential — the only signing key the
         // daemon ever holds, and what it signs on a role admin's behalf
@@ -1176,7 +1176,7 @@ pub(super) fn announce_founding_policy(domain: &str) {
 /// leaked-then-typed recovery password from issuing arbitrary certs over the
 /// wire (it can still revoke, which every signing slot can).
 fn recovery_policy() -> ca_vault::Policy {
-    netidx_conf::ca_policy::recovery_policy()
+    netidx_admin::ca_policy::recovery_policy()
 }
 
 /// Refuse to build a CA on a host with no usable TPM / Secure Enclave —
@@ -1234,7 +1234,7 @@ fn print_recovery_password(pw: &str) {
 /// key, so its password can never unlock the CA. Only minted for a server
 /// CA (a role admin authenticates to the daemon).
 fn setup_superuser(
-    cadir: &netidx_conf::ca_store::CaDir,
+    cadir: &netidx_admin::ca_store::CaDir,
     opts: &NewCaOpts,
     cn: &str,
 ) -> Result<()> {
@@ -1316,7 +1316,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
         bail!("no vault-protected CA at {}", dir.display());
     }
     let keytab = autorenew_keytab_path()?;
-    let autorenew_pw = netidx_conf::conf_server::read_autorenew_password(&keytab)
+    let autorenew_pw = netidx_admin::conf_server::read_autorenew_password(&keytab)
         .with_context(|| {
             format!(
                 "rotating the recovery password needs the autorenew keytab ({}); it \
@@ -1325,7 +1325,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
                 keytab.display()
             )
         })?;
-    let cadir = netidx_conf::ca_store::CaDir::open(&dir).context(
+    let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
         "rotating recovery needs exclusive access; stop the conf server first",
     )?;
     // Confirm the keytab credential actually unlocks this CA BEFORE removing
@@ -1537,12 +1537,12 @@ fn external_renew(args: ExternalRenewArgs) -> Result<()> {
 /// exists, else the recovery password. Returns the key and the held flock.
 fn external_ca_key(
     dir: &Path,
-) -> Result<(Zeroizing<Vec<u8>>, netidx_conf::ca_store::CaDir)> {
-    let cadir = netidx_conf::ca_store::CaDir::open(dir)
+) -> Result<(Zeroizing<Vec<u8>>, netidx_admin::ca_store::CaDir)> {
+    let cadir = netidx_admin::ca_store::CaDir::open(dir)
         .context("opening the CA (stop the conf server first if it is running)")?;
     let keytab = autorenew_keytab_path()?;
     let key = if keytab.exists() {
-        let pw = netidx_conf::conf_server::read_autorenew_password(&keytab)?;
+        let pw = netidx_admin::conf_server::read_autorenew_password(&keytab)?;
         cadir.vault.read().unlock(&pw)?.ca_key_pem
     } else {
         let pw = collect_required_password("CA recovery password")?;
@@ -2207,7 +2207,7 @@ fn resolve_ca_cn(provided: Option<String>, domain: Option<&str>) -> Result<Strin
 /// `admin set-policy`). Empty if it can't be read — the prompt then has
 /// no domain to suggest.
 fn existing_ca_cn(dir: &Path) -> String {
-    netidx_conf::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
+    netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
         .unwrap_or_default()
 }
 
@@ -2403,7 +2403,7 @@ fn maybe_register_in_id_map(
     san: &[SanEntry],
     no_id_map: bool,
 ) -> Result<()> {
-    use netidx_conf::id_map;
+    use netidx_admin::id_map;
     if no_id_map {
         return Ok(());
     }
@@ -2563,7 +2563,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
         // possession of the live key for the same name, so there is no
         // code to match and no groups to choose — approving them all is
         // honest, not careless. The ceremony stays for new identities.
-        let renewals: Vec<&netidx_conf::conf_proto::QueueEntry> =
+        let renewals: Vec<&netidx_admin::conf_proto::QueueEntry> =
             queue.iter().filter(|e| e.verified_renewal).collect();
         if !renewals.is_empty() {
             println!();
@@ -2599,7 +2599,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 continue; // re-list
             }
         }
-        let new_requests: Vec<&netidx_conf::conf_proto::QueueEntry> =
+        let new_requests: Vec<&netidx_admin::conf_proto::QueueEntry> =
             queue.iter().filter(|e| !e.verified_renewal).collect();
         if new_requests.is_empty() {
             println!("(only unapproved renewals remain)");
@@ -2750,7 +2750,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
 /// loopback-adjusted when it binds all interfaces.
 pub(super) fn local_conf_server_listen() -> Option<SocketAddr> {
     let path = paths::discover_conf_server_config().ok()?;
-    let cfg = netidx_conf::conf_server_config::ConfServerConfig::load(&path).ok()?;
+    let cfg = netidx_admin::conf_server_config::ConfServerConfig::load(&path).ok()?;
     let mut addr = cfg.listen;
     if addr.ip().is_unspecified() {
         addr.set_ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
@@ -2916,7 +2916,7 @@ fn list() -> Result<()> {
     // Conf server.
     let cfg = paths::discover_conf_server_config()
         .ok()
-        .and_then(|p| netidx_conf::conf_server_config::ConfServerConfig::load(&p).ok());
+        .and_then(|p| netidx_admin::conf_server_config::ConfServerConfig::load(&p).ok());
     match cfg {
         Some(c) => println!("  server: configured (listen {})", c.listen),
         None => println!("  server: not configured"),
@@ -2963,7 +2963,7 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
         // conf server owns the CA, so this fails fast if one is up. The handle
         // drops at the `return` below, releasing the flock before the issue /
         // sign paths re-open their own CaDir for serial allocation.
-        let cadir = netidx_conf::ca_store::CaDir::open(dir)
+        let cadir = netidx_admin::ca_store::CaDir::open(dir)
             .context("opening the CA to sign offline (a running conf server owns it — stop it first)")?;
         // Daily on-box use unlocks with the box's own autorenew credential —
         // read + unsealed from its keytab, no human secret typed. Fall back
@@ -2972,7 +2972,7 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
         // or a dead TPM).
         let from_keytab =
             autorenew_keytab_path().ok().filter(|k| k.exists()).and_then(|keytab| {
-                match netidx_conf::conf_server::read_autorenew_password(&keytab) {
+                match netidx_admin::conf_server::read_autorenew_password(&keytab) {
                     Ok(pw) => match cadir.vault.read().unlock(&pw) {
                         Ok(u) => Some(u),
                         Err(e) => {
@@ -3090,7 +3090,7 @@ fn first_dns_san(san: &[SanEntry]) -> Option<String> {
 /// `csr_pem` is empty when the key was generated internally (the
 /// revoke-UI glyph is then simply absent).
 pub(super) fn record_offline_issuance(
-    store: &mut netidx_conf::ca_store::CAStore,
+    store: &mut netidx_admin::ca_store::CAStore,
     serial: u64,
     kind: NodeKind,
     name: &str,
@@ -3098,7 +3098,7 @@ pub(super) fn record_offline_issuance(
     cert_pem: &str,
     validity: Duration,
 ) -> Result<()> {
-    let req = netidx_conf::ca_store::QueuedReq::new(
+    let req = netidx_admin::ca_store::QueuedReq::new(
         kind,
         csr_pem.to_string(),
         name.to_string(),
@@ -3124,7 +3124,7 @@ fn issue_and_record(
     // its in-memory counter from. Without this lock a `ca issue` run
     // against a live daemon would mint the serial the daemon allocates
     // next, producing a duplicate X.509 serial.
-    let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
+    let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
         .context("cannot issue offline: a running conf server owns this CA")?;
     let serial = cadir.store.lock().next_serial()?;
     params.serial = serial;
@@ -3167,7 +3167,7 @@ pub(super) fn sign_and_record(
     let ca_dir = ca.directory().to_path_buf();
     // See `issue_and_record`: hold the daemon's exclusive flock so offline
     // signing can't race the daemon's serial counter.
-    let cadir = netidx_conf::ca_store::CaDir::open(&ca_dir)
+    let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
         .context("cannot sign offline: a running conf server owns this CA")?;
     let serial = cadir.store.lock().next_serial()?;
     let cert = ca.sign_request(csr_pem, san, validity, serial)?;
@@ -3415,7 +3415,7 @@ mod tests {
         // path: same code as `accept_csr_san=true`, so it would have
         // bailed pre-change with "must pass either --san or
         // --accept-csr-san". Output cert is a real PEM X.509.
-        netidx_conf::tls::validate_pem_cert_file(&out_cert).unwrap();
+        netidx_admin::tls::validate_pem_cert_file(&out_cert).unwrap();
     }
 
     #[test]
@@ -3627,7 +3627,7 @@ mod tests {
         // Exactly the recovery signing slot, and nothing else — no autorenew
         // (no daemon), no superuser role (offline).
         assert_eq!(
-            netidx_conf::ca_store::CaDir::open(&dir)
+            netidx_admin::ca_store::CaDir::open(&dir)
                 .unwrap()
                 .vault
                 .read()
@@ -3635,7 +3635,7 @@ mod tests {
                 .unwrap(),
             vec![ca_vault::RECOVERY_ADMIN.to_string()]
         );
-        let admins = netidx_conf::ca_store::CaDir::open(&dir)
+        let admins = netidx_admin::ca_store::CaDir::open(&dir)
             .unwrap()
             .vault
             .read()

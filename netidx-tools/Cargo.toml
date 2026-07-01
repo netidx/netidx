@@ -64,7 +64,7 @@ graphix-package = { workspace = true }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
-netidx-conf = { path = "../netidx-conf", version = "0.32.0", features = ["cloud-detect"] }
+netidx-admin = { path = "../netidx-admin", version = "0.32.0", features = ["cloud-detect"] }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
 netidx-archive = { path = "../netidx-archive", version = "0.32.0", default-features = false }

@@ -8,9 +8,9 @@ use netidx::config::DefaultAuthMech;
 // enrollment path; the items below are cross-platform.
 use clap::Args;
 #[cfg(unix)]
-use netidx_conf::conf_proto;
-use netidx_conf::tls;
-use netidx_conf::{
+use netidx_admin::conf_proto;
+use netidx_admin::tls;
+use netidx_admin::{
     conf_client,
     conf_proto::{InfoAuth, NodeKind, Role},
     discovery,
@@ -32,7 +32,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-// `ca` submodule depends on netidx_conf::ca which is unix-only.
+// `ca` submodule depends on netidx_admin::ca which is unix-only.
 #[cfg(unix)]
 use super::ca;
 use super::{prompt, service};
@@ -291,7 +291,7 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     // `resolver.unit` / `container.unit` / `id-map.unit` files.
     if let Some(dir) = &rt.units_dir {
         for name in rt.units.keys() {
-            let p = netidx_conf::activation::unit_path_in(dir, name);
+            let p = netidx_admin::activation::unit_path_in(dir, name);
             if p.exists() {
                 existing.push(p);
             }
@@ -313,7 +313,7 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     for job in &rt.tls_install {
         let srcs = [&job.certificate_src, &job.private_key_src, &job.trusted_src];
         for (dst, src) in
-            netidx_conf::tls::installed_files_in(&job.dest_dir).iter().zip(srcs)
+            netidx_admin::tls::installed_files_in(&job.dest_dir).iter().zip(srcs)
         {
             if dst.exists() && dst != src {
                 existing.push(dst.clone());
@@ -453,7 +453,7 @@ fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>>
 /// discovery/enrollment cascade and only erroring at template-render time.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn run_workstation(_f: WorkstationFlags) -> Result<()> {
-    bail!("{}", netidx_conf::template::workstation::UNSUPPORTED_MSG)
+    bail!("{}", netidx_admin::template::workstation::UNSUPPORTED_MSG)
 }
 
 #[cfg(any(unix, windows))]
@@ -535,7 +535,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let units_dir = resolve_units_dir(&f.common, f.units_dir.as_deref())?;
     let has_tls = !tls_identities.is_empty();
     let post_apply_units_dir = units_dir.clone();
-    let params = netidx_conf::template::workstation::WorkstationParams {
+    let params = netidx_admin::template::workstation::WorkstationParams {
         parent,
         tls_identities,
         default_auth: f.default_auth.map(|k| k.default_mech()),
@@ -645,7 +645,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
         NetworkIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
     let conf_server = net.info.reached.first().copied();
     let rt =
-        netidx_conf::template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
+        netidx_admin::template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
     println!("{}", rt.describe());
     if f.dry_run {
         return Ok(());
@@ -939,7 +939,7 @@ fn join_network(
     let certificate = staging.path().join("certificate.pem");
     let private_key = staging.path().join("private.key");
     let trusted = staging.path().join("trusted.pem");
-    netidx_conf::atomic::write_atomic(&certificate, issued.cert_pem.as_bytes(), 0o644)?;
+    netidx_admin::atomic::write_atomic(&certificate, issued.cert_pem.as_bytes(), 0o644)?;
     // Apply the protection decided up front: the key is encrypted
     // before it ever touches disk (sealed and password cases), and a
     // sealed password's blob is staged beside it — the identity
@@ -951,9 +951,9 @@ fn join_network(
         ),
         None => issued.private_key_pem.clone(),
     };
-    netidx_conf::atomic::write_atomic(&private_key, key_payload.as_bytes(), 0o600)?;
+    netidx_admin::atomic::write_atomic(&private_key, key_payload.as_bytes(), 0o600)?;
     protection.write_sidecar(&private_key)?;
-    netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    netidx_admin::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     println!("got TLS identity {name:?} from conf server {addr}");
     for w in &issued.warnings {
         println!("  warning: {w}");
@@ -978,14 +978,14 @@ fn install_renew_unit(units_dir: &Path) -> Result<()> {
         .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
     let netidx_binary = std::env::current_exe()
         .context("could not determine current netidx binary for the renew unit")?;
-    let unit = netidx_conf::template::services::renew::unit(
-        &netidx_conf::template::services::renew::RenewServiceParams { netidx_binary },
+    let unit = netidx_admin::template::services::renew::unit(
+        &netidx_admin::template::services::renew::RenewServiceParams { netidx_binary },
     )?;
-    let dir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
+    let dir = netidx_admin::activation::ActivationDir::open(Some(units_dir))?;
     dir.save("renew", &unit).context("writing the renew activation unit")?;
     println!(
         "activation unit → {}",
-        netidx_conf::activation::unit_path_in(units_dir, "renew").display()
+        netidx_admin::activation::unit_path_in(units_dir, "renew").display()
     );
     Ok(())
 }
@@ -1125,7 +1125,7 @@ fn resolve_conf_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
     // bare host / ip.
     let seeds: Vec<SocketAddr> = match s.to_socket_addrs() {
         Ok(addrs) => addrs.collect(),
-        Err(_) => (s, netidx_conf::conf_proto::DEFAULT_PORT)
+        Err(_) => (s, netidx_admin::conf_proto::DEFAULT_PORT)
             .to_socket_addrs()
             .with_context(|| format!("could not resolve conf server address {s:?}"))?
             .collect(),
@@ -1322,7 +1322,7 @@ fn describe_info_auth(a: &InfoAuth) -> String {
 /// so `dest_dir` is `None` and the engine's install step is the
 /// harmless self-copy the `check_no_overwrite` guard already allows.
 fn joined_to_spec(j: JoinedIdentity) -> TlsIdentitySpec {
-    let server_pattern = netidx_conf::tls::domain_from_san(&j.name)
+    let server_pattern = netidx_admin::tls::domain_from_san(&j.name)
         .map(|d| d.to_string())
         .unwrap_or_else(|_| j.name.clone());
     TlsIdentitySpec {
@@ -1447,7 +1447,7 @@ fn find_askpass() -> Option<PathBuf> {
 enum KeyProtection {
     /// Encrypted under a random password sealed to this machine's
     /// TPM. The blob is written beside the key as `<key>.tpm`
-    /// ([`netidx_conf::tls::sealed_sidecar`]); the key is useless
+    /// ([`netidx_admin::tls::sealed_sidecar`]); the key is useless
     /// off-host.
     Sealed { password: Zeroizing<String>, blob: Vec<u8> },
     /// Encrypted under a typed password (saved to the system keychain;
@@ -1482,8 +1482,8 @@ impl KeyProtection {
     /// sidecars along with their keys.
     fn write_sidecar(&self, key: &Path) -> Result<()> {
         if let KeyProtection::Sealed { blob, .. } = self {
-            netidx_conf::atomic::write_atomic(
-                &netidx_conf::tls::sealed_sidecar(key),
+            netidx_admin::atomic::write_atomic(
+                &netidx_admin::tls::sealed_sidecar(key),
                 blob,
                 0o600,
             )?;
@@ -1683,7 +1683,7 @@ fn resolver_tls_name_default(addr: SocketAddr) -> String {
         Ok(rt) => rt,
         Err(_) => return convention,
     };
-    match rt.block_on(netidx_conf::resolver_probe::probe_resolver_tls_name(addr)) {
+    match rt.block_on(netidx_admin::resolver_probe::probe_resolver_tls_name(addr)) {
         Ok(Some(name)) => {
             println!("probed resolver {addr}: it serves TLS name {name:?}");
             name
@@ -1797,7 +1797,7 @@ fn current_username() -> Option<String> {
 /// resolver SAN carries no domain (e.g. a single-label name).
 fn suggest_client_san(resolver_san: &str) -> Option<String> {
     let user = current_username()?;
-    let domain = netidx_conf::tls::domain_from_san(resolver_san).ok()?;
+    let domain = netidx_admin::tls::domain_from_san(resolver_san).ok()?;
     Some(format!("{user}.{domain}"))
 }
 
@@ -2153,7 +2153,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         ))?;
     }
     let perms_seed = match &f.perms_seed {
-        Some(p) => Some(netidx_conf::perms::load_perms(p)?),
+        Some(p) => Some(netidx_admin::perms::load_perms(p)?),
         None => None,
     };
     // `--parent-path` defaults to this resolver's base: in the
@@ -2168,14 +2168,14 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // the same way it will.
     let resolver_config_actual = match &f.resolver_config_path {
         Some(p) => p.clone(),
-        None => netidx_conf::resolver::default_save_path()?,
+        None => netidx_admin::resolver::default_save_path()?,
     };
     // Only the netidx id-mapper writes an id-map.json the post-apply
     // step needs to know about; Platform / None have no such file.
     let id_map_actual = if matches!(id_map, IdMapMode::Netidx) {
         Some(match &f.id_map_path {
             Some(p) => p.clone(),
-            None => netidx_conf::id_map::user_id_map_path()?,
+            None => netidx_admin::id_map::user_id_map_path()?,
         })
     } else {
         None
@@ -2218,7 +2218,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
                     );
                 }
                 let child_auth = authchoice_to_info(&auth)?;
-                let child = vec![netidx_conf::conf_proto::ResolverAddr {
+                let child = vec![netidx_admin::conf_proto::ResolverAddr {
                     addr: listen,
                     auth: child_auth,
                 }];
@@ -2253,7 +2253,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             }
         }
     };
-    let params = netidx_conf::template::resolver::ResolverParams {
+    let params = netidx_admin::template::resolver::ResolverParams {
         auth,
         base: ArcStr::from(f.base),
         listen,
@@ -2659,7 +2659,7 @@ fn resolver_tls_generate(
              renewal)",
             ca_dir.display()
         );
-        let domain = netidx_conf::tls::domain_from_san(name)
+        let domain = netidx_admin::tls::domain_from_san(name)
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
         // The built-in-CA path applies a sensible default issuance policy
@@ -2880,7 +2880,7 @@ fn post_apply_conf_server(
 /// a different network that merely happens to be reachable on the wire.
 #[cfg(unix)]
 fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
-    use netidx_conf::fingerprint::Fingerprint;
+    use netidx_admin::fingerprint::Fingerprint;
     if !ca::default_ca_present() {
         return false;
     }
@@ -2900,7 +2900,7 @@ fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
 /// operator declined a conf server here, so there's nothing to update.
 #[cfg(unix)]
 fn merge_resolver_roles(resolver_config: PathBuf, id_map: Option<PathBuf>) -> Result<()> {
-    use netidx_conf::conf_server_config::{IdMapRole, ResolverRole};
+    use netidx_admin::conf_server_config::{IdMapRole, ResolverRole};
     if paths::discover_conf_server_config().is_err() {
         return Ok(());
     }
@@ -2936,7 +2936,7 @@ fn enroll_conf_server(
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
 ) -> Result<()> {
-    use netidx_conf::conf_server_config::{
+    use netidx_admin::conf_server_config::{
         ConfServerConfig, IdMapRole, ResolverRole, Roles,
     };
     let Some(ca_addr) = net.info.ca_addr else {
@@ -3057,22 +3057,22 @@ fn enroll_conf_server(
     let serving_cert = dir.join("cert.pem");
     let serving_key = dir.join("key.pem");
     let trusted = dir.join("trusted.pem");
-    netidx_conf::atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    match netidx_conf::tls::write_private_key_maybe_sealed(
+    netidx_admin::atomic::write_atomic(&serving_cert, &chain, 0o644)?;
+    match netidx_admin::tls::write_private_key_maybe_sealed(
         &serving_key,
         &issued.private_key_pem,
     )? {
-        netidx_conf::tls::KeyWrite::Sealed => {
+        netidx_admin::tls::KeyWrite::Sealed => {
             println!("  serving key sealed to this machine's {}", netidx_tpm::MECHANISM);
         }
-        netidx_conf::tls::KeyWrite::Plain(e) => {
+        netidx_admin::tls::KeyWrite::Plain(e) => {
             println!(
                 "  note: serving key is plaintext ({} sealing unavailable: {e:#})",
                 netidx_tpm::MECHANISM
             );
         }
     }
-    netidx_conf::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    netidx_admin::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     let cfg = ConfServerConfig {
         domain: net.identity.domain.clone(),
         listen,
@@ -3298,7 +3298,7 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         network,
         conf_server,
     );
-    let params = netidx_conf::template::publisher::PublisherParams {
+    let params = netidx_admin::template::publisher::PublisherParams {
         addrs,
         default_auth,
         tls_identities,
@@ -3349,8 +3349,8 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 /// delegation handshake exchanges (the child's address carries it). Local
 /// auth is host-local and can't serve a delegated network subtree.
 #[cfg(unix)]
-fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_conf::conf_proto::InfoAuth> {
-    use netidx_conf::conf_proto::InfoAuth;
+fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_admin::conf_proto::InfoAuth> {
+    use netidx_admin::conf_proto::InfoAuth;
     match a {
         AuthChoice::Anonymous => Ok(InfoAuth::Anonymous),
         AuthChoice::Krb5 { spn } => Ok(InfoAuth::Krb5 { spn: spn.to_string() }),
@@ -3424,7 +3424,7 @@ fn finish_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netidx_conf::template::TlsCopyJob;
+    use netidx_admin::template::TlsCopyJob;
     use std::collections::BTreeMap;
 
     // IP literals so the resolution is deterministic and needs no DNS;
@@ -3432,7 +3432,7 @@ mod tests {
     // name on the left.
     #[test]
     fn conf_server_seeds_default_and_explicit_port() {
-        let dflt = netidx_conf::conf_proto::DEFAULT_PORT;
+        let dflt = netidx_admin::conf_proto::DEFAULT_PORT;
         // bare ip → default conf port
         assert_eq!(
             resolve_conf_server_seeds("1.2.3.4").unwrap(),
@@ -3584,7 +3584,7 @@ mod tests {
     fn self_copy_install_is_not_an_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().to_path_buf();
-        let [cert, key, _trusted] = netidx_conf::tls::installed_files_in(&dest);
+        let [cert, key, _trusted] = netidx_admin::tls::installed_files_in(&dest);
         // The issued cert + key already live at their install paths.
         std::fs::write(&cert, b"cert").unwrap();
         std::fs::write(&key, b"key").unwrap();
@@ -3613,7 +3613,7 @@ mod tests {
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
         let [cert_dst, key_dst, _trusted_dst] =
-            netidx_conf::tls::installed_files_in(&dest);
+            netidx_admin::tls::installed_files_in(&dest);
         // An identity already installed at the destination.
         std::fs::write(&cert_dst, b"old cert").unwrap();
         std::fs::write(&key_dst, b"old key").unwrap();

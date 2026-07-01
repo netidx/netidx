@@ -43,12 +43,12 @@ use netidx::{
 // today, so gate them too rather than warn about unused imports on
 // Windows.
 #[cfg(unix)]
-use netidx_conf::{ca, id_map as id_map_engine, tls as tls_install};
+use netidx_admin::{ca, id_map as id_map_engine, tls as tls_install};
 // `WorkstationParams` is referenced only by the Local-auth workstation
 // test (also unix-only).
 #[cfg(unix)]
-use netidx_conf::template::workstation::WorkstationParams;
-use netidx_conf::template::{
+use netidx_admin::template::workstation::WorkstationParams;
+use netidx_admin::template::{
     self, AuthChoice, ReferralAuth,
     publisher::PublisherParams,
     resolver::{IdMapMode, ResolverParams},
@@ -325,7 +325,7 @@ async fn workstation_template_local_round_trip() -> Result<()> {
 ///   in-process here via `IdMapServer::start`, since there's no
 ///   activation supervisor in a tokio test).
 ///
-/// **Unix-only**: the test issues certs via `netidx_conf::ca`,
+/// **Unix-only**: the test issues certs via `netidx_admin::ca`,
 /// which depends on openssl (unix-only — we don't ship openssl to
 /// Windows). On Windows a TLS workstation install uses pre-issued
 /// certs supplied via explicit flags.
@@ -420,7 +420,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // result depends on the TOFU verifier capturing the leaf before that
     // rejection and reading its DNS SAN.
     let probed =
-        netidx_conf::resolver_probe::probe_resolver_tls_name(*server.local_addr())
+        netidx_admin::resolver_probe::probe_resolver_tls_name(*server.local_addr())
             .await?;
     assert_eq!(probed.as_deref(), Some("resolver.example.com"));
 
@@ -447,7 +447,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
-    use netidx_conf::ca_store;
+    use netidx_admin::ca_store;
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
     let dir = TempDir::new()?;
@@ -527,7 +527,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     let cadir = ca_store::CaDir::open(ca_dir.clone())?;
     cadir.store.lock().commit_signed(&ca_store::IssuedRecord {
         req: ca_store::QueuedReq::new(
-            netidx_conf::conf_proto::NodeKind::Resolver,
+            netidx_admin::conf_proto::NodeKind::Resolver,
             String::new(),
             "resolver.revoked.example".into(),
             std::time::Duration::from_secs(30 * 86400),
@@ -554,7 +554,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
     cadir.store.lock().write_crl(&ca_key)?;
     let rcfg =
-        netidx_conf::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
+        netidx_admin::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
     let mut installed = false;
     for member in &rcfg.0.member_servers {
         if let cfg_resolver::file::Auth::Tls { trusted, .. } = &member.auth {

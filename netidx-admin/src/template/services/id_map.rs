@@ -3,7 +3,7 @@
 //!
 //! Mirrors [`crate::template::services::container`] in shape. The
 //! engine doesn't invent a default socket / config path — the CLI
-//! resolves those via `netidx_conf::id_map::user_id_map_socket()` /
+//! resolves those via `netidx_admin::id_map::user_id_map_socket()` /
 //! `user_id_map_path()` so the workstation and standalone-resolver
 //! templates can decide independently.
 

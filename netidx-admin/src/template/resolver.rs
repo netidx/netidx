@@ -106,10 +106,10 @@ pub struct ResolverParams {
     /// form.
     pub id_map: IdMapMode,
     /// Where to put the id-map JSON. `None` ⇒
-    /// `netidx_conf::id_map::user_id_map_path()`.
+    /// `netidx_admin::id_map::user_id_map_path()`.
     pub id_map_path: Option<PathBuf>,
     /// Where the id-map daemon will bind its unix socket. `None` ⇒
-    /// `netidx_conf::id_map::user_id_map_socket()`.
+    /// `netidx_admin::id_map::user_id_map_socket()`.
     pub id_map_socket: Option<PathBuf>,
     /// Also emit a client config pointing at this resolver — useful
     /// for inspecting the resolver from the same host. For

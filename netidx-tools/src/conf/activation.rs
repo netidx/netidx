@@ -4,7 +4,7 @@ use netidx::path::Path as NetidxPath;
 use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus,
 };
-use netidx_conf::{
+use netidx_admin::{
     activation::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
         UnitBuilder,
@@ -18,11 +18,11 @@ use netidx_conf::{
 };
 // Remote, conf-plane control is unix-only (see `service_control`).
 #[cfg(unix)]
-use netidx_conf::{conf_client, conf_proto::NodeKind};
+use netidx_admin::{conf_client, conf_proto::NodeKind};
 // `conf_proto` is also referenced by `parse_unit_targets`, which the test
 // module exercises on every platform.
 #[cfg(any(unix, test))]
-use netidx_conf::conf_proto;
+use netidx_admin::conf_proto;
 
 use super::prompt;
 use clap::{Args, Subcommand};
@@ -483,7 +483,7 @@ fn add_id_map(a: IdMapAddArgs) -> Result<()> {
 fn install_unit(
     dir: Option<PathBuf>,
     name: &str,
-    unit: netidx_conf::activation::Unit,
+    unit: netidx_admin::activation::Unit,
 ) -> Result<()> {
     let ad = ActivationDir::open(dir.as_deref())?;
     let mut units = ad.list()?;
@@ -594,7 +594,7 @@ mod tests {
         let path = dir.path().join("id-map.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_conf::activation::Unit = serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         // `-f` is mandatory under the activation supervisor; see the
         // regression note on `template::services::id_map::unit`.
@@ -634,7 +634,7 @@ mod tests {
         let path = dir.path().join("container.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_conf::activation::Unit = serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         assert_eq!(
             u.process.args,

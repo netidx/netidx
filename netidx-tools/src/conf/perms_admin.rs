@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_conf::{
+use netidx_admin::{
     conf_client::{self, CaIdentity},
     conf_proto::{NetworkMap, NodeKind, PeerResult},
     perms,

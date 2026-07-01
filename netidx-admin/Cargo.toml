@@ -1,14 +1,14 @@
 [package]
-name = "netidx-conf"
+name = "netidx-admin"
 version = "0.32.0"
 authors = ["Eric Stokes <letaris@gmail.com>"]
 edition = "2024"
 license = "MIT"
-description = "netidx configuration tooling engine"
+description = "netidx administrative control plane engine"
 homepage = "https://netidx.github.io/netidx-book/"
 repository = "https://github.com/estokes/netidx"
 readme = "../README.md"
-documentation = "https://docs.rs/netidx-conf"
+documentation = "https://docs.rs/netidx-admin"
 keywords = ["networking", "distributed", "configuration"]
 categories = ["network-programming"]
 

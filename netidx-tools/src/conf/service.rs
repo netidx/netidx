@@ -1,5 +1,5 @@
 //! `netidx conf component service {install,uninstall,status}` — the CLI shell
-//! over `netidx_conf::service`. Handles sudo elevation for
+//! over `netidx_admin::service`. Handles sudo elevation for
 //! system-scope installs, and re-execs the same binary across the
 //! privilege boundary so the elevated child runs the binary the
 //! operator invoked.
@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_conf::service::{self, ServiceParams, ServiceScope, ServiceStatus};
+use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{io::IsTerminal, path::PathBuf};
 // `Command` only drives the unix sudo re-exec path.
 #[cfg(unix)]

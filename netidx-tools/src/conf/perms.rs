@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_conf::{paths, perms};
+use netidx_admin::{paths, perms};
 use std::path::PathBuf;
 
 use super::prompt;

@@ -46,7 +46,7 @@ pub(crate) fn windows_sam_name() -> Result<String> {
 #[cfg(any(unix, windows))]
 mod activation;
 // `ca` subcommand and its supporting CLI helpers depend on the
-// `netidx_conf::ca` engine module, which is unix-only (it pulls
+// `netidx_admin::ca` engine module, which is unix-only (it pulls
 // openssl). On Windows the subcommand is simply not exposed.
 #[cfg(unix)]
 mod ca;
@@ -71,7 +71,7 @@ mod renew;
 mod resolver;
 mod roles;
 // `server` (the conf-server daemon CLI) depends on the
-// `netidx_conf::conf_server` engine module, which is unix-only (the
+// `netidx_admin::conf_server` engine module, which is unix-only (the
 // CA signer pulls openssl). On Windows, put a host on a network by
 // installing a publisher client config (`netidx conf publisher
 // install`); the `workstation` role is unix-only too (Local auth +
@@ -100,7 +100,7 @@ pub(crate) enum Params {
         cmd: roles::publisher::Cmd,
     },
     /// manage a local certificate authority
-    // Unix-only — the engine module (`netidx_conf::ca`) needs
+    // Unix-only — the engine module (`netidx_admin::ca`) needs
     // openssl, which we don't ship to Windows.
     #[cfg(unix)]
     Ca {

@@ -1,12 +1,12 @@
 //! `netidx conf component server …` — run and set up the conf-server daemon.
 //!
-//! The daemon itself lives in `netidx_conf::conf_server`; this module
+//! The daemon itself lives in `netidx_admin::conf_server`; this module
 //! is the CLI shell plus [`setup_server`], the shared "stand up a conf
 //! server on this host" step used by `ca init` and the install flows.
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use netidx_conf::{
+use netidx_admin::{
     atomic,
     ca::{self, Ca, SanEntry},
     conf_client,
@@ -113,14 +113,14 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     let serving_cert = server_dir.join("cert.pem");
     let serving_key = server_dir.join("key.pem");
     atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    match netidx_conf::tls::write_private_key_maybe_sealed(
+    match netidx_admin::tls::write_private_key_maybe_sealed(
         &serving_key,
         &kc.private_key_pem,
     )? {
-        netidx_conf::tls::KeyWrite::Sealed => {
+        netidx_admin::tls::KeyWrite::Sealed => {
             println!("  serving key sealed to this machine's {}", netidx_tpm::MECHANISM);
         }
-        netidx_conf::tls::KeyWrite::Plain(e) => {
+        netidx_admin::tls::KeyWrite::Plain(e) => {
             println!(
                 "  note: serving key is plaintext ({} sealing unavailable: {e:#})",
                 netidx_tpm::MECHANISM
@@ -206,17 +206,17 @@ pub(super) fn install_unit(units_dir: &Path, cfg_path: &Path) -> Result<()> {
         .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
     let netidx_binary = std::env::current_exe()
         .context("could not determine current netidx binary for the conf-server unit")?;
-    let unit = netidx_conf::template::services::conf_server::unit(
-        &netidx_conf::template::services::conf_server::ConfServerServiceParams {
+    let unit = netidx_admin::template::services::conf_server::unit(
+        &netidx_admin::template::services::conf_server::ConfServerServiceParams {
             netidx_binary,
             config: cfg_path.to_path_buf(),
         },
     )?;
-    let dir = netidx_conf::activation::ActivationDir::open(Some(units_dir))?;
+    let dir = netidx_admin::activation::ActivationDir::open(Some(units_dir))?;
     dir.save("conf-server", &unit).context("writing the conf-server activation unit")?;
     println!(
         "  unit:     {}",
-        netidx_conf::activation::unit_path_in(units_dir, "conf-server").display()
+        netidx_admin::activation::unit_path_in(units_dir, "conf-server").display()
     );
     Ok(())
 }
@@ -261,7 +261,7 @@ fn default_listen_ip(hint: Option<IpAddr>) -> IpAddr {
 /// The listen IP of the default resolver config, if one is present and
 /// parseable.
 fn existing_resolver_listen_ip() -> Option<IpAddr> {
-    netidx_conf::resolver::ResolverConfig::load_default()
+    netidx_admin::resolver::ResolverConfig::load_default()
         .ok()
         .and_then(|c| c.0.member_servers.first().map(|m| m.addr.ip()))
 }

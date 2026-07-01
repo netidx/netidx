@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use clap::Args;
-use netidx_conf::{
+use netidx_admin::{
     conf_client,
     conf_proto::{
         DelegationPollResponse, InfoAuth, NodeKind, PeerResult, ReferralEdit,
