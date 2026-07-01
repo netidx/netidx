@@ -1,5 +1,5 @@
-//! `netidx conf …` CLI surface. A thin presentation layer over
-//! `netidx-conf`.
+//! `netidx admin …` CLI surface. A thin presentation layer over
+//! `netidx-admin`.
 //!
 //! Two levels: **system roles** (`workstation` / `resolver` /
 //! `publisher`, each with `install` and lifecycle actions) plus `ca`,
@@ -73,7 +73,7 @@ mod roles;
 // `server` (the conf-server daemon CLI) depends on the
 // `netidx_admin::conf_server` engine module, which is unix-only (the
 // CA signer pulls openssl). On Windows, put a host on a network by
-// installing a publisher client config (`netidx conf publisher
+// installing a publisher client config (`netidx admin publisher
 // install`); the `workstation` role is unix-only too (Local auth +
 // activation supervisor) until full Windows support lands.
 #[cfg(unix)]

@@ -1,4 +1,4 @@
-//! `netidx conf resolver add-parent` / `review-delegation` — the
+//! `netidx admin resolver add-parent` / `review-delegation` — the
 //! client/CLI half of resolver hierarchy delegation. The child queues a
 //! request with the parent's conf server (glyph-confirming it first) and
 //! polls; the parent admin reviews pending requests, matches the
@@ -88,7 +88,7 @@ pub(crate) fn delegate_under_parent(
     println!("{}", code.identicon(ColorMode::detect()));
     println!(
         "send this code to the parent admin (chat, phone — any channel you \
-         trust); they approve with `netidx conf resolver review-delegation` after \
+         trust); they approve with `netidx admin resolver review-delegation` after \
          matching it. Waiting for approval (Ctrl-C to abort; the request expires \
          on its own)..."
     );

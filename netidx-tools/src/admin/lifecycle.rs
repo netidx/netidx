@@ -36,7 +36,7 @@ pub(crate) struct UpdateFlags {
 fn require_record() -> Result<InstallRecord> {
     InstallRecord::load_default()?.context(
         "no install record (install.json) found — this host has no netidx \
-         install managed by `netidx conf`, or the install predates the record",
+         install managed by `netidx admin`, or the install predates the record",
     )
 }
 
@@ -45,7 +45,7 @@ fn require_record() -> Result<InstallRecord> {
 fn require_role(rec: &InstallRecord, want: InstallRole) -> Result<()> {
     if rec.role != want {
         bail!(
-            "this host is a {} install, not a {} — use `netidx conf {} …`",
+            "this host is a {} install, not a {} — use `netidx admin {} …`",
             rec.role.as_str(),
             want.as_str(),
             rec.role.as_str(),
@@ -135,7 +135,7 @@ pub(crate) fn workstation_status() -> Result<()> {
 
     match &rec.network {
         None => println!(
-            "  network: local-only — run `netidx conf workstation join` to \
+            "  network: local-only — run `netidx admin workstation join` to \
              attach to a network",
         ),
         Some(net_id) => {
@@ -152,7 +152,7 @@ pub(crate) fn workstation_status() -> Result<()> {
                     } else {
                         println!(
                             "  sync: behind by {} resolver peer(s) — run \
-                             `netidx conf workstation update`:",
+                             `netidx admin workstation update`:",
                             plan.changes.len(),
                         );
                         print!("{}", plan.describe());
@@ -169,7 +169,7 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     require_role(&rec, InstallRole::Workstation)?;
     let net_id = rec.network.as_ref().context(
         "this workstation is local-only — it hasn't joined a network, so there \
-         is nothing to update. Run `netidx conf workstation join` first.",
+         is nothing to update. Run `netidx admin workstation join` first.",
     )?;
     let rpath = resolver_config_path()?;
     let info = fetch_network_pinned(net_id, rec.conf_server, NodeKind::Client)?;

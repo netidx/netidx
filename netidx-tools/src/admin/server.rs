@@ -1,4 +1,4 @@
-//! `netidx conf component server …` — run and set up the conf-server daemon.
+//! `netidx admin component server …` — run and set up the conf-server daemon.
 //!
 //! The daemon itself lives in `netidx_admin::conf_server`; this module
 //! is the CLI shell plus [`setup_server`], the shared "stand up a conf
@@ -188,7 +188,7 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     let Some(units_dir) = a.units_dir else {
         println!(
             "  (--no-units: no activation unit written; run it yourself with\n\
-             \x20  netidx conf component server run -c {})",
+             \x20  netidx admin component server run -c {})",
             cfg_path.display()
         );
         return Ok(service::ServiceNeed::NONE);

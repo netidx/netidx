@@ -17,7 +17,7 @@
 //!   See [`required_string`], [`required_path`], [`required_parsed`].
 //!
 //! Kept in the CLI layer per the project convention that the
-//! `netidx-conf` library stays free of user-IO.
+//! `netidx-admin` library stays free of user-IO.
 
 use anyhow::{Context, Result, anyhow};
 use std::{

@@ -12,7 +12,7 @@ mod wsproxy;
 
 #[cfg(any(unix, windows))]
 mod activation;
-mod conf;
+mod admin;
 mod container;
 #[cfg(unix)]
 mod id_map;
@@ -130,10 +130,10 @@ enum Opt {
         #[command(subcommand)]
         cmd: IdMapCmd,
     },
-    /// configuration management
-    Conf {
+    /// administrative control plane
+    Admin {
         #[command(subcommand)]
-        params: conf::Params,
+        params: admin::Params,
     },
     /// stress test
     Stress {
@@ -188,7 +188,7 @@ fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params)
         }
-        Opt::Conf { params } => conf::run(params),
+        Opt::Admin { params } => admin::run(params),
         Opt::RecordClient { cmd } => record_client::run(cmd),
         #[cfg(unix)]
         Opt::Record { config, example } => recorder::run(config, example),

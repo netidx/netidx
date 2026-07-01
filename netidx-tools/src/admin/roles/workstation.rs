@@ -1,10 +1,10 @@
-//! `netidx conf workstation …` — the workstation role: a local-auth
+//! `netidx admin workstation …` — the workstation role: a local-auth
 //! resolver + matching client, optionally referred up to a network.
 
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::conf::{init, lifecycle};
+use crate::admin::{init, lifecycle};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {

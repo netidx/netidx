@@ -1,4 +1,4 @@
-//! `netidx conf <role> …` — per-system-role command groups.
+//! `netidx admin <role> …` — per-system-role command groups.
 //!
 //! Each role template (workstation / resolver / publisher) is a
 //! top-level command whose subcommands are *actions on that role's

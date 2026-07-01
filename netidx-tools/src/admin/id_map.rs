@@ -1,9 +1,9 @@
-//! `netidx conf component id-map …` — edit the id-map JSON file used by the
+//! `netidx admin component id-map …` — edit the id-map JSON file used by the
 //! id-mapper daemon. Mirrors the perms CLI in shape: each subcommand
 //! loads, mutates, and atomically saves the JSON file.
 //!
 //! A separate `init` subcommand creates an empty starter file (useful
-//! for `netidx conf resolver install --auth tls`, which wires
+//! for `netidx admin resolver install --auth tls`, which wires
 //! up the daemon's activation unit but leaves the actual map empty
 //! for the operator to fill in).
 //!

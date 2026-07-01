@@ -1,4 +1,4 @@
-//! The certificate renewal daemon CLI, surfaced as `netidx conf component tls
+//! The certificate renewal daemon CLI, surfaced as `netidx admin component tls
 //! auto-renew …` (see the `tls` module). The engine lives in
 //! `netidx_admin::renewd`; templates install the `run` form as an
 //! activation unit on every TLS host.

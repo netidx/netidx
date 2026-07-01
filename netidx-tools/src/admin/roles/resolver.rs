@@ -1,12 +1,12 @@
-//! `netidx conf resolver …` — the resolver role: a network-facing
+//! `netidx admin resolver …` — the resolver role: a network-facing
 //! resolver-server (with optional conf server / CA).
 
 use anyhow::Result;
 use clap::Subcommand;
 
 #[cfg(unix)]
-use crate::conf::delegation;
-use crate::conf::{init, lifecycle};
+use crate::admin::delegation;
+use crate::admin::{init, lifecycle};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {

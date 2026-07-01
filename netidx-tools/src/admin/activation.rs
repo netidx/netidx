@@ -412,7 +412,7 @@ fn add_container(a: ContainerAddArgs) -> Result<()> {
 /// Compute the default container API path. The rule: take the client
 /// config's `base` and append `/container/api`. Falls back to
 /// `/container/api` when no client config is loadable (e.g. brand-new
-/// install pre-`netidx conf install`) **or** when `base` is malformed
+/// install pre-`netidx admin install`) **or** when `base` is malformed
 /// (the JSON deserialiser accepts any string for `base` but a netidx
 /// path must start with `/`; treating "local" as a base would emit
 /// "local/container/api" which is not a valid netidx path). A

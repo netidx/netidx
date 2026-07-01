@@ -1,4 +1,4 @@
-//! `netidx conf component …` — the low-level, single-component commands:
+//! `netidx admin component …` — the low-level, single-component commands:
 //! show/edit one config file, manage activation units, run the
 //! conf-server daemon, or drive this host's TLS identity.
 //!

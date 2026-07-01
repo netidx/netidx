@@ -1,4 +1,4 @@
-//! `netidx conf uninstall` — wholesale teardown of a netidx install.
+//! `netidx admin uninstall` — wholesale teardown of a netidx install.
 //!
 //! Mirrors the install side's sudo-escalation pattern: a system-scope
 //! uninstall re-execs itself under `sudo` when not already root, then
@@ -141,7 +141,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
         } else {
             "Proceed with uninstall?"
         };
-        // Default `false`: an unattended `echo "" | netidx conf
+        // Default `false`: an unattended `echo "" | netidx admin
         // uninstall` must not silently wipe an install.
         prompt::confirm(q, false)?
     };
@@ -343,7 +343,7 @@ fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
         }
         Err(e) => eprintln!(
             "conf server: could not deregister from the CA at {ca_addr} ({e:#}); \
-             the CA will keep this server in its map until `netidx conf ca remove-server`"
+             the CA will keep this server in its map until `netidx admin ca remove-server`"
         ),
     }
 }

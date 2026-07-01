@@ -475,7 +475,7 @@ pub(crate) struct RequestArgs {
 pub(crate) struct SignArgs {
     /// Path to the CSR (PEM-encoded) to sign. Prompted when omitted.
     /// (To approve queued enrollment requests instead of signing a CSR
-    /// file, use `netidx conf ca approve`.)
+    /// file, use `netidx admin ca approve`.)
     pub csr_path: Option<PathBuf>,
     /// SubjectAltName entry to embed in the signed cert. Repeatable.
     /// The CA is authoritative — these override whatever the CSR
@@ -632,7 +632,7 @@ pub(super) fn setup_autorenew_slot(
                 "the autorenew credential could not be sealed to this host's {mech} \
                  ({e:#}). Writing it in plaintext would be equivalent to backing up the \
                  CA key, so this is refused. Fix the {mech} (e.g. clear an owner-auth or \
-                 dictionary-attack lockout) and re-run `netidx conf ca auto-approve`, or \
+                 dictionary-attack lockout) and re-run `netidx admin ca auto-approve`, or \
                  pass --insecure-no-tpm to accept a plaintext keytab (test CAs only).",
                 mech = netidx_tpm::MECHANISM
             );
@@ -985,7 +985,7 @@ fn seal_ca_recovery(
 }
 
 /// **The** entry point for building a new vaulted CA, shared verbatim
-/// by `netidx conf ca init` and the `netidx conf resolver install`
+/// by `netidx admin ca init` and the `netidx admin resolver install`
 /// "create a new CA" branch — so the operator gets the identical
 /// experience (admin/policy, identicon, the "set up the CA server?"
 /// question) either way.
@@ -1093,7 +1093,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         println!("automatic renewal approval enabled:");
         println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
         println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
-        println!("          rotate anytime with `netidx conf ca auto-approve --rotate`)");
+        println!("          rotate anytime with `netidx admin ca auto-approve --rotate`)");
         println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
         // The founding SUPERUSER role admin: it directs the server (mint
         // admins, edit perms, enroll servers) but wraps no MK, so its
@@ -1160,12 +1160,12 @@ pub(super) fn announce_founding_policy(domain: &str) {
     println!(
         "  the CA's founding admin will issue *.{domain} certificates, place \
          enrolled nodes in the 'users' id-map group, and may enroll conf \
-         servers — change any of this later with `netidx conf ca admin \
+         servers — change any of this later with `netidx admin ca admin \
          set-policy`."
     );
     println!(
         "  (chaining this CA to an existing PKI is a separate up-front choice: \
-         create it beforehand with `netidx conf ca init --external-sign`.)"
+         create it beforehand with `netidx admin ca init --external-sign`.)"
     );
 }
 
@@ -1224,7 +1224,7 @@ fn print_recovery_password(pw: &str) {
     println!("that can unlock the CA key — to mint a new admin or rotate the box's");
     println!("own credential. If you lose it AND this machine, the CA is unrecoverable;");
     println!("while the machine lives you can mint a fresh one with");
-    println!("`netidx conf ca recovery rotate`.");
+    println!("`netidx admin ca recovery rotate`.");
     println!();
 }
 
@@ -1321,7 +1321,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
             format!(
                 "rotating the recovery password needs the autorenew keytab ({}); it \
                  authorizes the re-mint on the CA box. (Set one up with \
-                 `netidx conf ca auto-approve`.)",
+                 `netidx admin ca auto-approve`.)",
                 keytab.display()
             )
         })?;
@@ -1334,7 +1334,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     cadir.vault.read().unlock(&autorenew_pw).with_context(|| {
         format!(
             "the autorenew keytab ({}) did not unlock this CA — its credential is \
-             stale. Re-mint it with `netidx conf ca auto-approve --rotate` (needs the \
+             stale. Re-mint it with `netidx admin ca auto-approve --rotate` (needs the \
              recovery password) and try again.",
             keytab.display()
         )
@@ -1507,7 +1507,7 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
         "wrote {} — get it signed by your PKI as a subordinate CA, then run:",
         csr_path.display()
     );
-    println!("  netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]");
+    println!("  netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]");
     println!();
     println!(
         "NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
@@ -1523,7 +1523,7 @@ fn external_renew(args: ExternalRenewArgs) -> Result<()> {
     if !lifetimes.externally_signed {
         bail!(
             "{} is not an externally-signed CA — create one with \
-             `netidx conf ca init --external-sign`",
+             `netidx admin ca init --external-sign`",
             dir.display()
         );
     }
@@ -1575,7 +1575,7 @@ fn emit_external_csr(dir: &Path) -> Result<()> {
     atomic::write_atomic(&csr_path, &csr, 0o644)
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
     println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
-    println!("  netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]");
+    println!("  netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]");
     Ok(())
 }
 
@@ -1636,7 +1636,7 @@ fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Resu
         println!("conf server configured ({})", cfg_path.display());
         println!(
             "CA-cert auto-renewal is DISABLED (external issuer); re-run \
-             `netidx conf ca external renew` when your PKI re-signs it."
+             `netidx admin ca external renew` when your PKI re-signs it."
         );
         return service::offer(
             need,
@@ -1798,7 +1798,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             bail!(
                 "`ca admin add` is gone: the only signing keyslots are `recovery` \
                  and `autorenew`, fixed at init. To grant a new admin authority, use \
-                 `netidx conf ca admin add-role <name>` — a role admin edits perms, \
+                 `netidx admin ca admin add-role <name>` — a role admin edits perms, \
                  manages admins, and (with --may-enroll-servers) enrolls servers, all \
                  without ever unlocking the CA key (the server signs for it)."
             )
@@ -1924,8 +1924,8 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 bail!(
                     "{name:?} is a system-managed signing slot and cannot be removed \
                      directly (that would orphan the CA key or the box credential). \
-                     Rotate recovery with `netidx conf ca recovery rotate`, or \
-                     autorenew with `netidx conf ca auto-approve --rotate`."
+                     Rotate recovery with `netidx admin ca recovery rotate`, or \
+                     autorenew with `netidx admin ca auto-approve --rotate`."
                 );
             }
             if let Some(server) = a.server {
@@ -2267,7 +2267,7 @@ fn issue(p: IssueArgs) -> Result<()> {
             validity: p.validity,
             out_dir,
             // Leaf key encryption is wired through the install flow
-            // (`netidx conf init`), where the engine knows how to plumb
+            // (`netidx admin init`), where the engine knows how to plumb
             // an askpass entry into the emitted client config. The bare
             // `ca issue` CLI deliberately stays unencrypted: callers
             // here are doing manual cert issuance and don't necessarily
@@ -2320,7 +2320,7 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
         p.key_bits,
         // Bare `ca request` CLI doesn't encrypt the key — same
         // rationale as the `ca issue` CLI: encrypted leaf keys are
-        // wired through `netidx conf init`, which knows how to set
+        // wired through `netidx admin init`, which knows how to set
         // the matching `tls.askpass` in the emitted config.
         None,
     )?;
@@ -2332,7 +2332,7 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
     println!("wrote CSR        (0644): {}", out_csr.display());
     println!();
     println!("# Next step: hand the CSR to a CA admin who runs");
-    println!("#   netidx conf ca sign {} --out <cert.pem>", out_csr.display());
+    println!("#   netidx admin ca sign {} --out <cert.pem>", out_csr.display());
     Ok(())
 }
 
@@ -2387,7 +2387,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
 /// - no local id-map exists at the canonical user path, or
 /// - the CSR carries no usable identity name (no SAN DNS entry and
 ///   no CN), or
-/// - stdin is not a TTY (scripts use `netidx conf component id-map set-user`
+/// - stdin is not a TTY (scripts use `netidx admin component id-map set-user`
 ///   for explicit non-interactive registration; we don't want a
 ///   level-1 prompt to silently write a wrong UID).
 ///
@@ -2434,7 +2434,7 @@ fn maybe_register_in_id_map(
             // they want one, but don't fail the sign.
             println!(
                 "(no local id-map at {} — skipping registration; \
-                 create one with `netidx conf component id-map init`)",
+                 create one with `netidx admin component id-map init`)",
                 map_path.display(),
             );
             return Ok(());
@@ -2871,7 +2871,7 @@ fn list() -> Result<()> {
         }
     };
     if !dir.join("certificate.pem").is_file() {
-        println!("# no CA at {} — run `netidx conf ca init` first", dir.display());
+        println!("# no CA at {} — run `netidx admin ca init` first", dir.display());
         return Ok(());
     }
     println!("CA at {}", dir.display());
@@ -2879,7 +2879,7 @@ fn list() -> Result<()> {
         && let Ok(fp) = Fingerprint::of_cert_pem(&cert)
     {
         println!(
-            "  fingerprint: {} … (`netidx conf ca fingerprint` for the full id)",
+            "  fingerprint: {} … (`netidx admin ca fingerprint` for the full id)",
             fp.short()
         );
     }
@@ -2926,7 +2926,7 @@ fn list() -> Result<()> {
 
 // -- generate-flow helpers ---------------------------------------------------
 //
-// Used by `netidx conf resolver install --auth tls` to offer a
+// Used by `netidx admin resolver install --auth tls` to offer a
 // "just generate the resolver certificate" path: for a small org the
 // resolver host is commonly the CA host too, and making that one-step
 // is the whole point.

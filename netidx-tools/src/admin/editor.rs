@@ -18,7 +18,7 @@ where
     F: Fn(&str) -> Result<T>,
 {
     let mut tmp = tempfile::Builder::new()
-        .prefix("netidx-conf-")
+        .prefix("netidx-admin-")
         .suffix(".json")
         .tempfile()
         .context("creating editor temp file")?;

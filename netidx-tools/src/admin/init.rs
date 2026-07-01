@@ -1,4 +1,4 @@
-//! `netidx conf <role> install` — render and apply a `RenderedTemplate`
+//! `netidx admin <role> install` — render and apply a `RenderedTemplate`
 //! for one of the three v1 templates.
 
 use anyhow::{Context, Result};
@@ -844,7 +844,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// `apply()` installs it).
 ///
 /// The default path queues a signing request and waits for an admin to
-/// approve it remotely (`netidx conf ca approve`): the enrollee shows a
+/// approve it remotely (`netidx admin ca approve`): the enrollee shows a
 /// request code (the CSR key's fingerprint) the admin matches out of
 /// band, and the admin — who knows who they're enrolling — chooses the
 /// id-map groups at approval. The synchronous path (an admin present
@@ -908,7 +908,7 @@ fn join_network(
         println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
         println!(
             "send this code to your CA admin (chat, phone — any channel you \
-             trust); they approve with `netidx conf ca approve` after \
+             trust); they approve with `netidx admin ca approve` after \
              matching it. Waiting for approval (Ctrl-C to abort; the request \
              expires on its own)..."
         );
@@ -1141,7 +1141,7 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
         return Ok(ConfServers::NotProbed);
     }
     println!(
-        "searching for netidx conf component servers on the local network \
+        "searching for netidx admin component servers on the local network \
          ({}s)...",
         DISCOVERY_TIMEOUT.as_secs()
     );
@@ -2482,7 +2482,7 @@ fn resolver_self_auth(
         AuthKind::Local => bail!(
             "the resolver template does not support local auth: local (unix-socket) \
              auth only authenticates clients on the same machine, so it cannot serve \
-             a network. For a single-machine setup use `netidx conf \
+             a network. For a single-machine setup use `netidx admin \
              workstation install`; for a network resolver choose anonymous, krb5, \
              or tls."
         ),
@@ -2634,7 +2634,7 @@ fn resolver_tls_generate(
         // instead runs `ca init --external-sign` up front, or self-manages
         // the TLS config by hand outside the wizard.
         //
-        // Created via the SAME entry point as `netidx conf ca init` —
+        // Created via the SAME entry point as `netidx admin ca init` —
         // admin/policy and identicon included. We already know the
         // domain from the resolver's TLS name (e.g.
         // `resolver.ryu-oh.org` → `ryu-oh.org`), so name the CA
@@ -3009,7 +3009,7 @@ fn enroll_conf_server(
         println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
         println!(
             "send this code to your CA admin (chat, phone — any channel you \
-             trust); they approve with `netidx conf ca approve` (their policy \
+             trust); they approve with `netidx admin ca approve` (their policy \
              must grant may_enroll_servers). Waiting for approval (Ctrl-C to \
              abort; the request expires on its own)..."
         );
@@ -3100,7 +3100,7 @@ fn enroll_conf_server(
     } else {
         println!(
             "  (--no-units: no activation unit written; run it yourself with\n\
-             \x20  netidx conf component server run -c {})",
+             \x20  netidx admin component server run -c {})",
             cfg_path.display()
         );
     }

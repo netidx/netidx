@@ -1,4 +1,4 @@
-//! `netidx conf perms show|edit --at <path>` — remote permissions
+//! `netidx admin perms show|edit --at <path>` — remote permissions
 //! administration through the conf server, routed by the network map. No
 //! SSH: an admin contacts a conf server (glyph-confirming its CA exactly as
 //! delegation does), the map locates the cluster mounted at `<path>`, and
