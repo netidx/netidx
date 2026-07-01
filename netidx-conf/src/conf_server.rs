@@ -1826,20 +1826,32 @@ fn issue_locked(
         }
     }
     // Opportunistic CA-cert renewal — rare, and only allocates a serial
-    // when actually renewing, so the common path burns nothing.
+    // when actually renewing, so the common path burns nothing. An
+    // externally-signed CA cert cannot be self-renewed (netidx doesn't
+    // hold the external issuer's key); warn instead so the operator
+    // re-signs out of band. (Warning fires only within the renewal
+    // window; a rate limit could reduce it further if it proves noisy.)
     if crate::ca::ca_cert_needs_renewal(&dir, ca.lifetimes.ca_renew_threshold) {
-        let rs = store.alloc_serial();
-        match crate::ca::maybe_renew_ca_cert(
-            &dir,
-            &signing.ca_key_pem,
-            rs,
-            ca.lifetimes.ca_renew_threshold,
-        ) {
-            Ok(true) => info!(
-                "conf-server: renewed the CA certificate (same key; glyph unchanged)"
-            ),
-            Ok(false) => (),
-            Err(e) => warn!("conf-server: CA renewal check failed: {e:#}"),
+        if ca.lifetimes.externally_signed {
+            warn!(
+                "conf-server: the externally-signed CA certificate is within its \
+                 renewal threshold and will NOT auto-renew — obtain a re-signed \
+                 cert from your PKI and run `netidx conf ca external renew`"
+            );
+        } else {
+            let rs = store.alloc_serial();
+            match crate::ca::maybe_renew_ca_cert(
+                &dir,
+                &signing.ca_key_pem,
+                rs,
+                ca.lifetimes.ca_renew_threshold,
+            ) {
+                Ok(true) => info!(
+                    "conf-server: renewed the CA certificate (same key; glyph unchanged)"
+                ),
+                Ok(false) => (),
+                Err(e) => warn!("conf-server: CA renewal check failed: {e:#}"),
+            }
         }
     }
     let serial = store.alloc_serial();

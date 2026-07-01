@@ -85,101 +85,6 @@ impl AuthKind {
 }
 
 #[derive(Args, Debug, Clone)]
-struct TlsIdentityFlags {
-    /// Source path of our certificate.
-    #[arg(long = "tls-cert")]
-    cert: Option<PathBuf>,
-    /// Source path of our private key.
-    #[arg(long = "tls-key")]
-    key: Option<PathBuf>,
-    /// Source path of the trusted-CA bundle.
-    #[arg(long = "tls-trusted")]
-    trusted: Option<PathBuf>,
-    /// Our SAN — drives the install subdirectory under
-    /// `~/.config/netidx/tls/<our-name>/`. Optional: defaults to
-    /// the DNS SAN inside `--tls-cert` so the on-disk name always
-    /// agrees with what netidx will see on the wire.
-    #[arg(long = "tls-our-name")]
-    our_name: Option<String>,
-    /// Server domain pattern this identity covers — the key in
-    /// `tls.identities`. Closest reverse-domain match wins.
-    /// Optional: defaults to the *domain* part of `our_name` (e.g.
-    /// SAN `mazikeen.local` ⇒ key `local`), matching the
-    /// interactive cascade.
-    #[arg(long = "tls-server-pattern")]
-    server_pattern: Option<String>,
-}
-
-impl TlsIdentityFlags {
-    /// Return `Some(spec)` if any flag in this group is populated,
-    /// `None` if none are. Errors if a required flag is missing
-    /// once the group is "active" — but `--tls-our-name` and
-    /// `--tls-server-pattern` are derivable from the cert SAN, so
-    /// they're optional.
-    fn to_spec(&self) -> Result<Option<TlsIdentitySpec>> {
-        let any = self.cert.is_some()
-            || self.key.is_some()
-            || self.trusted.is_some()
-            || self.our_name.is_some()
-            || self.server_pattern.is_some();
-        if !any {
-            return Ok(None);
-        }
-        let cert = self.cert.as_ref().context("--tls-cert required")?.clone();
-        let key = self.key.as_ref().context("--tls-key required")?.clone();
-        let trusted = self.trusted.as_ref().context("--tls-trusted required")?.clone();
-        // Default `our_name` to the cert's DNS SAN — same trick the
-        // interactive cascade uses for BYO certs. Asking the
-        // operator to type the SAN that's already in the cert just
-        // lets them get it wrong; reading it is always correct.
-        let our_name = match &self.our_name {
-            Some(s) => s.clone(),
-            None => {
-                netidx_conf::tls::extract_dns_san_from_pem(&cert).with_context(|| {
-                    format!(
-                        "deriving --tls-our-name from {} — supply a cert with a \
-                         DNS SubjectAlternativeName entry, or pass \
-                         --tls-our-name explicitly",
-                        cert.display(),
-                    )
-                })?
-            }
-        };
-        // Default `server_pattern` to the *domain* part of the SAN.
-        // netidx keys `tls.identities` by trust domain (one entry
-        // covers any host SAN under that domain via the
-        // reverse-domain prefix match), so the domain is almost
-        // always what the operator wants. Override with
-        // `--tls-server-pattern` if a more specific key is needed.
-        let server_pattern = match &self.server_pattern {
-            Some(s) => s.clone(),
-            None => netidx_conf::tls::domain_from_san(&our_name)
-                .with_context(|| {
-                    format!(
-                        "deriving --tls-server-pattern from SAN {our_name:?} — \
-                         supply a `<user>.<domain>` SAN, or pass \
-                         --tls-server-pattern explicitly",
-                    )
-                })?
-                .to_string(),
-        };
-        Ok(Some(TlsIdentitySpec {
-            server_pattern: ArcStr::from(server_pattern),
-            our_name: ArcStr::from(our_name),
-            certificate: cert,
-            private_key: key,
-            trusted,
-            dest_dir: None,
-            // CLI-flag path doesn't carry an askpass override.
-            // Operators driving the CLI non-interactively are
-            // expected to bring their own (unencrypted) key — or
-            // edit `tls.askpass` in the emitted config by hand.
-            askpass: None,
-        }))
-    }
-}
-
-#[derive(Args, Debug, Clone)]
 struct ParentFlags {
     /// Parent referral address. Required to enable a parent.
     /// Currently supports a single address; for multiple addresses,
@@ -433,8 +338,6 @@ fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
 pub(crate) struct WorkstationFlags {
     #[command(flatten)]
     parent: ParentFlags,
-    #[command(flatten)]
-    tls: TlsIdentityFlags,
     /// `default_auth` on the client config. Defaults to `local`.
     /// Override only when the workstation hosts publishers that
     /// network subscribers must reach.
@@ -555,18 +458,14 @@ pub(crate) fn run_workstation(_f: WorkstationFlags) -> Result<()> {
 
 #[cfg(any(unix, windows))]
 pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
-    let cli_tls_id = f.tls.to_spec()?;
     let mut tls_identities = vec![];
-    if let Some(spec) = cli_tls_id {
-        tls_identities.push(spec);
-    }
     // Holds the staging tempdirs for any CA-server-joined identity until
     // `finish()` (apply) installs them; must outlive the whole flow.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     // Parent: CLI flags fully populate it when `--parent-addr` is
     // given; otherwise walk the operator through the cascade ("is
-    // there a network-wide resolver? if so, what auth? if TLS, do
-    // you have a cert or should we generate a CSR?"). The CLI-flag
+    // there a network-wide resolver? if so, what auth? if TLS, enroll
+    // the identity over the conf plane"). The CLI-flag
     // path stays headless-friendly for scripting; the prompt path is
     // the discoverable default.
     //
@@ -768,7 +667,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// the address prompt (the level-1 default "none"). Returns
 /// `Ok(Some((ref, identity)))` otherwise; the optional identity is
 /// the TLS identity to add to `tls_identities` when parent auth is
-/// TLS and the operator brought their own cert.
+/// TLS (enrolled over the conf plane).
 ///
 /// `default_path` is the netidx path at which the current resolver
 /// attaches in the parent's namespace — typically the resolver's
@@ -776,12 +675,10 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// override it, so the cascade doesn't prompt for it; the CLI's
 /// `--parent-path` flag remains the override.
 ///
-/// For the TLS "generate" path this function **bails** with a
-/// next-steps message — the install can't complete without a signed
-/// cert, so silently dropping the parent referral would be a worse
-/// surprise than asking the operator to re-run once they've had the
-/// CSR signed. The CLI flag path (`--parent-addr … --tls-cert …`)
-/// is always available for the non-interactive case.
+/// For TLS the identity is obtained via `prompt_tls_client_identity`,
+/// which enrolls over the conf plane; with no reachable conf server it
+/// **bails** telling the operator to configure the TLS identity by hand
+/// (there is no in-wizard bring-your-own-cert path).
 #[cfg(any(unix, windows))]
 fn prompt_parent_referral(
     default_path: &str,
@@ -820,8 +717,8 @@ fn prompt_parent_referral(
         AuthKind::Tls => {
             let server_name =
                 prompt_resolver_tls_name(Some(addr), "parent TLS server name", None)?;
-            // identity is required for TLS — either bring one or
-            // (the generate path diverges via `bail!`). Suggest our own
+            // identity is required for TLS — enrolled over the conf plane
+            // (or a hard bail if no conf server is reachable). Suggest our own
             // SAN as `<user>.<domain>`, the domain taken from the
             // resolver's SAN we just resolved.
             let suggested = suggest_client_san(&server_name);
@@ -857,8 +754,7 @@ struct JoinedIdentity {
 }
 
 /// A client TLS identity plus the tempdir its files are staged in until
-/// `apply()` installs them. `staging` is `None` for the BYO-cert /
-/// wait-for-CSR paths, whose files already sit at their canonical home.
+/// `apply()` installs them.
 struct StagedIdentity {
     spec: TlsIdentitySpec,
     staging: Option<tempfile::TempDir>,
@@ -1452,169 +1348,32 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
     }
 }
 
-/// Interactive cascade for a client-side TLS identity: a cert/key
-/// pair the operator will use to authenticate to *some* upstream
-/// server. Used by both the workstation parent-referral flow and
-/// the publisher template — they both need exactly the same
-/// "bring a cert or generate a CSR" prompt and produce a
-/// `TlsIdentitySpec` that goes into `client.tls.identities`.
-///
-/// For the "generate" path: writes a key + CSR locally, prints
-/// instructions, then waits for the operator to confirm they've
-/// placed the signed cert and trusted-CA bundle at the canonical
-/// install location — only then does the install proceed, so by
-/// the time the daemon starts the cert files are guaranteed to be
-/// on disk. Local-CA-issue is deliberately *not* offered: in this
-/// flow the upstream is a different trust domain (the parent
-/// resolver, or whoever the publisher talks to), and the local
-/// CA's certs wouldn't be trusted there. Operators wanting to use
-/// their local CA can run `netidx conf ca issue` and then point
-/// `--tls-cert / --tls-key / --tls-trusted` at the result.
+/// Obtain a client-side TLS identity by enrolling over the conf plane:
+/// a discovered conf server signs our CSR on the spot (cross-platform,
+/// rcgen). Used by both the workstation parent-referral flow and the
+/// publisher template — both put the resulting `TlsIdentitySpec` into
+/// `client.tls.identities`. Requires a reachable conf server; there is
+/// no in-wizard bring-your-own-cert path (that is a self-managed setup,
+/// configured by hand).
 fn prompt_tls_client_identity(
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
     probe: &ConfServers,
 ) -> Result<StagedIdentity> {
-    // First the network path: a conf server signs our CSR on the
-    // spot, no files to shuttle. Works on every platform (rcgen, not
-    // openssl), so it's also how a Windows node gets a TLS identity.
-    // What we already know about conf servers (`probe`) decides
-    // whether this asks anything at all.
-    if let Some((j, staging)) =
-        maybe_join_ca_server(probe, NodeKind::Client, suggested_name, kp)?
-    {
-        return Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) });
+    // The conf plane is the only in-wizard source of a TLS identity: a
+    // conf server signs our CSR on the spot (cross-platform, rcgen, so
+    // it also works on Windows). No reachable conf server ⇒ this is a
+    // self-managed setup, configured by hand outside the wizard.
+    match maybe_join_ca_server(probe, NodeKind::Client, suggested_name, kp)? {
+        Some((j, staging)) => {
+            Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) })
+        }
+        None => bail!(
+            "a TLS identity via the wizard requires a reachable conf server to \
+             enroll against; none was found. To run TLS without a conf server, \
+             configure the identity by hand (cert, key, and trusted-CA bundle)."
+        ),
     }
-    // On unix the operator can choose 'generate' and we'll make a
-    // key + CSR for them via the openssl-backed `ca` module. On
-    // non-unix that module isn't available, so the prompt only
-    // accepts an explicit cert path.
-    #[cfg(unix)]
-    let cert_default = "generate";
-    #[cfg(not(unix))]
-    let cert_default = "";
-    #[cfg(unix)]
-    let cert_label = "your TLS cert (path, or 'generate' to make a new key + CSR)";
-    #[cfg(not(unix))]
-    let cert_label =
-        "your TLS cert path (CSR generation is unix-only; bring a pre-issued cert)";
-    let cert_choice = prompt::string_with_default(cert_label, None, cert_default)?;
-    #[cfg(unix)]
-    let is_generate = cert_choice == "generate";
-    #[cfg(not(unix))]
-    let is_generate = false;
-    let (our_name, certificate, private_key, trusted, askpass) = if is_generate {
-        #[cfg(unix)]
-        {
-            generate_and_wait_for_parent_cert(suggested_name, kp)?
-        }
-        #[cfg(not(unix))]
-        {
-            unreachable!("generate path is unix-only")
-        }
-    } else {
-        if cert_choice.is_empty() {
-            bail!(
-                "TLS cert path required (CSR generation is unix-only — \
-                 provide a pre-issued cert on this platform)"
-            );
-        }
-        let certificate = PathBuf::from(cert_choice);
-        let private_key = prompt::required_path("your TLS private key path", None)?;
-        let trusted =
-            prompt::required_path("trusted CA bundle (signs the parent's cert)", None)?;
-        // Extract the identity name from the cert's DNS SAN rather
-        // than asking the operator. netidx's runtime keys identities
-        // by the cert's `alt_name` at TLS-load time, so the on-disk
-        // install dir (and any matching elsewhere) must use that
-        // same name — asking would let the operator type something
-        // that disagrees with the cert, producing an install that
-        // looks fine on disk but doesn't match at runtime.
-        let our_name = netidx_conf::tls::extract_dns_san_from_pem(&certificate)
-            .with_context(|| {
-                format!(
-                    "deriving TLS identity name from {} — supply a cert \
-                     with a DNS SubjectAlternativeName entry",
-                    certificate.display()
-                )
-            })?;
-        // BYO-cert path: the key already exists, we don't touch its
-        // encryption. The operator is responsible for placing the
-        // password into the system keychain (or attaching an
-        // askpass) if they brought an encrypted key. We don't
-        // prompt for an askpass here because we don't know whether
-        // the key is encrypted at all — guessing wrong would either
-        // bury an extraneous `askpass` line in the config or skip a
-        // needed one. Operators with encrypted external keys can
-        // edit `tls.askpass` after install.
-        (our_name, certificate, private_key, trusted, None)
-    };
-    // Key the entry in `tls.identities` by the *domain* part of our
-    // SAN, not the full SAN. netidx's convention is
-    // `<user>.<domain>` (e.g. `mazikeen.local`) — one identity entry
-    // covers the whole domain (`local`) and the runtime matches any
-    // host under it via the reverse-domain prefix match in
-    // `tls::get_match`. Keying by the full SAN would still match,
-    // but it forces a separate identity per host where one per
-    // domain is what operators actually want. `our_name` (the
-    // install dir name) stays as the full SAN so multiple hosts'
-    // certs don't clobber each other on disk.
-    let server_pattern = netidx_conf::tls::domain_from_san(our_name.as_str())
-        .with_context(|| {
-            format!("deriving identity domain from cert SAN {:?}", our_name)
-        })?;
-    // These paths are already at (or, for BYO, point directly at) their
-    // final home, so no staging tempdir is needed.
-    Ok(StagedIdentity {
-        spec: TlsIdentitySpec {
-            server_pattern: ArcStr::from(server_pattern),
-            our_name: ArcStr::from(our_name.as_str()),
-            certificate,
-            private_key,
-            trusted,
-            // dest_dir = None resolves to the canonical
-            // `~/.config/netidx/tls/<our-name>/`. For the generate path
-            // the cert and trusted are already at exactly those paths,
-            // so the engine's "install" step ends up reading each file
-            // and writing it back — a no-op-ish round-trip. For the
-            // explicit-path case it's a real copy as before.
-            dest_dir: None,
-            askpass,
-        },
-        staging: None,
-    })
-}
-
-/// Generate a key + CSR, then loop until the operator confirms
-/// they've placed the signed cert and trusted-CA bundle at the
-/// canonical install location. Returns
-/// `(our_name, certificate_path, private_key_path, trusted_path)` —
-/// key/cert/trusted all under `~/.config/netidx/tls/<our-name>/`.
-///
-/// The CSR itself lands in the *current working directory* as
-/// `./<our-name>.csr` (matching `netidx conf component tls request`), not in
-/// the identity dir — it's something the operator hands off to the
-/// CA admin, so it needs to be where they'll naturally look for it
-/// (attach to an email, scp, etc.), not buried under XDG config.
-///
-/// The install proceeds only after the cert files validate, so
-/// downstream config save + activation start are guaranteed to find
-/// readable certs. Non-TTY callers bail immediately if the files
-/// aren't already there — scripted installs should use `--tls-cert`
-/// directly.
-#[cfg(unix)]
-fn generate_and_wait_for_parent_cert(
-    suggested_name: Option<&str>,
-    kp: Option<KeyProtArg>,
-) -> Result<(String, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
-    let name_label = "your TLS identity name (CN for the CSR; cert SAN)";
-    let our_name = match suggested_name {
-        Some(s) => prompt::string_with_default(name_label, None, s)?,
-        None => prompt::required_string(name_label, None)?,
-    };
-    let (cert_path, key_path, trusted_path, askpass) =
-        generate_csr_and_wait_for_cert(&our_name, kp)?;
-    Ok((our_name, cert_path, key_path, trusted_path, askpass))
 }
 
 /// Walk the canonical places askpass programs live and return the
@@ -1884,152 +1643,6 @@ fn choose_key_protection(
     }
 }
 
-/// Generate a private key + CSR for `name`, write the key to the
-/// canonical identity dir and the CSR to CWD, print operator
-/// next-steps, then block until both the signed cert and the
-/// trusted-CA bundle appear at their expected paths. Returns
-/// `(cert_path, key_path, trusted_path, askpass_path)`.
-///
-/// Shared by the two "no local CA available, BYO the cert" flows:
-/// the parent referral path (operator's resolver attaches to an
-/// upstream that signs the parent's cert), and the resolver TLS
-/// path when the operator declines to create a local CA. Both end
-/// up in the same place: a generated key + CSR locally, a
-/// "drop the signed cert here when ready" wait, and an
-/// `AuthChoice::Tls` (or `TlsIdentitySpec`) pointing at the
-/// canonical install paths.
-///
-/// If the operator picks a password at the prompt, the key is
-/// written as encrypted PKCS#8 and the askpass program they chose
-/// (defaulting to whatever [`find_askpass`] discovers) is returned
-/// so the caller can plumb it into the emitted client config.
-///
-/// The CSR itself lands in the *current working directory* as
-/// `./<name>.csr` (matching `netidx conf component tls request`), not in the
-/// identity dir — the operator hands it off to a CA admin, so it
-/// needs to be where they'll naturally look for it.
-#[cfg(unix)]
-fn generate_csr_and_wait_for_cert(
-    name: &str,
-    kp: Option<KeyProtArg>,
-) -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
-    let dest_dir = tls::identity_dir(name)?;
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("creating identity dir {}", dest_dir.display()))?;
-    let key_path = dest_dir.join("private.key");
-    let cert_path = dest_dir.join("certificate.pem");
-    let trusted_path = dest_dir.join("trusted.pem");
-    let csr_path = super::ca::default_csr_filename(name);
-
-    if key_path.exists() {
-        bail!(
-            "private key already exists at {} — refusing to overwrite. \
-             Move it aside, or re-run with explicit --tls-cert / \
-             --tls-key / --tls-trusted to point at an existing identity.",
-            key_path.display(),
-        );
-    }
-    let protection = choose_key_protection(kp, &key_path, name)?;
-    let askpass = protection.askpass();
-    let kr = netidx_conf::ca::generate_csr(
-        &netidx_conf::ca::Subject::cn(name.to_string()),
-        &[netidx_conf::ca::SanEntry::Dns(name.to_string())],
-        2048,
-        protection.password(),
-    )
-    .context("generating private key + CSR")?;
-    netidx_conf::atomic::write_atomic(&key_path, &kr.private_key_pem, 0o600)
-        .with_context(|| format!("writing private key to {}", key_path.display()))?;
-    protection.write_sidecar(&key_path)?;
-    netidx_conf::atomic::write_atomic(&csr_path, &kr.csr_pem, 0o644)
-        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
-
-    println!();
-    println!("Generated TLS identity '{}':", name);
-    println!("  private key (0600): {}", key_path.display());
-    println!("  CSR         (0644): {}", csr_path.display());
-    match &protection {
-        KeyProtection::Sealed { .. } => {
-            println!(
-                "  private key is encrypted; the password is sealed to this \
-                 machine's {} beside it.",
-                netidx_tpm::MECHANISM
-            );
-        }
-        KeyProtection::Password { .. } => {
-            println!(
-                "  private key is encrypted; password saved to the system keychain."
-            );
-        }
-        KeyProtection::None => (),
-    }
-    println!();
-    println!("Next steps:");
-    println!("  1. Send {} to your CA admin to sign.", csr_path.display());
-    println!("  2. Place the signed certificate at:");
-    println!("       {}", cert_path.display());
-    println!("  3. Place the trusted-CA bundle (the cert that signs the");
-    println!("     signing CA's cert chain) at:");
-    println!("       {}", trusted_path.display());
-    println!();
-
-    wait_for_cert_files(&cert_path, &trusted_path)?;
-    Ok((cert_path, key_path, trusted_path, askpass))
-}
-
-/// Loop until `cert_path` and `trusted_path` both exist and parse as
-/// X.509 certificates. On a TTY: prompt the operator to confirm and
-/// re-check; on each "not ready" verdict, print *why* and loop. On a
-/// non-TTY caller: check once and bail if anything is missing —
-/// scripted installs shouldn't hang waiting for human input.
-#[cfg(unix)]
-fn wait_for_cert_files(cert_path: &Path, trusted_path: &Path) -> Result<()> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        return check_cert_files_present(cert_path, trusted_path).with_context(|| {
-            "non-interactive install: required cert files missing. \
-             Place them at the paths above, or re-run with explicit \
-             --tls-cert / --tls-trusted"
-                .to_string()
-        });
-    }
-    use std::io::Write;
-    loop {
-        eprint!("Press Enter once both files are in place (or Ctrl-C to abort): ");
-        std::io::stderr().flush().ok();
-        let mut buf = String::new();
-        if std::io::stdin().read_line(&mut buf)? == 0 {
-            bail!("EOF at confirmation prompt — install aborted");
-        }
-        match check_cert_files_present(cert_path, trusted_path) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                eprintln!("not ready yet: {e:#}");
-                continue;
-            }
-        }
-    }
-}
-
-/// Verify both files exist and parse as PEM-encoded X.509. We
-/// deliberately don't check the cert is signed by the trusted bundle
-/// (that's the runtime TLS handshake's job) and don't check the cert
-/// matches our private key (the netidx config validator will catch
-/// that at save time and give a more precise error). The point is to
-/// catch the obvious "you forgot to drop the file" case before the
-/// engine's config-validation step.
-#[cfg(unix)]
-fn check_cert_files_present(cert: &Path, trusted: &Path) -> Result<()> {
-    // Lives in `tls` (cross-platform, rustls-pemfile backed), not
-    // `ca` (unix-only, openssl) — even though this caller itself is
-    // currently cfg(unix). Splitting the validator out gives a
-    // Windows install path a way to validate operator-provided
-    // certs without us having to add an openssl Windows toolchain.
-    netidx_conf::tls::validate_pem_cert_file(cert)?;
-    netidx_conf::tls::validate_pem_cert_file(trusted)?;
-    Ok(())
-}
-
 // -- standalone-resolver ------------------------------------------------------
 
 /// Conventional netidx resolver port — what the `--listen` prompt
@@ -2202,22 +1815,6 @@ pub(crate) struct ResolverFlags {
     /// (domain, then name) when omitted, defaulting to `resolver.local`.
     #[arg(long = "tls-name")]
     tls_name: Option<String>,
-    /// Source path of the resolver's certificate, or the literal
-    /// `generate` to issue one from the local CA — creating that CA
-    /// first if none exists. The interactive prompt defaults to
-    /// `generate`, which is the painless path for the common
-    /// "resolver host is also the CA host" case.
-    #[arg(long = "tls-cert")]
-    tls_cert: Option<PathBuf>,
-    /// Source path of the resolver's private key (with `--auth tls`).
-    /// Not needed when `--tls-cert` is `generate`.
-    #[arg(long = "tls-key")]
-    tls_key: Option<PathBuf>,
-    /// Source path of the trusted-CA bundle (with `--auth tls`). Not
-    /// needed when `--tls-cert` is `generate` — the generating CA's
-    /// own certificate becomes the trust anchor.
-    #[arg(long = "tls-trusted")]
-    tls_trusted: Option<PathBuf>,
     /// The resolver's advertised address — what clients connect to.
     /// Must be a concrete address (not `0.0.0.0`). The interactive
     /// prompt suggests an IPv4 address discovered from the machine's
@@ -2286,8 +1883,8 @@ pub(crate) struct ResolverFlags {
     #[arg(long = "no-conf-server")]
     no_conf_server: bool,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
-    /// Only relevant when this install mints a new CA (the `--tls-cert
-    /// generate` path with no existing CA, or a conf plane on a
+    /// Only relevant when this install mints a new CA (the netidx-CA TLS
+    /// resolver path with no existing CA, or a conf plane on a
     /// krb5/anonymous network). DANGER: the CA's autorenew credential is
     /// then written in PLAINTEXT, so every backup or disk image of this
     /// machine is a CA compromise. Test CAs only.
@@ -2538,34 +2135,22 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             None,
             DEFAULT_TLS_DOMAIN,
         )?;
+        ca::announce_founding_policy(&domain);
+        // Same founding CA an install stands up on the TLS path — the
+        // conf plane's trust root, with the sensible zero-prompt admin
+        // policy rather than an interrogation (see `founding_ca_opts`).
         // The returned `ServiceNeed` is intentionally dropped: this
         // resolver install always ends with a single system-service
         // offer, and the conf-server unit lands in the resolver's own
         // units dir, so that one service supervises it.
-        let (_ca, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
-            dir: paths::user_ca_dir()?,
-            common_name: Some(ca::default_ca_cn(&domain)),
-            domain: Some(domain),
-            country: None,
-            state: None,
-            locality: None,
-            organization: None,
-            san: vec![],
-            key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
-            ca_validity: netidx_conf::ca::DEFAULT_CA_VALIDITY,
-            leaf_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
-            ca_renew_threshold: netidx_conf::ca::DEFAULT_CA_RENEW_THRESHOLD,
-            admin: None,
-            allowed_san: vec![],
-            max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
-            id_map_groups: vec![],
-            may_enroll_servers: None,
-            insecure_no_tpm: f.insecure_no_tpm,
-            setup_server: Some(true),
-            listen: None,
-            listen_hint: Some(listen.ip()),
-            units_dir: units_dir.clone(),
-        })?;
+        let (_ca, _need) = ca::create_vaulted_ca(ca::founding_ca_opts(
+            paths::user_ca_dir()?,
+            domain,
+            f.insecure_no_tpm,
+            Some(true),
+            Some(listen.ip()),
+            units_dir.clone(),
+        ))?;
     }
     let perms_seed = match &f.perms_seed {
         Some(p) => Some(netidx_conf::perms::load_perms(p)?),
@@ -2921,28 +2506,12 @@ fn resolver_self_auth(
     }
 }
 
-/// Printed on the external-PKI resolver paths ('csr' and BYO cert):
-/// without a netidx CA there is no conf plane on this network — the
-/// capabilities lost are worth a sentence before the operator commits.
-fn note_external_pki(name: &str) {
-    println!(
-        "note: external-PKI identity {name:?} — without a netidx CA this \
-         network has no conf plane: no discovery for future installs, no \
-         queued enrollment, and certificate renewal stays with your PKI \
-         (the netidx renewal daemon is not installed)."
-    );
-}
-
-/// Resolve the resolver's TLS identity. The certificate is an explicit
-/// path the operator supplies, the literal `generate` (request it from
-/// a discovered conf server, or issue from the local CA — creating
-/// that CA if none exists), or the literal `csr` (external PKI:
-/// generate a key + CSR here, the operator gets it signed elsewhere).
-/// The interactive prompt defaults to `generate`: for the common
-/// small-org case where the resolver host is also the CA host, hitting
-/// return through the prompts gets you a working setup. The `csr` and
-/// path forms are the expert escape into a foreign PKI — they carry no
-/// conf plane, and say so.
+/// Resolve the resolver's TLS identity via the netidx CA — the only
+/// in-wizard path. On unix this host either enrolls from a discovered
+/// conf server or creates the network's CA and issues its own cert
+/// (both inside [`resolver_tls_generate`]). On non-unix, where creating
+/// a CA needs openssl, it can only enroll over the conf plane. Bringing
+/// your own certificate is a self-managed setup done outside the wizard.
 fn resolver_tls_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
@@ -2950,83 +2519,28 @@ fn resolver_tls_auth(
     probe: &ConfServers,
 ) -> Result<ResolvedAuth> {
     let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
-    // The flag form of `--tls-cert` is a path, the literal `generate`, or
-    // `csr`. Ask the easy yes/no question first: most operators want the
-    // batteries-included CA, and only the ones who don't should have to
-    // think about cert paths. `generate` / `csr` (local key + CSR via
-    // openssl) are unix-only — the CA module depends on openssl.
-    let flag = f.tls_cert.as_ref().map(|p| p.to_string_lossy().into_owned());
     #[cfg(unix)]
-    {
-        let use_built_in_ca = match flag.as_deref() {
-            Some("generate") => true,
-            Some(_) => false,
-            None => prompt::confirm(
-                "use netidx's built-in certificate authority? It creates a local \
-                 CA (if there isn't one already) and issues this resolver's \
-                 certificate from it — the zero-setup path. Answer n to use a \
-                 certificate from your own PKI instead.",
-                true,
-            )?,
-        };
-        if use_built_in_ca {
-            return resolver_tls_generate(f, &name, default_ca_ip, units_dir, probe);
-        }
-    }
+    let res = resolver_tls_generate(f, &name, default_ca_ip, units_dir, probe);
     #[cfg(not(unix))]
-    let _ = (default_ca_ip, units_dir, probe);
-    // External PKI: an existing cert path, or (unix only) `csr` to make a
-    // key + CSR here for your PKI to sign.
-    #[cfg(unix)]
-    let cert_label = "path to this resolver's certificate, or 'csr' to make a \
-                      key + CSR here for your PKI to sign";
-    #[cfg(not(unix))]
-    let cert_label = "resolver certificate path (CA-issued; local issuance is unix-only)";
-    let cert_choice = prompt::string_with_default(cert_label, flag, "")?;
-    #[cfg(unix)]
-    {
-        if cert_choice == "csr" {
-            note_external_pki(&name);
-            let (certificate, private_key, trusted, askpass) =
-                generate_csr_and_wait_for_cert(&name, f.key_protection)?;
-            return Ok(ResolvedAuth::external(AuthChoice::Tls {
-                name: ArcStr::from(name.as_str()),
-                certificate,
-                private_key,
-                trusted,
-                askpass,
-            }));
+    let res = {
+        // Creating a CA needs openssl (unix only), so a non-unix
+        // resolver can only *enroll* over the conf plane. No conf
+        // server ⇒ nothing the wizard can do: point at self-manage.
+        let _ = (default_ca_ip, units_dir);
+        match maybe_join_ca_server(probe, NodeKind::Resolver, Some(name.as_str()), f.key_protection)? {
+            Some((j, staging)) => Ok(ResolvedAuth {
+                choice: joined_to_auth(j),
+                staging: Some(staging),
+                netidx_ca: true,
+            }),
+            None => bail!(
+                "a TLS resolver identity requires a reachable conf server to \
+                 enroll against (creating a CA is unix-only). To run TLS without \
+                 a conf server, configure the resolver's TLS identity by hand."
+            ),
         }
-    }
-    if cert_choice.is_empty() {
-        bail!(
-            "a certificate path is required (or, on unix, 'csr' to generate a \
-             key + CSR for your PKI to sign)"
-        );
-    }
-    // Explicit cert path — the operator is bringing their own
-    // identity, so the key and trusted-CA bundle are required too.
-    // No staging dir: the sources are wherever the operator put them,
-    // and the copy into the canonical dir happens in `apply()`.
-    note_external_pki(&name);
-    Ok(ResolvedAuth::external(AuthChoice::Tls {
-        name: ArcStr::from(name.as_str()),
-        certificate: PathBuf::from(cert_choice),
-        private_key: prompt::required_path(
-            "path to the resolver private key",
-            f.tls_key.clone(),
-        )?,
-        trusted: prompt::required_path(
-            "path to the trusted CA bundle",
-            f.tls_trusted.clone(),
-        )?,
-        // BYO-cert path: the key already exists. We don't know
-        // whether it's encrypted, and guessing wrong either buries
-        // an extraneous askpass in the config or skips a needed
-        // one — same trade-off as the parent-referral BYO branch.
-        // Operators can edit `tls.askpass` post-install.
-        askpass: None,
-    }))
+    };
+    res
 }
 
 /// Issue a resolver certificate from the local CA, creating the CA
@@ -3116,8 +2630,9 @@ fn resolver_tls_generate(
         // No CA — this is the first resolver of a new TLS network, so
         // the CA is created right here, no question asked: it signs
         // the data plane *and* anchors the conf plane (discovery,
-        // enrollment, renewal). The operator who wants an external PKI
-        // instead chose 'csr' or a cert path one prompt ago.
+        // enrollment, renewal). An operator who wants an external PKI
+        // instead runs `ca init --external-sign` up front, or self-manages
+        // the TLS config by hand outside the wizard.
         //
         // Created via the SAME entry point as `netidx conf ca init` —
         // admin/policy and identicon included. We already know the
@@ -3151,45 +2666,23 @@ fn resolver_tls_generate(
         // rather than interrogating a newcomer about SAN globs and id-map
         // groups — but say what it is and how to change it. The explicit
         // `ca init` flow is where the founding admin's policy gets tuned.
-        let allowed_san = vec![format!("*.{domain}")];
-        println!(
-            "  the CA's founding admin will issue *.{domain} certificates, place \
-             enrolled nodes in the 'users' id-map group, and may enroll conf \
-             servers — change any of this later with `netidx conf ca admin \
-             set-policy`."
-        );
+        ca::announce_founding_policy(&domain);
         let setup_server = match conf_plane_decision(AuthKind::Tls, f.no_conf_server) {
             ConfPlane::Mandatory => Some(true),
             ConfPlane::Skip => Some(false),
             // TLS is never a question — see the matrix.
             ConfPlane::Ask => unreachable!("tls conf plane is not Ask"),
         };
-        let (created, _need) = ca::create_vaulted_ca(ca::NewCaOpts {
-            dir: ca_dir.clone(),
-            common_name: Some(ca::default_ca_cn(&domain)),
-            domain: Some(domain),
-            country: None,
-            state: None,
-            locality: None,
-            organization: None,
-            san: vec![],
-            key_bits: netidx_conf::ca::DEFAULT_KEY_BITS,
-            ca_validity: netidx_conf::ca::DEFAULT_CA_VALIDITY,
-            leaf_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
-            ca_renew_threshold: netidx_conf::ca::DEFAULT_CA_RENEW_THRESHOLD,
-            admin: None,
-            allowed_san,
-            max_validity: netidx_conf::ca::DEFAULT_LEAF_VALIDITY,
-            id_map_groups: vec!["users".to_string()],
-            may_enroll_servers: Some(true),
-            insecure_no_tpm: f.insecure_no_tpm,
+        // The CA co-locates with this resolver — suggest its IP
+        // (`default_ca_ip`) for the conf server's listen address.
+        let (created, _need) = ca::create_vaulted_ca(ca::founding_ca_opts(
+            ca_dir.clone(),
+            domain,
+            f.insecure_no_tpm,
             setup_server,
-            listen: None,
-            // The CA co-locates with this resolver — suggest its IP for
-            // the conf server's listen address.
-            listen_hint: default_ca_ip,
-            units_dir: units_dir.map(|p| p.to_path_buf()),
-        })?;
+            default_ca_ip,
+            units_dir.map(|p| p.to_path_buf()),
+        ))?;
         // The returned `ServiceNeed` (System, if the CA server was set
         // up) is intentionally dropped: this resolver install always
         // ends with a single system-service offer (it installs the
@@ -3636,8 +3129,6 @@ pub(crate) struct PublisherFlags {
     /// Server's TLS name (when `--auth tls`).
     #[arg(long = "tls-server-name")]
     tls_server_name: Option<String>,
-    #[command(flatten)]
-    tls: TlsIdentityFlags,
     /// Override `default_auth` on the client config. None ⇒ derive
     /// from `--auth`.
     #[arg(long = "default-auth")]
@@ -3675,9 +3166,6 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     // returns. Dropping a TempDir deletes its contents, so this must
     // outlive the `finish` call below.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
-    if let Some(spec) = f.tls.to_spec()? {
-        tls_identities.push(spec);
-    }
     // Ask the network before asking the human: with no `--addr` /
     // `--auth`, a discovered (and glyph-confirmed) conf server yields
     // every resolver address with its auth — and, on TLS networks, our
@@ -3719,13 +3207,11 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
             }
             let per_addr_auth = publisher_per_addr_auth(&f)?;
             if tls_identities.is_empty() && matches!(f.auth, Some(AuthKind::Tls)) {
-                // Interactive TLS path: `--auth tls` without `--tls-cert`
-                // (etc.) used to dead-end at the template's
-                // "default_auth=Tls requires at least one tls_identity"
-                // check. Mirror the workstation/resolver UX instead — walk
-                // the operator through a cert-or-generate cascade so they
-                // can either point at an existing cert or get a key+CSR
-                // produced on the spot.
+                // Interactive TLS path: `--auth tls` with no identity used
+                // to dead-end at the template's "default_auth=Tls requires
+                // at least one tls_identity" check. Mirror the
+                // workstation/resolver UX instead — enroll the identity over
+                // the conf plane (or bail if no conf server is reachable).
                 // Suggest our SAN as `<user>.<domain>`, the domain coming
                 // from the resolver's TLS name the operator just gave.
                 let suggested = match &per_addr_auth {
@@ -4090,15 +3576,10 @@ mod tests {
         assert_eq!(resolve_id_map_choice(&local, false).unwrap(), IdMapMode::Platform);
     }
 
-    // The BYO-CSR generate flows (resolver-declines-local-CA, and the
-    // client/parent identity prompt) deliberately use the canonical
-    // identity dir as the operator's cert-drop rendezvous: the key is
-    // generated there and the signed cert + trusted bundle are dropped
-    // there. So the copy job's source == destination for all three
-    // files. The guard must treat a self-copy as a no-op, not as
-    // clobbering operator material. (The local-CA-issue path avoids
-    // this entirely now by staging in a tempdir — see
-    // `resolver_tls_generate`.)
+    // `check_no_overwrite` must treat a copy job whose source ==
+    // destination as a no-op, never as clobbering operator material.
+    // Install paths stage in tempdirs (source != dest), so this is a
+    // defensive guarantee; the test pins it regardless.
     #[test]
     fn self_copy_install_is_not_an_overwrite() {
         let dir = tempfile::tempdir().unwrap();
@@ -4123,8 +3604,9 @@ mod tests {
         check_no_overwrite(&rt, false).unwrap();
     }
 
-    // A BYO-cert install whose source is elsewhere must still refuse to
-    // clobber an identity already at the destination without --force.
+    // A staged install whose source dir differs from the destination
+    // must still refuse to clobber an identity already at the
+    // destination without --force.
     #[test]
     fn foreign_source_over_existing_dest_is_blocked() {
         let dir = tempfile::tempdir().unwrap();

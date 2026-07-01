@@ -473,9 +473,11 @@ async fn renew_identity(
 ///
 /// Trust anchoring: the trust bundle is never replaced wholesale with
 /// what the peer returned. [`conf_client::reconcile_trusted_bundle`]
-/// keeps the installed roots and folds in only same-key, validly
-/// self-signed CA-cert refreshes — a compromised peer cannot introduce
-/// a new trust anchor through renewal.
+/// keeps the installed roots and folds in only same-key CA-cert refreshes
+/// that are either validly self-signed or signed by the installed cert's
+/// own issuer (an externally-signed intermediate's root) — a compromised
+/// peer cannot introduce a new trust anchor through renewal, nor overwrite
+/// an anchor whose issuer it does not control.
 fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
     let was_chain = std::fs::read(&id.certificate)
         .map(|pem| {

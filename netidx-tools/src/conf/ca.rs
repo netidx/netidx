@@ -46,6 +46,34 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: RecoveryCmd,
     },
+    /// manage an externally-signed (intermediate) CA: (re-)emit its CSR or
+    /// install a signed certificate
+    External {
+        #[command(subcommand)]
+        cmd: ExternalCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ExternalCmd {
+    /// With no argument, (re-)emit a CSR for the CA certificate for your
+    /// PKI to sign. With a signed certificate, install it (first install
+    /// also finishes conf-server setup; later installs renew the cert).
+    Renew(ExternalRenewArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ExternalRenewArgs {
+    /// The externally-signed CA certificate to install. Omit to (re-)emit
+    /// a CSR for your PKI to sign.
+    pub signed_cert: Option<PathBuf>,
+    /// The external root that signed the CA cert, when it is not included
+    /// as a trailing PEM block in the signed-certificate file.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Override the CA directory (defaults to `${basedir}/ca/`).
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -376,6 +404,12 @@ pub(crate) struct InitParams {
     /// `${basedir}/ca/` — one CA per netidx install.
     #[arg(long)]
     pub dir: Option<PathBuf>,
+    /// Run the CA as an intermediate: generate the key + a CSR requesting a
+    /// CA cert, then stop. Get the CSR signed by your existing PKI and
+    /// install it with `ca external renew <signed-cert>`. The CA cert will
+    /// NOT auto-renew (netidx does not hold your PKI's key).
+    #[arg(long = "external-sign")]
+    pub external_sign: bool,
 }
 
 #[derive(Args, Debug)]
@@ -489,6 +523,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Revoke(p) => revoke(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
+        Cmd::External { cmd } => external(cmd),
     }
 }
 
@@ -922,6 +957,33 @@ pub(super) struct NewCaOpts {
     pub units_dir: Option<PathBuf>,
 }
 
+/// Seal a freshly generated CA key into the vault's `recovery` slot and
+/// persist the lifetime policy, under one flock held for the rest of init.
+/// Shared by the self-signed [`create_vaulted_ca`] and the external-sign
+/// bootstrap. On a mid-write failure, roll back whatever init committed so
+/// the dir isn't a keyless half-CA that blocks a clean retry.
+fn seal_ca_recovery(
+    dir: &Path,
+    key_pem: &Zeroizing<Vec<u8>>,
+    lifetimes: ca::CaLifetimes,
+) -> Result<(Zeroizing<String>, netidx_conf::ca_store::CaDir)> {
+    let recovery_pw = ca_vault::gen_recovery_password();
+    let cadir = netidx_conf::ca_store::CaDir::open(dir)
+        .context("opening the new CA directory")?;
+    if let Err(e) = cadir.vault.write().create(
+        key_pem,
+        ca_vault::RECOVERY_ADMIN,
+        &recovery_pw,
+        recovery_policy(),
+    ) {
+        let _ = std::fs::remove_file(dir.join("certificate.pem"));
+        let _ = std::fs::remove_file(dir.join("serial"));
+        return Err(e).context("sealing CA key into the vault");
+    }
+    lifetimes.store(dir).context("writing CA lifetimes")?;
+    Ok((recovery_pw, cadir))
+}
+
 /// **The** entry point for building a new vaulted CA, shared verbatim
 /// by `netidx conf ca init` and the `netidx conf resolver install`
 /// "create a new CA" branch — so the operator gets the identical
@@ -974,31 +1036,18 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         key_bits: opts.key_bits,
         validity: opts.ca_validity,
     })?;
-    let recovery_pw = ca_vault::gen_recovery_password();
-    // One flock for the whole init: the new dir is ours exclusively until
-    // every slot is minted. The helpers below borrow this same handle.
-    let cadir = netidx_conf::ca_store::CaDir::open(&opts.dir)
-        .context("opening the new CA directory")?;
-    // Should sealing fail mid-write, roll back the cert + serial
-    // `init_vaulted` committed so the dir isn't a keyless half-CA that
-    // blocks a clean retry. The in-memory key zeroizes on the way out.
-    if let Err(e) = cadir.vault.write().create(
+    // Seal the key into the recovery slot and persist the lifetime policy
+    // (self-signed CA — externally_signed is false). One flock is held for
+    // the rest of init.
+    let (recovery_pw, cadir) = seal_ca_recovery(
+        &opts.dir,
         &key_pem,
-        ca_vault::RECOVERY_ADMIN,
-        &recovery_pw,
-        recovery_policy(),
-    ) {
-        let _ = std::fs::remove_file(opts.dir.join("certificate.pem"));
-        let _ = std::fs::remove_file(opts.dir.join("serial"));
-        return Err(e).context("sealing CA key into the vault");
-    }
-    // Persist the CA's configurable lifetime policy under the same flock.
-    ca::CaLifetimes {
-        leaf_validity: opts.leaf_validity,
-        ca_renew_threshold: opts.ca_renew_threshold,
-    }
-    .store(&opts.dir)
-    .context("writing CA lifetimes")?;
+        ca::CaLifetimes {
+            leaf_validity: opts.leaf_validity,
+            ca_renew_threshold: opts.ca_renew_threshold,
+            externally_signed: false,
+        },
+    )?;
 
     println!("created a new CA at {}", opts.dir.display());
     print_recovery_password(&recovery_pw);
@@ -1058,6 +1107,66 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         service::ServiceNeed::NONE
     };
     Ok((ca, need))
+}
+
+/// Build the [`NewCaOpts`] for the founding CA a resolver install stands
+/// up when it creates a network's trust root — shared by the TLS
+/// "generate" branch and the krb5/anonymous conf-plane branch so the two
+/// cannot drift. Unlike `ca init` (the explicit tuning flow, which
+/// interrogates the founding admin), an install applies a sensible
+/// zero-prompt founding-admin policy: issue `*.<domain>`, place enrolled
+/// nodes in the `users` id-map group, and may enroll conf servers. Say
+/// what it is (and how to change it) with [`announce_founding_policy`].
+pub(super) fn founding_ca_opts(
+    dir: PathBuf,
+    domain: String,
+    insecure_no_tpm: bool,
+    setup_server: Option<bool>,
+    listen_hint: Option<IpAddr>,
+    units_dir: Option<PathBuf>,
+) -> NewCaOpts {
+    let common_name = Some(default_ca_cn(&domain));
+    let allowed_san = vec![format!("*.{domain}")];
+    NewCaOpts {
+        dir,
+        common_name,
+        domain: Some(domain),
+        country: None,
+        state: None,
+        locality: None,
+        organization: None,
+        san: vec![],
+        key_bits: ca::DEFAULT_KEY_BITS,
+        ca_validity: ca::DEFAULT_CA_VALIDITY,
+        leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
+        ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
+        admin: None,
+        allowed_san,
+        max_validity: ca::DEFAULT_LEAF_VALIDITY,
+        id_map_groups: vec!["users".to_string()],
+        may_enroll_servers: Some(true),
+        insecure_no_tpm,
+        setup_server,
+        listen: None,
+        listen_hint,
+        units_dir,
+    }
+}
+
+/// Tell the operator the founding-admin policy [`founding_ca_opts`]
+/// applied, and how to change it — printed by both install branches in
+/// place of the `ca init` interrogation.
+pub(super) fn announce_founding_policy(domain: &str) {
+    println!(
+        "  the CA's founding admin will issue *.{domain} certificates, place \
+         enrolled nodes in the 'users' id-map group, and may enroll conf \
+         servers — change any of this later with `netidx conf ca admin \
+         set-policy`."
+    );
+    println!(
+        "  (chaining this CA to an existing PKI is a separate up-front choice: \
+         create it beforehand with `netidx conf ca init --external-sign`.)"
+    );
 }
 
 /// The `recovery` signing slot's policy: the same narrow, no-standing-wire-
@@ -1255,6 +1364,297 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     Ok(())
 }
 
+// -- ca external (intermediate CA signed by an external PKI) -----------------
+
+use serde_derive::{Deserialize, Serialize};
+
+/// Written by `ca init --external-sign`, read by `ca external renew`. Holds
+/// what phase 2 needs but cannot re-derive before the cert exists: the CA's
+/// subject/SANs (to re-emit a CSR) and the served-CA tail inputs.
+#[derive(Debug, Serialize, Deserialize)]
+struct ExternalPending {
+    cn: String,
+    domain: String,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    locality: Option<String>,
+    #[serde(default)]
+    organization: Option<String>,
+    #[serde(default)]
+    san: Vec<String>,
+    setup_server: bool,
+    #[serde(default)]
+    listen: Option<SocketAddr>,
+    #[serde(default)]
+    units_dir: Option<PathBuf>,
+}
+
+impl ExternalPending {
+    const FILE: &'static str = "external_pending.json";
+
+    fn store(&self, dir: &Path) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(self).context("encoding the external-sign marker")?;
+        atomic::write_atomic(&dir.join(Self::FILE), &bytes, 0o644)
+    }
+
+    fn load(dir: &Path) -> Result<Self> {
+        let bytes = std::fs::read(dir.join(Self::FILE)).context(
+            "reading the external-sign marker — was this CA created with \
+             `ca init --external-sign`?",
+        )?;
+        serde_json::from_slice(&bytes).context("parsing the external-sign marker")
+    }
+}
+
+fn external(cmd: ExternalCmd) -> Result<()> {
+    match cmd {
+        ExternalCmd::Renew(a) => external_renew(a),
+    }
+}
+
+/// Phase 1 of `ca init --external-sign`: generate the CA key + a CSR for its
+/// certificate, seal the vault (recovery slot always; for a served CA also
+/// the box autorenew slot and the superuser role slot), mark the CA
+/// externally-signed, and write the CSR + a marker. No `certificate.pem` is
+/// written — its absence is the "awaiting external cert" state. Returns no
+/// `ServiceNeed`: the server is stood up in phase 2, once the cert exists.
+fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
+    let common_name = resolve_ca_cn(opts.common_name.clone(), opts.domain.as_deref())?;
+    let domain = match &opts.domain {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => match common_name.split_once('.') {
+            Some((_, d)) if !d.is_empty() => d.to_string(),
+            _ => common_name.clone(),
+        },
+    };
+    let set_up_server = match opts.setup_server {
+        Some(b) => b,
+        None => prompt::confirm(
+            "set up the conf server (so nodes can discover the network and \
+             request certs over it)?",
+            true,
+        )?,
+    };
+    // The TPM gate matters only for a served CA — the autorenew keytab is
+    // the sole TPM-sealed artifact; an offline external CA has none.
+    if set_up_server {
+        tpm_gate(opts.insecure_no_tpm)?;
+    }
+    let san = parse_sans(&opts.san, &common_name)?;
+    let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
+        directory: opts.dir.clone(),
+        subject: Subject {
+            common_name: common_name.clone(),
+            country: opts.country.clone(),
+            state: opts.state.clone(),
+            locality: opts.locality.clone(),
+            organization: opts.organization.clone(),
+        },
+        san,
+        key_bits: opts.key_bits,
+        validity: opts.ca_validity,
+    })?;
+    let (recovery_pw, cadir) = seal_ca_recovery(
+        &opts.dir,
+        &key_pem,
+        ca::CaLifetimes {
+            leaf_validity: opts.leaf_validity,
+            ca_renew_threshold: opts.ca_renew_threshold,
+            externally_signed: true,
+        },
+    )?;
+    println!(
+        "created the CA key at {} (awaiting an externally-signed certificate)",
+        opts.dir.display()
+    );
+    print_recovery_password(&recovery_pw);
+    // Write the CSR and the marker BEFORE the fallible/interactive slot
+    // setup, so an interrupted bootstrap leaves a CA that `ca external
+    // renew` can continue rather than a dead-ended half-CA.
+    let csr_path = default_csr_filename(&common_name);
+    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
+        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
+    ExternalPending {
+        cn: common_name.clone(),
+        domain,
+        country: opts.country.clone(),
+        state: opts.state.clone(),
+        locality: opts.locality.clone(),
+        organization: opts.organization.clone(),
+        san: opts.san.clone(),
+        setup_server: set_up_server,
+        listen: opts.listen,
+        units_dir: opts.units_dir.clone(),
+    }
+    .store(&opts.dir)?;
+    if set_up_server {
+        // Mint the box autorenew slot now (it needs the recovery password,
+        // which we hold here) so phase 2 can unlock passwordlessly; it is
+        // wired to the server config in phase 2. The superuser role slot
+        // needs no CA cert, so it is minted here too.
+        let keytab = setup_autorenew_slot(&cadir, &recovery_pw, opts.insecure_no_tpm)?;
+        println!("provisioned the automatic-renewal (leaf) approval slot:");
+        println!("  slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)");
+        println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
+        setup_superuser(&cadir, &opts, &common_name)?;
+    }
+    println!();
+    println!(
+        "wrote {} — get it signed by your PKI as a subordinate CA, then run:",
+        csr_path.display()
+    );
+    println!("  netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]");
+    println!();
+    println!(
+        "NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
+         does not hold your PKI's key)."
+    );
+    // Phase 1 stands up no server yet, so there is nothing to offer.
+    Ok(service::ServiceNeed::NONE)
+}
+
+fn external_renew(args: ExternalRenewArgs) -> Result<()> {
+    let dir = ca_dir_for(args.ca_dir)?;
+    let lifetimes = ca::CaLifetimes::load(&dir)?;
+    if !lifetimes.externally_signed {
+        bail!(
+            "{} is not an externally-signed CA — create one with \
+             `netidx conf ca init --external-sign`",
+            dir.display()
+        );
+    }
+    match args.signed_cert {
+        None => emit_external_csr(&dir),
+        Some(signed) => install_external_cert(&dir, &signed, args.root.as_deref()),
+    }
+}
+
+/// Unlock the CA key: via the box autorenew keytab (passwordless) when it
+/// exists, else the recovery password. Returns the key and the held flock.
+fn external_ca_key(
+    dir: &Path,
+) -> Result<(Zeroizing<Vec<u8>>, netidx_conf::ca_store::CaDir)> {
+    let cadir = netidx_conf::ca_store::CaDir::open(dir)
+        .context("opening the CA (stop the conf server first if it is running)")?;
+    let keytab = autorenew_keytab_path()?;
+    let key = if keytab.exists() {
+        let pw = netidx_conf::conf_server::read_autorenew_password(&keytab)?;
+        cadir.vault.read().unlock(&pw)?.ca_key_pem
+    } else {
+        let pw = collect_required_password("CA recovery password")?;
+        cadir.vault.read().unlock(&pw)?.ca_key_pem
+    };
+    Ok((key, cadir))
+}
+
+/// (Re-)emit a CSR for the CA cert over the existing key — for renewing an
+/// externally-signed CA cert (same key ⇒ glyph unchanged).
+fn emit_external_csr(dir: &Path) -> Result<()> {
+    let m = ExternalPending::load(dir)?;
+    let san = if m.san.is_empty() {
+        vec![SanEntry::Dns(m.cn.clone())]
+    } else {
+        parse_sans(&m.san, &m.cn)?
+    };
+    // Rebuild the full subject (not just the CN) so a renewal CSR carries
+    // the same DN as the original CA cert.
+    let subject = Subject {
+        common_name: m.cn.clone(),
+        country: m.country.clone(),
+        state: m.state.clone(),
+        locality: m.locality.clone(),
+        organization: m.organization.clone(),
+    };
+    let (key, _cadir) = external_ca_key(dir)?;
+    let csr = ca::ca_csr_from_key(&key, &subject, &san)?;
+    let csr_path = default_csr_filename(&m.cn);
+    atomic::write_atomic(&csr_path, &csr, 0o644)
+        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
+    println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
+    println!("  netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]");
+    Ok(())
+}
+
+/// Install an externally-signed CA cert: validate it binds to our key, is a
+/// CA cert, and chains to the external root; write `certificate.pem` (the
+/// intermediate alone) + `trusted.pem` (`[root, intermediate]`). On the
+/// first install also finish the served-CA setup (serving cert + config)
+/// that phase 1 could not do without the cert.
+fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Result<()> {
+    let m = ExternalPending::load(dir)?;
+    let signed_pem =
+        std::fs::read(signed).with_context(|| format!("reading {}", signed.display()))?;
+    let root_pem = match root {
+        Some(p) => {
+            Some(std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)
+        }
+        None => None,
+    };
+    let (key, cadir) = external_ca_key(dir)?;
+    let (intermediate_pem, external_root_pem) =
+        ca::validate_external_ca_cert(&signed_pem, root_pem.as_deref(), &key)?;
+    // certificate.pem is the intermediate ALONE (the network glyph is its
+    // key); trusted.pem is [external root, intermediate].
+    atomic::write_atomic(&dir.join("certificate.pem"), &intermediate_pem, 0o644)
+        .context("installing certificate.pem")?;
+    let mut trusted = external_root_pem;
+    trusted.extend_from_slice(&intermediate_pem);
+    atomic::write_atomic(&dir.join("trusted.pem"), &trusted, 0o644)
+        .context("installing trusted.pem")?;
+    println!("installed the externally-signed CA certificate at {}", dir.display());
+    show_ca_identity(dir)?;
+    if !m.setup_server {
+        // Offline external CA — nothing further to set up.
+        println!("CA-cert auto-renewal is DISABLED (external issuer).");
+        return Ok(());
+    }
+    // Served CA. Decide "first install vs renewal" on whether the conf
+    // server is configured yet — NOT on certificate.pem (which we just
+    // wrote), so a failed/interrupted first-install tail is retriable
+    // instead of being silently reclassified as a renewal.
+    if paths::discover_conf_server_config().is_err() {
+        // First install (or a retry of one): run the idempotent served-CA
+        // tail (serving cert + config) using the key we unlocked. The
+        // autorenew slot + superuser were minted at bootstrap.
+        let ca = Ca::from_pem(dir.to_path_buf(), &key, &intermediate_pem)
+            .context("reconstructing the CA from the installed certificate")?;
+        // setup_server takes the CA flock itself — release ours first.
+        drop(cadir);
+        let need = super::server::setup_server(super::server::SetupArgs {
+            ca_dir: dir,
+            ca: &ca,
+            domain: &m.domain,
+            listen: m.listen,
+            listen_hint: None,
+            units_dir: m.units_dir.as_deref(),
+        })?;
+        let cfg_path = super::server::set_ca_autorenew(&autorenew_keytab_path()?)?;
+        println!("conf server configured ({})", cfg_path.display());
+        println!(
+            "CA-cert auto-renewal is DISABLED (external issuer); re-run \
+             `netidx conf ca external renew` when your PKI re-signs it."
+        );
+        return service::offer(
+            need,
+            service::ServiceGate { dry_run: false, no_service: false, with_service: false },
+        );
+    }
+    // The conf server is already configured: this is a renewal. Keep
+    // autorenew wired (idempotent) and let the refreshed intermediate reach
+    // enrolled nodes on their next renewal.
+    let keytab = autorenew_keytab_path()?;
+    if keytab.exists() {
+        let _ = super::server::set_ca_autorenew(&keytab);
+    }
+    println!("renewed the CA certificate — enrolled nodes adopt it on their");
+    println!("next renewal (glyph unchanged; existing certificates stay valid).");
+    Ok(())
+}
+
 fn init(p: InitParams) -> Result<()> {
     let directory = ca_dir_for(p.dir)?;
     // `ca init` always wants the unit when a server is set up (it has no
@@ -1271,7 +1671,7 @@ fn init(p: InitParams) -> Result<()> {
     } else {
         None
     };
-    let (_ca, need) = create_vaulted_ca(NewCaOpts {
+    let opts = NewCaOpts {
         dir: directory,
         common_name: p.cn,
         domain: p.domain,
@@ -1296,7 +1696,15 @@ fn init(p: InitParams) -> Result<()> {
         // an existing resolver's IP, then the public IP.
         listen_hint: None,
         units_dir,
-    })?;
+    };
+    // `--external-sign` runs the CA as an intermediate: phase 1 makes the
+    // key + a CSR and stops; `ca external renew <signed-cert>` installs the
+    // signed cert. Otherwise this is the normal self-signed CA.
+    let need = if p.external_sign {
+        external_bootstrap(opts)?
+    } else {
+        create_vaulted_ca(opts)?.1
+    };
 
     // Single end-of-process hook — the same one the `conf install`
     // templates use.

@@ -127,6 +127,13 @@ pub struct CaLifetimes {
     /// Renew the CA cert once its remaining lifetime drops below this.
     #[serde(with = "humantime_serde")]
     pub ca_renew_threshold: Duration,
+    /// True when the CA cert was signed by an external issuer (the CA
+    /// runs as an intermediate). netidx does not hold that issuer's key,
+    /// so it cannot re-sign its own CA cert: CA-cert auto-renewal is
+    /// disabled and the operator re-signs out of band. `#[serde(default)]`
+    /// keeps pre-existing (self-signed) CAs reading as `false`.
+    #[serde(default)]
+    pub externally_signed: bool,
 }
 
 impl Default for CaLifetimes {
@@ -134,6 +141,7 @@ impl Default for CaLifetimes {
         Self {
             leaf_validity: DEFAULT_LEAF_VALIDITY,
             ca_renew_threshold: DEFAULT_CA_RENEW_THRESHOLD,
+            externally_signed: false,
         }
     }
 }
@@ -336,6 +344,35 @@ impl Ca {
         atomic::write_atomic(&cert_path, &cert_pem, 0o644)?;
         let ca = Self { directory: params.directory.clone(), cert, pkey };
         Ok((ca, zeroize::Zeroizing::new(key_pem)))
+    }
+
+    /// Phase 1 of an externally-signed CA: generate the CA keypair and a
+    /// CSR for its certificate, requesting a CA cert (basicConstraints
+    /// CA:TRUE, keyUsage keyCertSign) so the operator's PKI knows this is
+    /// a sub-CA request. Creates the CA directory (refusing if a CA is
+    /// already there) but writes **no** `certificate.pem` — its absence
+    /// is the "awaiting external cert" discriminator. Returns the
+    /// unencrypted PKCS#8 key PEM (for the caller to seal into the vault,
+    /// exactly like [`init_vaulted`]) and the CSR PEM (for the operator to
+    /// get signed). The signed cert is installed later, once validated.
+    pub fn init_vaulted_external(
+        params: &CaParams,
+    ) -> Result<(zeroize::Zeroizing<Vec<u8>>, Vec<u8>)> {
+        check_key_bits(params.key_bits)?;
+        // Same existence guard as `init_vaulted`; creates the directory.
+        // We deliberately do not write the certificate.
+        let (_key_path, _cert_path) = Self::prepare_dir(params)?;
+        let rsa = Rsa::generate(params.key_bits).context("generating CA RSA key")?;
+        let pkey = PKey::from_rsa(rsa).context("wrapping CA key")?;
+        let san_entries = if params.san.is_empty() {
+            vec![SanEntry::Dns(params.subject.common_name.clone())]
+        } else {
+            params.san.clone()
+        };
+        let csr_pem = build_ca_csr(&pkey, &params.subject, &san_entries)?;
+        let key_pem =
+            pkey.private_key_to_pem_pkcs8().context("encoding CA private key")?;
+        Ok((zeroize::Zeroizing::new(key_pem), csr_pem))
     }
 
     /// Create the CA directory and refuse if a CA (key, cert, or vault)
@@ -596,6 +633,14 @@ pub fn maybe_renew_ca_cert(
     serial: u64,
     threshold: Duration,
 ) -> Result<bool> {
+    // An externally-signed CA cert cannot be self-renewed: netidx does
+    // not hold the external issuer's key, so re-signing here would
+    // clobber the external signature and silently revert the
+    // intermediate to a self-signed root. The primary gate lives in
+    // conf_server's approve path; this is defense in depth.
+    if CaLifetimes::load(ca_dir)?.externally_signed {
+        return Ok(false);
+    }
     let cert_pem = std::fs::read(ca_dir.join("certificate.pem"))
         .context("reading CA certificate")?;
     let old = X509::from_pem(&cert_pem).context("parsing CA certificate")?;
@@ -830,6 +875,118 @@ pub fn generate_csr(
     Ok(KeyAndRequest { private_key_pem, csr_pem: req.to_pem()? })
 }
 
+/// Build a CSR over an existing key that *requests a CA certificate*
+/// (basicConstraints CA:TRUE, keyUsage keyCertSign) — used to ask an
+/// external PKI to sign netidx's CA cert so the CA runs as an
+/// intermediate. Shared by [`Ca::init_vaulted_external`] (fresh key) and
+/// [`ca_csr_from_key`] (renewal over the same key).
+fn build_ca_csr(pkey: &PKey<Private>, subject: &Subject, san: &[SanEntry]) -> Result<Vec<u8>> {
+    let name = build_name(subject)?;
+    let mut req = X509ReqBuilder::new()?;
+    req.set_version(0)?;
+    req.set_subject_name(&name)?;
+    req.set_pubkey(pkey)?;
+    let bc = BasicConstraints::new().critical().ca().build()?;
+    let ku = KeyUsage::new()
+        .critical()
+        .crl_sign()
+        .digital_signature()
+        .key_cert_sign()
+        .build()?;
+    let ctx = req.x509v3_context(None);
+    let san_ext = build_san(san, &ctx)?;
+    let mut stack = openssl::stack::Stack::new()?;
+    stack.push(bc)?;
+    stack.push(ku)?;
+    stack.push(san_ext)?;
+    req.add_extensions(&stack)?;
+    req.sign(pkey, MessageDigest::sha512()).context("signing CA CSR")?;
+    Ok(req.build().to_pem().context("encoding CA CSR")?)
+}
+
+/// Re-emit a CA CSR over the CA's existing (vault-unlocked) key, so an
+/// externally-signed CA cert can be renewed without changing the key.
+pub fn ca_csr_from_key(key_pem: &[u8], subject: &Subject, san: &[SanEntry]) -> Result<Vec<u8>> {
+    let pkey = PKey::private_key_from_pem(key_pem).context("parsing CA key")?;
+    build_ca_csr(&pkey, subject, san)
+}
+
+/// Validate an externally-signed CA certificate before installing it
+/// (phase 2 of external-sign). `signed_pem` is what the operator's PKI
+/// returned — the intermediate alone, or a chain `[intermediate, root..]`.
+/// `root_pem` is an optional separately-supplied external root. Checks:
+/// the intermediate's public key matches our vaulted CA key; it is a CA
+/// certificate (basicConstraints CA:TRUE); and it is validly signed by the
+/// external root. Returns `(intermediate_pem, root_pem)` — the pieces for
+/// `certificate.pem` (intermediate alone) and `trusted.pem`
+/// (`[root, intermediate]`).
+pub fn validate_external_ca_cert(
+    signed_pem: &[u8],
+    root_pem: Option<&[u8]>,
+    ca_key_pem: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    use x509_parser::prelude::FromDer;
+    let mut certs =
+        X509::stack_from_pem(signed_pem).context("parsing the signed certificate PEM")?;
+    if certs.is_empty() {
+        bail!("the signed certificate file contains no certificates");
+    }
+    let key = PKey::private_key_from_pem(ca_key_pem).context("parsing the CA key")?;
+    let our_spki = key.public_key_to_der().context("encoding CA SPKI")?;
+    let inter_idx = certs
+        .iter()
+        .position(|c| {
+            c.public_key()
+                .ok()
+                .and_then(|k| k.public_key_to_der().ok())
+                .as_deref()
+                == Some(our_spki.as_slice())
+        })
+        .context(
+            "none of the supplied certificates match this CA's key — did your PKI \
+             sign the CSR emitted by `ca init --external-sign`?",
+        )?;
+    let intermediate = certs.remove(inter_idx);
+    // Must be a CA cert or leaves won't chain-validate for third parties.
+    let inter_der = intermediate.to_der().context("re-encoding the CA cert")?;
+    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&inter_der)
+        .map_err(|e| anyhow::anyhow!("parsing the signed CA cert: {e}"))?;
+    let is_ca = parsed
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .map(|bc| bc.value.ca)
+        .unwrap_or(false);
+    if !is_ca {
+        bail!(
+            "the signed certificate is not a CA certificate (basicConstraints \
+             CA:TRUE is missing) — netidx runs it as an intermediate CA, so ask \
+             your PKI to sign the CSR as a subordinate CA"
+        );
+    }
+    let root = match root_pem {
+        Some(r) => X509::from_pem(r).context("parsing --root")?,
+        None => {
+            if certs.len() != 1 {
+                bail!(
+                    "supply the external root with --root, or include exactly \
+                     [intermediate, root] in the signed file (found {} other certs)",
+                    certs.len()
+                );
+            }
+            certs.remove(0)
+        }
+    };
+    let root_key = root.public_key().context("reading the external root's key")?;
+    if !intermediate.verify(&root_key).unwrap_or(false) {
+        bail!("the CA certificate is not signed by the supplied external root");
+    }
+    Ok((
+        intermediate.to_pem().context("encoding the CA cert")?,
+        root.to_pem().context("encoding the external root")?,
+    ))
+}
+
 fn build_name(s: &Subject) -> Result<openssl::x509::X509Name> {
     let mut name = X509NameBuilder::new()?;
     name.append_entry_by_text("CN", &s.common_name)?;
@@ -912,6 +1069,23 @@ pub fn ca_cert_serial(dir: &Path) -> Option<u64> {
 mod tests {
     use super::*;
     use openssl::stack::Stack;
+
+    #[test]
+    fn ca_lifetimes_externally_signed_roundtrip_and_back_compat() {
+        let l = CaLifetimes {
+            leaf_validity: Duration::from_secs(100),
+            ca_renew_threshold: Duration::from_secs(200),
+            externally_signed: true,
+        };
+        let back: CaLifetimes =
+            serde_json::from_slice(&serde_json::to_vec(&l).unwrap()).unwrap();
+        assert_eq!(l, back);
+        assert!(back.externally_signed);
+        // A lifetimes.json written before the field existed reads as false.
+        let old = br#"{"leaf_validity":"100s","ca_renew_threshold":"200s"}"#;
+        let parsed: CaLifetimes = serde_json::from_slice(old).unwrap();
+        assert!(!parsed.externally_signed);
+    }
 
     fn small_ca(dir: &Path) -> Ca {
         small_ca_pw(dir, None)

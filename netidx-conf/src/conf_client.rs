@@ -1580,27 +1580,34 @@ pub fn reconcile_trusted_bundle(
                 continue;
             }
         };
-        match roots.iter_mut().find(|(known, _)| *known == fp) {
+        match roots.iter().position(|(known, _)| *known == fp) {
             None => warn!(
                 "ignoring CA {} offered by the renewal response: it is not a \
                  trust anchor we already hold (distribute trust changes out of band)",
                 fp.short()
             ),
-            Some((_, slot)) => {
-                // Same key — accept the refreshed cert only if it is
-                // validly self-signed under that key. A new validity
-                // window is the point; tampered constraints over a
-                // forged self-signature are not (the attacker lacks the
-                // CA private key, so a bad self-signature can't pass).
+            Some(idx) => {
+                // Same pinned key — accept the refreshed cert only if it is
+                // validly self-signed under that key (a self-signed CA
+                // getting a new validity window), OR validly signed by the
+                // SAME issuer that signed the cert currently in this slot
+                // (the external root of an externally-signed intermediate).
+                // The slot's public key never changes, so the glyph never
+                // moves; and requiring the *installed cert's own issuer*
+                // (not merely any held anchor) stops a federated peer that
+                // controls a DIFFERENT anchor from overwriting this slot's
+                // cert body with tampered constraints. A forged signature
+                // fails both checks.
                 let (_, cert) = X509Certificate::from_der(der.as_ref())
                     .map_err(|e| anyhow!("parsing a refreshed CA cert: {e}"))?;
-                match cert.verify_signature(Some(cert.public_key())) {
-                    Ok(()) => *slot = der.as_ref().to_vec(),
-                    Err(e) => warn!(
+                if refresh_is_authorized(&cert, &roots[idx].1, &roots) {
+                    roots[idx].1 = der.as_ref().to_vec();
+                } else {
+                    warn!(
                         "ignoring same-key CA refresh for {}: not validly \
-                         self-signed: {e}",
+                         self-signed and not signed by the installed cert's issuer",
                         fp.short()
-                    ),
+                    );
                 }
             }
         }
@@ -1610,6 +1617,39 @@ pub fn reconcile_trusted_bundle(
         out.push_str(&pem_encode_cert(der));
     }
     Ok(out)
+}
+
+/// Whether a returned CA cert whose SPKI already matches a pinned anchor
+/// may replace it. Accept if it is validly self-signed under its own key
+/// (a self-signed CA refreshing its validity window), or validly signed by
+/// the **same issuer** that signed the cert currently installed in this
+/// slot (`installed_der`) — the external root of an externally-signed
+/// intermediate. Requiring the installed cert's own issuer, rather than any
+/// held anchor, prevents a federated peer that controls a different trust
+/// anchor from overwriting this slot with a same-key cert bearing tampered
+/// constraints (a targeted DoS). The pinned public key never changes either
+/// way, so the glyph cannot move and no new anchor can be introduced.
+fn refresh_is_authorized(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    installed_der: &[u8],
+    roots: &[(Fingerprint, Vec<u8>)],
+) -> bool {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    if cert.verify_signature(Some(cert.public_key())).is_ok() {
+        return true;
+    }
+    // The issuer of the cert currently pinned in this slot.
+    let installed = match X509Certificate::from_der(installed_der) {
+        Ok((_, c)) => c,
+        Err(_) => return false,
+    };
+    let issuer_raw = installed.issuer().as_raw();
+    roots.iter().any(|(_, der)| {
+        X509Certificate::from_der(der).ok().is_some_and(|(_, anchor)| {
+            anchor.subject().as_raw() == issuer_raw
+                && cert.verify_signature(Some(anchor.public_key())).is_ok()
+        })
+    })
 }
 
 /// PEM-encode a single DER certificate (no external pem dep — the rest
@@ -1811,5 +1851,82 @@ mod tests {
         let fp = |pem: &str| Fingerprint::of_cert_pem(pem.as_bytes()).unwrap();
         assert!(bundle_contains(&out, &fp(&a)));
         assert!(!bundle_contains(&out, &fp(&x)));
+    }
+
+    /// Build a CA cert with `pubkey`'s SPKI, `issuer_cn` as issuer, signed
+    /// by `signer`. Used to synthesize an intermediate (signed by a root),
+    /// a same-key re-issue, and a forgery (same SPKI, attacker signature).
+    fn mk_cert(
+        subject_cn: &str,
+        issuer_cn: &str,
+        pubkey: &openssl::pkey::PKey<openssl::pkey::Private>,
+        signer: &openssl::pkey::PKey<openssl::pkey::Private>,
+        serial: u32,
+    ) -> String {
+        use openssl::{
+            asn1::Asn1Time,
+            bn::BigNum,
+            hash::MessageDigest,
+            x509::{X509Builder, X509NameBuilder, extension::BasicConstraints},
+        };
+        let mkname = |cn: &str| {
+            let mut n = X509NameBuilder::new().unwrap();
+            n.append_entry_by_text("CN", cn).unwrap();
+            n.build()
+        };
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_serial_number(&BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        b.set_subject_name(&mkname(subject_cn)).unwrap();
+        b.set_issuer_name(&mkname(issuer_cn)).unwrap();
+        b.set_pubkey(pubkey).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(365).unwrap()).unwrap();
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        b.sign(signer, MessageDigest::sha256()).unwrap();
+        String::from_utf8(b.build().to_pem().unwrap()).unwrap()
+    }
+
+    /// The relaxed rule: a same-SPKI refresh is accepted when it validly
+    /// chains to a held anchor (an externally-signed intermediate's root),
+    /// not only when it is self-signed; a forged same-SPKI cert that chains
+    /// to neither is still rejected.
+    #[test]
+    fn reconcile_accepts_externally_signed_refresh_and_rejects_forgery() {
+        use openssl::{pkey::PKey, rsa::Rsa};
+        let k = || PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let root_key = k();
+        let inter_key = k();
+        let attacker_key = k();
+        let root = mk_cert("root", "root", &root_key, &root_key, 1);
+        let inter = mk_cert("inter", "root", &inter_key, &root_key, 2);
+        let inter_refresh = mk_cert("inter", "root", &inter_key, &root_key, 3);
+        // Same SPKI as `inter`, but signed by an attacker (not the root, and
+        // not validly self-signed under the intermediate's key).
+        let forged = mk_cert("inter", "root", &inter_key, &attacker_key, 4);
+
+        let fp = |pem: &str| Fingerprint::of_cert_pem(pem.as_bytes()).unwrap();
+        let der_of = |pem: &str| pem_to_der(pem, "CERTIFICATE").unwrap();
+        let inter_fp = fp(&inter);
+        let installed = format!("{root}{inter}");
+        let slot_der = |out: &str| {
+            rustls_pemfile::certs(&mut std::io::Cursor::new(out.to_string().into_bytes()))
+                .flatten()
+                .find(|d| Fingerprint::of_cert_der(d.as_ref()).unwrap() == inter_fp)
+                .unwrap()
+                .as_ref()
+                .to_vec()
+        };
+
+        // A legit externally-signed refresh (chains to the held root) wins.
+        let out = reconcile_trusted_bundle(&installed, &format!("{root}{inter_refresh}"))
+            .unwrap();
+        assert_eq!(slot_der(&out), der_of(&inter_refresh), "intermediate refreshed");
+
+        // A forged same-SPKI cert is ignored; the installed intermediate stays.
+        let out2 = reconcile_trusted_bundle(&installed, &format!("{root}{forged}")).unwrap();
+        assert_eq!(slot_der(&out2), der_of(&inter), "forged refresh ignored");
     }
 }

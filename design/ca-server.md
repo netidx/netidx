@@ -97,6 +97,14 @@ work; this design is a **standalone CA-signing daemon** only.
 
 ## 1. What it replaces
 
+> **Update:** the manual-CSR wizard path described below
+> (`generate_csr_and_wait_for_cert` and the BYO-cert prompts) has since
+> been **removed entirely** — the `conf install` wizard now always uses
+> the netidx CA and enrolls over the conf plane. Bringing your own cert is
+> a self-managed setup done outside the wizard. This section is kept as
+> design history for how the CA server subsumed the old flow. For chaining
+> the netidx CA to an existing PKI, see *Externally-signed CA* at the end.
+
 Today the TLS "generate" path without a local CA on the joining box is
 `generate_csr_and_wait_for_cert` (`netidx-tools/src/conf/init.rs`): it
 writes a key + CSR locally, prints
@@ -575,3 +583,73 @@ ask for), all sharing the `prompt_resolver_port` helper.
   protocol is length-prefixed JSON (not Pack) — it's a one-shot control
   path, so simplicity wins. `tokio` was promoted from an optional to a
   base dependency of `netidx-conf` for the daemon/client.
+
+---
+
+## Externally-signed CA (intermediate mode)
+
+An advanced, non-default option runs the netidx CA as an **intermediate**
+whose certificate is signed by an external PKI, instead of self-signing
+it. The CA *key* is still netidx-generated and vault-sealed exactly as
+usual — only the CA cert's issuer changes. This keeps the entire conf
+plane (discovery, enrollment, renewal, RBAC, remote management) while
+letting the netidx CA chain up to an organization's existing root, so
+third parties that trust that root also trust netidx-issued leaves.
+
+Because netidx does not hold the external issuer's key, it cannot re-sign
+its own CA cert: **CA-cert auto-renewal is disabled** in this mode
+(`CaLifetimes.externally_signed`, gated in `conf_server`'s approve path
+and defended in `maybe_renew_ca_cert`). The operator re-signs out of band
+when it approaches expiry; the conf server warns during the renewal
+window. Leaf issuance and leaf/serving-cert renewal are unaffected — the
+CA still holds its key and signs normally.
+
+### Two-phase ceremony (one command after bootstrap)
+
+```
+$ netidx conf ca init --external-sign        # phase 1: bootstrap
+  ...generates the CA key, seals the vault (recovery slot; for a served
+  CA also the box autorenew slot + the superuser role slot), writes
+  ca.<domain>.csr, and STOPS. No certificate.pem is written — its
+  absence is the "awaiting external cert" state.
+
+# get ca.<domain>.csr signed by your PKI as a subordinate CA, then:
+
+$ netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]
+  ...validates the signed cert (its key matches the vaulted CA key, it is
+  a CA cert, and it chains to the external root), installs it, and — on
+  the first install — finishes the served-CA setup (serving cert, config)
+  that phase 1 could not do without the cert. Phase 2 unlocks the key
+  passwordlessly via the box autorenew keytab.
+```
+
+`ca external renew` is the single lifecycle command: with **no argument**
+it (re-)emits a CSR over the existing key (renewal); with a **signed
+cert** it installs it (first install finishes setup; later installs swap
+the cert and let the refreshed intermediate propagate to enrolled nodes
+on their next renewal).
+
+### On-disk layout and trust distribution
+
+- `certificate.pem` is the **intermediate alone** — never a chain. The
+  network glyph is `split_chain(chain).last()`'s SPKI, which stays the
+  netidx CA's key; a chain here would flip the glyph to the external
+  root's key and break `verify_serving_cert`.
+- `trusted.pem` is `[external root, intermediate]`, so netidx nodes hold
+  the external root as an anchor and can validate a future re-signed CA
+  cert.
+- `reconcile_trusted_bundle` accepts a same-SPKI CA refresh when it is
+  validly self-signed **or** validly signed by an anchor already held
+  (the external root) — so a re-signed intermediate propagates. It still
+  refuses to introduce a new anchor (a new SPKI), so a compromised
+  renewal peer cannot move trust; the pinned key never changes.
+
+### Known follow-up
+
+For a third party to chain a netidx **data-plane** serving cert
+(resolver/publisher) up to the external root, that leaf must be
+*presented* as `[leaf, intermediate]`. The conf serving chain already is
+(`server.rs`); extending data-plane serving certs to present the
+intermediate when the CA is externally signed is a scoped, third-party-
+only follow-up (netidx-internal validation pins the CA by key and does
+not need it).

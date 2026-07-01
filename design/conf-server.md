@@ -450,10 +450,13 @@ Expert escapes, all warned about where they're used:
 - `--no-conf-server` — skips the conf plane entirely; the host is
   invisible to discovery, and a network with no conf server anywhere
   has no enrollment and no certificate renewal.
-- External PKI — answering the resolver-certificate prompt with `csr`
-  (generate a key + CSR here, get it signed by your PKI) or a cert
-  path. No netidx CA means no conf plane; renewal stays with that PKI,
-  so the renew daemon is not installed for those identities.
+- External PKI / bring-your-own cert is **not** a wizard option: the
+  `conf install` wizard always uses the netidx CA (that is the point of
+  the control plane). To run TLS with your own certs, skip the wizard
+  and manage the resolver/publisher/subscriber TLS config by hand. To
+  chain the netidx CA to your existing PKI while keeping the conf plane,
+  use `netidx conf ca init --external-sign` (the CA runs as an
+  intermediate; its cert does not auto-renew — see ca-server.md).
 
 ## Future capabilities (out of v1, design kept compatible)
 
