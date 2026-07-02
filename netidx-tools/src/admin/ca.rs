@@ -5,9 +5,13 @@ use netidx_admin::{
     admin_ops::{self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops},
     admin_proto::{self, NodeKind},
     atomic,
-    ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
+    ca::{self, Ca, CaParams, IssueParams, SanEntry, Subject},
     ca_vault,
     fingerprint::{ColorMode, Fingerprint},
+    offline_ca::{
+        default_cert_filename, default_csr_filename, ensure_san_not_reserved, first_dns_san,
+        issue_and_record, parse_san_one, parse_sans, sign_and_record,
+    },
     paths, tls,
 };
 use std::{
@@ -2532,41 +2536,6 @@ fn san_display(s: &SanEntry) -> String {
     }
 }
 
-/// Make a CN safe to embed in a filename. CNs are usually hostnames
-/// (already safe), but the field is free-form text, so replace
-/// anything outside `[A-Za-z0-9._-]` with `_`. The result is always
-/// a single path component — no separators survive — so a defaulted
-/// output path can't traverse out of the cwd. Empty input collapses
-/// to `_` so we never produce a bare extension like `.csr`.
-pub(super) fn sanitize_filename(s: &str) -> String {
-    let out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if out.is_empty() { "_".to_string() } else { out }
-}
-
-/// Default `request` CSR path: `./<cn>.csr`.
-pub(super) fn default_csr_filename(cn: &str) -> PathBuf {
-    PathBuf::from(format!("{}.csr", sanitize_filename(cn)))
-}
-
-/// Default `sign` cert path: `./<csr-cn>.pem`, or `./certificate.pem`
-/// when the CSR carries no CN.
-fn default_cert_filename(csr_cn: Option<&str>) -> PathBuf {
-    let stem = match csr_cn {
-        Some(cn) => sanitize_filename(cn),
-        None => "certificate".to_string(),
-    };
-    PathBuf::from(format!("{stem}.pem"))
-}
-
 fn list() -> Result<()> {
     let dir = match paths::user_ca_dir() {
         Ok(p) => p,
@@ -2733,219 +2702,10 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
 /// name is the linchpin of the trust model; only the admin-server setup
 /// flow (which signs it directly) and the policy-gated network Enroll
 /// may issue it.
-fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
-    for s in san {
-        if let SanEntry::Dns(d) = s
-            && d.eq_ignore_ascii_case(admin_proto::SERVING_SAN)
-        {
-            bail!(
-                "{:?} is reserved for the admin server's serving certificate and \
-                 can't be issued here",
-                admin_proto::SERVING_SAN
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Issue an identity (CN = SAN-DNS = `name`) from `ca` into `out_dir`.
-/// Returns the issued file paths. The caller chooses `out_dir`: the
-/// install flow issues into a staging dir and lets `apply()` copy the
-/// result into the canonical location, so nothing under the config
-/// tree is touched until the apply phase.
-///
-/// `password = Some(p)` encrypts the on-disk private key with `p`
-/// (PKCS#8 + AES-256-CBC). `None` writes an unencrypted key.
-/// Encrypted-key callers in the install flow also wire an
-/// `askpass` entry into the emitted client config so netidx can
-/// decrypt the key at startup.
-/// The first DNS SAN of a leaf — the identity name the index keys on.
-fn first_dns_san(san: &[SanEntry]) -> Option<String> {
-    san.iter().find_map(|s| match s {
-        SanEntry::Dns(d) => Some(d.clone()),
-        _ => None,
-    })
-}
-
-/// Record an offline (pre-daemon) issuance in the CA store, exactly as the
-/// daemon records its own. Offline issuance happens during bootstrap —
-/// before the daemon takes ownership of the CA — so it must seed the
-/// serial from, and commit back into, the same store the daemon reads:
-/// that keeps serials unique across the bootstrap certs and every later
-/// daemon issuance, and makes a bootstrap cert revocable like any other.
-/// `csr_pem` is empty when the key was generated internally (the
-/// revoke-UI glyph is then simply absent).
-pub(super) fn record_offline_issuance(
-    store: &mut netidx_admin::ca_store::CAStore,
-    serial: u64,
-    kind: NodeKind,
-    name: &str,
-    csr_pem: &str,
-    cert_pem: &str,
-    validity: Duration,
-) -> Result<()> {
-    let req = netidx_admin::ca_store::QueuedReq::new(
-        kind,
-        csr_pem.to_string(),
-        name.to_string(),
-        validity,
-        "(offline issue)".to_string(),
-        None,
-        None,
-    );
-    store.commit_issuance(&req, serial, name, cert_pem, &[])
-}
-
-/// Issue a leaf offline, allocating a fresh serial and recording the
-/// issuance (see [`record_offline_issuance`]). Returns the written files.
-fn issue_and_record(
-    ca: &Ca,
-    kind: NodeKind,
-    mut params: IssueParams,
-) -> Result<IssuedFiles> {
-    let ca_dir = ca.directory().to_path_buf();
-    // Take the same exclusive flock the daemon holds: offline issuance is
-    // only legitimate before the daemon owns the CA, and the serial is
-    // allocated from (and committed back to) the store the daemon seeds
-    // its in-memory counter from. Without this lock a `ca issue` run
-    // against a live daemon would mint the serial the daemon allocates
-    // next, producing a duplicate X.509 serial.
-    let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
-        .context("cannot issue offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
-    params.serial = serial;
-    let name =
-        first_dns_san(&params.san).unwrap_or_else(|| params.subject.common_name.clone());
-    let validity = params.validity;
-    let issued = ca.issue(&params)?;
-    let cert_pem = std::fs::read_to_string(&issued.certificate).with_context(|| {
-        format!("reading issued cert {}", issued.certificate.display())
-    })?;
-    // `ca.issue` already wrote the key + cert to disk. If recording the
-    // issuance fails, roll those back: an un-recorded cert is invisible to
-    // `next_serial`, so leaving it would let its serial be handed out again.
-    if let Err(e) = record_offline_issuance(
-        &mut cadir.store.lock(),
-        serial,
-        kind,
-        &name,
-        "",
-        &cert_pem,
-        validity,
-    ) {
-        let _ = std::fs::remove_file(&issued.certificate);
-        let _ = std::fs::remove_file(&issued.private_key);
-        return Err(e);
-    }
-    Ok(issued)
-}
-
-/// Sign an external CSR offline, allocating a fresh serial and recording
-/// the issuance (see [`record_offline_issuance`]). Returns the leaf PEM.
-pub(super) fn sign_and_record(
-    ca: &Ca,
-    kind: NodeKind,
-    csr_pem: &[u8],
-    san: &[SanEntry],
-    name: &str,
-    validity: Duration,
-) -> Result<Vec<u8>> {
-    let ca_dir = ca.directory().to_path_buf();
-    // See `issue_and_record`: hold the daemon's exclusive flock so offline
-    // signing can't race the daemon's serial counter.
-    let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
-        .context("cannot sign offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
-    let cert = ca.sign_request(csr_pem, san, validity, serial)?;
-    let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
-    let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
-    record_offline_issuance(
-        &mut cadir.store.lock(),
-        serial,
-        kind,
-        name,
-        csr_str,
-        cert_str,
-        validity,
-    )?;
-    Ok(cert)
-}
-
-fn parse_sans(raw: &[String], fallback_cn: &str) -> Result<Vec<SanEntry>> {
-    if raw.is_empty() {
-        return Ok(vec![SanEntry::Dns(fallback_cn.to_string())]);
-    }
-    raw.iter().map(|s| parse_san_one(s)).collect()
-}
-
-fn parse_san_one(s: &str) -> Result<SanEntry> {
-    let (kind, val) = s
-        .split_once(':')
-        .ok_or_else(|| anyhow!("SAN must be in the form <kind>:<value>: {s:?}"))?;
-    if val.is_empty() {
-        bail!("SAN value must not be empty: {s:?}");
-    }
-    Ok(match kind {
-        "dns" => SanEntry::Dns(val.to_string()),
-        "ip" => SanEntry::Ip(
-            val.parse::<IpAddr>().map_err(|e| anyhow!("invalid SAN ip {val:?}: {e}"))?,
-        ),
-        "uri" => SanEntry::Uri(val.to_string()),
-        "email" => SanEntry::Email(val.to_string()),
-        other => bail!("unknown SAN kind {other:?}; expected dns / ip / uri / email"),
-    })
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reserved_serving_san_is_refused() {
-        let reserved = admin_proto::SERVING_SAN;
-        assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_string())]).is_err());
-        // DNS is case-insensitive — an upper/mixed-case variant is the
-        // same reserved name and must also be refused.
-        assert!(
-            ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_uppercase())]).is_err()
-        );
-        // A normal name (and a non-DNS SAN type) is fine.
-        assert!(
-            ensure_san_not_reserved(&[SanEntry::Dns("resolver.example.com".to_string())])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn san_parser() {
-        assert!(matches!(
-            parse_san_one("dns:example.com").unwrap(),
-            SanEntry::Dns(s) if s == "example.com"
-        ));
-        assert!(matches!(
-            parse_san_one("ip:127.0.0.1").unwrap(),
-            SanEntry::Ip(ip) if ip == "127.0.0.1".parse::<IpAddr>().unwrap()
-        ));
-        assert!(parse_san_one("uri:https://x").is_ok());
-        assert!(parse_san_one("email:a@b").is_ok());
-        assert!(parse_san_one("bogus").is_err());
-        assert!(parse_san_one("bogus:x").is_err());
-        assert!(parse_san_one("ip:not-an-ip").is_err());
-        // Empty values are rejected for every kind.
-        for kind in ["dns", "ip", "uri", "email"] {
-            assert!(
-                parse_san_one(&format!("{kind}:")).is_err(),
-                "empty {kind}: should be rejected",
-            );
-        }
-    }
-
-    #[test]
-    fn san_defaults_to_dns_cn() {
-        let v = parse_sans(&[], "host.example.com").unwrap();
-        assert_eq!(v.len(), 1);
-        assert!(matches!(&v[0], SanEntry::Dns(s) if s == "host.example.com"));
-    }
 
     #[test]
     fn request_then_sign_round_trip() {
@@ -3144,37 +2904,6 @@ mod tests {
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("not both"));
-    }
-
-    #[test]
-    fn sanitize_filename_keeps_safe_chars_replaces_rest() {
-        // Typical hostnames pass through untouched.
-        assert_eq!(sanitize_filename("alice.example.com"), "alice.example.com");
-        assert_eq!(sanitize_filename("host-1_test"), "host-1_test");
-        // Separators and spaces become `_` — no path component can
-        // escape the cwd.
-        assert_eq!(sanitize_filename("a/b"), "a_b");
-        assert_eq!(sanitize_filename("../etc/passwd"), ".._etc_passwd");
-        assert_eq!(sanitize_filename("with space"), "with_space");
-        assert_eq!(sanitize_filename("weird*<>chars"), "weird___chars");
-        // Empty collapses to `_` so we never produce a bare extension.
-        assert_eq!(sanitize_filename(""), "_");
-    }
-
-    #[test]
-    fn default_filenames() {
-        assert_eq!(
-            default_csr_filename("alice.example.com"),
-            PathBuf::from("alice.example.com.csr"),
-        );
-        assert_eq!(
-            default_cert_filename(Some("alice.example.com")),
-            PathBuf::from("alice.example.com.pem"),
-        );
-        // CN-less CSR falls back to a fixed name.
-        assert_eq!(default_cert_filename(None), PathBuf::from("certificate.pem"),);
-        // Slashes in the CN can't produce a traversing path.
-        assert_eq!(default_csr_filename("../sneaky"), PathBuf::from(".._sneaky.csr"),);
     }
 
     #[test]

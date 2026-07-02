@@ -95,7 +95,7 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     // would, keeping the serving cert's serial unique and the daemon's
     // startup counter seeded past it.
     let kc = admin_client::generate_key_and_csr(SERVING_SAN)?;
-    let leaf = super::ca::sign_and_record(
+    let leaf = netidx_admin::offline_ca::sign_and_record(
         a.ca,
         NodeKind::AdminServer,
         kc.csr_pem.as_bytes(),

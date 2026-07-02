@@ -66,6 +66,13 @@ pub mod admin_local;
 /// slots — that the strict CLI, the TUI, and Atlas all drive.
 #[cfg(unix)]
 pub mod admin_ops;
+/// Offline (pre-daemon) CA issuance glue — the non-interactive half of
+/// `ca sign` / `ca issue`, shared with the install flow and the daemon's own
+/// sign path (serial allocation under the CA flock, issuance recording, SAN
+/// parsing). Unix-only — it operates directly on the CA dir. The
+/// Answerer-driven orchestration lives in [`admin_ops::offline`].
+#[cfg(unix)]
+pub mod offline_ca;
 /// Wire protocol (message types + framing) shared by the admin server
 /// and its clients. Cross-platform — a Windows node speaks it to a unix
 /// admin server. See [`design/ca-server.md`].
