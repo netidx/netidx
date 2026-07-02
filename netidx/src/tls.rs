@@ -128,7 +128,7 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
             format!(
                 "unsealing {sealed} — if this host's {} was cleared or the \
                  hardware was replaced, re-issue the key (netidx certificate \
-                 issuance is one command; see `netidx conf ca`)",
+                 issuance is one command; see `netidx admin ca`)",
                 netidx_tpm::MECHANISM
             )
         })?;

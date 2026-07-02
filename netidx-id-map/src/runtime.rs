@@ -20,7 +20,7 @@
 //!   the file is modified or replaced (atomic-write rename-into-place
 //!   shows up as a Create event for the parent-dir watcher). This is
 //!   the normal path — operators editing `id-map.json` directly or
-//!   running `netidx conf id-map …` get reload-for-free. The watcher
+//!   running `netidx admin id-map …` get reload-for-free. The watcher
 //!   forwards its event batches straight onto a channel (the
 //!   `extended-notify` crate implements its handler trait for an mpsc
 //!   sender) and `run_loop` reloads on anything that arrives — we don't
@@ -703,7 +703,7 @@ mod tests {
         assert!(s.contains("uid=65534(bob.example.com)"), "got {s:?}");
 
         // Edit the file: add bob. We use the same atomic-write
-        // pattern the `netidx conf id-map` tools use, since the
+        // pattern the `netidx admin id-map` tools use, since the
         // rename-into-place path is the most demanding for the
         // watcher to catch.
         let mut groups = BTreeMap::new();
@@ -754,7 +754,7 @@ mod tests {
 
     /// Regression: the daemon must keep picking up *repeated* atomic
     /// replacements of its config, not just the first. Every
-    /// `id-map.json` update (enrollment, `netidx conf id-map …`) writes
+    /// `id-map.json` update (enrollment, `netidx admin id-map …`) writes
     /// a sibling temp file and renames it over the target — a fresh
     /// inode each time. A file watch that isn't re-armed after the
     /// replace goes dead after the first one, leaving the daemon serving

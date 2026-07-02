@@ -19,6 +19,7 @@ cloud-detect = ["dep:reqwest", "dep:if-addrs", "dep:futures"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
+async-trait = { workspace = true }
 compact_str = { workspace = true }
 dirs = { workspace = true }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }

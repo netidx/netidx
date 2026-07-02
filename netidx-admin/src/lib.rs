@@ -15,6 +15,9 @@
 extern crate anyhow;
 
 pub mod activation;
+/// The `Answerer` seam: how the admin engine asks the operator questions and
+/// reports progress, abstracted over the frontend (strict CLI / TUI / Atlas).
+pub mod answer;
 pub mod atomic;
 /// CA / CSR / cert generation. Unix-only because it depends on
 /// `openssl`, which on Windows requires a mingw build of OpenSSL
