@@ -15,6 +15,8 @@ use std::{net::SocketAddr, str::FromStr};
 /// Network discovery + certificate enrollment — the keystone subgraph every
 /// role install shares, driven through the [`crate::answer::Answerer`] seam.
 pub mod enroll;
+/// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
+pub mod delegation;
 /// The OS-service setup decision seam (`ServiceNeed` / `offer`).
 pub mod service;
 /// The role install cascades (`resolver` / `workstation` / `publisher`) and

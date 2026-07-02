@@ -65,6 +65,51 @@ pub fn publisher_bind_shape() -> (Option<String>, bool) {
     (None, false)
 }
 
+/// The environment shape a resolver install needs to suggest its listen / bind
+/// addresses. Computed once (detection probes cloud metadata); a resolver
+/// install computes it lazily, only when `--listen`/`--bind` weren't given.
+pub struct ResolverShape {
+    /// The IP to advertise to clients (the listen default). `None` when the
+    /// environment can't be probed (`cloud-detect` off).
+    pub advertised_ip: Option<IpAddr>,
+    /// The environment couldn't determine a public IP (container with no
+    /// metadata) — the suggestion is only the private IP; warn about it.
+    pub needs_operator_hint: bool,
+    /// A separate local NIC to bind to when advertising a different (NAT'd)
+    /// public IP.
+    pub bind_override: Option<IpAddr>,
+    /// The local publisher's `BindCfg::Elastic` string on a cloud-elastic
+    /// host (advertise the public IP, bind the private subnet).
+    pub elastic_local_client_bind: Option<String>,
+}
+
+/// Detect the resolver environment shape (see [`ResolverShape`]).
+#[cfg(feature = "cloud-detect")]
+pub fn detect_resolver_shape() -> ResolverShape {
+    use crate::netshape::NetShape;
+    let s = NetShape::detect();
+    ResolverShape {
+        advertised_ip: Some(s.advertised_ip().into()),
+        needs_operator_hint: s.needs_operator_hint(),
+        bind_override: s.resolver_bind_override().map(IpAddr::V4),
+        elastic_local_client_bind: match &s {
+            NetShape::CloudElastic { .. } => Some(s.publisher_bind_suggestion()),
+            _ => None,
+        },
+    }
+}
+
+/// See the `cloud-detect` variant.
+#[cfg(not(feature = "cloud-detect"))]
+pub fn detect_resolver_shape() -> ResolverShape {
+    ResolverShape {
+        advertised_ip: None,
+        needs_operator_hint: false,
+        bind_override: None,
+        elastic_local_client_bind: None,
+    }
+}
+
 // -- environment resolvers (paths) --------------------------------------------
 
 /// Resolve `--units-dir` / `--no-units` into the template's

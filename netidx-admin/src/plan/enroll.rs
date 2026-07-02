@@ -620,6 +620,27 @@ pub async fn maybe_join_ca_server(
     Ok(Some((j, staging)))
 }
 
+/// Poll a queued request until it settles (approved / denied / expired),
+/// sleeping [`POLL_INTERVAL`] between checks. Each poll is one short pinned
+/// connection, so waiting holds nothing open. Never returns
+/// [`PollOutcome::Pending`] — it loops on it. Shared by every queued-approval
+/// flow (cert join, admin-server enroll) so they don't each re-implement the
+/// wait.
+pub async fn await_issuance(
+    addr: SocketAddr,
+    kind: NodeKind,
+    pending: &admin_client::PendingEnrollment,
+    identity: &CaIdentity,
+) -> Result<PollOutcome> {
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        match admin_client::poll(addr, kind, pending, identity).await? {
+            PollOutcome::Pending => continue,
+            settled => return Ok(settled),
+        }
+    }
+}
+
 /// Obtain a cert from an **already confirmed** network — every connection pins
 /// to `identity`. Returns the issued identity staged in a tempdir (the
 /// template's `--force`-gated `apply()` installs it).
@@ -669,19 +690,16 @@ pub async fn join_network(
             Stage::WaitingApproval,
             "waiting for a CA admin to approve this request…",
         ));
-        loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            match admin_client::poll(addr, kind, &pending, identity).await? {
-                PollOutcome::Pending => continue,
-                PollOutcome::Issued(issued) => break issued,
-                PollOutcome::Denied(reason) => {
-                    bail!("the CA admin denied this request: {reason}")
-                }
-                PollOutcome::Expired => bail!(
-                    "the request expired before an admin approved it; re-run to \
-                     queue a new one"
-                ),
+        match await_issuance(addr, kind, &pending, identity).await? {
+            PollOutcome::Issued(issued) => issued,
+            PollOutcome::Denied(reason) => {
+                bail!("the CA admin denied this request: {reason}")
             }
+            PollOutcome::Expired => bail!(
+                "the request expired before an admin approved it; re-run to \
+                 queue a new one"
+            ),
+            PollOutcome::Pending => unreachable!("await_issuance never returns Pending"),
         }
     };
 
