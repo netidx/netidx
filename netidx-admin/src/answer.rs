@@ -20,7 +20,7 @@
 //! by the caller) so it stays `dyn`-safe; [`async_trait`] provides the object
 //! safety native `async fn` in traits still lacks.
 
-use crate::{admin_proto::Secret, provenance::NetworkIdentity};
+use crate::{admin_client::CaIdentity, admin_proto::Secret, fingerprint::Fingerprint};
 use anyhow::Result;
 use compact_str::CompactString;
 
@@ -49,6 +49,18 @@ pub enum Field {
     Base,
     /// How the private key is protected (`seal` / `password` / `none`).
     KeyProtection,
+    /// A typed password protecting a private key.
+    KeyPassword,
+    /// An askpass helper program for a password-protected key.
+    Askpass,
+    /// The id-map groups a newly enrolled identity is registered in.
+    IdMapGroups,
+    /// Whether a CA admin is present to authorize an enrollment now.
+    AdminHere,
+    /// Whether to join a discovered network.
+    JoinNetwork,
+    /// Which of several discovered networks to join.
+    WhichNetwork,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
     /// The owner principal a workstation grants admin over its subtree.
@@ -149,6 +161,42 @@ impl Field {
                 label: "private-key protection",
                 help: "How the private key is kept at rest: seal (TPM-bound, \
                        passwordless), password (you type one), or none.",
+            },
+            KeyPassword => FieldInfo {
+                flag: "--key-password-file",
+                label: "private-key password",
+                help: "A password to encrypt this private key at rest. Supplied \
+                       from a file or stdin for scripts; never echoed.",
+            },
+            Askpass => FieldInfo {
+                flag: "--askpass",
+                label: "askpass program",
+                help: "A helper the client runs to obtain the key password at \
+                       startup when the keychain is unavailable. '-' for none.",
+            },
+            IdMapGroups => FieldInfo {
+                flag: "--id-map-group",
+                label: "id-map groups",
+                help: "Groups to register this identity in (comma-separated, \
+                       first is primary; '-' for none). The CA admin's policy \
+                       caps which are allowed.",
+            },
+            AdminHere => FieldInfo {
+                flag: "--admin-here",
+                label: "admin present?",
+                help: "Yes: a CA admin at this machine authorizes now with their \
+                       password. No: queue the request for remote approval.",
+            },
+            JoinNetwork => FieldInfo {
+                flag: "--join",
+                label: "join this network?",
+                help: "Whether to join the discovered netidx network.",
+            },
+            WhichNetwork => FieldInfo {
+                flag: "--network",
+                label: "network to join",
+                help: "Which of the discovered netidx networks to join ('none' \
+                       for manual setup).",
             },
             IdMapMode => FieldInfo {
                 flag: "--id-map",
@@ -304,6 +352,12 @@ impl Progress {
 /// `provided` is `None`.
 #[async_trait::async_trait]
 pub trait Answerer: Send {
+    /// Whether this frontend prompts interactively. The strict-CLI answerer
+    /// returns `false`, which tells the engine never to run an
+    /// interactive-only step (network discovery, glyph confirm with no
+    /// out-of-band value) — every value must come from a flag or error.
+    fn interactive(&self) -> bool;
+
     /// Ask for free text. `default` (if any) is taken on blank input by an
     /// interactive frontend; `required` means a non-empty answer is
     /// mandatory. Returns `None` only when not required and left blank.
@@ -335,12 +389,28 @@ pub trait Answerer: Send {
     /// Ask for a secret (password). Never echoed, never defaulted.
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret>;
 
-    /// The security gesture: present the network's identity (domain + CA
-    /// fingerprint, which a frontend renders as text and an 8×8 identicon)
-    /// and require an explicit accept before the engine trusts it. Returns
+    /// The security gesture: present the admin server's identity (domain,
+    /// roles, and CA fingerprint — which a frontend renders as text and an
+    /// 8×8 identicon) and require an explicit accept before the engine trusts
+    /// it. Everything after is pinned to the confirmed fingerprint. Returns
     /// whether the operator confirmed.
-    async fn confirm_identity(&mut self, identity: &NetworkIdentity) -> Result<bool>;
+    async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool>;
 
-    /// Report progress on a long or asynchronous step. Non-blocking.
+    /// Show an out-of-band verification code (an enrollment request code, a
+    /// delegation code) — a fingerprint the operator relays to an admin over
+    /// a trusted channel so they can match it before approving. A CLI prints
+    /// its text + identicon; a TUI renders the identicon.
+    fn show_verification_code(&mut self, purpose: &str, code: &Fingerprint);
+
+    /// Report progress on a long or asynchronous step (discovery, waiting for
+    /// approval). Non-blocking.
     fn progress(&mut self, progress: Progress);
+
+    /// An informational note — something the engine did or found that the
+    /// operator should see but needn't act on. A CLI prints it; a TUI logs it.
+    fn note(&mut self, message: &str);
+
+    /// A non-fatal warning — a degraded outcome the operator should know
+    /// about (sealing unavailable, keychain save failed, enrollment denied).
+    fn warn(&mut self, message: &str);
 }
