@@ -16,17 +16,14 @@ use netidx_admin::{
         id_map::{self as id_map_template, IdMapServiceParams},
     },
 };
-// Remote, admin-plane control is unix-only (see `service_control`).
+// Remote, admin-plane control is unix-only (it needs the CA/openssl modules);
+// the local control path below is cross-platform.
 #[cfg(unix)]
-use netidx_admin::{admin_client, admin_proto::NodeKind};
-// `admin_proto` is also referenced by `parse_unit_targets`, which the test
-// module exercises on every platform.
-#[cfg(any(unix, test))]
-use netidx_admin::admin_proto;
+use netidx_admin::{admin_ops, admin_proto};
 
-use super::prompt;
+use super::{answer_cli::RemoteAuthFlags, prompt};
 use clap::{Args, Subcommand};
-use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeSet, path::PathBuf};
 
 // One-shot CLI argument value on the stack; boxing the big variant
 // would trade nothing for an allocation.
@@ -63,11 +60,6 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct ServiceCtlArgs {
-    /// Drive a REMOTE CA over the admin plane (RBAC-gated, routed by the
-    /// network map). Without it, this host's local activation supervisor is
-    /// controlled directly (on-box, filesystem authority).
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
     /// The resolver-cluster path whose services to control — the RBAC scope.
     /// Required with `--server`; ignored locally. e.g. `/eu`.
     #[arg(long)]
@@ -80,9 +72,12 @@ pub(crate) struct ServiceCtlArgs {
     /// Activation directory (local mode). Default: the user activation dir.
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// CA dir, to verify the admin server's identity (remote mode).
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    /// Admin-plane auth for `--server` mode (drive a REMOTE CA, RBAC-gated by
+    /// `service_control_scopes`). Ignored in local mode, where this host's own
+    /// activation supervisor is controlled directly (on-box filesystem
+    /// authority — no CA).
+    #[command(flatten)]
+    pub auth: RemoteAuthFlags,
 }
 
 #[derive(Subcommand, Debug)]
@@ -214,24 +209,25 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// RBAC-gated, cluster+member targeting) or against the local activation
 /// supervisor's control socket (on-box).
 fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
-    match a.server {
-        // Remote, admin-plane control is unix-only: the admin preamble needs
-        // the openssl-backed CA module. On Windows (workstation-only) the
-        // local control path below is the one that matters.
+    let server = a.auth.server_addr()?;
+    match server {
+        // Remote, admin-plane control is unix-only: the admin session needs the
+        // openssl-backed CA module. On Windows (workstation-only) the local
+        // control path below is the one that matters.
         #[cfg(unix)]
         Some(server) => {
-            let path = a.path.ok_or_else(|| {
+            let path = a.path.clone().ok_or_else(|| {
                 anyhow!("--path <resolver-cluster-path> is required with --server")
             })?;
-            let targets = parse_unit_targets(&a.units)?;
-            let (rt, identity, admin, password) =
-                super::ca::remote_admin_preamble(server, a.ca_dir.clone())?;
-            let results = rt.block_on(admin_client::control_service(
+            let targets = admin_ops::service::parse_unit_targets(&a.units)?;
+            let mut ans = a.auth.answerer()?;
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let results = rt.block_on(admin_ops::service::control_remote(
+                &mut ans,
                 server,
-                NodeKind::Client,
-                &identity,
-                &admin,
-                password.as_str(),
+                a.auth.ca_dir.clone(),
+                a.auth.admin.clone(),
+                None,
                 &path,
                 targets,
                 op,
@@ -261,26 +257,6 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
             }
         }
     }
-}
-
-/// Parse `unit[:member]` tokens into [`admin_proto::UnitTarget`]s. A trailing
-/// `:<n>` pins the unit to cluster member `n`; otherwise it hits every member.
-#[cfg(any(unix, test))]
-fn parse_unit_targets(toks: &[String]) -> Result<Vec<admin_proto::UnitTarget>> {
-    toks.iter()
-        .map(|t| match t.rsplit_once(':') {
-            Some((unit, idx)) => {
-                let member = idx
-                    .parse::<u32>()
-                    .with_context(|| format!("invalid member index in {t:?}"))?;
-                Ok(admin_proto::UnitTarget {
-                    unit: unit.to_string(),
-                    member: Some(member),
-                })
-            }
-            None => Ok(admin_proto::UnitTarget { unit: t.clone(), member: None }),
-        })
-        .collect()
 }
 
 fn fmt_state(s: &UnitState) -> String {
@@ -544,24 +520,6 @@ mod tests {
         // Malformed: empty after trim.
         assert_eq!(api_path_for_base(Some("")), "/container/api");
         assert_eq!(api_path_for_base(Some("//")), "/container/api");
-    }
-
-    #[test]
-    fn unit_target_parsing() {
-        let t = parse_unit_targets(&[
-            "resolver".to_string(),
-            "resolver:0".to_string(),
-            "id-map:12".to_string(),
-        ])
-        .unwrap();
-        assert_eq!(t[0].unit, "resolver");
-        assert_eq!(t[0].member, None);
-        assert_eq!(t[1].unit, "resolver");
-        assert_eq!(t[1].member, Some(0));
-        assert_eq!(t[2].unit, "id-map");
-        assert_eq!(t[2].member, Some(12));
-        // A non-numeric index is a clear error, not a silent unit name.
-        assert!(parse_unit_targets(&["resolver:abc".to_string()]).is_err());
     }
 
     #[test]

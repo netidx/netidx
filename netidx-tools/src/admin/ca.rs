@@ -1631,45 +1631,6 @@ fn init(p: InitParams) -> Result<()> {
 
 // -- ca admin -----------------------------------------------------------------
 
-/// The preamble for a `--server` admin op: confirm WHO the admin server is
-/// (silently against the local CA cert when this host holds it, else
-/// glyph-confirm with the operator — before any password is typed), then
-/// prompt for the managing admin's name + password. Returns the runtime, the
-/// pinned identity, and the admin credentials. Mirrors `revoke` / `approve`.
-pub(super) fn remote_admin_preamble(
-    server: SocketAddr,
-    ca_dir: Option<PathBuf>,
-) -> Result<(tokio::runtime::Runtime, admin_client::CaIdentity, String, Zeroizing<String>)>
-{
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let identity = rt
-        .block_on(admin_client::fetch_identity(server, NodeKind::Client))
-        .with_context(|| format!("contacting admin server {server}"))?;
-    let local_fp = ca_dir_for(ca_dir)
-        .ok()
-        .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
-        .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
-    match local_fp {
-        Some(fp) if fp == identity.fingerprint => {
-            println!("verified {server} against the local CA");
-        }
-        _ => {
-            init::show_network_identity(server, &identity);
-            if !prompt::confirm("does this match what your CA admin gave you?", false)? {
-                bail!("CA identity was not confirmed; nothing was sent");
-            }
-        }
-    }
-    let admin = match env_user_name() {
-        Some(user) => prompt::string_with_default("your admin name", None, &user)?,
-        None => prompt::required_string("your admin name", None)?,
-    };
-    let password = Zeroizing::new(collect_existing_password(&format!(
-        "CA password for admin {admin:?}"
-    ))?);
-    Ok((rt, identity, admin, password))
-}
-
 /// Print the admin roster (local `list` and remote `list --server` share
 /// this), one line per admin: name, tier, and full policy incl.
 /// `may_manage_admins`.

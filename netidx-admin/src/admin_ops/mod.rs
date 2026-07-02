@@ -40,6 +40,7 @@ pub mod delegation;
 pub mod queue;
 pub mod revoke;
 pub mod roster;
+pub mod service;
 
 /// A pinned, authenticated remote-admin session: the admin server to talk to,
 /// its confirmed identity (later connections verify against *this* CA, not a
