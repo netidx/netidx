@@ -67,6 +67,20 @@ pub enum Field {
     Owner,
     /// OS service scope (`system` / `user`).
     Scope,
+    /// Whether to register netidx as an OS service now.
+    Service,
+    /// The CA's common name.
+    CaCommonName,
+    /// The SAN glob an admin may issue certificates for.
+    AllowSan,
+    /// Whether an admin may enroll new admin servers.
+    MayEnrollServers,
+    /// The resolver-server port.
+    ResolverPort,
+    /// The TLS domain a resolver's certificate name is under.
+    TlsDomain,
+    /// The network domain (groups the network in discovery).
+    NetworkDomain,
     /// The CA / network domain (e.g. `ryu-oh.org`).
     Domain,
     /// A publisher's resolver-server address(es).
@@ -215,6 +229,48 @@ impl Field {
                 label: "service scope",
                 help: "Install the OS service system-wide (starts at boot) or \
                        for the current user only.",
+            },
+            Service => FieldInfo {
+                flag: "--with-service",
+                label: "register OS service?",
+                help: "Register netidx as an OS service now so it starts \
+                       automatically (else install it later).",
+            },
+            CaCommonName => FieldInfo {
+                flag: "--cn",
+                label: "CA common name",
+                help: "The certificate authority's own name, conventionally \
+                       ca.<domain>.",
+            },
+            AllowSan => FieldInfo {
+                flag: "--allow-san",
+                label: "issuable SAN glob",
+                help: "The certificate names this admin may issue, as a glob, \
+                       e.g. *.example.com.",
+            },
+            MayEnrollServers => FieldInfo {
+                flag: "--may-enroll-servers",
+                label: "may enroll admin servers?",
+                help: "Whether this admin may approve new admin-server \
+                       enrollments — more privileged than any SAN glob.",
+            },
+            ResolverPort => FieldInfo {
+                flag: "--listen",
+                label: "resolver port",
+                help: "The port the resolver server listens on (conventionally \
+                       4564).",
+            },
+            TlsDomain => FieldInfo {
+                flag: "--tls-name",
+                label: "TLS domain",
+                help: "The domain part of this resolver's certificate name, \
+                       e.g. ryu-oh.org.",
+            },
+            NetworkDomain => FieldInfo {
+                flag: "--domain",
+                label: "network domain",
+                help: "The domain this network is grouped under in discovery, \
+                       e.g. ryu-oh.org.",
             },
             Domain => FieldInfo {
                 flag: "--domain",
