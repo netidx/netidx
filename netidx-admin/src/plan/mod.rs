@@ -20,6 +20,13 @@ pub mod service;
 /// The role install cascades (`resolver` / `workstation` / `publisher`) and
 /// the shared tail they run.
 pub mod install;
+/// The CA-creation brain (vaulted CA, superuser, recovery/autorenew slots).
+/// Unix-only — depends on `ca`/`ca_store`/`ca_vault`, all unix-only.
+#[cfg(unix)]
+pub mod ca_setup;
+/// Standing up this host's admin server (serving cert, config, unit). Unix-only.
+#[cfg(unix)]
+pub mod server_setup;
 
 /// The data-plane authentication scheme a network uses: how subscribers prove
 /// who they are to publishers and resolvers.
