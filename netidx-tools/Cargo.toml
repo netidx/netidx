@@ -47,6 +47,7 @@ krb5_iov = ["netidx/krb5_iov"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
+async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 combine = { workspace = true }

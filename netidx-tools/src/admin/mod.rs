@@ -48,6 +48,9 @@ mod activation;
 // `ca` subcommand and its supporting CLI helpers depend on the
 // `netidx_admin::ca` engine module, which is unix-only (it pulls
 // openssl). On Windows the subcommand is simply not exposed.
+/// The strict-CLI `Answerer`: turns each subcommand into a non-interactive
+/// command that takes its values from flags or errors naming the flag.
+mod answer_cli;
 #[cfg(unix)]
 mod ca;
 mod client;
