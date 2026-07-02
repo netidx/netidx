@@ -49,21 +49,7 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
             let cadir = CaDir::open(dir).context(
                 "cannot open the CA offline: a running admin server owns it — stop it first",
             )?;
-            let keytab = offline_ca::autorenew_keytab_path()?;
-            match offline_ca::try_unlock_with_keytab(&cadir, &keytab) {
-                KeytabOutcome::Unlocked(u) => u,
-                // No autorenew slot on this box — the normal offline case.
-                KeytabOutcome::Absent => recovery_unlock(ans, &cadir, dir).await?,
-                // A keytab was there but didn't unlock this CA (different CA
-                // dir, cleared TPM): note it, then fall back.
-                KeytabOutcome::Failed(e) => {
-                    ans.note(&format!(
-                        "the autorenew keytab did not unlock this CA ({e:#}); \
-                         falling back to the recovery password"
-                    ));
-                    recovery_unlock(ans, &cadir, dir).await?
-                }
-            }
+            unlock_held(ans, &cadir, dir).await?
         };
         offline_ca::load_ca_from_unlocked(dir, &unlocked)
     } else {
@@ -76,6 +62,34 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
                     .with_context(|| format!("opening CA at {}", dir.display()))
             }
             Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
+        }
+    }
+}
+
+/// Unlock the vault at `cadir` while the caller holds its flock: try the box's
+/// autorenew keytab first (no human secret), falling back to the operator's
+/// recovery password (via the Answerer) on absence or failure. Shared by
+/// offline sign/issue (which drops the flock before signing) and `ca external`
+/// (which keeps it), so both fold a typed recovery password to canonical form —
+/// the fix for the external path's raw-password unlock.
+pub async fn unlock_held(
+    ans: &mut dyn Answerer,
+    cadir: &CaDir,
+    dir: &Path,
+) -> Result<Unlocked> {
+    let keytab = offline_ca::autorenew_keytab_path()?;
+    match offline_ca::try_unlock_with_keytab(cadir, &keytab) {
+        KeytabOutcome::Unlocked(u) => Ok(u),
+        // No autorenew slot on this box — the normal offline case.
+        KeytabOutcome::Absent => recovery_unlock(ans, cadir, dir).await,
+        // A keytab was there but didn't unlock this CA (different CA dir,
+        // cleared TPM): note it, then fall back to the recovery password.
+        KeytabOutcome::Failed(e) => {
+            ans.note(&format!(
+                "the autorenew keytab did not unlock this CA ({e:#}); falling back \
+                 to the recovery password"
+            ));
+            recovery_unlock(ans, cadir, dir).await
         }
     }
 }

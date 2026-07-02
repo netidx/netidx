@@ -4,6 +4,7 @@ use netidx_admin::{
     admin_client, admin_local,
     admin_ops::{
         self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
+        slots as slots_ops,
     },
     admin_proto::{self, NodeKind},
     atomic,
@@ -79,10 +80,41 @@ pub(crate) enum Cmd {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ExternalCmd {
-    /// With no argument, (re-)emit a CSR for the CA certificate for your
-    /// PKI to sign. With a signed certificate, install it (first install
-    /// also finishes admin-server setup; later installs renew the cert).
+    /// (Re-)emit a CSR for the CA certificate for your PKI to sign.
+    EmitCsr(ExternalDirArgs),
+    /// Install a signed certificate (first install also finishes
+    /// admin-server setup; later installs renew the cert).
+    Install(ExternalInstallArgs),
+    /// Show the external-CA state (externally-signed? cert installed?
+    /// awaiting a signature?).
+    Status(ExternalDirArgs),
+    /// Compatibility shim: with no argument dispatches to `emit-csr`, with
+    /// a signed certificate to `install`.
     Renew(ExternalRenewArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ExternalDirArgs {
+    /// Override the CA directory (defaults to `${basedir}/ca/`).
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ExternalInstallArgs {
+    /// The externally-signed CA certificate to install.
+    pub signed_cert: PathBuf,
+    /// The external root that signed the CA cert, when it is not included
+    /// as a trailing PEM block in the signed-certificate file.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Override the CA directory (defaults to `${basedir}/ca/`).
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 #[derive(Args, Debug)]
@@ -97,6 +129,8 @@ pub(crate) struct ExternalRenewArgs {
     /// Override the CA directory (defaults to `${basedir}/ca/`).
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,6 +139,9 @@ pub(crate) enum RecoveryCmd {
     /// box's autorenew keytab, so a lost recovery password is recoverable
     /// while the machine lives). The new password is printed once.
     Rotate(RecoveryRotateArgs),
+    /// show whether the CA has a recovery slot and whether the on-box
+    /// authority (the autorenew keytab) needed to rotate it is present.
+    Status(RecoveryRotateArgs),
 }
 
 #[derive(Args, Debug)]
@@ -121,11 +158,17 @@ pub(crate) struct AutoApproveArgs {
     /// pick up the new credential.
     #[arg(long)]
     pub rotate: bool,
+    /// Show the autorenew credential's state (slot present? keytab present /
+    /// sealed? wired in the config?) instead of setting it up.
+    #[arg(long)]
+    pub status: bool,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// DANGER: the autorenew keytab is then written in PLAINTEXT — every
     /// backup or disk image of this machine becomes a CA compromise.
     #[arg(long = "insecure-no-tpm")]
     pub insecure_no_tpm: bool,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 #[derive(Args, Debug)]
@@ -463,7 +506,7 @@ pub(crate) struct InitParams {
     pub dir: Option<PathBuf>,
     /// Run the CA as an intermediate: generate the key + a CSR requesting a
     /// CA cert, then stop. Get the CSR signed by your existing PKI and
-    /// install it with `ca external renew <signed-cert>`. The CA cert will
+    /// install it with `ca external install <signed-cert>`. The CA cert will
     /// NOT auto-renew (netidx does not hold your PKI's key).
     #[arg(long = "external-sign")]
     pub external_sign: bool,
@@ -747,57 +790,52 @@ pub(super) fn setup_autorenew_slot(
 fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
-    let cfg_path = paths::discover_admin_server_config().ok();
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Hot-swap path: the running daemon owns the CA, so it rotates the box
-    // credential in-process (re-wraps the slot, swaps the live key, rewrites
-    // the keytab) with no downtime — no flock, no recovery password.
-    if let Some(cfg) = &cfg_path
-        && rt.block_on(admin_local::daemon_running(cfg))
-    {
-        let warning = rt.block_on(admin_local::rotate_autorenew(cfg))?;
-        println!(
-            "auto-approve rotated (hot-swapped on the running admin server, no downtime)"
-        );
-        if let Some(w) = warning {
-            eprintln!("WARNING: {w}");
-        }
+    let cfg = paths::discover_admin_server_config().ok();
+    if p.status {
+        let s = slots_ops::auto_approve_status(&dir, cfg.as_deref())?;
+        println!("auto-approve status:");
+        println!("  autorenew slot: {}", if s.slot_present { "present" } else { "absent" });
+        let keytab = if !s.keytab_present {
+            "absent".to_string()
+        } else if s.keytab_sealed {
+            format!("{} (sealed to this machine)", s.keytab.display())
+        } else {
+            format!("{} (PLAINTEXT — do not back up)", s.keytab.display())
+        };
+        println!("  keytab:         {keytab}");
+        println!("  wired in config: {}", if s.wired_in_config { "yes" } else { "no" });
         return Ok(());
     }
-    // Offline / first-time setup: the daemon is down, so take the flock and
-    // mint the slot directly. Same gate as init: refuse on a TPM-less host
-    // unless the operator opts into a plaintext keytab. (Re-minting the box
-    // credential here is exactly the moment a plaintext fallback would leak
-    // it.)
-    tpm_gate(p.insecure_no_tpm)?;
-    // Re-minting autorenew removes the old slot first, so the recovery
-    // password (not the old keytab) is what authorizes it — and after a TPM
-    // clear the old keytab is unsealable anyway, so recovery is the only way
-    // in. Normalize a re-typed copy (spaces/case/confusables fold away).
-    let typed = Zeroizing::new(collect_existing_password(
-        "the CA recovery password (printed once at init; authorizes re-minting the \
-         autorenew credential)",
-    )?);
-    let recovery = ca_vault::normalize_recovery_password(&typed);
-    let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
-        "setting up autorenew needs exclusive access; the admin server must be stopped",
-    )?;
-    let keytab = setup_autorenew_slot(&cadir, &recovery, p.insecure_no_tpm)?;
-    let verb = if p.rotate { "rotated" } else { "enabled" };
-    println!("auto-approve {verb}:");
-    println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
-    println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
-    // Rotation rewrote the keytab's contents but not its path, so pointing
-    // the config at it is correct whether we just created or replaced it.
-    match super::server::set_ca_autorenew(&keytab) {
-        Ok(cfg_path) => {
-            println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
-            println!("  restart the admin server to pick up the keytab.");
+    let mut ans = p.recovery.answerer()?;
+    let out = runtime()?
+        .block_on(slots_ops::auto_approve(&mut ans, dir, cfg, p.rotate, p.insecure_no_tpm))?;
+    match out {
+        slots_ops::AutoApproveOutcome::HotSwapped { warning } => {
+            println!(
+                "auto-approve rotated (hot-swapped on the running admin server, no \
+                 downtime)"
+            );
+            if let Some(w) = warning {
+                eprintln!("WARNING: {w}");
+            }
         }
-        Err(e) => {
-            println!("  note: could not update the admin-server config ({e:#}).");
-            println!("        set roles.ca.autorenew to the keytab path and");
-            println!("        restart the admin server.");
+        slots_ops::AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error } => {
+            println!("auto-approve {}:", if rotate { "rotated" } else { "enabled" });
+            println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
+            println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
+            match (cfg_path, cfg_error) {
+                (Some(cfg_path), _) => {
+                    println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
+                    println!("  restart the admin server to pick up the keytab.");
+                }
+                (None, err) => {
+                    if let Some(e) = err {
+                        println!("  note: could not update the admin-server config ({e}).");
+                    }
+                    println!("        set roles.ca.autorenew to the keytab path and");
+                    println!("        restart the admin server.");
+                }
+            }
         }
     }
     Ok(())
@@ -1231,137 +1269,151 @@ fn setup_superuser(
     Ok(())
 }
 
-/// `admin ca recovery rotate`: mint a fresh recovery password on the CA box.
-/// Authorized by the box's own autorenew keytab (read + unsealed), so a lost
-/// recovery password is recoverable while the machine lives — without it.
+/// `admin ca recovery {rotate,status}`: mint a fresh recovery password on the
+/// CA box (authorized by the box's own autorenew keytab, so a lost recovery
+/// password is recoverable while the machine lives), or report the recovery
+/// slot's state.
 fn recovery(cmd: RecoveryCmd) -> Result<()> {
     match cmd {
         RecoveryCmd::Rotate(a) => recovery_rotate(a),
+        RecoveryCmd::Status(a) => {
+            let dir = ca_dir_for(a.ca_dir)?;
+            let s = slots_ops::recovery_status(&dir)?;
+            println!("recovery status:");
+            println!("  recovery slot:  {}", if s.slot_present { "present" } else { "absent" });
+            println!(
+                "  autorenew keytab (offline re-mint authority): {}",
+                if s.keytab_present { "present" } else { "absent" }
+            );
+            Ok(())
+        }
     }
 }
 
 fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    let cfg_path = paths::discover_admin_server_config().ok();
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Prefer the running daemon: it owns the CA and re-wraps the recovery
-    // slot with its own on-box autorenew credential, so no flock contention
-    // and no offline keytab handling here.
-    if let Some(cfg) = &cfg_path
-        && rt.block_on(admin_local::daemon_running(cfg))
-    {
-        let new_pw = rt.block_on(admin_local::rotate_recovery(cfg))?;
-        println!("rotated the recovery password (via the running admin server)");
-        print_recovery_password(&new_pw);
-        return Ok(());
+    let cfg = paths::discover_admin_server_config().ok();
+    // The library shows the new password once (via the Answerer); we only
+    // narrate which path ran. The recovery-rotate offline path authorizes with
+    // the autorenew keytab, not a typed recovery password, so a bare
+    // FlagAnswerer (no secret) is all the CLI needs.
+    let mut ans = make_offline_answerer(None, false)?;
+    let out = runtime()?.block_on(slots_ops::recovery_rotate(&mut ans, dir, cfg))?;
+    match out {
+        slots_ops::RecoveryRotateOutcome::HotSwapped => {
+            println!("rotated the recovery password (via the running admin server)")
+        }
+        slots_ops::RecoveryRotateOutcome::Offline { ca_dir } => {
+            println!("rotated the recovery password for the CA at {}", ca_dir.display())
+        }
     }
-    // Offline break-glass (daemon down): take the flock and rotate the slot
-    // directly. The autorenew keytab is the on-box authority: it holds a
-    // signing-slot password (sealed to this machine), and re-minting the
-    // recovery slot recovers MK to wrap it. This is why rotation works
-    // without the lost recovery password — but only on the box that holds
-    // the keytab.
-    if !ca_vault::CAVault::exists(&dir) {
-        bail!("no vault-protected CA at {}", dir.display());
-    }
-    let keytab = autorenew_keytab_path()?;
-    let autorenew_pw = netidx_admin::admin_server::read_autorenew_password(&keytab)
-        .with_context(|| {
-            format!(
-                "rotating the recovery password needs the autorenew keytab ({}); it \
-                 authorizes the re-mint on the CA box. (Set one up with \
-                 `netidx admin ca auto-approve`.)",
-                keytab.display()
-            )
-        })?;
-    let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
-        "rotating recovery needs exclusive access; stop the admin server first",
-    )?;
-    // Confirm the keytab credential actually unlocks this CA BEFORE removing
-    // the old recovery slot — a stale keytab must not leave the CA with no
-    // recovery slot. (The recovered key is dropped/zeroized immediately.)
-    cadir.vault.read().unlock(&autorenew_pw).with_context(|| {
-        format!(
-            "the autorenew keytab ({}) did not unlock this CA — its credential is \
-             stale. Re-mint it with `netidx admin ca auto-approve --rotate` (needs the \
-             recovery password) and try again.",
-            keytab.display()
-        )
-    })?;
-    // Drop the old recovery slot, then mint a fresh one. Autorenew remains
-    // the signing slot throughout, so the master key is never orphaned; if
-    // the re-mint fails, autorenew still unlocks and the rotate can be
-    // retried.
-    let exists = cadir
-        .vault
-        .read()
-        .list_admins()?
-        .iter()
-        .any(|i| i.admin == ca_vault::RECOVERY_ADMIN);
-    if exists {
-        cadir.vault.write().remove_slot(ca_vault::RECOVERY_ADMIN, false)?;
-    }
-    let new_pw = ca_vault::gen_recovery_password();
-    cadir.vault.write().add_signing_slot(
-        &autorenew_pw,
-        ca_vault::RECOVERY_ADMIN,
-        &new_pw,
-        recovery_policy(),
-    )?;
-    println!("rotated the recovery password for the CA at {}", dir.display());
-    print_recovery_password(&new_pw);
     Ok(())
 }
 
 // -- ca external (intermediate CA signed by an external PKI) -----------------
 
-use serde_derive::{Deserialize, Serialize};
-
-/// Written by `ca init --external-sign`, read by `ca external renew`. Holds
-/// what phase 2 needs but cannot re-derive before the cert exists: the CA's
-/// subject/SANs (to re-emit a CSR) and the served-CA tail inputs.
-#[derive(Debug, Serialize, Deserialize)]
-struct ExternalPending {
-    cn: String,
-    domain: String,
-    #[serde(default)]
-    country: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default)]
-    locality: Option<String>,
-    #[serde(default)]
-    organization: Option<String>,
-    #[serde(default)]
-    san: Vec<String>,
-    setup_server: bool,
-    #[serde(default)]
-    listen: Option<SocketAddr>,
-    #[serde(default)]
-    units_dir: Option<PathBuf>,
-}
-
-impl ExternalPending {
-    const FILE: &'static str = "external_pending.json";
-
-    fn store(&self, dir: &Path) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(self)
-            .context("encoding the external-sign marker")?;
-        atomic::write_atomic(&dir.join(Self::FILE), &bytes, 0o644)
-    }
-
-    fn load(dir: &Path) -> Result<Self> {
-        let bytes = std::fs::read(dir.join(Self::FILE)).context(
-            "reading the external-sign marker — was this CA created with \
-             `ca init --external-sign`?",
-        )?;
-        serde_json::from_slice(&bytes).context("parsing the external-sign marker")
-    }
-}
-
 fn external(cmd: ExternalCmd) -> Result<()> {
     match cmd {
+        ExternalCmd::EmitCsr(a) => external_emit_csr(a),
+        ExternalCmd::Install(a) => external_install(a),
+        ExternalCmd::Status(a) => external_status(a),
         ExternalCmd::Renew(a) => external_renew(a),
+    }
+}
+
+/// Refuse the `external` ops on a CA that isn't externally-signed, with the
+/// same clear pointer the overloaded `renew` gave.
+fn ensure_externally_signed(dir: &Path) -> Result<()> {
+    if !ca::CaLifetimes::load(dir)?.externally_signed {
+        bail!(
+            "{} is not an externally-signed CA — create one with \
+             `netidx admin ca init --external-sign`",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
+    let dir = ca_dir_for(a.ca_dir)?;
+    ensure_externally_signed(&dir)?;
+    let mut ans = a.recovery.answerer()?;
+    let csr_path = runtime()?.block_on(slots_ops::external_emit_csr(&mut ans, dir))?;
+    println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
+    println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
+    Ok(())
+}
+
+fn external_install(a: ExternalInstallArgs) -> Result<()> {
+    let dir = ca_dir_for(a.ca_dir)?;
+    ensure_externally_signed(&dir)?;
+    let mut ans = a.recovery.answerer()?;
+    let out = runtime()?.block_on(slots_ops::external_install_cert(
+        &mut ans,
+        dir,
+        &a.signed_cert,
+        a.root.as_deref(),
+    ))?;
+    report_external_install(out)
+}
+
+fn report_external_install(out: slots_ops::ExternalInstallOutcome) -> Result<()> {
+    use slots_ops::ExternalInstallOutcome;
+    match out {
+        ExternalInstallOutcome::OfflineCa => {
+            println!("installed the externally-signed CA certificate.");
+            println!("CA-cert auto-renewal is DISABLED (external issuer).");
+            Ok(())
+        }
+        ExternalInstallOutcome::FirstInstall { need, cfg_path } => {
+            println!("installed the externally-signed CA certificate.");
+            println!("admin server configured ({})", cfg_path.display());
+            println!(
+                "CA-cert auto-renewal is DISABLED (external issuer); re-run \
+                 `netidx admin ca external install` when your PKI re-signs it."
+            );
+            service::offer(
+                need,
+                service::ServiceGate { dry_run: false, no_service: false, with_service: false },
+            )
+        }
+        ExternalInstallOutcome::Renewal => {
+            println!("renewed the CA certificate — enrolled nodes adopt it on their");
+            println!("next renewal (glyph unchanged; existing certificates stay valid).");
+            Ok(())
+        }
+    }
+}
+
+fn external_status(a: ExternalDirArgs) -> Result<()> {
+    let dir = ca_dir_for(a.ca_dir)?;
+    let s = slots_ops::external_status(&dir)?;
+    println!("external CA status:");
+    println!("  externally signed: {}", if s.externally_signed { "yes" } else { "no" });
+    println!(
+        "  certificate:       {}",
+        if s.cert_installed { "installed" } else { "not installed" }
+    );
+    match &s.pending {
+        Some((cn, domain)) => println!(
+            "  pending:           awaiting a signed cert for {cn:?} (domain {domain})"
+        ),
+        None => println!("  pending:           none"),
+    }
+    Ok(())
+}
+
+/// Compatibility shim for the old overloaded `ca external renew`: no argument
+/// (re-)emits a CSR; a signed certificate installs it.
+fn external_renew(a: ExternalRenewArgs) -> Result<()> {
+    match a.signed_cert {
+        None => external_emit_csr(ExternalDirArgs { ca_dir: a.ca_dir, recovery: a.recovery }),
+        Some(signed_cert) => external_install(ExternalInstallArgs {
+            signed_cert,
+            root: a.root,
+            ca_dir: a.ca_dir,
+            recovery: a.recovery,
+        }),
     }
 }
 
@@ -1427,7 +1479,7 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
     let csr_path = default_csr_filename(&common_name);
     atomic::write_atomic(&csr_path, &csr_pem, 0o644)
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
-    ExternalPending {
+    slots_ops::ExternalPending {
         cn: common_name.clone(),
         domain,
         country: opts.country.clone(),
@@ -1458,7 +1510,7 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
         "wrote {} — get it signed by your PKI as a subordinate CA, then run:",
         csr_path.display()
     );
-    println!("  netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]");
+    println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
     println!();
     println!(
         "NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
@@ -1466,148 +1518,6 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
     );
     // Phase 1 stands up no server yet, so there is nothing to offer.
     Ok(service::ServiceNeed::NONE)
-}
-
-fn external_renew(args: ExternalRenewArgs) -> Result<()> {
-    let dir = ca_dir_for(args.ca_dir)?;
-    let lifetimes = ca::CaLifetimes::load(&dir)?;
-    if !lifetimes.externally_signed {
-        bail!(
-            "{} is not an externally-signed CA — create one with \
-             `netidx admin ca init --external-sign`",
-            dir.display()
-        );
-    }
-    match args.signed_cert {
-        None => emit_external_csr(&dir),
-        Some(signed) => install_external_cert(&dir, &signed, args.root.as_deref()),
-    }
-}
-
-/// Unlock the CA key: via the box autorenew keytab (passwordless) when it
-/// exists, else the recovery password. Returns the key and the held flock.
-fn external_ca_key(
-    dir: &Path,
-) -> Result<(Zeroizing<Vec<u8>>, netidx_admin::ca_store::CaDir)> {
-    let cadir = netidx_admin::ca_store::CaDir::open(dir)
-        .context("opening the CA (stop the admin server first if it is running)")?;
-    let keytab = autorenew_keytab_path()?;
-    let key = if keytab.exists() {
-        let pw = netidx_admin::admin_server::read_autorenew_password(&keytab)?;
-        cadir.vault.read().unlock(&pw)?.ca_key_pem
-    } else {
-        let pw = collect_required_password("CA recovery password")?;
-        cadir.vault.read().unlock(&pw)?.ca_key_pem
-    };
-    Ok((key, cadir))
-}
-
-/// (Re-)emit a CSR for the CA cert over the existing key — for renewing an
-/// externally-signed CA cert (same key ⇒ glyph unchanged).
-fn emit_external_csr(dir: &Path) -> Result<()> {
-    let m = ExternalPending::load(dir)?;
-    let san = if m.san.is_empty() {
-        vec![SanEntry::Dns(m.cn.clone())]
-    } else {
-        parse_sans(&m.san, &m.cn)?
-    };
-    // Rebuild the full subject (not just the CN) so a renewal CSR carries
-    // the same DN as the original CA cert.
-    let subject = Subject {
-        common_name: m.cn.clone(),
-        country: m.country.clone(),
-        state: m.state.clone(),
-        locality: m.locality.clone(),
-        organization: m.organization.clone(),
-    };
-    let (key, _cadir) = external_ca_key(dir)?;
-    let csr = ca::ca_csr_from_key(&key, &subject, &san)?;
-    let csr_path = default_csr_filename(&m.cn);
-    atomic::write_atomic(&csr_path, &csr, 0o644)
-        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
-    println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
-    println!("  netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]");
-    Ok(())
-}
-
-/// Install an externally-signed CA cert: validate it binds to our key, is a
-/// CA cert, and chains to the external root; write `certificate.pem` (the
-/// intermediate alone) + `trusted.pem` (`[root, intermediate]`). On the
-/// first install also finish the served-CA setup (serving cert + config)
-/// that phase 1 could not do without the cert.
-fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Result<()> {
-    let m = ExternalPending::load(dir)?;
-    let signed_pem =
-        std::fs::read(signed).with_context(|| format!("reading {}", signed.display()))?;
-    let root_pem = match root {
-        Some(p) => {
-            Some(std::fs::read(p).with_context(|| format!("reading {}", p.display()))?)
-        }
-        None => None,
-    };
-    let (key, cadir) = external_ca_key(dir)?;
-    let (intermediate_pem, external_root_pem) =
-        ca::validate_external_ca_cert(&signed_pem, root_pem.as_deref(), &key)?;
-    // certificate.pem is the intermediate ALONE (the network glyph is its
-    // key); trusted.pem is [external root, intermediate].
-    atomic::write_atomic(&dir.join("certificate.pem"), &intermediate_pem, 0o644)
-        .context("installing certificate.pem")?;
-    let mut trusted = external_root_pem;
-    trusted.extend_from_slice(&intermediate_pem);
-    atomic::write_atomic(&dir.join("trusted.pem"), &trusted, 0o644)
-        .context("installing trusted.pem")?;
-    println!("installed the externally-signed CA certificate at {}", dir.display());
-    show_ca_identity(dir)?;
-    if !m.setup_server {
-        // Offline external CA — nothing further to set up.
-        println!("CA-cert auto-renewal is DISABLED (external issuer).");
-        return Ok(());
-    }
-    // Served CA. Decide "first install vs renewal" on whether the admin
-    // server is configured yet — NOT on certificate.pem (which we just
-    // wrote), so a failed/interrupted first-install tail is retriable
-    // instead of being silently reclassified as a renewal.
-    if paths::discover_admin_server_config().is_err() {
-        // First install (or a retry of one): run the idempotent served-CA
-        // tail (serving cert + config) using the key we unlocked. The
-        // autorenew slot + superuser were minted at bootstrap.
-        let ca = Ca::from_pem(dir.to_path_buf(), &key, &intermediate_pem)
-            .context("reconstructing the CA from the installed certificate")?;
-        // setup_server takes the CA flock itself — release ours first.
-        drop(cadir);
-        let need = super::server::setup_server(super::server::SetupArgs {
-            ca_dir: dir,
-            ca: &ca,
-            domain: &m.domain,
-            listen: m.listen,
-            listen_hint: None,
-            units_dir: m.units_dir.as_deref(),
-        })?;
-        let cfg_path = super::server::set_ca_autorenew(&autorenew_keytab_path()?)?;
-        println!("admin server configured ({})", cfg_path.display());
-        println!(
-            "CA-cert auto-renewal is DISABLED (external issuer); re-run \
-             `netidx admin ca external renew` when your PKI re-signs it."
-        );
-        return service::offer(
-            need,
-            service::ServiceGate {
-                dry_run: false,
-                no_service: false,
-                with_service: false,
-            },
-        );
-    }
-    // The admin server is already configured: this is a renewal. Keep
-    // autorenew wired (idempotent) and let the refreshed intermediate reach
-    // enrolled nodes on their next renewal.
-    let keytab = autorenew_keytab_path()?;
-    if keytab.exists() {
-        let _ = super::server::set_ca_autorenew(&keytab);
-    }
-    println!("renewed the CA certificate — enrolled nodes adopt it on their");
-    println!("next renewal (glyph unchanged; existing certificates stay valid).");
-    Ok(())
 }
 
 fn init(p: InitParams) -> Result<()> {
@@ -1653,7 +1563,7 @@ fn init(p: InitParams) -> Result<()> {
         units_dir,
     };
     // `--external-sign` runs the CA as an intermediate: phase 1 makes the
-    // key + a CSR and stops; `ca external renew <signed-cert>` installs the
+    // key + a CSR and stops; `ca external install <signed-cert>` installs the
     // signed cert. Otherwise this is the normal self-signed CA.
     let need = if p.external_sign {
         external_bootstrap(opts)?

@@ -1836,7 +1836,7 @@ fn issue_locked(
             warn!(
                 "admin-server: the externally-signed CA certificate is within its \
                  renewal threshold and will NOT auto-renew — obtain a re-signed \
-                 cert from your PKI and run `netidx admin ca external renew`"
+                 cert from your PKI and run `netidx admin ca external install`"
             );
         } else {
             let rs = store.alloc_serial();

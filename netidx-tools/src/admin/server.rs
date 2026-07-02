@@ -4,7 +4,7 @@
 //! is the CLI shell plus [`setup_server`], the shared "stand up a admin
 //! server on this host" step used by `ca init` and the install flows.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client,
@@ -222,19 +222,12 @@ pub(super) fn install_unit(units_dir: &Path, cfg_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Point this host's CA role at the autorenew slot's `keytab`, so the
-/// running admin-server daemon approves verified renewals in-process. The
-/// config must already exist and hold a CA role — autorenew is a CA-host
-/// feature, and the keytab path is all the daemon needs to read the slot.
+/// Point this host's CA role at the autorenew slot's `keytab`. Thin wrapper
+/// over the library's [`netidx_admin::plan::server_setup::set_ca_autorenew`]
+/// (the canonical definition, shared with the relocated `ca auto-approve` /
+/// `ca external` ops) so the install flow's callers keep one local name.
 pub(super) fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
-    let cfg_path = paths::discover_admin_server_config()?;
-    let mut cfg = AdminServerConfig::load(&cfg_path)?;
-    let ca = cfg.roles.ca.as_mut().ok_or_else(|| {
-        anyhow!("admin-server config {} has no CA role", cfg_path.display())
-    })?;
-    ca.autorenew = Some(keytab.to_path_buf());
-    cfg.save(&cfg_path)?;
-    Ok(cfg_path)
+    netidx_admin::plan::server_setup::set_ca_autorenew(keytab)
 }
 
 /// IP to suggest for the admin server's listen address: the resolver
