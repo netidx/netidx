@@ -768,6 +768,13 @@ pub(crate) struct ResolverFlags {
     /// kerberos principal including realm (e.g. `eric@RYU-OH.ORG`).
     #[arg(long = "no-id-map")]
     no_id_map: bool,
+    /// For `--auth krb5`, how to map kerberos principals to unix ids:
+    /// `platform` (a site IdM / `/bin/id` resolves full principals),
+    /// `netidx` (the netidx id-mapper maps them), or `none` (perms keyed on
+    /// the raw principal, no uid/gid mapping — the right choice on a krb5
+    /// host with no system IdM). Ignored for other auth schemes.
+    #[arg(long = "id-map-mode")]
+    id_map_mode: Option<String>,
     /// Skip admin-server setup entirely (expert). On a fresh krb5 /
     /// anonymous network this also skips the admin-plane CA. A host
     /// without a admin server is invisible to discovery, and if no admin
@@ -857,6 +864,7 @@ fn resolver_input(
         units_dir: f.units_dir,
         netidx_binary: f.netidx_binary,
         no_id_map: f.no_id_map,
+        id_map_mode: f.id_map_mode,
         no_admin_server: f.no_admin_server,
         insecure_no_tpm: f.insecure_no_tpm,
         parent_admin_server: f.parent_admin_server,

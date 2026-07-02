@@ -89,6 +89,10 @@ pub struct ResolverInput {
     pub netidx_binary: Option<PathBuf>,
     /// Skip auto-installing the id-mapper daemon.
     pub no_id_map: bool,
+    /// For `--auth krb5`, how to map principals to unix ids
+    /// (`platform` | `netidx` | `none`). `None` ⇒ prompt (interactive) or a
+    /// required-value error (strict). Ignored for other auth schemes.
+    pub id_map_mode: Option<String>,
     /// Skip admin-server setup entirely (expert).
     pub no_admin_server: bool,
     /// Proceed even without a usable TPM / Secure Enclave (test CAs only).
@@ -318,7 +322,8 @@ pub async fn run_resolver(
         Some(p) => Some(crate::perms::load_perms(p)?),
         None => None,
     };
-    let id_map = resolve_id_map_choice(ans, &auth, input.no_id_map).await?;
+    let id_map =
+        resolve_id_map_choice(ans, &auth, input.no_id_map, input.id_map_mode.clone()).await?;
     let no_admin_server = input.no_admin_server;
     // The admin-server step after apply() needs the *actual* config paths this
     // install produces — resolve the template's defaults the same way it will.
@@ -486,6 +491,7 @@ async fn resolve_id_map_choice(
     ans: &mut dyn Answerer,
     auth: &AuthChoice,
     no_id_map: bool,
+    id_map_mode: Option<String>,
 ) -> Result<IdMapMode> {
     if no_id_map {
         return Ok(IdMapMode::Platform);
@@ -502,7 +508,7 @@ async fn resolve_id_map_choice(
             let choice = ans
                 .choice(
                     Field::IdMapMode,
-                    None,
+                    id_map_mode,
                     &["platform", "netidx", "none"],
                     Some("platform"),
                 )
