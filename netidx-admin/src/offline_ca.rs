@@ -11,11 +11,18 @@
 
 use crate::{
     admin_proto::{NodeKind, SERVING_SAN},
+    admin_server::read_autorenew_password,
     ca::{Ca, IssueParams, IssuedFiles, SanEntry},
     ca_store::{CAStore, CaDir, QueuedReq},
+    ca_vault::{self, Unlocked},
+    paths,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use std::{net::IpAddr, path::PathBuf, time::Duration};
+use std::{
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 /// The first DNS SAN of a leaf — the identity name the index keys on.
 pub fn first_dns_san(san: &[SanEntry]) -> Option<String> {
@@ -200,6 +207,74 @@ pub fn sign_and_record(
     Ok(cert)
 }
 
+// -- CA master-key unlock (offline) ------------------------------------------
+//
+// The offline sign/issue path unlocks the CA's keyslot vault to recover the
+// signing key. Two credentials can do it: the box's own `autorenew` slot, read
+// from its keytab (no human secret typed), or the off-box `recovery` password
+// the operator keeps in a safe. These are the pure primitives — try the keytab,
+// fold-and-unlock a typed recovery password, recombine the recovered key with
+// the cert. The Answerer that prompts for the recovery password (and holds one
+// flock across both attempts) lives in [`crate::admin_ops::offline`].
+
+/// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA dir: never
+/// back this file up; recreating it is one `ca auto-approve --rotate`.
+pub fn autorenew_keytab_path() -> Result<PathBuf> {
+    Ok(paths::user_config_root()?.join("autorenew.keytab"))
+}
+
+/// The outcome of trying the box's autorenew keytab as an unlock credential.
+/// [`Absent`](KeytabOutcome::Absent) is the normal case for an offline CA with
+/// no autorenew slot (the keytab file simply isn't there — a silent fall back
+/// to the recovery password). [`Failed`](KeytabOutcome::Failed) means the
+/// keytab was present but could not be read/unsealed or did not unlock this CA
+/// (a different CA dir, a cleared TPM) — the caller notes it, then falls back.
+pub enum KeytabOutcome {
+    Unlocked(Unlocked),
+    Absent,
+    Failed(anyhow::Error),
+}
+
+/// Try to unlock the vault at `cadir` with the box's autorenew credential read
+/// from `keytab`. Pure: it reads (unsealing if needed) the keytab and attempts
+/// the unlock, but never prompts and never falls back — the caller decides what
+/// to do with [`Failed`](KeytabOutcome::Failed). The keytab path is a parameter
+/// (rather than [`autorenew_keytab_path`]) so this stays testable against a
+/// tempdir.
+pub fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutcome {
+    if !keytab.exists() {
+        return KeytabOutcome::Absent;
+    }
+    let pw = match read_autorenew_password(keytab) {
+        Ok(pw) => pw,
+        Err(e) => return KeytabOutcome::Failed(e),
+    };
+    match cadir.vault.read().unlock(&pw) {
+        Ok(u) => KeytabOutcome::Unlocked(u),
+        Err(e) => KeytabOutcome::Failed(e),
+    }
+}
+
+/// Unlock the vault at `cadir` with an operator-typed recovery password,
+/// folding it back to canonical form first (so a transcription that grouped the
+/// quads for readability, or confused O/0 and I/L/1, still unlocks). Pure: the
+/// caller obtains `typed` from the operator (via the Answerer) and hands it
+/// here.
+pub fn unlock_with_recovery(cadir: &CaDir, typed: &str) -> Result<Unlocked> {
+    let pw = ca_vault::normalize_recovery_password(typed);
+    cadir.vault.read().unlock(&pw)
+}
+
+/// Recombine an already-unlocked master key with the CA cert on disk to produce
+/// a signer. The final step of both unlock paths, split out so the flock held
+/// while unlocking can drop before this reads the (public) cert.
+pub fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
+    let cert = std::fs::read(dir.join("certificate.pem"))
+        .with_context(|| format!("reading CA cert in {}", dir.display()))?;
+    Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
+        .with_context(|| format!("loading CA at {}", dir.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +340,113 @@ mod tests {
             PathBuf::from("alice.example.com.pem")
         );
         assert_eq!(default_cert_filename(None), PathBuf::from("certificate.pem"));
+    }
+
+    // -- unlock split --------------------------------------------------------
+    //
+    // These exercise the CA-master-key unlock the offline sign/issue path
+    // depends on, which had NO coverage before the 8b split (the issuance
+    // integration tests build `Ca` directly and never unlock a vault). Stand up
+    // a real vaulted CA in a tempdir — a recovery slot (off-box password) plus
+    // an autorenew slot (the box's keytab) — exactly as the install flow does,
+    // then unlock it both ways.
+
+    /// A vaulted CA in `dir` with a `recovery` slot and an `autorenew` slot,
+    /// mirroring `admin_server`'s test setup and the real install path. Returns
+    /// `(recovery_password, autorenew_password)`; the recovery password is
+    /// freshly minted (as at init) so we can feed it back to `unlock`.
+    fn vaulted_ca(dir: &Path) -> (zeroize::Zeroizing<String>, String) {
+        use crate::ca::{CaParams, Subject};
+        let params = CaParams {
+            directory: dir.to_path_buf(),
+            subject: Subject::cn("test-ca"),
+            san: vec![SanEntry::Dns("test-ca".to_string())],
+            key_bits: 2048, // smaller for test speed
+            validity: Duration::from_secs(30 * 86400),
+        };
+        Ca::init(&params, None).unwrap();
+        let key = std::fs::read(dir.join("private.key")).unwrap();
+        let mut vault = ca_vault::CAVault::new(dir.to_path_buf());
+        let recovery_pw = ca_vault::gen_recovery_password();
+        vault
+            .create(&key, ca_vault::RECOVERY_ADMIN, &recovery_pw, crate::ca_policy::recovery_policy())
+            .unwrap();
+        std::fs::remove_file(dir.join("private.key")).unwrap();
+        let autorenew_pw = "renew-secret-01234".to_string();
+        vault
+            .add_signing_slot(
+                &recovery_pw,
+                crate::admin_server::AUTORENEW_ADMIN,
+                &autorenew_pw,
+                crate::ca_policy::autorenew_policy(),
+            )
+            .unwrap();
+        (recovery_pw, autorenew_pw)
+    }
+
+    #[test]
+    fn recovery_password_unlocks_canonical_and_grouped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (recovery_pw, _) = vaulted_ca(dir.path());
+        let cadir = CaDir::open(dir.path()).unwrap();
+        // The canonical minted form unlocks.
+        let u = unlock_with_recovery(&cadir, &recovery_pw).unwrap();
+        assert_eq!(u.admin, ca_vault::RECOVERY_ADMIN);
+        // The grouped form — what the operator reads back out of the safe —
+        // must ALSO unlock: `unlock_with_recovery` folds the quads back out.
+        // Without the normalize step the spaces would make this fail, so this
+        // is the regression guard for the normalize round-trip.
+        let grouped = ca_vault::group_recovery_password(&recovery_pw);
+        assert_ne!(&*grouped, &*recovery_pw, "grouping must actually change the string");
+        let u2 = unlock_with_recovery(&cadir, &grouped).unwrap();
+        assert_eq!(u2.admin, ca_vault::RECOVERY_ADMIN);
+        // The recovered key recombines with the cert into a usable signer.
+        load_ca_from_unlocked(dir.path(), &u2).unwrap();
+    }
+
+    #[test]
+    fn wrong_recovery_password_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = vaulted_ca(dir.path());
+        let cadir = CaDir::open(dir.path()).unwrap();
+        assert!(unlock_with_recovery(&cadir, "NOT THE PASSWORD").is_err());
+    }
+
+    #[test]
+    fn keytab_absent_is_absent_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = vaulted_ca(dir.path());
+        let cadir = CaDir::open(dir.path()).unwrap();
+        let keytab = dir.path().join("does-not-exist.keytab");
+        assert!(matches!(try_unlock_with_keytab(&cadir, &keytab), KeytabOutcome::Absent));
+    }
+
+    #[test]
+    fn keytab_unlocks_with_the_box_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, autorenew_pw) = vaulted_ca(dir.path());
+        // A plaintext keytab is just the password; the install path seals it to
+        // the TPM when it can, and `read_autorenew_password` handles both.
+        let keytab = dir.path().join("autorenew.keytab");
+        std::fs::write(&keytab, &autorenew_pw).unwrap();
+        let cadir = CaDir::open(dir.path()).unwrap();
+        match try_unlock_with_keytab(&cadir, &keytab) {
+            KeytabOutcome::Unlocked(u) => {
+                assert_eq!(u.admin, crate::admin_server::AUTORENEW_ADMIN)
+            }
+            _ => panic!("expected the keytab to unlock the autorenew slot"),
+        }
+    }
+
+    #[test]
+    fn keytab_with_wrong_password_fails_not_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = vaulted_ca(dir.path());
+        let keytab = dir.path().join("autorenew.keytab");
+        std::fs::write(&keytab, "wrong-password").unwrap();
+        let cadir = CaDir::open(dir.path()).unwrap();
+        // A present-but-wrong keytab is Failed (→ caller notes it and falls back
+        // to the recovery password), NOT Absent (→ silent fall back).
+        assert!(matches!(try_unlock_with_keytab(&cadir, &keytab), KeytabOutcome::Failed(_)));
     }
 }
