@@ -2,7 +2,7 @@
 
 **Status:** Deferred — designed, not scheduled. Too large to land at the end of the
 current release cycle; intended for a future release. Design verified against the
-codebase (file:line references below are accurate as of 2026-06, branch `netidx-conf`).
+codebase (file:line references below are accurate as of 2026-06, branch `netidx-admin`).
 
 ## Context
 
@@ -102,7 +102,7 @@ enum ResolverAddr { Ip(SocketAddr), Dns { hostport: ArcStr } }
   `1.2.3.4:4564` and `[::1]:4564`); on failure, validate a `host:port` shape
   (non-empty host, parseable `u16` port) and store as `Dns`. Existing config files
   (`"1.2.3.4:4564"`) deserialize to `Ip` and re-serialize byte-identically — preserves
-  the `netidx-conf` round-trip test.
+  the `netidx-admin` round-trip test.
 - Use it for the *config* address lists (operators get one friendly `addrs` list that
   accepts both forms):
   - **Client**: `netidx/src/config/mod.rs` `file::Config.addrs` and `Config.addrs`
@@ -168,7 +168,7 @@ client consumes its own config directly.
 - `netidx/src/resolver_server/config.rs` — `file::Referral.addrs` / `MemberServer.addr` type, `check_addrs`, `check()` partition.
 - `netidx/src/resolver_client/read_client.rs` + `write_client.rs` — connect-time resolution + candidate merge.
 - `netidx/src/resolver_server/store.rs` / `mod.rs` — referral construction populating both lists.
-- `netidx-conf/src/client.rs`, `resolver.rs` (+ `template/`) — config tests/builders that use `"...".parse()` now target `ResolverAddr` (still works via `FromStr`); add hostname round-trip/validate tests.
+- `netidx-admin/src/client.rs`, `resolver.rs` (+ `template/`) — config tests/builders that use `"...".parse()` now target `ResolverAddr` (still works via `FromStr`); add hostname round-trip/validate tests.
 
 ## Verification
 
@@ -188,7 +188,7 @@ client consumes its own config directly.
   retry, not a panic/hang. Federation: configure a parent/child referral with a
   hostname and confirm a new client follows it.
 - `cargo build`/`cargo test`/`cargo clippy` on `netidx-core`, `netidx-netproto`,
-  `netidx`, `netidx-conf`.
+  `netidx`, `netidx-admin`.
 
 ## Explicitly out of scope / risks
 

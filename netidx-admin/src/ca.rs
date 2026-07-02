@@ -121,7 +121,7 @@ fn cert_span(cert: &X509) -> Result<Duration> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaLifetimes {
     /// Validity stamped on certs the CA issues itself without an explicit
-    /// request — notably the conf server's own serving cert.
+    /// request — notably the admin server's own serving cert.
     #[serde(with = "humantime_serde")]
     pub leaf_validity: Duration,
     /// Renew the CA cert once its remaining lifetime drops below this.
@@ -637,7 +637,7 @@ pub fn maybe_renew_ca_cert(
     // not hold the external issuer's key, so re-signing here would
     // clobber the external signature and silently revert the
     // intermediate to a self-signed root. The primary gate lives in
-    // conf_server's approve path; this is defense in depth.
+    // admin_server's approve path; this is defense in depth.
     if CaLifetimes::load(ca_dir)?.externally_signed {
         return Ok(false);
     }
@@ -724,7 +724,7 @@ pub fn maybe_renew_ca_cert(
     Ok(true)
 }
 
-/// Inspect a PEM-encoded CSR — the engine half of `netidx conf ca sign`'s
+/// Inspect a PEM-encoded CSR — the engine half of `netidx admin ca sign`'s
 /// pre-flight confirmation. Returns the requested subject CN and the
 /// embedded SAN list. The CA admin is expected to look at this before
 /// signing, since `Ca::sign_request` deliberately ignores whatever SAN
@@ -830,7 +830,7 @@ pub struct CsrSummary {
 
 /// Generate a private key + CSR with the given subject and SANs.
 /// Useful when the CSR will be signed by a different CA than this
-/// process owns (e.g. handed off to a remote conf-server). The CSR's
+/// process owns (e.g. handed off to a remote admin-server). The CSR's
 /// requested SAN is also embedded so a signing party can verify the
 /// request before signing.
 /// Generate a fresh RSA keypair and a matching CSR. The CSR is
@@ -1501,7 +1501,7 @@ mod tests {
     /// cert "live", wedging its replacement and pinning it in the CRL.
     #[test]
     fn commit_issuance_records_the_signed_validity_not_the_requested() {
-        use crate::{ca_store, conf_proto::NodeKind};
+        use crate::{ca_store, admin_proto::NodeKind};
         let dir = tempfile::tempdir().unwrap();
         let ca = small_ca(dir.path()); // 30-day CA
         let name = "host.example.com";

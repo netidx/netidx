@@ -19,7 +19,7 @@
 //! tests can't see.
 //!
 //! What this layer does NOT cover (by design — see the discussion at
-//! the top of `netidx-tools/src/conf/init.rs`):
+//! the top of `netidx-tools/src/admin/init.rs`):
 //!
 //! - systemd / launchd install (no service supervisor in-process).
 //! - daemonize (process fork; can't happen inside a tokio test).
@@ -527,7 +527,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     let cadir = ca_store::CaDir::open(ca_dir.clone())?;
     cadir.store.lock().commit_signed(&ca_store::IssuedRecord {
         req: ca_store::QueuedReq::new(
-            netidx_admin::conf_proto::NodeKind::Resolver,
+            netidx_admin::admin_proto::NodeKind::Resolver,
             String::new(),
             "resolver.revoked.example".into(),
             std::time::Duration::from_secs(30 * 86400),

@@ -24,7 +24,7 @@
   (multiple revocable admins), syncthing-style identicon verification of
   the CA identity, runs as an optional activation unit. See
   design/ca-server.md.
-  - DONE: the engine (`netidx-conf`): `fingerprint`, `ca_vault`,
+  - DONE: the engine (`netidx-admin`): `fingerprint`, `ca_vault`,
     `ca_proto`, `ca_join`, `ca_server` + `Ca::from_pem` /
     `Ca::init_vaulted` + algorithm-aware CSR check; the server returns
     the full trusted bundle. Tested, incl. real-TLS end-to-end.

@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 // The policy model lives in the cross-platform `ca_policy` module (a
-// Windows admin client carries these types over the conf plane). Re-export
+// Windows admin client carries these types over the admin plane). Re-export
 // so existing `ca_vault::Policy` / `SlotKind` / `AdminInfo` paths in unix
 // code keep working and the vault body can name them unqualified.
 pub use crate::ca_policy::{AdminInfo, Policy, SlotKind};
@@ -46,7 +46,7 @@ const VAULT_VERSION: u32 = 1;
 /// The off-box break-glass signing credential the operator stores in a
 /// safe — the only key-recovery credential that ever leaves the box.
 /// Minted once at init via [`create`]; rotated on-box via
-/// `conf ca recovery rotate`. With [`crate::conf_server::AUTORENEW_ADMIN`]
+/// `admin ca recovery rotate`. With [`crate::admin_server::AUTORENEW_ADMIN`]
 /// these are the only two signing (master-key-holding) slots.
 pub const RECOVERY_ADMIN: &str = "recovery";
 
@@ -56,7 +56,7 @@ pub const RECOVERY_ADMIN: &str = "recovery";
 /// authorizes what.
 pub fn is_reserved_admin(name: &str) -> bool {
     name.eq_ignore_ascii_case(RECOVERY_ADMIN)
-        || name.eq_ignore_ascii_case(crate::conf_server::AUTORENEW_ADMIN)
+        || name.eq_ignore_ascii_case(crate::admin_server::AUTORENEW_ADMIN)
 }
 
 /// Crockford base32 alphabet (digits + uppercase, excluding I L O U — the

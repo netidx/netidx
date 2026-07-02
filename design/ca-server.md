@@ -1,36 +1,36 @@
 # CA server — design
 
-> **Superseded in part by [`conf-server.md`](conf-server.md).** The CA
-> server has been generalized into the **conf server**: one per-host
+> **Superseded in part by [`admin-server.md`](admin-server.md).** The CA
+> server has been generalized into the **admin server**: one per-host
 > daemon with roles (`ca`, `resolver`, `id-map`), mDNS discovery, a
 > `GetInfo` protocol, network enrollment, and CA-pushed id-map
 > registration. Module renames: `ca_proto` → `conf_proto`, `ca_join` →
-> `conf_client`, `ca_server` → `conf_server`; the reserved serving SAN
-> is now `netidx-conf-server`; the daemon config is `conf-server.json`
-> (`netidx conf component server run`). The vault (§ keyslots), signing engine,
+> `conf_client`, `ca_server` → `admin_server`; the reserved serving SAN
+> is now `netidx-admin-server`; the daemon config is `admin-server.json`
+> (`netidx admin component server run`). The vault (§ keyslots), signing engine,
 > issuance policy, and the two-connection fingerprint trust model below
 > are unchanged and remain authoritative.
 
 **Status: Engine + CLI + activation/service setup + composite
 resolver-install flow implemented and tested end-to-end.** Remaining is
-only `ca migrate` (v1 → vault). `netidx conf ca init` and the
-`netidx conf resolver install` "create a new CA" branch now share one
+only `ca migrate` (v1 → vault). `netidx admin ca init` and the
+`netidx admin resolver install` "create a new CA" branch now share one
 entry point, `create_vaulted_ca` (§15), so creating a CA is identical
 either way — vault, identicon, and the "set up the CA server?" prompt.
 
 Built and tested:
-- **Engine** (`netidx-conf`, real-TLS e2e): `fingerprint` (identicon),
+- **Engine** (`netidx-admin`, real-TLS e2e): `fingerprint` (identicon),
   `ca_vault` (LUKS keyslots), `ca_proto`, `ca_join` (TOFU client + CSR),
   `ca_server` (policy + sign + TLS serve), plus `Ca::from_pem` /
   `Ca::init_vaulted` and an algorithm-aware CSR strength check. The
   server returns the full **trusted bundle**, so a join installs trust
   with no file copying.
-- **CLI** (`netidx conf ca`): `init` (vaulted CA + identicon + serving
+- **CLI** (`netidx admin ca`): `init` (vaulted CA + identicon + serving
   cert + `server.json`), `serve`, `admin add|remove|list`,
   `fingerprint`, `join`. Smoke-tested via PTY: init → serve → join
   installs `certificate.pem` / `private.key` / `trusted.pem` and writes
   an audit line; the identicon shown at join matches the one at init.
-- **Template integration** (`conf init … --auth tls`): the generate
+- **Template integration** (`admin init … --auth tls`): the generate
   paths (`resolver_tls_generate`, `prompt_tls_client_identity`) first
   offer "get this cert from a CA server?", seeded with the upstream
   resolver IP; yes → join over the network, no → the existing local-CA /
@@ -49,19 +49,19 @@ Multiple setup steps can each install activation units that need
 unattended supervision, but the activation supervisor should be
 registered as an OS service **once** per top-level process. The design:
 
-- **`ServiceNeed`** (`conf/service.rs`): `None | User | System`, with a
+- **`ServiceNeed`** (`admin/service.rs`): `None | User | System`, with a
   `merge` that ranks `System > User > None`. A setup step returns the
   need its units imply (a CA server → `System`; a resolver → `System`;
   a workstation → `User`; a client-only publisher → `None`).
 - **One entry point**, `service::offer(need, gate)`: given the merged
   need and the `--dry-run/--no-service/--with-service` gate, it offers
   (or installs, or skips) the OS service exactly once. Both the
-  `conf install` templates (via `finish`) and `ca init` call it.
+  `admin install` templates (via `finish`) and `ca init` call it.
 - **Composition**: a flow that stands up several daemons drops all their
   units into one activation dir and offers a single service.
-  **Implemented**: `netidx conf resolver install` creating a CA calls
+  **Implemented**: `netidx admin resolver install` creating a CA calls
   the shared `create_vaulted_ca` (the same entry point as
-  `netidx conf ca init`), which writes the `ca.unit` into the resolver's
+  `netidx admin ca init`), which writes the `ca.unit` into the resolver's
   *own* activation dir; the resolver install then makes its single
   system-service offer, and that one supervisor runs the resolver,
   id-map, and CA-server units together. The resolver always needs a
@@ -89,7 +89,7 @@ manual shuttling of CSR / cert files between machines.
 
 This supersedes the *certificate-issuance* half of the "Layer 4
 configuration server" sketch in
-[`netidx-conf-future.md`](netidx-conf-future.md) (multicast discovery +
+[`netidx-admin-future.md`](netidx-admin-future.md) (multicast discovery +
 per-admin SCRAM). Perms-publishing and admin RPCs remain future Layer-4
 work; this design is a **standalone CA-signing daemon** only.
 
@@ -99,14 +99,14 @@ work; this design is a **standalone CA-signing daemon** only.
 
 > **Update:** the manual-CSR wizard path described below
 > (`generate_csr_and_wait_for_cert` and the BYO-cert prompts) has since
-> been **removed entirely** — the `conf install` wizard now always uses
-> the netidx CA and enrolls over the conf plane. Bringing your own cert is
+> been **removed entirely** — the `admin install` wizard now always uses
+> the netidx CA and enrolls over the admin plane. Bringing your own cert is
 > a self-managed setup done outside the wizard. This section is kept as
 > design history for how the CA server subsumed the old flow. For chaining
 > the netidx CA to an existing PKI, see *Externally-signed CA* at the end.
 
 Today the TLS "generate" path without a local CA on the joining box is
-`generate_csr_and_wait_for_cert` (`netidx-tools/src/conf/init.rs`): it
+`generate_csr_and_wait_for_cert` (`netidx-tools/src/admin/init.rs`): it
 writes a key + CSR locally, prints
 
 ```
@@ -120,7 +120,7 @@ it signed, and copies two files back. The CA daemon turns that whole
 out-of-band loop into one prompt:
 
 ```
-$ netidx conf init resolver --auth tls
+$ netidx admin init resolver --auth tls
 resolver TLS name: resolver.ryu-oh.org
 resolver certificate [local-ca, ca-server, manual-csr]: ca-server
 CA server address [192.168.1.10:4565]:           # default = upstream resolver IP : CA port
@@ -150,9 +150,9 @@ identity dir via the existing install machinery — no files moved by hand.
 Three pieces:
 
 - **CA box.** Holds the CA directory (cert + vault-encrypted key +
-  keyslots + serial + audit log) and runs `netidx conf ca serve`,
+  keyslots + serial + audit log) and runs `netidx admin ca serve`,
   installed as an activation unit. Unix-only (the signing engine is
-  openssl-backed, like the rest of `netidx-conf::ca`).
+  openssl-backed, like the rest of `netidx-admin::ca`).
 - **Joining node** (the CLI). Runs cross-platform — **including
   Windows**. It generates the keypair + CSR locally, connects to the CA
   daemon over TLS, verifies the CA identity by eyeball (identicon),
@@ -172,7 +172,7 @@ confirmation, so it can't be harvested by an impostor daemon.
 
 ```
                         ┌──────────────────────── CA box (unix) ─────────┐
-  joining node          │  netidx conf ca serve  (activation unit)        │
+  joining node          │  netidx admin ca serve  (activation unit)        │
   (any OS)              │     ├─ certificate.pem      (CA cert, public)   │
     │  TLS connect      │     ├─ key.enc              (CA key, MK-wrapped) │
     │ ───────────────►  │     ├─ keyslots.json        (LUKS-style slots)   │
@@ -277,7 +277,7 @@ CSR via the existing `Ca::sign_request`, and drop.
 ### Migration from the v1 single-password CA
 
 v1 wrote the CA key as a single PKCS#8 EncryptedPrivateKeyInfo. A
-one-shot `netidx conf ca migrate` opens it with the old password,
+one-shot `netidx admin ca migrate` opens it with the old password,
 generates an MK, rewraps into the vault, and writes slot 0 — **the CA
 cert and key material are unchanged**, so the fingerprint/identicon and
 every already-issued cert stay valid. Unencrypted v1 CAs (plaintext key)
@@ -335,7 +335,7 @@ Shown at three moments, all rendering the same artifact for the same CA:
 2. `ca fingerprint` — reprint on demand.
 3. The join prompt — "does this match?"
 
-Lives in a new pure-Rust, openssl-free module `netidx-conf::fingerprint`
+Lives in a new pure-Rust, openssl-free module `netidx-admin::fingerprint`
 (`fn fingerprint(cert_der) -> Fingerprint` with `text()` and
 `identicon(ColorMode)` renderers), so both the daemon side and the
 cross-platform client side use the exact same code.
@@ -388,7 +388,7 @@ daemon config; the CA key remains the only vault-protected secret.
 
 ## 7. Join flow, end to end
 
-On the joining node (`netidx conf init {resolver,publisher,workstation}
+On the joining node (`netidx admin init {resolver,publisher,workstation}
 --auth tls`, "ca-server" option — and the client-identity cascade
 `prompt_tls_client_identity`):
 
@@ -418,17 +418,17 @@ that function stays only as the fully-offline fallback (`manual-csr`).
 
 CA box:
 ```
-netidx conf ca init            # create CA → identicon → optionally install+start the daemon
-netidx conf ca serve   [-c <ca-server.json>] [-f]     # the daemon (activation unit calls this)
-netidx conf ca fingerprint     # reprint fingerprint + identicon
-netidx conf ca admin add <name> [--allow-san <glob>...] [--max-validity-days N]
-netidx conf ca admin remove <name>
-netidx conf ca admin list
-netidx conf ca migrate         # v1 single-password key → vault slot 0
+netidx admin ca init            # create CA → identicon → optionally install+start the daemon
+netidx admin ca serve   [-c <ca-server.json>] [-f]     # the daemon (activation unit calls this)
+netidx admin ca fingerprint     # reprint fingerprint + identicon
+netidx admin ca admin add <name> [--allow-san <glob>...] [--max-validity-days N]
+netidx admin ca admin remove <name>
+netidx admin ca admin list
+netidx admin ca migrate         # v1 single-password key → vault slot 0
 ```
 
 Joining node: no new top-level command — the `ca-server` option in the
-existing `conf init … --auth tls` cascade, plus flags for scripting:
+existing `admin init … --auth tls` cascade, plus flags for scripting:
 `--ca-server <addr>`, `--ca-admin <name>`, `--ca-pin <sha256>` (skip the
 interactive identicon confirm for non-TTY installs).
 
@@ -440,7 +440,7 @@ interactive identicon confirm for non-TTY installs).
 the CA server daemon? [Y/n]*. Yes ⇒ write a `ca.unit` (system scope,
 boot-triggered, run as the netidx service user — same machinery as
 `resolver.unit` / `id-map.unit`) whose `ExecStart` is
-`netidx conf ca serve -c <ca-server.json> -f`, and offer to start it via
+`netidx admin ca serve -c <ca-server.json> -f`, and offer to start it via
 the OS-service installer. Declining leaves a fully-formed offline CA.
 
 **Daemon config** `~/.config/netidx/ca-server.json` (or the system
@@ -462,7 +462,7 @@ operator to type a single IP address. In the common small-org case the
 CA daemon runs on the resolver box, so the suggested IP is usually
 correct; the multicast machinery from the old sketch is dropped
 entirely. (The resolver-address IP/port split has already landed across
-all the init flows that take one — `conf {resolver,publisher} install`
+all the init flows that take one — `admin {resolver,publisher} install`
 and the parent-referral cascade the workstation uses; the CA-server
 prompt arrives with this daemon.)
 
@@ -470,10 +470,10 @@ prompt arrives with this daemon.)
 
 ## 10. Crate layout & new dependencies
 
-Engine code in `netidx-conf` (where `ca.rs`/`tls.rs` already live):
+Engine code in `netidx-admin` (where `ca.rs`/`tls.rs` already live):
 
 ```
-netidx-conf/src/
+netidx-admin/src/
   ca.rs            existing signer; add `Ca::from_pem(key, cert)` (in-memory, no file read)
   ca/vault.rs      NEW — keyslot vault: init / unlock / add_slot / remove_slot / migrate
   ca/server.rs     NEW — the daemon: TLS accept loop, policy check, audit log (unix-only)
@@ -482,7 +482,7 @@ netidx-conf/src/
   template/…       add the `ca.unit` emitter alongside resolver/id-map
 ```
 
-CLI glue in `netidx-tools/src/conf/ca.rs` (subcommands) and
+CLI glue in `netidx-tools/src/admin/ca.rs` (subcommands) and
 `init.rs` (the `ca-server` branch of the TLS cascade).
 
 New workspace deps: `argon2` (Argon2id KDF), `sha2` (fingerprint,
@@ -526,9 +526,9 @@ Already present and reused: `rustls`, `tokio-rustls`, `rustls-pemfile`,
 ## 12. Deferred / not in this piece
 
 - Perms publishing + admin RPCs + the Graphix perms editor (the rest of
-  Layer 4 — stays in `netidx-conf-future.md`).
+  Layer 4 — stays in `netidx-admin-future.md`).
 - Leaf-cert revocation / CRL (CA-wide; orthogonal).
-- Conf-server clustering / HA for the CA daemon (one CA box for now;
+- Admin-server clustering / HA for the CA daemon (one CA box for now;
   re-issue is idempotent, so a cold standby that shares the CA dir is the
   poor-man's HA).
 - Rotating the CA itself (new CA cert) and cross-signing for rollover.
@@ -550,7 +550,7 @@ Already present and reused: `rustls`, `tokio-rustls`, `rustls-pemfile`,
 The init UX change that this design relies on — asking for a
 resolver-server address as an **IP plus a separately-prompted port**
 (default 4564) so the operator types one IP and the CA-server prompt can
-reuse it — has already shipped in `netidx-tools/src/conf/init.rs` at
+reuse it — has already shipped in `netidx-tools/src/admin/init.rs` at
 every site that takes such an address: `run_resolver` (advertised
 address), `run_publisher` (cluster address), and `prompt_parent_referral`
 (the upstream-resolver address the workstation and a resolver-with-parent
@@ -582,7 +582,7 @@ ask for), all sharing the `prompt_resolver_port` helper.
   policy must never grant that name to a normal join. The control
   protocol is length-prefixed JSON (not Pack) — it's a one-shot control
   path, so simplicity wins. `tokio` was promoted from an optional to a
-  base dependency of `netidx-conf` for the daemon/client.
+  base dependency of `netidx-admin` for the daemon/client.
 
 ---
 
@@ -591,23 +591,23 @@ ask for), all sharing the `prompt_resolver_port` helper.
 An advanced, non-default option runs the netidx CA as an **intermediate**
 whose certificate is signed by an external PKI, instead of self-signing
 it. The CA *key* is still netidx-generated and vault-sealed exactly as
-usual — only the CA cert's issuer changes. This keeps the entire conf
+usual — only the CA cert's issuer changes. This keeps the entire admin
 plane (discovery, enrollment, renewal, RBAC, remote management) while
 letting the netidx CA chain up to an organization's existing root, so
 third parties that trust that root also trust netidx-issued leaves.
 
 Because netidx does not hold the external issuer's key, it cannot re-sign
 its own CA cert: **CA-cert auto-renewal is disabled** in this mode
-(`CaLifetimes.externally_signed`, gated in `conf_server`'s approve path
+(`CaLifetimes.externally_signed`, gated in `admin_server`'s approve path
 and defended in `maybe_renew_ca_cert`). The operator re-signs out of band
-when it approaches expiry; the conf server warns during the renewal
+when it approaches expiry; the admin server warns during the renewal
 window. Leaf issuance and leaf/serving-cert renewal are unaffected — the
 CA still holds its key and signs normally.
 
 ### Two-phase ceremony (one command after bootstrap)
 
 ```
-$ netidx conf ca init --external-sign        # phase 1: bootstrap
+$ netidx admin ca init --external-sign        # phase 1: bootstrap
   ...generates the CA key, seals the vault (recovery slot; for a served
   CA also the box autorenew slot + the superuser role slot), writes
   ca.<domain>.csr, and STOPS. No certificate.pem is written — its
@@ -615,7 +615,7 @@ $ netidx conf ca init --external-sign        # phase 1: bootstrap
 
 # get ca.<domain>.csr signed by your PKI as a subordinate CA, then:
 
-$ netidx conf ca external renew <signed-cert.pem> [--root <root.pem>]
+$ netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]
   ...validates the signed cert (its key matches the vaulted CA key, it is
   a CA cert, and it chains to the external root), installs it, and — on
   the first install — finishes the served-CA setup (serving cert, config)
@@ -648,7 +648,7 @@ on their next renewal).
 
 For a third party to chain a netidx **data-plane** serving cert
 (resolver/publisher) up to the external root, that leaf must be
-*presented* as `[leaf, intermediate]`. The conf serving chain already is
+*presented* as `[leaf, intermediate]`. The admin serving chain already is
 (`server.rs`); extending data-plane serving certs to present the
 intermediate when the CA is externally signed is a scoped, third-party-
 only follow-up (netidx-internal validation pins the CA by key and does

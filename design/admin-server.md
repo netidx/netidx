@@ -1,11 +1,11 @@
-# Conf server — design
+# Admin server — design
 
 **Status: implemented.** The CA server (`design/ca-server.md`) has been
-generalized into the **conf server**: a per-host daemon that makes
+generalized into the **admin server**: a per-host daemon that makes
 netidx setup discovery-driven. Every host running a netidx server
 component (resolver, CA, id-map) runs one; it advertises its roles over
 mDNS and answers setup questions over TLS. The CA is now a *role* of
-the conf server rather than a separate daemon. The vault, signing
+the admin server rather than a separate daemon. The vault, signing
 engine, and join trust model from the CA-server design are unchanged
 and remain documented there.
 
@@ -14,7 +14,7 @@ and remain documented there.
 Interactive Q&A doesn't scale to a distributed system: every setup
 improvement before this (resolver TLS-name probe, `user.domain` SAN
 suggestion, CA join with fingerprint confirm) was an ad-hoc special
-case of "ask the network instead of the human." The conf server is the
+case of "ask the network instead of the human." The admin server is the
 generalization. The UX benchmark is syncthing; the trust model is
 better than syncthing's because netidx has a CA: the human confirms
 **one** fingerprint glyph per network, ever, instead of one per device
@@ -22,9 +22,9 @@ pair.
 
 ## Trust model
 
-1. **The conf plane is always TLS, rooted at the CA — regardless of
+1. **The admin plane is always TLS, rooted at the CA — regardless of
    data-plane auth.** On a Kerberos (or anonymous) network the CA's
-   scope shrinks to conf-server serving certs; the glyph confirm,
+   scope shrinks to admin-server serving certs; the glyph confirm,
    server-to-server PKI, and pushes work identically everywhere.
 2. **mDNS beacons are hints, never trusted.** TXT carries the domain,
    roles, and a short fingerprint purely for candidate addresses and
@@ -36,8 +36,8 @@ pair.
    Inspection is its own connection that sends nothing secret and
    closes before credentials are typed; everything after it pins the
    presented CA cert to the confirmed fingerprint.
-4. **Reserved serving SAN.** Every conf server serves TLS with a
-   CA-issued cert whose single DNS SAN is `netidx-conf-server`
+4. **Reserved serving SAN.** Every admin server serves TLS with a
+   CA-issued cert whose single DNS SAN is `netidx-admin-server`
    (`conf_proto::SERVING_SAN`). The Sign path refuses that name
    unconditionally (even under a `*` policy glob); it is minted only by
    the local setup path on the CA host or by the policy-gated network
@@ -46,14 +46,14 @@ pair.
    host's domain + roles; it's trustworthy because the serving chain
    roots at the confirmed CA and the leaf carries the reserved SAN.
 6. **Server-to-server uses real PKI, not TOFU.** Server hosts have the
-   CA bundle installed, so a conf server connecting to a peer verifies
-   it with webpki (`ServerName = "netidx-conf-server"`) and presents
+   CA bundle installed, so a admin server connecting to a peer verifies
+   it with webpki (`ServerName = "netidx-admin-server"`) and presents
    its own serving cert as the client certificate. The receiving
    daemon's client-cert verification is *optional* (join clients have
    no cert yet); requests that mutate host state (`AddIdentity`)
    require a verified reserved-SAN client cert.
 
-## Protocol (`netidx-conf/src/conf_proto.rs`)
+## Protocol (`netidx-admin/src/conf_proto.rs`)
 
 Length-prefixed JSON over TLS, port 4565. A connection is: TLS accept,
 `ClientHello`/`ServerHello` exchange, then exactly **one** `Request`
@@ -76,10 +76,10 @@ Request::Deny(…)                 → DenyResponse        (ca role, admin-authe
 
 - **GetInfo** returns *local facts + known peers*: the network domain,
   where the CA is, this host's resolver (address + data-plane auth:
-  anonymous / krb5 `spn` / tls `name`), and the other conf servers this
+  anonymous / krb5 `spn` / tls `name`), and the other admin servers this
   one knows of. Servers never fan out to answer it — the **client**
   walks `peers` (deduped, cycle-safe, every hop pinned) and aggregates.
-  One reachable conf server maps the whole network, so the manual
+  One reachable admin server maps the whole network, so the manual
   fallback on mDNS-hostile networks is a single address.
 - **Sign** is the CA-server join, unchanged at its core (vault unlock,
   per-admin policy, audit). The request carries the id-map groups the
@@ -91,7 +91,7 @@ Request::Deny(…)                 → DenyResponse        (ca role, admin-authe
   identity to every id-map host it knows (configured peers ∪ a 2s mDNS
   browse; the local map is written directly). Push failures degrade to
   `warnings` in the response — the cert is valid regardless.
-- **Enroll** mints a new conf server: admin password + the
+- **Enroll** mints a new admin server: admin password + the
   `may_enroll_servers` policy bit authorize issuing the reserved SAN.
   The request carries the enrollee's listen address; the CA appends it
   to its own `peers` (a local write — no push), which makes the CA host
@@ -134,13 +134,13 @@ lives), audited as `op=approve`; the outcome is deposited as a sidecar
 the daemon serves to `Poll` idempotently. `Deny` carries a reason the
 enrollee sees.
 
-The admin works the queue with `netidx conf ca approve`:
+The admin works the queue with `netidx admin ca approve`:
 list → pick → match the code → choose groups → approve, or deny. It
-finds the conf server via `--server`, the host's own
-`conf-server.json`, or discovery — an enrollment admin needs no shell
+finds the admin server via `--server`, the host's own
+`admin-server.json`, or discovery — an enrollment admin needs no shell
 access to the CA host, just an admin keyslot.
 
-**Conf-server enrollment queues too** (`EnqueueRequest.enroll_listen =
+**Admin-server enrollment queues too** (`EnqueueRequest.enroll_listen =
 Some(addr)`): a second resolver's install enqueues its reserved-SAN
 serving-cert request under the same code ceremony instead of demanding
 an admin password at its keyboard. The entry lists as `CONF-SERVER
@@ -159,7 +159,7 @@ The CA keeps an append-only index of everything it has ever signed
 inside `Ca::sign_request`, so it is complete by construction). The
 index is what makes certificates manageable by *name*:
 
-- **`netidx conf ca revoke`** lists live identities, shows the glyph
+- **`netidx admin ca revoke`** lists live identities, shows the glyph
   the enrollment showed, revokes every live serial for the chosen name
   (or `--serial` for one cert), records the reason, re-signs the CRL
   with the admin's password, installs it beside the local resolver's
@@ -201,12 +201,12 @@ anyway. The pieces:
   `verified_renewal`: cryptographic continuation, no glyph. Approval
   skips the SAN globs and the one-live-cert rule, ignores groups
   (the identity already exists in the id-map), allows the reserved
-  serving SAN (conf servers renew themselves), and audits `op=renew`.
+  serving SAN (admin servers renew themselves), and audits `op=renew`.
   A revoked serial never verifies — a thief with stolen cert+key falls
   through to the glyph-gated queue, in front of an admin's eyes.
-- **The renewal daemon** (`netidx conf component tls auto-renew run`, installed by every
+- **The renewal daemon** (`netidx admin component tls auto-renew run`, installed by every
   TLS install — workstation, publisher, resolver, CA host): scans this
-  host's identities (client config, resolver config, conf-server
+  host's identities (client config, resolver config, admin-server
   serving cert), and inside the window — `min(30d, validity/3)` —
   queues a renewal with a **fresh key**, polls, and installs
   atomically. Request ids persist beside the cert (`renewal.id`) so
@@ -229,9 +229,9 @@ anyway. The pieces:
 - **Auto-approving renewals** (`ca auto-approve`, the lazy-correct default,
   asked at CA creation, default yes): a dedicated `autorenew` keyslot
   with an **empty policy** — its password can approve continuations and
-  nothing else (no SANs, no groups, no enrollment). The conf-server
+  nothing else (no SANs, no groups, no enrollment). The admin-server
   daemon, the CA's sole owner, does the approving **in-process**: when
-  the CA role's `autorenew` field (in `conf-server.json`) names the
+  the CA role's `autorenew` field (in `admin-server.json`) names the
   keytab, each sweep it reads the keytab, unlocks the slot, and approves
   every pending *verified renewal* the same way a human admin would
   (audited `op=renew`) — there is no separate approval process. The `ca
@@ -239,7 +239,7 @@ anyway. The pieces:
   config at its keytab, which lives in
   `${config}/netidx/autorenew.keytab` (0600, deliberately outside the CA
   dir — never back it up); `--rotate` is the one-command kill-and-replace
-  (restart the conf server to pick up the new keytab). Invariant: **no
+  (restart the admin server to pick up the new keytab). Invariant: **no
   new identity without a human; continuations are automatic.**
 
 ### The keytab at rest (TPM sealing)
@@ -269,7 +269,7 @@ stop renewal (an outage on a delay timer); the honest threat model is
 at-rest/offline theft, not live-host compromise — root on the running
 box can unseal, exactly as it could have read the plaintext. Unseal
 failure (TPM cleared, board swapped) is a screaming error whose
-message names the fix: `netidx conf ca auto-approve --rotate`.
+message names the fix: `netidx admin ca auto-approve --rotate`.
 Operational note: on linux the device node is root:tss, so the CA
 user needs `tss` group membership — without it, setup falls back to
 plaintext and says so. On Windows, TBS brokers access for any user;
@@ -325,7 +325,7 @@ At issue, every flow asks once — `choose_key_protection`, also the
   pre-TPM behavior.
 - **none**: plaintext, file modes only.
 
-Daemon serving keys (conf server, local and enrolled) skip the
+Daemon serving keys (admin server, local and enrolled) skip the
 question — a daemon can't type, so they're sealed-or-plaintext
 automatically with a printed note. The identity installer copies
 sidecars with their keys (and clears stale ones — a leftover sidecar
@@ -343,24 +343,24 @@ which is the point of the whole renewal chapter: keys are disposable.
   when enrolling a node; the actual choice is made per-enrollment in
   the `SignRequest` and validated against this set. Empty ⇒ this
   admin's signs never register identities. Default suggestion: `users`.
-- `may_enroll_servers: bool` — whether this admin can grow the conf
-  plane. More privileged than any SAN glob (a rogue conf server can
+- `may_enroll_servers: bool` — whether this admin can grow the admin
+  plane. More privileged than any SAN glob (a rogue admin server can
   impersonate the network), so it defaults on only for the founding
   admin and off for added admins.
 
-## Discovery (`netidx-conf/src/discovery.rs`)
+## Discovery (`netidx-admin/src/discovery.rs`)
 
 mDNS/DNS-SD via the pure-Rust `mdns-sd` crate (no avahi/Bonjour
 dependency; a Windows workstation browses with the same stack).
-Service type `_netidx-conf._tcp.local.`; TXT: `v=1`, `domain`, `roles`
+Service type `_netidx-admin._tcp.local.`; TXT: `v=1`, `domain`, `roles`
 (csv), `fp` (short fingerprint, display hint). The daemon advertises
 unless `mdns: false`; installers browse for ~3s and group results by
 domain. Networks that filter multicast set `mdns: false` and rely on
 `peers` / the manual-address prompt.
 
-## Config (`conf-server.json`)
+## Config (`admin-server.json`)
 
-Written by the install flows, read by `netidx conf component server run`. Roles
+Written by the install flows, read by `netidx admin component server run`. Roles
 are explicit — the daemon never guesses from what's lying around:
 
 ```json
@@ -381,8 +381,8 @@ are explicit — the daemon never guesses from what's lying around:
 }
 ```
 
-Canonical locations: `${config}/netidx/conf-server.json`, then
-`/etc/netidx/conf-server.json`.
+Canonical locations: `${config}/netidx/admin-server.json`, then
+`/etc/netidx/admin-server.json`.
 
 ## Install flows
 
@@ -390,14 +390,14 @@ The probe outcome is a three-state value threaded through every
 sub-flow that could offer a network join: `Have(network)` (discovered
 and glyph-confirmed — use it, ask nothing), `DontHave` (probed and/or
 declined — never re-offer), `NotProbed` (CLI-flag path, non-TTY — a
-sub-flow that wants a conf server probes itself; this is also how
-`netidx conf component tls join` without `--server` finds the network). The
-operator answers the conf-server question at most once per install.
+sub-flow that wants a admin server probes itself; this is also how
+`netidx admin component tls join` without `--server` finds the network). The
+operator answers the admin-server question at most once per install.
 
 - **Workstation / publisher**: browse → pick the domain (asked only if
   more than one is found; manual address fallback when none) →
   fetch + glyph-confirm the network identity → aggregate GetInfo across
-  its conf servers → the parent referral gets **every** resolver with
+  its admin servers → the parent referral gets **every** resolver with
   its per-address auth. Then:
   - TLS network: one join (suggested SAN `user.<domain>`, id-map
     groups for the new identity — default `users` — then admin +
@@ -407,18 +407,18 @@ operator answers the conf-server question at most once per install.
     IdM). The glyph confirm is the only human input.
 - **First resolver**: per-box single-member resolver config (the
   members list remains a hand-managed central-config convenience; the
-  conf-server flows never produce multi-member configs, and peer
+  admin-server flows never produce multi-member configs, and peer
   resolvers stay mutually unaware). The CA is created for TLS networks
   without asking — it signs the data plane anyway — and for krb5
-  networks too, scoped to the conf plane. `setup_server` writes a
-  ca-role `conf-server.json`; after the template applies, the install
+  networks too, scoped to the admin plane. `setup_server` writes a
+  ca-role `admin-server.json`; after the template applies, the install
   adds the resolver / id-map roles to it.
 - **Second resolver**: discovers the network, imports its settings
   (auth scheme, domain), CA-joins for its resolver identity (suggested
   `resolver.<domain>`), prompts for an SPN on krb5 networks, then
-  **enrolls** a conf server here: the network CA signs its reserved-SAN
-  serving cert over the wire, the host writes `conf-server.json` with
-  its roles + the conf servers it found as peers, and drops the
+  **enrolls** a admin server here: the network CA signs its reserved-SAN
+  serving cert over the wire, the host writes `admin-server.json` with
+  its roles + the admin servers it found as peers, and drops the
   activation unit. Nothing is pushed to existing resolvers.
 
 ### Install profiles
@@ -426,20 +426,20 @@ operator answers the conf-server question at most once per install.
 The installer asks for *intent* (what auth scheme, what network) and
 derives the components; it never offers a choice whose "no" produces a
 broken network. The matrix is `conf_plane_decision` +
-`resolve_id_map_choice` in `netidx-tools/src/conf/init.rs` (both
+`resolve_id_map_choice` in `netidx-tools/src/admin/init.rs` (both
 exhaustively tested there); this table mirrors them — change all three
 together.
 
-The conf-server column applies to fresh networks and joins alike:
+The admin-server column applies to fresh networks and joins alike:
 enrolling on an existing network queues for remote approval (the
 approving admin's `may_enroll_servers` is the gate), so no admin needs
 to be at the keyboard and the join side has no reason to differ.
 
-| data plane         | CA               | conf server      | id-mapper        | renew daemon |
+| data plane         | CA               | admin server      | id-mapper        | renew daemon |
 |--------------------|------------------|------------------|------------------|--------------|
 | TLS                | always (fresh: signs the data plane; joining: exists upstream) | always | always | always |
-| krb5               | always (conf plane only; joining: exists upstream) | always | asked (default no: krb5 sites have a system IdM) | with the conf server |
-| anonymous          | with the conf server | asked (default yes — labs may not want the machinery) | never | with the conf server |
+| krb5               | always (admin plane only; joining: exists upstream) | always | asked (default no: krb5 sites have a system IdM) | with the admin server |
+| anonymous          | with the admin server | asked (default yes — labs may not want the machinery) | never | with the admin server |
 | local (workstation)| —                | —                | never            | only with TLS parent identities |
 
 Expert escapes, all warned about where they're used:
@@ -447,27 +447,27 @@ Expert escapes, all warned about where they're used:
 - `--no-id-map` — a TLS resolver without it maps every cert SAN to
   nobody and perms deny everything; the template emits a render-time
   coherence warning (visible on `--dry-run` too).
-- `--no-conf-server` — skips the conf plane entirely; the host is
-  invisible to discovery, and a network with no conf server anywhere
+- `--no-admin-server` — skips the admin plane entirely; the host is
+  invisible to discovery, and a network with no admin server anywhere
   has no enrollment and no certificate renewal.
 - External PKI / bring-your-own cert is **not** a wizard option: the
-  `conf install` wizard always uses the netidx CA (that is the point of
+  `admin install` wizard always uses the netidx CA (that is the point of
   the control plane). To run TLS with your own certs, skip the wizard
   and manage the resolver/publisher/subscriber TLS config by hand. To
-  chain the netidx CA to your existing PKI while keeping the conf plane,
-  use `netidx conf ca init --external-sign` (the CA runs as an
+  chain the netidx CA to your existing PKI while keeping the admin plane,
+  use `netidx admin ca init --external-sign` (the CA runs as an
   intermediate; its cert does not auto-renew — see ca-server.md).
 
 ## Future capabilities (out of v1, design kept compatible)
 
 Coordinated remote changes (perms updates, etc.) follow the pattern v1
-establishes with `AddIdentity`: CLI/lib → ca-role conf server (admin
-authorizes) → PKI push to the non-local conf servers that own the
+establishes with `AddIdentity`: CLI/lib → ca-role admin server (admin
+authorizes) → PKI push to the non-local admin servers that own the
 affected files. The `Request` enum and the reserved-SAN client-cert
 gate are the extension points; nothing assumes the request set is
 closed.
 
 Explicitly out of scope for v1: global discovery / relays (WAN setups
-use the manual conf-server address), and a Windows conf-server daemon
+use the manual admin-server address), and a Windows admin-server daemon
 (the CA signer is openssl/unix; browsing, joining, and GetInfo
 consumption all work on Windows).

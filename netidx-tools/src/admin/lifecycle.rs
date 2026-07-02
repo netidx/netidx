@@ -3,16 +3,16 @@
 //! per-role command modules under [`super::roles`].
 //!
 //! The security-critical step is [`fetch_network_pinned`]: these ops
-//! trust a conf server's picture of the network, so they first re-pin to
+//! trust a admin server's picture of the network, so they first re-pin to
 //! the **same** CA identity the operator glyph-confirmed at install
-//! (stored in the [`InstallRecord`]). A conf server whose CA fingerprint
+//! (stored in the [`InstallRecord`]). A admin server whose CA fingerprint
 //! doesn't match the pin is refused before anything is read or changed.
 
 use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin::{
-    conf_client::{self, NetworkInfo},
-    conf_proto::{NetworkMap, NodeKind},
+    admin_client::{self, NetworkInfo},
+    admin_proto::{NetworkMap, NodeKind},
     discovery, paths,
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     reconcile,
@@ -21,7 +21,7 @@ use netidx_admin::{
 };
 use std::{net::SocketAddr, time::Duration};
 
-/// How long to browse mDNS for the install's conf server when the
+/// How long to browse mDNS for the install's admin server when the
 /// recorded address doesn't answer.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -54,19 +54,19 @@ fn require_role(rec: &InstallRecord, want: InstallRole) -> Result<()> {
     Ok(())
 }
 
-/// Locate the install's conf server and return the network's current
+/// Locate the install's admin server and return the network's current
 /// facts, **pinned** to the CA fingerprint recorded at install. Tries
 /// the recorded address first, then mDNS; every candidate is verified
 /// against the pin before any info is trusted. Fails closed: a reachable
 /// but wrong-fingerprint server is refused, not used.
 fn fetch_network_pinned(
     net_id: &NetworkIdentity,
-    conf_server: Option<SocketAddr>,
+    admin_server: Option<SocketAddr>,
     kind: NodeKind,
 ) -> Result<NetworkInfo> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
-    if let Some(a) = conf_server {
+    if let Some(a) = admin_server {
         candidates.push(a);
     }
     for d in discovery::browse_or_empty(DISCOVERY_TIMEOUT) {
@@ -75,30 +75,30 @@ fn fetch_network_pinned(
     candidates.dedup();
     let mut saw_mismatch = false;
     for addr in &candidates {
-        let id = match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
+        let id = match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
             Ok(id) => id,
-            // Unreachable / not a conf server — try the next candidate.
+            // Unreachable / not a admin server — try the next candidate.
             Err(_) => continue,
         };
         // Fail closed on a malformed stored fingerprint (corrupt record).
         if net_id.matches(&id.fingerprint)? {
             return rt
-                .block_on(conf_client::aggregate(&[*addr], kind, &id))
+                .block_on(admin_client::aggregate(&[*addr], kind, &id))
                 .context("mapping the network (GetInfo)");
         }
         saw_mismatch = true;
     }
     if saw_mismatch {
         bail!(
-            "reached a conf server, but its CA fingerprint did not match this \
+            "reached a admin server, but its CA fingerprint did not match this \
              install's pinned network identity (network {:?}). Refusing to \
              trust it — if your network's CA legitimately changed, re-join.",
             net_id.domain,
         )
     }
     bail!(
-        "could not reach any conf server for network {:?} (the recorded \
-         address and mDNS both failed). Is the resolver / conf-server host up?",
+        "could not reach any admin server for network {:?} (the recorded \
+         address and mDNS both failed). Is the resolver / admin-server host up?",
         net_id.domain,
     )
 }
@@ -140,7 +140,7 @@ pub(crate) fn workstation_status() -> Result<()> {
         ),
         Some(net_id) => {
             println!("  network: {:?}", net_id.domain);
-            match fetch_network_pinned(net_id, rec.conf_server, NodeKind::Client) {
+            match fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(info) => {
                     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
@@ -172,7 +172,7 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
          is nothing to update. Run `netidx admin workstation join` first.",
     )?;
     let rpath = resolver_config_path()?;
-    let info = fetch_network_pinned(net_id, rec.conf_server, NodeKind::Client)?;
+    let info = fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client)?;
     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
     if plan.is_empty() {
         println!("already in sync with network {:?} — nothing to do", net_id.domain);
@@ -201,12 +201,12 @@ fn client_config_path() -> Result<std::path::PathBuf> {
 /// map in one round trip (no client-side walk). Same fail-closed pinning.
 fn fetch_map_pinned(
     net_id: &NetworkIdentity,
-    conf_server: Option<SocketAddr>,
+    admin_server: Option<SocketAddr>,
     kind: NodeKind,
 ) -> Result<NetworkMap> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
-    if let Some(a) = conf_server {
+    if let Some(a) = admin_server {
         candidates.push(a);
     }
     for d in discovery::browse_or_empty(DISCOVERY_TIMEOUT) {
@@ -215,28 +215,28 @@ fn fetch_map_pinned(
     candidates.dedup();
     let mut saw_mismatch = false;
     for addr in &candidates {
-        let id = match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
+        let id = match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
             Ok(id) => id,
             Err(_) => continue,
         };
         if net_id.matches(&id.fingerprint)? {
             return rt
-                .block_on(conf_client::get_map_pinned(*addr, kind, &id))
+                .block_on(admin_client::get_map_pinned(*addr, kind, &id))
                 .context("fetching the network map");
         }
         saw_mismatch = true;
     }
     if saw_mismatch {
         bail!(
-            "reached a conf server, but its CA fingerprint did not match this \
+            "reached a admin server, but its CA fingerprint did not match this \
              install's pinned network identity (network {:?}). Refusing to trust \
              it — if your network's CA legitimately changed, re-join.",
             net_id.domain,
         )
     }
     bail!(
-        "could not reach any conf server for network {:?} (the recorded address \
-         and mDNS both failed). Is the resolver / conf-server host up?",
+        "could not reach any admin server for network {:?} (the recorded address \
+         and mDNS both failed). Is the resolver / admin-server host up?",
         net_id.domain,
     )
 }
@@ -290,7 +290,7 @@ pub(crate) fn resolver_status() -> Result<()> {
         None => println!("  network: local-only — not attached"),
         Some(net_id) => {
             println!("  network: {:?}", net_id.domain);
-            match fetch_map_pinned(net_id, rec.conf_server, NodeKind::Resolver) {
+            match fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => {
                     if let Ok(cpath) = client_config_path() {
@@ -319,7 +319,7 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
         "this resolver is local-only — it hasn't joined a network, so there is \
          nothing to update",
     )?;
-    let map = fetch_map_pinned(net_id, rec.conf_server, NodeKind::Resolver)?;
+    let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver)?;
     // The client config (the resolvers this host talks to), if present.
     let mut plan = match client_config_path() {
         Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
@@ -347,7 +347,7 @@ pub(crate) fn publisher_status() -> Result<()> {
         None => println!("  network: local-only — not attached"),
         Some(net_id) => {
             println!("  network: {:?}", net_id.domain);
-            match fetch_map_pinned(net_id, rec.conf_server, NodeKind::Publisher) {
+            match fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => match client_config_path() {
                     Ok(cpath) => report_drift(
@@ -369,7 +369,7 @@ pub(crate) fn publisher_update(flags: UpdateFlags) -> Result<()> {
         "this publisher is local-only — it hasn't joined a network, so there is \
          nothing to update",
     )?;
-    let map = fetch_map_pinned(net_id, rec.conf_server, NodeKind::Publisher)?;
+    let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher)?;
     let cpath = client_config_path()?;
     let plan = reconcile::reconcile_client_peers(&cpath, &map)?;
     run_update(plan, flags.dry_run, "re-run publishers to use the new resolvers")

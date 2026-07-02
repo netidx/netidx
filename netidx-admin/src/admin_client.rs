@@ -1,10 +1,10 @@
-//! Conf-server client: discover what a netidx network looks like, join
+//! Admin-server client: discover what a netidx network looks like, join
 //! it (generate a key + CSR locally and request a signature over TLS),
-//! and enroll new conf servers — verifying the network's CA identity by
+//! and enroll new admin servers — verifying the network's CA identity by
 //! fingerprint before sending anything secret.
 //!
 //! Cross-platform — rcgen + rustls + sha2 + x509-parser, never openssl
-//! — so a Windows node can talk to a unix conf server.
+//! — so a Windows node can talk to a unix admin server.
 //!
 //! ## Trust model
 //!
@@ -28,12 +28,12 @@
 //!    fresh TOFU handshakes that **pin** the presented CA cert to the
 //!    confirmed fingerprint, aborting before sending anything secret if
 //!    it changed. Combined with the handshake and serving-cert check,
-//!    only a genuine conf server of the confirmed network (holding a
+//!    only a genuine admin server of the confirmed network (holding a
 //!    CA-issued reserved-SAN serving cert) can reach the point where a
 //!    password is sent.
 
 use crate::{
-    conf_proto::{
+    admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
         AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
         ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
@@ -100,7 +100,7 @@ pub fn generate_key_and_csr(name: &str) -> Result<KeyAndCsr> {
     })
 }
 
-/// A conf server's verified identity, captured by [`fetch_identity`]:
+/// A admin server's verified identity, captured by [`fetch_identity`]:
 /// the CA [`Fingerprint`] to show the operator out of band, the CA
 /// certificate it's bound to, and the domain + roles the server claimed
 /// inside TLS. Pass it to [`get_info`] / [`request_cert`] / [`enroll`]
@@ -159,7 +159,7 @@ pub fn issuing_ca_pem(bundle: &str, leaf_pem: &str) -> Result<String> {
     bail!("no certificate in the bundle signed this leaf")
 }
 
-/// TOFU-handshake to the conf server at `addr`; return the live TLS
+/// TOFU-handshake to the admin server at `addr`; return the live TLS
 /// stream and the certificate chain it presented
 /// (`[serving_leaf, …, ca]`). Accepts any cert — trust is established
 /// out of band by fingerprint — but the handshake signature is still
@@ -178,16 +178,16 @@ async fn connect_tofu(
     let connector = TlsConnector::from(Arc::new(config));
     let tcp = TcpStream::connect(addr)
         .await
-        .with_context(|| format!("connecting to conf server {addr}"))?;
+        .with_context(|| format!("connecting to admin server {addr}"))?;
     let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
     let tls = connector
         .connect(server_name, tcp)
         .await
-        .context("TLS handshake with conf server")?;
+        .context("TLS handshake with admin server")?;
     let chain: Vec<CertificateDer<'static>> = {
         let (_io, conn) = tls.get_ref();
         conn.peer_certificates()
-            .ok_or_else(|| anyhow!("conf server presented no certificate"))?
+            .ok_or_else(|| anyhow!("admin server presented no certificate"))?
             .iter()
             .map(|c| c.clone().into_owned())
             .collect()
@@ -203,7 +203,7 @@ fn split_chain<'a>(
 ) -> Result<(&'a CertificateDer<'static>, &'a CertificateDer<'static>)> {
     if chain.len() < 2 {
         bail!(
-            "conf server did not present its CA certificate in the chain \
+            "admin server did not present its CA certificate in the chain \
              (got {} cert(s)); the daemon's serving chain must be [leaf, …, ca]",
             chain.len()
         );
@@ -217,19 +217,19 @@ async fn exchange_hello(
     tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
     kind: NodeKind,
 ) -> Result<ServerHello> {
-    conf_proto::write_msg(tls, &ClientHello { protocol_version: PROTOCOL_VERSION, kind })
+    admin_proto::write_msg(tls, &ClientHello { protocol_version: PROTOCOL_VERSION, kind })
         .await?;
-    let hello: ServerHello = conf_proto::read_msg(tls).await?;
+    let hello: ServerHello = admin_proto::read_msg(tls).await?;
     if hello.protocol_version != PROTOCOL_VERSION {
         bail!(
-            "conf server speaks protocol version {} but we speak {PROTOCOL_VERSION}",
+            "admin server speaks protocol version {} but we speak {PROTOCOL_VERSION}",
             hello.protocol_version
         );
     }
     Ok(hello)
 }
 
-/// Connect to the conf server at `addr`, TOFU-handshake, exchange
+/// Connect to the admin server at `addr`, TOFU-handshake, exchange
 /// hellos, and return its verified identity — **sending nothing
 /// secret**. The connection is closed before returning, so the operator
 /// can compare the fingerprint and enter credentials at their own pace
@@ -245,7 +245,7 @@ pub async fn fetch_identity(addr: SocketAddr, kind: NodeKind) -> Result<CaIdenti
     let (mut tls, chain) = connect_tofu(addr).await?;
     let (serving_der, ca_der) = split_chain(&chain)?;
     verify_serving_cert(serving_der, ca_der).context(
-        "the conf server's serving certificate is not bound to the CA it presented",
+        "the admin server's serving certificate is not bound to the CA it presented",
     )?;
     let hello = exchange_hello(&mut tls, kind).await?;
     drop(tls);
@@ -276,7 +276,7 @@ async fn connect_pinned(
     let presented_fp = Fingerprint::of_cert_der(presented_ca.as_ref()).ok();
     if presented_fp != Some(expected.fingerprint) {
         bail!(
-            "the conf server's identity changed since you confirmed it \
+            "the admin server's identity changed since you confirmed it \
              (fingerprint mismatch); aborted before sending anything"
         );
     }
@@ -284,14 +284,14 @@ async fn connect_pinned(
     // re-presented one (identical given the pin passed, but this makes
     // the trust anchor explicit).
     verify_serving_cert(serving_der, &expected.ca_der).context(
-        "the conf server's serving certificate failed verification against the \
+        "the admin server's serving certificate failed verification against the \
          confirmed CA — this is not the network you confirmed",
     )?;
     exchange_hello(&mut tls, kind).await?;
     Ok(tls)
 }
 
-/// Fetch one conf server's local facts + known peers, pinned to the
+/// Fetch one admin server's local facts + known peers, pinned to the
 /// confirmed identity. See [`aggregate`] for the network-wide picture.
 pub async fn get_info(
     addr: SocketAddr,
@@ -299,11 +299,11 @@ pub async fn get_info(
     expected: &CaIdentity,
 ) -> Result<GetInfoResponse> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetInfo).await?;
-    conf_proto::read_msg(&mut tls).await
+    admin_proto::write_msg(&mut tls, &Request::GetInfo).await?;
+    admin_proto::read_msg(&mut tls).await
 }
 
-/// Fetch the whole network map from one conf server, pinned to the
+/// Fetch the whole network map from one admin server, pinned to the
 /// confirmed CA identity — one round trip is the entire network. The
 /// client-facing counterpart of [`get_map`] (which authenticates with a
 /// serving cert for the server-to-server refresh path).
@@ -313,14 +313,14 @@ pub async fn get_map_pinned(
     expected: &CaIdentity,
 ) -> Result<NetworkMap> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match conf_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
 }
 
-/// Server→server: apply a perms edit to a peer conf server (serving-cert
+/// Server→server: apply a perms edit to a peer admin server (serving-cert
 /// authed). Mirrors [`push_referral_edit`].
 pub async fn push_perms_edit(
     addr: SocketAddr,
@@ -333,16 +333,16 @@ pub async fn push_perms_edit(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
             .await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ApplyPermsEdit(ApplyPermsEditRequest {
             perms_json: perms_json.to_string(),
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
         ApplyPermsEditResponse::Ok => Ok(()),
         ApplyPermsEditResponse::Err { reason } => {
             bail!("peer refused the perms edit: {reason}")
@@ -350,7 +350,7 @@ pub async fn push_perms_edit(
     }
 }
 
-/// Read a conf server's local perms, pinned to the confirmed CA (perms are
+/// Read a admin server's local perms, pinned to the confirmed CA (perms are
 /// readable within the trust domain). The client routes to a member of the
 /// cluster it wants.
 pub async fn get_perms(
@@ -359,8 +359,8 @@ pub async fn get_perms(
     expected: &CaIdentity,
 ) -> Result<String> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetPerms).await?;
-    match conf_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::GetPerms).await?;
+    match admin_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
         GetPermsResponse::Ok { perms_json } => Ok(perms_json),
         GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
     }
@@ -376,19 +376,19 @@ pub async fn edit_perms(
     password: &str,
     target_path: &str,
     perms_json: &str,
-) -> Result<Vec<conf_proto::PeerResult>> {
+) -> Result<Vec<admin_proto::PeerResult>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::EditPerms(EditPermsRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             target_path: target_path.to_string(),
             perms_json: perms_json.to_string(),
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
         EditPermsResponse::Ok { peers } => Ok(peers),
         EditPermsResponse::Err { reason } => {
             bail!("the CA refused the perms edit: {reason}")
@@ -411,18 +411,18 @@ pub async fn add_role_admin(
     policy: crate::ca_policy::Policy,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::AddRoleAdmin(AddRoleAdminRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             name: name.to_string(),
-            new_password: conf_proto::Secret(new_password.to_string()),
+            new_password: admin_proto::Secret(new_password.to_string()),
             policy,
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -439,17 +439,17 @@ pub async fn set_admin_policy(
     policy: crate::ca_policy::Policy,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::SetAdminPolicy(SetAdminPolicyRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             target: target.to_string(),
             policy,
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -465,16 +465,16 @@ pub async fn remove_admin(
     target: &str,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::RemoveAdmin(RemoveAdminRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             target: target.to_string(),
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -489,15 +489,15 @@ pub async fn list_admins(
     password: &str,
 ) -> Result<Vec<crate::ca_policy::AdminInfo>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ListAdmins(ListAdminsRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -514,28 +514,28 @@ pub async fn control_service(
     admin: &str,
     password: &str,
     target_path: &str,
-    targets: Vec<conf_proto::UnitTarget>,
+    targets: Vec<admin_proto::UnitTarget>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<conf_proto::ServiceControlResult>> {
+) -> Result<Vec<admin_proto::ServiceControlResult>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ControlService(ControlServiceRequest {
             admin: admin.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             target_path: target_path.to_string(),
             targets,
             op,
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
         ControlServiceResponse::Ok { results } => Ok(results),
         ControlServiceResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
 
-/// Server → server: apply a service-control op to a peer conf server's local
+/// Server → server: apply a service-control op to a peer admin server's local
 /// activation supervisor (serving-cert authed). Mirrors [`push_perms_edit`].
 pub async fn push_service_control(
     addr: SocketAddr,
@@ -549,14 +549,14 @@ pub async fn push_service_control(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
             .await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ApplyServiceControl(ApplyServiceControlRequest { units, op }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
         ApplyServiceControlResponse::Ok { units } => Ok(units),
         ApplyServiceControlResponse::Err { reason } => {
             bail!("peer refused service control: {reason}")
@@ -564,7 +564,7 @@ pub async fn push_service_control(
     }
 }
 
-/// The aggregated picture of a network, built by walking conf servers'
+/// The aggregated picture of a network, built by walking admin servers'
 /// `peers` from one or more seeds. Everything in it was served over
 /// connections pinned to the operator-confirmed CA.
 pub struct NetworkInfo {
@@ -572,10 +572,10 @@ pub struct NetworkInfo {
     /// Where Sign/Enroll requests go. The first CA location seen wins;
     /// a well-formed network only has one.
     pub ca_addr: Option<SocketAddr>,
-    /// Every resolver any reached conf server reported, deduped by
+    /// Every resolver any reached admin server reported, deduped by
     /// address.
     pub resolvers: Vec<ResolverAddr>,
-    /// The conf servers actually reached.
+    /// The admin servers actually reached.
     pub reached: Vec<SocketAddr>,
 }
 
@@ -583,7 +583,7 @@ pub struct NetworkInfo {
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
-/// Walk the network from `seeds`: [`get_info`] each conf server, follow
+/// Walk the network from `seeds`: [`get_info`] each admin server, follow
 /// `peers` (deduped, cycle-safe), and merge the results. Unreachable or
 /// mismatching (different-CA) servers are skipped with a logged warning
 /// — one live seed is enough to map the network.
@@ -608,7 +608,7 @@ pub async fn aggregate(
         let resp = match get_info(addr, kind, expected).await {
             Ok(r) => r,
             Err(e) => {
-                warn!("conf server {addr} could not be queried: {e:#}");
+                warn!("admin server {addr} could not be queried: {e:#}");
                 continue;
             }
         };
@@ -629,7 +629,7 @@ pub async fn aggregate(
         queue.extend(resp.peers);
     }
     if info.reached.is_empty() {
-        bail!("no conf server could be reached");
+        bail!("no admin server could be reached");
     }
     Ok(info)
 }
@@ -669,7 +669,7 @@ pub async fn request_cert(
     submit_csr(addr, kind, name, kc, req, expected).await
 }
 
-/// Enroll a new conf server: request the reserved [`SERVING_SAN`]
+/// Enroll a new admin server: request the reserved [`SERVING_SAN`]
 /// serving cert from the network's CA, authenticated as
 /// `admin`/`password` (whose policy must grant `may_enroll_servers`),
 /// pinned to the confirmed identity. `listen` is where the new daemon
@@ -690,7 +690,7 @@ pub async fn enroll(
         csr_pem: kc.csr_pem.clone(),
         listen,
     });
-    submit_csr(addr, NodeKind::ConfServer, SERVING_SAN, kc, req, expected).await
+    submit_csr(addr, NodeKind::AdminServer, SERVING_SAN, kc, req, expected).await
 }
 
 /// Shared Sign/Enroll tail: send the prepared request over a pinned
@@ -708,8 +708,8 @@ async fn submit_csr(
     // confirm the CA signed *our* key, not a substituted one.
     let our_spki = csr_spki(&kc.csr_pem)?;
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(&mut tls, &req).await?;
-    match conf_proto::read_msg::<_, SignResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &req).await?;
+    match admin_proto::read_msg::<_, SignResponse>(&mut tls).await? {
         SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
             verify_issued(expected, name, &our_spki, &signed_cert_pem, &trusted_pem)?;
             Ok(Issued {
@@ -719,7 +719,7 @@ async fn submit_csr(
                 warnings,
             })
         }
-        SignResponse::Err { reason } => bail!("conf server refused to sign: {reason}"),
+        SignResponse::Err { reason } => bail!("admin server refused to sign: {reason}"),
     }
 }
 
@@ -745,7 +745,7 @@ fn verify_issued(
         );
     }
     verify_issued_leaf(signed_cert_pem, &expected.ca_der, name, our_spki).context(
-        "the certificate returned by the conf server failed verification \
+        "the certificate returned by the admin server failed verification \
          against the confirmed CA",
     )
 }
@@ -797,11 +797,11 @@ pub async fn enqueue(
     enqueue_inner(addr, kind, name, validity, None, expected).await
 }
 
-/// Queue a **conf-server enrollment** for asynchronous admin approval:
+/// Queue a **admin-server enrollment** for asynchronous admin approval:
 /// the reserved [`SERVING_SAN`] serving cert, approvable only by an
 /// admin whose policy grants `may_enroll_servers`. Same request-code
 /// ceremony and [`poll`] loop as a queued sign; `listen` is where the
-/// new conf server will serve (recorded as a peer at approval).
+/// new admin server will serve (recorded as a peer at approval).
 pub async fn enqueue_enroll(
     addr: SocketAddr,
     listen: SocketAddr,
@@ -812,7 +812,7 @@ pub async fn enqueue_enroll(
     // placeholder.
     enqueue_inner(
         addr,
-        NodeKind::ConfServer,
+        NodeKind::AdminServer,
         SERVING_SAN,
         Duration::from_secs(1),
         Some(listen),
@@ -833,7 +833,7 @@ async fn enqueue_inner(
     let our_spki = csr_spki(&kc.csr_pem)?;
     let fingerprint = Fingerprint::of_der(&our_spki);
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Enqueue(EnqueueRequest {
             kind,
@@ -844,7 +844,7 @@ async fn enqueue_inner(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
         EnqueueResponse::Ok { request_id } => Ok(PendingEnrollment {
             request_id,
             fingerprint,
@@ -853,7 +853,7 @@ async fn enqueue_inner(
             kc,
         }),
         EnqueueResponse::Err { reason } => {
-            bail!("conf server refused to queue the request: {reason}")
+            bail!("admin server refused to queue the request: {reason}")
         }
     }
 }
@@ -870,12 +870,12 @@ pub async fn poll(
     expected: &CaIdentity,
 ) -> Result<PollOutcome> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Poll(PollRequest { request_id: pending.request_id.clone() }),
     )
     .await?;
-    match conf_proto::read_msg::<_, PollResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, PollResponse>(&mut tls).await? {
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
@@ -906,7 +906,7 @@ pub async fn list_queue(
     expected: &CaIdentity,
 ) -> Result<Vec<QueueEntry>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ListQueue(ListQueueRequest {
             admin: admin.to_string(),
@@ -914,9 +914,9 @@ pub async fn list_queue(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ListQueueResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ListQueueResponse>(&mut tls).await? {
         ListQueueResponse::Ok { requests } => Ok(requests),
-        ListQueueResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        ListQueueResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
@@ -933,7 +933,7 @@ pub async fn approve(
     expected: &CaIdentity,
 ) -> Result<Vec<String>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Approve(ApproveRequest {
             admin: admin.to_string(),
@@ -943,9 +943,9 @@ pub async fn approve(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ApproveResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ApproveResponse>(&mut tls).await? {
         ApproveResponse::Ok { warnings } => Ok(warnings),
-        ApproveResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        ApproveResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
@@ -957,8 +957,8 @@ pub async fn get_crl(
     expected: &CaIdentity,
 ) -> Result<Option<String>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetCrl).await?;
-    let resp: conf_proto::GetCrlResponse = conf_proto::read_msg(&mut tls).await?;
+    admin_proto::write_msg(&mut tls, &Request::GetCrl).await?;
+    let resp: admin_proto::GetCrlResponse = admin_proto::read_msg(&mut tls).await?;
     Ok(resp.crl_pem)
 }
 
@@ -972,7 +972,7 @@ pub async fn deny(
     expected: &CaIdentity,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Deny(DenyRequest {
             admin: admin.to_string(),
@@ -982,9 +982,9 @@ pub async fn deny(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
         DenyResponse::Ok => Ok(()),
-        DenyResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        DenyResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
@@ -1004,7 +1004,7 @@ pub fn delegation_code(proposed_path: &str, child: &[ResolverAddr]) -> Fingerpri
     Fingerprint::of_der(&canonical)
 }
 
-/// Queue a delegation request with the parent's conf server (no
+/// Queue a delegation request with the parent's admin server (no
 /// credentials — the parent admin authorizes by matching the code).
 /// Returns the request id to [`poll_delegation`] with.
 pub async fn request_delegation(
@@ -1014,7 +1014,7 @@ pub async fn request_delegation(
     expected: &CaIdentity,
 ) -> Result<String> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::RequestDelegation(DelegationRequest {
             proposed_path: proposed_path.to_string(),
@@ -1022,7 +1022,7 @@ pub async fn request_delegation(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, DelegationResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, DelegationResponse>(&mut tls).await? {
         DelegationResponse::Ok { request_id } => Ok(request_id),
         DelegationResponse::Err { reason } => {
             bail!("the parent refused the delegation request: {reason}")
@@ -1037,12 +1037,12 @@ pub async fn poll_delegation(
     expected: &CaIdentity,
 ) -> Result<DelegationPollResponse> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::PollDelegation(PollRequest { request_id: request_id.to_string() }),
     )
     .await?;
-    conf_proto::read_msg(&mut tls).await
+    admin_proto::read_msg(&mut tls).await
 }
 
 /// List the pending delegation queue, authenticated as `admin` (pinned).
@@ -1053,7 +1053,7 @@ pub async fn list_delegations(
     expected: &CaIdentity,
 ) -> Result<Vec<DelegationEntry>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ListDelegations(ListDelegationsRequest {
             admin: admin.to_string(),
@@ -1061,9 +1061,9 @@ pub async fn list_delegations(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
         ListDelegationsResponse::Ok { requests } => Ok(requests),
-        ListDelegationsResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        ListDelegationsResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
@@ -1077,7 +1077,7 @@ pub async fn approve_delegation(
     expected: &CaIdentity,
 ) -> Result<Vec<PeerResult>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ApproveDelegation(ApproveDelegationRequest {
             admin: admin.to_string(),
@@ -1086,10 +1086,10 @@ pub async fn approve_delegation(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
         ApproveDelegationResponse::Ok { peers } => Ok(peers),
         ApproveDelegationResponse::Err { reason } => {
-            bail!("conf server refused: {reason}")
+            bail!("admin server refused: {reason}")
         }
     }
 }
@@ -1104,7 +1104,7 @@ pub async fn deny_delegation(
     expected: &CaIdentity,
 ) -> Result<()> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::DenyDelegation(DenyDelegationRequest {
             admin: admin.to_string(),
@@ -1114,13 +1114,13 @@ pub async fn deny_delegation(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
         DenyDelegationResponse::Ok => Ok(()),
-        DenyDelegationResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        DenyDelegationResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
-/// Server-to-server: push a referral edit to a peer conf server's local
+/// Server-to-server: push a referral edit to a peer admin server's local
 /// resolver config (the cluster-wide propagation push), authenticated by
 /// our reserved-SAN serving cert. Mirrors [`push_identity`].
 pub async fn push_referral_edit(
@@ -1134,14 +1134,14 @@ pub async fn push_referral_edit(
         .context("parsing client key")?
         .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::AdminServer)
             .await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ApplyReferralEdit(ApplyReferralEditRequest { edit: edit.clone() }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
         ApplyReferralEditResponse::Ok => Ok(()),
         ApplyReferralEditResponse::Err { reason } => {
             bail!("peer refused the referral edit: {reason}")
@@ -1159,7 +1159,7 @@ pub async fn list_issued(
     expected: &CaIdentity,
 ) -> Result<Vec<IssuedEntry>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::ListIssued(ListIssuedRequest {
             admin: admin.to_string(),
@@ -1167,9 +1167,9 @@ pub async fn list_issued(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
         ListIssuedResponse::Ok { entries } => Ok(entries),
-        ListIssuedResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        ListIssuedResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
@@ -1185,7 +1185,7 @@ pub async fn revoke(
     expected: &CaIdentity,
 ) -> Result<Vec<String>> {
     let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Revoke(RevokeRequest {
             admin: admin.to_string(),
@@ -1195,16 +1195,16 @@ pub async fn revoke(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
         RevokeResponse::Ok { warnings } => Ok(warnings),
-        RevokeResponse::Err { reason } => bail!("conf server refused: {reason}"),
+        RevokeResponse::Err { reason } => bail!("admin server refused: {reason}"),
     }
 }
 
-/// Push an identity registration to a peer conf server, authenticating
+/// Push an identity registration to a peer admin server, authenticating
 /// with *our* serving cert (server-to-server; the receiver requires the
 /// reserved SAN). Unlike the operator-facing calls this does real PKI —
-/// the caller is a conf server that has the CA bundle installed — so
+/// the caller is a admin server that has the CA bundle installed — so
 /// there is no TOFU and no pinning: `roots` is the trust anchor.
 ///
 /// Returns `Ok(None)` when the peer's hello shows it has no id-map role
@@ -1221,21 +1221,21 @@ pub async fn push_identity(
         .context("parsing client key")?
         .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
     let (mut tls, hello) =
-        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::AdminServer)
             .await?;
     if !hello.roles.contains(&Role::IdMap) {
         return Ok(None);
     }
-    conf_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
-    match conf_proto::read_msg::<_, AddIdentityResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
+    match admin_proto::read_msg::<_, AddIdentityResponse>(&mut tls).await? {
         AddIdentityResponse::Ok { uid } => Ok(Some(uid)),
         AddIdentityResponse::Err { reason } => {
-            bail!("conf server refused the identity: {reason}")
+            bail!("admin server refused the identity: {reason}")
         }
     }
 }
 
-/// Server→CA: register/update this conf server's facts in the CA's network
+/// Server→CA: register/update this admin server's facts in the CA's network
 /// map, authenticated with the serving cert (peer-cert-gated). Returns the
 /// CA's new map version.
 pub async fn register(
@@ -1249,10 +1249,10 @@ pub async fn register(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
             .await?;
-    conf_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
-    match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
+    match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the registration: {reason}")
@@ -1260,7 +1260,7 @@ pub async fn register(
     }
 }
 
-/// Server→CA: drop this conf server (`own_addr`) from the map on uninstall.
+/// Server→CA: drop this admin server (`own_addr`) from the map on uninstall.
 pub async fn deregister(
     addr: SocketAddr,
     serving_cert_pem: &[u8],
@@ -1272,14 +1272,14 @@ pub async fn deregister(
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
     let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::ConfServer)
+        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
             .await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Deregister(DeregisterRequest { addr: own_addr }),
     )
     .await?;
-    match conf_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the deregistration: {reason}")
@@ -1295,8 +1295,8 @@ pub async fn get_map_version(
     kind: NodeKind,
 ) -> Result<u64> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
-    match conf_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
+    match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
         GetMapVersionResponse::Ok { version } => Ok(version),
         GetMapVersionResponse::Err { reason } => {
             bail!("map version query refused: {reason}")
@@ -1305,23 +1305,23 @@ pub async fn get_map_version(
 }
 
 /// Fetch the whole network map in one round trip — every cluster, every
-/// conf server's role, the CA location.
+/// admin server's role, the CA location.
 pub async fn get_map(
     addr: SocketAddr,
     roots: rustls::RootCertStore,
     kind: NodeKind,
 ) -> Result<NetworkMap> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match conf_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
 }
 
-/// Connect to a conf server with **real PKI** (webpki against `roots`,
+/// Connect to a admin server with **real PKI** (webpki against `roots`,
 /// `ServerName = SERVING_SAN`) — for callers that already hold the
-/// trust bundle (peer conf servers, the renewal daemon). No TOFU, no
+/// trust bundle (peer admin servers, the renewal daemon). No TOFU, no
 /// pinning, no human. Presents `client_identity` (cert chain + key
 /// PEM) when given — that's what authenticates a verified renewal.
 async fn connect_pki(
@@ -1350,12 +1350,12 @@ async fn connect_pki(
     let connector = TlsConnector::from(Arc::new(config));
     let tcp = TcpStream::connect(addr)
         .await
-        .with_context(|| format!("connecting to conf server {addr}"))?;
+        .with_context(|| format!("connecting to admin server {addr}"))?;
     let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
     let mut tls = connector
         .connect(server_name, tcp)
         .await
-        .context("TLS handshake with conf server")?;
+        .context("TLS handshake with admin server")?;
     let hello = exchange_hello(&mut tls, kind).await?;
     Ok((tls, hello))
 }
@@ -1429,7 +1429,7 @@ pub async fn enqueue_renewal(
     let our_spki = csr_spki(&kc.csr_pem)?;
     let (mut tls, _hello) =
         connect_pki(addr, roots, Some((current_cert_pem, current_key)), kind).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Enqueue(EnqueueRequest {
             kind,
@@ -1440,12 +1440,12 @@ pub async fn enqueue_renewal(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
         EnqueueResponse::Ok { request_id } => {
             Ok(PendingRenewal { request_id, name: name.to_string(), our_spki, kc })
         }
         EnqueueResponse::Err { reason } => {
-            bail!("conf server refused to queue the renewal: {reason}")
+            bail!("admin server refused to queue the renewal: {reason}")
         }
     }
 }
@@ -1464,12 +1464,12 @@ pub async fn poll_renewal(
     roots: rustls::RootCertStore,
 ) -> Result<PollOutcome> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &Request::Poll(PollRequest { request_id: pending.request_id.clone() }),
     )
     .await?;
-    match conf_proto::read_msg::<_, PollResponse>(&mut tls).await? {
+    match admin_proto::read_msg::<_, PollResponse>(&mut tls).await? {
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
@@ -1500,8 +1500,8 @@ pub async fn get_info_pki(
     roots: rustls::RootCertStore,
 ) -> Result<GetInfoResponse> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetInfo).await?;
-    conf_proto::read_msg(&mut tls).await
+    admin_proto::write_msg(&mut tls, &Request::GetInfo).await?;
+    admin_proto::read_msg(&mut tls).await
 }
 
 /// [`get_crl`] over real PKI — the renewal daemon's CRL pull.
@@ -1511,8 +1511,8 @@ pub async fn get_crl_pki(
     roots: rustls::RootCertStore,
 ) -> Result<Option<String>> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
-    conf_proto::write_msg(&mut tls, &Request::GetCrl).await?;
-    let resp: conf_proto::GetCrlResponse = conf_proto::read_msg(&mut tls).await?;
+    admin_proto::write_msg(&mut tls, &Request::GetCrl).await?;
+    let resp: admin_proto::GetCrlResponse = admin_proto::read_msg(&mut tls).await?;
     Ok(resp.crl_pem)
 }
 
@@ -1676,7 +1676,7 @@ fn bundle_contains(bundle: &str, fp: &Fingerprint) -> bool {
     })
 }
 
-/// Verify the conf server's issued leaf binds to what the operator
+/// Verify the admin server's issued leaf binds to what the operator
 /// confirmed: signed by the confirmed CA (`ca_der`), carrying exactly
 /// the requested DNS SAN (`name`), and containing our own public key
 /// (`our_spki`, the SubjectPublicKeyInfo DER from our CSR).

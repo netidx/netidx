@@ -9,7 +9,7 @@
 //! configs.
 //!
 //! Issuance, signing, CRLs, and the `--tls-auto` flow are
-//! design/netidx-conf-future.md.
+//! design/netidx-admin-future.md.
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};
@@ -487,7 +487,7 @@ mod tests {
     /// key takes (no TPM involved here; the password is the variable).
     #[test]
     fn encrypt_decrypt_round_trips_the_key() {
-        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let kc = crate::admin_client::generate_key_and_csr("x.example.com").unwrap();
         let enc =
             netidx::tls::encrypt_private_key(&kc.private_key_pem, "hunter2").unwrap();
         assert!(enc.contains("ENCRYPTED PRIVATE KEY"));
@@ -517,7 +517,7 @@ mod tests {
             eprintln!("skipping: no usable sealing hardware on this host");
             return;
         }
-        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let kc = crate::admin_client::generate_key_and_csr("x.example.com").unwrap();
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("private.key");
         let (enc, blob) = seal_private_key(&kc.private_key_pem).unwrap();
@@ -554,7 +554,7 @@ mod tests {
             eprintln!("skipping: no usable sealing hardware on this host");
             return;
         }
-        let kc = crate::conf_client::generate_key_and_csr("x.example.com").unwrap();
+        let kc = crate::admin_client::generate_key_and_csr("x.example.com").unwrap();
         let (enc, blob) = seal_private_key(&kc.private_key_pem).unwrap();
         let recovered = unseal_private_key(&enc, &blob).unwrap();
         let der = |pem: &str| {

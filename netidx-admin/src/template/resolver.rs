@@ -5,7 +5,7 @@
 //!
 //! For v1 the TLS path here uses the resolver's default `id_map_type:
 //! Command` (`/bin/id`). The id-map daemon and its socket-mode
-//! wiring are design/netidx-conf-future.md.
+//! wiring are design/netidx-admin-future.md.
 
 use super::*;
 use crate::{

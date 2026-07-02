@@ -1,7 +1,7 @@
-# `netidx-conf` — design notes for future work
+# `netidx-admin` — design notes for future work
 
 This document captures design for features that were scoped out of the
-`netidx-conf` v1 (which ships templates, basic config manipulation, the
+`netidx-admin` v1 (which ships templates, basic config manipulation, the
 CLI, and resolver-server SIGHUP-based perms reload). The intent is to
 preserve the design direction so future PRs can pick it up without
 re-litigating the broader vision.
@@ -12,7 +12,7 @@ Status legend (left column of each section):
 
 ---
 
-## CA module (`netidx-conf::ca`) — partially landed
+## CA module (`netidx-admin::ca`) — partially landed
 
 A minimal openssl-backed CA module shipped in v1:
 `Ca::init` / `Ca::open` / `Ca::sign_request` / `Ca::issue` plus a
@@ -53,7 +53,7 @@ verbatim so the resulting certs continue to load through the existing
 The id-mapper daemon shipped: `netidx id-map serve` listens on a unix
 socket, answers `IdMapType::Socket` queries from the resolver, and
 holds the parsed map in memory behind an `RwLock<Arc<IdMap>>` with
-SIGHUP-triggered reload. `netidx conf component id-map …` edits the JSON; the
+SIGHUP-triggered reload. `netidx admin component id-map …` edits the JSON; the
 `standalone-resolver --auth tls` template auto-installs an `id-map.unit`
 and a starter `id-map.json` alongside the resolver (opt out with
 `--no-id-map`).
@@ -136,7 +136,7 @@ netidx-id-map/
                        and the file-watch task
 ```
 
-`netidx-conf::id_map` re-exports `netidx_id_map::file::*` and adds the
+`netidx-admin::id_map` re-exports `netidx_id_map::file::*` and adds the
 engine-side conveniences (atomic save in the right location, builder
 shells, structural validation).
 
@@ -150,7 +150,7 @@ Defaults: `--socket` → `~/.config/netidx/id-map.sock` (or
 `/var/run/netidx/id-map.sock` for system installs); `--config` →
 `$NETIDX_ID_MAP_FILE` or `~/.config/netidx/id-map.json`.
 
-### Engine API (`netidx-conf::id_map`)
+### Engine API (`netidx-admin::id_map`)
 
 ```rust
 pub struct IdMap { /* parsed schema, plus a uid → name reverse index */ }
@@ -199,7 +199,7 @@ every TLS identity. Last-known-good keeps serving.
 ### Bootstrap
 
 The daemon needs to be running before the resolver accepts its first
-TLS connection. Standard path: `netidx conf init standalone-resolver
+TLS connection. Standard path: `netidx admin init standalone-resolver
 --auth tls` drops `resolver.unit` and `id-map.unit` into the activation
 unit directory; the activation supervisor starts both.
 
@@ -209,7 +209,7 @@ and uid → group lookup goes through `/bin/id`.
 
 ---
 
-## Designed: OS service install (`netidx-conf::service`)
+## Designed: OS service install (`netidx-admin::service`)
 
 The activation supervisor (Layer 0, done) is great at supervising netidx
 daemons but it has the same chicken-and-egg problem every supervisor
@@ -295,29 +295,29 @@ never touches services it didn't install.
 > **perms-publishing + admin-RPC role (item 3)** below is the part that
 > remains future Layer-4 work.
 
-A single daemon (`netidx conf serve`) that does three things, intended
+A single daemon (`netidx admin serve`) that does three things, intended
 to run **one instance per resolver-server machine**, coordinating with
 peers via the `netidx-protocols` cluster protocol so any one of them
 can serve a config-bootstrap request:
 
 1. **HMAC-authenticated certificate issuance.** Administrators
    pre-configure `(username, password)` credentials. A new machine
-   running `netidx conf init` either uses an explicit
-   `--conf-server <addr>` or — by default — performs multicast
+   running `netidx admin init` either uses an explicit
+   `--admin-server <addr>` or — by default — performs multicast
    discovery. The CLI exchanges SCRAM-SHA-256 with the server; on
    success the server signs a CSR generated locally on the new machine
    and returns a signed cert + the CA certificate.
 2. **Broadcast / multicast bootstrap discovery.** `init` tries this by
-   default whenever an explicit `--conf-server` was not supplied. The
+   default whenever an explicit `--admin-server` was not supplied. The
    server listens on a well-known multicast address; the new machine
    multicasts `Discover` and the first listener whose random timer fires
    answers with `Announce { server_addr, server_cert_sha256 }`.
-3. **Resolver permissions publisher + RPCs.** The conf server is also
+3. **Resolver permissions publisher + RPCs.** The admin server is also
    the long-running owner of the resolver perms file: it publishes the
    current perms tree under netidx, exposes RPCs for editing them, and
    publishes a Graphix permissions editor at `<base>/.view`. The
    resolver server picks up changes via SIGHUP (Part B of v1) when the
-   conf server writes the perms file. The runtime PMap-swap path
+   admin server writes the perms file. The runtime PMap-swap path
    already exists.
 
 ### Wire protocol (sketch)
@@ -327,7 +327,7 @@ can serve a config-bootstrap request:
 - `Announce { client_id, server_addr, server_cert_sha256 }` — first
   listener wins; others cancel.
 
-**Issuance** (TCP, TLS with self-signed conf-server cert, pinned via
+**Issuance** (TCP, TLS with self-signed admin-server cert, pinned via
 the SHA-256 from `Announce`):
 - `Hello { protocol_version }`
 - `BeginAuth { username }`
@@ -338,7 +338,7 @@ the SHA-256 from `Announce`):
 
 ### Admin credential storage
 
-`~/.config/netidx/conf-server/admins.json`, mode 0600:
+`~/.config/netidx/admin-server/admins.json`, mode 0600:
 
 ```json
 {
@@ -355,37 +355,37 @@ the SHA-256 from `Announce`):
 }
 ```
 
-`netidx conf admin add <user>` prompts for the password and derives
+`netidx admin admin add <user>` prompts for the password and derives
 all four SCRAM fields per RFC 5802. The plaintext password is never
 written to disk.
 
 ### Trust model and what's deferred
 
-- **Bootstrap trust on first connect.** Conf-server's own cert is
+- **Bootstrap trust on first connect.** Admin-server's own cert is
   delivered via the discovery `Announce` (fingerprint). On a hostile
-  network the discovery channel can be spoofed; `--conf-server-pin
+  network the discovery channel can be spoofed; `--admin-server-pin
   <sha256>` short-circuits this.
 - **Replay defenses.** SCRAM nonces handle authentication replay; CSR
   reuse is prevented by binding the cert's serial to the authenticated
   session.
 - **Online revocation / OCSP.** Out of scope; revocation via CRL only.
-- **Conf-server clustering.** One per resolver-server machine,
+- **Admin-server clustering.** One per resolver-server machine,
   coordinating via the existing cluster protocol in `netidx-protocols`.
 - **Cross-subnet discovery.** Multicast only crosses subnets with an
-  explicit relay. Multi-subnet networks use explicit `--conf-server
+  explicit relay. Multi-subnet networks use explicit `--admin-server
   <addr>`.
 
 `init`-time discovery flags:
 - `--no-discovery` — skip the multicast probe.
-- `--conf-server <addr>` — use this address explicitly, no probing.
-- `--conf-server-pin <sha>` — only accept a discovered (or explicit)
-  conf-server whose cert SHA-256 matches.
+- `--admin-server <addr>` — use this address explicitly, no probing.
+- `--admin-server-pin <sha>` — only accept a discovered (or explicit)
+  admin-server whose cert SHA-256 matches.
 
 ---
 
 ## Sketched: publishers + admin GUIs (Layer 5)
 
-- **Perms publisher.** This is the conf server (Layer 4). Exposes the
+- **Perms publisher.** This is the admin server (Layer 4). Exposes the
   resolver's PMap under a configurable subtree, accepts writes, persists
   to disk, triggers SIGHUP. Auth via the resolver's TLS / Krb5 —
   admin group only.
@@ -393,17 +393,17 @@ written to disk.
   rather than running as a separate publisher. Mirrors the unit dir on
   a host; same RPC shape.
 - **Graphix browser admin screens.** Text-mode (TUI) and iced. Consumes
-  the perms / activation publishers and drives `netidx-conf` for
+  the perms / activation publishers and drives `netidx-admin` for
   client-side editing.
 - **CA management publisher.** Not recommended for remote use — CA
   private key handling over the network is a separate trust problem.
-  Local-only GUI on top of `netidx-conf::ca` is fine.
+  Local-only GUI on top of `netidx-admin::ca` is fine.
 
 ---
 
 ## Cross-cutting: identity-management migration path
 
-The id-map JSON + conf-server issuance scheme is "poor man's IdM" —
+The id-map JSON + admin-server issuance scheme is "poor man's IdM" —
 sufficient for small organizations (tens of machines, dozens of users).
 Larger organizations migrate to Kerberos backed by FreeIPA / Active
 Directory / OpenIDM, which netidx already supports natively. The plan

@@ -1,5 +1,5 @@
 //! Renewal-daemon service template: an activation unit that runs
-//! `<netidx> conf component tls auto-renew run -f`.
+//! `<netidx> admin component tls auto-renew run -f`.
 //!
 //! Installed on every TLS host (workstation, publisher, resolver, CA)
 //! so certificate lifecycle is nobody's chore: the daemon queues
@@ -21,7 +21,7 @@ pub struct RenewServiceParams {
 /// foreground under the supervisor (same reasoning as the other
 /// daemon units).
 pub fn unit(p: &RenewServiceParams) -> Result<Unit> {
-    let args: Vec<String> = ["conf", "component", "tls", "auto-renew", "run", "-f"]
+    let args: Vec<String> = ["admin", "component", "tls", "auto-renew", "run", "-f"]
         .into_iter()
         .map(String::from)
         .collect();
@@ -44,7 +44,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             u.process.args,
-            ["conf", "component", "tls", "auto-renew", "run", "-f"]
+            ["admin", "component", "tls", "auto-renew", "run", "-f"]
                 .into_iter()
                 .map(String::from)
                 .collect::<Vec<_>>(),

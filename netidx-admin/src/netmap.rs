@@ -2,14 +2,14 @@
 //! mutation helpers the register / deregister / remove-server handlers use.
 //!
 //! The CA owns this file (`<ca-dir>/netmap.json`) and is its only writer.
-//! It is built purely from conf-server pushes — never a walk — so it must
+//! It is built purely from admin-server pushes — never a walk — so it must
 //! survive a restart on its own; load/save here are that persistence. Every
-//! other conf server holds an in-memory cache of it (filled by the refresh
+//! other admin server holds an in-memory cache of it (filled by the refresh
 //! loop) and never writes here.
 
 use crate::{
     atomic,
-    conf_proto::{NetworkMap, ServerEntry},
+    admin_proto::{NetworkMap, ServerEntry},
 };
 use anyhow::{Context, Result};
 use std::{
@@ -38,7 +38,7 @@ pub fn save(ca_dir: &Path, map: &NetworkMap) -> Result<()> {
     atomic::write_atomic_pretty_json(&path(ca_dir), map)
 }
 
-/// Upsert a conf server's entry (keyed by `addr`), bumping `version` only
+/// Upsert a admin server's entry (keyed by `addr`), bumping `version` only
 /// when something actually changed — an idempotent re-register of identical
 /// facts is a no-op, so it doesn't churn every cache's version. Returns
 /// whether the map changed.
@@ -78,7 +78,7 @@ pub fn remove(map: &mut NetworkMap, addr: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf_proto::Role;
+    use crate::admin_proto::Role;
 
     fn entry(addr: &str, roles: Vec<Role>) -> ServerEntry {
         ServerEntry { addr: addr.parse().unwrap(), roles, cluster: None }

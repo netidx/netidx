@@ -1,6 +1,6 @@
-//! `netidx-conf` — configuration tooling engine for netidx.
+//! `netidx-admin` — configuration tooling engine for netidx.
 //!
-//! This crate is the library half of the `netidx conf …` CLI. It owns
+//! This crate is the library half of the `netidx admin …` CLI. It owns
 //! the load/edit/save story for the various netidx config files (client,
 //! resolver-server, perms, activation, id-map), the CA module, and the
 //! OS service installer. The CLI in `netidx-tools` is a thin shell over
@@ -26,11 +26,11 @@ pub mod atomic;
 pub mod ca;
 /// The CA's RBAC policy model (`Policy`, `SlotKind`, `AdminInfo`) — pure
 /// data. Cross-platform: the unix vault stores it, but a Windows admin
-/// client carries these types over the conf plane (see [`conf_proto`]).
+/// client carries these types over the admin plane (see [`admin_proto`]).
 pub mod ca_policy;
 /// The CA's request store — one atomic JSON record per request, owned by
 /// the daemon (`queue/`, `issued/`, `denied/` under the CA dir). Backs
-/// the conf server's Enqueue / Poll / Approve / Deny, revoke-by-name, and
+/// the admin server's Enqueue / Poll / Approve / Deny, revoke-by-name, and
 /// duplicate-name refusal. Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod ca_store;
@@ -43,37 +43,37 @@ pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]
 mod cloud;
-/// Conf-server client: fetch a network's identity and info, join it
-/// (key + CSR + signature over TLS), and enroll new conf servers —
+/// Admin-server client: fetch a network's identity and info, join it
+/// (key + CSR + signature over TLS), and enroll new admin servers —
 /// verifying the CA identity by fingerprint first. Cross-platform
 /// (rcgen + rustls, no openssl).
-pub mod conf_client;
-/// Local control-socket client: the on-box `ca` CLI drives the running conf
+pub mod admin_client;
+/// Local control-socket client: the on-box `ca` CLI drives the running admin
 /// daemon over its `0600` unix socket (no TLS / no password — the daemon
 /// trusts the local peer by `SO_PEERCRED`). Unix-only — the socket is a
 /// daemon feature and the daemon is unix.
 #[cfg(unix)]
-pub mod conf_local;
-/// Wire protocol (message types + framing) shared by the conf server
+pub mod admin_local;
+/// Wire protocol (message types + framing) shared by the admin server
 /// and its clients. Cross-platform — a Windows node speaks it to a unix
-/// conf server. See [`design/ca-server.md`].
-pub mod conf_proto;
-/// Conf server: answers network-info queries, validates sign/enroll
+/// admin server. See [`design/ca-server.md`].
+pub mod admin_proto;
+/// Admin server: answers network-info queries, validates sign/enroll
 /// requests against per-admin policy, and pushes id-map registrations
 /// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].
 #[cfg(unix)]
-pub mod conf_server;
-/// On-disk config (`conf-server.json`) for the conf-server daemon:
+pub mod admin_server;
+/// On-disk config (`admin-server.json`) for the admin-server daemon:
 /// domain, listen address, serving identity, roles, peers. Unix-only —
 /// only the daemon and its installer read or write it.
 #[cfg(unix)]
-pub mod conf_server_config;
-/// The conf server's resolver-hierarchy delegation request store (the
+pub mod admin_server_config;
+/// The admin server's resolver-hierarchy delegation request store (the
 /// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
 /// Unix-only — it lives in the CA dir.
 #[cfg(unix)]
 pub mod delegation_store;
-/// mDNS/DNS-SD advertisement + browsing for conf servers. The beacon is
+/// mDNS/DNS-SD advertisement + browsing for admin servers. The beacon is
 /// a *hint* (candidate addresses, display grouping) — nothing
 /// security-relevant is decided from it. Cross-platform: a Windows
 /// workstation browses; the unix daemon advertises.
@@ -86,7 +86,7 @@ pub mod fingerprint;
 pub mod id_map;
 pub mod netmap;
 /// Deployment-environment network-shape detection (`--listen` /
-/// `--bind` suggestions) for the `conf install` flow. Behind the
+/// `--bind` suggestions) for the `admin install` flow. Behind the
 /// `cloud-detect` feature because it pulls an HTTP client + interface
 /// enumeration that config-only consumers don't need.
 #[cfg(feature = "cloud-detect")]
@@ -107,7 +107,7 @@ pub mod resolver_probe;
 pub mod service;
 pub mod template;
 pub mod tls;
-/// Shared trust-on-first-use rustls verifier for [`conf_client`] and
+/// Shared trust-on-first-use rustls verifier for [`admin_client`] and
 /// [`resolver_probe`].
 mod tls_tofu;
 pub mod uninstall;

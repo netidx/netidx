@@ -6,7 +6,7 @@
 
 use crate::{
     atomic,
-    conf_proto::{ClusterEdge, ClusterFacts, InfoAuth, ResolverAddr},
+    admin_proto::{ClusterEdge, ClusterFacts, InfoAuth, ResolverAddr},
     paths,
 };
 use anyhow::{Context, Result};
@@ -36,7 +36,7 @@ impl ResolverConfig {
     ///
     /// Validation resolves relative `include_permissions` entries
     /// against the target file's parent directory — mirroring runtime
-    /// startup (`Config::load_file`). That way `netidx conf resolver
+    /// startup (`Config::load_file`). That way `netidx admin resolver
     /// show/edit` run from an unrelated cwd doesn't misvalidate the
     /// same config that the server happily loads.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {

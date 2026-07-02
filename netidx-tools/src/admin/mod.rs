@@ -40,7 +40,7 @@ pub(crate) fn windows_sam_name() -> Result<String> {
 
 // `activation` (edit + control the supervisor's units) drives the
 // activation supervisor and its local control transport, both available
-// on unix and Windows. The remote, conf-plane control path (`--server`)
+// on unix and Windows. The remote, admin-plane control path (`--server`)
 // is unix-only — it needs the openssl-backed CA admin auth — and is gated
 // inside `service_control`.
 #[cfg(any(unix, windows))]
@@ -53,7 +53,7 @@ mod ca;
 mod client;
 mod component;
 // `delegation` (resolver hierarchy add-parent / review-delegation) drives
-// the conf server's CA admin auth + the delegation queue, both unix-only.
+// the admin server's CA admin auth + the delegation queue, both unix-only.
 #[cfg(unix)]
 mod delegation;
 mod editor;
@@ -61,7 +61,7 @@ mod id_map;
 mod init;
 mod lifecycle;
 mod perms;
-// `perms` admin (remote, map-routed perms show/edit) drives the conf
+// `perms` admin (remote, map-routed perms show/edit) drives the admin
 // server's CA admin auth + cluster push, both unix-only (the engine
 // pulls openssl), same as `delegation`.
 #[cfg(unix)]
@@ -70,8 +70,8 @@ mod prompt;
 mod renew;
 mod resolver;
 mod roles;
-// `server` (the conf-server daemon CLI) depends on the
-// `netidx_admin::conf_server` engine module, which is unix-only (the
+// `server` (the admin-server daemon CLI) depends on the
+// `netidx_admin::admin_server` engine module, which is unix-only (the
 // CA signer pulls openssl). On Windows, put a host on a network by
 // installing a publisher client config (`netidx admin publisher
 // install`); the `workstation` role is unix-only too (Local auth +
@@ -107,7 +107,7 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
-    /// remotely show or edit a cluster's permissions through the conf
+    /// remotely show or edit a cluster's permissions through the admin
     /// server, routed by the network map (no SSH).
     // Unix-only — like `ca`/`delegation`, the admin path needs openssl.
     #[cfg(unix)]

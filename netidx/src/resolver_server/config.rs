@@ -139,7 +139,7 @@ pub fn merge_perms_only(cfg: &file::Config) -> Result<PMap> {
 
 /// Read and parse a single permissions file in the on-disk `PMap`
 /// JSON format. The one place that knows how to load a perms file:
-/// `load_included_pmap` and the `netidx-conf` config tooling both go
+/// `load_included_pmap` and the `netidx-admin` config tooling both go
 /// through here rather than re-implementing the read/parse.
 pub fn load_perms<P: AsRef<FsPath>>(path: P) -> Result<PMap> {
     let path = path.as_ref();
@@ -171,7 +171,7 @@ pub(crate) fn load_included_pmap(paths: &[ArcStr]) -> Result<PMap> {
 /// fresh-install directory is created).
 ///
 /// This is the single implementation shared by `Config::load_raw`
-/// (runtime load) and the `netidx-conf` editor's pre-save validation,
+/// (runtime load) and the `netidx-admin` editor's pre-save validation,
 /// so the two can't drift.
 ///
 /// **Path-traversal posture.** Relative entries are joined with the
@@ -692,7 +692,7 @@ impl Config {
     /// Borrow the merged file-level permission map (after
     /// `include_permissions` + inline `perms` have been folded
     /// together by `from_file`). Exposed primarily for testing the
-    /// merge semantics, including from `netidx-conf`'s cross-crate
+    /// merge semantics, including from `netidx-admin`'s cross-crate
     /// template tests.
     pub fn perms(&self) -> &PMap {
         &self.perms

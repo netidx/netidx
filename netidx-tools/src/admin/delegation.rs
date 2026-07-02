@@ -1,6 +1,6 @@
 //! `netidx admin resolver add-parent` / `review-delegation` — the
 //! client/CLI half of resolver hierarchy delegation. The child queues a
-//! request with the parent's conf server (glyph-confirming it first) and
+//! request with the parent's admin server (glyph-confirming it first) and
 //! polls; the parent admin reviews pending requests, matches the
 //! out-of-band code, and approves (which edits the parent's `children`
 //! cluster-wide) or denies. Mirrors the CA enrollment `ca approve`
@@ -10,12 +10,12 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use clap::Args;
 use netidx_admin::{
-    conf_client,
-    conf_proto::{
+    admin_client,
+    admin_proto::{
         DelegationPollResponse, InfoAuth, NodeKind, PeerResult, ReferralEdit,
         ResolverAddr,
     },
-    conf_server, conf_server_config,
+    admin_server, admin_server_config,
     fingerprint::ColorMode,
     paths,
     resolver::ResolverConfig,
@@ -25,7 +25,7 @@ use std::{net::SocketAddr, time::Duration};
 use zeroize::Zeroizing;
 
 use super::{
-    ca::{collect_existing_password, env_user_name, fmt_age, local_conf_server_listen},
+    ca::{collect_existing_password, env_user_name, fmt_age, local_admin_server_listen},
     init, prompt,
 };
 
@@ -41,7 +41,7 @@ pub(super) fn info_to_referral_auth(a: &InfoAuth) -> ReferralAuth {
 }
 
 /// The shared client half of delegation, used by both `add-parent` and
-/// the install child branch: connect to the parent conf server,
+/// the install child branch: connect to the parent admin server,
 /// glyph-confirm its CA (the one human trust decision), queue a request
 /// for `proposed_path` carrying the child cluster's address(es), show the
 /// request code, and poll until the parent admin approves (or
@@ -51,7 +51,7 @@ pub(crate) fn delegate_under_parent(
     parent_conf_addr: SocketAddr,
     proposed_path: &str,
     child: Vec<ResolverAddr>,
-    confirmed: Option<&conf_client::CaIdentity>,
+    confirmed: Option<&admin_client::CaIdentity>,
 ) -> Result<Vec<ResolverAddr>> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Reuse an identity the caller already glyph-confirmed (the resolver
@@ -62,9 +62,9 @@ pub(crate) fn delegate_under_parent(
         Some(id) => (*id).clone(),
         None => {
             let id = rt
-                .block_on(conf_client::fetch_identity(parent_conf_addr, NodeKind::Client))
+                .block_on(admin_client::fetch_identity(parent_conf_addr, NodeKind::Client))
                 .with_context(|| {
-                    format!("contacting parent conf server {parent_conf_addr}")
+                    format!("contacting parent admin server {parent_conf_addr}")
                 })?;
             init::show_network_identity(parent_conf_addr, &id);
             if !prompt::confirm(
@@ -76,13 +76,13 @@ pub(crate) fn delegate_under_parent(
             id
         }
     };
-    let request_id = rt.block_on(conf_client::request_delegation(
+    let request_id = rt.block_on(admin_client::request_delegation(
         parent_conf_addr,
         proposed_path,
         child.clone(),
         &identity,
     ))?;
-    let code = conf_client::delegation_code(proposed_path, &child);
+    let code = admin_client::delegation_code(proposed_path, &child);
     println!("delegation requested for {proposed_path:?}. Your request code is:");
     println!("  SHA256  {}", code.text());
     println!("{}", code.identicon(ColorMode::detect()));
@@ -94,7 +94,7 @@ pub(crate) fn delegate_under_parent(
     );
     loop {
         std::thread::sleep(POLL_INTERVAL);
-        match rt.block_on(conf_client::poll_delegation(
+        match rt.block_on(admin_client::poll_delegation(
             parent_conf_addr,
             &request_id,
             &identity,
@@ -113,8 +113,8 @@ pub(crate) fn delegate_under_parent(
 
 #[derive(Args, Debug)]
 pub(crate) struct AddParentFlags {
-    /// The parent's conf-server address: a hostname or IP, with or
-    /// without a `:port` (the conf port defaults to 4565). Prompted when
+    /// The parent's admin-server address: a hostname or IP, with or
+    /// without a `:port` (the admin port defaults to 4565). Prompted when
     /// omitted — over a WAN you type it (no mDNS).
     #[arg(long = "server")]
     server: Option<String>,
@@ -146,11 +146,11 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     }
     let n_members = child.len();
     let server = match f.server {
-        Some(s) => init::resolve_conf_server_addr(&s)?,
+        Some(s) => init::resolve_admin_server_addr(&s)?,
         None => prompt::required_with(
-            "parent conf-server address (host or ip, optional :port, e.g. \
+            "parent admin-server address (host or ip, optional :port, e.g. \
              203.0.113.1:4565)",
-            init::resolve_conf_server_addr,
+            init::resolve_admin_server_addr,
         )?,
     };
     let proposed_path = prompt::required_string(
@@ -181,8 +181,8 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
 
 /// Push the child's freshly-written `parent` referral to every other member
 /// of the child cluster (symmetric to the parent-side `AddChild` push). This
-/// host's conf server supplies the peer-cert identity needed to authenticate
-/// to the other members' conf servers. Without a local conf server we can't
+/// host's admin server supplies the peer-cert identity needed to authenticate
+/// to the other members' admin servers. Without a local admin server we can't
 /// authenticate as a cluster peer, so we fall back to a loud "copy it
 /// manually" warning.
 fn propagate_parent_to_child_cluster(
@@ -190,12 +190,12 @@ fn propagate_parent_to_child_cluster(
     proposed_path: &str,
     parent: &[ResolverAddr],
 ) -> Result<()> {
-    let conf_path = match paths::discover_conf_server_config() {
+    let admin_path = match paths::discover_admin_server_config() {
         Ok(p) => p,
         Err(_) => {
             let n = rcfg.as_file().member_servers.len();
             eprintln!(
-                "WARNING: this is a {n}-member cluster but this host has no conf \
+                "WARNING: this is a {n}-member cluster but this host has no admin \
                  server, so the parent referral could not be propagated \
                  automatically. Copy the `parent` block from this host's \
                  resolver.json into every other member's resolver.json, or they \
@@ -204,8 +204,8 @@ fn propagate_parent_to_child_cluster(
             return Ok(());
         }
     };
-    let cfg = conf_server_config::ConfServerConfig::load(&conf_path).context(
-        "loading this host's conf-server config to propagate the parent referral",
+    let cfg = admin_server_config::AdminServerConfig::load(&admin_path).context(
+        "loading this host's admin-server config to propagate the parent referral",
     )?;
     let cert = std::fs::read(&cfg.serving_cert).with_context(|| {
         format!("reading serving cert {}", cfg.serving_cert.display())
@@ -214,7 +214,7 @@ fn propagate_parent_to_child_cluster(
         .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
     let trusted = std::fs::read(&cfg.trusted)
         .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
-    let roots = conf_server::load_roots(&trusted)?;
+    let roots = admin_server::load_roots(&trusted)?;
     let member_addrs: Vec<SocketAddr> =
         rcfg.as_file().member_servers.iter().map(|m| m.addr).collect();
     let edit = ReferralEdit::SetParent {
@@ -224,7 +224,7 @@ fn propagate_parent_to_child_cluster(
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     println!("propagating the parent referral to the other cluster member(s)...");
     sync_cluster_peers("parent referral", || {
-        Ok(rt.block_on(conf_server::push_referral_edit_to_peers(
+        Ok(rt.block_on(admin_server::push_referral_edit_to_peers(
             &edit,
             &member_addrs,
             cfg.listen,
@@ -283,9 +283,9 @@ fn sync_cluster_peers(
 
 #[derive(Args, Debug)]
 pub(crate) struct ReviewFlags {
-    /// The conf server whose delegation queue to work: a hostname or IP,
-    /// with or without a `:port` (the conf port defaults to 4565).
-    /// Defaults to this host's own conf server.
+    /// The admin server whose delegation queue to work: a hostname or IP,
+    /// with or without a `:port` (the admin port defaults to 4565).
+    /// Defaults to this host's own admin server.
     #[arg(long = "server")]
     server: Option<String>,
 }
@@ -296,16 +296,16 @@ pub(crate) struct ReviewFlags {
 pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let server = match f.server {
-        Some(s) => init::resolve_conf_server_addr(&s)?,
-        None => local_conf_server_listen()
-            .context("no conf server found; pass --server <host-or-ip[:port]>")?,
+        Some(s) => init::resolve_admin_server_addr(&s)?,
+        None => local_admin_server_listen()
+            .context("no admin server found; pass --server <host-or-ip[:port]>")?,
     };
     let identity = rt
-        .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-        .with_context(|| format!("contacting conf server {server}"))?;
+        .block_on(admin_client::fetch_identity(server, NodeKind::Client))
+        .with_context(|| format!("contacting admin server {server}"))?;
     init::show_network_identity(server, &identity);
-    if !prompt::confirm("is this your network's conf server?", false)? {
-        bail!("conf-server identity was not confirmed; nothing was sent");
+    if !prompt::confirm("is this your network's admin server?", false)? {
+        bail!("admin-server identity was not confirmed; nothing was sent");
     }
     let admin = match env_user_name() {
         Some(user) => prompt::string_with_default("admin name", None, &user)?,
@@ -315,7 +315,7 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
         "CA password for admin {admin:?}"
     ))?);
     loop {
-        let queue = rt.block_on(conf_client::list_delegations(
+        let queue = rt.block_on(admin_client::list_delegations(
             server,
             &admin,
             password.as_str(),
@@ -328,7 +328,7 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
         println!();
         println!("pending delegation requests:");
         for (i, e) in queue.iter().enumerate() {
-            let code = conf_client::delegation_code(&e.proposed_path, &e.child).short();
+            let code = admin_client::delegation_code(&e.proposed_path, &e.child).short();
             println!(
                 "  {}) delegate {:?} to {}  code {}  age {}  from {}",
                 i + 1,
@@ -351,7 +351,7 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
                 continue;
             }
         };
-        let code = conf_client::delegation_code(&entry.proposed_path, &entry.child);
+        let code = admin_client::delegation_code(&entry.proposed_path, &entry.child);
         println!();
         println!("  delegate subtree: {}", entry.proposed_path);
         println!("  to child resolver(s): {}", describe_child(&entry.child));
@@ -367,7 +367,7 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
                     None,
                     "request code mismatch",
                 )?;
-                rt.block_on(conf_client::deny_delegation(
+                rt.block_on(admin_client::deny_delegation(
                     server,
                     &admin,
                     password.as_str(),
@@ -387,7 +387,7 @@ pub(crate) fn review_delegation(f: ReviewFlags) -> Result<()> {
         // sync_cluster_peers keeps offering to retry here until every peer is
         // consistent. This is the only path to the idempotent re-sync.
         sync_cluster_peers("approval", || {
-            rt.block_on(conf_client::approve_delegation(
+            rt.block_on(admin_client::approve_delegation(
                 server,
                 &admin,
                 password.as_str(),

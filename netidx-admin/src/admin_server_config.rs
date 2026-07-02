@@ -1,6 +1,6 @@
-//! On-disk config for the conf-server daemon (`conf-server.json`).
+//! On-disk config for the admin-server daemon (`admin-server.json`).
 //!
-//! Written by the install flows, read by `netidx conf component server run`.
+//! Written by the install flows, read by `netidx admin component server run`.
 //! Roles are explicit: the file states exactly what this host does
 //! (holds the CA, runs a resolver, runs an id-map) and where each
 //! role's backing files live — the daemon never guesses from what it
@@ -49,7 +49,7 @@ pub struct IdMapRole {
     pub map: PathBuf,
 }
 
-/// What this host does. Every field optional — a conf server with no
+/// What this host does. Every field optional — a admin server with no
 /// roles still answers GetInfo (domain + peers), which is enough to be
 /// a stepping stone in a peer walk.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub struct Roles {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ConfServerConfig {
+pub struct AdminServerConfig {
     /// The TLS domain this network is rooted at (e.g. `ryu-oh.org`).
     pub domain: String,
     pub listen: SocketAddr,
@@ -79,14 +79,14 @@ pub struct ConfServerConfig {
     /// server-to-server connections.
     pub trusted: PathBuf,
     pub roles: Roles,
-    /// The CA's conf server: where this host registers its facts and
+    /// The CA's admin server: where this host registers its facts and
     /// fetches the network map (and where Sign/Enroll go). **Required for
-    /// a non-CA conf server** — without it the host can't register and is
+    /// a non-CA admin server** — without it the host can't register and is
     /// silently absent from the map. Only the CA host (which owns the map)
-    /// may omit it. Enforced by [`ConfServerConfig::validate`].
+    /// may omit it. Enforced by [`AdminServerConfig::validate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_addr: Option<SocketAddr>,
-    /// Other conf servers this one knows of. Served verbatim in GetInfo
+    /// Other admin servers this one knows of. Served verbatim in GetInfo
     /// for the client-side peer walk, and used by the ca role to find
     /// id-map hosts to push registrations to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -106,25 +106,25 @@ fn default_true() -> bool {
     true
 }
 
-impl ConfServerConfig {
+impl AdminServerConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
-            .with_context(|| format!("reading conf-server config {}", path.display()))?;
+            .with_context(|| format!("reading admin-server config {}", path.display()))?;
         let cfg: Self = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing {}", path.display()))?;
         cfg.validate()
-            .with_context(|| format!("invalid conf-server config {}", path.display()))?;
+            .with_context(|| format!("invalid admin-server config {}", path.display()))?;
         Ok(cfg)
     }
 
-    /// A non-CA conf server must know its CA: without `ca_addr` it can
+    /// A non-CA admin server must know its CA: without `ca_addr` it can
     /// neither register its facts nor version-check + pull the network
     /// map, so it would be silently invisible to the map. Only the CA host
     /// (`roles.ca` set), which *is* the map's owner, may omit it.
     pub fn validate(&self) -> Result<()> {
         if self.roles.ca.is_none() && self.ca_addr.is_none() {
             bail!(
-                "a non-CA conf server must set `ca_addr` — the CA it registers \
+                "a non-CA admin server must set `ca_addr` — the CA it registers \
                  with and fetches the network map from. Only the CA host (with \
                  a `ca` role) may omit it."
             );
@@ -134,7 +134,7 @@ impl ConfServerConfig {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let bytes =
-            serde_json::to_vec_pretty(self).context("serializing conf-server config")?;
+            serde_json::to_vec_pretty(self).context("serializing admin-server config")?;
         atomic::write_atomic(path, &bytes, 0o644)
     }
 }
@@ -143,8 +143,8 @@ impl ConfServerConfig {
 mod tests {
     use super::*;
 
-    fn sample() -> ConfServerConfig {
-        ConfServerConfig {
+    fn sample() -> AdminServerConfig {
+        AdminServerConfig {
             domain: "ryu-oh.org".to_string(),
             listen: "192.168.0.5:4565".parse().unwrap(),
             serving_cert: PathBuf::from("/etc/netidx/ca/server/cert.pem"),
@@ -170,10 +170,10 @@ mod tests {
     #[test]
     fn round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("conf-server.json");
+        let p = dir.path().join("admin-server.json");
         let cfg = sample();
         cfg.save(&p).unwrap();
-        assert_eq!(ConfServerConfig::load(&p).unwrap(), cfg);
+        assert_eq!(AdminServerConfig::load(&p).unwrap(), cfg);
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod tests {
             "trusted": "/a/trusted.pem",
             "roles": {}
         }"#;
-        let cfg: ConfServerConfig = serde_json::from_str(json).unwrap();
+        let cfg: AdminServerConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.mdns);
         assert!(cfg.peers.is_empty());
         assert!(cfg.ca_addr.is_none());
@@ -212,12 +212,12 @@ mod tests {
         // load() enforces it: an on-disk non-CA config without ca_addr is
         // rejected at load, not silently accepted (it would never register).
         let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("conf-server.json");
+        let p = dir.path().join("admin-server.json");
         let mut bad = sample();
         bad.roles.ca = None;
         bad.ca_addr = None;
         bad.save(&p).unwrap(); // save does not validate
-        assert!(ConfServerConfig::load(&p).is_err(), "load rejects non-CA + no ca_addr");
+        assert!(AdminServerConfig::load(&p).is_err(), "load rejects non-CA + no ca_addr");
     }
 
     #[test]
@@ -231,6 +231,6 @@ mod tests {
             "roles": {},
             "tpyo": true
         }"#;
-        assert!(serde_json::from_str::<ConfServerConfig>(json).is_err());
+        assert!(serde_json::from_str::<AdminServerConfig>(json).is_err());
     }
 }

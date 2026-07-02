@@ -1,8 +1,8 @@
-//! Conf server: the per-host daemon behind discovery-driven setup. It
+//! Admin server: the per-host daemon behind discovery-driven setup. It
 //! answers [`Request::GetInfo`] with this host's local facts + known
 //! peers, and — on the host holding the CA — turns a join client's
 //! [`Request::Sign`] into a signed cert and a [`Request::Enroll`] into
-//! a new conf server's reserved-SAN serving cert. After a successful
+//! a new admin server's reserved-SAN serving cert. After a successful
 //! sign it pushes id-map registrations to every id-map-role peer.
 //!
 //! The request-handling cores ([`handle_sign_request`],
@@ -16,8 +16,8 @@
 
 use crate::{
     ca::{Ca, SanEntry},
-    ca_store, ca_vault, conf_client,
-    conf_proto::{
+    ca_store, ca_vault, admin_client,
+    admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
         AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
         ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
@@ -38,7 +38,7 @@ use crate::{
         SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceControlResult,
         SetAdminPolicyRequest, SignRequest, SignResponse,
     },
-    conf_server_config::ConfServerConfig,
+    admin_server_config::AdminServerConfig,
     delegation_store, discovery, id_map, netmap,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -93,9 +93,9 @@ const PUSH_BROWSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The dedicated auto-renewal admin: a vault slot with an empty issuance
 /// policy whose only over-the-wire power is approving verified renewals.
-/// When [`CaRole::autorenew`](crate::conf_server_config::CaRole) names its
+/// When [`CaRole::autorenew`](crate::admin_server_config::CaRole) names its
 /// keytab, the daemon authenticates as this slot to approve renewals
-/// in-process — the same narrow principal the separate `conf ca auto-approve`
+/// in-process — the same narrow principal the separate `admin ca auto-approve`
 /// process used to be, now without the extra process.
 pub const AUTORENEW_ADMIN: &str = "autorenew";
 
@@ -104,11 +104,11 @@ pub const AUTORENEW_ADMIN: &str = "autorenew";
 /// not latency-sensitive, so a slow poll is plenty.
 const AUTORENEW_POLL: Duration = Duration::from_secs(60);
 
-/// Shared state of a running conf server.
+/// Shared state of a running admin server.
 pub struct Server {
     /// The config, mutable because [`Request::Enroll`] appends the
     /// enrollee to `peers`.
-    cfg: Mutex<ConfServerConfig>,
+    cfg: Mutex<AdminServerConfig>,
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
@@ -144,7 +144,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(
-        cfg: ConfServerConfig,
+        cfg: AdminServerConfig,
         cfg_path: Option<PathBuf>,
         serving_cert_pem: Vec<u8>,
         serving_key_pem: Vec<u8>,
@@ -168,18 +168,18 @@ impl Server {
                     Ok(pw) => Some(pw),
                     Err(e) => {
                         error!(
-                            "conf-server: CANNOT SIGN — the autorenew credential is \
+                            "admin-server: CANNOT SIGN — the autorenew credential is \
                              unavailable: {e:#}. The CA serves read-only (auth/list/deny \
                              work; issue/enroll/approve/revoke fail). Recover with \
-                             `netidx conf ca recovery rotate`."
+                             `netidx admin ca recovery rotate`."
                         );
                         None
                     }
                 },
                 None => {
                     error!(
-                        "conf-server: CANNOT SIGN — this CA has no autorenew credential. \
-                         Set one up with `netidx conf ca auto-approve`; until then it serves \
+                        "admin-server: CANNOT SIGN — this CA has no autorenew credential. \
+                         Set one up with `netidx admin ca auto-approve`; until then it serves \
                          read-only."
                     );
                     None
@@ -247,7 +247,7 @@ impl Server {
         };
         load_serving_keypair(&cert_path, &key_path).unwrap_or_else(|e| {
             warn!(
-                "conf-server: re-reading serving identity for push failed, \
+                "admin-server: re-reading serving identity for push failed, \
                  using startup copy: {e:#}"
             );
             (self.serving_cert_pem.clone(), self.serving_key_pem.clone())
@@ -255,13 +255,13 @@ impl Server {
     }
 }
 
-/// Run the conf server described by the config at `cfg_path` until the
+/// Run the admin server described by the config at `cfg_path` until the
 /// process is killed.
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
-    let cfg = ConfServerConfig::load(&cfg_path)?;
+    let cfg = AdminServerConfig::load(&cfg_path)?;
     // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
     // this machine; `load_serving_keypair` unseals + decrypts in memory.
-    // Failure is a hard error (a conf server silently down means no discovery
+    // Failure is a hard error (a admin server silently down means no discovery
     // and no renewals for the whole network).
     let (serving_cert_pem, serving_key_pem) =
         load_serving_keypair(&cfg.serving_cert, &cfg.serving_key)?;
@@ -272,8 +272,8 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         build_serving_acceptor(&state, &state.serving_cert_pem, &state.serving_key_pem)?;
     let listener = TcpListener::bind(listen)
         .await
-        .with_context(|| format!("binding conf server to {listen}"))?;
-    info!("conf-server: listening on {listen}");
+        .with_context(|| format!("binding admin server to {listen}"))?;
+    info!("admin-server: listening on {listen}");
     // Advertise over mDNS. The beacon is a hint only — fingerprint +
     // roles ride in TXT purely for pre-connect display/grouping.
     let _advert = if mdns {
@@ -282,7 +282,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         match discovery::advertise(listen, &domain, &state.roles(), &fp_short) {
             Ok(ad) => Some(ad),
             Err(e) => {
-                warn!("conf-server: mDNS advertisement failed (continuing): {e:#}");
+                warn!("admin-server: mDNS advertisement failed (continuing): {e:#}");
                 None
             }
         }
@@ -331,8 +331,8 @@ pub async fn serve_on(
                     let _ = push_registrations(&state, &plan).await;
                 }
             }
-            Ok(Err(e)) => warn!("conf-server: listing pending id-map pushes: {e:#}"),
-            Err(e) => warn!("conf-server: pending-push task panicked: {e}"),
+            Ok(Err(e)) => warn!("admin-server: listing pending id-map pushes: {e:#}"),
+            Err(e) => warn!("admin-server: pending-push task panicked: {e}"),
         }
     }
     // If the CA role names an autorenew keytab, approve verified renewals
@@ -351,7 +351,7 @@ pub async fn serve_on(
         let (tcp, peer) = match listener.accept().await {
             Ok(x) => x,
             Err(e) => {
-                warn!("conf-server: accept failed: {e:#}");
+                warn!("admin-server: accept failed: {e:#}");
                 continue;
             }
         };
@@ -360,7 +360,7 @@ pub async fn serve_on(
         let conn_permit = match conns.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                warn!("conf-server: at connection limit, dropping {peer}");
+                warn!("admin-server: at connection limit, dropping {peer}");
                 continue;
             }
         };
@@ -380,18 +380,18 @@ pub async fn serve_on(
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => debug!("conf-server: connection from {peer} ended: {e:#}"),
-                Err(_) => debug!("conf-server: connection from {peer} timed out"),
+                Ok(Err(e)) => debug!("admin-server: connection from {peer} ended: {e:#}"),
+                Err(_) => debug!("admin-server: connection from {peer} timed out"),
             }
         });
     }
 }
 
-/// `conf.sock` beside the conf-server config file. The daemon binds it and
+/// `admin.sock` beside the admin-server config file. The daemon binds it and
 /// the local `ca` CLI connects to it; both derive it from the same config
 /// path, so they always agree on the location.
 pub fn local_socket_path(cfg_path: &Path) -> PathBuf {
-    cfg_path.parent().unwrap_or_else(|| Path::new(".")).join("conf.sock")
+    cfg_path.parent().unwrap_or_else(|| Path::new(".")).join("admin.sock")
 }
 
 /// Bind the local control socket `0600` so only the daemon's uid / root can
@@ -420,7 +420,7 @@ fn local_peer_allowed(stream: &tokio::net::UnixStream) -> bool {
     match stream.peer_cred() {
         Ok(cred) => cred.uid() == 0 || cred.uid() == nix::unistd::geteuid().as_raw(),
         Err(e) => {
-            debug!("conf-server: cannot read local control peer creds: {e}");
+            debug!("admin-server: cannot read local control peer creds: {e}");
             false
         }
     }
@@ -429,7 +429,7 @@ fn local_peer_allowed(stream: &tokio::net::UnixStream) -> bool {
 /// If this daemon has a config path (always, outside tests), bind the local
 /// control socket and serve admin / recovery / service requests from it.
 /// Best-effort: a bind failure is logged and the daemon keeps serving the
-/// network conf plane. Local connections share the sign semaphore (the
+/// network admin plane. Local connections share the sign semaphore (the
 /// Argon2 budget) but not the network connection limit — the socket is a
 /// privileged, peer-cred-gated local channel.
 fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
@@ -439,13 +439,13 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
         Ok(l) => l,
         Err(e) => {
             warn!(
-                "conf-server: local control socket disabled ({}): {e:#}",
+                "admin-server: local control socket disabled ({}): {e:#}",
                 path.display()
             );
             return;
         }
     };
-    info!("conf-server: local control socket at {}", path.display());
+    info!("admin-server: local control socket at {}", path.display());
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
@@ -453,14 +453,14 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
             let (stream, _addr) = match listener.accept().await {
                 Ok(x) => x,
                 Err(e) => {
-                    warn!("conf-server: local control accept failed: {e:#}");
+                    warn!("admin-server: local control accept failed: {e:#}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             };
             if !local_peer_allowed(&stream) {
                 debug!(
-                    "conf-server: refusing local control peer (uid not root / daemon)"
+                    "admin-server: refusing local control peer (uid not root / daemon)"
                 );
                 continue;
             }
@@ -474,9 +474,9 @@ fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        debug!("conf-server: local control connection ended: {e:#}")
+                        debug!("admin-server: local control connection ended: {e:#}")
                     }
-                    Err(_) => debug!("conf-server: local control connection timed out"),
+                    Err(_) => debug!("admin-server: local control connection timed out"),
                 }
             });
         }
@@ -536,7 +536,7 @@ async fn handle_conn(
     serve_request(tls, peer, peer_ident, false, state, signs).await
 }
 
-/// The transport-agnostic body of a conf-plane connection: the hello
+/// The transport-agnostic body of a admin-plane connection: the hello
 /// exchange and the single request/response, dispatched against the same
 /// handlers regardless of how the bytes arrived. Shared by the TLS listener
 /// ([`handle_conn`]) and the local control socket ([`handle_local_conn`]).
@@ -547,7 +547,7 @@ async fn handle_conn(
 /// admin-management ops as a superuser — no password, the way a signing slot
 /// does. `peer_ident` is the TLS peer's cert identity and is always `None`
 /// for a local connection: there is no certificate, and a local caller is
-/// deliberately *not* treated as a conf-server peer, so the peer-cert-gated
+/// deliberately *not* treated as a admin-server peer, so the peer-cert-gated
 /// server-to-server requests stay refused locally.
 async fn serve_request<S>(
     mut tls: S,
@@ -560,14 +560,14 @@ async fn serve_request<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
-    let peer_is_conf_server = peer_ident
+    let peer_is_admin_server = peer_ident
         .as_ref()
         .map(|p| p.san.eq_ignore_ascii_case(SERVING_SAN))
         .unwrap_or(false);
     let hello: ClientHello =
-        conf_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
+        admin_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
     let domain = state.cfg.lock().domain.clone();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut tls,
         &ServerHello { protocol_version: PROTOCOL_VERSION, domain, roles: state.roles() },
     )
@@ -578,11 +578,11 @@ where
         "client speaks protocol version {} but we speak {PROTOCOL_VERSION}",
         hello.protocol_version
     );
-    let req: Request = conf_proto::read_msg(&mut tls).await.context("reading Request")?;
+    let req: Request = admin_proto::read_msg(&mut tls).await.context("reading Request")?;
     match req {
         Request::GetInfo => {
             let resp = get_info(state);
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing GetInfoResponse")
         }
@@ -617,7 +617,7 @@ where
                     }
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
         }
         Request::Enroll(req) => {
             let resp = match ca_dir(state) {
@@ -641,12 +641,12 @@ where
                     resp
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
         }
         Request::AddIdentity(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 AddIdentityResponse::Err {
-                    reason: "identity registration requires a conf-server peer \
+                    reason: "identity registration requires a admin-server peer \
                              certificate"
                         .to_string(),
                 }
@@ -668,7 +668,7 @@ where
                     }
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AddIdentityResponse")
         }
@@ -691,7 +691,7 @@ where
                     .context("enqueue task panicked")?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing EnqueueResponse")
         }
@@ -740,7 +740,7 @@ where
                                     (PollResponse::Unknown, None)
                                 }
                                 Err(e) => {
-                                    warn!("conf-server: queue status failed: {e:#}");
+                                    warn!("admin-server: queue status failed: {e:#}");
                                     (PollResponse::Unknown, None)
                                 }
                             }
@@ -756,7 +756,7 @@ where
                     resp
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing PollResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing PollResponse")
         }
         Request::ListQueue(req) => {
             let resp = match ca_dir(state) {
@@ -771,7 +771,7 @@ where
                     .await?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ListQueueResponse")
         }
@@ -814,7 +814,7 @@ where
                             if let Some(plan) = push {
                                 warnings.extend(push_registrations(state, &plan).await);
                             }
-                            // An approved enrollment makes the new conf
+                            // An approved enrollment makes the new admin
                             // server a peer — same side effect as the
                             // synchronous Enroll, deferred to approval.
                             if let Some(listen) = enroll_listen {
@@ -825,7 +825,7 @@ where
                     }
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApproveResponse")
         }
@@ -844,7 +844,7 @@ where
                     .await?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing DenyResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing DenyResponse")
         }
         Request::Revoke(req) => {
             let resp = match ca_dir(state) {
@@ -859,7 +859,7 @@ where
                     .await?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing RevokeResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing RevokeResponse")
         }
         Request::ListIssued(req) => {
             let resp = match ca_dir(state) {
@@ -874,7 +874,7 @@ where
                     .await?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ListIssuedResponse")
         }
@@ -889,7 +889,7 @@ where
                 .await
                 .context("delegation request task panicked")?,
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing DelegationResponse")
         }
@@ -902,7 +902,7 @@ where
                 .await
                 .context("delegation poll task panicked")?,
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing DelegationPollResponse")
         }
@@ -923,13 +923,13 @@ where
                     .context("list delegations task panicked")?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ListDelegationsResponse")
         }
         Request::ApproveDelegation(req) => {
             let resp = handle_approve_delegation(state, req).await;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApproveDelegationResponse")
         }
@@ -938,14 +938,14 @@ where
             let state = state.clone();
             let resp =
                 run_signing(&signs, move || handle_deny_delegation(&state, &req)).await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing DenyDelegationResponse")
         }
         Request::ApplyReferralEdit(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 ApplyReferralEditResponse::Err {
-                    reason: "a referral edit requires a conf-server peer certificate"
+                    reason: "a referral edit requires a admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -956,7 +956,7 @@ where
                 .await
                 .context("apply referral edit task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApplyReferralEditResponse")
         }
@@ -979,7 +979,7 @@ where
                                 GetCrlResponse { crl_pem: None }
                             }
                             Err(e) => {
-                                warn!("conf-server: reading the CRL failed: {e:#}");
+                                warn!("admin-server: reading the CRL failed: {e:#}");
                                 GetCrlResponse { crl_pem: None }
                             }
                         }
@@ -988,12 +988,12 @@ where
                     .context("CRL read task panicked")?
                 }
             };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing GetCrlResponse")
         }
         Request::Register(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 RegisterResponse::Err {
-                    reason: "register requires a conf-server peer certificate"
+                    reason: "register requires a admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -1002,14 +1002,14 @@ where
                     .await
                     .context("register task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RegisterResponse")
         }
         Request::Deregister(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 RegisterResponse::Err {
-                    reason: "deregister requires a conf-server peer certificate"
+                    reason: "deregister requires a admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -1018,26 +1018,26 @@ where
                     .await
                     .context("deregister task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RegisterResponse")
         }
         Request::GetMapVersion => {
             let resp = GetMapVersionResponse::Ok { version: state.map.lock().version };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing GetMapVersionResponse")
         }
         Request::GetMap => {
             let resp = GetMapResponse::Ok { map: state.map.lock().clone() };
-            conf_proto::write_msg(&mut tls, &resp).await.context("writing GetMapResponse")
+            admin_proto::write_msg(&mut tls, &resp).await.context("writing GetMapResponse")
         }
         Request::RemoveServer(req) => {
             // Argon2-bound (vault auth) — keep it under the sign semaphore.
             let state = state.clone();
             let resp =
                 run_signing(&signs, move || handle_remove_server(&state, &req)).await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RemoveServerResponse")
         }
@@ -1046,20 +1046,20 @@ where
             let resp = tokio::task::spawn_blocking(move || handle_get_perms(&state))
                 .await
                 .context("get-perms task panicked")?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing GetPermsResponse")
         }
         Request::EditPerms(req) => {
             let resp = handle_edit_perms(state, &signs, &req).await;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing EditPermsResponse")
         }
         Request::ApplyPermsEdit(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 ApplyPermsEditResponse::Err {
-                    reason: "a perms edit requires a conf-server peer certificate"
+                    reason: "a perms edit requires a admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -1068,7 +1068,7 @@ where
                     .await
                     .context("apply perms edit task panicked")?
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApplyPermsEditResponse")
         }
@@ -1080,7 +1080,7 @@ where
             let resp =
                 run_signing(&signs, move || handle_add_role_admin(&state, &req, local))
                     .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AdminMgmtResponse")
         }
@@ -1089,7 +1089,7 @@ where
             let resp =
                 run_signing(&signs, move || handle_set_admin_policy(&state, &req, local))
                     .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AdminMgmtResponse")
         }
@@ -1098,7 +1098,7 @@ where
             let resp =
                 run_signing(&signs, move || handle_remove_admin(&state, &req, local))
                     .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AdminMgmtResponse")
         }
@@ -1107,26 +1107,26 @@ where
             let resp =
                 run_signing(&signs, move || handle_list_admins(&state, &req, local))
                     .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AdminListResponse")
         }
         Request::ControlService(req) => {
             let resp = handle_control_service(state, &signs, &req).await;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ControlServiceResponse")
         }
         Request::ApplyServiceControl(req) => {
-            let resp = if !peer_is_conf_server {
+            let resp = if !peer_is_admin_server {
                 ApplyServiceControlResponse::Err {
-                    reason: "service control requires a conf-server peer certificate"
+                    reason: "service control requires a admin-server peer certificate"
                         .to_string(),
                 }
             } else {
                 handle_apply_service_control(state, &req).await
             };
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing ApplyServiceControlResponse")
         }
@@ -1136,7 +1136,7 @@ where
             let state = state.clone();
             let resp = run_signing(&signs, move || handle_rotate_recovery(&state, local))
                 .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RotateRecoveryResponse")
         }
@@ -1145,7 +1145,7 @@ where
             let resp =
                 run_signing(&signs, move || handle_rotate_autorenew(&state, local))
                     .await?;
-            conf_proto::write_msg(&mut tls, &resp)
+            admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing RotateAutorenewResponse")
         }
@@ -1181,7 +1181,7 @@ fn ca_dir(state: &Server) -> Option<PathBuf> {
     state.ca_dir.clone()
 }
 
-/// Append a freshly enrolled conf server to our peer list (and persist
+/// Append a freshly enrolled admin server to our peer list (and persist
 /// it when we have a config path). The CA host thereby becomes the
 /// well-known starting point for peer walks.
 fn record_peer(state: &Server, peer: SocketAddr) {
@@ -1193,7 +1193,7 @@ fn record_peer(state: &Server, peer: SocketAddr) {
     if let Some(path) = &state.cfg_path
         && let Err(e) = cfg.save(path)
     {
-        warn!("conf-server: failed to persist enrolled peer {peer}: {e:#}");
+        warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
     }
 }
 
@@ -1207,7 +1207,7 @@ fn get_info(state: &Server) -> GetInfoResponse {
             Ok(x) => x,
             Err(e) => {
                 warn!(
-                    "conf-server: could not derive resolver info from {}: {e:#}",
+                    "admin-server: could not derive resolver info from {}: {e:#}",
                     r.config.display()
                 );
                 None
@@ -1232,7 +1232,7 @@ fn resolver_info(config: &Path) -> Result<Option<ResolverAddr>> {
 }
 
 /// Fan the freshly signed identity out to every id-map host we know of:
-/// the local map directly, configured peers and mDNS-discovered conf
+/// the local map directly, configured peers and mDNS-discovered admin
 /// servers over authenticated TLS. Returns warnings for the failures —
 /// the sign itself already succeeded.
 async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String> {
@@ -1281,7 +1281,7 @@ async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String>
                     }
                 }
             }
-            Err(e) => warn!("conf-server: push-time mDNS browse failed: {e:#}"),
+            Err(e) => warn!("admin-server: push-time mDNS browse failed: {e:#}"),
         }
     }
     targets.retain(|a| *a != own_listen);
@@ -1298,7 +1298,7 @@ async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String>
                 let cert = cert.clone();
                 let key = key.clone();
                 let h = tokio::spawn(async move {
-                    conf_client::push_identity(
+                    admin_client::push_identity(
                         addr,
                         &cert,
                         &key,
@@ -1315,7 +1315,7 @@ async fn push_registrations(state: &Arc<Server>, plan: &PushPlan) -> Vec<String>
         let abort = h.abort_handle();
         match tokio::time::timeout_at(deadline, h).await {
             Ok(Ok(Ok(Some(uid)))) => {
-                info!("conf-server: registered {} (uid {uid}) on {addr}", plan.name)
+                info!("admin-server: registered {} (uid {uid}) on {addr}", plan.name)
             }
             Ok(Ok(Ok(None))) => (), // peer has no id-map role
             Ok(Ok(Err(e))) => {
@@ -1367,16 +1367,16 @@ fn build_server_config(
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder =
         WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone());
-    // Client certs are *optional*: join clients have none yet; peer conf
+    // Client certs are *optional*: join clients have none yet; peer admin
     // servers authenticate with theirs (verified against the CA bundle) to
     // authorize server-to-server requests. When we hold a CRL, a *presented*
     // peer cert is additionally checked for revocation, so a revoked but
     // unexpired serving cert is refused at the handshake — closing the peer
     // gate (Register/Deregister/ApplyPermsEdit/…) against decommissioned or
-    // compromised conf servers. Unknown status stays permitted: absence of a
+    // compromised admin servers. Unknown status stays permitted: absence of a
     // CRL must not lock the plane out, presence on one must. (The CRL is read
     // when the acceptor is built; a revocation takes effect on the next
-    // conf-server restart, the same coarseness as a serving-cert rotation.)
+    // admin-server restart, the same coarseness as a serving-cert rotation.)
     let crls: Vec<rustls_pki_types::CertificateRevocationListDer<'static>> = match crl_pem
     {
         Some(pem) => rustls_pemfile::crls(&mut std::io::Cursor::new(pem))
@@ -1405,11 +1405,11 @@ fn build_server_config(
         .context("building TLS server config")
 }
 
-/// The CRL this conf server enforces on inbound peer certs: the CA's own
+/// The CRL this admin server enforces on inbound peer certs: the CA's own
 /// authoritative `crl.pem` when we hold the CA, else the copy the renewal
 /// daemon places beside our trust bundle (the convention netidx's own
 /// acceptor watches). Absent ⇒ `None` — a missing CRL must never lock the
-/// conf plane out; it just means no revocation is enforced yet.
+/// admin plane out; it just means no revocation is enforced yet.
 fn serving_crl_path(state: &Server) -> PathBuf {
     match state.ca.as_ref() {
         Some(ca) => ca.store.lock().crl_path(),
@@ -1423,7 +1423,7 @@ fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            warn!("conf-server: reading CRL {path:?}: {e:#} (revocation NOT enforced)");
+            warn!("admin-server: reading CRL {path:?}: {e:#} (revocation NOT enforced)");
             None
         }
     }
@@ -1448,7 +1448,7 @@ fn load_serving_keypair(
             let pw = netidx_tpm::unseal(&blob).with_context(|| {
                 format!(
                     "unsealing {sidecar:?} — if this host's TPM was cleared or \
-                     the board was replaced, re-enroll this conf server"
+                     the board was replaced, re-enroll this admin server"
                 )
             })?;
             let pw = std::str::from_utf8(&pw).context("sealed password is not utf8")?;
@@ -1483,7 +1483,7 @@ fn build_serving_acceptor(
 /// How often the daemon re-stats its serving cert + CRL on disk. Both were
 /// previously read once at startup, so a serving cert the renewal daemon
 /// renewed *on disk* sat unused until the running daemon's in-memory copy
-/// expired — taking the conf plane down network-wide. Now a long-running
+/// expired — taking the admin plane down network-wide. Now a long-running
 /// daemon picks up a renewal (or a fresh CRL / revocation) within one poll,
 /// no restart needed. Cheap: a stat, and a rebuild only when an mtime moves.
 const SERVING_RELOAD_POLL: Duration = Duration::from_secs(30);
@@ -1515,12 +1515,12 @@ fn spawn_serving_reload(state: &Arc<Server>, acceptor: Arc<RwLock<TlsAcceptor>>)
                         *acceptor.write() = acc;
                         last = now;
                         info!(
-                            "conf-server: reloaded serving cert / CRL from disk \
+                            "admin-server: reloaded serving cert / CRL from disk \
                              (renewal or revocation installed, no restart)"
                         );
                     }
                     Err(e) => warn!(
-                        "conf-server: serving cert/CRL reload failed, keeping current: {e:#}"
+                        "admin-server: serving cert/CRL reload failed, keeping current: {e:#}"
                     ),
                 }
             }
@@ -1588,7 +1588,7 @@ fn server_unlock(
         let vault = ca.vault.read();
         let pw = ca.autorenew_pw.read().clone().ok_or_else(|| {
             "this CA cannot sign: it holds no autorenew credential (the server holds the \
-             only signing key). Recover with `netidx conf ca recovery rotate`."
+             only signing key). Recover with `netidx admin ca recovery rotate`."
                 .to_string()
         })?;
         vault.unlock(&pw).map_err(|e| {
@@ -1596,9 +1596,9 @@ fn server_unlock(
         })?
     };
     match ca.store.lock().refresh_crl_if_stale(&unlocked.ca_key_pem) {
-        Ok(true) => info!("conf-server: re-signed the CRL (was nearing nextUpdate)"),
+        Ok(true) => info!("admin-server: re-signed the CRL (was nearing nextUpdate)"),
         Ok(false) => (),
-        Err(e) => warn!("conf-server: opportunistic CRL refresh failed: {e:#}"),
+        Err(e) => warn!("admin-server: opportunistic CRL refresh failed: {e:#}"),
     }
     Ok(unlocked)
 }
@@ -1611,7 +1611,7 @@ pub fn handle_sign_request(ca: &ca_store::CaDir, req: &SignRequest) -> Signed {
     // A direct Sign has no queue entry; synthesize a request to carry in
     // the issued record (its fresh id keys the `issued/` file).
     let record_req = ca_store::QueuedReq::new(
-        conf_proto::NodeKind::Client,
+        admin_proto::NodeKind::Client,
         req.csr_pem.clone(),
         req.requested_name.clone(),
         req.requested_validity,
@@ -1664,15 +1664,15 @@ fn try_handle(
     if name.is_empty() {
         return Ok(failed(reject("requested name is empty")));
     }
-    // The conf server's own serving name is reserved: the trust model
+    // The admin server's own serving name is reserved: the trust model
     // hinges on *only* genuine daemons holding a CA-signed cert with it.
     // Issuing it via Sign — even to an admin whose policy glob (e.g. "*")
     // happens to match — would let that admin stand up an impostor
-    // daemon. Refuse it unconditionally; conf servers are minted only by
+    // daemon. Refuse it unconditionally; admin servers are minted only by
     // the local setup path or the `may_enroll_servers`-gated enroll.
     if name.eq_ignore_ascii_case(SERVING_SAN) {
         return Ok(failed(reject(
-            "that name is reserved for the conf server and cannot be issued",
+            "that name is reserved for the admin server and cannot be issued",
         )));
     }
     if !name_permitted(name, &authd.policy.allowed_san)? {
@@ -1799,7 +1799,7 @@ fn issue_locked(
             return Ok(Signed {
                 resp: reject(&format!(
                     "an unexpired certificate already exists for {name:?}; an admin \
-                     must revoke it first (`netidx conf ca revoke`)"
+                     must revoke it first (`netidx admin ca revoke`)"
                 )),
                 push: None,
             });
@@ -1834,9 +1834,9 @@ fn issue_locked(
     if crate::ca::ca_cert_needs_renewal(&dir, ca.lifetimes.ca_renew_threshold) {
         if ca.lifetimes.externally_signed {
             warn!(
-                "conf-server: the externally-signed CA certificate is within its \
+                "admin-server: the externally-signed CA certificate is within its \
                  renewal threshold and will NOT auto-renew — obtain a re-signed \
-                 cert from your PKI and run `netidx conf ca external renew`"
+                 cert from your PKI and run `netidx admin ca external renew`"
             );
         } else {
             let rs = store.alloc_serial();
@@ -1847,10 +1847,10 @@ fn issue_locked(
                 ca.lifetimes.ca_renew_threshold,
             ) {
                 Ok(true) => info!(
-                    "conf-server: renewed the CA certificate (same key; glyph unchanged)"
+                    "admin-server: renewed the CA certificate (same key; glyph unchanged)"
                 ),
                 Ok(false) => (),
-                Err(e) => warn!("conf-server: CA renewal check failed: {e:#}"),
+                Err(e) => warn!("admin-server: CA renewal check failed: {e:#}"),
             }
         }
     }
@@ -1881,7 +1881,7 @@ fn issue_locked(
     })
 }
 
-/// Handle a conf-server enrollment: authenticate the admin, require the
+/// Handle a admin-server enrollment: authenticate the admin, require the
 /// `may_enroll_servers` policy bit, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
 pub fn handle_enroll_request(
@@ -1903,7 +1903,7 @@ fn try_enroll(
     // A request over the local control socket is already authorized as a
     // signing-tier superuser (`SO_PEERCRED` root / the daemon's own uid),
     // which carries `may_enroll_servers`. This is the path renewd uses to
-    // re-mint the conf server's OWN serving cert without TLS — the only way
+    // re-mint the admin server's OWN serving cert without TLS — the only way
     // to recover from an already-expired serving cert, since renewing it
     // over TLS-to-self can't connect once it's expired.
     let authd = if local {
@@ -1915,14 +1915,14 @@ fn try_enroll(
         };
         if !authd.policy.may_enroll_servers {
             return Ok(reject(&format!(
-                "admin {} may not enroll conf servers",
+                "admin {} may not enroll admin servers",
                 authd.admin
             )));
         }
         authd
     };
     let record_req = ca_store::QueuedReq::new(
-        conf_proto::NodeKind::ConfServer,
+        admin_proto::NodeKind::AdminServer,
         req.csr_pem.clone(),
         SERVING_SAN.to_string(),
         ca.lifetimes.leaf_validity,
@@ -1934,7 +1934,7 @@ fn try_enroll(
         Ok(u) => u,
         Err(reason) => return Ok(reject(&reason)),
     };
-    // Serving certs aren't subject to the one-live check (many conf
+    // Serving certs aren't subject to the one-live check (many admin
     // servers legitimately hold the reserved SAN), and carry no groups.
     let signed = issue_locked(
         ca,
@@ -2042,10 +2042,10 @@ fn handle_enqueue(
     peer_ident: Option<&PeerIdent>,
 ) -> EnqueueResponse {
     let mut store = ca.store.lock();
-    // Conf-server enrollment: the name is the reserved serving SAN by
+    // Admin-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
     // reserved-name refusal (this is the sanctioned way to request it)
-    // and not one-live-cert (every conf server on the network holds the
+    // and not one-live-cert (every admin server on the network holds the
     // same name). The real gate — the approving admin's
     // `may_enroll_servers` — runs at approval; this entry just waits in
     // the queue under the same code-matching ceremony as any other.
@@ -2062,7 +2062,7 @@ fn handle_enqueue(
         return match store.enqueue(&queued) {
             Ok(()) => {
                 info!(
-                    "conf-server: queued enrollment {} (listen {listen}) from {peer}",
+                    "admin-server: queued enrollment {} (listen {listen}) from {peer}",
                     queued.id
                 );
                 EnqueueResponse::Ok { request_id: queued.id }
@@ -2095,7 +2095,7 @@ fn handle_enqueue(
                 }
                 Ok(_) => None,
                 Err(e) => {
-                    warn!("conf-server: index lookup during enqueue failed: {e:#}");
+                    warn!("admin-server: index lookup during enqueue failed: {e:#}");
                     None
                 }
             }
@@ -2106,11 +2106,11 @@ fn handle_enqueue(
     if !verified_renewal {
         // Fail fast on the reserved name — approval would refuse it
         // anyway, but the enrollee should hear it now, not after the
-        // admin clicked through. (A conf server renewing its own
+        // admin clicked through. (A admin server renewing its own
         // serving cert is the legitimate exception above.)
         if name.eq_ignore_ascii_case(SERVING_SAN) {
             return EnqueueResponse::Err {
-                reason: "that name is reserved for the conf server and cannot be \
+                reason: "that name is reserved for the admin server and cannot be \
                          issued"
                     .to_string(),
             };
@@ -2124,7 +2124,7 @@ fn handle_enqueue(
                 return EnqueueResponse::Err {
                     reason: format!(
                         "an unexpired certificate already exists for {name:?}; an \
-                         admin must revoke it first (`netidx conf ca revoke`)"
+                         admin must revoke it first (`netidx admin ca revoke`)"
                     ),
                 };
             }
@@ -2148,7 +2148,7 @@ fn handle_enqueue(
     match store.enqueue(&queued) {
         Ok(()) => {
             info!(
-                "conf-server: queued {} {} for {name:?} from {peer}",
+                "admin-server: queued {} {} for {name:?} from {peer}",
                 if verified_renewal { "verified renewal" } else { "signing request" },
                 queued.id
             );
@@ -2322,7 +2322,7 @@ fn handle_list_issued(
 /// A successful [`handle_approve`]: the signed outcome plus what the
 /// dispatch arm needs to finish the job — the push plan for id-map
 /// registration, and the peer address to record when the approved
-/// entry was a conf-server enrollment.
+/// entry was a admin-server enrollment.
 struct Approved {
     resp: SignResponse,
     push: Option<PushPlan>,
@@ -2357,7 +2357,7 @@ fn handle_approve(
 }
 
 /// Sign a queued request through the same checks a synchronous Sign goes
-/// through (or, for a verified renewal / conf-server enrollment, the
+/// through (or, for a verified renewal / admin-server enrollment, the
 /// narrower continuation gate), committing the issuance atomically under
 /// the issuer lock. `queued` came from the cheap precheck; `issue_locked`
 /// re-checks it is still Pending under the lock.
@@ -2366,9 +2366,9 @@ fn approve_locked(
     req: &ApproveRequest,
     queued: ca_store::QueuedReq,
 ) -> std::result::Result<Approved, String> {
-    // A queued conf-server enrollment: gated on the approving admin's
+    // A queued admin-server enrollment: gated on the approving admin's
     // `may_enroll_servers`; signs the reserved serving SAN; no one-live
-    // check and no id-map groups (a conf server isn't a user).
+    // check and no id-map groups (a admin server isn't a user).
     if let Some(listen) = queued.enroll_listen {
         let authd = ca
             .vault
@@ -2376,7 +2376,7 @@ fn approve_locked(
             .authenticate(&req.admin, &req.password.0)
             .map_err(|_| "authentication failed".to_string())?;
         if !authd.policy.may_enroll_servers {
-            return Err(format!("admin {} may not enroll conf servers", authd.admin));
+            return Err(format!("admin {} may not enroll admin servers", authd.admin));
         }
         let signing = server_unlock(ca)?;
         let signed = issue_locked(
@@ -2402,7 +2402,7 @@ fn approve_locked(
     // A verified renewal: continuation of an already-approved identity —
     // possession of the live key was proven at enqueue. The SAN-scope and
     // one-live-cert checks don't apply (a renewal's name *does* have a live
-    // cert), the reserved serving name is allowed (conf servers renew
+    // cert), the reserved serving name is allowed (admin servers renew
     // themselves), and the id-map is untouched (requested groups ignored).
     // `issue_locked` re-checks the renewed serial is STILL live under the
     // lock, so a revocation since enqueue refuses the renewal.
@@ -2466,7 +2466,7 @@ pub fn read_autorenew_password(keytab: &Path) -> Result<Zeroizing<String>> {
             format!(
                 "unsealing autorenew keytab {} — if this host's TPM was cleared \
                  or the board was replaced, mint a fresh keytab with \
-                 `netidx conf ca auto-approve --rotate`",
+                 `netidx admin ca auto-approve --rotate`",
                 keytab.display()
             )
         })?;
@@ -2504,7 +2504,7 @@ fn autorenew_sweep(ca: &ca_store::CaDir, password: &str) -> usize {
     for q in pending.iter().filter(|q| q.renewal_of.is_some()) {
         let req = ApproveRequest {
             admin: AUTORENEW_ADMIN.to_string(),
-            password: conf_proto::Secret(password.to_string()),
+            password: admin_proto::Secret(password.to_string()),
             request_id: q.id.clone(),
             id_map_groups: Vec::new(),
         };
@@ -2537,13 +2537,13 @@ fn autorenew_sweep(ca: &ca_store::CaDir, password: &str) -> usize {
 /// had, on the same host, now without the extra process. A keytab that
 /// won't unseal is logged and the task simply isn't spawned (the daemon
 /// keeps serving). Captures a `Weak`, so a dropped server stops the loop.
-/// How often a non-CA conf server re-asserts its own facts to the CA and
+/// How often a non-CA admin server re-asserts its own facts to the CA and
 /// refreshes its cached map (a cheap version probe; a full pull only when
 /// it changed). Short enough that `update` sees recent changes, infrequent
 /// enough to be free on a control plane.
 const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// On a non-CA conf server, keep the cached network map current and keep
+/// On a non-CA admin server, keep the cached network map current and keep
 /// our own entry registered with the CA. The CA owns the map; we are a
 /// read-replica — if the CA is unreachable we keep serving the last copy
 /// we cached, and the re-register self-heals a push lost while it was down.
@@ -2555,7 +2555,7 @@ fn spawn_map_refresh(state: &Arc<Server>) {
         }
         match cfg.ca_addr {
             Some(a) => a,
-            None => return, // no conf-plane CA configured
+            None => return, // no admin-plane CA configured
         }
     };
     let weak = Arc::downgrade(state);
@@ -2573,36 +2573,36 @@ fn spawn_map_refresh(state: &Arc<Server>) {
             };
             // Self-heal: (re)register our own facts. Idempotent at the CA.
             if let Err(e) =
-                conf_client::register(ca_addr, &cert, &key, roots.clone(), &req).await
+                admin_client::register(ca_addr, &cert, &key, roots.clone(), &req).await
             {
                 warn!(
-                    "conf-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
+                    "admin-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
                 );
             }
             // Refresh the cache: cheap version check, full pull only when changed.
-            match conf_client::get_map_version(
+            match admin_client::get_map_version(
                 ca_addr,
                 roots.clone(),
-                NodeKind::ConfServer,
+                NodeKind::AdminServer,
             )
             .await
             {
                 Ok(v) => {
                     let stale = state.map.lock().version != v;
                     if stale {
-                        match conf_client::get_map(ca_addr, roots, NodeKind::ConfServer)
+                        match admin_client::get_map(ca_addr, roots, NodeKind::AdminServer)
                             .await
                         {
                             Ok(map) => *state.map.lock() = map,
                             Err(e) => warn!(
-                                "conf-server: pulling the network map from {ca_addr} failed \
+                                "admin-server: pulling the network map from {ca_addr} failed \
                                  (serving the cached copy): {e:#}"
                             ),
                         }
                     }
                 }
                 Err(e) => warn!(
-                    "conf-server: map version check against {ca_addr} failed \
+                    "admin-server: map version check against {ca_addr} failed \
                      (serving the cached copy): {e:#}"
                 ),
             }
@@ -2623,7 +2623,7 @@ fn spawn_autorenew(state: &Arc<Server>) {
         return;
     }
     info!(
-        "conf-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})"
+        "admin-server: autorenew enabled (approving verified renewals as {AUTORENEW_ADMIN:?})"
     );
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
@@ -2943,8 +2943,8 @@ fn handle_apply_referral_edit(
     }
 }
 
-/// The role list a conf-server config implies.
-fn roles_of(cfg: &ConfServerConfig) -> Vec<Role> {
+/// The role list a admin-server config implies.
+fn roles_of(cfg: &AdminServerConfig) -> Vec<Role> {
     let mut out = Vec::new();
     if cfg.roles.ca.is_some() {
         out.push(Role::Ca);
@@ -2960,13 +2960,13 @@ fn roles_of(cfg: &ConfServerConfig) -> Vec<Role> {
 
 /// This host's own [`ServerEntry`] for the network map: its listen
 /// address, its roles, and — if it runs a resolver — its cluster facts.
-fn self_entry(cfg: &ConfServerConfig) -> ServerEntry {
+fn self_entry(cfg: &AdminServerConfig) -> ServerEntry {
     let cluster = cfg.roles.resolver.as_ref().and_then(|r| {
         match crate::resolver::ResolverConfig::load(&r.config) {
             Ok(rc) => Some(rc.cluster_facts()),
             Err(e) => {
                 warn!(
-                    "conf-server: deriving own cluster facts from {}: {e:#}",
+                    "admin-server: deriving own cluster facts from {}: {e:#}",
                     r.config.display()
                 );
                 None
@@ -2976,7 +2976,7 @@ fn self_entry(cfg: &ConfServerConfig) -> ServerEntry {
     ServerEntry { addr: cfg.listen, roles: roles_of(cfg), cluster }
 }
 
-/// CA-side: register/update a conf server's facts in the authoritative
+/// CA-side: register/update a admin server's facts in the authoritative
 /// map and persist it. Peer-cert-gated at the dispatch. The CA is the
 /// map's only writer, so a non-CA host refuses.
 fn handle_register(state: &Server, req: &RegisterRequest) -> RegisterResponse {
@@ -3005,7 +3005,7 @@ fn handle_register(state: &Server, req: &RegisterRequest) -> RegisterResponse {
     RegisterResponse::Ok { version: map.version }
 }
 
-/// CA-side: drop a conf server from the map on uninstall.
+/// CA-side: drop a admin server from the map on uninstall.
 fn handle_deregister(state: &Server, req: &DeregisterRequest) -> RegisterResponse {
     let ca_dir = match state.ca_dir() {
         Some(d) => d.to_path_buf(),
@@ -3026,7 +3026,7 @@ fn handle_deregister(state: &Server, req: &DeregisterRequest) -> RegisterRespons
     RegisterResponse::Ok { version: map.version }
 }
 
-/// CA-side: admin-authenticated removal of a (dead) conf server from the
+/// CA-side: admin-authenticated removal of a (dead) admin server from the
 /// map — for a machine that never ran `uninstall`. Cascades via the
 /// dropped entry, which carries that host's resolver-cluster facts.
 fn handle_remove_server(
@@ -3049,16 +3049,16 @@ fn handle_remove_server(
         Ok(a) => a,
         Err(reason) => return RemoveServerResponse::Err { reason },
     };
-    // Evicting a conf server from the authoritative map cascades that host's
+    // Evicting a admin server from the authoritative map cascades that host's
     // resolver-cluster facts out of the map — a privileged, network-affecting
-    // edit. Gate it on the conf-server lifecycle capability (the same bit
+    // edit. Gate it on the admin-server lifecycle capability (the same bit
     // that authorizes enrolling one) or a broad admin.
     let broad = matches!(authd.kind, ca_vault::SlotKind::Signing)
         || authd.policy.may_manage_admins;
     if !broad && !authd.policy.may_enroll_servers {
         return RemoveServerResponse::Err {
             reason: format!(
-                "admin {} is not authorized to remove conf servers (needs \
+                "admin {} is not authorized to remove admin servers (needs \
                  may_enroll_servers)",
                 authd.admin
             ),
@@ -3197,8 +3197,8 @@ fn cluster_members_for(map: &NetworkMap, target_path: &str) -> Option<Vec<Socket
     (!members.is_empty()).then_some(members)
 }
 
-/// Push a perms edit to every conf server co-located with a target-cluster
-/// member (`member.ip : my_conf_port`, the uniform-port convention),
+/// Push a perms edit to every admin server co-located with a target-cluster
+/// member (`member.ip : my_admin_port`, the uniform-port convention),
 /// ourselves included when we're in the target cluster (a loopback push is
 /// an idempotent apply). Loud: each unreachable/erroring peer is a
 /// `PeerResult`.
@@ -3212,10 +3212,10 @@ async fn push_perms_edit_to_peers(
         let cfg = state.cfg.lock();
         (cfg.listen, state.roots.clone())
     };
-    let conf_port = my_listen.port();
+    let admin_port = my_listen.port();
     let mut targets: Vec<SocketAddr> = Vec::new();
     for m in member_addrs {
-        let cs = SocketAddr::new(m.ip(), conf_port);
+        let cs = SocketAddr::new(m.ip(), admin_port);
         if !targets.contains(&cs) {
             targets.push(cs);
         }
@@ -3223,7 +3223,7 @@ async fn push_perms_edit_to_peers(
     let mut results = Vec::new();
     for addr in targets {
         let res =
-            conf_client::push_perms_edit(addr, &cert, &key, roots.clone(), perms_json)
+            admin_client::push_perms_edit(addr, &cert, &key, roots.clone(), perms_json)
                 .await;
         results.push(PeerResult { addr, error: res.err().map(|e| format!("{e:#}")) });
     }
@@ -3231,7 +3231,7 @@ async fn push_perms_edit_to_peers(
 }
 
 /// CA-side: authenticate the admin, find the target cluster in the map, and
-/// propagate the perms edit to its conf servers (peer-cert-gated). The CA
+/// propagate the perms edit to its admin servers (peer-cert-gated). The CA
 /// never edits a foreign cluster's files directly — it pushes.
 async fn handle_edit_perms(
     state: &Arc<Server>,
@@ -3306,7 +3306,7 @@ async fn handle_edit_perms(
 ///
 /// The scope is the *cluster path*, which selects which member HOSTS the op
 /// reaches; on a reached host the admin may control any unit that host's
-/// supervisor manages. That is intentional: a host running a `/eu` conf
+/// supervisor manages. That is intentional: a host running a `/eu` admin
 /// server is a `/eu` host, and a `/eu` service-control admin controls its
 /// services — co-locating a different cluster's services on it would merge
 /// the two clusters' control trust, which is the operator's choice.
@@ -3388,7 +3388,7 @@ async fn handle_control_service(
         let cfg = state.cfg.lock();
         (cfg.listen, state.roots.clone())
     };
-    let conf_port = my_listen.port();
+    let admin_port = my_listen.port();
     // Audit the *intent* before acting: the ops take effect on the members
     // immediately, and a slow op can outlive the connection timeout — so the
     // audit must record who/what/where up front, including the unit targets.
@@ -3424,10 +3424,10 @@ async fn handle_control_service(
         if units.is_empty() {
             continue;
         }
-        let addr = SocketAddr::new(m.ip(), conf_port);
+        let addr = SocketAddr::new(m.ip(), admin_port);
         let (cert, key, roots, op) = (cert.clone(), key.clone(), roots.clone(), req.op);
         set.spawn(async move {
-            match conf_client::push_service_control(addr, &cert, &key, roots, units, op)
+            match admin_client::push_service_control(addr, &cert, &key, roots, units, op)
                 .await
             {
                 Ok(units) => {
@@ -3825,7 +3825,7 @@ fn handle_list_admins(
 /// (off-box break-glass) password using the box's own autorenew credential
 /// to unlock MK and re-wrap the recovery slot. Returns the new password in
 /// grouped display form — shown to the operator once, never stored. Refused
-/// over the network conf plane: reaching the local socket is itself the
+/// over the network admin plane: reaching the local socket is itself the
 /// authority, and a recovery password must never travel the network.
 fn handle_rotate_recovery(state: &Server, local: bool) -> RotateRecoveryResponse {
     let err = |reason: String| RotateRecoveryResponse::Err { reason };
@@ -3980,7 +3980,7 @@ fn handle_rotate_autorenew(state: &Server, local: bool) -> RotateAutorenewRespon
         // back so it still matches the unchanged live keytab.
         if let Err(re) = vault.rekey_signing_slot(AUTORENEW_ADMIN, &new_pw, &old_pw) {
             error!(
-                "conf-server: CRITICAL — autorenew rotation failed AND rollback failed: \
+                "admin-server: CRITICAL — autorenew rotation failed AND rollback failed: \
                  {re:#}. The vault's autorenew slot may no longer match the keytab; \
                  recover with `ca auto-approve` (daemon stopped) before the next restart."
             );
@@ -4089,8 +4089,8 @@ fn approve_delegation_prepare(
 
 /// Propagate `edit` to the OTHER members of this resolver cluster so a
 /// single admin approval updates every peer. For each `member_servers`
-/// resolver address that isn't this host's, push the edit to the conf
-/// server co-located with it (same IP, this conf server's port — the
+/// resolver address that isn't this host's, push the edit to the admin
+/// server co-located with it (same IP, this admin server's port — the
 /// cluster-uniform-port convention). A down or rejecting peer is
 /// **reported** (not silently skipped), so the admin knows the cluster is
 /// out of sync; the push is idempotent, so re-approving re-syncs it.
@@ -4112,9 +4112,9 @@ async fn push_to_cluster_peers(
     .await
 }
 
-/// Push a referral edit to every cluster peer's conf server. Peers are
+/// Push a referral edit to every cluster peer's admin server. Peers are
 /// derived from the resolver's `member_addrs` as `member.ip :
-/// my_listen.port()` (the uniform conf-port convention), excluding
+/// my_listen.port()` (the uniform admin-port convention), excluding
 /// `my_listen` itself (already applied locally; with an unspecified listen
 /// IP we can't identify ourselves, but a self-push is an idempotent no-op,
 /// so it's harmless). Loud: every unreachable or erroring peer comes back
@@ -4132,20 +4132,20 @@ pub async fn push_referral_edit_to_peers(
     serving_key_pem: &[u8],
     roots: RootCertStore,
 ) -> Vec<PeerResult> {
-    let (my_ip, conf_port) = (my_listen.ip(), my_listen.port());
+    let (my_ip, admin_port) = (my_listen.ip(), my_listen.port());
     let mut targets: Vec<SocketAddr> = Vec::new();
     for m in member_addrs {
         if !my_ip.is_unspecified() && m.ip() == my_ip {
             continue;
         }
-        let cs = SocketAddr::new(m.ip(), conf_port);
+        let cs = SocketAddr::new(m.ip(), admin_port);
         if cs != my_listen && !targets.contains(&cs) {
             targets.push(cs);
         }
     }
     let mut results = Vec::new();
     for addr in targets {
-        let res = conf_client::push_referral_edit(
+        let res = admin_client::push_referral_edit(
             addr,
             serving_cert_pem,
             serving_key_pem,
@@ -4264,7 +4264,7 @@ pub fn audit(ca_dir: &Path, admin: &str, op: &str, name: &str, validity: Duratio
         .and_then(|mut f| f.write_all(line.as_bytes()));
     if let Err(e) = r {
         // Audit is best-effort; a failed write must not fail issuance.
-        eprintln!("conf-server: WARNING failed to append audit log: {e}");
+        eprintln!("admin-server: WARNING failed to append audit log: {e}");
     }
 }
 
@@ -4274,9 +4274,9 @@ mod tests {
     use crate::{
         ca::{Ca, CaParams, MIN_KEY_BITS, Subject},
         ca_vault::{self, Policy},
-        conf_client,
-        conf_proto::{NodeKind, Secret},
-        conf_server_config::{CaRole, ConfServerConfig, IdMapRole, ResolverRole, Roles},
+        admin_client,
+        admin_proto::{NodeKind, Secret},
+        admin_server_config::{CaRole, AdminServerConfig, IdMapRole, ResolverRole, Roles},
         fingerprint::Fingerprint,
         tls_tofu::TofuVerifier,
     };
@@ -4324,7 +4324,7 @@ mod tests {
         let unlocked = cadir.vault.read().unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.clone(), &unlocked.ca_key_pem, &ca_cert).unwrap();
-        let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let kc = admin_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
             .sign_request(
@@ -4335,7 +4335,7 @@ mod tests {
             )
             .unwrap();
         let req = ca_store::QueuedReq::new(
-            NodeKind::ConfServer,
+            NodeKind::AdminServer,
             kc.csr_pem.clone(),
             SERVING_SAN.to_string(),
             std::time::Duration::from_secs(365 * 86400),
@@ -4365,7 +4365,7 @@ mod tests {
         let unlocked = ca_vault::CAVault::new(dir.to_path_buf()).unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
-        let kc = conf_client::generate_key_and_csr(san).unwrap();
+        let kc = admin_client::generate_key_and_csr(san).unwrap();
         let leaf = ca
             .sign_request(
                 kc.csr_pem.as_bytes(),
@@ -4388,7 +4388,7 @@ mod tests {
         let unlocked = cadir.vault.read().unlock("apw").unwrap();
         let ca_cert = std::fs::read(dir.join("certificate.pem")).unwrap();
         let ca = Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &ca_cert).unwrap();
-        let kc = conf_client::generate_key_and_csr(san).unwrap();
+        let kc = admin_client::generate_key_and_csr(san).unwrap();
         let serial = cadir.store.lock().next_serial().unwrap();
         let leaf = ca
             .sign_request(
@@ -4415,7 +4415,7 @@ mod tests {
         serial
     }
 
-    /// Bind an ephemeral port and run a conf server with the given
+    /// Bind an ephemeral port and run a admin server with the given
     /// roles + peers over the test CA at `dir`. Returns the address
     /// and the live state (so tests can assert on e.g. learned peers).
     async fn spawn_server_with(
@@ -4429,7 +4429,7 @@ mod tests {
     /// Like [`spawn_server_with`] but binds an explicit address and takes
     /// its serving cert + roots from `ca_dir` (which may differ from
     /// where this server's resolver config lives) — for multi-peer
-    /// cluster tests where several conf servers share one CA but each
+    /// cluster tests where several admin servers share one CA but each
     /// holds its own resolver.json.
     async fn spawn_server_at(
         ca_dir: &Path,
@@ -4456,7 +4456,7 @@ mod tests {
     ) -> (SocketAddr, Arc<Server>) {
         let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let cfg = ConfServerConfig {
+        let cfg = AdminServerConfig {
             domain: "ryu-oh.org".to_string(),
             listen: addr,
             // serve_on uses the in-memory PEMs; these paths are only
@@ -4501,31 +4501,31 @@ mod tests {
     async fn register_then_get_map_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
-        // Mint the resolver conf server's serving cert BEFORE the CA daemon
+        // Mint the resolver admin server's serving cert BEFORE the CA daemon
         // takes the dir's exclusive flock (it holds it for the test's life).
         let (cert, key) = issue_serving_cert(dir.path());
         let (ca_addr, ca_state) = spawn_ca_server(dir.path()).await;
         let roots = ca_state.roots.clone();
 
         // The CA seeded its own entry + address.
-        let map0 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer)
+        let map0 = admin_client::get_map(ca_addr, roots.clone(), NodeKind::AdminServer)
             .await
             .unwrap();
         assert_eq!(map0.servers.len(), 1);
         assert_eq!(map0.ca_addr, Some(ca_addr));
         let v0 = map0.version;
 
-        // A resolver conf server registers its facts (peer-cert-gated).
+        // A resolver admin server registers its facts (peer-cert-gated).
         let target: SocketAddr = "10.9.9.9:4565".parse().unwrap();
         let req =
             RegisterRequest { addr: target, roles: vec![Role::Resolver], cluster: None };
-        let v1 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req)
+        let v1 = admin_client::register(ca_addr, &cert, &key, roots.clone(), &req)
             .await
             .unwrap();
         assert!(v1 > v0);
 
         // Served whole to a plain reader: both servers now present.
-        let map1 = conf_client::get_map(ca_addr, roots.clone(), NodeKind::ConfServer)
+        let map1 = admin_client::get_map(ca_addr, roots.clone(), NodeKind::AdminServer)
             .await
             .unwrap();
         assert_eq!(map1.servers.len(), 2);
@@ -4533,22 +4533,22 @@ mod tests {
         assert_eq!(map1.version, v1);
 
         // Idempotent re-register of identical facts: no version churn.
-        let v2 = conf_client::register(ca_addr, &cert, &key, roots.clone(), &req)
+        let v2 = admin_client::register(ca_addr, &cert, &key, roots.clone(), &req)
             .await
             .unwrap();
         assert_eq!(v2, v1);
 
         // Deregister drops it and bumps.
-        let v3 = conf_client::deregister(ca_addr, &cert, &key, roots.clone(), target)
+        let v3 = admin_client::deregister(ca_addr, &cert, &key, roots.clone(), target)
             .await
             .unwrap();
         assert!(v3 > v1);
         let map2 =
-            conf_client::get_map(ca_addr, roots, NodeKind::ConfServer).await.unwrap();
+            admin_client::get_map(ca_addr, roots, NodeKind::AdminServer).await.unwrap();
         assert_eq!(map2.servers.len(), 1);
     }
 
-    /// A conf server enforces the CA's CRL on inbound peer certs: a
+    /// A admin server enforces the CA's CRL on inbound peer certs: a
     /// revoked-but-unexpired serving cert is refused at the handshake, so
     /// the peer-gated endpoints (here Register) are closed to it — while a
     /// freshly issued cert is still accepted (the CRL only adds denials).
@@ -4558,7 +4558,7 @@ mod tests {
         setup_ca(dir.path());
 
         // Issue a peer serving cert, capture its serial, revoke it, and
-        // publish the CRL — all BEFORE the CA conf server starts (it holds
+        // publish the CRL — all BEFORE the CA admin server starts (it holds
         // the dir's exclusive flock for the test's life), so its acceptor
         // loads the CRL with this serial already revoked. `next_serial` goes
         // through a transient CaDir that drops before `issue_serving_cert`
@@ -4606,12 +4606,12 @@ mod tests {
         // The revoked cert is refused at the TLS handshake — Register never
         // reaches the app layer.
         let denied =
-            conf_client::register(ca_addr, &vcert, &vkey, roots.clone(), &req).await;
+            admin_client::register(ca_addr, &vcert, &vkey, roots.clone(), &req).await;
         assert!(denied.is_err(), "a revoked peer cert must be refused at the handshake");
 
         // A fresh (un-revoked) serving cert is still accepted — the CRL adds
         // denials without locking valid peers out.
-        conf_client::register(ca_addr, &gcert, &gkey, roots, &req)
+        admin_client::register(ca_addr, &gcert, &gkey, roots, &req)
             .await
             .expect("a valid peer cert is still accepted");
     }
@@ -4675,7 +4675,7 @@ mod tests {
     }
 
     fn request(name: &str, admin: &str, pw: &str, days: u32) -> SignRequest {
-        let kc = conf_client::generate_key_and_csr(name).unwrap();
+        let kc = admin_client::generate_key_and_csr(name).unwrap();
         SignRequest {
             admin: admin.to_string(),
             password: Secret(pw.to_string()),
@@ -4815,7 +4815,7 @@ mod tests {
     fn refuses_to_issue_the_reserved_serving_name() {
         let dir = tempfile::tempdir().unwrap();
         // A wide-open "*" policy — which WOULD match the reserved name —
-        // must still not be able to mint a conf server's serving cert
+        // must still not be able to mint a admin server's serving cert
         // via Sign (that would enable impersonating the daemon). Only
         // the `may_enroll_servers`-gated Enroll path may.
         setup_ca_with_policy(
@@ -4921,7 +4921,7 @@ mod tests {
 
     /// Revocation is scope-bound exactly like issuance: a role admin scoped
     /// to `*.eu` can revoke its own `*.eu` leaves but NOT another region's
-    /// `*.us` leaf nor a conf-server serving cert — otherwise the lowest
+    /// `*.us` leaf nor a admin-server serving cert — otherwise the lowest
     /// issuance privilege could take the whole network's TLS offline via the
     /// CRL. (Adversarial-review finding: the old gate only checked "has any
     /// issuance authority", not per-serial scope.)
@@ -5052,7 +5052,7 @@ mod tests {
             .unwrap();
         let peer = "1.2.3.4:5".parse().unwrap();
         let enqueue = |name: &str| -> String {
-            let kc = conf_client::generate_key_and_csr(name).unwrap();
+            let kc = admin_client::generate_key_and_csr(name).unwrap();
             let req = EnqueueRequest {
                 kind: NodeKind::Client,
                 csr_pem: kc.csr_pem,
@@ -5135,7 +5135,7 @@ mod tests {
             .unwrap()
             .spki_fp;
         // Enqueue a verified renewal (presenting our live cert's identity).
-        let kc = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
+        let kc = admin_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
         let enq = EnqueueRequest {
             kind: NodeKind::Client,
             csr_pem: kc.csr_pem,
@@ -5225,7 +5225,7 @@ mod tests {
             .find(|r| r.serial == orig)
             .unwrap()
             .spki_fp;
-        let kc = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
+        let kc = admin_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
         let enq = EnqueueRequest {
             kind: NodeKind::Client,
             csr_pem: kc.csr_pem,
@@ -5289,7 +5289,7 @@ mod tests {
                 service_control_scopes: vec![],
             },
         );
-        let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let kc = admin_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let req = EnrollRequest {
             admin: "alice".to_string(),
             password: Secret("apw".to_string()),
@@ -5324,7 +5324,7 @@ mod tests {
                 service_control_scopes: vec![],
             },
         );
-        let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let kc = admin_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let req = EnrollRequest {
             admin: String::new(),
             password: Secret(String::new()),
@@ -5346,7 +5346,7 @@ mod tests {
     fn enroll_signs_the_reserved_san() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path()); // policy(): may_enroll_servers = true
-        let kc = conf_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let kc = admin_client::generate_key_and_csr(SERVING_SAN).unwrap();
         let req = EnrollRequest {
             admin: "alice".to_string(),
             password: Secret("apw".to_string()),
@@ -5373,12 +5373,12 @@ mod tests {
 
         // Inspect first — the operator is shown the CA fingerprint plus
         // the TLS-attested domain and roles.
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         assert!(!identity.fingerprint.text().is_empty());
         assert_eq!(identity.domain, "ryu-oh.org");
         assert_eq!(identity.roles, vec![Role::Ca]);
         // Then sign, pinned to the confirmed identity.
-        let issued = conf_client::request_cert(
+        let issued = admin_client::request_cert(
             addr,
             NodeKind::Resolver,
             "resolver.ryu-oh.org",
@@ -5411,9 +5411,9 @@ mod tests {
         // that swapped its cert between inspection and signing. The pin in
         // `request_cert` must reject it before the password is sent.
         let mut identity =
-            conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         identity.fingerprint = Fingerprint::of_der(b"not the real CA cert");
-        let err = conf_client::request_cert(
+        let err = admin_client::request_cert(
             addr,
             NodeKind::Resolver,
             "resolver.ryu-oh.org",
@@ -5434,8 +5434,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, _state) = spawn_ca_server(dir.path()).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
-        let err = conf_client::request_cert(
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let err = admin_client::request_cert(
             addr,
             NodeKind::Resolver,
             "resolver.ryu-oh.org",
@@ -5465,9 +5465,9 @@ mod tests {
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![peer]).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let info =
-            conf_client::get_info(addr, NodeKind::Client, &identity).await.unwrap();
+            admin_client::get_info(addr, NodeKind::Client, &identity).await.unwrap();
         assert_eq!(info.domain, "ryu-oh.org");
         assert_eq!(info.ca_addr, Some(addr));
         assert_eq!(info.peers, vec![peer]);
@@ -5490,9 +5490,9 @@ mod tests {
         };
         let (a_addr, _a) = spawn_server_with(dir.path(), roles, vec![b_addr]).await;
         let identity =
-            conf_client::fetch_identity(a_addr, NodeKind::Client).await.unwrap();
+            admin_client::fetch_identity(a_addr, NodeKind::Client).await.unwrap();
         let info =
-            conf_client::aggregate(&[a_addr], NodeKind::Client, &identity).await.unwrap();
+            admin_client::aggregate(&[a_addr], NodeKind::Client, &identity).await.unwrap();
         assert_eq!(info.ca_addr, Some(a_addr));
         assert!(info.reached.contains(&a_addr));
         assert!(info.reached.contains(&b_addr), "peer walk must reach B via A");
@@ -5521,8 +5521,8 @@ mod tests {
         };
         let (a_addr, _a) = spawn_server_with(dir.path(), roles_a, vec![b_addr]).await;
         let identity =
-            conf_client::fetch_identity(a_addr, NodeKind::Workstation).await.unwrap();
-        let issued = conf_client::request_cert(
+            admin_client::fetch_identity(a_addr, NodeKind::Workstation).await.unwrap();
+        let issued = admin_client::request_cert(
             a_addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -5563,8 +5563,8 @@ mod tests {
         };
         let (a_addr, _a) = spawn_server_with(dir.path(), roles, vec![dead]).await;
         let identity =
-            conf_client::fetch_identity(a_addr, NodeKind::Workstation).await.unwrap();
-        let issued = conf_client::request_cert(
+            admin_client::fetch_identity(a_addr, NodeKind::Workstation).await.unwrap();
+        let issued = admin_client::request_cert(
             a_addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -5588,9 +5588,9 @@ mod tests {
         setup_ca(dir.path());
         let (a_addr, a_state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(a_addr, NodeKind::ConfServer).await.unwrap();
+            admin_client::fetch_identity(a_addr, NodeKind::AdminServer).await.unwrap();
         let new_listen: SocketAddr = "192.168.0.42:4565".parse().unwrap();
-        let issued = conf_client::enroll(
+        let issued = admin_client::enroll(
             a_addr,
             "alice",
             Zeroizing::new("apw".to_string()),
@@ -5609,7 +5609,7 @@ mod tests {
         // GetInfo, making the CA host the well-known walk seed).
         assert!(a_state.cfg.lock().peers.contains(&new_listen));
         let info =
-            conf_client::get_info(a_addr, NodeKind::Client, &identity).await.unwrap();
+            admin_client::get_info(a_addr, NodeKind::Client, &identity).await.unwrap();
         assert!(info.peers.contains(&new_listen));
     }
 
@@ -5636,9 +5636,9 @@ mod tests {
             .unwrap();
         let (a_addr, a_state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(a_addr, NodeKind::ConfServer).await.unwrap();
+            admin_client::fetch_identity(a_addr, NodeKind::AdminServer).await.unwrap();
         let new_listen: SocketAddr = "192.168.0.43:4565".parse().unwrap();
-        let err = conf_client::enroll(
+        let err = admin_client::enroll(
             a_addr,
             "bob",
             Zeroizing::new("bpw".to_string()),
@@ -5654,7 +5654,7 @@ mod tests {
     }
 
     /// Hand-rolled AddIdentity sender with NO client certificate — what
-    /// an unauthenticated (or merely CA-issued-but-not-conf-server)
+    /// an unauthenticated (or merely CA-issued-but-not-admin-server)
     /// peer looks like on the wire.
     async fn send_add_identity_no_cert(
         addr: SocketAddr,
@@ -5674,24 +5674,24 @@ mod tests {
             .connect(ServerName::try_from(SERVING_SAN).unwrap(), tcp)
             .await
             .unwrap();
-        conf_proto::write_msg(
+        admin_proto::write_msg(
             &mut tls,
             &ClientHello {
                 protocol_version: PROTOCOL_VERSION,
-                kind: NodeKind::ConfServer,
+                kind: NodeKind::AdminServer,
             },
         )
         .await
         .unwrap();
-        let _: ServerHello = conf_proto::read_msg(&mut tls).await.unwrap();
-        conf_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone()))
+        let _: ServerHello = admin_proto::read_msg(&mut tls).await.unwrap();
+        admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone()))
             .await
             .unwrap();
-        conf_proto::read_msg(&mut tls).await.unwrap()
+        admin_proto::read_msg(&mut tls).await.unwrap()
     }
 
     #[tokio::test]
-    async fn add_identity_requires_a_conf_server_peer_cert() {
+    async fn add_identity_requires_a_admin_server_peer_cert() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let map_path = dir.path().join("id-map.json");
@@ -5715,7 +5715,7 @@ mod tests {
                 panic!("unauthenticated AddIdentity accepted")
             }
         }
-        // 2. A CA-issued client cert that is NOT a conf-server serving
+        // 2. A CA-issued client cert that is NOT a admin-server serving
         //    cert (an ordinary node identity) must also be refused —
         //    holding *some* cert from the CA is not authority to edit
         //    the id-map.
@@ -5725,7 +5725,7 @@ mod tests {
         for der in rustls_pemfile::certs(&mut std::io::Cursor::new(&ca_pem)) {
             roots.add(der.unwrap()).unwrap();
         }
-        let err = conf_client::push_identity(b_addr, &eve_chain, &eve_key, roots, &req)
+        let err = admin_client::push_identity(b_addr, &eve_chain, &eve_key, roots, &req)
             .await
             .map(|_| ())
             .unwrap_err();
@@ -5751,9 +5751,9 @@ mod tests {
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
         // Enrollee queues (no credentials) and starts polling.
-        let pending = conf_client::enqueue(
+        let pending = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -5763,25 +5763,25 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+            admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Pending
+            admin_client::PollOutcome::Pending
         ));
         // Admin lists the queue and matches the request code — computed
         // locally from the queued CSR, equal to the one the enrollee
         // displays.
         let queue =
-            conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+            admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].requested_name, "eric.ryu-oh.org");
         assert_eq!(
-            conf_client::csr_fingerprint(&queue[0].csr_pem).unwrap(),
+            admin_client::csr_fingerprint(&queue[0].csr_pem).unwrap(),
             pending.fingerprint,
             "admin-side and enrollee-side request codes must agree",
         );
         // Admin approves, choosing the groups at approval time.
-        let warnings = conf_client::approve(
+        let warnings = admin_client::approve(
             addr,
             "alice",
             "apw",
@@ -5794,11 +5794,11 @@ mod tests {
         assert!(warnings.is_empty(), "local id-map push should succeed: {warnings:?}");
         // The waiting enrollee's next poll delivers the verified cert.
         let issued =
-            match conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+            match admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
                 .await
                 .unwrap()
             {
-                conf_client::PollOutcome::Issued(i) => i,
+                admin_client::PollOutcome::Issued(i) => i,
                 _ => panic!("expected Issued after approval"),
             };
         let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
@@ -5810,13 +5810,13 @@ mod tests {
         assert_eq!(ident.primary_group.as_str(), "users");
         // Re-polls stay Issued (idempotent); double-approve is refused.
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+            admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Issued(_)
+            admin_client::PollOutcome::Issued(_)
         ));
         let err =
-            conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
+            admin_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
                 .await
                 .map(|_| ())
                 .unwrap_err();
@@ -5829,7 +5829,7 @@ mod tests {
     /// Auto-renewal in-process: with an `autorenew` slot present, one
     /// sweep approves a pending **verified renewal** but leaves an
     /// ordinary pending request for a human — the exact split the
-    /// separate autorenew daemon enforced, now inside the conf server. The
+    /// separate autorenew daemon enforced, now inside the admin server. The
     /// slot's empty policy is a second line of defense: it would refuse a
     /// non-renewal even if the filter let one through.
     #[test]
@@ -5842,8 +5842,8 @@ mod tests {
         // cert so the approval's still-live re-check passes.
         let orig_serial = commit_live_cert(dir.path(), "host.ryu-oh.org");
         // A verified renewal and an ordinary new request, both pending.
-        let renew = conf_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
-        let fresh = conf_client::generate_key_and_csr("newcomer.ryu-oh.org").unwrap();
+        let renew = admin_client::generate_key_and_csr("host.ryu-oh.org").unwrap();
+        let fresh = admin_client::generate_key_and_csr("newcomer.ryu-oh.org").unwrap();
         let renew_req = ca_store::QueuedReq::new(
             NodeKind::Workstation,
             renew.csr_pem,
@@ -5913,10 +5913,10 @@ mod tests {
         setup_ca(dir.path());
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
 
         // Approve first, then a deny is refused; only the signed sidecar exists.
-        let a = conf_client::enqueue(
+        let a = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "approved.ryu-oh.org",
@@ -5925,11 +5925,11 @@ mod tests {
         )
         .await
         .unwrap();
-        conf_client::approve(addr, "alice", "apw", &a.request_id, vec![], &identity)
+        admin_client::approve(addr, "alice", "apw", &a.request_id, vec![], &identity)
             .await
             .unwrap();
         let derr =
-            conf_client::deny(addr, "alice", "apw", &a.request_id, "no", &identity)
+            admin_client::deny(addr, "alice", "apw", &a.request_id, "no", &identity)
                 .await
                 .unwrap_err();
         assert!(format!("{derr:#}").contains("already approved"), "got: {derr:#}");
@@ -5939,7 +5939,7 @@ mod tests {
         ));
 
         // Deny first, then an approve is refused.
-        let b = conf_client::enqueue(
+        let b = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "denied.ryu-oh.org",
@@ -5948,11 +5948,11 @@ mod tests {
         )
         .await
         .unwrap();
-        conf_client::deny(addr, "alice", "apw", &b.request_id, "nope", &identity)
+        admin_client::deny(addr, "alice", "apw", &b.request_id, "nope", &identity)
             .await
             .unwrap();
         let aerr =
-            conf_client::approve(addr, "alice", "apw", &b.request_id, vec![], &identity)
+            admin_client::approve(addr, "alice", "apw", &b.request_id, vec![], &identity)
                 .await
                 .map(|_| ())
                 .unwrap_err();
@@ -5963,7 +5963,7 @@ mod tests {
         ));
     }
 
-    /// A second conf server enrolls with no admin at its keyboard: the
+    /// A second admin server enrolls with no admin at its keyboard: the
     /// enrollment queues, the admin approves remotely (their
     /// `may_enroll_servers` is the gate), the poll delivers a
     /// reserved-SAN serving cert, and the CA records the new server as
@@ -5975,42 +5975,42 @@ mod tests {
         setup_ca(dir.path());
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::AdminServer).await.unwrap();
         let listen: SocketAddr = "10.0.0.9:4565".parse().unwrap();
-        let pending = conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        let pending = admin_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+            admin_client::poll(addr, NodeKind::AdminServer, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Pending
+            admin_client::PollOutcome::Pending
         ));
         // The admin's list shows what this really is — an enrollment at
         // a stated address, not a user cert — and the request code
         // matches the enrollee's.
         let queue =
-            conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+            admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].requested_name, SERVING_SAN);
         assert_eq!(queue[0].enroll_listen, Some(listen));
         assert_eq!(
-            conf_client::csr_fingerprint(&queue[0].csr_pem).unwrap(),
+            admin_client::csr_fingerprint(&queue[0].csr_pem).unwrap(),
             pending.fingerprint,
         );
-        conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
+        admin_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
             .await
             .unwrap();
         let issued =
-            match conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+            match admin_client::poll(addr, NodeKind::AdminServer, &pending, &identity)
                 .await
                 .unwrap()
             {
-                conf_client::PollOutcome::Issued(i) => i,
+                admin_client::PollOutcome::Issued(i) => i,
                 _ => panic!("expected Issued after approval"),
             };
         let cert = openssl::x509::X509::from_pem(issued.cert_pem.as_bytes()).unwrap();
         let san = cert.subject_alt_names().unwrap();
         assert!(san.iter().any(|n| n.dnsname() == Some(SERVING_SAN)));
-        // The CA now knows the new conf server as a peer (the start of
+        // The CA now knows the new admin server as a peer (the start of
         // future installs' peer walks).
         assert!(state.cfg.lock().peers.contains(&listen));
         let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
@@ -6019,7 +6019,7 @@ mod tests {
 
     /// The `may_enroll_servers` gate binds to the *approving* admin: an
     /// admin without it can approve user certs all day but cannot mint
-    /// a conf server; the entry stays pending for someone who can.
+    /// a admin server; the entry stays pending for someone who can.
     #[tokio::test]
     async fn enrollment_approval_requires_the_policy_bit() {
         let dir = tempfile::tempdir().unwrap();
@@ -6030,31 +6030,31 @@ mod tests {
             .unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::AdminServer).await.unwrap();
         let listen: SocketAddr = "10.0.0.10:4565".parse().unwrap();
-        let pending = conf_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
-        let queue = conf_client::list_queue(addr, "bob", "bpw", &identity).await.unwrap();
+        let pending = admin_client::enqueue_enroll(addr, listen, &identity).await.unwrap();
+        let queue = admin_client::list_queue(addr, "bob", "bpw", &identity).await.unwrap();
         let err =
-            conf_client::approve(addr, "bob", "bpw", &queue[0].id, vec![], &identity)
+            admin_client::approve(addr, "bob", "bpw", &queue[0].id, vec![], &identity)
                 .await
                 .map(|_| ())
                 .unwrap_err();
         assert!(format!("{err:#}").contains("may not enroll"));
         // Still pending — bob's failed approval consumed nothing.
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+            admin_client::poll(addr, NodeKind::AdminServer, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Pending
+            admin_client::PollOutcome::Pending
         ));
-        conf_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
+        admin_client::approve(addr, "alice", "apw", &queue[0].id, vec![], &identity)
             .await
             .unwrap();
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::ConfServer, &pending, &identity)
+            admin_client::poll(addr, NodeKind::AdminServer, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Issued(_)
+            admin_client::PollOutcome::Issued(_)
         ));
     }
 
@@ -6064,8 +6064,8 @@ mod tests {
         setup_ca(dir.path());
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
-        let pending = conf_client::enqueue(
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let pending = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "mallory.ryu-oh.org",
@@ -6075,8 +6075,8 @@ mod tests {
         .await
         .unwrap();
         let queue =
-            conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
-        conf_client::deny(
+            admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        admin_client::deny(
             addr,
             "alice",
             "apw",
@@ -6086,11 +6086,11 @@ mod tests {
         )
         .await
         .unwrap();
-        match conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+        match admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
             .await
             .unwrap()
         {
-            conf_client::PollOutcome::Denied(reason) => {
+            admin_client::PollOutcome::Denied(reason) => {
                 assert!(reason.contains("mismatch"))
             }
             _ => panic!("expected Denied"),
@@ -6103,8 +6103,8 @@ mod tests {
         setup_ca(dir.path()); // policy: allowed groups = ["users"]
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
-        let pending = conf_client::enqueue(
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let pending = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -6114,12 +6114,12 @@ mod tests {
         .await
         .unwrap();
         // Wrong password: list and approve both refuse.
-        let err = conf_client::list_queue(addr, "alice", "WRONG", &identity)
+        let err = admin_client::list_queue(addr, "alice", "WRONG", &identity)
             .await
             .map(|_| ())
             .unwrap_err();
         assert!(format!("{err:#}").contains("authentication"));
-        let err = conf_client::approve(
+        let err = admin_client::approve(
             addr,
             "alice",
             "WRONG",
@@ -6133,7 +6133,7 @@ mod tests {
         assert!(format!("{err:#}").contains("authentication"));
         // A disallowed group refuses the approval — and the request
         // stays pending, so the admin can retry with allowed groups.
-        let err = conf_client::approve(
+        let err = admin_client::approve(
             addr,
             "alice",
             "apw",
@@ -6146,12 +6146,12 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("not permitted"));
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+            admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Pending
+            admin_client::PollOutcome::Pending
         ));
-        conf_client::approve(
+        admin_client::approve(
             addr,
             "alice",
             "apw",
@@ -6162,10 +6162,10 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            conf_client::poll(addr, NodeKind::Workstation, &pending, &identity)
+            admin_client::poll(addr, NodeKind::Workstation, &pending, &identity)
                 .await
                 .unwrap(),
-            conf_client::PollOutcome::Issued(_)
+            admin_client::PollOutcome::Issued(_)
         ));
     }
 
@@ -6175,10 +6175,10 @@ mod tests {
         setup_ca(dir.path());
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
-        let err = conf_client::enqueue(
+            admin_client::fetch_identity(addr, NodeKind::AdminServer).await.unwrap();
+        let err = admin_client::enqueue(
             addr,
-            NodeKind::ConfServer,
+            NodeKind::AdminServer,
             SERVING_SAN,
             std::time::Duration::from_secs(30 * 86400),
             &identity,
@@ -6235,8 +6235,8 @@ mod tests {
         ));
         let (addr, _state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
-        let err = conf_client::enqueue(
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let err = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -6260,10 +6260,10 @@ mod tests {
         // deadlock). Each `lock()` here is a short, awaitless critical section
         // — never held across a wire call that the server itself must lock.
         let ca = state.ca.as_ref().expect("CA role held");
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         // Nothing revoked yet ⇒ no CRL.
         assert!(
-            conf_client::get_crl(addr, NodeKind::Client, &identity)
+            admin_client::get_crl(addr, NodeKind::Client, &identity)
                 .await
                 .unwrap()
                 .is_none()
@@ -6289,7 +6289,7 @@ mod tests {
         ca.store.lock().write_crl(&unlocked.ca_key_pem).unwrap();
         // The daemon serves it; it parses; the revoked serial is on it;
         // and it is genuinely signed by the CA.
-        let pem = conf_client::get_crl(addr, NodeKind::Client, &identity)
+        let pem = admin_client::get_crl(addr, NodeKind::Client, &identity)
             .await
             .unwrap()
             .expect("a CRL after the first revocation");
@@ -6347,9 +6347,9 @@ mod tests {
             .unwrap();
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
         // 1. Initial enrollment (the trust ceremony happened here).
-        let issued = conf_client::request_cert(
+        let issued = admin_client::request_cert(
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -6374,7 +6374,7 @@ mod tests {
         ))
         .unwrap()
         .unwrap();
-        let pending = conf_client::enqueue_renewal(
+        let pending = admin_client::enqueue_renewal(
             addr,
             NodeKind::Client,
             "eric.ryu-oh.org",
@@ -6387,13 +6387,13 @@ mod tests {
         .unwrap();
         // 3. The server marked it verified — proof of possession of the
         //    live key, checked against the issuance index.
-        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        let q = admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(q.len(), 1);
         assert!(q[0].verified_renewal, "renewal must be marked verified");
         // 4. The empty-scope bot approves it — renewals skip the SAN
         //    globs (the name was approved at enrollment; this is
         //    continuation).
-        conf_client::approve(
+        admin_client::approve(
             addr,
             "bot",
             "botpw",
@@ -6403,7 +6403,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let renewed = match conf_client::poll_renewal(
+        let renewed = match admin_client::poll_renewal(
             addr,
             NodeKind::Client,
             &pending,
@@ -6413,7 +6413,7 @@ mod tests {
         .await
         .unwrap()
         {
-            conf_client::PollOutcome::Issued(i) => i,
+            admin_client::PollOutcome::Issued(i) => i,
             _ => panic!("expected the renewed cert"),
         };
         assert_ne!(renewed.cert_pem, issued.cert_pem, "fresh cert (and fresh key)");
@@ -6438,7 +6438,7 @@ mod tests {
         assert!(log.contains("op=renew"));
         // 5. The bot CANNOT approve a *new* identity: queue one without
         //    a client cert and watch the empty SAN scope refuse it.
-        let new_req = conf_client::enqueue(
+        let new_req = admin_client::enqueue(
             addr,
             NodeKind::Workstation,
             "bob.ryu-oh.org",
@@ -6447,7 +6447,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = conf_client::approve(
+        let err = admin_client::approve(
             addr,
             "bot",
             "botpw",
@@ -6467,7 +6467,7 @@ mod tests {
         setup_ca(dir.path());
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::ConfServer).await.unwrap();
+            admin_client::fetch_identity(addr, NodeKind::AdminServer).await.unwrap();
         // Renew the daemon's own serving identity, authenticated by the
         // serving chain itself. The reserved name is legitimate here —
         // possession of the live serving key IS the authority.
@@ -6481,9 +6481,9 @@ mod tests {
         ))
         .unwrap()
         .unwrap();
-        let pending = conf_client::enqueue_renewal(
+        let pending = admin_client::enqueue_renewal(
             addr,
-            NodeKind::ConfServer,
+            NodeKind::AdminServer,
             SERVING_SAN,
             std::time::Duration::from_secs(365 * 86400),
             &state.serving_cert_pem,
@@ -6492,9 +6492,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        let q = admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert!(q[0].verified_renewal, "serving-cert renewal must verify");
-        conf_client::approve(
+        admin_client::approve(
             addr,
             "alice",
             "apw",
@@ -6505,9 +6505,9 @@ mod tests {
         .await
         .unwrap();
         let installed_pem = std::str::from_utf8(&ca_pem).unwrap();
-        let renewed = match conf_client::poll_renewal(
+        let renewed = match admin_client::poll_renewal(
             addr,
-            NodeKind::ConfServer,
+            NodeKind::AdminServer,
             &pending,
             installed_pem,
             roots,
@@ -6515,14 +6515,14 @@ mod tests {
         .await
         .unwrap()
         {
-            conf_client::PollOutcome::Issued(i) => i,
+            admin_client::PollOutcome::Issued(i) => i,
             _ => panic!("expected the renewed serving cert"),
         };
         // The chain rebuild: leaf + the issuing CA from the returned
         // bundle parses back as a ≥2-cert chain — what `split_chain`
         // on every future enrollee requires.
         let ca =
-            conf_client::issuing_ca_pem(&renewed.trusted_pem, &renewed.cert_pem).unwrap();
+            admin_client::issuing_ca_pem(&renewed.trusted_pem, &renewed.cert_pem).unwrap();
         let chain = format!("{}{}", renewed.cert_pem, ca);
         let n = rustls_pemfile::certs(&mut std::io::Cursor::new(chain.as_bytes()))
             .flatten()
@@ -6536,8 +6536,8 @@ mod tests {
         setup_ca(dir.path());
         let (addr, state) = spawn_ca_server(dir.path()).await;
         let identity =
-            conf_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
-        let issued = conf_client::request_cert(
+            admin_client::fetch_identity(addr, NodeKind::Workstation).await.unwrap();
+        let issued = admin_client::request_cert(
             addr,
             NodeKind::Workstation,
             "eric.ryu-oh.org",
@@ -6592,7 +6592,7 @@ mod tests {
         ))
         .unwrap()
         .unwrap();
-        conf_client::enqueue_renewal(
+        admin_client::enqueue_renewal(
             addr,
             NodeKind::Client,
             "eric.ryu-oh.org",
@@ -6603,7 +6603,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let q = conf_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
+        let q = admin_client::list_queue(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(q.len(), 1);
         assert!(
             !q[0].verified_renewal,
@@ -6656,7 +6656,7 @@ mod tests {
     }
 
     /// A single anonymous resolver member on 127.0.0.1 — when this is the
-    /// conf server's own member, single-host delegation pushes to no
+    /// admin server's own member, single-host delegation pushes to no
     /// remote peer (the member is recognized as self).
     fn write_anon_resolver_cfg(dir: &Path, name: &str) -> PathBuf {
         use netidx::resolver_server::config::file as rfile;
@@ -6673,7 +6673,7 @@ mod tests {
         p
     }
 
-    /// Spawn a single-host parent: a conf server holding both ca +
+    /// Spawn a single-host parent: a admin server holding both ca +
     /// resolver roles over the anon resolver config at `dir/resolver.json`.
     /// Returns its address, the resolver config path, and the live state.
     async fn spawn_anon_parent(dir: &Path) -> (SocketAddr, PathBuf, Arc<Server>) {
@@ -6725,16 +6725,16 @@ mod tests {
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
-        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let id = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
 
         // Read the current perms (no credentials — readable in-domain).
-        let p0 = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        let p0 = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p0.contains("users"), "got {p0}");
 
         // Edit the root cluster's perms (admin-authed at the CA, propagated
         // to the cluster — here a single self-member loopback push).
         let new_perms = r#"{"/foo":{"bob":"swl"}}"#;
-        let peers = conf_client::edit_perms(
+        let peers = admin_client::edit_perms(
             addr,
             NodeKind::Client,
             &id,
@@ -6748,12 +6748,12 @@ mod tests {
         assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
 
         // The edit is reflected.
-        let p1 = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        let p1 = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p1.contains("bob") && !p1.contains("users"), "got {p1}");
 
         // Wrong password is refused (the file is unchanged).
         assert!(
-            conf_client::edit_perms(
+            admin_client::edit_perms(
                 addr,
                 NodeKind::Client,
                 &id,
@@ -6805,13 +6805,13 @@ mod tests {
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
-        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let id = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let new_perms = r#"{"/foo":{"bob":"swl"}}"#;
 
         // eve's scope `/eu` does not cover the `/` cluster — refused on
         // authorization, before the map is even consulted, and the file
         // is untouched.
-        let denied = conf_client::edit_perms(
+        let denied = admin_client::edit_perms(
             addr,
             NodeKind::Client,
             &id,
@@ -6823,12 +6823,12 @@ mod tests {
         .await;
         let msg = format!("{:#}", denied.unwrap_err());
         assert!(msg.contains("not authorized"), "got {msg}");
-        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p.contains("users") && !p.contains("bob"), "deny must not mutate: {p}");
 
         // A wrong password for a real role admin is also refused.
         assert!(
-            conf_client::edit_perms(
+            admin_client::edit_perms(
                 addr,
                 NodeKind::Client,
                 &id,
@@ -6843,7 +6843,7 @@ mod tests {
 
         // rod's scope `/` covers the root cluster — authorized, and the
         // edit propagates (a role admin edits perms with no CA key).
-        let peers = conf_client::edit_perms(
+        let peers = admin_client::edit_perms(
             addr,
             NodeKind::Client,
             &id,
@@ -6855,7 +6855,7 @@ mod tests {
         .await
         .unwrap();
         assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}");
-        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p.contains("bob") && !p.contains("users"), "in-scope edit applied: {p}");
     }
 
@@ -6878,12 +6878,12 @@ mod tests {
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
-        let id = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let id = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
 
         // Valid JSON, but `xyz` are not permission bits (only `!swlpd`).
         // The peer writes it, validation fails, and it rolls back.
         let bad = r#"{"/foo":{"bob":"xyz"}}"#;
-        let peers = conf_client::edit_perms(
+        let peers = admin_client::edit_perms(
             addr,
             NodeKind::Client,
             &id,
@@ -6900,14 +6900,14 @@ mod tests {
         );
 
         // The prior perms survive — the bad edit was reverted.
-        let p = conf_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(
             p.contains("users") && !p.contains("bob"),
             "reverted to prior perms: {p}"
         );
     }
 
-    /// End-to-end delegation over the real pinned-TLS protocol: a conf
+    /// End-to-end delegation over the real pinned-TLS protocol: a admin
     /// server wearing both ca + resolver hats hosts a parent
     /// resolver.json (root `/`, one anon member, no children). A child
     /// requests `/eu`, the admin lists then approves, and we assert the
@@ -6918,7 +6918,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
 
         // The child site queues a request for /eu carrying its own
         // (concrete) resolver address.
@@ -6927,28 +6927,28 @@ mod tests {
             auth: InfoAuth::Anonymous,
         }];
         let request_id =
-            conf_client::request_delegation(addr, "/eu", child.clone(), &identity)
+            admin_client::request_delegation(addr, "/eu", child.clone(), &identity)
                 .await
                 .unwrap();
         assert!(matches!(
-            conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap(),
+            admin_client::poll_delegation(addr, &request_id, &identity).await.unwrap(),
             DelegationPollResponse::Pending
         ));
 
         // The parent admin lists the queue; the code it computes locally
         // matches the child's (same canonical (path, child) bytes).
         let queue =
-            conf_client::list_delegations(addr, "alice", "apw", &identity).await.unwrap();
+            admin_client::list_delegations(addr, "alice", "apw", &identity).await.unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].proposed_path, "/eu");
         assert_eq!(
-            conf_client::delegation_code(&queue[0].proposed_path, &queue[0].child),
-            conf_client::delegation_code("/eu", &child)
+            admin_client::delegation_code(&queue[0].proposed_path, &queue[0].child),
+            admin_client::delegation_code("/eu", &child)
         );
 
         // Approve. Single-member cluster ⇒ no remote peer push.
         let peers =
-            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+            admin_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
                 .await
                 .unwrap();
         assert!(peers.is_empty(), "single-member cluster should push to no peers");
@@ -6963,7 +6963,7 @@ mod tests {
 
         // The child's poll flips to Approved, carrying the parent's own
         // resolver address for its `parent` referral.
-        match conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
+        match admin_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
             DelegationPollResponse::Approved { parent } => {
                 assert_eq!(parent.len(), 1);
                 assert_eq!(
@@ -6978,7 +6978,7 @@ mod tests {
         // Re-approving an already-approved request is an idempotent
         // re-sync — still Ok, children unchanged (no duplicate mount).
         let peers =
-            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+            admin_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
                 .await
                 .unwrap();
         assert!(peers.is_empty());
@@ -6993,7 +6993,7 @@ mod tests {
     /// Two anonymous resolver members on distinct loopback IPs (same
     /// resolver port). Each peer keeps its own copy of this config; a
     /// delegation must reach both. Linux-only: the cluster push derives a
-    /// peer's conf address from its member IP, so the peers must live on
+    /// peer's admin address from its member IP, so the peers must live on
     /// separate loopback IPs (127.0.0.0/8, all loopback on Linux).
     #[cfg(target_os = "linux")]
     fn write_cluster_cfg(ca_dir: &Path, name: &str) -> PathBuf {
@@ -7042,10 +7042,10 @@ mod tests {
             id_map: None,
         };
         let (addr_a, a) = spawn_server_at(ca_dir, "127.0.0.2:0", roles_a, vec![]).await;
-        // B shares A's conf port on the other loopback IP — the cluster
-        // push derives a peer's conf address as member.ip : my_conf_port.
+        // B shares A's admin port on the other loopback IP — the cluster
+        // push derives a peer's admin address as member.ip : my_admin_port.
         // A (the CA) already holds the dir's exclusive flock, so B can't open
-        // it to mint its own serving cert; it reuses A's (every conf server
+        // it to mint its own serving cert; it reuses A's (every admin server
         // shares the reserved serving SAN, so A's cert is a valid identity
         // for B too).
         let port = addr_a.port();
@@ -7060,15 +7060,15 @@ mod tests {
         .await;
 
         let identity =
-            conf_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
+            admin_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
-        let request_id = conf_client::request_delegation(addr_a, "/eu", child, &identity)
+        let request_id = admin_client::request_delegation(addr_a, "/eu", child, &identity)
             .await
             .unwrap();
-        let peers = conf_client::approve_delegation(
+        let peers = admin_client::approve_delegation(
             addr_a,
             "alice",
             "apw",
@@ -7089,7 +7089,7 @@ mod tests {
         }
     }
 
-    /// A cluster peer whose conf server is down must be reported LOUDLY
+    /// A cluster peer whose admin server is down must be reported LOUDLY
     /// (the cluster is now inconsistent), and a re-approve once it
     /// recovers must re-sync it idempotently.
     #[cfg(target_os = "linux")]
@@ -7113,18 +7113,18 @@ mod tests {
         let port = addr_a.port();
 
         let identity =
-            conf_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
+            admin_client::fetch_identity(addr_a, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
-        let request_id = conf_client::request_delegation(addr_a, "/eu", child, &identity)
+        let request_id = admin_client::request_delegation(addr_a, "/eu", child, &identity)
             .await
             .unwrap();
 
         // Peer B is down — approve still commits locally on A, but the
         // push to B is reported as a failure (the cluster is now split).
-        let peers = conf_client::approve_delegation(
+        let peers = admin_client::approve_delegation(
             addr_a,
             "alice",
             "apw",
@@ -7160,7 +7160,7 @@ mod tests {
             a.serving_key_pem.clone(),
         )
         .await;
-        let peers = conf_client::approve_delegation(
+        let peers = admin_client::approve_delegation(
             addr_a,
             "alice",
             "apw",
@@ -7181,7 +7181,7 @@ mod tests {
 
     /// The child-cluster direction: `push_referral_edit_to_peers` with a
     /// `SetParent` edit (what `add-parent` runs after writing the local
-    /// referral) reaches the other child member's conf server and sets its
+    /// referral) reaches the other child member's admin server and sets its
     /// `parent` referral, while self is excluded.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
@@ -7191,7 +7191,7 @@ mod tests {
         setup_ca(ca_dir);
         let ra = write_cluster_cfg(ca_dir, "child_a.json");
         let rb = write_cluster_cfg(ca_dir, "child_b.json");
-        // A holds the conf identity used to push; B only receives.
+        // A holds the admin identity used to push; B only receives.
         let roles = |cfg: PathBuf| Roles {
             ca: None,
             resolver: Some(ResolverRole { config: cfg }),
@@ -7259,15 +7259,15 @@ mod tests {
             id_map: None,
         };
         let (addr, _state) = spawn_server_with(dir.path(), roles, vec![]).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
         let request_id =
-            conf_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
+            admin_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
         let err =
-            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+            admin_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
                 .await
                 .unwrap_err();
         assert!(format!("{err:#}").contains("resolver role"), "got: {err:#}");
@@ -7281,15 +7281,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         // First child mounts /eu.
         let a = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
         let id_a =
-            conf_client::request_delegation(addr, "/eu", a, &identity).await.unwrap();
-        conf_client::approve_delegation(addr, "alice", "apw", &id_a, &identity)
+            admin_client::request_delegation(addr, "/eu", a, &identity).await.unwrap();
+        admin_client::approve_delegation(addr, "alice", "apw", &id_a, &identity)
             .await
             .unwrap();
         // A second site asks for /eu/sub — inside the first child's
@@ -7299,8 +7299,8 @@ mod tests {
             auth: InfoAuth::Anonymous,
         }];
         let id_b =
-            conf_client::request_delegation(addr, "/eu/sub", b, &identity).await.unwrap();
-        let err = conf_client::approve_delegation(addr, "alice", "apw", &id_b, &identity)
+            admin_client::request_delegation(addr, "/eu/sub", b, &identity).await.unwrap();
+        let err = admin_client::approve_delegation(addr, "alice", "apw", &id_b, &identity)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").to_lowercase().contains("below"), "got: {err:#}");
@@ -7318,14 +7318,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         let (addr, _rpath, _state) = spawn_anon_parent(dir.path()).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
         let child = vec![ResolverAddr {
             addr: "203.0.113.9:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }];
         let request_id =
-            conf_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
-        conf_client::deny_delegation(
+            admin_client::request_delegation(addr, "/eu", child, &identity).await.unwrap();
+        admin_client::deny_delegation(
             addr,
             "alice",
             "apw",
@@ -7335,14 +7335,14 @@ mod tests {
         )
         .await
         .unwrap();
-        match conf_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
+        match admin_client::poll_delegation(addr, &request_id, &identity).await.unwrap() {
             DelegationPollResponse::Denied { reason } => {
                 assert_eq!(reason, "not your subtree")
             }
             other => panic!("expected Denied, got {other:?}"),
         }
         let err =
-            conf_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
+            admin_client::approve_delegation(addr, "alice", "apw", &request_id, &identity)
                 .await
                 .unwrap_err();
         assert!(format!("{err:#}").contains("denied"), "got: {err:#}");
@@ -7741,7 +7741,7 @@ mod tests {
     }
 
     /// End to end over TLS: a managing role admin mints a sub-role through the
-    /// pinned conf plane, and it shows up in the wire `list`.
+    /// pinned admin plane, and it shows up in the wire `list`.
     #[tokio::test]
     async fn remote_add_role_admin_over_tls() {
         let dir = tempfile::tempdir().unwrap();
@@ -7754,8 +7754,8 @@ mod tests {
             )
             .unwrap();
         let (addr, _state) = spawn_ca_server(dir.path()).await;
-        let identity = conf_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
-        conf_client::add_role_admin(
+        let identity = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        admin_client::add_role_admin(
             addr,
             NodeKind::Client,
             &identity,
@@ -7768,7 +7768,7 @@ mod tests {
         .await
         .unwrap();
         let admins =
-            conf_client::list_admins(addr, NodeKind::Client, &identity, "boss", "bosspw")
+            admin_client::list_admins(addr, NodeKind::Client, &identity, "boss", "bosspw")
                 .await
                 .unwrap();
         let eu = admins.iter().find(|a| a.admin == "eu-ops").expect("eu-ops minted");

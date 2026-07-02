@@ -1,6 +1,6 @@
 //! The CA's RBAC policy model — pure data, shared between the unix-only
 //! keyslot vault ([`crate::ca_vault`]) that stores and enforces it and the
-//! cross-platform conf-plane wire protocol ([`crate::conf_proto`]) that
+//! cross-platform admin-plane wire protocol ([`crate::admin_proto`]) that
 //! carries it. A Windows admin client speaks these types to a unix CA, so
 //! the types must be cross-platform even though the vault is `#[cfg(unix)]`.
 
@@ -39,9 +39,9 @@ pub struct Policy {
     /// identities.
     #[serde(default)]
     pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new conf servers — i.e. authorize
+    /// Whether this admin may enroll new admin servers — i.e. authorize
     /// issuance of the reserved serving SAN. Granted explicitly; a
-    /// rogue enrollee can impersonate the conf plane, so this is more
+    /// rogue enrollee can impersonate the admin plane, so this is more
     /// privileged than any `allowed_san` glob.
     #[serde(default)]
     pub may_enroll_servers: bool,
@@ -53,7 +53,7 @@ pub struct Policy {
     #[serde(default)]
     pub perms_edit_scopes: Vec<String>,
     /// Whether this admin may mint / rescope / revoke **role** admins (the
-    /// `ca admin` ops, local or over the conf plane). It never confers MK
+    /// `ca admin` ops, local or over the admin plane). It never confers MK
     /// access — a managing admin directs the server, which uses the
     /// autorenew credential as the MK proof — and may only grant
     /// capabilities ⊆ its own (no escalation; enforced server-side).
@@ -61,7 +61,7 @@ pub struct Policy {
     #[serde(default)]
     pub may_manage_admins: bool,
     /// Netidx hierarchy paths under which this admin may control services
-    /// (restart / start / stop / status the activation units on the conf
+    /// (restart / start / stop / status the activation units on the admin
     /// servers of the cluster serving that path). Same path-scoping as
     /// [`perms_edit_scopes`](Self::perms_edit_scopes) but a separate grant —
     /// editing perms and restarting services are distinct authorities.

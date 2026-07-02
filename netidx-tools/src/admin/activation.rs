@@ -16,13 +16,13 @@ use netidx_admin::{
         id_map::{self as id_map_template, IdMapServiceParams},
     },
 };
-// Remote, conf-plane control is unix-only (see `service_control`).
+// Remote, admin-plane control is unix-only (see `service_control`).
 #[cfg(unix)]
-use netidx_admin::{conf_client, conf_proto::NodeKind};
-// `conf_proto` is also referenced by `parse_unit_targets`, which the test
+use netidx_admin::{admin_client, admin_proto::NodeKind};
+// `admin_proto` is also referenced by `parse_unit_targets`, which the test
 // module exercises on every platform.
 #[cfg(any(unix, test))]
-use netidx_admin::conf_proto;
+use netidx_admin::admin_proto;
 
 use super::prompt;
 use clap::{Args, Subcommand};
@@ -63,7 +63,7 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct ServiceCtlArgs {
-    /// Drive a REMOTE CA over the conf plane (RBAC-gated, routed by the
+    /// Drive a REMOTE CA over the admin plane (RBAC-gated, routed by the
     /// network map). Without it, this host's local activation supervisor is
     /// controlled directly (on-box, filesystem authority).
     #[arg(long)]
@@ -80,7 +80,7 @@ pub(crate) struct ServiceCtlArgs {
     /// Activation directory (local mode). Default: the user activation dir.
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// CA dir, to verify the conf server's identity (remote mode).
+    /// CA dir, to verify the admin server's identity (remote mode).
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -210,12 +210,12 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     }
 }
 
-/// Restart / start / stop / status units — over the conf plane (`--server`,
+/// Restart / start / stop / status units — over the admin plane (`--server`,
 /// RBAC-gated, cluster+member targeting) or against the local activation
 /// supervisor's control socket (on-box).
 fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
     match a.server {
-        // Remote, conf-plane control is unix-only: the admin preamble needs
+        // Remote, admin-plane control is unix-only: the admin preamble needs
         // the openssl-backed CA module. On Windows (workstation-only) the
         // local control path below is the one that matters.
         #[cfg(unix)]
@@ -226,7 +226,7 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
             let targets = parse_unit_targets(&a.units)?;
             let (rt, identity, admin, password) =
                 super::ca::remote_admin_preamble(server, a.ca_dir.clone())?;
-            let results = rt.block_on(conf_client::control_service(
+            let results = rt.block_on(admin_client::control_service(
                 server,
                 NodeKind::Client,
                 &identity,
@@ -263,22 +263,22 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
     }
 }
 
-/// Parse `unit[:member]` tokens into [`conf_proto::UnitTarget`]s. A trailing
+/// Parse `unit[:member]` tokens into [`admin_proto::UnitTarget`]s. A trailing
 /// `:<n>` pins the unit to cluster member `n`; otherwise it hits every member.
 #[cfg(any(unix, test))]
-fn parse_unit_targets(toks: &[String]) -> Result<Vec<conf_proto::UnitTarget>> {
+fn parse_unit_targets(toks: &[String]) -> Result<Vec<admin_proto::UnitTarget>> {
     toks.iter()
         .map(|t| match t.rsplit_once(':') {
             Some((unit, idx)) => {
                 let member = idx
                     .parse::<u32>()
                     .with_context(|| format!("invalid member index in {t:?}"))?;
-                Ok(conf_proto::UnitTarget {
+                Ok(admin_proto::UnitTarget {
                     unit: unit.to_string(),
                     member: Some(member),
                 })
             }
-            None => Ok(conf_proto::UnitTarget { unit: t.clone(), member: None }),
+            None => Ok(admin_proto::UnitTarget { unit: t.clone(), member: None }),
         })
         .collect()
 }
@@ -303,7 +303,7 @@ fn print_unit_statuses(units: &[UnitStatus]) {
 }
 
 #[cfg(unix)]
-fn print_service_results(results: &[conf_proto::ServiceControlResult]) {
+fn print_service_results(results: &[admin_proto::ServiceControlResult]) {
     if results.is_empty() {
         println!("(no cluster members matched)");
     }

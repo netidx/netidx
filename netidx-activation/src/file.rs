@@ -132,7 +132,7 @@ pub struct Unit {
 /// Check that no two units claim the same `OnAccess` trigger path.
 /// `units` yields `(unit_name, unit)` pairs. This is the single
 /// implementation of the cross-unit trigger-conflict invariant, shared
-/// by the daemon's `load_units` (runtime) and the `netidx-conf`
+/// by the daemon's `load_units` (runtime) and the `netidx-admin`
 /// editor's pre-save `validate`, so the two can't drift.
 pub fn check_trigger_conflicts<'a, I>(units: I) -> Result<()>
 where

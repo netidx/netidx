@@ -1,4 +1,4 @@
-//! Deployment-environment IP discovery for the `conf install`
+//! Deployment-environment IP discovery for the `admin install`
 //! tooling: cloud-metadata probes, env-var overrides, and container
 //! detection. Internal to [`crate::netshape`].
 //!

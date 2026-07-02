@@ -104,7 +104,7 @@ pub struct WorkstationParams {
     /// an empty perms map.
     ///
     /// The CLI fills this from `nix::unistd::User::from_uid(getuid())`
-    /// so a `conf workstation install` run as `alice` grants `alice`
+    /// so a `admin workstation install` run as `alice` grants `alice`
     /// the local-resolver namespace. Tests pass an explicit name.
     pub owner: Option<ArcStr>,
     /// Initial perms map. `None` + `with_perms_file = true` +
@@ -139,7 +139,7 @@ pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 #[cfg(not(any(unix, windows)))]
 pub const UNSUPPORTED_MSG: &str = "the workstation role needs a Local-auth local resolver supervised by \
      netidx-activation, neither of which exists on this platform. To put \
-     this host on a network, install a publisher instead: `netidx conf \
+     this host on a network, install a publisher instead: `netidx admin \
      publisher install`.";
 
 /// Unsupported-platform stub: the workstation role can't be rendered

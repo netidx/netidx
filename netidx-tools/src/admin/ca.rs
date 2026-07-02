@@ -3,8 +3,8 @@ use clap::{Args, Subcommand};
 use netidx_admin::{
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    ca_vault, conf_client, conf_local,
-    conf_proto::{self, NodeKind},
+    ca_vault, admin_client, admin_local,
+    admin_proto::{self, NodeKind},
     fingerprint::{ColorMode, Fingerprint},
     paths, tls,
 };
@@ -19,7 +19,7 @@ use super::{init, prompt, service};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// create a new local CA (keyslot vault; can serve via `conf server`)
+    /// create a new local CA (keyslot vault; can serve via `admin server`)
     Init(InitParams),
     /// issue a leaf certificate from a CA
     Issue(IssueArgs),
@@ -38,7 +38,7 @@ pub(crate) enum Cmd {
     Fingerprint(FingerprintArgs),
     /// revoke certificates by name (or serial) and re-sign the CRL
     Revoke(RevokeArgs),
-    /// set up or rotate the auto-approve slot, so the running conf server
+    /// set up or rotate the auto-approve slot, so the running admin server
     /// approves verified renewals in-process (no human per renewal)
     AutoApprove(AutoApproveArgs),
     /// manage the off-box recovery credential (rotate it on the CA box)
@@ -58,7 +58,7 @@ pub(crate) enum Cmd {
 pub(crate) enum ExternalCmd {
     /// With no argument, (re-)emit a CSR for the CA certificate for your
     /// PKI to sign. With a signed certificate, install it (first install
-    /// also finishes conf-server setup; later installs renew the cert).
+    /// also finishes admin-server setup; later installs renew the cert).
     Renew(ExternalRenewArgs),
 }
 
@@ -94,7 +94,7 @@ pub(crate) struct RecoveryRotateArgs {
 pub(crate) struct AutoApproveArgs {
     /// Rotate the auto-approve slot: revoke the old keyslot, mint a new
     /// long random password, and rewrite the keytab — the one-command
-    /// response to a leaked keytab. Restart the conf server afterwards to
+    /// response to a leaked keytab. Restart the admin server afterwards to
     /// pick up the new credential.
     #[arg(long)]
     pub rotate: bool,
@@ -107,13 +107,13 @@ pub(crate) struct AutoApproveArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct ApproveArgs {
-    /// Conf server whose enrollment queue to work. Defaults to this
-    /// host's own conf server, then mDNS discovery — so an enrollment
+    /// Admin server whose enrollment queue to work. Defaults to this
+    /// host's own admin server, then mDNS discovery — so an enrollment
     /// admin can approve from their workstation without shell access to
     /// the CA host.
     #[arg(long)]
     pub server: Option<SocketAddr>,
-    /// CA dir, used only to verify the conf server's identity against the
+    /// CA dir, used only to verify the admin server's identity against the
     /// local CA cert when one is present.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -131,11 +131,11 @@ pub(crate) struct RevokeArgs {
     /// Revocation reason, recorded in the index. Prompted when omitted.
     #[arg(long)]
     pub reason: Option<String>,
-    /// Conf server to revoke through. Defaults to this host's own conf
+    /// Admin server to revoke through. Defaults to this host's own admin
     /// server, else discovered on the local network.
     #[arg(long)]
     pub server: Option<SocketAddr>,
-    /// CA dir, used only to verify the conf server's identity against the
+    /// CA dir, used only to verify the admin server's identity against the
     /// local CA cert when one is present.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -158,7 +158,7 @@ pub(crate) enum AdminCmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminScopeArgs {
-    /// Manage admins on a REMOTE CA over the conf plane (instead of the
+    /// Manage admins on a REMOTE CA over the admin plane (instead of the
     /// local vault). Authenticates as a `may_manage_admins` role admin;
     /// the operator confirms the CA's fingerprint before any password.
     #[arg(long)]
@@ -184,7 +184,7 @@ pub(crate) struct AdminAddArgs {
     /// string disables registration.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new conf servers. Prompted when
+    /// Whether this admin may enroll new admin servers. Prompted when
     /// omitted (default no for added admins).
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
@@ -213,7 +213,7 @@ pub(crate) struct AdminAddRoleArgs {
     /// first is primary). Prompted when omitted; empty disables it.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether this role may enroll new conf servers. Prompted when omitted.
+    /// Whether this role may enroll new admin servers. Prompted when omitted.
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
     /// Netidx path this role may edit perms under (repeatable, e.g. /eu,
@@ -224,7 +224,7 @@ pub(crate) struct AdminAddRoleArgs {
     /// the activation units of the cluster serving that path; repeatable).
     #[arg(long = "service-scope", num_args = 1)]
     pub service_scope: Vec<String>,
-    /// Mint the role admin on a REMOTE CA over the conf plane. The CA
+    /// Mint the role admin on a REMOTE CA over the admin plane. The CA
     /// enforces no-escalation (you may only grant ⊆ your own authority).
     #[arg(long)]
     pub server: Option<SocketAddr>,
@@ -249,7 +249,7 @@ pub(crate) struct AdminSetPolicyArgs {
     /// string disables registration.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new conf servers. Prompted when
+    /// Whether this admin may enroll new admin servers. Prompted when
     /// omitted.
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
@@ -261,7 +261,7 @@ pub(crate) struct AdminSetPolicyArgs {
     /// Replaces the existing list.
     #[arg(long = "service-scope", num_args = 1)]
     pub service_scope: Vec<String>,
-    /// Rescope a role admin on a REMOTE CA over the conf plane (CA enforces
+    /// Rescope a role admin on a REMOTE CA over the admin plane (CA enforces
     /// no-escalation).
     #[arg(long)]
     pub server: Option<SocketAddr>,
@@ -277,7 +277,7 @@ pub(crate) struct AdminRemoveArgs {
     /// Allow removing the last admin (locks the CA permanently).
     #[arg(long)]
     pub force: bool,
-    /// Remove a role admin on a REMOTE CA over the conf plane.
+    /// Remove a role admin on a REMOTE CA over the admin plane.
     #[arg(long)]
     pub server: Option<SocketAddr>,
     #[arg(long)]
@@ -292,7 +292,7 @@ pub(crate) struct FingerprintArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct JoinArgs {
-    /// Conf server address (`ip:port`). When omitted, discovered over
+    /// Admin server address (`ip:port`). When omitted, discovered over
     /// mDNS (with a manual-address fallback prompt).
     #[arg(long)]
     pub server: Option<SocketAddr>,
@@ -343,7 +343,7 @@ pub(crate) struct InitParams {
     /// Validity for the CA cert itself. Default 7300d (20 years).
     #[arg(long, value_parser = humantime::parse_duration, default_value = "7300d")]
     pub ca_validity: Duration,
-    /// Default validity for certs this CA issues (e.g. the conf server's
+    /// Default validity for certs this CA issues (e.g. the admin server's
     /// serving cert). Default 730d.
     #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
     pub leaf_validity: Duration,
@@ -367,7 +367,7 @@ pub(crate) struct InitParams {
     /// (repeatable; first is primary). Prompted when omitted.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether the superuser may enroll new conf servers. Prompted
+    /// Whether the superuser may enroll new admin servers. Prompted
     /// when omitted (default yes for the founding admin).
     #[arg(long)]
     pub may_enroll_servers: Option<bool>,
@@ -536,7 +536,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
-pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::conf_server::AUTORENEW_ADMIN;
+pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::admin_server::AUTORENEW_ADMIN;
 
 fn autorenew_policy() -> ca_vault::Policy {
     netidx_admin::ca_policy::autorenew_policy()
@@ -642,7 +642,7 @@ pub(super) fn setup_autorenew_slot(
 }
 
 /// Set up (or rotate) the autorenew slot and point this host's
-/// conf-server config at its keytab. Approval itself is the running
+/// admin-server config at its keytab. Approval itself is the running
 /// daemon's job now — it reads the keytab named here and approves
 /// verified renewals in-process — so this command just manages the
 /// credential. `--rotate` is the same operation framed as a leaked-keytab
@@ -651,17 +651,17 @@ pub(super) fn setup_autorenew_slot(
 fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
-    let cfg_path = paths::discover_conf_server_config().ok();
+    let cfg_path = paths::discover_admin_server_config().ok();
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Hot-swap path: the running daemon owns the CA, so it rotates the box
     // credential in-process (re-wraps the slot, swaps the live key, rewrites
     // the keytab) with no downtime — no flock, no recovery password.
     if let Some(cfg) = &cfg_path
-        && rt.block_on(conf_local::daemon_running(cfg))
+        && rt.block_on(admin_local::daemon_running(cfg))
     {
-        let warning = rt.block_on(conf_local::rotate_autorenew(cfg))?;
+        let warning = rt.block_on(admin_local::rotate_autorenew(cfg))?;
         println!(
-            "auto-approve rotated (hot-swapped on the running conf server, no downtime)"
+            "auto-approve rotated (hot-swapped on the running admin server, no downtime)"
         );
         if let Some(w) = warning {
             eprintln!("WARNING: {w}");
@@ -684,7 +684,7 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     )?);
     let recovery = ca_vault::normalize_recovery_password(&typed);
     let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
-        "setting up autorenew needs exclusive access; the conf server must be stopped",
+        "setting up autorenew needs exclusive access; the admin server must be stopped",
     )?;
     let keytab = setup_autorenew_slot(&cadir, &recovery, p.insecure_no_tpm)?;
     let verb = if p.rotate { "rotated" } else { "enabled" };
@@ -696,12 +696,12 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     match super::server::set_ca_autorenew(&keytab) {
         Ok(cfg_path) => {
             println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
-            println!("  restart the conf server to pick up the keytab.");
+            println!("  restart the admin server to pick up the keytab.");
         }
         Err(e) => {
-            println!("  note: could not update the conf-server config ({e:#}).");
+            println!("  note: could not update the admin-server config ({e:#}).");
             println!("        set roles.ca.autorenew to the keytab path and");
-            println!("        restart the conf server.");
+            println!("        restart the admin server.");
         }
     }
     Ok(())
@@ -727,21 +727,21 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
 /// peers) — flagging the behavior change rather than hiding it.
 fn revoke(p: RevokeArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Find the CA: an explicit `--server`, else this host's own conf
+    // Find the CA: an explicit `--server`, else this host's own admin
     // server, else discover one on the network (glyph-confirmed).
-    let (server, known_identity) = match p.server.or_else(local_conf_server_listen) {
+    let (server, known_identity) = match p.server.or_else(local_admin_server_listen) {
         Some(s) => (s, None),
         None => match init::discover_network(NodeKind::Client)? {
-            init::ConfServers::Have(net) => {
+            init::AdminServers::Have(net) => {
                 let ca = net.info.ca_addr.ok_or_else(|| {
                     anyhow!("network {:?} reported no CA; cannot revoke", net.info.domain)
                 })?;
                 (ca, Some(net.identity))
             }
-            init::ConfServers::DontHave => {
-                bail!("no conf server found or selected; pass --server")
+            init::AdminServers::DontHave => {
+                bail!("no admin server found or selected; pass --server")
             }
-            init::ConfServers::NotProbed => {
+            init::AdminServers::NotProbed => {
                 bail!("--server is required when stdin is not a TTY")
             }
         },
@@ -752,8 +752,8 @@ fn revoke(p: RevokeArgs) -> Result<()> {
         Some(identity) => identity,
         None => {
             let identity = rt
-                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting conf server {server}"))?;
+                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting admin server {server}"))?;
             let local_fp = ca_dir_for(p.ca_dir.clone())
                 .ok()
                 .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
@@ -783,19 +783,19 @@ fn revoke(p: RevokeArgs) -> Result<()> {
         "CA password for admin {admin:?}"
     ))?);
     // The daemon owns the index — read the issued set from it.
-    let entries = rt.block_on(conf_client::list_issued(
+    let entries = rt.block_on(admin_client::list_issued(
         server,
         &admin,
         password.as_str(),
         &identity,
     ))?;
-    let live: Vec<&conf_proto::IssuedEntry> =
+    let live: Vec<&admin_proto::IssuedEntry> =
         entries.iter().filter(|e| !e.revoked).collect();
     if live.is_empty() {
         println!("no live certificates in the index — nothing to revoke");
         return Ok(());
     }
-    let targets: Vec<&conf_proto::IssuedEntry> = if let Some(serial) = p.serial {
+    let targets: Vec<&admin_proto::IssuedEntry> = if let Some(serial) = p.serial {
         let t: Vec<_> = live.iter().copied().filter(|e| e.serial == serial).collect();
         if t.is_empty() {
             bail!("no live certificate with serial {serial}");
@@ -876,7 +876,7 @@ fn revoke(p: RevokeArgs) -> Result<()> {
         )?,
     };
     let serials: Vec<u64> = targets.iter().map(|t| t.serial).collect();
-    let warnings = rt.block_on(conf_client::revoke(
+    let warnings = rt.block_on(admin_client::revoke(
         server,
         &admin,
         password.as_str(),
@@ -927,7 +927,7 @@ pub(super) struct NewCaOpts {
     /// Renew the CA cert once its remaining lifetime drops below this.
     pub ca_renew_threshold: Duration,
     /// Superuser (role) admin name; `None` ⇒ prompt, defaulting to the
-    /// current unix user. Created only when the conf server is set up
+    /// current unix user. Created only when the admin server is set up
     /// (a role admin authenticates to the daemon; an offline CA has none).
     pub admin: Option<String>,
     /// Superuser's server-signing scope globs; empty ⇒ prompt (default
@@ -936,14 +936,14 @@ pub(super) struct NewCaOpts {
     pub max_validity: Duration,
     /// Superuser's id-map groups; empty ⇒ prompt (default `users`).
     pub id_map_groups: Vec<String>,
-    /// Whether the superuser may enroll conf servers; `None` ⇒
+    /// Whether the superuser may enroll admin servers; `None` ⇒
     /// prompt, defaulting to yes (someone has to be able to grow the
     /// network).
     pub may_enroll_servers: Option<bool>,
     /// Proceed without a TPM / Secure Enclave (autorenew keytab written
     /// in plaintext). A loud warning is printed; test CAs only.
     pub insecure_no_tpm: bool,
-    /// `None` ⇒ prompt "set up the conf server?"; `Some(b)` ⇒ forced.
+    /// `None` ⇒ prompt "set up the admin server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
     /// Explicit `--listen` for the CA server (skips the prompt).
     pub listen: Option<SocketAddr>,
@@ -1002,7 +1002,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     // otherwise prompt with the `ca.<domain>` default when we know the
     // domain.
     let common_name = resolve_ca_cn(opts.common_name.clone(), opts.domain.as_deref())?;
-    // The conf-server config wants a concrete domain (it's what the
+    // The admin-server config wants a concrete domain (it's what the
     // network is grouped by in discovery). Prefer the threaded one;
     // fall back to the CN's domain part, which `resolve_ca_cn` makes
     // likely (`ca.<domain>`).
@@ -1061,7 +1061,7 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
     let set_up_server = match opts.setup_server {
         Some(b) => b,
         None => prompt::confirm(
-            "set up the conf server (so nodes can discover the network and \
+            "set up the admin server (so nodes can discover the network and \
              request certs over it)?",
             true,
         )?,
@@ -1111,11 +1111,11 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
 
 /// Build the [`NewCaOpts`] for the founding CA a resolver install stands
 /// up when it creates a network's trust root — shared by the TLS
-/// "generate" branch and the krb5/anonymous conf-plane branch so the two
+/// "generate" branch and the krb5/anonymous admin-plane branch so the two
 /// cannot drift. Unlike `ca init` (the explicit tuning flow, which
 /// interrogates the founding admin), an install applies a sensible
 /// zero-prompt founding-admin policy: issue `*.<domain>`, place enrolled
-/// nodes in the `users` id-map group, and may enroll conf servers. Say
+/// nodes in the `users` id-map group, and may enroll admin servers. Say
 /// what it is (and how to change it) with [`announce_founding_policy`].
 pub(super) fn founding_ca_opts(
     dir: PathBuf,
@@ -1159,7 +1159,7 @@ pub(super) fn founding_ca_opts(
 pub(super) fn announce_founding_policy(domain: &str) {
     println!(
         "  the CA's founding admin will issue *.{domain} certificates, place \
-         enrolled nodes in the 'users' id-map group, and may enroll conf \
+         enrolled nodes in the 'users' id-map group, and may enroll admin \
          servers — change any of this later with `netidx admin ca admin \
          set-policy`."
     );
@@ -1282,7 +1282,7 @@ fn setup_superuser(
     Ok(())
 }
 
-/// `conf ca recovery rotate`: mint a fresh recovery password on the CA box.
+/// `admin ca recovery rotate`: mint a fresh recovery password on the CA box.
 /// Authorized by the box's own autorenew keytab (read + unsealed), so a lost
 /// recovery password is recoverable while the machine lives — without it.
 fn recovery(cmd: RecoveryCmd) -> Result<()> {
@@ -1293,16 +1293,16 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
 
 fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    let cfg_path = paths::discover_conf_server_config().ok();
+    let cfg_path = paths::discover_admin_server_config().ok();
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Prefer the running daemon: it owns the CA and re-wraps the recovery
     // slot with its own on-box autorenew credential, so no flock contention
     // and no offline keytab handling here.
     if let Some(cfg) = &cfg_path
-        && rt.block_on(conf_local::daemon_running(cfg))
+        && rt.block_on(admin_local::daemon_running(cfg))
     {
-        let new_pw = rt.block_on(conf_local::rotate_recovery(cfg))?;
-        println!("rotated the recovery password (via the running conf server)");
+        let new_pw = rt.block_on(admin_local::rotate_recovery(cfg))?;
+        println!("rotated the recovery password (via the running admin server)");
         print_recovery_password(&new_pw);
         return Ok(());
     }
@@ -1316,7 +1316,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
         bail!("no vault-protected CA at {}", dir.display());
     }
     let keytab = autorenew_keytab_path()?;
-    let autorenew_pw = netidx_admin::conf_server::read_autorenew_password(&keytab)
+    let autorenew_pw = netidx_admin::admin_server::read_autorenew_password(&keytab)
         .with_context(|| {
             format!(
                 "rotating the recovery password needs the autorenew keytab ({}); it \
@@ -1326,7 +1326,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
             )
         })?;
     let cadir = netidx_admin::ca_store::CaDir::open(&dir).context(
-        "rotating recovery needs exclusive access; stop the conf server first",
+        "rotating recovery needs exclusive access; stop the admin server first",
     )?;
     // Confirm the keytab credential actually unlocks this CA BEFORE removing
     // the old recovery slot — a stale keytab must not leave the CA with no
@@ -1434,7 +1434,7 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
     let set_up_server = match opts.setup_server {
         Some(b) => b,
         None => prompt::confirm(
-            "set up the conf server (so nodes can discover the network and \
+            "set up the admin server (so nodes can discover the network and \
              request certs over it)?",
             true,
         )?,
@@ -1539,10 +1539,10 @@ fn external_ca_key(
     dir: &Path,
 ) -> Result<(Zeroizing<Vec<u8>>, netidx_admin::ca_store::CaDir)> {
     let cadir = netidx_admin::ca_store::CaDir::open(dir)
-        .context("opening the CA (stop the conf server first if it is running)")?;
+        .context("opening the CA (stop the admin server first if it is running)")?;
     let keytab = autorenew_keytab_path()?;
     let key = if keytab.exists() {
-        let pw = netidx_admin::conf_server::read_autorenew_password(&keytab)?;
+        let pw = netidx_admin::admin_server::read_autorenew_password(&keytab)?;
         cadir.vault.read().unlock(&pw)?.ca_key_pem
     } else {
         let pw = collect_required_password("CA recovery password")?;
@@ -1612,11 +1612,11 @@ fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Resu
         println!("CA-cert auto-renewal is DISABLED (external issuer).");
         return Ok(());
     }
-    // Served CA. Decide "first install vs renewal" on whether the conf
+    // Served CA. Decide "first install vs renewal" on whether the admin
     // server is configured yet — NOT on certificate.pem (which we just
     // wrote), so a failed/interrupted first-install tail is retriable
     // instead of being silently reclassified as a renewal.
-    if paths::discover_conf_server_config().is_err() {
+    if paths::discover_admin_server_config().is_err() {
         // First install (or a retry of one): run the idempotent served-CA
         // tail (serving cert + config) using the key we unlocked. The
         // autorenew slot + superuser were minted at bootstrap.
@@ -1633,7 +1633,7 @@ fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Resu
             units_dir: m.units_dir.as_deref(),
         })?;
         let cfg_path = super::server::set_ca_autorenew(&autorenew_keytab_path()?)?;
-        println!("conf server configured ({})", cfg_path.display());
+        println!("admin server configured ({})", cfg_path.display());
         println!(
             "CA-cert auto-renewal is DISABLED (external issuer); re-run \
              `netidx admin ca external renew` when your PKI re-signs it."
@@ -1643,7 +1643,7 @@ fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Resu
             service::ServiceGate { dry_run: false, no_service: false, with_service: false },
         );
     }
-    // The conf server is already configured: this is a renewal. Keep
+    // The admin server is already configured: this is a renewal. Keep
     // autorenew wired (idempotent) and let the refreshed intermediate reach
     // enrolled nodes on their next renewal.
     let keytab = autorenew_keytab_path()?;
@@ -1706,7 +1706,7 @@ fn init(p: InitParams) -> Result<()> {
         create_vaulted_ca(opts)?.1
     };
 
-    // Single end-of-process hook — the same one the `conf install`
+    // Single end-of-process hook — the same one the `admin install`
     // templates use.
     service::offer(
         need,
@@ -1720,7 +1720,7 @@ fn init(p: InitParams) -> Result<()> {
 
 // -- ca admin -----------------------------------------------------------------
 
-/// The preamble for a `--server` admin op: confirm WHO the conf server is
+/// The preamble for a `--server` admin op: confirm WHO the admin server is
 /// (silently against the local CA cert when this host holds it, else
 /// glyph-confirm with the operator — before any password is typed), then
 /// prompt for the managing admin's name + password. Returns the runtime, the
@@ -1728,12 +1728,12 @@ fn init(p: InitParams) -> Result<()> {
 pub(super) fn remote_admin_preamble(
     server: SocketAddr,
     ca_dir: Option<PathBuf>,
-) -> Result<(tokio::runtime::Runtime, conf_client::CaIdentity, String, Zeroizing<String>)>
+) -> Result<(tokio::runtime::Runtime, admin_client::CaIdentity, String, Zeroizing<String>)>
 {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let identity = rt
-        .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-        .with_context(|| format!("contacting conf server {server}"))?;
+        .block_on(admin_client::fetch_identity(server, NodeKind::Client))
+        .with_context(|| format!("contacting admin server {server}"))?;
     let local_fp = ca_dir_for(ca_dir)
         .ok()
         .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
@@ -1833,7 +1833,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 let new_pw = collect_required_password(&format!(
                     "password for new role admin {name:?}"
                 ))?;
-                rt.block_on(conf_client::add_role_admin(
+                rt.block_on(admin_client::add_role_admin(
                     server,
                     NodeKind::Client,
                     &identity,
@@ -1850,7 +1850,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             // as a superuser over the control socket (no password). A role
             // with no authority at all is allowed (a placeholder to scope
             // later). The CN default is read from the local CA's public cert.
-            let cfg_path = paths::discover_conf_server_config()?;
+            let cfg_path = paths::discover_admin_server_config()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let policy = prompt_policy(
                 &policy_args,
@@ -1861,8 +1861,8 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             let new_pw = collect_required_password(&format!(
                 "password for new role admin {name:?}"
             ))?;
-            rt.block_on(conf_local::add_role_admin(&cfg_path, &name, &new_pw, policy))?;
-            println!("added role admin {name:?} (via the local conf server)");
+            rt.block_on(admin_local::add_role_admin(&cfg_path, &name, &new_pw, policy))?;
+            println!("added role admin {name:?} (via the local admin server)");
             Ok(())
         }
         AdminCmd::SetPolicy(a) => {
@@ -1891,7 +1891,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                     &default_ca_cn(&identity.domain),
                     Some(&identity.domain),
                 )?;
-                rt.block_on(conf_client::set_admin_policy(
+                rt.block_on(admin_client::set_admin_policy(
                     server,
                     NodeKind::Client,
                     &identity,
@@ -1906,7 +1906,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             // Local: rescope through the daemon (superuser over the control
             // socket). Rescoping touches only the slot's plaintext policy,
             // never MK.
-            let cfg_path = paths::discover_conf_server_config()?;
+            let cfg_path = paths::discover_admin_server_config()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let policy = prompt_policy(
                 &policy_args,
@@ -1914,8 +1914,8 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
                 None,
             )?;
-            rt.block_on(conf_local::set_admin_policy(&cfg_path, &name, policy))?;
-            println!("updated policy for admin {name:?} (via the local conf server)");
+            rt.block_on(admin_local::set_admin_policy(&cfg_path, &name, policy))?;
+            println!("updated policy for admin {name:?} (via the local admin server)");
             Ok(())
         }
         AdminCmd::Remove(a) => {
@@ -1931,7 +1931,7 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             if let Some(server) = a.server {
                 let (rt, identity, admin, password) =
                     remote_admin_preamble(server, a.ca_dir.clone())?;
-                rt.block_on(conf_client::remove_admin(
+                rt.block_on(admin_client::remove_admin(
                     server,
                     NodeKind::Client,
                     &identity,
@@ -1946,17 +1946,17 @@ fn admin(cmd: AdminCmd) -> Result<()> {
             // socket). `a.force` is ignored here — the daemon's last-manager
             // and reserved-slot guards still apply, preventing an orphaned CA
             // key.
-            let cfg_path = paths::discover_conf_server_config()?;
+            let cfg_path = paths::discover_admin_server_config()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            rt.block_on(conf_local::remove_admin(&cfg_path, &name))?;
-            println!("removed role admin {name:?} (via the local conf server)");
+            rt.block_on(admin_local::remove_admin(&cfg_path, &name))?;
+            println!("removed role admin {name:?} (via the local admin server)");
             Ok(())
         }
         AdminCmd::List(a) => {
             if let Some(server) = a.server {
                 let (rt, identity, admin, password) =
                     remote_admin_preamble(server, a.ca_dir.clone())?;
-                let admins = rt.block_on(conf_client::list_admins(
+                let admins = rt.block_on(admin_client::list_admins(
                     server,
                     NodeKind::Client,
                     &identity,
@@ -1966,9 +1966,9 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                 print_admin_list(&admins);
                 return Ok(());
             }
-            let cfg_path = paths::discover_conf_server_config()?;
+            let cfg_path = paths::discover_admin_server_config()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let admins = rt.block_on(conf_local::list_admins(&cfg_path))?;
+            let admins = rt.block_on(admin_local::list_admins(&cfg_path))?;
             print_admin_list(&admins);
             Ok(())
         }
@@ -1985,7 +1985,7 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
 // -- ca join (the client) -----------------------------------------------------
 
 pub(crate) fn join(p: JoinArgs) -> Result<()> {
-    use super::init::{self, ConfServers};
+    use super::init::{self, AdminServers};
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let (server, identity) = match p.server {
         // An explicit address: confirm WHO we've reached before any
@@ -1993,8 +1993,8 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
         // and closes before returning.
         Some(server) => {
             let identity = rt
-                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting conf server {server}"))?;
+                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting admin server {server}"))?;
             init::show_network_identity(server, &identity);
             if !prompt::confirm("does this match what your CA admin gave you?", false)? {
                 bail!("CA identity was not confirmed; nothing was sent");
@@ -2005,7 +2005,7 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
         // level flow" — probe for the network ourselves (browse →
         // confirm glyph → aggregate, with a manual-address fallback).
         None => match init::discover_network(NodeKind::Client)? {
-            ConfServers::Have(net) => {
+            AdminServers::Have(net) => {
                 let ca = net.info.ca_addr.ok_or_else(|| {
                     anyhow!(
                         "network {:?} reported no CA; cannot request a certificate",
@@ -2014,10 +2014,10 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
                 })?;
                 (ca, net.identity)
             }
-            ConfServers::DontHave => {
-                bail!("no conf server found or selected; pass --server to specify one")
+            AdminServers::DontHave => {
+                bail!("no admin server found or selected; pass --server to specify one")
             }
-            ConfServers::NotProbed => {
+            AdminServers::NotProbed => {
                 bail!("--server is required when stdin is not a TTY")
             }
         },
@@ -2031,7 +2031,7 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
     let password = Zeroizing::new(collect_existing_password(&format!(
         "CA password for admin {admin:?}"
     ))?);
-    let issued = rt.block_on(conf_client::request_cert(
+    let issued = rt.block_on(admin_client::request_cert(
         server,
         NodeKind::Client,
         &name,
@@ -2158,7 +2158,7 @@ fn prompt_policy(
     let may_enroll_servers = match args.may_enroll_servers {
         Some(b) => b,
         None => prompt::confirm(
-            "may this admin enroll new conf servers (more privileged than any \
+            "may this admin enroll new admin servers (more privileged than any \
              SAN glob)?",
             enroll_default,
         )?,
@@ -2479,21 +2479,21 @@ fn maybe_register_in_id_map(
 }
 
 /// `ca approve` — interactive enrollment-queue mode: list the pending
-/// requests on the conf server, review one at a time (matching the
+/// requests on the admin server, review one at a time (matching the
 /// request code the enrollee read out — the fingerprint of the CSR's
 /// public key, computed locally from the CSR, never trusted from the
 /// wire), and approve (choosing the id-map groups) or deny. Works from
-/// anywhere that can reach the conf server — enrollment admins don't
+/// anywhere that can reach the admin server — enrollment admins don't
 /// need shell access to the CA host.
 fn approve(p: ApproveArgs) -> Result<()> {
-    use super::init::{self, ConfServers};
+    use super::init::{self, AdminServers};
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Where's the conf server? `--server`, else this host's own conf
+    // Where's the admin server? `--server`, else this host's own admin
     // server, else discovery (browse → confirm → aggregate).
-    let (server, discovered_identity) = match p.server.or_else(local_conf_server_listen) {
+    let (server, discovered_identity) = match p.server.or_else(local_admin_server_listen) {
         Some(s) => (s, None),
         None => match init::discover_network(NodeKind::Client)? {
-            ConfServers::Have(net) => {
+            AdminServers::Have(net) => {
                 let ca = net.info.ca_addr.ok_or_else(|| {
                     anyhow!(
                         "network {:?} reported no CA; there is no queue to work",
@@ -2502,10 +2502,10 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 })?;
                 (ca, Some(net.identity))
             }
-            ConfServers::DontHave => {
-                bail!("no conf server found or selected; pass --server to specify one")
+            AdminServers::DontHave => {
+                bail!("no admin server found or selected; pass --server to specify one")
             }
-            ConfServers::NotProbed => {
+            AdminServers::NotProbed => {
                 bail!("--server is required when stdin is not a TTY")
             }
         },
@@ -2515,8 +2515,8 @@ fn approve(p: ApproveArgs) -> Result<()> {
         Some(identity) => identity,
         None => {
             let identity = rt
-                .block_on(conf_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting conf server {server}"))?;
+                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
+                .with_context(|| format!("contacting admin server {server}"))?;
             // On the CA host itself (or any box with the CA dir), the
             // local CA cert is the trust anchor — verify automatically
             // rather than asking the admin to confirm their own glyph.
@@ -2549,7 +2549,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
         "CA password for admin {admin:?}"
     ))?);
     loop {
-        let queue = rt.block_on(conf_client::list_queue(
+        let queue = rt.block_on(admin_client::list_queue(
             server,
             &admin,
             password.as_str(),
@@ -2563,7 +2563,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
         // possession of the live key for the same name, so there is no
         // code to match and no groups to choose — approving them all is
         // honest, not careless. The ceremony stays for new identities.
-        let renewals: Vec<&netidx_admin::conf_proto::QueueEntry> =
+        let renewals: Vec<&netidx_admin::admin_proto::QueueEntry> =
             queue.iter().filter(|e| e.verified_renewal).collect();
         if !renewals.is_empty() {
             println!();
@@ -2582,7 +2582,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 true,
             )? {
                 for e in &renewals {
-                    match rt.block_on(conf_client::approve(
+                    match rt.block_on(admin_client::approve(
                         server,
                         &admin,
                         password.as_str(),
@@ -2599,7 +2599,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 continue; // re-list
             }
         }
-        let new_requests: Vec<&netidx_admin::conf_proto::QueueEntry> =
+        let new_requests: Vec<&netidx_admin::admin_proto::QueueEntry> =
             queue.iter().filter(|e| !e.verified_renewal).collect();
         if new_requests.is_empty() {
             println!("(only unapproved renewals remain)");
@@ -2608,10 +2608,10 @@ fn approve(p: ApproveArgs) -> Result<()> {
         println!();
         println!("pending signing requests:");
         for (i, e) in new_requests.iter().enumerate() {
-            let code = conf_client::csr_fingerprint(&e.csr_pem)
+            let code = admin_client::csr_fingerprint(&e.csr_pem)
                 .map(|f| f.short())
                 .unwrap_or_else(|_| "????????".to_string());
-            // A conf-server enrollment is a bigger trust decision than
+            // A admin-server enrollment is a bigger trust decision than
             // a user cert — say so in the list, not just the detail.
             let what = match e.enroll_listen {
                 Some(listen) => format!("CONF-SERVER ENROLLMENT at {listen}"),
@@ -2639,7 +2639,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 continue;
             }
         };
-        let fp = conf_client::csr_fingerprint(&entry.csr_pem)
+        let fp = admin_client::csr_fingerprint(&entry.csr_pem)
             .context("the queued CSR does not parse — deny it")?;
         println!();
         match entry.enroll_listen {
@@ -2647,9 +2647,9 @@ fn approve(p: ApproveArgs) -> Result<()> {
                 println!("  CONF-SERVER ENROLLMENT — approving signs the reserved");
                 println!(
                     "  serving name {:?} and registers the new",
-                    conf_proto::SERVING_SAN
+                    admin_proto::SERVING_SAN
                 );
-                println!("  conf server at {listen} as a peer. It will answer");
+                println!("  admin server at {listen} as a peer. It will answer");
                 println!("  discovery and present the network identity to joiners.");
                 println!("  (requires your policy's may_enroll_servers)");
             }
@@ -2677,7 +2677,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                     None,
                     "request code mismatch",
                 )?;
-                rt.block_on(conf_client::deny(
+                rt.block_on(admin_client::deny(
                     server,
                     &admin,
                     password.as_str(),
@@ -2699,7 +2699,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
             "approve" => {
                 // The admin knows who they're enrolling — the groups
                 // are chosen here, bounded by this admin's policy. A
-                // conf server isn't a user: enrollments never register
+                // admin server isn't a user: enrollments never register
                 // in the id-map, so there is nothing to ask.
                 let groups = if entry.enroll_listen.is_some() {
                     vec![]
@@ -2709,7 +2709,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                         init::default_id_map_groups(entry.kind),
                     )?
                 };
-                let warnings = rt.block_on(conf_client::approve(
+                let warnings = rt.block_on(admin_client::approve(
                     server,
                     &admin,
                     password.as_str(),
@@ -2731,7 +2731,7 @@ fn approve(p: ApproveArgs) -> Result<()> {
                     "denial reason (shown to the requester)",
                     None,
                 )?;
-                rt.block_on(conf_client::deny(
+                rt.block_on(admin_client::deny(
                     server,
                     &admin,
                     password.as_str(),
@@ -2746,11 +2746,11 @@ fn approve(p: ApproveArgs) -> Result<()> {
     }
 }
 
-/// This host's conf-server address from its own `conf-server.json`,
+/// This host's admin-server address from its own `admin-server.json`,
 /// loopback-adjusted when it binds all interfaces.
-pub(super) fn local_conf_server_listen() -> Option<SocketAddr> {
-    let path = paths::discover_conf_server_config().ok()?;
-    let cfg = netidx_admin::conf_server_config::ConfServerConfig::load(&path).ok()?;
+pub(super) fn local_admin_server_listen() -> Option<SocketAddr> {
+    let path = paths::discover_admin_server_config().ok()?;
+    let cfg = netidx_admin::admin_server_config::AdminServerConfig::load(&path).ok()?;
     let mut addr = cfg.listen;
     if addr.ip().is_unspecified() {
         addr.set_ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
@@ -2890,12 +2890,12 @@ fn list() -> Result<()> {
         // The daemon owns the vault now, so the admin roster comes over the
         // local control socket. Without a running daemon we can detect the
         // vault format but not list its admins.
-        let cfg_path = paths::discover_conf_server_config().ok();
+        let cfg_path = paths::discover_admin_server_config().ok();
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
         match &cfg_path {
-            Some(p) if rt.block_on(conf_local::daemon_running(p)) => {
+            Some(p) if rt.block_on(admin_local::daemon_running(p)) => {
                 let admins = rt
-                    .block_on(conf_local::list_admins(p))
+                    .block_on(admin_local::list_admins(p))
                     .map(|a| a.into_iter().map(|i| i.admin).collect::<Vec<_>>())
                     .unwrap_or_default();
                 if admins.is_empty() {
@@ -2905,7 +2905,7 @@ fn list() -> Result<()> {
                 }
             }
             _ => {
-                println!("  key:    keyslot vault (start the conf server to list admins)")
+                println!("  key:    keyslot vault (start the admin server to list admins)")
             }
         }
     } else if dir.join("private.key").is_file() {
@@ -2913,10 +2913,10 @@ fn list() -> Result<()> {
     } else {
         println!("  key:    MISSING — CA cannot sign");
     }
-    // Conf server.
-    let cfg = paths::discover_conf_server_config()
+    // Admin server.
+    let cfg = paths::discover_admin_server_config()
         .ok()
-        .and_then(|p| netidx_admin::conf_server_config::ConfServerConfig::load(&p).ok());
+        .and_then(|p| netidx_admin::admin_server_config::AdminServerConfig::load(&p).ok());
     match cfg {
         Some(c) => println!("  server: configured (listen {})", c.listen),
         None => println!("  server: not configured"),
@@ -2960,11 +2960,11 @@ pub(super) fn default_ca_present() -> bool {
 pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
     if ca_vault::CAVault::exists(dir) {
         // Offline issuance takes the CA flock for the whole unlock — a running
-        // conf server owns the CA, so this fails fast if one is up. The handle
+        // admin server owns the CA, so this fails fast if one is up. The handle
         // drops at the `return` below, releasing the flock before the issue /
         // sign paths re-open their own CaDir for serial allocation.
         let cadir = netidx_admin::ca_store::CaDir::open(dir)
-            .context("opening the CA to sign offline (a running conf server owns it — stop it first)")?;
+            .context("opening the CA to sign offline (a running admin server owns it — stop it first)")?;
         // Daily on-box use unlocks with the box's own autorenew credential —
         // read + unsealed from its keytab, no human secret typed. Fall back
         // to the recovery password only when the keytab is absent or doesn't
@@ -2972,7 +2972,7 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
         // or a dead TPM).
         let from_keytab =
             autorenew_keytab_path().ok().filter(|k| k.exists()).and_then(|keytab| {
-                match netidx_admin::conf_server::read_autorenew_password(&keytab) {
+                match netidx_admin::admin_server::read_autorenew_password(&keytab) {
                     Ok(pw) => match cadir.vault.read().unlock(&pw) {
                         Ok(u) => Some(u),
                         Err(e) => {
@@ -3042,20 +3042,20 @@ pub(super) fn open_default_ca() -> Result<Ca> {
     open_ca(&paths::user_ca_dir()?)
 }
 
-/// Refuse to mint the conf server's reserved serving name from the
+/// Refuse to mint the admin server's reserved serving name from the
 /// local CLI, mirroring the network sign path's refusal. The reserved
-/// name is the linchpin of the trust model; only the conf-server setup
+/// name is the linchpin of the trust model; only the admin-server setup
 /// flow (which signs it directly) and the policy-gated network Enroll
 /// may issue it.
 fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
     for s in san {
         if let SanEntry::Dns(d) = s
-            && d.eq_ignore_ascii_case(conf_proto::SERVING_SAN)
+            && d.eq_ignore_ascii_case(admin_proto::SERVING_SAN)
         {
             bail!(
-                "{:?} is reserved for the conf server's serving certificate and \
+                "{:?} is reserved for the admin server's serving certificate and \
                  can't be issued here",
-                conf_proto::SERVING_SAN
+                admin_proto::SERVING_SAN
             );
         }
     }
@@ -3125,7 +3125,7 @@ fn issue_and_record(
     // against a live daemon would mint the serial the daemon allocates
     // next, producing a duplicate X.509 serial.
     let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
-        .context("cannot issue offline: a running conf server owns this CA")?;
+        .context("cannot issue offline: a running admin server owns this CA")?;
     let serial = cadir.store.lock().next_serial()?;
     params.serial = serial;
     let name =
@@ -3168,7 +3168,7 @@ pub(super) fn sign_and_record(
     // See `issue_and_record`: hold the daemon's exclusive flock so offline
     // signing can't race the daemon's serial counter.
     let cadir = netidx_admin::ca_store::CaDir::open(&ca_dir)
-        .context("cannot sign offline: a running conf server owns this CA")?;
+        .context("cannot sign offline: a running admin server owns this CA")?;
     let serial = cadir.store.lock().next_serial()?;
     let cert = ca.sign_request(csr_pem, san, validity, serial)?;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
@@ -3253,7 +3253,7 @@ mod tests {
 
     #[test]
     fn reserved_serving_san_is_refused() {
-        let reserved = conf_proto::SERVING_SAN;
+        let reserved = admin_proto::SERVING_SAN;
         assert!(ensure_san_not_reserved(&[SanEntry::Dns(reserved.to_string())]).is_err());
         // DNS is case-insensitive — an upper/mixed-case variant is the
         // same reserved name and must also be refused.
@@ -3590,7 +3590,7 @@ mod tests {
         assert!(msg.contains("not a TTY"), "should report non-TTY context: {msg}");
     }
 
-    /// An offline CA (no conf server) is minted with exactly one signing
+    /// An offline CA (no admin server) is minted with exactly one signing
     /// slot — `recovery`, holding a generated password never typed — and no
     /// role admins (a role admin needs a daemon to authenticate to). The
     /// whole path runs with no prompts and no TTY. `--insecure-no-tpm`

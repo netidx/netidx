@@ -5,7 +5,7 @@
 //! operator invoked.
 //!
 //! Sentinel env var: `NETIDX_ELEVATED=1` is set in the sudo child
-//! so the post-install prompt path (in `conf install`) can skip
+//! so the post-install prompt path (in `admin install`) can skip
 //! prompts the elevated process would otherwise re-ask.
 
 use anyhow::{Context, Result};
@@ -198,7 +198,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     }
 }
 
-/// Entry-point used by the post-install hook in `conf install`. The
+/// Entry-point used by the post-install hook in `admin install`. The
 /// templated install flow doesn't expose every service flag — it
 /// just calls in with a scope and lets us pick the rest of the
 /// defaults (service name = "netidx", binary = current_exe,
@@ -350,7 +350,7 @@ fn escalate_for_install(a: &InstallArgs, binary: &std::path::Path) -> Result<()>
     let mut cmd = Command::new(elevator());
     cmd.arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf")
+        .arg("admin")
         .arg("component")
         .arg("service")
         .arg("install")
@@ -383,7 +383,7 @@ fn escalate_for_uninstall(a: &CommonArgs) -> Result<()> {
     let status = Command::new(elevator())
         .arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf")
+        .arg("admin")
         .arg("component")
         .arg("service")
         .arg("uninstall")

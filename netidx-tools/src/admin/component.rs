@@ -1,6 +1,6 @@
 //! `netidx admin component …` — the low-level, single-component commands:
 //! show/edit one config file, manage activation units, run the
-//! conf-server daemon, or drive this host's TLS identity.
+//! admin-server daemon, or drive this host's TLS identity.
 //!
 //! The role templates (`workstation` / `resolver` / `publisher`) and
 //! `ca` wire these pieces together; reach for `component` when you want
@@ -39,7 +39,7 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: activation::Cmd,
     },
-    /// run the conf server (network discovery + setup daemon)
+    /// run the admin server (network discovery + setup daemon)
     #[cfg(unix)]
     Server {
         #[command(subcommand)]

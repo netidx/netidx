@@ -4,7 +4,7 @@
 //! OS-specific pieces — the local control transport, child process
 //! stop/spawn, privilege handling, orphan reaping, and the signal
 //! sources that drive shutdown/reload — live here, one impl per
-//! platform. This mirrors `netidx::os` and `netidx-conf`'s
+//! platform. This mirrors `netidx::os` and `netidx-admin`'s
 //! `service::platform`: a single shared body plus a thin per-OS module.
 
 #[cfg(unix)]

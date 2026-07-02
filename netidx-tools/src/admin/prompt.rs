@@ -40,7 +40,7 @@ use std::{
 /// regardless of how the suite was launched; the interactive branches
 /// are smoke-tested against the built binary.
 ///
-/// `pub(super)` so the other `conf` submodules share this single
+/// `pub(super)` so the other `admin` submodules share this single
 /// definition rather than re-checking `is_terminal()` themselves.
 #[cfg(not(test))]
 pub(super) fn stdin_is_tty() -> bool {
@@ -158,7 +158,7 @@ where
 /// hostname and defaulting an omitted port). Re-prompts on parse error
 /// (a typo is recoverable on a TTY); a non-TTY caller, or EOF at the
 /// prompt, bails. The error is shown with its full context chain.
-// Only the unix-only conf commands (delegation / perms admin) call this
+// Only the unix-only admin commands (delegation / perms admin) call this
 // today; keep it available cross-platform but don't warn on Windows.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn required_with<T>(

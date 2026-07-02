@@ -15,8 +15,8 @@
 
 use crate::{
     client::ClientConfig,
-    conf_client::NetworkInfo,
-    conf_proto::{InfoAuth, NetworkMap, ResolverAddr},
+    admin_client::NetworkInfo,
+    admin_proto::{InfoAuth, NetworkMap, ResolverAddr},
     resolver::ResolverConfig,
 };
 use anyhow::{Context, Result};
@@ -119,7 +119,7 @@ impl EditPlan {
     }
 }
 
-/// Map a network-reported data-plane auth (from a conf server's
+/// Map a network-reported data-plane auth (from a admin server's
 /// `GetInfo`) to a resolver-referral auth.
 fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     match a {
@@ -391,7 +391,7 @@ pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf_proto::{ClusterFacts, ResolverAddr, Role, ServerEntry};
+    use crate::admin_proto::{ClusterFacts, ResolverAddr, Role, ServerEntry};
     use std::net::SocketAddr;
 
     fn addr(s: &str) -> SocketAddr {

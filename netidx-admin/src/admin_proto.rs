@@ -1,11 +1,11 @@
-//! Wire protocol for the conf server: small request/response messages
+//! Wire protocol for the admin server: small request/response messages
 //! exchanged over a TLS stream, length-prefixed JSON.
 //!
 //! This is a control path — a handful of round trips per node setup —
 //! not a data path, so JSON framing (4-byte big-endian length + body)
 //! is plenty and keeps the protocol dependency-light and
 //! human-debuggable. The types are cross-platform: a Windows node
-//! speaks this to a unix conf server.
+//! speaks this to a unix admin server.
 //!
 //! A connection is: TLS accept, [`ClientHello`] / [`ServerHello`]
 //! exchange, then exactly **one** [`Request`] and its response. One
@@ -20,17 +20,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const PROTOCOL_VERSION: u32 = 3;
 
-/// Conventional conf-server port (resolver is 4564).
+/// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
 
-/// Reserved DNS SAN of every conf server's TLS *serving* certificate.
+/// Reserved DNS SAN of every admin server's TLS *serving* certificate.
 /// Clients require the presented serving cert to carry exactly this
 /// name and to be signed by the fingerprint-confirmed CA — that's what
-/// distinguishes a conf-server daemon from any other node the same CA
+/// distinguishes a admin-server daemon from any other node the same CA
 /// has issued a cert to. Issuance policy must never grant this name to
 /// a normal join; it is only issued locally on the CA host or via the
 /// policy-gated [`Request::Enroll`].
-pub const SERVING_SAN: &str = "netidx-conf-server";
+pub const SERVING_SAN: &str = "netidx-admin-server";
 
 /// Bodies larger than this are refused before allocation — CSRs and
 /// certs are a few KB; this is a generous backstop against a hostile or
@@ -45,11 +45,11 @@ pub enum NodeKind {
     Publisher,
     Client,
     Workstation,
-    /// A peer conf server (server-to-server pushes).
-    ConfServer,
+    /// A peer admin server (server-to-server pushes).
+    AdminServer,
 }
 
-/// A role this conf server's host performs. Claimed inside the
+/// A role this admin server's host performs. Claimed inside the
 /// TLS-protected [`ServerHello`], so it's trustworthy once the chain is
 /// pinned to the confirmed CA — unlike the mDNS beacon, which carries
 /// the same list purely as a display hint.
@@ -110,8 +110,8 @@ pub enum Request {
     /// admin's password rides in the request, so an admin must be
     /// present at the enrolling node. Answered with [`SignResponse`].
     Sign(SignRequest),
-    /// Conf-server enrollment: issue the reserved [`SERVING_SAN`]
-    /// serving cert to a new conf server. Requires an admin whose
+    /// Admin-server enrollment: issue the reserved [`SERVING_SAN`]
+    /// serving cert to a new admin server. Requires an admin whose
     /// policy grants `may_enroll_servers`. Answered with
     /// [`SignResponse`].
     Enroll(EnrollRequest),
@@ -173,23 +173,23 @@ pub enum Request {
     /// cluster-wide delegation propagation. Peer-cert-gated like
     /// [`Request::AddIdentity`]. Answered with [`ApplyReferralEditResponse`].
     ApplyReferralEdit(ApplyReferralEditRequest),
-    /// Server→CA push: register/update this conf server's facts (address,
+    /// Server→CA push: register/update this admin server's facts (address,
     /// roles, resolver-cluster facts) in the CA's authoritative network
     /// map. Peer-cert-gated like [`Request::AddIdentity`]. Answered with
     /// [`RegisterResponse`].
     Register(RegisterRequest),
-    /// Server→CA push: drop this conf server from the CA's map (on
+    /// Server→CA push: drop this admin server from the CA's map (on
     /// uninstall). Peer-cert-gated. Answered with [`RegisterResponse`].
     Deregister(DeregisterRequest),
     /// Cheap probe: return the served map's current version so a caching
-    /// conf server can skip a full pull when unchanged. Answered with
+    /// admin server can skip a full pull when unchanged. Answered with
     /// [`GetMapVersionResponse`].
     GetMapVersion,
-    /// Fetch the full network map — the CA's authoritative copy, or a conf
-    /// server's cache. One round trip to any conf server is the whole
+    /// Fetch the full network map — the CA's authoritative copy, or a admin
+    /// server's cache. One round trip to any admin server is the whole
     /// network. Answered with [`GetMapResponse`].
     GetMap,
-    /// Admin-authenticated: drop a (dead) conf server from the CA's map,
+    /// Admin-authenticated: drop a (dead) admin server from the CA's map,
     /// cascading to its resolver servers — for a machine that never ran
     /// `uninstall`. Answered with [`RemoveServerResponse`].
     RemoveServer(RemoveServerRequest),
@@ -201,7 +201,7 @@ pub enum Request {
     /// Admin-authenticated, sent to the **CA**: replace a target cluster's
     /// permissions file, validated and propagated cluster-wide. The CA
     /// authorizes the admin and pushes [`Request::ApplyPermsEdit`] to the
-    /// target cluster's conf servers. Answered with [`EditPermsResponse`].
+    /// target cluster's admin servers. Answered with [`EditPermsResponse`].
     EditPerms(EditPermsRequest),
     /// Server-to-server: apply a permissions edit to this host's local
     /// resolver perms — the receive side of cluster-wide perms propagation.
@@ -229,7 +229,7 @@ pub enum Request {
     /// [`AdminListResponse`].
     ListAdmins(ListAdminsRequest),
     /// Admin-authenticated, sent to the **CA**: restart / start / stop /
-    /// status the activation units on the conf servers of the cluster serving
+    /// status the activation units on the admin servers of the cluster serving
     /// `target_path`. Gated on the caller's `service_control_scopes` covering
     /// the path (or a signing slot). The CA fans out
     /// [`Request::ApplyServiceControl`] to the targeted members. Answered with
@@ -242,7 +242,7 @@ pub enum Request {
     ApplyServiceControl(ApplyServiceControlRequest),
     /// Mint a fresh recovery (off-box break-glass) password. Carries no
     /// credentials: it is **local-control-socket only** — the daemon refuses
-    /// it over the network conf plane, because anyone who can reach the local
+    /// it over the network admin plane, because anyone who can reach the local
     /// socket already has on-box authority. The daemon rewraps the master key
     /// under a new recovery slot using its own in-process autorenew
     /// credential. Answered with [`RotateRecoveryResponse`] (the new
@@ -329,7 +329,7 @@ pub struct SignRequest {
     pub id_map_groups: Vec<String>,
 }
 
-/// Conf-server enrollment ([`Request::Enroll`]): the CSR is signed with
+/// Admin-server enrollment ([`Request::Enroll`]): the CSR is signed with
 /// the reserved [`SERVING_SAN`] regardless of what it claims. There is
 /// no `requested_name` — the whole point is that the name is fixed and
 /// privileged.
@@ -338,7 +338,7 @@ pub struct EnrollRequest {
     pub admin: String,
     pub password: Secret,
     pub csr_pem: String,
-    /// Where the new conf server will listen. The CA appends it to its
+    /// Where the new admin server will listen. The CA appends it to its
     /// own peer list (admin-authorized, so trusted), which makes the CA
     /// host the well-known starting point for peer walks.
     pub listen: SocketAddr,
@@ -401,9 +401,9 @@ pub struct EnqueueRequest {
     pub requested_name: String,
     #[serde(with = "humantime_serde")]
     pub requested_validity: Duration,
-    /// `Some` ⇒ this queues a **conf-server enrollment**: the cert is
+    /// `Some` ⇒ this queues a **admin-server enrollment**: the cert is
     /// the reserved [`SERVING_SAN`] (whatever `requested_name` says)
-    /// and the value is where the new conf server will listen — the CA
+    /// and the value is where the new admin server will listen — the CA
     /// records it as a peer at approval. Approval requires an admin
     /// whose policy grants `may_enroll_servers`; the request code
     /// ceremony is the same as any queued request.
@@ -471,7 +471,7 @@ pub struct QueueEntry {
     /// `autorenew` approves).
     #[serde(default)]
     pub verified_renewal: bool,
-    /// `Some` ⇒ a conf-server enrollment (see
+    /// `Some` ⇒ a admin-server enrollment (see
     /// [`EnqueueRequest::enroll_listen`]): approval signs the reserved
     /// [`SERVING_SAN`] and requires `may_enroll_servers`; id-map groups
     /// don't apply.
@@ -642,7 +642,7 @@ pub enum ApplyReferralEditResponse {
 }
 
 /// How clients authenticate to a resolver — the data-plane auth, as
-/// opposed to the conf plane, which is always TLS rooted at the CA.
+/// opposed to the admin plane, which is always TLS rooted at the CA.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InfoAuth {
     Anonymous,
@@ -657,9 +657,9 @@ pub struct ResolverAddr {
     pub auth: InfoAuth,
 }
 
-/// This host's local facts plus the conf servers it knows of. The
+/// This host's local facts plus the admin servers it knows of. The
 /// client aggregates across servers (mDNS-discovered ∪ peer-walk) to
-/// build the network-wide picture; one reachable conf server is enough
+/// build the network-wide picture; one reachable admin server is enough
 /// to walk the rest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetInfoResponse {
@@ -669,7 +669,7 @@ pub struct GetInfoResponse {
     pub ca_addr: Option<SocketAddr>,
     /// This host's resolver, if it runs one.
     pub resolver: Option<ResolverAddr>,
-    /// Other conf servers this one knows of.
+    /// Other admin servers this one knows of.
     pub peers: Vec<SocketAddr>,
 }
 
@@ -682,7 +682,7 @@ pub struct ClusterEdge {
     pub addrs: Vec<ResolverAddr>,
 }
 
-/// A resolver cluster's facts, self-reported by one of its conf servers:
+/// A resolver cluster's facts, self-reported by one of its admin servers:
 /// its advertisable members, where it attaches in the namespace, and its
 /// hierarchy edges. This is the single-owner fact the CA folds into the
 /// map — each cluster owns its own.
@@ -699,10 +699,10 @@ pub struct ClusterFacts {
     pub children: Vec<ClusterEdge>,
 }
 
-/// One conf server in the trust domain, as recorded in the CA's map.
+/// One admin server in the trust domain, as recorded in the CA's map.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
-    /// The conf server's listen address.
+    /// The admin server's listen address.
     pub addr: SocketAddr,
     /// What this host does (see [`Role`]).
     pub roles: Vec<Role>,
@@ -711,10 +711,10 @@ pub struct ServerEntry {
 }
 
 /// The CA-authoritative, versioned picture of the whole trust domain. The
-/// CA builds it from conf-server [`Request::Register`] pushes — never by
+/// CA builds it from admin-server [`Request::Register`] pushes — never by
 /// walking — bumps `version` on every change, persists it, and serves it.
-/// Every conf server caches a copy (version-checked) and serves it to
-/// clients, so one round trip to any conf server is the whole network.
+/// Every admin server caches a copy (version-checked) and serves it to
+/// clients, so one round trip to any admin server is the whole network.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
@@ -722,20 +722,20 @@ pub struct NetworkMap {
     pub version: u64,
     /// Where the CA lives (the Sign/Enroll destination).
     pub ca_addr: Option<SocketAddr>,
-    /// Every conf server in the trust domain.
+    /// Every admin server in the trust domain.
     pub servers: Vec<ServerEntry>,
 }
 
-/// Server→CA: register/update this conf server's facts in the map.
+/// Server→CA: register/update this admin server's facts in the map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
-    /// This conf server's own listen address.
+    /// This admin server's own listen address.
     pub addr: SocketAddr,
     pub roles: Vec<Role>,
     pub cluster: Option<ClusterFacts>,
 }
 
-/// Server→CA: drop this conf server from the map (on uninstall).
+/// Server→CA: drop this admin server from the map (on uninstall).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeregisterRequest {
     pub addr: SocketAddr,
@@ -759,14 +759,14 @@ pub enum GetMapResponse {
     Err { reason: String },
 }
 
-/// Admin-authenticated: drop a (dead) conf server from the CA's map,
+/// Admin-authenticated: drop a (dead) admin server from the CA's map,
 /// cascading to its resolver servers. For the machine that never ran
 /// `uninstall`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveServerRequest {
     pub admin: String,
     pub password: Secret,
-    /// The listen address of the conf server to remove.
+    /// The listen address of the admin server to remove.
     pub addr: SocketAddr,
 }
 
@@ -812,7 +812,7 @@ pub enum ApplyPermsEditResponse {
     Err { reason: String },
 }
 
-// -- remote admin management (over the conf plane) ----------------------------
+// -- remote admin management (over the admin plane) ----------------------------
 
 /// Admin → CA: mint a new role admin `name` with `policy`. The server gates
 /// on the caller's `may_manage_admins` (or a signing slot) and enforces that
@@ -871,7 +871,7 @@ pub enum AdminListResponse {
     Err { reason: String },
 }
 
-// -- remote service control (over the conf plane) -----------------------------
+// -- remote service control (over the admin plane) -----------------------------
 
 /// One unit to act on, optionally pinned to a single cluster member by index
 /// (`resolver:0`). `member: None` ⇒ every member of the cluster — `member:

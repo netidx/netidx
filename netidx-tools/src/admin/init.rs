@@ -4,15 +4,15 @@
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::config::DefaultAuthMech;
-// Qualified `conf_proto::` uses are all in the unix-only conf-server
+// Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
 #[cfg(unix)]
-use netidx_admin::conf_proto;
+use netidx_admin::admin_proto;
 use netidx_admin::tls;
 use netidx_admin::{
-    conf_client,
-    conf_proto::{InfoAuth, NodeKind, Role},
+    admin_client,
+    admin_proto::{InfoAuth, NodeKind, Role},
     discovery,
     fingerprint::ColorMode,
     netshape::NetShape,
@@ -38,7 +38,7 @@ use super::ca;
 use super::{prompt, service};
 
 // The three install entry points are exposed to the per-role command
-// modules (`conf::roles::*`), which own the `<role> install` surface.
+// modules (`admin::roles::*`), which own the `<role> install` surface.
 // `init` stays the shared install engine + helpers.
 
 // -- Common -------------------------------------------------------------------
@@ -465,7 +465,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     // Parent: CLI flags fully populate it when `--parent-addr` is
     // given; otherwise walk the operator through the cascade ("is
     // there a network-wide resolver? if so, what auth? if TLS, enroll
-    // the identity over the conf plane"). The CLI-flag
+    // the identity over the admin plane"). The CLI-flag
     // path stays headless-friendly for scripting; the prompt path is
     // the discoverable default.
     //
@@ -487,7 +487,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
         f.parent.to_parent_ref(parent_default_path)?
     } else {
         // Ask the network before asking the human: a discovered (and
-        // glyph-confirmed) conf server answers everything the prompt
+        // glyph-confirmed) admin server answers everything the prompt
         // cascade would have asked — every resolver address with its
         // auth, and (TLS networks) where to get our client cert. The
         // probe outcome rides into the manual cascade so a declined
@@ -553,7 +553,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
         with_container: !f.no_container,
     };
     let rt = template::workstation(&params)?;
-    let (network, conf_server) = net_prov;
+    let (network, admin_server) = net_prov;
     // The workstation's own resolver is local-auth; the network it refers
     // up to (if any) carries its auth inside the parent referral.
     let record = InstallRecord::new(
@@ -561,7 +561,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
         f.base.clone(),
         "local",
         network,
-        conf_server,
+        admin_server,
     );
     // A workstation runs in the operator's session; a user-scope
     // systemd / launchd service is the right level — no sudo needed.
@@ -643,7 +643,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     // Capture the confirmed identity for the marker before applying.
     let network =
         NetworkIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
-    let conf_server = net.info.reached.first().copied();
+    let admin_server = net.info.reached.first().copied();
     let rt =
         netidx_admin::template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
     println!("{}", rt.describe());
@@ -653,7 +653,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     rt.apply().context("applying the join")?;
     println!("ok");
     rec.network = Some(network);
-    rec.conf_server = conf_server;
+    rec.admin_server = admin_server;
     rec.save_default().context("updating the install record")?;
     println!(
         "joined network {:?} — restart the local resolver to use it",
@@ -667,7 +667,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// the address prompt (the level-1 default "none"). Returns
 /// `Ok(Some((ref, identity)))` otherwise; the optional identity is
 /// the TLS identity to add to `tls_identities` when parent auth is
-/// TLS (enrolled over the conf plane).
+/// TLS (enrolled over the admin plane).
 ///
 /// `default_path` is the netidx path at which the current resolver
 /// attaches in the parent's namespace — typically the resolver's
@@ -676,14 +676,14 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 /// `--parent-path` flag remains the override.
 ///
 /// For TLS the identity is obtained via `prompt_tls_client_identity`,
-/// which enrolls over the conf plane; with no reachable conf server it
+/// which enrolls over the admin plane; with no reachable admin server it
 /// **bails** telling the operator to configure the TLS identity by hand
 /// (there is no in-wizard bring-your-own-cert path).
 #[cfg(any(unix, windows))]
 fn prompt_parent_referral(
     default_path: &str,
     kp: Option<KeyProtArg>,
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
     // The upstream resolver IP is the one thing the operator has to
     // know (blank ⇒ no parent); the port is prompted separately with
@@ -717,8 +717,8 @@ fn prompt_parent_referral(
         AuthKind::Tls => {
             let server_name =
                 prompt_resolver_tls_name(Some(addr), "parent TLS server name", None)?;
-            // identity is required for TLS — enrolled over the conf plane
-            // (or a hard bail if no conf server is reachable). Suggest our own
+            // identity is required for TLS — enrolled over the admin plane
+            // (or a hard bail if no admin server is reachable). Suggest our own
             // SAN as `<user>.<domain>`, the domain taken from the
             // resolver's SAN we just resolved.
             let suggested = suggest_client_san(&server_name);
@@ -760,32 +760,32 @@ struct StagedIdentity {
     staging: Option<tempfile::TempDir>,
 }
 
-/// Obtain a TLS identity from the network's conf server when one is
+/// Obtain a TLS identity from the network's admin server when one is
 /// known (or discoverable), instead of the local-CA / CSR flow.
 ///
-/// Keyed on what the calling flow already knows ([`ConfServers`]):
+/// Keyed on what the calling flow already knows ([`AdminServers`]):
 /// `Have` joins with no further questions (the identity was already
 /// glyph-confirmed); `DontHave` returns `None` silently — the operator
-/// already said there is no conf server, asking again would be
+/// already said there is no admin server, asking again would be
 /// nagging; `NotProbed` runs discovery right here (browse → confirm →
 /// aggregate, with its manual-address fallback). Cross-platform: this
 /// is also how a node with no openssl (Windows) gets a TLS cert.
 fn maybe_join_ca_server(
-    probe: &ConfServers,
+    probe: &AdminServers,
     kind: NodeKind,
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
 ) -> Result<Option<(JoinedIdentity, tempfile::TempDir)>> {
     let probed_here;
     let net = match probe {
-        ConfServers::DontHave => return Ok(None),
-        ConfServers::Have(net) => net,
-        ConfServers::NotProbed => match discover_network(kind)? {
-            ConfServers::Have(net) => {
+        AdminServers::DontHave => return Ok(None),
+        AdminServers::Have(net) => net,
+        AdminServers::NotProbed => match discover_network(kind)? {
+            AdminServers::Have(net) => {
                 probed_here = net;
                 &probed_here
             }
-            ConfServers::DontHave | ConfServers::NotProbed => return Ok(None),
+            AdminServers::DontHave | AdminServers::NotProbed => return Ok(None),
         },
     };
     let Some(ca_addr) = net.info.ca_addr else {
@@ -806,10 +806,10 @@ fn maybe_join_ca_server(
 /// fingerprint text + identicon.
 pub(super) fn show_network_identity(
     addr: SocketAddr,
-    identity: &conf_client::CaIdentity,
+    identity: &admin_client::CaIdentity,
 ) {
     println!(
-        "The conf server at {addr} serves network {:?} (roles: {}) and presented \
+        "The admin server at {addr} serves network {:?} (roles: {}) and presented \
          this identity:",
         identity.domain,
         describe_roles(&identity.roles),
@@ -856,7 +856,7 @@ fn join_network(
     kind: NodeKind,
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
-    identity: &conf_client::CaIdentity,
+    identity: &admin_client::CaIdentity,
 ) -> Result<(JoinedIdentity, tempfile::TempDir)> {
     let name_label = "TLS identity name to request (the cert's DNS SAN)";
     let name = match suggested_name {
@@ -877,7 +877,7 @@ fn join_network(
         // The admin chooses the new identity's id-map groups here, at
         // enrollment — the per-admin policy is the *allowed set* the
         // server validates this choice against. Infrastructure
-        // identities (resolvers, conf servers) don't act as users, so
+        // identities (resolvers, admin servers) don't act as users, so
         // they default to no registration; everything else defaults to
         // `users`.
         let groups = prompt_id_map_groups(&[], default_id_map_groups(kind))?;
@@ -885,7 +885,7 @@ fn join_network(
         let password = Zeroizing::new(rpassword::prompt_password(format!(
             "CA password for admin {admin}: "
         ))?);
-        rt.block_on(conf_client::request_cert(
+        rt.block_on(admin_client::request_cert(
             addr,
             kind,
             &name,
@@ -896,7 +896,7 @@ fn join_network(
             identity,
         ))?
     } else {
-        let pending = rt.block_on(conf_client::enqueue(
+        let pending = rt.block_on(admin_client::enqueue(
             addr,
             kind,
             &name,
@@ -914,13 +914,13 @@ fn join_network(
         );
         loop {
             std::thread::sleep(POLL_INTERVAL);
-            match rt.block_on(conf_client::poll(addr, kind, &pending, identity))? {
-                conf_client::PollOutcome::Pending => continue,
-                conf_client::PollOutcome::Issued(issued) => break issued,
-                conf_client::PollOutcome::Denied(reason) => {
+            match rt.block_on(admin_client::poll(addr, kind, &pending, identity))? {
+                admin_client::PollOutcome::Pending => continue,
+                admin_client::PollOutcome::Issued(issued) => break issued,
+                admin_client::PollOutcome::Denied(reason) => {
                     bail!("the CA admin denied this request: {reason}")
                 }
-                conf_client::PollOutcome::Expired => bail!(
+                admin_client::PollOutcome::Expired => bail!(
                     "the request expired before an admin approved it; re-run \
                      to queue a new one"
                 ),
@@ -954,7 +954,7 @@ fn join_network(
     netidx_admin::atomic::write_atomic(&private_key, key_payload.as_bytes(), 0o600)?;
     protection.write_sidecar(&private_key)?;
     netidx_admin::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
-    println!("got TLS identity {name:?} from conf server {addr}");
+    println!("got TLS identity {name:?} from admin server {addr}");
     for w in &issued.warnings {
         println!("  warning: {w}");
     }
@@ -991,11 +991,11 @@ fn install_renew_unit(units_dir: &Path) -> Result<()> {
 }
 
 /// The id-map group default suggested at enrollment, by node kind:
-/// infrastructure identities (resolvers, conf servers) don't act as
+/// infrastructure identities (resolvers, admin servers) don't act as
 /// users, so they default to no registration.
 pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
     match kind {
-        NodeKind::Resolver | NodeKind::ConfServer => "",
+        NodeKind::Resolver | NodeKind::AdminServer => "",
         NodeKind::Publisher | NodeKind::Client | NodeKind::Workstation => "users",
     }
 }
@@ -1042,25 +1042,25 @@ pub(super) fn prompt_id_map_groups(
     Ok(parse_id_map_answer(&answer))
 }
 
-/// How long the install flows browse mDNS for conf servers.
+/// How long the install flows browse mDNS for admin servers.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A discovered-and-confirmed netidx network: the operator-confirmed
-/// conf-plane identity plus the aggregated picture of the network
+/// admin-plane identity plus the aggregated picture of the network
 /// (every connection behind `info` was pinned to that identity).
 pub(super) struct DiscoveredNetwork {
-    pub(super) identity: conf_client::CaIdentity,
-    pub(super) info: conf_client::NetworkInfo,
+    pub(super) identity: admin_client::CaIdentity,
+    pub(super) info: admin_client::NetworkInfo,
 }
 
-/// What the calling flow knows about conf servers on this network.
+/// What the calling flow knows about admin servers on this network.
 /// Threaded into every sub-flow that could otherwise offer a network
 /// join, so the operator is asked at most once.
 // `Have` is ~200 bytes vs the dataless variants; this is a one-shot
 // value on an interactive CLI's stack — boxing it would trade nothing
 // for an allocation.
 #[allow(clippy::large_enum_variant)]
-pub(super) enum ConfServers {
+pub(super) enum AdminServers {
     /// A network was discovered and its identity glyph-confirmed: use
     /// it, ask nothing further.
     Have(DiscoveredNetwork),
@@ -1068,52 +1068,52 @@ pub(super) enum ConfServers {
     /// offer a network join again in this run.
     DontHave,
     /// Nobody has checked (CLI-flag path, dry-run, non-TTY). A
-    /// sub-flow that wants a conf server may probe itself.
+    /// sub-flow that wants a admin server may probe itself.
     NotProbed,
 }
 
-impl ConfServers {
+impl AdminServers {
     pub(super) fn have(&self) -> Option<&DiscoveredNetwork> {
         match self {
-            ConfServers::Have(net) => Some(net),
-            ConfServers::DontHave | ConfServers::NotProbed => None,
+            AdminServers::Have(net) => Some(net),
+            AdminServers::DontHave | AdminServers::NotProbed => None,
         }
     }
 }
 
 /// Find the network this node should join: browse mDNS, group what's
 /// found by domain, let the operator pick (falling back to a manual
-/// conf-server address when discovery finds nothing), then fetch and
+/// admin-server address when discovery finds nothing), then fetch and
 /// glyph-confirm the network's identity and aggregate `GetInfo` across
-/// its conf servers (peer walk — one reachable server is enough).
+/// its admin servers (peer walk — one reachable server is enough).
 ///
-/// [`ConfServers::DontHave`] ⇒ the operator concluded there is no conf
+/// [`AdminServers::DontHave`] ⇒ the operator concluded there is no admin
 /// server (nothing found / declined); callers continue with the manual
 /// prompt cascade and never re-offer a network join.
-/// [`ConfServers::NotProbed`] is returned only on a non-TTY — scripted
+/// [`AdminServers::NotProbed`] is returned only on a non-TTY — scripted
 /// installs use CLI flags.
-/// Resolve an operator-typed conf-server address to a single socket
-/// address (the first [`resolve_conf_server_seeds`] yields). For the
-/// commands that contact one conf server directly (`add-parent`,
+/// Resolve an operator-typed admin-server address to a single socket
+/// address (the first [`resolve_admin_server_seeds`] yields). For the
+/// commands that contact one admin server directly (`add-parent`,
 /// `review-delegation`, remote `perms`) rather than peer-walking a set of
 /// discovery seeds.
 // Those callers are all unix-only (they need the openssl-backed CA admin
 // path), so on Windows this has no non-test caller — keep it compiled
 // (the test below uses it on every platform) but don't warn there.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(super) fn resolve_conf_server_addr(input: &str) -> Result<SocketAddr> {
-    Ok(resolve_conf_server_seeds(input)?
+pub(super) fn resolve_admin_server_addr(input: &str) -> Result<SocketAddr> {
+    Ok(resolve_admin_server_seeds(input)?
         .into_iter()
         .next()
-        .expect("resolve_conf_server_seeds never returns an empty vec"))
+        .expect("resolve_admin_server_seeds never returns an empty vec"))
 }
 
-/// Resolve an operator-typed conf-server address into seed socket
+/// Resolve an operator-typed admin-server address into seed socket
 /// addresses. Accepts a hostname or an IP, with or without a `:port`;
-/// when the port is omitted it defaults to the conventional conf-server
+/// when the port is omitted it defaults to the conventional admin-server
 /// port. A hostname may resolve to several addresses — all are returned,
 /// which the peer walk in [`confirm_seeds`] tries in turn.
-fn resolve_conf_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
+fn resolve_admin_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
     use std::net::ToSocketAddrs;
     let s = input.trim();
     if s.is_empty() {
@@ -1121,13 +1121,13 @@ fn resolve_conf_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
     }
     // An explicit port (`ip:port`, `host:port`, `[ipv6]:port`) resolves
     // directly. Without one, std's `&str` resolver errors for lack of a
-    // port; fall back to attaching the default conf-server port to the
+    // port; fall back to attaching the default admin-server port to the
     // bare host / ip.
     let seeds: Vec<SocketAddr> = match s.to_socket_addrs() {
         Ok(addrs) => addrs.collect(),
-        Err(_) => (s, netidx_admin::conf_proto::DEFAULT_PORT)
+        Err(_) => (s, netidx_admin::admin_proto::DEFAULT_PORT)
             .to_socket_addrs()
-            .with_context(|| format!("could not resolve conf server address {s:?}"))?
+            .with_context(|| format!("could not resolve admin server address {s:?}"))?
             .collect(),
     };
     if seeds.is_empty() {
@@ -1136,9 +1136,9 @@ fn resolve_conf_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
     Ok(seeds)
 }
 
-pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
+pub(super) fn discover_network(kind: NodeKind) -> Result<AdminServers> {
     if !prompt::stdin_is_tty() {
-        return Ok(ConfServers::NotProbed);
+        return Ok(AdminServers::NotProbed);
     }
     println!(
         "searching for netidx admin component servers on the local network \
@@ -1153,23 +1153,23 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
     }
     let manual_fallback = || -> Result<Option<Vec<SocketAddr>>> {
         prompt::optional_with(
-            "address of an existing conf server to join (host or ip, optional \
+            "address of an existing admin server to join (host or ip, optional \
              :port), blank if there is none",
-            resolve_conf_server_seeds,
+            resolve_admin_server_seeds,
         )
     };
     let seeds: Vec<SocketAddr> = if domains.is_empty() {
-        println!("no conf servers found.");
+        println!("no admin servers found.");
         match manual_fallback()? {
             Some(s) => s,
-            None => return Ok(ConfServers::DontHave),
+            None => return Ok(AdminServers::DontHave),
         }
     } else {
         let chosen: Option<String> = if domains.len() == 1 {
             let (domain, servers) = domains.iter().next().unwrap();
             let use_it = prompt::confirm(
                 &format!(
-                    "found netidx network {domain:?} ({} conf server(s)) — join it?",
+                    "found netidx network {domain:?} ({} admin server(s)) — join it?",
                     servers.len()
                 ),
                 true,
@@ -1196,7 +1196,7 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
             }
             None => match manual_fallback()? {
                 Some(s) => s,
-                None => return Ok(ConfServers::DontHave),
+                None => return Ok(AdminServers::DontHave),
             },
         }
     };
@@ -1206,39 +1206,39 @@ pub(super) fn discover_network(kind: NodeKind) -> Result<ConfServers> {
 /// Fetch the network identity from the first reachable seed and have the
 /// operator confirm it — the single human trust decision; everything after
 /// is pinned to the confirmed fingerprint. Then map the network. Shared by
-/// mDNS discovery and the explicit `--parent-conf-server` / manual-address
+/// mDNS discovery and the explicit `--parent-admin-server` / manual-address
 /// paths, so "is a CA reachable?" has ONE answer feeding the
 /// create-vs-enroll decision.
-fn confirm_seeds(seeds: &[SocketAddr], kind: NodeKind) -> Result<ConfServers> {
+fn confirm_seeds(seeds: &[SocketAddr], kind: NodeKind) -> Result<AdminServers> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut fetched = None;
     for addr in seeds {
-        match rt.block_on(conf_client::fetch_identity(*addr, kind)) {
+        match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
             Ok(id) => {
                 fetched = Some((*addr, id));
                 break;
             }
-            Err(e) => println!("note: conf server {addr} could not be queried: {e:#}"),
+            Err(e) => println!("note: admin server {addr} could not be queried: {e:#}"),
         }
     }
     let Some((addr, identity)) = fetched else {
-        bail!("no conf server could be reached")
+        bail!("no admin server could be reached")
     };
     show_network_identity(addr, &identity);
     if !prompt::confirm("does this match what your network admin gave you?", false)? {
         bail!("the network identity was not confirmed; nothing was sent");
     }
     let info = rt
-        .block_on(conf_client::aggregate(seeds, kind, &identity))
+        .block_on(admin_client::aggregate(seeds, kind, &identity))
         .context("mapping the network (GetInfo peer walk)")?;
-    Ok(ConfServers::Have(DiscoveredNetwork { identity, info }))
+    Ok(AdminServers::Have(DiscoveredNetwork { identity, info }))
 }
 
 /// Confirm a network reachable at one explicit address — the WAN parent
-/// given via `--parent-conf-server`, where there is no mDNS. Resolving the
+/// given via `--parent-admin-server`, where there is no mDNS. Resolving the
 /// parent into a `Have` BEFORE the create-vs-enroll decision is what makes a
 /// satellite enroll its cert from the existing CA and never mint its own.
-fn confirm_network_at(addr: SocketAddr, kind: NodeKind) -> Result<ConfServers> {
+fn confirm_network_at(addr: SocketAddr, kind: NodeKind) -> Result<AdminServers> {
     confirm_seeds(&[addr], kind)
 }
 
@@ -1258,9 +1258,9 @@ fn network_addrs_and_identity(
 ) -> Result<Vec<(SocketAddr, ReferralAuth)>> {
     if net.info.resolvers.is_empty() {
         bail!(
-            "the conf servers of network {:?} reported no resolvers — is the \
-             resolver host's conf server down? (manual setup: re-run and \
-             leave the conf-server prompts blank)",
+            "the admin servers of network {:?} reported no resolvers — is the \
+             resolver host's admin server down? (manual setup: re-run and \
+             leave the admin-server prompts blank)",
             net.identity.domain,
         );
     }
@@ -1286,7 +1286,7 @@ fn network_addrs_and_identity(
     if needs_tls && !have_identity {
         let Some(ca_addr) = net.info.ca_addr else {
             bail!(
-                "network {:?} uses TLS but none of its conf servers reported \
+                "network {:?} uses TLS but none of its admin servers reported \
                  a CA — cannot obtain a client certificate",
                 net.identity.domain,
             )
@@ -1348,29 +1348,29 @@ fn joined_to_auth(j: JoinedIdentity) -> AuthChoice {
     }
 }
 
-/// Obtain a client-side TLS identity by enrolling over the conf plane:
-/// a discovered conf server signs our CSR on the spot (cross-platform,
+/// Obtain a client-side TLS identity by enrolling over the admin plane:
+/// a discovered admin server signs our CSR on the spot (cross-platform,
 /// rcgen). Used by both the workstation parent-referral flow and the
 /// publisher template — both put the resulting `TlsIdentitySpec` into
-/// `client.tls.identities`. Requires a reachable conf server; there is
+/// `client.tls.identities`. Requires a reachable admin server; there is
 /// no in-wizard bring-your-own-cert path (that is a self-managed setup,
 /// configured by hand).
 fn prompt_tls_client_identity(
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> Result<StagedIdentity> {
-    // The conf plane is the only in-wizard source of a TLS identity: a
-    // conf server signs our CSR on the spot (cross-platform, rcgen, so
-    // it also works on Windows). No reachable conf server ⇒ this is a
+    // The admin plane is the only in-wizard source of a TLS identity: a
+    // admin server signs our CSR on the spot (cross-platform, rcgen, so
+    // it also works on Windows). No reachable admin server ⇒ this is a
     // self-managed setup, configured by hand outside the wizard.
     match maybe_join_ca_server(probe, NodeKind::Client, suggested_name, kp)? {
         Some((j, staging)) => {
             Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) })
         }
         None => bail!(
-            "a TLS identity via the wizard requires a reachable conf server to \
-             enroll against; none was found. To run TLS without a conf server, \
+            "a TLS identity via the wizard requires a reachable admin server to \
+             enroll against; none was found. To run TLS without a admin server, \
              configure the identity by hand (cert, key, and trusted-CA bundle)."
         ),
     }
@@ -1875,30 +1875,30 @@ pub(crate) struct ResolverFlags {
     /// kerberos principal including realm (e.g. `eric@RYU-OH.ORG`).
     #[arg(long = "no-id-map")]
     no_id_map: bool,
-    /// Skip conf-server setup entirely (expert). On a fresh krb5 /
-    /// anonymous network this also skips the conf-plane CA. A host
-    /// without a conf server is invisible to discovery, and if no conf
+    /// Skip admin-server setup entirely (expert). On a fresh krb5 /
+    /// anonymous network this also skips the admin-plane CA. A host
+    /// without a admin server is invisible to discovery, and if no admin
     /// server exists anywhere on the network, certificate renewal and
     /// future zero-touch installs don't work at all.
-    #[arg(long = "no-conf-server")]
-    no_conf_server: bool,
+    #[arg(long = "no-admin-server")]
+    no_admin_server: bool,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// Only relevant when this install mints a new CA (the netidx-CA TLS
-    /// resolver path with no existing CA, or a conf plane on a
+    /// resolver path with no existing CA, or a admin plane on a
     /// krb5/anonymous network). DANGER: the CA's autorenew credential is
     /// then written in PLAINTEXT, so every backup or disk image of this
     /// machine is a CA compromise. Test CAs only.
     #[arg(long = "insecure-no-tpm")]
     insecure_no_tpm: bool,
     /// Set this resolver up as a CHILD of an existing network: give the
-    /// parent's conf-server address (`ip:port`). The install requests
+    /// parent's admin-server address (`ip:port`). The install requests
     /// delegation of a subtree (`--delegate-subtree`) and, once the parent
     /// admin approves, bakes the parent referral into the config — no
     /// restart. Distinct from the peer-join discovery path. Unix-only.
-    #[arg(long = "parent-conf-server")]
-    parent_conf_server: Option<SocketAddr>,
+    #[arg(long = "parent-admin-server")]
+    parent_admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the parent (with
-    /// `--parent-conf-server`), e.g. `/eu`. Prompted if omitted.
+    /// `--parent-admin-server`), e.g. `/eu`. Prompted if omitted.
     #[arg(long = "delegate-subtree")]
     delegate_subtree: Option<String>,
     /// How new private keys are protected at rest: `seal` (bind to
@@ -1939,13 +1939,13 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // — auth scheme, domain, where the CA is. Peer resolvers stay
     // mutually unaware; only installers aggregate the full picture.
     // The probe outcome rides through the whole install: once the
-    // operator has said "no conf server", nothing downstream offers a
+    // operator has said "no admin server", nothing downstream offers a
     // network join again.
-    let probe = if let Some(parent) = f.parent_conf_server {
+    let probe = if let Some(parent) = f.parent_admin_server {
         if f.common.dry_run {
             // dry-run can't run the live confirm; the parent match below
             // bails on dry-run with a clear message.
-            ConfServers::NotProbed
+            AdminServers::NotProbed
         } else {
             // An explicit WAN parent (no mDNS): confirm it and pin the
             // network. This makes `probe.have()` Some, so the install
@@ -1957,7 +1957,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     } else if f.auth.is_none() && !f.common.dry_run {
         discover_network(NodeKind::Resolver)?
     } else {
-        ConfServers::NotProbed
+        AdminServers::NotProbed
     };
     // Resolve required args with interactive prompting before we
     // start building the params struct. `--auth` and `--listen` are
@@ -1965,11 +1965,11 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // conventional resolver port), so a blank answer is fine. A
     // discovered network's auth scheme wins — a resolver joining a
     // network must speak what its peers speak.
-    // A delegated child (`--parent-conf-server`) keeps the data-plane auth
+    // A delegated child (`--parent-admin-server`) keeps the data-plane auth
     // the operator chose — a /eu subtree may run krb5 under a TLS parent —
     // so only the trust-domain/CA decision comes from the parent, never its
     // auth. A plain discovered peer still imports its cluster's scheme.
-    let imported_auth = if f.parent_conf_server.is_some() {
+    let imported_auth = if f.parent_admin_server.is_some() {
         None
     } else {
         probe.have().and_then(network_auth_kind)
@@ -2100,34 +2100,34 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         None => resolver_self_auth(&f, Some(listen.ip()), units_dir.as_deref(), &probe)?,
     };
     // First server of a new network with a non-TLS data plane: the
-    // conf plane still needs its trust root (it is always TLS — the
+    // admin plane still needs its trust root (it is always TLS — the
     // glyph confirm, enrollment, and server-to-server pushes all hang
     // off the CA), so create one even though the data plane is
     // krb5/anonymous. Mandatory on krb5, a question on anonymous —
-    // see [`conf_plane_decision`]. The TLS path gets its CA inside
+    // see [`admin_plane_decision`]. The TLS path gets its CA inside
     // `resolver_tls_generate`.
     #[cfg(unix)]
     if probe.have().is_none()
-        && f.parent_conf_server.is_none()
+        && f.parent_admin_server.is_none()
         && !f.common.dry_run
         && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
         && !ca::default_ca_present()
-        && match conf_plane_decision(kind, f.no_conf_server) {
-            ConfPlane::Mandatory => {
+        && match admin_plane_decision(kind, f.no_admin_server) {
+            AdminPlane::Mandatory => {
                 println!(
-                    "setting up the conf server for this network. The conf \
+                    "setting up the admin server for this network. The admin \
                      plane is TLS even on a krb5 data plane — it anchors \
                      discovery, enrollment, and certificate renewal. \
-                     (expert opt-out: --no-conf-server)"
+                     (expert opt-out: --no-admin-server)"
                 );
                 true
             }
-            ConfPlane::Ask => prompt::confirm(
-                "set up a conf server for this network? (creates a CA used only \
-                 to secure the conf plane — data-plane auth stays as chosen)",
+            AdminPlane::Ask => prompt::confirm(
+                "set up a admin server for this network? (creates a CA used only \
+                 to secure the admin plane — data-plane auth stays as chosen)",
                 true,
             )?,
-            ConfPlane::Skip => false,
+            AdminPlane::Skip => false,
         }
     {
         let domain = prompt::string_with_default(
@@ -2137,11 +2137,11 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         )?;
         ca::announce_founding_policy(&domain);
         // Same founding CA an install stands up on the TLS path — the
-        // conf plane's trust root, with the sensible zero-prompt admin
+        // admin plane's trust root, with the sensible zero-prompt admin
         // policy rather than an interrogation (see `founding_ca_opts`).
         // The returned `ServiceNeed` is intentionally dropped: this
         // resolver install always ends with a single system-service
-        // offer, and the conf-server unit lands in the resolver's own
+        // offer, and the admin-server unit lands in the resolver's own
         // units dir, so that one service supervises it.
         let (_ca, _need) = ca::create_vaulted_ca(ca::founding_ca_opts(
             paths::user_ca_dir()?,
@@ -2162,8 +2162,8 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // wherever this resolver hosts its own tree.
     let parent_default_path = f.base.clone();
     let id_map = resolve_id_map_choice(&auth, f.no_id_map)?;
-    let no_conf_server = f.no_conf_server;
-    // The conf-server step after apply() needs the *actual* config
+    let no_admin_server = f.no_admin_server;
+    // The admin-server step after apply() needs the *actual* config
     // paths this install produces — resolve the template's defaults
     // the same way it will.
     let resolver_config_actual = match &f.resolver_config_path {
@@ -2185,19 +2185,19 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     // `probe`. A resolver joining a discovered network pins that
     // network's identity; a fresh first resolver records none (it is the
     // root — `resolver update` is a later pass).
-    let (network, conf_server) = network_provenance(&probe);
+    let (network, admin_server) = network_provenance(&probe);
     let record = InstallRecord::new(
         InstallRole::Resolver,
         f.base.clone(),
         f.auth.map(|k| k.as_str()).unwrap_or("tls"),
         network,
-        conf_server,
+        admin_server,
     );
     // Install-time child: delegate this resolver under a parent (the same
     // ceremony as `add-parent`, run inline) and bake the resulting parent
     // referral into the config the install writes — no restart needed.
     // Distinct from the peer-join discovery path above.
-    let parent = match f.parent_conf_server {
+    let parent = match f.parent_admin_server {
         None => f.parent.to_parent_ref(&parent_default_path)?,
         Some(parent_conf) => {
             #[cfg(unix)]
@@ -2210,15 +2210,15 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
                     // --dry-run's "write nothing" contract.
                     bail!(
                         "--dry-run can't preview an install-time delegation: \
-                         --parent-conf-server runs a live, interactive approval \
+                         --parent-admin-server runs a live, interactive approval \
                          ceremony with the parent admin (it enqueues a request on \
                          the parent and blocks until they approve). Re-run without \
-                         --dry-run, or drop --parent-conf-server to preview a \
+                         --dry-run, or drop --parent-admin-server to preview a \
                          standalone install."
                     );
                 }
                 let child_auth = authchoice_to_info(&auth)?;
-                let child = vec![netidx_admin::conf_proto::ResolverAddr {
+                let child = vec![netidx_admin::admin_proto::ResolverAddr {
                     addr: listen,
                     auth: child_auth,
                 }];
@@ -2249,7 +2249,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             #[cfg(not(unix))]
             {
                 let _ = parent_conf;
-                bail!("delegation (--parent-conf-server) is unix-only")
+                bail!("delegation (--parent-admin-server) is unix-only")
             }
         }
     };
@@ -2281,20 +2281,20 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
         &f.common,
         service::ServiceNeed::at(service::ScopeArg::System),
         record,
-        // Conf-server step, after the configs it points at exist: a
-        // discovered network ⇒ enroll a new conf server here; a fresh
+        // Admin-server step, after the configs it points at exist: a
+        // discovered network ⇒ enroll a new admin server here; a fresh
         // network ⇒ add this host's roles to the config the CA setup
-        // wrote (no conf server here ⇒ nothing to do). Then the
+        // wrote (no admin server here ⇒ nothing to do). Then the
         // renewal daemon, on any host with certificates our CA can
         // renew (a netidx-CA-issued resolver identity, or a
-        // conf-server serving cert) — an external-PKI identity renews
+        // admin-server serving cert) — an external-PKI identity renews
         // through that PKI, so the daemon would only log failures.
         move || {
             #[cfg(unix)]
-            post_apply_conf_server(
+            post_apply_admin_server(
                 probe.have(),
                 kind,
-                no_conf_server,
+                no_admin_server,
                 listen,
                 post_apply_units_dir.as_deref(),
                 resolver_config_actual,
@@ -2302,11 +2302,11 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
             )?;
             #[cfg(not(unix))]
             {
-                let _ = (&probe, kind, no_conf_server, listen);
+                let _ = (&probe, kind, no_admin_server, listen);
                 let _ = (resolver_config_actual, id_map_actual);
             }
             if let Some(d) = post_apply_units_dir.as_deref()
-                && (netidx_ca || paths::discover_conf_server_config().is_ok())
+                && (netidx_ca || paths::discover_admin_server_config().is_ok())
             {
                 install_renew_unit(d)?;
             }
@@ -2315,16 +2315,16 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     )
 }
 
-/// What the resolver install does about the conf plane (the conf
-/// server, and on non-TLS networks the conf-plane CA that anchors it).
+/// What the resolver install does about the admin plane (the admin
+/// server, and on non-TLS networks the admin-plane CA that anchors it).
 /// This function IS the install-profile matrix — documented in
-/// design/conf-server.md (Install profiles) and exhaustively tested
+/// design/admin-server.md (Install profiles) and exhaustively tested
 /// below; change all three together.
-// cfg(unix): only the unix-gated resolver install stands up conf
+// cfg(unix): only the unix-gated resolver install stands up admin
 // servers (the CA signer is openssl/unix).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfPlane {
+enum AdminPlane {
     /// Set it up. Announce what's happening; don't ask.
     Mandatory,
     /// Default-yes question.
@@ -2334,7 +2334,7 @@ enum ConfPlane {
 }
 
 /// TLS already creates the CA on a fresh network (it signs the data
-/// plane), and krb5/anonymous still need the conf plane's TLS trust
+/// plane), and krb5/anonymous still need the admin plane's TLS trust
 /// root for discovery, enrollment, and renewal — declining it on a TLS
 /// or krb5 network produces a network where certificate renewal and
 /// zero-touch installs can never work, so neither is offered as a
@@ -2342,20 +2342,20 @@ enum ConfPlane {
 /// (lab/dev setups), so they're asked. Local auth is host-local by
 /// definition: nothing to discover, nothing to enroll.
 ///
-/// The same rule covers joining an existing network: enrolling a conf
+/// The same rule covers joining an existing network: enrolling a admin
 /// server queues for remote approval like any other request (the
 /// admin's `may_enroll_servers` gate runs at approval), so no admin
 /// needs to be at this keyboard and there is no reason for the join
 /// side of the matrix to differ.
 #[cfg(unix)]
-fn conf_plane_decision(kind: AuthKind, no_conf_server: bool) -> ConfPlane {
-    if no_conf_server {
-        return ConfPlane::Skip;
+fn admin_plane_decision(kind: AuthKind, no_admin_server: bool) -> AdminPlane {
+    if no_admin_server {
+        return AdminPlane::Skip;
     }
     match kind {
-        AuthKind::Tls | AuthKind::Krb5 => ConfPlane::Mandatory,
-        AuthKind::Anonymous => ConfPlane::Ask,
-        AuthKind::Local => ConfPlane::Skip,
+        AuthKind::Tls | AuthKind::Krb5 => AdminPlane::Mandatory,
+        AuthKind::Anonymous => AdminPlane::Ask,
+        AuthKind::Local => AdminPlane::Skip,
     }
 }
 
@@ -2449,8 +2449,8 @@ impl ResolvedAuth {
 /// realm == the upper-cased DNS domain). The operator edits the suggested
 /// default when their realm doesn't follow that convention.
 fn default_krb5_spn() -> Option<String> {
-    let conf = std::fs::read_to_string("/etc/krb5.conf").ok()?;
-    let realm = conf.lines().find_map(|l| {
+    let krb5 = std::fs::read_to_string("/etc/krb5.conf").ok()?;
+    let realm = krb5.lines().find_map(|l| {
         l.trim()
             .strip_prefix("default_realm")
             .and_then(|r| r.trim_start().strip_prefix('='))
@@ -2469,7 +2469,7 @@ fn resolver_self_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> Result<ResolvedAuth> {
     // `f.auth` was resolved (with a level-1 prompt) upstream in
     // `run_resolver`; treat it as guaranteed-Some. The
@@ -2508,15 +2508,15 @@ fn resolver_self_auth(
 
 /// Resolve the resolver's TLS identity via the netidx CA — the only
 /// in-wizard path. On unix this host either enrolls from a discovered
-/// conf server or creates the network's CA and issues its own cert
+/// admin server or creates the network's CA and issues its own cert
 /// (both inside [`resolver_tls_generate`]). On non-unix, where creating
-/// a CA needs openssl, it can only enroll over the conf plane. Bringing
+/// a CA needs openssl, it can only enroll over the admin plane. Bringing
 /// your own certificate is a self-managed setup done outside the wizard.
 fn resolver_tls_auth(
     f: &ResolverFlags,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> Result<ResolvedAuth> {
     let name = prompt_resolver_own_tls_name(f.tls_name.clone())?;
     #[cfg(unix)]
@@ -2524,7 +2524,7 @@ fn resolver_tls_auth(
     #[cfg(not(unix))]
     let res = {
         // Creating a CA needs openssl (unix only), so a non-unix
-        // resolver can only *enroll* over the conf plane. No conf
+        // resolver can only *enroll* over the admin plane. No admin
         // server ⇒ nothing the wizard can do: point at self-manage.
         let _ = (default_ca_ip, units_dir);
         match maybe_join_ca_server(probe, NodeKind::Resolver, Some(name.as_str()), f.key_protection)? {
@@ -2534,9 +2534,9 @@ fn resolver_tls_auth(
                 netidx_ca: true,
             }),
             None => bail!(
-                "a TLS resolver identity requires a reachable conf server to \
+                "a TLS resolver identity requires a reachable admin server to \
                  enroll against (creating a CA is unix-only). To run TLS without \
-                 a conf server, configure the resolver's TLS identity by hand."
+                 a admin server, configure the resolver's TLS identity by hand."
             ),
         }
     };
@@ -2565,11 +2565,11 @@ fn resolver_tls_generate(
     name: &str,
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> Result<ResolvedAuth> {
-    // First the network path: a conf server signs our CSR on the
+    // First the network path: a admin server signs our CSR on the
     // spot. Whether this asks anything is decided by `probe` — in
-    // particular, an operator who already said "no conf server" at the
+    // particular, an operator who already said "no admin server" at the
     // discovery phase is not asked again. The issued files are written
     // to a staging tempdir; we hand it back so the caller can hold it
     // across the template install, which does the --force-gated copy
@@ -2629,7 +2629,7 @@ fn resolver_tls_generate(
     } else {
         // No CA — this is the first resolver of a new TLS network, so
         // the CA is created right here, no question asked: it signs
-        // the data plane *and* anchors the conf plane (discovery,
+        // the data plane *and* anchors the admin plane (discovery,
         // enrollment, renewal). An operator who wants an external PKI
         // instead runs `ca init --external-sign` up front, or self-manages
         // the TLS config by hand outside the wizard.
@@ -2642,13 +2642,13 @@ fn resolver_tls_generate(
         // the domain through so the first admin's policy defaults to
         // `*.<domain>` — no extra typing and no mismatch with the
         // names this deployment will issue.
-        // Belt-and-suspenders: a resolver told about a parent conf server
+        // Belt-and-suspenders: a resolver told about a parent admin server
         // must enroll from that network's CA, never mint its own. The probe
         // (confirm_network_at) already routes such installs to the enroll
         // path, so reaching here with a parent set would be a bug.
-        if f.parent_conf_server.is_some() {
+        if f.parent_admin_server.is_some() {
             bail!(
-                "about to create a local CA while --parent-conf-server is set; a \
+                "about to create a local CA while --parent-admin-server is set; a \
                  delegated child must enroll from the parent's CA, not create its \
                  own trust domain (internal: the probe should have prevented this)"
             );
@@ -2667,14 +2667,14 @@ fn resolver_tls_generate(
         // groups — but say what it is and how to change it. The explicit
         // `ca init` flow is where the founding admin's policy gets tuned.
         ca::announce_founding_policy(&domain);
-        let setup_server = match conf_plane_decision(AuthKind::Tls, f.no_conf_server) {
-            ConfPlane::Mandatory => Some(true),
-            ConfPlane::Skip => Some(false),
+        let setup_server = match admin_plane_decision(AuthKind::Tls, f.no_admin_server) {
+            AdminPlane::Mandatory => Some(true),
+            AdminPlane::Skip => Some(false),
             // TLS is never a question — see the matrix.
-            ConfPlane::Ask => unreachable!("tls conf plane is not Ask"),
+            AdminPlane::Ask => unreachable!("tls admin plane is not Ask"),
         };
         // The CA co-locates with this resolver — suggest its IP
-        // (`default_ca_ip`) for the conf server's listen address.
+        // (`default_ca_ip`) for the admin server's listen address.
         let (created, _need) = ca::create_vaulted_ca(ca::founding_ca_opts(
             ca_dir.clone(),
             domain,
@@ -2797,7 +2797,7 @@ fn resolver_auth_from_network(
         AuthKind::Tls => {
             let Some(ca_addr) = net.info.ca_addr else {
                 bail!(
-                    "network {:?} uses TLS but none of its conf servers \
+                    "network {:?} uses TLS but none of its admin servers \
                      reported a CA — cannot obtain the resolver certificate",
                     net.identity.domain,
                 )
@@ -2824,20 +2824,20 @@ fn resolver_auth_from_network(
     }
 }
 
-/// The resolver install's post-apply conf-server step. Three cases:
+/// The resolver install's post-apply admin-server step. Three cases:
 /// (1) joining an existing network whose CA we do NOT hold ⇒
-/// [`enroll_conf_server`] (a brand new conf server here, serving cert minted
+/// [`enroll_admin_server`] (a brand new admin server here, serving cert minted
 /// by the network's CA). (2) A fresh network we just created, OR a
 /// "discovered" network whose CA *this host already holds* (it ran `ca init`
-/// and is now adding a resolver) ⇒ the ca-role `conf-server.json` already
+/// and is now adding a resolver) ⇒ the ca-role `admin-server.json` already
 /// exists; merge this host's resolver / id-map roles into it, preserving the
-/// `ca` role. (3) No config at all ⇒ the operator declined a conf server —
+/// `ca` role. (3) No config at all ⇒ the operator declined a admin server —
 /// nothing to do.
 #[cfg(unix)]
-fn post_apply_conf_server(
+fn post_apply_admin_server(
     discovered: Option<&DiscoveredNetwork>,
     kind: AuthKind,
-    no_conf_server: bool,
+    no_admin_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
@@ -2846,24 +2846,24 @@ fn post_apply_conf_server(
     match discovered {
         // A "discovered" network whose CA this host already holds is our OWN
         // network: this host bootstrapped the CA (`ca init`, or an earlier
-        // install) and is now adding a resolver. It already serves the conf
+        // install) and is now adding a resolver. It already serves the admin
         // plane with the `ca` role, so it must MERGE the new resolver/id-map
-        // roles into that config — never enroll a fresh conf server, whose
+        // roles into that config — never enroll a fresh admin server, whose
         // join-shape config drops the `ca` role and silently disables signing
         // (observed in the lab). Same handling as the fresh-network arm below.
         Some(net) if host_holds_ca(net) => {
-            match conf_plane_decision(kind, no_conf_server) {
-                // Honor an explicit `--no-conf-server` (and Local auth) the same way
+            match admin_plane_decision(kind, no_admin_server) {
+                // Honor an explicit `--no-admin-server` (and Local auth) the same way
                 // the enroll arm does — don't advertise this resolver — even though
-                // the conf server itself keeps running here (it's the CA).
-                ConfPlane::Skip => Ok(()),
+                // the admin server itself keeps running here (it's the CA).
+                AdminPlane::Skip => Ok(()),
                 _ => merge_resolver_roles(resolver_config, id_map),
             }
         }
-        Some(net) => enroll_conf_server(
+        Some(net) => enroll_admin_server(
             net,
             kind,
-            no_conf_server,
+            no_admin_server,
             resolver_listen,
             units_dir,
             resolver_config,
@@ -2894,14 +2894,14 @@ fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
 }
 
 /// Merge this host's resolver / id-map roles into the existing
-/// `conf-server.json`, preserving every other role (notably `ca`). Used both
+/// `admin-server.json`, preserving every other role (notably `ca`). Used both
 /// when there's no discovered network (a fresh network we just created) and
 /// when the discovered network is our own CA host. No existing config ⇒ the
-/// operator declined a conf server here, so there's nothing to update.
+/// operator declined a admin server here, so there's nothing to update.
 #[cfg(unix)]
 fn merge_resolver_roles(resolver_config: PathBuf, id_map: Option<PathBuf>) -> Result<()> {
-    use netidx_admin::conf_server_config::{IdMapRole, ResolverRole};
-    if paths::discover_conf_server_config().is_err() {
+    use netidx_admin::admin_server_config::{IdMapRole, ResolverRole};
+    if paths::discover_admin_server_config().is_err() {
         return Ok(());
     }
     let path = super::server::update_roles(|roles| {
@@ -2910,13 +2910,13 @@ fn merge_resolver_roles(resolver_config: PathBuf, id_map: Option<PathBuf>) -> Re
             roles.id_map = Some(IdMapRole { map });
         }
     })?;
-    println!("updated conf-server roles in {}", path.display());
+    println!("updated admin-server roles in {}", path.display());
     Ok(())
 }
 
-/// Enroll a conf server on this (non-CA) host: the network's CA signs
+/// Enroll a admin server on this (non-CA) host: the network's CA signs
 /// our reserved-SAN serving cert (admin-authorized, policy-gated), we
-/// install the serving identity + `conf-server.json` with this host's
+/// install the serving identity + `admin-server.json` with this host's
 /// roles, and drop the activation unit. The CA records us as a peer as
 /// a side effect of the enrollment.
 ///
@@ -2927,41 +2927,41 @@ fn merge_resolver_roles(resolver_config: PathBuf, id_map: Option<PathBuf>) -> Re
 /// is a note, not a failure — the resolver this install produced
 /// works; it just isn't advertised to discovery from this host.
 #[cfg(unix)]
-fn enroll_conf_server(
+fn enroll_admin_server(
     net: &DiscoveredNetwork,
     kind: AuthKind,
-    no_conf_server: bool,
+    no_admin_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
 ) -> Result<()> {
-    use netidx_admin::conf_server_config::{
-        ConfServerConfig, IdMapRole, ResolverRole, Roles,
+    use netidx_admin::admin_server_config::{
+        AdminServerConfig, IdMapRole, ResolverRole, Roles,
     };
     let Some(ca_addr) = net.info.ca_addr else {
         println!(
-            "note: network {:?} reported no CA; skipping conf-server setup on \
+            "note: network {:?} reported no CA; skipping admin-server setup on \
              this host",
             net.identity.domain,
         );
         return Ok(());
     };
-    match conf_plane_decision(kind, no_conf_server) {
-        ConfPlane::Skip => return Ok(()),
-        ConfPlane::Mandatory => println!(
-            "enrolling a conf server on this host — it advertises this \
+    match admin_plane_decision(kind, no_admin_server) {
+        AdminPlane::Skip => return Ok(()),
+        AdminPlane::Mandatory => println!(
+            "enrolling a admin server on this host — it advertises this \
              resolver to future installs and renews its certificates. \
-             (expert opt-out: --no-conf-server)"
+             (expert opt-out: --no-admin-server)"
         ),
-        ConfPlane::Ask => {
+        AdminPlane::Ask => {
             if !prompt::confirm(
-                "set up a conf server on this host (advertises this resolver \
+                "set up a admin server on this host (advertises this resolver \
                  to future installs)?",
                 true,
             )? {
                 println!(
-                    "note: skipped — discovery only sees hosts running a conf \
+                    "note: skipped — discovery only sees hosts running a admin \
                      server, so future installs won't learn about this resolver \
                      from this host"
                 );
@@ -2970,14 +2970,14 @@ fn enroll_conf_server(
         }
     }
     let ip = prompt::parsed_with_default::<IpAddr>(
-        "conf server listen IP",
+        "admin server listen IP",
         None,
         &resolver_listen.ip().to_string(),
     )?;
     let port = prompt::parsed_with_default::<u16>(
-        "conf server listen port",
+        "admin server listen port",
         None,
-        &conf_proto::DEFAULT_PORT.to_string(),
+        &admin_proto::DEFAULT_PORT.to_string(),
     )?;
     let listen = SocketAddr::new(ip, port);
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
@@ -2988,13 +2988,13 @@ fn enroll_conf_server(
     )?;
     let issued = if admin_here {
         let admin = prompt::required_string(
-            "CA admin name (authorizes enrolling this conf server)",
+            "CA admin name (authorizes enrolling this admin server)",
             None,
         )?;
         let password = Zeroizing::new(rpassword::prompt_password(format!(
             "CA password for admin {admin}: "
         ))?);
-        rt.block_on(conf_client::enroll(
+        rt.block_on(admin_client::enroll(
             ca_addr,
             &admin,
             password,
@@ -3003,7 +3003,7 @@ fn enroll_conf_server(
         ))?
     } else {
         let pending =
-            rt.block_on(conf_client::enqueue_enroll(ca_addr, listen, &net.identity))?;
+            rt.block_on(admin_client::enqueue_enroll(ca_addr, listen, &net.identity))?;
         println!("enrollment queued. Your request code is:");
         println!("  SHA256  {}", pending.fingerprint.text());
         println!("{}", pending.fingerprint.identicon(ColorMode::detect()));
@@ -3015,15 +3015,15 @@ fn enroll_conf_server(
         );
         loop {
             std::thread::sleep(POLL_INTERVAL);
-            match rt.block_on(conf_client::poll(
+            match rt.block_on(admin_client::poll(
                 ca_addr,
-                NodeKind::ConfServer,
+                NodeKind::AdminServer,
                 &pending,
                 &net.identity,
             ))? {
-                conf_client::PollOutcome::Pending => continue,
-                conf_client::PollOutcome::Issued(issued) => break issued,
-                conf_client::PollOutcome::Denied(reason) => {
+                admin_client::PollOutcome::Pending => continue,
+                admin_client::PollOutcome::Issued(issued) => break issued,
+                admin_client::PollOutcome::Denied(reason) => {
                     println!(
                         "note: the CA admin denied the enrollment ({reason}); \
                          this resolver works, but won't be advertised to \
@@ -3031,7 +3031,7 @@ fn enroll_conf_server(
                     );
                     return Ok(());
                 }
-                conf_client::PollOutcome::Expired => {
+                admin_client::PollOutcome::Expired => {
                     println!(
                         "note: the enrollment request expired before an admin \
                          approved it; this resolver works, but won't be \
@@ -3048,8 +3048,8 @@ fn enroll_conf_server(
     }
     // Serving identity: chain = [issued leaf, confirmed CA] so clients
     // receive the CA cert at the end of the chain, exactly like the CA
-    // host's own conf server.
-    let dir = paths::user_config_root()?.join("conf-server");
+    // host's own admin server.
+    let dir = paths::user_config_root()?.join("admin-server");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
     let mut chain = issued.cert_pem.clone().into_bytes();
@@ -3073,7 +3073,7 @@ fn enroll_conf_server(
         }
     }
     netidx_admin::atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
-    let cfg = ConfServerConfig {
+    let cfg = AdminServerConfig {
         domain: net.identity.domain.clone(),
         listen,
         serving_cert,
@@ -3089,9 +3089,9 @@ fn enroll_conf_server(
         mdns: true,
         activation_units_dir: None,
     };
-    let cfg_path = paths::user_conf_server_config()?;
+    let cfg_path = paths::user_admin_server_config()?;
     cfg.save(&cfg_path)?;
-    println!("conf server configured:");
+    println!("admin server configured:");
     println!("  config:   {}", cfg_path.display());
     println!("  listen:   {listen}");
     println!("  domain:   {}", net.identity.domain);
@@ -3161,20 +3161,20 @@ pub(crate) struct PublisherFlags {
 
 pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     let mut tls_identities = vec![];
-    // Holds the staging tempdir(s) for any conf-server-joined identity
+    // Holds the staging tempdir(s) for any admin-server-joined identity
     // until `finish` (which runs the template's --force-gated install)
     // returns. Dropping a TempDir deletes its contents, so this must
     // outlive the `finish` call below.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     // Ask the network before asking the human: with no `--addr` /
-    // `--auth`, a discovered (and glyph-confirmed) conf server yields
+    // `--auth`, a discovered (and glyph-confirmed) admin server yields
     // every resolver address with its auth — and, on TLS networks, our
     // client cert. The probe outcome rides into the manual cascade so
     // a declined discovery is never re-offered.
     let probe = if f.addrs.is_empty() && f.auth.is_none() {
         discover_network(NodeKind::Publisher)?
     } else {
-        ConfServers::NotProbed
+        AdminServers::NotProbed
     };
     let addrs: Vec<(SocketAddr, ReferralAuth)> = match probe.have() {
         Some(net) => {
@@ -3211,7 +3211,7 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
                 // to dead-end at the template's "default_auth=Tls requires
                 // at least one tls_identity" check. Mirror the
                 // workstation/resolver UX instead — enroll the identity over
-                // the conf plane (or bail if no conf server is reachable).
+                // the admin plane (or bail if no admin server is reachable).
                 // Suggest our SAN as `<user>.<domain>`, the domain coming
                 // from the resolver's TLS name the operator just gave.
                 let suggested = match &per_addr_auth {
@@ -3290,13 +3290,13 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
     } else {
         service::ServiceNeed::NONE
     };
-    let (network, conf_server) = network_provenance(&probe);
+    let (network, admin_server) = network_provenance(&probe);
     let record = InstallRecord::new(
         InstallRole::Publisher,
         f.base.clone(),
         f.auth.map(|k| k.as_str()).unwrap_or("tls"),
         network,
-        conf_server,
+        admin_server,
     );
     let params = netidx_admin::template::publisher::PublisherParams {
         addrs,
@@ -3349,8 +3349,8 @@ fn publisher_per_addr_auth(f: &PublisherFlags) -> Result<ReferralAuth> {
 /// delegation handshake exchanges (the child's address carries it). Local
 /// auth is host-local and can't serve a delegated network subtree.
 #[cfg(unix)]
-fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_admin::conf_proto::InfoAuth> {
-    use netidx_admin::conf_proto::InfoAuth;
+fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_admin::admin_proto::InfoAuth> {
+    use netidx_admin::admin_proto::InfoAuth;
     match a {
         AuthChoice::Anonymous => Ok(InfoAuth::Anonymous),
         AuthChoice::Krb5 { spn } => Ok(InfoAuth::Krb5 { spn: spn.to_string() }),
@@ -3364,13 +3364,13 @@ fn authchoice_to_info(a: &AuthChoice) -> Result<netidx_admin::conf_proto::InfoAu
 
 /// Extract install provenance from a network probe: the glyph-confirmed
 /// network identity (domain + CA fingerprint) to pin later lifecycle ops
-/// to, and a reachable conf-server address to start from. `(None, None)`
+/// to, and a reachable admin-server address to start from. `(None, None)`
 /// when the install didn't join a *discovered* network — a CLI-flag
 /// parent, the manual prompt cascade, or no parent at all carry no
 /// confirmed identity, so they record none and a later `join` supplies
 /// it.
 fn network_provenance(
-    probe: &ConfServers,
+    probe: &AdminServers,
 ) -> (Option<NetworkIdentity>, Option<SocketAddr>) {
     match probe.have() {
         Some(net) => {
@@ -3387,7 +3387,7 @@ fn network_provenance(
 /// Describe + apply the rendered template, with a post-apply step that
 /// runs after it has been installed (and never on `--dry-run`). The
 /// resolver install uses the step to stand up / update this host's
-/// conf server, which points at config files that only exist once
+/// admin server, which points at config files that only exist once
 /// `apply()` has run.
 fn finish_with(
     rt: RenderedTemplate,
@@ -3405,7 +3405,7 @@ fn finish_with(
         // Record what we installed and the network it joined
         // (identity-pinned), so lifecycle ops (`status`/`update`) know
         // what this host is and can re-pin to the same CA before
-        // trusting a conf server's picture of the network.
+        // trusting a admin server's picture of the network.
         record.save_default().context("writing the install record")?;
     }
     // Single end-of-process hook: offer the OS service (or print the
@@ -3431,42 +3431,42 @@ mod tests {
     // the hostname path is the same `ToSocketAddrs` call, just with a
     // name on the left.
     #[test]
-    fn conf_server_seeds_default_and_explicit_port() {
-        let dflt = netidx_admin::conf_proto::DEFAULT_PORT;
-        // bare ip → default conf port
+    fn admin_server_seeds_default_and_explicit_port() {
+        let dflt = netidx_admin::admin_proto::DEFAULT_PORT;
+        // bare ip → default admin port
         assert_eq!(
-            resolve_conf_server_seeds("1.2.3.4").unwrap(),
+            resolve_admin_server_seeds("1.2.3.4").unwrap(),
             vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
         );
         // explicit port wins
         assert_eq!(
-            resolve_conf_server_seeds("1.2.3.4:9999").unwrap(),
+            resolve_admin_server_seeds("1.2.3.4:9999").unwrap(),
             vec![SocketAddr::from(([1, 2, 3, 4], 9999))],
         );
         // surrounding whitespace is trimmed
         assert_eq!(
-            resolve_conf_server_seeds("  1.2.3.4  ").unwrap(),
+            resolve_admin_server_seeds("  1.2.3.4  ").unwrap(),
             vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
         );
         // bare ipv6 → default port; bracketed ipv6 carries an explicit port
         assert_eq!(
-            resolve_conf_server_seeds("::1").unwrap(),
+            resolve_admin_server_seeds("::1").unwrap(),
             vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, dflt))],
         );
         assert_eq!(
-            resolve_conf_server_seeds("[::1]:9999").unwrap(),
+            resolve_admin_server_seeds("[::1]:9999").unwrap(),
             vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9999))],
         );
         // empty / blank is rejected (the prompt treats blank as "none"
         // before reaching here, but the parser must not accept it either)
-        assert!(resolve_conf_server_seeds("").is_err());
-        assert!(resolve_conf_server_seeds("   ").is_err());
+        assert!(resolve_admin_server_seeds("").is_err());
+        assert!(resolve_admin_server_seeds("   ").is_err());
         // the single-addr wrapper applies the same defaulting
         assert_eq!(
-            resolve_conf_server_addr("1.2.3.4").unwrap(),
+            resolve_admin_server_addr("1.2.3.4").unwrap(),
             SocketAddr::from(([1, 2, 3, 4], dflt)),
         );
-        assert!(resolve_conf_server_addr("").is_err());
+        assert!(resolve_admin_server_addr("").is_err());
     }
 
     #[test]
@@ -3526,14 +3526,14 @@ mod tests {
     }
 
     // The install-profile matrix, exhaustively. This test and
-    // design/conf-server.md (Install profiles) mirror
-    // `conf_plane_decision`; change all three together.
+    // design/admin-server.md (Install profiles) mirror
+    // `admin_plane_decision`; change all three together.
     #[cfg(unix)]
     #[test]
-    fn the_conf_plane_matrix() {
+    fn the_admin_plane_matrix() {
         use AuthKind::*;
-        use ConfPlane::*;
-        // Declining the conf plane on a TLS or krb5 network breaks
+        use AdminPlane::*;
+        // Declining the admin plane on a TLS or krb5 network breaks
         // renewal + zero-touch installs forever, so neither is a
         // question — fresh network or joining one (enrollment queues
         // for remote approval, so no admin is needed at this
@@ -3542,11 +3542,11 @@ mod tests {
         for (kind, want) in
             [(Tls, Mandatory), (Krb5, Mandatory), (Anonymous, Ask), (Local, Skip)]
         {
-            assert_eq!(conf_plane_decision(kind, false), want, "{kind:?}");
+            assert_eq!(admin_plane_decision(kind, false), want, "{kind:?}");
         }
         // The expert opt-out beats everything.
         for kind in [Tls, Krb5, Anonymous, Local] {
-            assert_eq!(conf_plane_decision(kind, true), Skip);
+            assert_eq!(admin_plane_decision(kind, true), Skip);
         }
     }
 

@@ -19,7 +19,7 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct RunArgs {
-    /// Conf server holding the CA. Defaults to this host's conf-server
+    /// Admin server holding the CA. Defaults to this host's admin-server
     /// config, then mDNS discovery (PKI-verified — no prompts).
     #[arg(long)]
     pub server: Option<SocketAddr>,
@@ -34,7 +34,7 @@ pub(crate) struct RunArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct NowArgs {
-    /// Conf server holding the CA. Defaults to this host's conf-server
+    /// Admin server holding the CA. Defaults to this host's admin-server
     /// config, then mDNS discovery.
     #[arg(long)]
     pub server: Option<SocketAddr>,

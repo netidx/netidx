@@ -1,5 +1,5 @@
 //! `netidx admin resolver …` — the resolver role: a network-facing
-//! resolver-server (with optional conf server / CA).
+//! resolver-server (with optional admin server / CA).
 
 use anyhow::Result;
 use clap::Subcommand;

@@ -1,5 +1,5 @@
-//! Trust-on-first-use rustls server-cert verifier, shared by the conf
-//! client ([`crate::conf_client`]) and the resolver-name probe
+//! Trust-on-first-use rustls server-cert verifier, shared by the admin
+//! client ([`crate::admin_client`]) and the resolver-name probe
 //! ([`crate::resolver_probe`]).
 //!
 //! It accepts any certificate chain — trust is established out of band

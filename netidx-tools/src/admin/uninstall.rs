@@ -123,7 +123,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     let root = config_root(p, scope);
     if p.dry_run {
         if let Some(root) = &root {
-            deregister_conf_server(root, true);
+            deregister_admin_server(root, true);
         }
         return Ok(());
     }
@@ -152,7 +152,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     // Drop ourselves from the CA's map before deleting the certs we'd need
     // to authenticate the deregister.
     if let Some(root) = &root {
-        deregister_conf_server(root, false);
+        deregister_admin_server(root, false);
     }
     let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
     print_report(&report, true);
@@ -301,26 +301,26 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
     }
 }
 
-/// Tell the CA to drop this conf server from the network map before we
-/// delete its config + certs. Best-effort: a non-CA conf server registers
+/// Tell the CA to drop this admin server from the network map before we
+/// delete its config + certs. Best-effort: a non-CA admin server registers
 /// its facts with the CA, so on teardown it should deregister, or the CA
-/// keeps a dead entry until `conf ca remove-server`. The CA host itself
+/// keeps a dead entry until `admin ca remove-server`. The CA host itself
 /// owns the map and has nothing to deregister from. Runs while the serving
 /// cert/key still exist (before the teardown removes them). Unix-only: the
-/// conf-server daemon is, so only a unix host ever has one to deregister.
+/// admin-server daemon is, so only a unix host ever has one to deregister.
 #[cfg(unix)]
-fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
-    use netidx_admin::{conf_client, conf_server, conf_server_config::ConfServerConfig};
-    let cfg = match ConfServerConfig::load(&root.join("conf-server.json")) {
+fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
+    use netidx_admin::{admin_client, admin_server, admin_server_config::AdminServerConfig};
+    let cfg = match AdminServerConfig::load(&root.join("admin-server.json")) {
         Ok(c) => c,
-        Err(_) => return, // no conf server here (workstation/publisher/hand-rolled)
+        Err(_) => return, // no admin server here (workstation/publisher/hand-rolled)
     };
     if cfg.roles.ca.is_some() {
         return; // the CA owns the map; it doesn't deregister from itself
     }
     let Some(ca_addr) = cfg.ca_addr else { return };
     if dry_run {
-        println!("conf server: would deregister {} from the CA at {ca_addr}", cfg.listen);
+        println!("admin server: would deregister {} from the CA at {ca_addr}", cfg.listen);
         return;
     }
     let result = (|| -> Result<()> {
@@ -332,24 +332,24 @@ fn deregister_conf_server(root: &std::path::Path, dry_run: bool) {
         })?;
         let trusted = std::fs::read(&cfg.trusted)
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
-        let roots = conf_server::load_roots(&trusted)?;
+        let roots = admin_server::load_roots(&trusted)?;
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-        rt.block_on(conf_client::deregister(ca_addr, &cert, &key, roots, cfg.listen))?;
+        rt.block_on(admin_client::deregister(ca_addr, &cert, &key, roots, cfg.listen))?;
         Ok(())
     })();
     match result {
         Ok(()) => {
-            println!("conf server: deregistered {} from the CA at {ca_addr}", cfg.listen)
+            println!("admin server: deregistered {} from the CA at {ca_addr}", cfg.listen)
         }
         Err(e) => eprintln!(
-            "conf server: could not deregister from the CA at {ca_addr} ({e:#}); \
+            "admin server: could not deregister from the CA at {ca_addr} ({e:#}); \
              the CA will keep this server in its map until `netidx admin ca remove-server`"
         ),
     }
 }
 
 #[cfg(not(unix))]
-fn deregister_conf_server(_root: &std::path::Path, _dry_run: bool) {}
+fn deregister_admin_server(_root: &std::path::Path, _dry_run: bool) {}
 
 /// Print an uninstall report. `applied` distinguishes the dry-run
 /// preview (`false` ⇒ "plan", subjunctive "would be uninstalled") from
@@ -392,7 +392,7 @@ fn escalate(a: &Params) -> Result<()> {
     let mut cmd = Command::new(svc_cli::elevator());
     cmd.arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf")
+        .arg("admin")
         .arg("uninstall")
         .arg("--scope")
         .arg("system")
@@ -443,7 +443,7 @@ fn escalate_for_system_offer(p: &Params) -> Result<()> {
     let mut cmd = Command::new(svc_cli::elevator());
     cmd.arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
-        .arg("conf")
+        .arg("admin")
         .arg("uninstall")
         .arg("--scope")
         .arg("system")

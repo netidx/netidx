@@ -1,17 +1,17 @@
 //! Local control-socket client. The on-box `ca` CLI uses this to drive the
-//! running conf daemon over its `0600` unix socket — no TLS and no admin
+//! running admin daemon over its `0600` unix socket — no TLS and no admin
 //! password, because the daemon trusts the local peer by `SO_PEERCRED` and
 //! authorizes it as a superuser. Unix-only: the socket is a daemon feature
 //! and the daemon is unix.
 //!
-//! The wire types are the same [`crate::conf_proto`] messages the network
-//! [`crate::conf_client`] sends, so the daemon dispatches both through one
+//! The wire types are the same [`crate::admin_proto`] messages the network
+//! [`crate::admin_client`] sends, so the daemon dispatches both through one
 //! code path; only the transport (a unix socket) and the authorization
 //! (local superuser vs. a pinned-TLS admin password) differ. The credential
 //! fields the admin-management requests carry are sent empty and ignored by
 //! the daemon on this socket.
 
-use crate::conf_proto::{
+use crate::admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
     EnrollRequest, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, RemoveAdminRequest,
     Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
@@ -22,38 +22,38 @@ use std::{net::SocketAddr, path::Path};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
 
-/// Connect to the daemon's local control socket (beside the conf-server
+/// Connect to the daemon's local control socket (beside the admin-server
 /// config) and complete the hello exchange, returning the stream positioned
 /// to send one request. A connect failure almost always means the daemon
 /// isn't running on this host — say so.
 async fn connect(cfg_path: &Path) -> Result<UnixStream> {
-    let path = crate::conf_server::local_socket_path(cfg_path);
+    let path = crate::admin_server::local_socket_path(cfg_path);
     let mut stream = UnixStream::connect(&path).await.with_context(|| {
         format!(
-            "connecting to the conf daemon's control socket at {} — start the conf \
+            "connecting to the admin daemon's control socket at {} — start the admin \
              server on this host (the daemon owns the CA; the CLI talks to it)",
             path.display()
         )
     })?;
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut stream,
         &ClientHello { protocol_version: PROTOCOL_VERSION, kind: NodeKind::Client },
     )
     .await
     .context("sending ClientHello")?;
     let _: ServerHello =
-        conf_proto::read_msg(&mut stream).await.context("reading ServerHello")?;
+        admin_proto::read_msg(&mut stream).await.context("reading ServerHello")?;
     Ok(stream)
 }
 
-/// Whether the conf daemon is reachable on its local control socket — a
+/// Whether the admin daemon is reachable on its local control socket — a
 /// cheap connect probe. Commands that have an offline break-glass path
 /// (`recovery rotate`, `auto-approve`) use this to choose the daemon-mediated
 /// path when it's up and the offline flock path when it isn't. There's a
 /// benign TOCTOU (the daemon could stop right after): the offline path takes
 /// the CA flock, which fails cleanly if the daemon is in fact up.
 pub async fn daemon_running(cfg_path: &Path) -> bool {
-    let path = crate::conf_server::local_socket_path(cfg_path);
+    let path = crate::admin_server::local_socket_path(cfg_path);
     UnixStream::connect(&path).await.is_ok()
 }
 
@@ -63,14 +63,14 @@ fn no_creds() -> (String, Secret) {
     (String::new(), Secret(String::new()))
 }
 
-/// Re-mint the conf server's own serving cert (the reserved
-/// [`crate::conf_proto::SERVING_SAN`]) over the local control socket.
+/// Re-mint the admin server's own serving cert (the reserved
+/// [`crate::admin_proto::SERVING_SAN`]) over the local control socket.
 /// renewd on the CA host uses this instead of a TLS enrollment to
 /// localhost: the serving cert is the linchpin of TLS-to-self, so once it
 /// expires a TLS renewal can never connect to renew it (a deadlock). The
 /// local socket is plain (no TLS), so it works regardless of the current
 /// serving cert's validity. `csr_pem` is a fresh CSR for the serving SAN;
-/// `listen` is the conf server's own listen address (the daemon no-ops
+/// `listen` is the admin server's own listen address (the daemon no-ops
 /// recording itself as a peer). Auth is the `SO_PEERCRED` superuser check
 /// at accept — the admin/password fields are sent empty and ignored.
 pub async fn enroll(
@@ -80,7 +80,7 @@ pub async fn enroll(
 ) -> Result<SignResponse> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut s,
         &Request::Enroll(EnrollRequest {
             admin,
@@ -91,7 +91,7 @@ pub async fn enroll(
     )
     .await
     .context("sending Enroll")?;
-    conf_proto::read_msg::<_, SignResponse>(&mut s).await.context("reading SignResponse")
+    admin_proto::read_msg::<_, SignResponse>(&mut s).await.context("reading SignResponse")
 }
 
 /// Mint a new role admin `name` with `policy` and `new_password`.
@@ -103,7 +103,7 @@ pub async fn add_role_admin(
 ) -> Result<()> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut s,
         &Request::AddRoleAdmin(AddRoleAdminRequest {
             admin,
@@ -114,7 +114,7 @@ pub async fn add_role_admin(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -128,7 +128,7 @@ pub async fn set_admin_policy(
 ) -> Result<()> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut s,
         &Request::SetAdminPolicy(SetAdminPolicyRequest {
             admin,
@@ -138,7 +138,7 @@ pub async fn set_admin_policy(
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -148,7 +148,7 @@ pub async fn set_admin_policy(
 pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut s,
         &Request::RemoveAdmin(RemoveAdminRequest {
             admin,
@@ -157,7 +157,7 @@ pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
         }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -167,12 +167,12 @@ pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
 pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminInfo>> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
-    conf_proto::write_msg(
+    admin_proto::write_msg(
         &mut s,
         &Request::ListAdmins(ListAdminsRequest { admin, password }),
     )
     .await?;
-    match conf_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
+    match admin_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
@@ -184,8 +184,8 @@ pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminI
 /// once, never stored).
 pub async fn rotate_recovery(cfg_path: &Path) -> Result<Zeroizing<String>> {
     let mut s = connect(cfg_path).await?;
-    conf_proto::write_msg(&mut s, &Request::RotateRecovery).await?;
-    match conf_proto::read_msg::<_, RotateRecoveryResponse>(&mut s).await? {
+    admin_proto::write_msg(&mut s, &Request::RotateRecovery).await?;
+    match admin_proto::read_msg::<_, RotateRecoveryResponse>(&mut s).await? {
         RotateRecoveryResponse::Ok { recovery_password } => {
             Ok(Zeroizing::new(recovery_password.0.clone()))
         }
@@ -198,8 +198,8 @@ pub async fn rotate_recovery(cfg_path: &Path) -> Result<Zeroizing<String>> {
 /// plaintext because this CA was set up `--insecure-no-tpm`.
 pub async fn rotate_autorenew(cfg_path: &Path) -> Result<Option<String>> {
     let mut s = connect(cfg_path).await?;
-    conf_proto::write_msg(&mut s, &Request::RotateAutorenew).await?;
-    match conf_proto::read_msg::<_, RotateAutorenewResponse>(&mut s).await? {
+    admin_proto::write_msg(&mut s, &Request::RotateAutorenew).await?;
+    match admin_proto::read_msg::<_, RotateAutorenewResponse>(&mut s).await? {
         RotateAutorenewResponse::Ok { warning } => Ok(warning),
         RotateAutorenewResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }

@@ -1,6 +1,6 @@
 //! `netidx admin perms show|edit --at <path>` — remote permissions
-//! administration through the conf server, routed by the network map. No
-//! SSH: an admin contacts a conf server (glyph-confirming its CA exactly as
+//! administration through the admin server, routed by the network map. No
+//! SSH: an admin contacts a admin server (glyph-confirming its CA exactly as
 //! delegation does), the map locates the cluster mounted at `<path>`, and
 //! `show` reads that cluster's perms while `edit` opens them in `$EDITOR`,
 //! validates, and hands the result to the CA — which authenticates the
@@ -9,15 +9,15 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use netidx_admin::{
-    conf_client::{self, CaIdentity},
-    conf_proto::{NetworkMap, NodeKind, PeerResult},
+    admin_client::{self, CaIdentity},
+    admin_proto::{NetworkMap, NodeKind, PeerResult},
     perms,
 };
 use std::{collections::BTreeSet, net::SocketAddr};
 use zeroize::Zeroizing;
 
 use super::{
-    ca::{collect_existing_password, env_user_name, local_conf_server_listen},
+    ca::{collect_existing_password, env_user_name, local_admin_server_listen},
     editor, init, prompt,
 };
 
@@ -31,9 +31,9 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct Flags {
-    /// A conf server to reach the network through: a hostname or IP, with
-    /// or without a `:port` (the conf port defaults to 4565). Defaults to
-    /// this host's own conf server, else prompted.
+    /// A admin server to reach the network through: a hostname or IP, with
+    /// or without a `:port` (the admin port defaults to 4565). Defaults to
+    /// this host's own admin server, else prompted.
     #[arg(long = "server")]
     server: Option<String>,
     /// The hierarchy path whose cluster's perms to act on (e.g. `/eu`, or
@@ -49,7 +49,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     }
 }
 
-/// A glyph-confirmed conf server plus the network map fetched from it.
+/// A glyph-confirmed admin server plus the network map fetched from it.
 struct Bootstrap {
     rt: tokio::runtime::Runtime,
     addr: SocketAddr,
@@ -57,35 +57,35 @@ struct Bootstrap {
     map: NetworkMap,
 }
 
-/// Reach a conf server (flag, else this host's own, else prompted),
+/// Reach a admin server (flag, else this host's own, else prompted),
 /// confirm its CA glyph (the one human trust decision), and pull the map.
 fn bootstrap(server: Option<String>) -> Result<Bootstrap> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let addr = match server {
-        Some(s) => init::resolve_conf_server_addr(&s)?,
-        None => match local_conf_server_listen() {
+        Some(s) => init::resolve_admin_server_addr(&s)?,
+        None => match local_admin_server_listen() {
             Some(a) => a,
             None => prompt::required_with(
-                "conf-server address (host or ip, optional :port, e.g. \
+                "admin-server address (host or ip, optional :port, e.g. \
                  203.0.113.1:4565)",
-                init::resolve_conf_server_addr,
+                init::resolve_admin_server_addr,
             )?,
         },
     };
     let id = rt
-        .block_on(conf_client::fetch_identity(addr, NodeKind::Client))
-        .with_context(|| format!("contacting conf server {addr}"))?;
+        .block_on(admin_client::fetch_identity(addr, NodeKind::Client))
+        .with_context(|| format!("contacting admin server {addr}"))?;
     init::show_network_identity(addr, &id);
-    if !prompt::confirm("is this your network's conf server?", false)? {
-        bail!("conf-server identity was not confirmed; nothing was sent");
+    if !prompt::confirm("is this your network's admin server?", false)? {
+        bail!("admin-server identity was not confirmed; nothing was sent");
     }
     let map = rt
-        .block_on(conf_client::get_map_pinned(addr, NodeKind::Client, &id))
+        .block_on(admin_client::get_map_pinned(addr, NodeKind::Client, &id))
         .context("fetching the network map")?;
     Ok(Bootstrap { rt, addr, id, map })
 }
 
-/// The conf server of the cluster mounted exactly at `at` (the same
+/// The admin server of the cluster mounted exactly at `at` (the same
 /// exact-base match the CA uses to route the edit).
 fn route(map: &NetworkMap, at: &str) -> Result<SocketAddr> {
     let mut bases = BTreeSet::new();
@@ -118,11 +118,11 @@ fn with_same_ca<T>(
     }
     let tid = bs
         .rt
-        .block_on(conf_client::fetch_identity(target, NodeKind::Client))
-        .with_context(|| format!("contacting conf server {target}"))?;
+        .block_on(admin_client::fetch_identity(target, NodeKind::Client))
+        .with_context(|| format!("contacting admin server {target}"))?;
     if tid.fingerprint != bs.id.fingerprint {
         bail!(
-            "the conf server at {target} presents a DIFFERENT CA than the one \
+            "the admin server at {target} presents a DIFFERENT CA than the one \
              you confirmed — refusing to trust where the map routed us."
         );
     }
@@ -137,7 +137,7 @@ fn show(f: Flags) -> Result<()> {
     let bs = bootstrap(f.server)?;
     let target = route(&bs.map, &at)?;
     let perms_json = with_same_ca(&bs, target, |id| {
-        bs.rt.block_on(conf_client::get_perms(target, NodeKind::Client, id))
+        bs.rt.block_on(admin_client::get_perms(target, NodeKind::Client, id))
     })?;
     println!("{}", pretty(&perms_json)?);
     Ok(())
@@ -155,7 +155,7 @@ fn edit(f: Flags) -> Result<()> {
     // Seed the editor with the cluster's current perms.
     let target = route(&bs.map, &at)?;
     let current = with_same_ca(&bs, target, |id| {
-        bs.rt.block_on(conf_client::get_perms(target, NodeKind::Client, id))
+        bs.rt.block_on(admin_client::get_perms(target, NodeKind::Client, id))
     })?;
     let edited = editor::edit_with_validation(&pretty(&current)?, validate)?;
     // Authenticate to the CA, which performs the edit and propagates it.
@@ -167,7 +167,7 @@ fn edit(f: Flags) -> Result<()> {
         "CA password for admin {admin:?}"
     ))?);
     let peers = with_same_ca(&bs, ca_addr, |id| {
-        bs.rt.block_on(conf_client::edit_perms(
+        bs.rt.block_on(admin_client::edit_perms(
             ca_addr,
             NodeKind::Client,
             id,

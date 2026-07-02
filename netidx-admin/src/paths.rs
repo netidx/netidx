@@ -110,10 +110,10 @@ pub fn user_ca_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
-/// `${dirs::config_dir}/netidx/conf-server.json`. No existence check.
-pub fn user_conf_server_config() -> Result<PathBuf> {
+/// `${dirs::config_dir}/netidx/admin-server.json`. No existence check.
+pub fn user_admin_server_config() -> Result<PathBuf> {
     let mut p = user_config_root()?;
-    p.push("conf-server.json");
+    p.push("admin-server.json");
     Ok(p)
 }
 
@@ -133,28 +133,28 @@ pub fn system_install_record() -> PathBuf {
     p
 }
 
-/// `/etc/netidx/conf-server.json` on unix, `C:\netidx\conf-server.json`
+/// `/etc/netidx/admin-server.json` on unix, `C:\netidx\admin-server.json`
 /// on windows.
-pub fn system_conf_server_config() -> PathBuf {
+pub fn system_admin_server_config() -> PathBuf {
     let mut p = system_config_root();
-    p.push("conf-server.json");
+    p.push("admin-server.json");
     p
 }
 
-/// Find the first existing conf-server config in standard order:
-/// `${dirs::config_dir}/netidx/conf-server.json` then the system path.
+/// Find the first existing admin-server config in standard order:
+/// `${dirs::config_dir}/netidx/admin-server.json` then the system path.
 /// Errors if none exists.
-pub fn discover_conf_server_config() -> Result<PathBuf> {
-    if let Ok(p) = user_conf_server_config()
+pub fn discover_admin_server_config() -> Result<PathBuf> {
+    if let Ok(p) = user_admin_server_config()
         && p.is_file()
     {
         return Ok(p);
     }
-    let sys = system_conf_server_config();
+    let sys = system_admin_server_config();
     if sys.is_file() {
         return Ok(sys);
     }
-    bail!("no conf-server config found in any standard location")
+    bail!("no admin-server config found in any standard location")
 }
 
 /// Find the first existing client config in the standard search order:

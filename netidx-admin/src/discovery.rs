@@ -1,6 +1,6 @@
-//! mDNS/DNS-SD advertisement + browsing for conf servers.
+//! mDNS/DNS-SD advertisement + browsing for admin servers.
 //!
-//! Conf servers register `_netidx-conf._tcp.local.` with a TXT record
+//! Admin servers register `_netidx-admin._tcp.local.` with a TXT record
 //! carrying the network domain, the host's roles, and a short CA
 //! fingerprint. **The beacon is a hint, never trusted**: browsing
 //! yields candidate addresses and labels for grouping in the setup UI;
@@ -9,7 +9,7 @@
 //! fingerprint. Anyone on the LAN can broadcast anything here; it buys
 //! them nothing.
 
-use crate::conf_proto::Role;
+use crate::admin_proto::Role;
 use anyhow::{Context, Result};
 use log::{debug, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const SERVICE_TYPE: &str = "_netidx-conf._tcp.local.";
+pub const SERVICE_TYPE: &str = "_netidx-admin._tcp.local.";
 
 /// TXT schema version — bump if the key set changes incompatibly.
 const TXT_VERSION: &str = "1";
@@ -78,7 +78,7 @@ impl Drop for Advertisement {
     }
 }
 
-/// Advertise a conf server at `listen`. When the listen IP is concrete
+/// Advertise a admin server at `listen`. When the listen IP is concrete
 /// it is advertised directly; an unspecified IP (0.0.0.0 / ::) lets the
 /// responder advertise every interface address automatically.
 pub fn advertise(
@@ -93,10 +93,10 @@ pub fn advertise(
     // to fingerprint + pid (two daemons of the same network on one
     // host would differ by pid).
     let instance = if listen.ip().is_unspecified() {
-        format!("netidx-conf-{}-{}", fp_short.to_lowercase(), std::process::id())
+        format!("netidx-admin-{}-{}", fp_short.to_lowercase(), std::process::id())
     } else {
         format!(
-            "netidx-conf-{}-{}",
+            "netidx-admin-{}-{}",
             listen.ip().to_string().replace([':', '.'], "-"),
             listen.port()
         )
@@ -135,7 +135,7 @@ pub fn advertise(
     Ok(Advertisement { daemon, fullname })
 }
 
-/// A conf server seen on the local network. Everything here is
+/// A admin server seen on the local network. Everything here is
 /// unauthenticated hint material.
 #[derive(Debug, Clone)]
 pub struct Discovered {
@@ -147,19 +147,19 @@ pub struct Discovered {
 }
 
 impl Discovered {
-    /// Candidate socket addresses for this conf server.
+    /// Candidate socket addresses for this admin server.
     pub fn socket_addrs(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         self.addrs.iter().map(|ip| SocketAddr::new(*ip, self.port))
     }
 }
 
-/// Browse for conf servers for `timeout`, blocking the calling thread.
+/// Browse for admin servers for `timeout`, blocking the calling thread.
 /// Returns every distinct service resolved in the window — possibly
 /// from multiple networks (group by `domain` + confirm fingerprints
 /// before trusting anything).
 pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
     let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
-    let receiver = daemon.browse(SERVICE_TYPE).context("browsing for conf servers")?;
+    let receiver = daemon.browse(SERVICE_TYPE).context("browsing for admin servers")?;
     // Keyed by service fullname so re-resolutions overwrite instead of
     // duplicating.
     let mut found: BTreeMap<String, Discovered> = BTreeMap::new();
@@ -182,7 +182,7 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
                     info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
                 if domain.is_empty() || addrs.is_empty() {
                     debug!(
-                        "ignoring malformed conf-server record {}",
+                        "ignoring malformed admin-server record {}",
                         info.get_fullname()
                     );
                     continue;
@@ -209,7 +209,7 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
 }
 
 /// Async wrapper for [`browse_blocking`] — runs it on the blocking
-/// pool so a conf server can browse mid-request without stalling the
+/// pool so a admin server can browse mid-request without stalling the
 /// runtime.
 pub async fn browse(timeout: Duration) -> Result<Vec<Discovered>> {
     tokio::task::spawn_blocking(move || browse_blocking(timeout))
@@ -249,7 +249,7 @@ mod tests {
 
     /// Live loopback advertise/browse. Ignored by default: multicast is
     /// unreliable in CI sandboxes. Run with
-    /// `cargo test -p netidx-conf discovery -- --ignored` on a real
+    /// `cargo test -p netidx-admin discovery -- --ignored` on a real
     /// machine.
     #[test]
     #[ignore]

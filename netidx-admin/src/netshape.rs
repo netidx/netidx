@@ -1,5 +1,5 @@
 //! Deployment-environment network-shape detection for the
-//! `conf install` flow. Decides the `--listen` / `--bind` defaults a
+//! `admin install` flow. Decides the `--listen` / `--bind` defaults a
 //! frontend should suggest for the resolver and publisher templates,
 //! by enumerating local interfaces and — only when the routable NIC is
 //! RFC1918 — racing the cloud-metadata services to discover a NAT'd
@@ -73,7 +73,7 @@ fn pick_advertised_v4_interface(
     first_private
 }
 
-/// Network shape of the host running `conf install`, used to drive
+/// Network shape of the host running `admin install`, used to drive
 /// the `--listen` / `--bind` defaults for the resolver and publisher
 /// templates. Computed once per CLI invocation; the resolver and
 /// publisher prompts both consume it so the suggested address(es)

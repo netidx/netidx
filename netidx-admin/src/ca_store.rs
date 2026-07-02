@@ -22,7 +22,7 @@
 //! wire-supplied string that becomes a file name): anything but
 //! `[0-9a-f]{32}` is rejected (no path traversal).
 
-use crate::{atomic, conf_proto::NodeKind};
+use crate::{atomic, admin_proto::NodeKind};
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub struct QueuedReq {
     /// and approval cannot be outrun. `None` ⇒ an ordinary request.
     #[serde(default)]
     pub renewal_of: Option<u64>,
-    /// `Some` ⇒ a conf-server enrollment.
+    /// `Some` ⇒ a admin-server enrollment.
     #[serde(default)]
     pub enroll_listen: Option<SocketAddr>,
 }
@@ -121,7 +121,7 @@ pub struct IssuedRecord {
     pub req: QueuedReq,
     pub serial: u64,
     /// The DNS SAN actually signed (== `req.requested_name`, or the
-    /// reserved serving name for a conf-server enrollment).
+    /// reserved serving name for a admin-server enrollment).
     pub name: String,
     /// SPKI fingerprint of the leaf public key (revoke UI glyph).
     pub spki_fp: String,
@@ -263,7 +263,7 @@ fn exclusive_lock(ca_dir: &Path) -> Result<std::fs::File> {
     match f.try_lock() {
         Ok(()) => Ok(f),
         Err(_) => anyhow::bail!(
-            "another conf server already owns this CA ({}); only one daemon \
+            "another admin server already owns this CA ({}); only one daemon \
              may hold it",
             ca_dir.display()
         ),
@@ -645,7 +645,7 @@ impl CAStore {
         groups: &[String],
     ) -> Result<()> {
         let now = now_unix();
-        let spki_fp = crate::conf_client::csr_fingerprint(&req.csr_pem)
+        let spki_fp = crate::admin_client::csr_fingerprint(&req.csr_pem)
             .map(|f| f.text())
             .unwrap_or_default();
         let record = IssuedRecord {
@@ -725,7 +725,7 @@ impl CAStore {
     // gives the scan→sign→rename serialization the old global `CRL_LOCK`
     // provided — one writer can't drop a just-revoked serial by racing.
 
-    /// Canonical CRL location: `<ca-dir>/crl.pem`. The conf server serves it
+    /// Canonical CRL location: `<ca-dir>/crl.pem`. The admin server serves it
     /// (`GetCrl`); the renewal daemon copies it beside each resolver's
     /// trusted bundle, where netidx's TLS acceptor picks it up.
     pub fn crl_path(&self) -> PathBuf {

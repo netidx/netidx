@@ -1,4 +1,4 @@
-//! The conf server's **delegation** request store — the resolver-hierarchy
+//! The admin server's **delegation** request store — the resolver-hierarchy
 //! analogue of [`ca_store`](crate::ca_store). One self-contained JSON
 //! record per request, one atomic write per state transition. The daemon
 //! is the sole owner of the CA dir, so an in-process mutex plus the
@@ -21,7 +21,7 @@
 use crate::{
     atomic,
     ca_store::{TTL, new_id, now_unix, valid_id},
-    conf_proto::ResolverAddr,
+    admin_proto::ResolverAddr,
 };
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -311,7 +311,7 @@ pub fn prune(ca_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf_proto::InfoAuth;
+    use crate::admin_proto::InfoAuth;
 
     fn ra(s: &str) -> ResolverAddr {
         ResolverAddr { addr: s.parse().unwrap(), auth: InfoAuth::Anonymous }

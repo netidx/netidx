@@ -3,11 +3,11 @@
 //! installed and **which network** it joined.
 //!
 //! The network half is load-bearing for the lifecycle ops (`status`,
-//! `update`, `join`): they trust a conf server's picture of the network
+//! `update`, `join`): they trust a admin server's picture of the network
 //! ("here are the resolvers, add the ones you're missing"), so they must
 //! first re-pin to the **same** CA identity the operator glyph-confirmed
 //! at install. Storing that identity here is what makes an unattended
-//! `update` safe rather than an MITM foothold — a rogue conf server with
+//! `update` safe rather than an MITM foothold — a rogue admin server with
 //! a different CA fingerprint is refused before anything is changed.
 
 use crate::{atomic, fingerprint::Fingerprint, paths};
@@ -20,8 +20,8 @@ use std::{
 };
 
 /// Which system-role template produced this install. Distinct from
-/// [`conf_proto::Role`](crate::conf_proto::Role), which enumerates the
-/// services a *conf server* offers (ca / resolver / id-map).
+/// [`admin_proto::Role`](crate::admin_proto::Role), which enumerates the
+/// services a *admin server* offers (ca / resolver / id-map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallRole {
     Workstation,
@@ -82,10 +82,10 @@ pub struct InstallRecord {
     /// workstation with no parent, or a fresh first resolver).
     #[serde(default)]
     pub network: Option<NetworkIdentity>,
-    /// A conf-server address known at install time, if any — a starting
+    /// A admin-server address known at install time, if any — a starting
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
-    pub conf_server: Option<SocketAddr>,
+    pub admin_server: Option<SocketAddr>,
     /// Unix seconds the record was written.
     pub created_unix: u64,
 }
@@ -97,7 +97,7 @@ impl InstallRecord {
         base: impl Into<String>,
         auth: impl Into<String>,
         network: Option<NetworkIdentity>,
-        conf_server: Option<SocketAddr>,
+        admin_server: Option<SocketAddr>,
     ) -> Self {
         let created_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -108,7 +108,7 @@ impl InstallRecord {
             base: base.into(),
             auth: auth.into(),
             network,
-            conf_server,
+            admin_server,
             created_unix,
         }
     }
@@ -179,6 +179,6 @@ mod tests {
         rec.save(&path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
         assert!(back.network.is_none());
-        assert!(back.conf_server.is_none());
+        assert!(back.admin_server.is_none());
     }
 }

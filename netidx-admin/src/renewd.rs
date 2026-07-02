@@ -8,11 +8,11 @@
 //! there's no mDNS chatter in every process. Each cycle it:
 //!
 //! 1. **Scans** this host's TLS identities — every client-config
-//!    identity, the resolver's (if one runs here), and the conf
+//!    identity, the resolver's (if one runs here), and the admin
 //!    server's serving cert (unix) — and for any certificate inside
 //!    its renewal window, queues a **verified renewal**: a fresh key +
 //!    CSR enqueued over a connection authenticated by the *current*
-//!    cert. The conf server marks it proof-of-possession; an admin (or
+//!    cert. The admin server marks it proof-of-possession; an admin (or
 //!    the `autorenew` daemon) approves without ceremony; we poll and
 //!    install the result atomically.
 //! 2. **Distributes the CRL**: pulls it from the CA and writes
@@ -21,15 +21,15 @@
 //!    via the CRL-watching acceptor.
 //!
 //! Everything here runs unattended over real PKI: the daemon verifies
-//! conf servers with webpki against the trust bundles it already has.
+//! admin servers with webpki against the trust bundles it already has.
 //! No TOFU, no glyphs — those are for humans establishing trust;
 //! renewal is continuation under trust already established.
 
-use crate::{atomic, conf_client, conf_proto::NodeKind, paths};
-// The `conf_proto` module alias is only needed by the unix-only renewal
+use crate::{atomic, admin_client, admin_proto::NodeKind, paths};
+// The `admin_proto` module alias is only needed by the unix-only renewal
 // path below (SERVING_SAN / SignResponse); `NodeKind` is cross-platform.
 #[cfg(unix)]
-use crate::{conf_local, conf_proto};
+use crate::{admin_local, admin_proto};
 use anyhow::{Context, Result, anyhow, bail};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub struct Identity {
 
 /// Scan the standard configs for every TLS identity on this host:
 /// client-config identities, resolver members (TLS auth), and — on
-/// unix — the conf server's serving identity. Deduped by certificate
+/// unix — the admin server's serving identity. Deduped by certificate
 /// path. Missing configs are skipped silently: a krb5 workstation has
 /// nothing to renew and that's fine.
 pub fn host_identities() -> Vec<Identity> {
@@ -113,14 +113,14 @@ pub fn host_identities() -> Vec<Identity> {
         }
     }
     #[cfg(unix)]
-    if let Ok(path) = paths::discover_conf_server_config() {
-        match crate::conf_server_config::ConfServerConfig::load(&path) {
+    if let Ok(path) = paths::discover_admin_server_config() {
+        match crate::admin_server_config::AdminServerConfig::load(&path) {
             Ok(cfg) => push(Identity {
                 certificate: cfg.serving_cert,
                 private_key: cfg.serving_key,
                 trusted: cfg.trusted,
             }),
-            Err(e) => warn!("renewd: could not read conf-server config {path:?}: {e:#}"),
+            Err(e) => warn!("renewd: could not read admin-server config {path:?}: {e:#}"),
         }
     }
     out
@@ -165,8 +165,8 @@ fn load_roots(trusted: &Path) -> Result<rustls::RootCertStore> {
     Ok(roots)
 }
 
-/// Find the network's CA conf server, verified against `roots`:
-/// an explicit override, the local conf-server config (unix), or mDNS
+/// Find the network's CA admin server, verified against `roots`:
+/// an explicit override, the local admin-server config (unix), or mDNS
 /// discovery + a PKI-verified peer walk. Unattended-safe — candidates
 /// that don't verify against our trust bundle are just skipped.
 async fn find_ca_addr(
@@ -177,8 +177,8 @@ async fn find_ca_addr(
         return Ok(s);
     }
     #[cfg(unix)]
-    if let Ok(path) = paths::discover_conf_server_config()
-        && let Ok(cfg) = crate::conf_server_config::ConfServerConfig::load(&path)
+    if let Ok(path) = paths::discover_admin_server_config()
+        && let Ok(cfg) = crate::admin_server_config::AdminServerConfig::load(&path)
     {
         if cfg.roles.ca.is_some() {
             let mut addr = cfg.listen;
@@ -202,7 +202,7 @@ async fn find_ca_addr(
             continue;
         }
         visited.push(addr);
-        match conf_client::get_info_pki(addr, NodeKind::Client, roots.clone()).await {
+        match admin_client::get_info_pki(addr, NodeKind::Client, roots.clone()).await {
             Ok(info) => {
                 if let Some(ca) = info.ca_addr {
                     let ca = if ca.ip().is_unspecified() {
@@ -216,11 +216,11 @@ async fn find_ca_addr(
             }
             Err(e) => {
                 // Wrong network or down — either way, not ours.
-                log::debug!("renewd: conf server {addr} not usable: {e:#}");
+                log::debug!("renewd: admin server {addr} not usable: {e:#}");
             }
         }
     }
-    bail!("no conf server holding the CA could be found")
+    bail!("no admin server holding the CA could be found")
 }
 
 /// Where a not-yet-installed renewal is persisted beside the
@@ -251,7 +251,7 @@ struct PersistedRenewal {
 /// install it. The fresh key is sealed the same way identity keys are.
 fn persist_pending(
     certificate: &Path,
-    pending: &conf_client::PendingRenewal,
+    pending: &admin_client::PendingRenewal,
 ) -> Result<()> {
     let key_path = pending_key_path(certificate);
     let _ =
@@ -268,7 +268,7 @@ fn persist_pending(
 }
 
 /// Reconstruct a renewal persisted by an earlier cycle, if any.
-fn load_pending(certificate: &Path) -> Result<Option<conf_client::PendingRenewal>> {
+fn load_pending(certificate: &Path) -> Result<Option<admin_client::PendingRenewal>> {
     let meta_path = pending_meta_path(certificate);
     let bytes = match std::fs::read(&meta_path) {
         Ok(b) => b,
@@ -280,7 +280,7 @@ fn load_pending(certificate: &Path) -> Result<Option<conf_client::PendingRenewal
     let meta: PersistedRenewal =
         serde_json::from_slice(&bytes).context("parsing persisted renewal state")?;
     let private_key_pem = read_pending_key(&pending_key_path(certificate))?;
-    Ok(Some(conf_client::PendingRenewal::resume(
+    Ok(Some(admin_client::PendingRenewal::resume(
         meta.request_id,
         meta.name,
         meta.our_spki,
@@ -333,25 +333,25 @@ async fn renew_identity(
         .with_context(|| format!("reading trust bundle {}", id.trusted.display()))?;
     // Co-located serving-cert re-mint over the local control socket. The
     // serving cert is the linchpin of TLS-to-self: once it expires, a TLS
-    // renewal to our own conf server can't connect to renew it — a permanent
+    // renewal to our own admin server can't connect to renew it — a permanent
     // deadlock that bricks the whole renewal chain. On the CA host we re-mint
-    // it locally over conf.sock (SO_PEERCRED superuser, no TLS), which works
+    // it locally over admin.sock (SO_PEERCRED superuser, no TLS), which works
     // even when the current serving cert is already expired. Scope is the
     // serving cert only; every other co-located identity recovers on TLS
     // once the serving cert is fresh again.
     #[cfg(unix)]
     {
-        if name == conf_proto::SERVING_SAN
-            && let Ok(cfg_path) = paths::discover_conf_server_config()
-            && let Ok(cfg) = crate::conf_server_config::ConfServerConfig::load(&cfg_path)
+        if name == admin_proto::SERVING_SAN
+            && let Ok(cfg_path) = paths::discover_admin_server_config()
+            && let Ok(cfg) = crate::admin_server_config::AdminServerConfig::load(&cfg_path)
             && cfg.roles.ca.is_some()
-            && conf_local::daemon_running(&cfg_path).await
+            && admin_local::daemon_running(&cfg_path).await
         {
-            let kc = conf_client::generate_key_and_csr(conf_proto::SERVING_SAN)?;
-            let our_spki = conf_client::csr_spki(&kc.csr_pem)?;
-            return match conf_local::enroll(&cfg_path, &kc.csr_pem, cfg.listen).await? {
-                conf_proto::SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
-                    conf_client::verify_issued_any(
+            let kc = admin_client::generate_key_and_csr(admin_proto::SERVING_SAN)?;
+            let our_spki = admin_client::csr_spki(&kc.csr_pem)?;
+            return match admin_local::enroll(&cfg_path, &kc.csr_pem, cfg.listen).await? {
+                admin_proto::SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
+                    admin_client::verify_issued_any(
                         &installed_pem,
                         name.as_str(),
                         &our_spki,
@@ -360,7 +360,7 @@ async fn renew_identity(
                     .context("verifying the locally re-minted serving cert")?;
                     install(
                         id,
-                        &conf_client::Issued {
+                        &admin_client::Issued {
                             cert_pem: signed_cert_pem,
                             private_key_pem: kc.private_key_pem,
                             trusted_pem,
@@ -368,10 +368,10 @@ async fn renew_identity(
                         },
                     )?;
                     clear_pending(&id.certificate);
-                    info!("renewd: re-minted serving cert {name} locally over conf.sock");
+                    info!("renewd: re-minted serving cert {name} locally over admin.sock");
                     Ok("renewed (local)")
                 }
-                conf_proto::SignResponse::Err { reason } => {
+                admin_proto::SignResponse::Err { reason } => {
                     bail!("local re-mint of the serving cert was refused: {reason}")
                 }
             };
@@ -395,7 +395,7 @@ async fn renew_identity(
             // resolution so a short-lived cert renews to the same short
             // window rather than silently rounding up to a day.
             let validity = Duration::from_secs(na.saturating_sub(nb).max(1));
-            let pending = conf_client::enqueue_renewal(
+            let pending = admin_client::enqueue_renewal(
                 ca_addr,
                 NodeKind::Client,
                 &name,
@@ -421,7 +421,7 @@ async fn renew_identity(
     let deadline = tokio::time::Instant::now() + APPROVAL_POLL;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        match conf_client::poll_renewal(
+        match admin_client::poll_renewal(
             ca_addr,
             NodeKind::Client,
             &pending,
@@ -430,22 +430,22 @@ async fn renew_identity(
         )
         .await?
         {
-            conf_client::PollOutcome::Pending => {
+            admin_client::PollOutcome::Pending => {
                 if tokio::time::Instant::now() >= deadline {
                     return Ok("awaiting approval");
                 }
             }
-            conf_client::PollOutcome::Issued(issued) => {
+            admin_client::PollOutcome::Issued(issued) => {
                 install(id, &issued)?;
                 clear_pending(&id.certificate);
                 info!("renewd: renewed {name}; running processes pick it up on restart");
                 return Ok("renewed");
             }
-            conf_client::PollOutcome::Denied(reason) => {
+            admin_client::PollOutcome::Denied(reason) => {
                 clear_pending(&id.certificate);
                 bail!("renewal of {name} was denied: {reason}");
             }
-            conf_client::PollOutcome::Expired => {
+            admin_client::PollOutcome::Expired => {
                 clear_pending(&id.certificate);
                 bail!("renewal request for {name} expired before approval");
             }
@@ -457,7 +457,7 @@ async fn renew_identity(
 /// (0600), then certificate, then the (possibly rolled) trust bundle —
 /// each write atomic.
 ///
-/// Chain preservation: a conf server's serving certificate file is a
+/// Chain preservation: a admin server's serving certificate file is a
 /// chain `[leaf, ca]` (clients read the CA from the end of it); plain
 /// client identities hold just the leaf. The renewal response carries
 /// the bare leaf, so whichever shape the file had is rebuilt — the
@@ -472,20 +472,20 @@ async fn renew_identity(
 /// intact and the daemon retries next tick.
 ///
 /// Trust anchoring: the trust bundle is never replaced wholesale with
-/// what the peer returned. [`conf_client::reconcile_trusted_bundle`]
+/// what the peer returned. [`admin_client::reconcile_trusted_bundle`]
 /// keeps the installed roots and folds in only same-key CA-cert refreshes
 /// that are either validly self-signed or signed by the installed cert's
 /// own issuer (an externally-signed intermediate's root) — a compromised
 /// peer cannot introduce a new trust anchor through renewal, nor overwrite
 /// an anchor whose issuer it does not control.
-fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
+fn install(id: &Identity, issued: &admin_client::Issued) -> Result<()> {
     let was_chain = std::fs::read(&id.certificate)
         .map(|pem| {
             rustls_pemfile::certs(&mut std::io::Cursor::new(pem)).flatten().count() > 1
         })
         .unwrap_or(false);
     let cert_payload = if was_chain {
-        let ca = conf_client::issuing_ca_pem(&issued.trusted_pem, &issued.cert_pem)
+        let ca = admin_client::issuing_ca_pem(&issued.trusted_pem, &issued.cert_pem)
             .context("rebuilding the serving chain")?;
         format!("{}{}", issued.cert_pem, ca)
     } else {
@@ -509,7 +509,7 @@ fn install(id: &Identity, issued: &conf_client::Issued) -> Result<()> {
         format!("reading current trust bundle {}", id.trusted.display())
     })?;
     let reconciled =
-        conf_client::reconcile_trusted_bundle(&installed_pem, &issued.trusted_pem)
+        admin_client::reconcile_trusted_bundle(&installed_pem, &issued.trusted_pem)
             .context("reconciling the renewed trust bundle")?;
     atomic::write_atomic(&id.trusted, reconciled.as_bytes(), 0o644)?;
     for w in &issued.warnings {
@@ -531,7 +531,7 @@ async fn distribute_crl(ids: &[Identity], server: Option<SocketAddr>) -> Result<
         done.push(id.trusted.as_path());
         let roots = load_roots(&id.trusted)?;
         let ca_addr = find_ca_addr(server, &roots).await?;
-        let crl = match conf_client::get_crl_pki(ca_addr, NodeKind::Client, roots).await?
+        let crl = match admin_client::get_crl_pki(ca_addr, NodeKind::Client, roots).await?
         {
             Some(pem) => pem,
             None => continue, // nothing ever revoked
