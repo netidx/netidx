@@ -4,15 +4,90 @@
 //! compares the presented CA against a required `--accept-glyph` fingerprint
 //! the operator obtained out of band.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use netidx_admin::{
     admin_client::CaIdentity,
     admin_proto::Secret,
     answer::{Answerer, Field, Progress},
     fingerprint::Fingerprint,
 };
-use std::io::Write;
+use std::{
+    io::Write,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 use zeroize::Zeroizing;
+
+/// Read a password from `--password-file` / `--password-stdin` (never argv) and
+/// parse an out-of-band `--accept-glyph` fingerprint into a [`FlagAnswerer`].
+/// Shared by install (`CommonFlags`) and remote-admin (`RemoteAuthFlags`).
+pub(crate) fn make_flag_answerer(
+    password_file: Option<&Path>,
+    password_stdin: bool,
+    accept_glyph: Option<&str>,
+) -> Result<FlagAnswerer> {
+    let password = if password_stdin {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).context("reading --password-stdin")?;
+        Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
+    } else if let Some(p) = password_file {
+        let s = std::fs::read_to_string(p)
+            .with_context(|| format!("reading --password-file {}", p.display()))?;
+        Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
+    } else {
+        None
+    };
+    let accept_glyph = match accept_glyph {
+        Some(s) => Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?),
+        None => None,
+    };
+    Ok(FlagAnswerer::new(password, accept_glyph))
+}
+
+/// The shared clap flags every remote-admin query/action carries: which admin
+/// server, the authorizing admin + password, and the out-of-band CA glyph.
+#[derive(clap::Args, Debug)]
+pub(crate) struct RemoteAuthFlags {
+    /// The admin server to run this against (`ip:port`, or a host resolved with
+    /// the default admin port). Defaults to this host's own admin server.
+    #[arg(long = "server")]
+    pub server: Option<String>,
+    /// The CA role-admin name authorizing this operation.
+    #[arg(long = "admin")]
+    pub admin: Option<String>,
+    /// Read the admin password from a file (never on the command line).
+    #[arg(long = "password-file")]
+    pub password_file: Option<PathBuf>,
+    /// Read the admin password from stdin.
+    #[arg(long = "password-stdin", conflicts_with = "password_file")]
+    pub password_stdin: bool,
+    /// The admin server's CA fingerprint, obtained out of band (view it with
+    /// `netidx admin ca fingerprint <ip:port>`). Required off the CA host;
+    /// auto-verified against the local CA cert on it.
+    #[arg(long = "accept-glyph")]
+    pub accept_glyph: Option<String>,
+    /// Override the CA directory used to auto-verify the server's identity.
+    #[arg(long = "ca-dir")]
+    pub ca_dir: Option<PathBuf>,
+}
+
+impl RemoteAuthFlags {
+    /// The strict answerer these flags drive.
+    pub(crate) fn answerer(&self) -> Result<FlagAnswerer> {
+        make_flag_answerer(
+            self.password_file.as_deref(),
+            self.password_stdin,
+            self.accept_glyph.as_deref(),
+        )
+    }
+
+    /// The explicit admin server, resolved from `--server` (host → `ip:port`
+    /// with the default admin port), or `None` for this host's own.
+    pub(crate) fn server_addr(&self) -> Result<Option<SocketAddr>> {
+        self.server.as_deref().map(super::init::resolve_admin_server_addr).transpose()
+    }
+}
 
 // Wired into the subcommand handlers as they convert to the Answerer.
 #[allow(dead_code)]

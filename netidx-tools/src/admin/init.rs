@@ -196,26 +196,11 @@ impl CommonFlags {
 /// the secret from `--password-file` / `--password-stdin` (never argv) and
 /// parse the out-of-band `--accept-glyph` fingerprint.
 fn build_answerer(common: &CommonFlags) -> Result<super::answer_cli::FlagAnswerer> {
-    let password = if common.password_stdin {
-        use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s).context("reading --password-stdin")?;
-        Some(zeroize::Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
-    } else if let Some(p) = &common.password_file {
-        let s = std::fs::read_to_string(p)
-            .with_context(|| format!("reading --password-file {}", p.display()))?;
-        Some(zeroize::Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
-    } else {
-        None
-    };
-    let accept_glyph = match &common.accept_glyph {
-        Some(s) => Some(
-            netidx_admin::fingerprint::Fingerprint::parse_text(s)
-                .context("parsing --accept-glyph")?,
-        ),
-        None => None,
-    };
-    Ok(super::answer_cli::FlagAnswerer::new(password, accept_glyph))
+    super::answer_cli::make_flag_answerer(
+        common.password_file.as_deref(),
+        common.password_stdin,
+        common.accept_glyph.as_deref(),
+    )
 }
 
 /// Drive a library install cascade to completion under one tokio runtime, then

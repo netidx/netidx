@@ -22,10 +22,16 @@ pub(crate) enum Cmd {
     /// (queues a request; the parent admin approves a subtree for it)
     #[cfg(unix)]
     AddParent(delegation::AddParentFlags),
-    /// review pending delegation requests as the parent admin: match the
-    /// code, approve (cluster-wide) or deny
+    /// list pending delegation requests as the parent admin (each keyed by its
+    /// request code, to match out of band before approving)
     #[cfg(unix)]
-    ReviewDelegation(delegation::ReviewFlags),
+    ListDelegations(delegation::ListDelegationFlags),
+    /// approve one pending delegation request by its code (cluster-wide)
+    #[cfg(unix)]
+    ApproveDelegation(delegation::ApproveDelegationFlags),
+    /// deny one pending delegation request by its code
+    #[cfg(unix)]
+    DenyDelegation(delegation::DenyDelegationFlags),
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -36,6 +42,10 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         #[cfg(unix)]
         Cmd::AddParent(f) => delegation::add_parent(f),
         #[cfg(unix)]
-        Cmd::ReviewDelegation(f) => delegation::review_delegation(f),
+        Cmd::ListDelegations(f) => delegation::list_delegations(f),
+        #[cfg(unix)]
+        Cmd::ApproveDelegation(f) => delegation::approve_delegation(f),
+        #[cfg(unix)]
+        Cmd::DenyDelegation(f) => delegation::deny_delegation(f),
     }
 }
