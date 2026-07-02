@@ -129,6 +129,8 @@ pub enum Field {
     RevokeReason,
     /// The unix uid a newly signed offline identity maps to.
     Uid,
+    /// Whether to sign a CSR with the SAN it already carries (offline `ca sign`).
+    AcceptCsrSan,
     /// Whether an admin may mint and scope other admins.
     MayManageAdmins,
 }
@@ -425,6 +427,13 @@ impl Field {
                 label: "unix uid",
                 help: "The unix user id a newly signed identity maps to in the \
                        resolver's id-map.",
+            },
+            AcceptCsrSan => FieldInfo {
+                flag: "--accept-csr-san",
+                label: "accept the CSR's SAN?",
+                help: "Embed the SubjectAltName the CSR already carries in the \
+                       signed cert. The CA is authoritative — pass --san \
+                       <kind>:<value> instead to override what the CSR requested.",
             },
             MayManageAdmins => FieldInfo {
                 flag: "--may-manage-admins",

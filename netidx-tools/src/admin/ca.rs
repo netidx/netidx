@@ -2,16 +2,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client, admin_local,
-    admin_ops::{self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops},
+    admin_ops::{
+        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
+    },
     admin_proto::{self, NodeKind},
     atomic,
-    ca::{self, Ca, CaParams, IssueParams, SanEntry, Subject},
+    ca::{self, Ca, CaParams, SanEntry, Subject},
     ca_vault,
     fingerprint::{ColorMode, Fingerprint},
-    offline_ca::{
-        default_cert_filename, default_csr_filename, ensure_san_not_reserved, first_dns_san,
-        issue_and_record, parse_san_one, parse_sans, sign_and_record,
-    },
+    offline_ca::{default_csr_filename, parse_san_one, parse_sans},
     paths, tls,
 };
 use std::{
@@ -21,7 +20,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-use super::{answer_cli::RemoteAuthFlags, init, prompt, service};
+use super::{
+    answer_cli::{RemoteAuthFlags, make_offline_answerer},
+    init, prompt, service,
+};
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
@@ -35,6 +37,8 @@ pub(crate) enum Cmd {
     Issue(IssueArgs),
     /// sign an externally-supplied CSR file with a local CA
     Sign(SignArgs),
+    /// print a CSR's contents (CN, key bits, SAN) without signing it
+    InspectCsr(InspectCsrArgs),
     /// list the pending enrollment queue (each request keyed by its code)
     Queue(QueueArgs),
     /// approve one pending enrollment request by its code (or `--renewals` to
@@ -465,9 +469,33 @@ pub(crate) struct InitParams {
     pub external_sign: bool,
 }
 
+/// The recovery-password flags shared by the offline CA-vault commands
+/// (`ca sign` / `ca issue`). The CA unlocks with the box's autorenew keytab
+/// when present, so these are only consulted on a fall back to the off-box
+/// recovery password (or a legacy encrypted key).
+#[derive(Args, Debug)]
+pub(crate) struct RecoveryAuth {
+    /// Read the CA recovery password from a file (never on the command line).
+    /// Only needed when the box's autorenew keytab can't unlock the CA.
+    #[arg(long = "recovery-password-file")]
+    pub recovery_password_file: Option<PathBuf>,
+    /// Read the CA recovery password from stdin.
+    #[arg(long = "recovery-password-stdin", conflicts_with = "recovery_password_file")]
+    pub recovery_password_stdin: bool,
+}
+
+impl RecoveryAuth {
+    fn answerer(&self) -> Result<super::answer_cli::FlagAnswerer> {
+        make_offline_answerer(
+            self.recovery_password_file.as_deref(),
+            self.recovery_password_stdin,
+        )
+    }
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct IssueArgs {
-    /// Common Name for the issued cert. Prompted when omitted.
+    /// Common Name for the issued cert. Required.
     #[arg(long)]
     pub cn: Option<String>,
     #[arg(long)]
@@ -487,10 +515,11 @@ pub(crate) struct IssueArgs {
     /// Override the CA's directory. Defaults to `${basedir}/ca/`.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
-    /// Where to write the issued `private.key` + `certificate.pem`.
-    /// Prompted when omitted.
+    /// Where to write the issued `private.key` + `certificate.pem`. Required.
     #[arg(short, long = "out")]
     pub out_dir: Option<PathBuf>,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 #[derive(Args, Debug)]
@@ -553,15 +582,23 @@ pub(crate) struct SignArgs {
     /// CN).
     #[arg(short, long)]
     pub out: Option<PathBuf>,
-    /// Skip the post-sign id-map registration prompt. The default on
-    /// a TTY (when a local id-map exists) is to prompt for groups
-    /// and add the identity to the map; this flag suppresses that
-    /// entirely. Non-TTY callers already skip the prompt by default,
-    /// so this is mostly useful for interactive sessions where you
-    /// want to handle id-map registration separately (or not at
-    /// all).
+    /// Skip the post-sign id-map registration entirely. Interactive
+    /// sessions otherwise prompt (when a local id-map exists); scripts
+    /// register explicitly with `--id-map-group`.
     #[arg(long)]
     pub no_id_map: bool,
+    /// Register the signed identity in the local id-map under these groups
+    /// (repeatable; the first is primary). Enables non-interactive id-map
+    /// registration; requires `--uid`. Omit to prompt (interactive) or skip
+    /// (strict).
+    #[arg(long = "id-map-group", num_args = 1)]
+    pub id_map_group: Vec<String>,
+    /// The unix uid the signed identity maps to. Required with
+    /// `--id-map-group`.
+    #[arg(long, requires = "id_map_group")]
+    pub uid: Option<u32>,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -569,6 +606,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Init(p) => init(p),
         Cmd::Issue(p) => issue(p),
         Cmd::Sign(p) => sign(p),
+        Cmd::InspectCsr(p) => inspect_csr(p),
         Cmd::Queue(f) => queue(f),
         Cmd::Approve(p) => approve(p),
         Cmd::Deny(f) => deny(f),
@@ -599,9 +637,11 @@ fn autorenew_policy() -> ca_vault::Policy {
 }
 
 /// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
-/// dir: never back this file up; recreating it is one `--rotate`.
+/// dir: never back this file up; recreating it is one `--rotate`. The
+/// canonical definition lives in the library (offline sign/issue reads it
+/// too); this delegates so the two never drift.
 fn autorenew_keytab_path() -> Result<PathBuf> {
-    Ok(paths::user_config_root()?.join("autorenew.keytab"))
+    netidx_admin::offline_ca::autorenew_keytab_path()
 }
 
 /// A long random password for the autorenew slot (256 bits, hex). The
@@ -2090,40 +2130,38 @@ pub(super) fn collect_existing_password(label: &str) -> Result<String> {
 
 fn issue(p: IssueArgs) -> Result<()> {
     let directory = ca_dir_for(p.ca_dir)?;
-    let cn = prompt::required_string("certificate common name", p.cn)?;
-    let out_dir = prompt::required_path("output directory for key + cert", p.out_dir)?;
-    let ca = open_ca(&directory)?;
+    let cn = p.cn.ok_or_else(|| anyhow!("--cn is required (the certificate common name)"))?;
+    let out_dir = p
+        .out_dir
+        .ok_or_else(|| anyhow!("--out is required (the output dir for key + cert)"))?;
     let san = parse_sans(&p.san, &cn)?;
-    ensure_san_not_reserved(&san)?;
-    let issued = issue_and_record(
-        &ca,
-        NodeKind::Client,
-        IssueParams {
-            subject: Subject {
-                common_name: cn.clone(),
-                country: p.country,
-                state: p.state,
-                locality: p.locality,
-                organization: p.organization,
-            },
-            san,
-            key_bits: p.key_bits,
-            validity: p.validity,
-            out_dir,
-            // Leaf key encryption is wired through the install flow
-            // (`netidx admin init`), where the engine knows how to plumb
-            // an askpass entry into the emitted client config. The bare
-            // `ca issue` CLI deliberately stays unencrypted: callers
-            // here are doing manual cert issuance and don't necessarily
-            // have a netidx config to receive the askpass.
-            password: None,
-            serial: 0, // assigned by issue_and_record
-        },
-    )?;
+    let subject = Subject {
+        common_name: cn,
+        country: p.country,
+        state: p.state,
+        locality: p.locality,
+        organization: p.organization,
+    };
+    let mut ans = p.recovery.answerer()?;
+    // Leaf key encryption is wired through the install flow (`netidx admin
+    // init`), where the engine knows how to plumb an askpass entry into the
+    // emitted client config. The bare `ca issue` CLI deliberately stays
+    // unencrypted: callers here are doing manual cert issuance and don't
+    // necessarily have a netidx config to receive the askpass.
+    let out = runtime()?.block_on(offline_ops::ca_issue(
+        &mut ans,
+        directory,
+        subject,
+        san,
+        p.key_bits,
+        p.validity,
+        out_dir,
+        None,
+    ))?;
     println!("issued cert:");
-    println!("  cn:          {}", cn);
-    println!("  private key: {}", issued.private_key.display());
-    println!("  certificate: {}", issued.certificate.display());
+    println!("  cn:          {}", out.cn);
+    println!("  private key: {}", out.private_key.display());
+    println!("  certificate: {}", out.certificate.display());
     Ok(())
 }
 
@@ -2181,12 +2219,108 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
 }
 
 fn sign(mut p: SignArgs) -> Result<()> {
-    let csr_path = prompt::required_path("path to the CSR to sign", p.csr_path.take())?;
+    let csr_path = p
+        .csr_path
+        .take()
+        .ok_or_else(|| anyhow!("a CSR path is required (the PEM CSR to sign)"))?;
     let directory = ca_dir_for(p.ca_dir.take())?;
-    let ca = open_ca(&directory)?;
     let csr_pem = std::fs::read(&csr_path)
         .with_context(|| format!("reading CSR {}", csr_path.display()))?;
+    let san = sign_san_choice(&p)?;
+    let id_map = id_map_choice(&p);
+    let mut ans = p.recovery.answerer()?;
+    let out = runtime()?.block_on(offline_ops::ca_sign(
+        &mut ans,
+        directory,
+        csr_pem,
+        san,
+        p.validity,
+        p.out.take(),
+        id_map,
+    ))?;
+    print_sign_outcome(&csr_path, &out);
+    Ok(())
+}
+
+/// Build the SAN choice from `--san` / `--accept-csr-san`, preserving the
+/// mutually-exclusive decision table (the library resolves what `Ask` means).
+fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
+    Ok(match (p.san.is_empty(), p.accept_csr_san) {
+        (false, false) => {
+            let san = p.san.iter().map(|s| parse_san_one(s)).collect::<Result<Vec<_>>>()?;
+            offline_ops::SignSan::Explicit(san)
+        }
+        (false, true) => bail!(
+            "pass either --san <kind>:<value> (one or more) or --accept-csr-san, not both"
+        ),
+        (true, true) => offline_ops::SignSan::InheritCsr,
+        (true, false) => offline_ops::SignSan::Ask,
+    })
+}
+
+/// Build the post-sign id-map action from `--no-id-map` / `--id-map-group` /
+/// `--uid` (`--uid` requires `--id-map-group`, enforced by clap).
+fn id_map_choice(p: &SignArgs) -> offline_ops::IdMapAction {
+    if p.no_id_map {
+        offline_ops::IdMapAction::Skip
+    } else if !p.id_map_group.is_empty() {
+        offline_ops::IdMapAction::Register { groups: p.id_map_group.clone(), uid: p.uid }
+    } else {
+        offline_ops::IdMapAction::Ask
+    }
+}
+
+fn print_sign_outcome(csr_path: &Path, out: &offline_ops::SignOutcome) {
+    print_csr_summary(csr_path, &out.summary);
+    println!("  signing SAN:");
+    for entry in &out.san {
+        println!("    - {}", san_display(entry));
+    }
+    println!("\nsigned cert (0644): {}", out.out.display());
+    print_id_map_result(&out.id_map);
+}
+
+fn print_id_map_result(r: &offline_ops::IdMapResult) {
+    use offline_ops::IdMapResult;
+    match r {
+        IdMapResult::NotRequested | IdMapResult::Declined => {}
+        IdMapResult::NoIdentityName => {
+            println!("(no DNS SAN / CN — skipping id-map registration)")
+        }
+        IdMapResult::NoMap { path } => println!(
+            "(no local id-map at {} — skipping registration; create one with \
+             `netidx admin component id-map init`)",
+            path.display(),
+        ),
+        IdMapResult::Registered(reg) => match &reg.previous {
+            Some(old) => println!(
+                "updated id-map: {} (was uid={} primary={})",
+                reg.name, old.uid, old.primary_group,
+            ),
+            None => {
+                println!("added to id-map: {} uid={} primary={}", reg.name, reg.uid, reg.primary)
+            }
+        },
+    }
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InspectCsrArgs {
+    /// Path to the CSR (PEM-encoded) to inspect.
+    pub csr_path: PathBuf,
+}
+
+fn inspect_csr(p: InspectCsrArgs) -> Result<()> {
+    let csr_pem = std::fs::read(&p.csr_path)
+        .with_context(|| format!("reading CSR {}", p.csr_path.display()))?;
     let summary = ca::inspect_csr(&csr_pem).context("inspecting CSR")?;
+    print_csr_summary(&p.csr_path, &summary);
+    Ok(())
+}
+
+/// Print the standard CSR summary block (`path`, `cn`, `key bits`, `san`),
+/// shared by `sign` and `inspect-csr`.
+fn print_csr_summary(csr_path: &Path, summary: &ca::CsrSummary) {
     println!("CSR summary:");
     println!("  path:        {}", csr_path.display());
     println!("  cn:          {}", summary.common_name.as_deref().unwrap_or("(none)"));
@@ -2199,127 +2333,6 @@ fn sign(mut p: SignArgs) -> Result<()> {
             println!("    - {}", san_display(entry));
         }
     }
-    // `--out` defaults to `./<csr-cn>.pem` once we've read the CN out
-    // of the CSR (falling back to `./certificate.pem` for a CN-less
-    // CSR). Certs are cheap to regenerate, so the default overwrites
-    // freely.
-    let out = p
-        .out
-        .take()
-        .unwrap_or_else(|| default_cert_filename(summary.common_name.as_deref()));
-    let san = resolve_sign_san(&p, &summary)?;
-    ensure_san_not_reserved(&san)?;
-    println!("  signing SAN:");
-    for entry in &san {
-        println!("    - {}", san_display(entry));
-    }
-    let name =
-        first_dns_san(&san).or_else(|| summary.common_name.clone()).unwrap_or_default();
-    let cert_pem =
-        sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, p.validity)?;
-    atomic::write_atomic(&out, &cert_pem, 0o644)
-        .with_context(|| format!("writing certificate to {:?}", out))?;
-    println!("\nsigned cert (0644): {}", out.display());
-    maybe_register_in_id_map(&summary, &san, p.no_id_map)?;
-    Ok(())
-}
-
-/// After signing a cert, optionally register the new identity in
-/// the local id-map (the file the resolver consults to map TLS SANs
-/// to unix uid + groups). Silently skipped when:
-/// - `--no-id-map` was passed, or
-/// - no local id-map exists at the canonical user path, or
-/// - the CSR carries no usable identity name (no SAN DNS entry and
-///   no CN), or
-/// - stdin is not a TTY (scripts use `netidx admin component id-map set-user`
-///   for explicit non-interactive registration; we don't want a
-///   level-1 prompt to silently write a wrong UID).
-///
-/// On a TTY with an id-map present, prompts for groups (level-1,
-/// default `users`) and uid (level-1, default = max(existing) + 1
-/// starting from 1000). First group in the list is the primary;
-/// the rest become secondary memberships. Refuses any group not
-/// already in the map — there's no "create group on the fly" path
-/// here because that would let a typo silently introduce a
-/// privilege-bearing group.
-fn maybe_register_in_id_map(
-    summary: &ca::CsrSummary,
-    san: &[SanEntry],
-    no_id_map: bool,
-) -> Result<()> {
-    use netidx_admin::id_map;
-    if no_id_map {
-        return Ok(());
-    }
-    if !prompt::stdin_is_tty() {
-        return Ok(());
-    }
-    // The identity NAME in the id-map is what the resolver sees on
-    // the wire: the cert's SAN alt-name, i.e. the first DNS SAN.
-    // Fall back to the CN if no DNS SAN (unlikely; netidx rejects
-    // such certs anyway, but the prompt path shouldn't crash).
-    let identity_name = san
-        .iter()
-        .find_map(|s| if let SanEntry::Dns(d) = s { Some(d.clone()) } else { None })
-        .or_else(|| summary.common_name.clone());
-    let identity_name = match identity_name {
-        Some(n) => n,
-        None => {
-            println!("(no DNS SAN / CN — skipping id-map registration)");
-            return Ok(());
-        }
-    };
-    let map_path = id_map::user_id_map_path()?;
-    let mut map = match id_map::load(&map_path) {
-        Ok(m) => m,
-        Err(_) => {
-            // Most common cause: no map yet. Tell the operator
-            // exactly what's missing so they can `id-map init` if
-            // they want one, but don't fail the sign.
-            println!(
-                "(no local id-map at {} — skipping registration; \
-                 create one with `netidx admin component id-map init`)",
-                map_path.display(),
-            );
-            return Ok(());
-        }
-    };
-    if !prompt::confirm(
-        &format!("register identity {identity_name:?} in the local id-map?"),
-        true,
-    )? {
-        return Ok(());
-    }
-    // List groups so the operator knows what's valid; sorted for
-    // readable output and stable across runs.
-    let mut group_names: Vec<&str> = map.groups.keys().map(|k| k.as_str()).collect();
-    group_names.sort_unstable();
-    println!("available groups: {}", group_names.join(", "));
-    let groups_str = prompt::string_with_default(
-        "groups (comma-separated; first is primary)",
-        None,
-        "users",
-    )?;
-    let groups: Vec<&str> =
-        groups_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    if groups.is_empty() {
-        bail!("no groups specified — at least the primary group is required");
-    }
-    let (primary, secondary): (&str, &[&str]) = (groups[0], &groups[1..]);
-    let uid: u32 =
-        prompt::parsed_with_default("uid", None, &id_map::next_uid(&map).to_string())?;
-    let prev =
-        id_map::upsert_identity(&mut map, &identity_name, uid, primary, secondary)?;
-    id_map::save(&map_path, &map)?;
-    match prev {
-        Some(old) => println!(
-            "updated id-map: {identity_name} (was uid={} primary={})",
-            old.uid,
-            old.primary_group.as_str(),
-        ),
-        None => println!("added to id-map: {identity_name} uid={uid} primary={primary}"),
-    }
-    Ok(())
 }
 
 /// `ca queue` — list the pending enrollment queue, each request keyed by its
@@ -2477,56 +2490,6 @@ pub(super) fn fmt_age(secs: u64) -> String {
     }
 }
 
-/// Decide which SAN to embed in the signed cert.
-///
-/// - `--san …` (one or more) → use those as-is, override the CSR.
-/// - `--accept-csr-san` → use whatever the CSR carries (no prompt).
-/// - Both flags → error: the explicit choice makes the implicit
-///   acceptance redundant, and combining them would quietly hide
-///   whether `--san` came from the operator's intent or from an
-///   earlier shell-history copy of the CSR's contents.
-/// - Neither flag → level-1 prompt: the CSR summary (incl. its SAN)
-///   was already printed by `sign`; ask the admin whether to accept
-///   that SAN as-is, defaulting to yes. A non-TTY caller also takes
-///   the default — scripts that want to be explicit can still pass
-///   `--san` or `--accept-csr-san`. The bare "neither flag" case
-///   used to bail and tell the operator to re-run with one of the
-///   flags; that was a UX wart for the common interactive case.
-fn resolve_sign_san(p: &SignArgs, summary: &ca::CsrSummary) -> Result<Vec<SanEntry>> {
-    match (p.san.is_empty(), p.accept_csr_san) {
-        (false, false) => p.san.iter().map(|s| parse_san_one(s)).collect(),
-        (true, true) => {
-            if summary.san.is_empty() {
-                bail!(
-                    "--accept-csr-san was set but the CSR carries no SAN; pass \
-                     --san <kind>:<value> to specify one"
-                );
-            }
-            Ok(summary.san.clone())
-        }
-        (false, true) => bail!(
-            "pass either --san <kind>:<value> (one or more) or --accept-csr-san, \
-             not both"
-        ),
-        (true, false) => {
-            if summary.san.is_empty() {
-                bail!(
-                    "CSR carries no SAN to inherit; pass --san <kind>:<value> \
-                     (one or more) to specify one"
-                );
-            }
-            if prompt::confirm("use the CSR's SAN as the signed cert's SAN?", true)? {
-                Ok(summary.san.clone())
-            } else {
-                bail!(
-                    "rejected — re-run with --san <kind>:<value> (one or \
-                     more) to override the CSR's SAN"
-                );
-            }
-        }
-    }
-}
-
 fn san_display(s: &SanEntry) -> String {
     match s {
         SanEntry::Dns(d) => format!("dns:{d}"),
@@ -2607,96 +2570,6 @@ fn list() -> Result<()> {
 // resolver host is commonly the CA host too, and making that one-step
 // is the whole point.
 
-/// Open the CA at `dir` as a signer. Handles both formats:
-/// - **vaulted** (current): prompt for an admin password and unlock the
-///   keyslot vault to recover the signing key.
-/// - **legacy** `private.key`: unencrypted open, prompting only if the
-///   key turns out to be encrypted.
-///
-/// A non-TTY caller that would need a password bails rather than
-/// hanging. This is the single CA-open entry point — every command that
-/// signs (`issue`, `sign`, the resolver's local-CA issuance) goes
-/// through it, so they all transparently handle vaulted CAs.
-pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
-    if ca_vault::CAVault::exists(dir) {
-        // Offline issuance takes the CA flock for the whole unlock — a running
-        // admin server owns the CA, so this fails fast if one is up. The handle
-        // drops at the `return` below, releasing the flock before the issue /
-        // sign paths re-open their own CaDir for serial allocation.
-        let cadir = netidx_admin::ca_store::CaDir::open(dir)
-            .context("opening the CA to sign offline (a running admin server owns it — stop it first)")?;
-        // Daily on-box use unlocks with the box's own autorenew credential —
-        // read + unsealed from its keytab, no human secret typed. Fall back
-        // to the recovery password only when the keytab is absent or doesn't
-        // unlock this CA (an offline CA with no autorenew, a different CA dir,
-        // or a dead TPM).
-        let from_keytab =
-            autorenew_keytab_path().ok().filter(|k| k.exists()).and_then(|keytab| {
-                match netidx_admin::admin_server::read_autorenew_password(&keytab) {
-                    Ok(pw) => match cadir.vault.read().unlock(&pw) {
-                        Ok(u) => Some(u),
-                        Err(e) => {
-                            eprintln!(
-                                "note: the autorenew keytab did not unlock this CA \
-                                 ({e:#}); falling back to the recovery password"
-                            );
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!(
-                            "note: could not read the autorenew keytab ({e:#}); \
-                             falling back to the recovery password"
-                        );
-                        None
-                    }
-                }
-            });
-        let unlocked = match from_keytab {
-            Some(u) => u,
-            None => {
-                if !prompt::stdin_is_tty() {
-                    bail!(
-                        "the CA at {} is vault-protected and the autorenew keytab did \
-                         not unlock it; it needs the recovery password, but stdin is \
-                         not a TTY",
-                        dir.display(),
-                    );
-                }
-                let typed = Zeroizing::new(collect_existing_password(
-                    "the CA recovery password (from your safe; printed once at init)",
-                )?);
-                let pw = ca_vault::normalize_recovery_password(&typed);
-                cadir.vault.read().unlock(&pw).with_context(|| {
-                    format!("unlocking the CA vault at {}", dir.display())
-                })?
-            }
-        };
-        let cert = std::fs::read(dir.join("certificate.pem"))
-            .with_context(|| format!("reading CA cert in {}", dir.display()))?;
-        return Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
-            .with_context(|| format!("loading CA at {}", dir.display()));
-    }
-    // Legacy `private.key` CA.
-    match Ca::open(dir, None) {
-        Ok(ca) => Ok(ca),
-        Err(e) if format!("{e:#}").contains("encrypted") => {
-            if !prompt::stdin_is_tty() {
-                bail!(
-                    "the CA at {} has an encrypted private key and stdin is \
-                     not a TTY; cannot prompt for the password",
-                    dir.display(),
-                );
-            }
-            let pw = rpassword::prompt_password("CA password: ")
-                .context("reading CA password")?;
-            Ca::open(dir, Some(&pw))
-                .with_context(|| format!("opening CA at {}", dir.display()))
-        }
-        Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
-    }
-}
-
 /// Refuse to mint the admin server's reserved serving name from the
 /// local CLI, mirroring the network sign path's refusal. The reserved
 /// name is the linchpin of the trust model; only the admin-server setup
@@ -2763,6 +2636,9 @@ mod tests {
             ca_dir: Some(ca_dir.clone()),
             out: Some(cert_path.clone()),
             no_id_map: true,
+            id_map_group: vec![],
+            uid: None,
+            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
         })
         .unwrap();
         assert!(cert_path.exists());
@@ -2774,14 +2650,12 @@ mod tests {
     }
 
     #[test]
-    fn sign_without_flags_accepts_csr_san_by_default() {
-        // With neither --san nor --accept-csr-san, `sign` now drops
-        // through a level-1 prompt (default Y). In test builds
-        // `prompt::stdin_is_tty()` is pinned to `false`, so
-        // `prompt::confirm` returns the default, which means signing
-        // succeeds and the resulting cert carries the CSR's SAN. The
-        // interactive path is "type 'n' to reject and bail" — covered
-        // by smoke-testing the built binary.
+    fn sign_without_san_flags_errors_in_strict_mode() {
+        // With neither --san nor --accept-csr-san, the strict FlagAnswerer
+        // has no way to answer the "inherit the CSR's SAN?" question, so it
+        // errors naming the flag rather than silently defaulting. This is
+        // the strict-mode contract: every decision is explicit. (The
+        // interactive TUI answerer prompts instead.)
         let scratch = tempfile::tempdir().unwrap();
         let csr_path = scratch.path().join("client.csr");
         let key_path = scratch.path().join("client.key");
@@ -2809,29 +2683,31 @@ mod tests {
             None,
         )
         .unwrap();
-        let out_cert = scratch.path().join("out.pem");
-        sign(SignArgs {
+        let err = sign(SignArgs {
             csr_path: Some(csr_path),
             san: vec![],
             accept_csr_san: false,
             validity: Duration::from_secs(30 * 86400),
             ca_dir: Some(ca_dir),
-            out: Some(out_cert.clone()),
+            out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
+            id_map_group: vec![],
+            uid: None,
+            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
         })
-        .unwrap();
-        // The (true, false) branch went through the prompt-default-Y
-        // path: same code as `accept_csr_san=true`, so it would have
-        // bailed pre-change with "must pass either --san or
-        // --accept-csr-san". Output cert is a real PEM X.509.
-        netidx_admin::tls::validate_pem_cert_file(&out_cert).unwrap();
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--accept-csr-san"),
+            "error should name --accept-csr-san: {msg}"
+        );
     }
 
     #[test]
-    fn sign_without_flags_bails_when_csr_has_no_san() {
-        // The "no SAN to inherit" branch — there's nothing to default
-        // to, so the confirm-prompt path is skipped and we bail with
-        // a clear "pass --san …" message regardless of TTY.
+    fn sign_accept_csr_san_bails_when_csr_has_no_san() {
+        // The "no SAN to inherit" branch: --accept-csr-san on a CSR that
+        // carries no SAN has nothing to inherit, so it bails telling the
+        // operator to pass --san.
         let scratch = tempfile::tempdir().unwrap();
         // Build a CSR with no SAN by going through generate_csr directly
         // (request() always wires up dns:<cn> by default).
@@ -2853,11 +2729,14 @@ mod tests {
         let err = sign(SignArgs {
             csr_path: Some(csr_path),
             san: vec![],
-            accept_csr_san: false,
+            accept_csr_san: true,
             validity: Duration::from_secs(30 * 86400),
             ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
+            id_map_group: vec![],
+            uid: None,
+            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
         })
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -2901,6 +2780,9 @@ mod tests {
             ca_dir: Some(ca_dir),
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
+            id_map_group: vec![],
+            uid: None,
+            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("not both"));

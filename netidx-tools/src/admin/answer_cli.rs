@@ -26,23 +26,49 @@ pub(crate) fn make_flag_answerer(
     password_stdin: bool,
     accept_glyph: Option<&str>,
 ) -> Result<FlagAnswerer> {
-    let password = if password_stdin {
-        use std::io::Read;
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s).context("reading --password-stdin")?;
-        Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
-    } else if let Some(p) = password_file {
-        let s = std::fs::read_to_string(p)
-            .with_context(|| format!("reading --password-file {}", p.display()))?;
-        Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string()))
-    } else {
-        None
-    };
+    let password = read_secret(password_file, password_stdin, ("--password-file", "--password-stdin"))?;
     let accept_glyph = match accept_glyph {
         Some(s) => Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?),
         None => None,
     };
     Ok(FlagAnswerer::new(password, accept_glyph))
+}
+
+/// The strict answerer for offline CA-vault ops (`ca sign` / `ca issue`): the
+/// only secret is the CA **recovery** password, read from
+/// `--recovery-password-file` / `--recovery-password-stdin` (never argv), and
+/// there is no admin server to glyph-confirm. The flag names are threaded into
+/// the answerer so a missing-secret error cites the right flags.
+pub(crate) fn make_offline_answerer(
+    recovery_password_file: Option<&Path>,
+    recovery_password_stdin: bool,
+) -> Result<FlagAnswerer> {
+    let flags = ("--recovery-password-file", "--recovery-password-stdin");
+    let password = read_secret(recovery_password_file, recovery_password_stdin, flags)?;
+    Ok(FlagAnswerer::with_secret_flags(password, None, flags))
+}
+
+/// Read a password once from a `--*-file` path or stdin (never argv), trimming a
+/// single trailing newline. `flags` is only used to name the source in errors.
+fn read_secret(
+    file: Option<&Path>,
+    stdin: bool,
+    flags: (&'static str, &'static str),
+) -> Result<Option<Zeroizing<String>>> {
+    if stdin {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .with_context(|| format!("reading {}", flags.1))?;
+        Ok(Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string())))
+    } else if let Some(p) = file {
+        let s = std::fs::read_to_string(p)
+            .with_context(|| format!("reading {} {}", flags.0, p.display()))?;
+        Ok(Some(Zeroizing::new(s.trim_end_matches(['\n', '\r']).to_string())))
+    } else {
+        Ok(None)
+    }
 }
 
 /// The shared clap flags every remote-admin query/action carries: which admin
@@ -92,12 +118,16 @@ impl RemoteAuthFlags {
 // Wired into the subcommand handlers as they convert to the Answerer.
 #[allow(dead_code)]
 pub(crate) struct FlagAnswerer {
-    /// A password read once from `--password-file` / `--password-stdin`, handed
-    /// to any `secret()` call that has no inline value.
+    /// A password read once from the secret flags, handed to any `secret()`
+    /// call that has no inline value.
     password: Option<Zeroizing<String>>,
     /// The CA fingerprint the operator obtained out of band; a presented
     /// identity must match it (there is no interactive glyph confirm here).
     accept_glyph: Option<Fingerprint>,
+    /// The (`--*-file`, `--*-stdin`) flag names a missing-secret error should
+    /// cite — `--password-file` for remote admin, `--recovery-password-file`
+    /// for offline CA-vault ops.
+    secret_flags: (&'static str, &'static str),
 }
 
 #[allow(dead_code)]
@@ -106,7 +136,15 @@ impl FlagAnswerer {
         password: Option<Zeroizing<String>>,
         accept_glyph: Option<Fingerprint>,
     ) -> Self {
-        FlagAnswerer { password, accept_glyph }
+        Self::with_secret_flags(password, accept_glyph, ("--password-file", "--password-stdin"))
+    }
+
+    pub(crate) fn with_secret_flags(
+        password: Option<Zeroizing<String>>,
+        accept_glyph: Option<Fingerprint>,
+        secret_flags: (&'static str, &'static str),
+    ) -> Self {
+        FlagAnswerer { password, accept_glyph, secret_flags }
     }
 }
 
@@ -174,9 +212,11 @@ impl Answerer for FlagAnswerer {
         match &self.password {
             Some(pw) => Ok(Secret(pw.to_string())),
             None => bail!(
-                "{} is required — supply it with --password-file <path> or \
-                 --password-stdin (never on the command line)",
-                field.flag()
+                "{} is required — supply it with {} <path> or {} (never on the \
+                 command line)",
+                field.flag(),
+                self.secret_flags.0,
+                self.secret_flags.1,
             ),
         }
     }

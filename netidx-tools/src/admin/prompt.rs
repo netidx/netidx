@@ -23,7 +23,6 @@ use anyhow::{Context, Result, anyhow};
 use std::{
     fmt::Display,
     io::{BufRead, IsTerminal, Write},
-    path::PathBuf,
     str::FromStr,
 };
 
@@ -107,13 +106,6 @@ pub fn required_string(label: &str, provided: Option<String>) -> Result<String> 
             Some(line) => return Ok(line),
         }
     }
-}
-
-/// Prompt for a required filesystem path. Same semantics as
-/// [`required_string`].
-pub fn required_path(label: &str, provided: Option<PathBuf>) -> Result<PathBuf> {
-    let s = required_string(label, provided.map(|p| p.to_string_lossy().into_owned()))?;
-    Ok(PathBuf::from(s))
 }
 
 // ---- level 1: prompt, offer a default ----------------------------------
@@ -324,10 +316,6 @@ mod tests {
     #[test]
     fn provided_value_short_circuits_every_level() {
         assert_eq!(required_string("x", Some("v".into())).unwrap(), "v");
-        assert_eq!(
-            required_path("x", Some(PathBuf::from("/p"))).unwrap(),
-            PathBuf::from("/p"),
-        );
         assert_eq!(string_with_default("x", Some("v".into()), "d").unwrap(), "v",);
         assert_eq!(parsed_with_default::<u32>("x", Some(7), "9").unwrap(), 7,);
         assert_eq!(
@@ -339,7 +327,6 @@ mod tests {
     #[test]
     fn level_2_bails_without_tty() {
         assert!(required_string("flag", None).is_err());
-        assert!(required_path("flag", None).is_err());
     }
 
     #[test]
