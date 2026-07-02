@@ -109,15 +109,22 @@ pub async fn setup_server(
     let listen = match a.listen {
         Some(addr) => addr,
         None => {
-            let ip_default = default_listen_ip(a.listen_hint).to_string();
+            let default_ip = default_listen_ip(a.listen_hint).await;
+            // A concrete default (the co-located resolver's advertised IP, an
+            // existing resolver's, or a detected public IP) is itself a valid
+            // non-interactive answer — the admin server address isn't a
+            // separate decision the operator must restate. Only `0.0.0.0`
+            // (nothing detectable) forces an explicit value.
+            let ip_required = default_ip.is_unspecified();
+            let ip_default = default_ip.to_string();
             let ip = ans
-                .text(Field::AdminServerListenIp, None, Some(&ip_default), true)
+                .text(Field::AdminServerListenIp, None, Some(&ip_default), ip_required)
                 .await?
                 .context("admin server listen IP required")?
                 .parse::<IpAddr>()?;
             let port_default = admin_proto::DEFAULT_PORT.to_string();
             let port = ans
-                .text(Field::AdminServerListenPort, None, Some(&port_default), true)
+                .text(Field::AdminServerListenPort, None, Some(&port_default), false)
                 .await?
                 .context("admin server listen port required")?
                 .parse::<u16>()?;
@@ -234,9 +241,12 @@ pub fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
 /// resolver's listen IP, else the machine's first public IP. The admin
 /// server usually co-locates with a resolver, so its address is the
 /// resolver's.
-fn default_listen_ip(hint: Option<IpAddr>) -> IpAddr {
-    hint.or_else(existing_resolver_listen_ip)
-        .or_else(crate::plan::install::detected_advertised_ip)
+async fn default_listen_ip(hint: Option<IpAddr>) -> IpAddr {
+    if let Some(ip) = hint.or_else(existing_resolver_listen_ip) {
+        return ip;
+    }
+    crate::plan::install::detected_advertised_ip()
+        .await
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
 }
 

@@ -252,6 +252,14 @@ fn lib_kp(k: Option<KeyProtArg>) -> Option<netidx_admin::plan::enroll::KeyProtAr
 pub(crate) struct WorkstationFlags {
     #[command(flatten)]
     parent: ParentFlags,
+    /// Enroll against this admin server (`ip:port`) instead of mDNS
+    /// discovery — the non-interactive join path. On a TLS network this
+    /// enrolls a client certificate (queued for admin approval); confirm the
+    /// network out of band with `--accept-glyph` (view the glyph via `netidx
+    /// admin ca fingerprint <ip:port>`). Ignored when a `--parent-*` flag
+    /// specifies the parent explicitly.
+    #[arg(long = "admin-server")]
+    admin_server: Option<SocketAddr>,
     /// `default_auth` on the client config. Defaults to `local`.
     /// Override only when the workstation hosts publishers that
     /// network subscribers must reach.
@@ -391,6 +399,7 @@ fn workstation_input(
     Ok(WorkstationInput {
         common: f.common.install_common(),
         explicit_parent,
+        admin_server: f.admin_server,
         default_auth: f.default_auth,
         base: f.base,
         listen_port: f.listen_port,
@@ -870,6 +879,14 @@ pub(crate) struct PublisherFlags {
     /// Auth scheme (anonymous|local|krb5|tls). Prompted when omitted.
     #[arg(long = "auth")]
     auth: Option<AuthKind>,
+    /// Enroll against this admin server (`ip:port`) instead of mDNS
+    /// discovery — the non-interactive join path. On a TLS network this
+    /// enrolls a client certificate (queued for admin approval); confirm the
+    /// network out of band with `--accept-glyph` (view the glyph via `netidx
+    /// admin ca fingerprint <ip:port>`). Takes precedence over `--addr` /
+    /// `--auth`.
+    #[arg(long = "admin-server")]
+    admin_server: Option<SocketAddr>,
     /// Resolver's Kerberos SPN (with `--auth krb5`), e.g.
     /// `netidx/resolver.example.com@REALM`.
     #[arg(long = "spn")]
@@ -923,6 +940,7 @@ fn publisher_input(
         common: f.common.install_common(),
         addrs: f.addrs,
         auth: f.auth,
+        admin_server: f.admin_server,
         spn: f.spn,
         socket: f.socket,
         tls_server_name: f.tls_server_name,

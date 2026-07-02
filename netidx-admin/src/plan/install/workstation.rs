@@ -39,6 +39,11 @@ pub struct WorkstationInput {
     /// operator specified a parent explicitly (skip discovery); `None` means
     /// run the discovery / prompt cascade.
     pub explicit_parent: Option<ParentRef>,
+    /// Enroll against this admin server (`--admin-server`) instead of mDNS
+    /// discovery — the non-interactive join path. On a TLS network this
+    /// enrolls a client certificate; the presented identity is confirmed via
+    /// `--accept-glyph`. Ignored when `explicit_parent` is set.
+    pub admin_server: Option<SocketAddr>,
     /// `default_auth` on the client config.
     pub default_auth: Option<AuthKind>,
     /// Namespace base path (`/local` by convention).
@@ -87,6 +92,7 @@ pub async fn run_workstation(
 ) -> Result<Option<ServiceScope>> {
     let WorkstationInput {
         explicit_parent,
+        admin_server,
         default_auth,
         base,
         listen_port,
@@ -115,8 +121,14 @@ pub async fn run_workstation(
         None => {
             // Ask the network before asking the human: a discovered
             // (glyph-confirmed) admin server answers everything the prompt
-            // cascade would have.
-            let probe = enroll::discover_network(ans, NodeKind::Workstation).await?;
+            // cascade would have. `--admin-server` names it explicitly (the
+            // non-interactive path, where mDNS discovery is disabled).
+            let probe = match admin_server {
+                Some(addr) => {
+                    enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?
+                }
+                None => enroll::discover_network(ans, NodeKind::Workstation).await?,
+            };
             net_prov = network_provenance(&probe);
             match probe.have() {
                 Some(net) => {

@@ -457,10 +457,13 @@ pub async fn setup_superuser(
             Field::AdminName,
             opts.admin.clone(),
             enroll::current_username().as_deref(),
-            true,
+            // Not a required-explicit decision: the founding admin defaults to
+            // the installing OS user (the interactive flow's default too), so a
+            // non-interactive install without `--admin-*` still completes.
+            false,
         )
         .await?
-        .context("superuser name required")?;
+        .context("superuser name required (no current OS username to default to)")?;
     if name.trim().is_empty() {
         bail!("superuser name must not be empty");
     }

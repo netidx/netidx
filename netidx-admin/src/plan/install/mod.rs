@@ -40,14 +40,21 @@ pub mod workstation;
 
 /// The IP a network daemon on this host should advertise, if the environment
 /// can be probed. `None` without `cloud-detect`.
+///
+/// `NetShape::detect` does blocking work — interface enumeration plus a
+/// cloud-metadata probe that drives its own current-thread runtime — so it
+/// runs on a blocking thread rather than the async worker, where the nested
+/// runtime would panic ("cannot start a runtime from within a runtime").
 #[cfg(feature = "cloud-detect")]
-pub fn detected_advertised_ip() -> Option<IpAddr> {
-    Some(crate::netshape::NetShape::detect().advertised_ip().into())
+pub async fn detected_advertised_ip() -> Option<IpAddr> {
+    tokio::task::spawn_blocking(|| crate::netshape::NetShape::detect().advertised_ip().into())
+        .await
+        .ok()
 }
 
 /// See the `cloud-detect` variant.
 #[cfg(not(feature = "cloud-detect"))]
-pub fn detected_advertised_ip() -> Option<IpAddr> {
+pub async fn detected_advertised_ip() -> Option<IpAddr> {
     None
 }
 
@@ -55,14 +62,18 @@ pub fn detected_advertised_ip() -> Option<IpAddr> {
 /// an operator hint (a `<PUBLIC_IP>` placeholder to fill). `(None, false)`
 /// without `cloud-detect`.
 #[cfg(feature = "cloud-detect")]
-pub fn publisher_bind_shape() -> (Option<String>, bool) {
-    let shape = crate::netshape::NetShape::detect();
-    (Some(shape.publisher_bind_suggestion()), shape.needs_operator_hint())
+pub async fn publisher_bind_shape() -> (Option<String>, bool) {
+    tokio::task::spawn_blocking(|| {
+        let shape = crate::netshape::NetShape::detect();
+        (Some(shape.publisher_bind_suggestion()), shape.needs_operator_hint())
+    })
+    .await
+    .unwrap_or((None, false))
 }
 
 /// See the `cloud-detect` variant.
 #[cfg(not(feature = "cloud-detect"))]
-pub fn publisher_bind_shape() -> (Option<String>, bool) {
+pub async fn publisher_bind_shape() -> (Option<String>, bool) {
     (None, false)
 }
 
@@ -86,23 +97,32 @@ pub struct ResolverShape {
 
 /// Detect the resolver environment shape (see [`ResolverShape`]).
 #[cfg(feature = "cloud-detect")]
-pub fn detect_resolver_shape() -> ResolverShape {
-    use crate::netshape::NetShape;
-    let s = NetShape::detect();
-    ResolverShape {
-        advertised_ip: Some(s.advertised_ip().into()),
-        needs_operator_hint: s.needs_operator_hint(),
-        bind_override: s.resolver_bind_override().map(IpAddr::V4),
-        elastic_local_client_bind: match &s {
-            NetShape::CloudElastic { .. } => Some(s.publisher_bind_suggestion()),
-            _ => None,
-        },
-    }
+pub async fn detect_resolver_shape() -> ResolverShape {
+    tokio::task::spawn_blocking(|| {
+        use crate::netshape::NetShape;
+        let s = NetShape::detect();
+        ResolverShape {
+            advertised_ip: Some(s.advertised_ip().into()),
+            needs_operator_hint: s.needs_operator_hint(),
+            bind_override: s.resolver_bind_override().map(IpAddr::V4),
+            elastic_local_client_bind: match &s {
+                NetShape::CloudElastic { .. } => Some(s.publisher_bind_suggestion()),
+                _ => None,
+            },
+        }
+    })
+    .await
+    .unwrap_or(ResolverShape {
+        advertised_ip: None,
+        needs_operator_hint: false,
+        bind_override: None,
+        elastic_local_client_bind: None,
+    })
 }
 
 /// See the `cloud-detect` variant.
 #[cfg(not(feature = "cloud-detect"))]
-pub fn detect_resolver_shape() -> ResolverShape {
+pub async fn detect_resolver_shape() -> ResolverShape {
     ResolverShape {
         advertised_ip: None,
         needs_operator_hint: false,

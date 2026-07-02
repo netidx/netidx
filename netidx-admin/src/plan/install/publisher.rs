@@ -36,6 +36,11 @@ pub struct PublisherInput {
     pub addrs: Vec<SocketAddr>,
     /// Data-plane auth scheme (`None` ⇒ discover or prompt).
     pub auth: Option<AuthKind>,
+    /// Enroll against this admin server (`--admin-server`) instead of mDNS
+    /// discovery — the non-interactive join path. On a TLS network this
+    /// enrolls a client certificate; the presented identity is confirmed via
+    /// `--accept-glyph`. Takes precedence over `--addr`/`--auth`.
+    pub admin_server: Option<SocketAddr>,
     /// Resolver's Kerberos SPN (krb5).
     pub spn: Option<String>,
     /// Resolver's local-auth socket path (local).
@@ -112,6 +117,7 @@ pub async fn run_publisher(
     let PublisherInput {
         mut addrs,
         mut auth,
+        admin_server,
         spn,
         socket,
         tls_server_name,
@@ -131,7 +137,9 @@ pub async fn run_publisher(
     // Ask the network before asking the human: with no `--addr` / `--auth`, a
     // discovered (glyph-confirmed) admin server yields every resolver address
     // with its auth — and, on TLS networks, our client cert.
-    let probe = if addrs.is_empty() && auth.is_none() {
+    let probe = if let Some(addr) = admin_server {
+        enroll::confirm_network_at(ans, addr, NodeKind::Publisher).await?
+    } else if addrs.is_empty() && auth.is_none() {
         enroll::discover_network(ans, NodeKind::Publisher).await?
     } else {
         AdminServers::NotProbed
@@ -210,7 +218,7 @@ pub async fn run_publisher(
     let bind: String = if let Some(b) = bind {
         b
     } else {
-        let (suggestion, needs_hint) = publisher_bind_shape();
+        let (suggestion, needs_hint) = publisher_bind_shape().await;
         if needs_hint {
             ans.warn(
                 "detected a container environment with no NETIDX_PUBLIC_IP env \

@@ -30,7 +30,6 @@ use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use std::{
-    cell::OnceCell,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
@@ -175,13 +174,18 @@ pub async fn run_resolver(
     input.auth = Some(kind);
     // Shape detection (incl. cloud-metadata probe) only fires when we
     // actually need a default — i.e. when `--listen` or `--bind` weren't
-    // given explicitly. A `OnceCell` so the probe runs at most once even if
-    // both prompts need it.
-    let shape: OnceCell<super::ResolverShape> = OnceCell::new();
+    // given explicitly. Computed at most once, up front, so the two prompts
+    // below share the single probe.
+    let shape: Option<super::ResolverShape> =
+        if input.listen.is_none() || input.bind.is_none() {
+            Some(detect_resolver_shape().await)
+        } else {
+            None
+        };
     let listen: SocketAddr = if let Some(l) = input.listen {
         l
     } else {
-        let s = shape.get_or_init(detect_resolver_shape);
+        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
         if s.needs_operator_hint {
             ans.warn(
                 "detected container environment with no NETIDX_PUBLIC_IP env var \
@@ -213,7 +217,7 @@ pub async fn run_resolver(
     let bind = if let Some(b) = input.bind {
         Some(b)
     } else {
-        let s = shape.get_or_init(detect_resolver_shape);
+        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
         match s.bind_override {
             Some(private) => {
                 let default = private.to_string();
@@ -236,7 +240,7 @@ pub async fn run_resolver(
     // while binding to a private NIC (cloud-elastic), the local client's
     // publisher must advertise the public IP but bind the private subnet.
     // Only kicks in when shape was actually detected.
-    let local_client_bind = shape.get().and_then(|s| s.elastic_local_client_bind.clone());
+    let local_client_bind = shape.as_ref().and_then(|s| s.elastic_local_client_bind.clone());
     // The auth-scheme sub-args (tls cert paths, krb5 spn, local socket) are
     // level-2 prompts inside `resolver_self_auth`.
     //

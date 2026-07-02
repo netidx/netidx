@@ -35,7 +35,9 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: AdminCmd,
     },
-    /// show the CA's fingerprint + identicon for out-of-band verification
+    /// show a CA's fingerprint + identicon for out-of-band verification — this
+    /// host's own CA, or (given an `ip:port`) the identity a remote admin
+    /// server presents
     Fingerprint(FingerprintArgs),
     /// revoke certificates by name (or serial) and re-sign the CRL
     Revoke(RevokeArgs),
@@ -287,6 +289,11 @@ pub(crate) struct AdminRemoveArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct FingerprintArgs {
+    /// Admin server address (`ip:port`) to fetch and display the glyph for —
+    /// the network identity to verify out of band before enrolling against it
+    /// (pass the confirmed value to a join's `--accept-glyph`). When omitted,
+    /// show this host's own local CA glyph.
+    pub server: Option<SocketAddr>,
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
 }
@@ -1927,8 +1934,23 @@ fn admin(cmd: AdminCmd) -> Result<()> {
 // -- ca fingerprint -----------------------------------------------------------
 
 fn fingerprint(p: FingerprintArgs) -> Result<()> {
-    let dir = ca_dir_for(p.ca_dir)?;
-    show_ca_identity(&dir)
+    match p.server {
+        // Remote: fetch the identity the admin server presents and show its
+        // glyph, so an operator can verify it out of band before enrolling.
+        Some(addr) => {
+            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+            let identity = rt
+                .block_on(admin_client::fetch_identity(addr, NodeKind::Client))
+                .with_context(|| format!("contacting admin server {addr}"))?;
+            init::show_network_identity(addr, &identity);
+            Ok(())
+        }
+        // Local: this host's own CA.
+        None => {
+            let dir = ca_dir_for(p.ca_dir)?;
+            show_ca_identity(&dir)
+        }
+    }
 }
 
 // -- ca join (the client) -----------------------------------------------------

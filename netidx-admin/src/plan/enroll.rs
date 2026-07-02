@@ -661,9 +661,17 @@ pub async fn join_network(
     identity: &CaIdentity,
 ) -> Result<(JoinedIdentity, TempDir)> {
     let name = ans
-        .text(Field::TlsName, None, suggested_name, true)
+        .text(
+            Field::TlsName,
+            None,
+            suggested_name,
+            // Not a required-explicit decision: the enrolling node's identity
+            // defaults to `<user-or-host>.<domain>` (the interactive default),
+            // so a non-interactive join still enrolls without an identity flag.
+            false,
+        )
         .await?
-        .context("a TLS identity name is required")?;
+        .context("a TLS identity name is required (no default could be derived)")?;
     // Key protection is decided before the request: the operator is here now,
     // and the queued path may wait on a remote admin for a long time after.
     let protection = choose_key_protection(
@@ -673,7 +681,10 @@ pub async fn join_network(
         &name,
     )
     .await?;
-    let admin_here = ans.confirm(Field::AdminHere, None, false).await?;
+    // A non-interactive install has no admin standing by to type a password,
+    // so it always takes the queued (remote-approval) path.
+    let admin_here =
+        ans.interactive() && ans.confirm(Field::AdminHere, None, false).await?;
     let issued = if admin_here {
         // The admin chooses the new identity's id-map groups here; the
         // per-admin policy is the allowed set the server validates against.
