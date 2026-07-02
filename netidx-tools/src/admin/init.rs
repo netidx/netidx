@@ -530,7 +530,7 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     finish_with(
         rt,
         &f.common,
-        service::ServiceNeed::at(service::ScopeArg::User),
+        service::ServiceNeed::at(service::ScopeArg::User.into()),
         record,
         // TLS identities expire: install the renewal daemon alongside.
         move || match (&post_apply_units_dir, has_tls) {
@@ -2197,7 +2197,7 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     finish_with(
         rt,
         &f.common,
-        service::ServiceNeed::at(service::ScopeArg::System),
+        service::ServiceNeed::at(service::ScopeArg::System.into()),
         record,
         // Admin-server step, after the configs it points at exist: a
         // discovered network ⇒ enroll a new admin server here; a fresh
@@ -3160,7 +3160,7 @@ pub(crate) fn run_publisher(mut f: PublisherFlags) -> Result<()> {
         // A publisher is typically a headless (often cloud) host, so a
         // system service that starts at boot — no login session needed —
         // is the right default, like the resolver.
-        service::ServiceNeed::at(service::ScopeArg::System)
+        service::ServiceNeed::at(service::ScopeArg::System.into())
     } else {
         service::ServiceNeed::NONE
     };

@@ -15,6 +15,8 @@ use std::{net::SocketAddr, str::FromStr};
 /// Network discovery + certificate enrollment — the keystone subgraph every
 /// role install shares, driven through the [`crate::answer::Answerer`] seam.
 pub mod enroll;
+/// The OS-service setup decision seam (`ServiceNeed` / `offer`).
+pub mod service;
 
 /// The data-plane authentication scheme a network uses: how subscribers prove
 /// who they are to publishers and resolvers.

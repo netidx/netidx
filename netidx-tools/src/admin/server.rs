@@ -195,7 +195,7 @@ pub(super) fn setup_server(a: SetupArgs) -> Result<service::ServiceNeed> {
     };
     install_unit(units_dir, &cfg_path)?;
     // A admin server is a network daemon → system-scope service.
-    Ok(service::ServiceNeed::at(service::ScopeArg::System))
+    Ok(service::ServiceNeed::at(service::ScopeArg::System.into()))
 }
 
 /// Write the `admin-server` activation unit into `units_dir`, pointing

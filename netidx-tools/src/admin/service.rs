@@ -16,104 +16,10 @@ use std::{io::IsTerminal, path::PathBuf};
 #[cfg(unix)]
 use std::process::Command;
 
-use super::prompt;
-
-/// Whether a setup process needs the activation supervisor installed as
-/// an OS service, and at what scope. Setup steps that drop activation
-/// units needing unattended supervision contribute a scope; a top-level
-/// flow [`merge`](ServiceNeed::merge)s the needs of all its sub-steps
-/// and offers a *single* service install at the end. `None` ⇒ nothing
-/// to supervise (e.g. a client-only publisher).
-///
-/// This is the seam that keeps service setup composable: a resolver
-/// install that also stands up a CA server merges two `System` needs
-/// into one offer; a standalone `ca init` produces the same `System`
-/// need and offers it itself. Neither has to know about the other.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ServiceNeed(Option<ScopeArg>);
-
-impl ServiceNeed {
-    /// No service needed.
-    pub(crate) const NONE: ServiceNeed = ServiceNeed(None);
-
-    /// A service is needed at `scope`.
-    pub(crate) fn at(scope: ScopeArg) -> Self {
-        ServiceNeed(Some(scope))
-    }
-
-    /// Combine two needs. System outranks User outranks nothing — a
-    /// process that needs *any* system-scope daemon needs a system
-    /// service.
-    ///
-    /// The composition seam: a flow that stands up more than one daemon
-    /// (e.g. a resolver install that also sets up a CA server) folds
-    /// each sub-step's need together with this and offers once. No flow
-    /// composes two daemons *yet*, hence `allow(dead_code)` — but the
-    /// merge semantics are the whole point of the design, so they're
-    /// here and tested rather than re-derived when the first composite
-    /// flow lands.
-    #[allow(dead_code)]
-    pub(crate) fn merge(self, other: ServiceNeed) -> ServiceNeed {
-        fn rank(n: ServiceNeed) -> u8 {
-            match n.0 {
-                None => 0,
-                Some(ScopeArg::User) => 1,
-                Some(ScopeArg::System) => 2,
-            }
-        }
-        if rank(other) > rank(self) { other } else { self }
-    }
-
-    fn scope(self) -> Option<ScopeArg> {
-        self.0
-    }
-}
-
-/// Gates on the single service-setup offer, lifted from a flow's flags.
-pub(crate) struct ServiceGate {
-    pub dry_run: bool,
-    pub no_service: bool,
-    pub with_service: bool,
-}
-
-/// **The** end-of-process hook for offering OS-service setup. A flow
-/// merges the [`ServiceNeed`]s of its setup steps and calls this once.
-/// Behaviour:
-/// - need is `NONE` ⇒ nothing to do.
-/// - `--dry-run` ⇒ print what would be offered, change nothing.
-/// - `--no-service` ⇒ skip silently.
-/// - `--with-service` ⇒ install without prompting.
-/// - otherwise ⇒ prompt on a TTY (default yes), or print a hint on a
-///   non-TTY.
-pub(super) fn offer(need: ServiceNeed, gate: ServiceGate) -> Result<()> {
-    let Some(scope) = need.scope() else { return Ok(()) };
-    let label = match scope {
-        ScopeArg::User => "user-scope (no sudo)",
-        ScopeArg::System => "system-scope (sudo required)",
-    };
-    if gate.dry_run {
-        println!("[dry-run] would offer to install netidx as a {label} OS service");
-        return Ok(());
-    }
-    if gate.no_service {
-        return Ok(());
-    }
-    let install_now = if gate.with_service {
-        true
-    } else if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        prompt::confirm(&format!("install netidx as an OS service now ({label})?"), true)?
-    } else {
-        eprintln!(
-            "note: pass --with-service to register netidx as an OS service \
-             (run `netidx admin component service install` later if you prefer)"
-        );
-        false
-    };
-    if install_now {
-        install_with_defaults(scope)?;
-    }
-    Ok(())
-}
+/// The service-setup decision types + offer now live in the library so every
+/// frontend shares them; this module keeps the clap surface and the privileged
+/// doing ([`install_with_defaults`] and escalation).
+pub(crate) use netidx_admin::plan::service::{ServiceGate, ServiceNeed, offer};
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.
@@ -142,6 +48,15 @@ impl From<ScopeArg> for ServiceScope {
         match a {
             ScopeArg::User => ServiceScope::User,
             ScopeArg::System => ServiceScope::System,
+        }
+    }
+}
+
+impl From<ServiceScope> for ScopeArg {
+    fn from(s: ServiceScope) -> Self {
+        match s {
+            ServiceScope::User => ScopeArg::User,
+            ServiceScope::System => ScopeArg::System,
         }
     }
 }
