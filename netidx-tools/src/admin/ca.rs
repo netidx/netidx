@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client, admin_local,
-    admin_ops::queue as ca_ops,
+    admin_ops::{queue as ca_ops, revoke as revoke_ops},
     admin_proto::{self, NodeKind},
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
@@ -49,7 +49,9 @@ pub(crate) enum Cmd {
     /// host's own CA, or (given an `ip:port`) the identity a remote admin
     /// server presents
     Fingerprint(FingerprintArgs),
-    /// revoke certificates by name (or serial) and re-sign the CRL
+    /// list the CA's issued certificates (serial, name, glyph, expiry, status)
+    Issued(IssuedArgs),
+    /// revoke certificate(s) by serial or name and re-sign the CRL
     Revoke(RevokeArgs),
     /// set up or rotate the auto-approve slot, so the running admin server
     /// approves verified renewals in-process (no human per renewal)
@@ -162,25 +164,34 @@ pub(crate) struct DenyArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct IssuedArgs {
+    /// Include already-revoked certificates in the listing.
+    #[arg(long)]
+    all: bool,
+    /// Only show certificates whose name contains this substring
+    /// (case-insensitive).
+    #[arg(long)]
+    name: Option<String>,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct RevokeArgs {
-    /// The identity to revoke — every live certificate carrying this
-    /// name. Interactive list when omitted.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// Revoke a single certificate by serial number instead.
-    #[arg(long, conflicts_with = "name")]
-    pub serial: Option<u64>,
-    /// Revocation reason, recorded in the index. Prompted when omitted.
-    #[arg(long)]
-    pub reason: Option<String>,
-    /// Admin server to revoke through. Defaults to this host's own admin
-    /// server, else discovered on the local network.
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
-    /// CA dir, used only to verify the admin server's identity against the
-    /// local CA cert when one is present.
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    /// What to revoke: a serial number (exactly one certificate) or a name
+    /// (every live certificate carrying it — when they share one key). Read
+    /// the serial or glyph off `ca issued`.
+    #[arg(value_name = "ID-OR-NAME")]
+    target: String,
+    /// The revocation reason, recorded in the index.
+    #[arg(long = "reason")]
+    reason: String,
+    /// Require every target to carry this SPKI glyph (as shown by `ca issued`);
+    /// refuse on any mismatch. Needed to revoke a name that spans >1 key.
+    #[arg(long = "assert-glyph")]
+    assert_glyph: Option<String>,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Subcommand, Debug)]
@@ -569,6 +580,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::List => list(),
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
+        Cmd::Issued(f) => issued(f),
         Cmd::Revoke(p) => revoke(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
@@ -758,183 +770,94 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
 
 // -- ca revoke ----------------------------------------------------------------
 
-/// Revoke certificates and re-sign the CRL — over RPC. The daemon owns
-/// the CA: it holds the issuance index, signs the CRL, and serves it
-/// (`GetCrl`). The CLI is a pure client — it lists the issued set
-/// (`ListIssued`), lets the admin pick by name/serial/interactively, and
-/// sends `Revoke`. By name is the common case; the daemon's list maps
-/// names to serials so the admin never hunts serial numbers.
-///
-/// CR claude for estokes: the old local-file revoke also (a) copied the
-/// fresh CRL beside this host's resolver for instant enforcement and (b)
-/// offered to drop the revoked identity from the local id-map. Both
-/// needed direct file access the CLI no longer has now the daemon owns
-/// the CA. The CRL still re-signs (in the daemon) and distributes via
-/// `GetCrl`; the local-resolver fast-path and the id-map cleanup are
-/// dropped here. If we want them back they belong in the daemon's
-/// `handle_revoke` (it has the resolver role config and can reach id-map
-/// peers) — flagging the behavior change rather than hiding it.
-fn revoke(p: RevokeArgs) -> Result<()> {
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Find the CA: an explicit `--server`, else this host's own admin
-    // server, else discover one on the network (glyph-confirmed).
-    let (server, known_identity) = match p.server.or_else(local_admin_server_listen) {
-        Some(s) => (s, None),
-        None => match init::discover_network(NodeKind::Client)? {
-            init::AdminServers::Have(net) => {
-                let ca = net.info.ca_addr.ok_or_else(|| {
-                    anyhow!("network {:?} reported no CA; cannot revoke", net.info.domain)
-                })?;
-                (ca, Some(net.identity))
-            }
-            init::AdminServers::DontHave => {
-                bail!("no admin server found or selected; pass --server")
-            }
-            init::AdminServers::NotProbed => {
-                bail!("--server is required when stdin is not a TTY")
-            }
-        },
-    };
-    // Confirm who we're talking to. If this host holds the CA cert, verify
-    // silently against it; otherwise glyph-confirm with the operator.
-    let identity = match known_identity {
-        Some(identity) => identity,
-        None => {
-            let identity = rt
-                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting admin server {server}"))?;
-            let local_fp = ca_dir_for(p.ca_dir.clone())
-                .ok()
-                .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
-                .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
-            match local_fp {
-                Some(fp) if fp == identity.fingerprint => {
-                    println!("verified {server} against the local CA");
-                }
-                _ => {
-                    init::show_network_identity(server, &identity);
-                    if !prompt::confirm(
-                        "does this match what your CA admin gave you?",
-                        false,
-                    )? {
-                        bail!("CA identity was not confirmed; nothing was sent");
-                    }
-                }
-            }
-            identity
-        }
-    };
-    let admin = match env_user_name() {
-        Some(user) => prompt::string_with_default("admin name", None, &user)?,
-        None => prompt::required_string("admin name", None)?,
-    };
-    let password = Zeroizing::new(collect_existing_password(&format!(
-        "CA password for admin {admin:?}"
-    ))?);
-    // The daemon owns the index — read the issued set from it.
-    let entries = rt.block_on(admin_client::list_issued(
+/// Format a unix timestamp (seconds) as a UTC date for the issued listing.
+fn fmt_unix(secs: u64) -> String {
+    use chrono::{DateTime, Utc};
+    match DateTime::<Utc>::from_timestamp(secs as i64, 0) {
+        Some(dt) => dt.format("%Y-%m-%d").to_string(),
+        None => format!("@{secs}"),
+    }
+}
+
+/// `ca issued` — list the CA's issued-certificate index (the query half of
+/// revocation). Read a serial or glyph off this to feed `ca revoke`.
+fn issued(f: IssuedArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let entries = runtime()?.block_on(revoke_ops::issued(
+        &mut ans,
         server,
-        &admin,
-        password.as_str(),
-        &identity,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        f.all,
+        f.name.as_deref(),
     ))?;
-    let live: Vec<&admin_proto::IssuedEntry> =
-        entries.iter().filter(|e| !e.revoked).collect();
-    if live.is_empty() {
-        println!("no live certificates in the index — nothing to revoke");
+    if entries.is_empty() {
+        println!("no matching certificates in the index");
         return Ok(());
     }
-    let targets: Vec<&admin_proto::IssuedEntry> = if let Some(serial) = p.serial {
-        let t: Vec<_> = live.iter().copied().filter(|e| e.serial == serial).collect();
-        if t.is_empty() {
-            bail!("no live certificate with serial {serial}");
-        }
-        t
-    } else {
-        let name = match p.name {
-            Some(n) => n,
-            None => {
-                // Distinct names, most recently issued first.
-                let mut names: Vec<&str> = Vec::new();
-                for e in live.iter().rev() {
-                    if !e.name.is_empty()
-                        && !names.iter().any(|n| n.eq_ignore_ascii_case(&e.name))
-                    {
-                        names.push(&e.name);
-                    }
-                }
-                if names.is_empty() {
-                    bail!(
-                        "live certificates exist but none carry a DNS name; \
-                         revoke by --serial"
-                    );
-                }
-                println!("live identities:");
-                for (i, n) in names.iter().enumerate() {
-                    let count =
-                        live.iter().filter(|e| e.name.eq_ignore_ascii_case(n)).count();
-                    println!("  {}) {n}  ({count} cert(s))", i + 1);
-                }
-                let answer = prompt::required_string(
-                    "identity # to revoke (or 'q' to quit)",
-                    None,
-                )?;
-                if answer.eq_ignore_ascii_case("q") {
-                    return Ok(());
-                }
-                match answer.parse::<usize>() {
-                    Ok(i) if (1..=names.len()).contains(&i) => names[i - 1].to_string(),
-                    _ => bail!("enter a number between 1 and {}", names.len()),
-                }
-            }
-        };
-        let t: Vec<_> =
-            live.iter().copied().filter(|e| e.name.eq_ignore_ascii_case(&name)).collect();
-        if t.is_empty() {
-            bail!("no live certificate for {name:?}");
-        }
-        t
-    };
-    // Show what's about to die — including the identity glyph the
-    // enrollment showed, so the admin can sanity-check it's the right
-    // entity.
-    println!();
-    for t in &targets {
+    println!("issued certificates:");
+    for e in &entries {
+        let status = if e.revoked { "REVOKED" } else { "live" };
+        let name = if e.name.is_empty() { "(no name)" } else { &e.name };
         println!(
-            "  serial {}  {}",
-            t.serial,
-            if t.name.is_empty() { "(no name)" } else { &t.name },
+            "  serial {}  {}  [{}]  expires {}",
+            e.serial,
+            name,
+            status,
+            fmt_unix(e.not_after_unix),
         );
-        if let Ok(fp) = Fingerprint::parse_text(&t.spki_fp) {
-            println!("  SHA256  {}", fp.text());
-            println!("{}", fp.identicon(ColorMode::detect()));
-        }
+        println!("    glyph {}", e.spki_fp);
     }
-    if !prompt::confirm(
-        &format!("revoke {} certificate(s)? This cannot be undone", targets.len()),
-        false,
-    )? {
-        bail!("revocation aborted; nothing was changed");
-    }
-    let reason = match p.reason {
-        Some(r) => r,
-        None => prompt::string_with_default(
-            "revocation reason (recorded in the index)",
-            None,
-            "unspecified",
-        )?,
-    };
-    let serials: Vec<u64> = targets.iter().map(|t| t.serial).collect();
-    let warnings = rt.block_on(admin_client::revoke(
+    println!(
+        "\nrevoke with `netidx admin ca revoke <serial-or-name> --reason <text>` \
+         (add --assert-glyph <glyph> to pin a key)."
+    );
+    Ok(())
+}
+
+/// `ca revoke <id-or-name> --reason <text>` — revoke certificate(s) and re-sign
+/// the CRL over RPC (the daemon owns the CA index and CRL). `<id-or-name>` is a
+/// serial (one cert) or a name (every live cert for it, when they share one
+/// key); `--assert-glyph` pins the intended key. Irreversible.
+///
+/// CR claude for estokes: the old local-file revoke also (a) copied the fresh
+/// CRL beside this host's resolver for instant enforcement and (b) offered to
+/// drop the revoked identity from the local id-map. Both needed direct file
+/// access the CLI no longer has now the daemon owns the CA. The CRL still
+/// re-signs (in the daemon) and distributes via `GetCrl`; the local-resolver
+/// fast-path and the id-map cleanup remain dropped (unchanged from the prior
+/// RPC revoke). If we want them back they belong in the daemon's `handle_revoke`.
+fn revoke(f: RevokeArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let assert_glyph = f
+        .assert_glyph
+        .as_deref()
+        .map(Fingerprint::parse_text)
+        .transpose()
+        .context("parsing --assert-glyph")?;
+    let selector = revoke_ops::parse_selector(&f.target);
+    let out = runtime()?.block_on(revoke_ops::revoke(
+        &mut ans,
         server,
-        &admin,
-        password.as_str(),
-        serials,
-        &reason,
-        &identity,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        selector,
+        assert_glyph,
+        &f.reason,
     ))?;
-    println!("revoked {} certificate(s); the daemon re-signed the CRL", targets.len());
-    for w in warnings {
+    println!(
+        "revoked {} certificate(s); the daemon re-signed the CRL:",
+        out.revoked.len()
+    );
+    for e in &out.revoked {
+        let name = if e.name.is_empty() { "(no name)" } else { &e.name };
+        println!("  serial {}  {}", e.serial, name);
+    }
+    for w in out.warnings {
         println!("  warning: {w}");
     }
     Ok(())
