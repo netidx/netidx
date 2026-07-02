@@ -85,12 +85,26 @@ pub enum Field {
     Domain,
     /// A publisher's resolver-server address(es).
     ResolverAddr,
+    /// A publisher's local-auth unix socket path (auth `local`).
+    Socket,
+    /// The leftmost label of a resolver's certificate name.
+    ResolverName,
+    /// Whether to set up an admin server (admin-plane CA) for this network.
+    SetupAdminServer,
+    /// The IP the admin server on this host listens on.
+    AdminServerListenIp,
+    /// The port the admin server on this host listens on.
+    AdminServerListenPort,
 
     // -- install: parent referral / delegation -------------------------------
     /// Parent resolver address for a referral.
     ParentAddr,
     /// The subtree path handed to the parent referral.
     ParentPath,
+    /// The auth scheme a node uses to authenticate to its parent resolver.
+    ParentAuth,
+    /// Parent's local-auth unix socket path (parent-auth `local`).
+    ParentSocket,
     /// Parent's Kerberos SPN (krb5 referral).
     ParentSpn,
     /// Parent's TLS name (tls referral).
@@ -105,6 +119,8 @@ pub enum Field {
     AdminName,
     /// The admin password authenticating a remote operation.
     AdminPassword,
+    /// The off-box CA recovery password (unlocks the CA key offline).
+    RecoveryPassword,
     /// The netidx path a perms / service-control operation acts on (`--at`).
     TargetPath,
     /// The name of an issued cert to revoke.
@@ -284,6 +300,40 @@ impl Field {
                 help: "The address of a resolver server this publisher \
                        registers with.",
             },
+            Socket => FieldInfo {
+                flag: "--socket",
+                label: "local-auth socket path",
+                help: "The resolver's local-auth unix socket a publisher \
+                       connects through (used only with auth local).",
+            },
+            ResolverName => FieldInfo {
+                flag: "--tls-name",
+                label: "resolver name",
+                help: "The leftmost label of this resolver's certificate name \
+                       (default 'resolver'); combined with the TLS domain into \
+                       <name>.<domain>. A full --tls-name supplies both at once.",
+            },
+            SetupAdminServer => FieldInfo {
+                flag: "--no-admin-server",
+                label: "set up admin server?",
+                help: "Set up an admin server for this network — a small CA that \
+                       secures the admin plane (discovery, enrollment, certificate \
+                       renewal). Data-plane auth is unaffected. Default yes; \
+                       --no-admin-server opts out (expert).",
+            },
+            AdminServerListenIp => FieldInfo {
+                flag: "--listen",
+                label: "admin server listen IP",
+                help: "The IP the admin server on this host listens on for \
+                       discovery, enrollment, and CSR signing; usually the \
+                       co-located resolver's IP.",
+            },
+            AdminServerListenPort => FieldInfo {
+                flag: "--listen",
+                label: "admin server listen port",
+                help: "The port the admin server on this host listens on \
+                       (conventionally 4565).",
+            },
             ParentAddr => FieldInfo {
                 flag: "--parent-addr",
                 label: "parent resolver address",
@@ -294,6 +344,18 @@ impl Field {
                 flag: "--parent-path",
                 label: "referral subtree",
                 help: "The subtree served under the parent referral.",
+            },
+            ParentAuth => FieldInfo {
+                flag: "--parent-auth",
+                label: "parent auth scheme",
+                help: "How this node authenticates to its parent resolver: \
+                       anonymous, local, krb5, or tls.",
+            },
+            ParentSocket => FieldInfo {
+                flag: "--parent-socket",
+                label: "parent local-auth socket",
+                help: "The parent resolver's local-auth unix socket path (used \
+                       only with parent-auth local).",
             },
             ParentSpn => FieldInfo {
                 flag: "--parent-spn",
@@ -328,6 +390,14 @@ impl Field {
                 label: "admin password",
                 help: "The password for the named admin. Never echoed or \
                        stored.",
+            },
+            RecoveryPassword => FieldInfo {
+                flag: "--recovery-password-file",
+                label: "CA recovery password",
+                help: "The off-box CA recovery password, printed once at CA init \
+                       and locked in a safe. Unlocks the CA key to sign offline or \
+                       rotate the box credential; supplied from a file/stdin for \
+                       scripts, never echoed.",
             },
             TargetPath => FieldInfo {
                 flag: "--at",
@@ -469,4 +539,12 @@ pub trait Answerer: Send {
     /// A non-fatal warning — a degraded outcome the operator should know
     /// about (sealing unavailable, keychain save failed, enrollment denied).
     fn warn(&mut self, message: &str);
+
+    /// Present the CA recovery password — generated once at CA init, shown
+    /// once, and **never persisted**. This is the off-box break-glass secret
+    /// the operator must copy into a safe now; there is no second chance to
+    /// read it. Distinct from [`note`] because it must be impossible to miss:
+    /// a CLI prints a boxed banner, a TUI renders a modal that forces
+    /// acknowledgment before continuing.
+    fn show_recovery_password(&mut self, password: &str);
 }

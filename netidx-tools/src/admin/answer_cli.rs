@@ -134,4 +134,24 @@ impl Answerer for FlagAnswerer {
     fn warn(&mut self, m: &str) {
         let _ = writeln!(std::io::stderr(), "warning: {m}");
     }
+
+    fn show_recovery_password(&mut self, password: &str) {
+        // The one-time, never-stored CA break-glass secret. Boxed on stdout
+        // (the operator must copy it) with the store-it-in-a-safe warning.
+        let bar = "─".repeat(password.chars().count() + 2);
+        let mut out = std::io::stdout();
+        let _ = writeln!(out);
+        let _ = writeln!(out, "┌{bar}┐");
+        let _ = writeln!(out, "│ {password} │");
+        let _ = writeln!(out, "└{bar}┘");
+        let _ = writeln!(
+            out,
+            "This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.\n\
+             It is shown ONCE and never stored. It is the only OFF-box credential\n\
+             that can unlock the CA key — to mint a new admin or rotate the box's\n\
+             own credential. If you lose it AND this machine, the CA is unrecoverable;\n\
+             while the machine lives you can mint a fresh one with\n\
+             `netidx admin ca recovery rotate`.\n"
+        );
+    }
 }
