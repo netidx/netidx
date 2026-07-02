@@ -17,6 +17,9 @@ use std::{net::SocketAddr, str::FromStr};
 pub mod enroll;
 /// The OS-service setup decision seam (`ServiceNeed` / `offer`).
 pub mod service;
+/// The role install cascades (`resolver` / `workstation` / `publisher`) and
+/// the shared tail they run.
+pub mod install;
 
 /// The data-plane authentication scheme a network uses: how subscribers prove
 /// who they are to publishers and resolvers.
