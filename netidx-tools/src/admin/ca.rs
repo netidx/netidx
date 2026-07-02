@@ -1,7 +1,8 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client, admin_local,
+    admin_ops::queue as ca_ops,
     admin_proto::{self, NodeKind},
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
@@ -16,7 +17,11 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-use super::{init, prompt, service};
+use super::{answer_cli::RemoteAuthFlags, init, prompt, service};
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new().context("starting tokio runtime")
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -26,8 +31,13 @@ pub(crate) enum Cmd {
     Issue(IssueArgs),
     /// sign an externally-supplied CSR file with a local CA
     Sign(SignArgs),
-    /// work the enrollment queue: approve or deny pending requests
+    /// list the pending enrollment queue (each request keyed by its code)
+    Queue(QueueArgs),
+    /// approve one pending enrollment request by its code (or `--renewals` to
+    /// approve the verified-renewal batch)
     Approve(ApproveArgs),
+    /// deny one pending enrollment request by its code
+    Deny(DenyArgs),
     /// list local CAs
     List,
     /// manage CA admin keyslots (add / revoke / set-policy / list)
@@ -109,17 +119,46 @@ pub(crate) struct AutoApproveArgs {
 }
 
 #[derive(Args, Debug)]
+pub(crate) struct QueueArgs {
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
 pub(crate) struct ApproveArgs {
-    /// Admin server whose enrollment queue to work. Defaults to this
-    /// host's own admin server, then mDNS discovery — so an enrollment
-    /// admin can approve from their workstation without shell access to
-    /// the CA host.
+    /// The request code to approve (as shown by `ca queue`; the code groups
+    /// may be passed space-separated without quoting). Selects and asserts
+    /// the request — a mismatch or ambiguous prefix is refused. Omit with
+    /// `--renewals`.
+    #[arg(value_name = "CODE", num_args = 1.., conflicts_with = "renewals")]
+    code: Vec<String>,
+    /// Approve every verified renewal in one batch. A verified renewal is a
+    /// cryptographic proof of possession of the live key for the same name,
+    /// so there is no code to match; id-map groups stay as they were.
     #[arg(long)]
-    pub server: Option<SocketAddr>,
-    /// CA dir, used only to verify the admin server's identity against the
-    /// local CA cert when one is present.
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    renewals: bool,
+    /// Register the new identity in these id-map groups (repeatable; the
+    /// first is primary). Defaults to the per-kind default; ignored for a
+    /// server enrollment or `--renewals`.
+    #[arg(long = "id-map-group")]
+    id_map_group: Vec<String>,
+    /// Do not register the new identity in the local id-map.
+    #[arg(long = "no-id-map", conflicts_with = "id_map_group")]
+    no_id_map: bool,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DenyArgs {
+    /// The request code to deny (as shown by `ca queue`).
+    #[arg(value_name = "CODE", num_args = 1..)]
+    code: Vec<String>,
+    /// The reason shown to the waiting enrollee.
+    #[arg(long = "reason")]
+    reason: String,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
@@ -524,7 +563,9 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Init(p) => init(p),
         Cmd::Issue(p) => issue(p),
         Cmd::Sign(p) => sign(p),
+        Cmd::Queue(f) => queue(f),
         Cmd::Approve(p) => approve(p),
+        Cmd::Deny(f) => deny(f),
         Cmd::List => list(),
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
@@ -2449,273 +2490,149 @@ fn maybe_register_in_id_map(
     Ok(())
 }
 
-/// `ca approve` — interactive enrollment-queue mode: list the pending
-/// requests on the admin server, review one at a time (matching the
-/// request code the enrollee read out — the fingerprint of the CSR's
-/// public key, computed locally from the CSR, never trusted from the
-/// wire), and approve (choosing the id-map groups) or deny. Works from
-/// anywhere that can reach the admin server — enrollment admins don't
-/// need shell access to the CA host.
-fn approve(p: ApproveArgs) -> Result<()> {
-    use super::init::{self, AdminServers};
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // Where's the admin server? `--server`, else this host's own admin
-    // server, else discovery (browse → confirm → aggregate).
-    let (server, discovered_identity) = match p.server.or_else(local_admin_server_listen)
-    {
-        Some(s) => (s, None),
-        None => match init::discover_network(NodeKind::Client)? {
-            AdminServers::Have(net) => {
-                let ca = net.info.ca_addr.ok_or_else(|| {
-                    anyhow!(
-                        "network {:?} reported no CA; there is no queue to work",
-                        net.identity.domain
-                    )
-                })?;
-                (ca, Some(net.identity))
-            }
-            AdminServers::DontHave => {
-                bail!("no admin server found or selected; pass --server to specify one")
-            }
-            AdminServers::NotProbed => {
-                bail!("--server is required when stdin is not a TTY")
-            }
-        },
-    };
-    let identity = match discovered_identity {
-        // Discovery already glyph-confirmed the network.
-        Some(identity) => identity,
-        None => {
-            let identity = rt
-                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting admin server {server}"))?;
-            // On the CA host itself (or any box with the CA dir), the
-            // local CA cert is the trust anchor — verify automatically
-            // rather than asking the admin to confirm their own glyph.
-            let local_fp = ca_dir_for(p.ca_dir.clone())
-                .ok()
-                .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
-                .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
-            match local_fp {
-                Some(fp) if fp == identity.fingerprint => {
-                    println!("verified {server} against the local CA");
-                }
-                _ => {
-                    init::show_network_identity(server, &identity);
-                    if !prompt::confirm(
-                        "does this match what your CA admin gave you?",
-                        false,
-                    )? {
-                        bail!("CA identity was not confirmed; nothing was sent");
-                    }
-                }
-            }
-            identity
-        }
-    };
-    let admin = match env_user_name() {
-        Some(user) => prompt::string_with_default("admin name", None, &user)?,
-        None => prompt::required_string("admin name", None)?,
-    };
-    let password = Zeroizing::new(collect_existing_password(&format!(
-        "CA password for admin {admin:?}"
-    ))?);
-    loop {
-        let queue = rt.block_on(admin_client::list_queue(
-            server,
-            &admin,
-            password.as_str(),
-            &identity,
-        ))?;
-        if queue.is_empty() {
-            println!("the signing queue is empty (pass a CSR path to sign a file)");
-            return Ok(());
-        }
-        // Verified renewals first, as a batch: the server proved
-        // possession of the live key for the same name, so there is no
-        // code to match and no groups to choose — approving them all is
-        // honest, not careless. The ceremony stays for new identities.
-        let renewals: Vec<&netidx_admin::admin_proto::QueueEntry> =
-            queue.iter().filter(|e| e.verified_renewal).collect();
-        if !renewals.is_empty() {
-            println!();
-            println!("verified renewals (proof of possession; no code to match):");
-            for e in &renewals {
-                println!(
-                    "  {}  kind {:?}  age {}  from {}",
-                    e.requested_name,
-                    e.kind,
-                    fmt_age(e.age_secs),
-                    e.peer,
-                );
-            }
-            if prompt::confirm(
-                &format!("approve all {} verified renewal(s)?", renewals.len()),
-                true,
-            )? {
-                for e in &renewals {
-                    match rt.block_on(admin_client::approve(
-                        server,
-                        &admin,
-                        password.as_str(),
-                        &e.id,
-                        vec![],
-                        &identity,
-                    )) {
-                        Ok(_) => println!("  renewed {:?}", e.requested_name),
-                        Err(err) => {
-                            println!("  renewing {:?} failed: {err:#}", e.requested_name)
-                        }
-                    }
-                }
-                continue; // re-list
-            }
-        }
-        let new_requests: Vec<&netidx_admin::admin_proto::QueueEntry> =
-            queue.iter().filter(|e| !e.verified_renewal).collect();
-        if new_requests.is_empty() {
-            println!("(only unapproved renewals remain)");
-            return Ok(());
-        }
-        println!();
-        println!("pending signing requests:");
-        for (i, e) in new_requests.iter().enumerate() {
-            let code = admin_client::csr_fingerprint(&e.csr_pem)
-                .map(|f| f.short())
-                .unwrap_or_else(|_| "????????".to_string());
-            // A admin-server enrollment is a bigger trust decision than
-            // a user cert — say so in the list, not just the detail.
-            let what = match e.enroll_listen {
-                Some(listen) => format!("CONF-SERVER ENROLLMENT at {listen}"),
-                None => e.requested_name.clone(),
-            };
+/// `ca queue` — list the pending enrollment queue, each request keyed by its
+/// code (the CSR public-key fingerprint the enrollee's terminal showed,
+/// recomputed here from the CSR — never trusted from the wire). Verified
+/// renewals are listed separately: they carry a cryptographic proof of
+/// possession, so there is no code to match — approve them with
+/// `ca approve --renewals`.
+fn queue(f: QueueArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let items = runtime()?.block_on(ca_ops::list_queue(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+    ))?;
+    let renewals: Vec<_> = items.iter().filter(|i| i.verified_renewal).collect();
+    let pending: Vec<_> = items.iter().filter(|i| !i.verified_renewal).collect();
+    if renewals.is_empty() && pending.is_empty() {
+        println!("the enrollment queue is empty");
+        return Ok(());
+    }
+    if !renewals.is_empty() {
+        println!("verified renewals (proof of possession; no code to match):");
+        for e in &renewals {
             println!(
-                "  {}) {}  code {}  kind {:?}  age {}  from {}",
-                i + 1,
-                what,
-                code,
+                "  {}  kind {:?}  age {}  from {}",
+                e.requested_name,
                 e.kind,
                 fmt_age(e.age_secs),
                 e.peer,
             );
         }
-        let answer =
-            prompt::required_string("request # to review (or 'q' to quit)", None)?;
-        if answer.eq_ignore_ascii_case("q") {
-            return Ok(());
-        }
-        let entry = match answer.parse::<usize>() {
-            Ok(n) if (1..=new_requests.len()).contains(&n) => new_requests[n - 1],
-            _ => {
-                eprintln!("enter a number between 1 and {}, or 'q'", new_requests.len());
-                continue;
-            }
-        };
-        let fp = admin_client::csr_fingerprint(&entry.csr_pem)
-            .context("the queued CSR does not parse — deny it")?;
-        println!();
-        match entry.enroll_listen {
-            Some(listen) => {
-                println!("  CONF-SERVER ENROLLMENT — approving signs the reserved");
-                println!(
-                    "  serving name {:?} and registers the new",
-                    admin_proto::SERVING_SAN
-                );
-                println!("  admin server at {listen} as a peer. It will answer");
-                println!("  discovery and present the network identity to joiners.");
-                println!("  (requires your policy's may_enroll_servers)");
-            }
-            None => {
-                println!("  name:     {}", entry.requested_name);
-                println!(
-                    "  validity: {} (capped by your policy)",
-                    humantime::format_duration(entry.requested_validity)
-                );
-            }
-        }
-        println!("  kind:     {:?}", entry.kind);
-        println!("  from:     {}", entry.peer);
-        println!("  request code:");
-        println!("  SHA256  {}", fp.text());
-        println!("{}", fp.identicon(ColorMode::detect()));
-        // The mutual-glyph moment: the enrollee's terminal shows this
-        // same code; the requester sent it over a channel the admin
-        // trusts. A mismatch means the queue entry is NOT the request
-        // the admin thinks it is.
-        if !prompt::confirm("does this code match what the requester sent you?", false)? {
-            if prompt::confirm("deny this request?", true)? {
-                let reason = prompt::string_with_default(
-                    "denial reason (shown to the requester)",
-                    None,
-                    "request code mismatch",
-                )?;
-                rt.block_on(admin_client::deny(
-                    server,
-                    &admin,
-                    password.as_str(),
-                    &entry.id,
-                    &reason,
-                    &identity,
-                ))?;
-                println!("denied.");
-            }
-            continue;
-        }
-        let action: String = prompt::choice_with_default(
-            "action",
-            None,
-            &["approve", "deny", "skip"],
-            "approve",
-        )?;
-        match action.as_str() {
-            "approve" => {
-                // The admin knows who they're enrolling — the groups
-                // are chosen here, bounded by this admin's policy. A
-                // admin server isn't a user: enrollments never register
-                // in the id-map, so there is nothing to ask.
-                let groups = if entry.enroll_listen.is_some() {
-                    vec![]
-                } else {
-                    init::prompt_id_map_groups(
-                        &[],
-                        init::default_id_map_groups(entry.kind),
-                    )?
-                };
-                let warnings = rt.block_on(admin_client::approve(
-                    server,
-                    &admin,
-                    password.as_str(),
-                    &entry.id,
-                    groups,
-                    &identity,
-                ))?;
-                println!(
-                    "approved and signed {:?} — the requester's install picks it \
-                     up on its next poll.",
-                    entry.requested_name
-                );
-                for w in warnings {
-                    println!("  warning: {w}");
-                }
-            }
-            "deny" => {
-                let reason = prompt::required_string(
-                    "denial reason (shown to the requester)",
-                    None,
-                )?;
-                rt.block_on(admin_client::deny(
-                    server,
-                    &admin,
-                    password.as_str(),
-                    &entry.id,
-                    &reason,
-                    &identity,
-                ))?;
-                println!("denied.");
-            }
-            _ => continue,
+        println!("  approve them all with `netidx admin ca approve --renewals`.");
+        if !pending.is_empty() {
+            println!();
         }
     }
+    if !pending.is_empty() {
+        println!("pending enrollment requests:");
+        for e in &pending {
+            let what = match e.enroll_listen {
+                Some(listen) => format!("CONF-SERVER ENROLLMENT at {listen}"),
+                None => e.requested_name.clone(),
+            };
+            println!(
+                "  {}  kind {:?}  age {}  from {}",
+                what,
+                e.kind,
+                fmt_age(e.age_secs),
+                e.peer,
+            );
+            match e.code {
+                Some(code) => println!("    code {}", code.text()),
+                None => println!("    (unparseable CSR — can only be denied)"),
+            }
+        }
+        println!(
+            "\napprove with `netidx admin ca approve <code>` after matching the code \
+             out of band."
+        );
+    }
+    Ok(())
+}
+
+/// `ca approve <code>` / `ca approve --renewals` — approve one pending request
+/// whose recomputed code matches, or the whole verified-renewal batch.
+fn approve(f: ApproveArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let rt = runtime()?;
+    if f.renewals {
+        let results = rt.block_on(ca_ops::approve_renewals(
+            &mut ans,
+            server,
+            f.auth.ca_dir.clone(),
+            f.auth.admin.clone(),
+            None,
+        ))?;
+        if results.is_empty() {
+            println!("no verified renewals to approve");
+            return Ok(());
+        }
+        for r in &results {
+            match &r.error {
+                None => println!("  renewed {:?}", r.requested_name),
+                Some(e) => println!("  renewing {:?} failed: {e}", r.requested_name),
+            }
+        }
+        return Ok(());
+    }
+    if f.code.is_empty() {
+        bail!("provide a request code (as shown by `ca queue`), or `--renewals`");
+    }
+    let code = f.code.join(" ");
+    let out = rt.block_on(ca_ops::approve(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        &code,
+        &f.id_map_group,
+        f.no_id_map,
+    ))?;
+    match out.enroll_listen {
+        Some(listen) => println!(
+            "approved CONF-SERVER ENROLLMENT — {listen} is now a registered \
+             admin-server peer."
+        ),
+        None if out.id_map_groups.is_empty() => println!(
+            "approved and signed {:?} (no id-map registration).",
+            out.requested_name
+        ),
+        None => println!(
+            "approved and signed {:?} — id-map groups {:?}.",
+            out.requested_name, out.id_map_groups
+        ),
+    }
+    println!("the requester's install picks up the cert on its next poll.");
+    for w in out.warnings {
+        println!("  warning: {w}");
+    }
+    Ok(())
+}
+
+/// `ca deny <code> --reason <text>` — deny the one pending request whose
+/// recomputed code matches.
+fn deny(f: DenyArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let code = f.code.join(" ");
+    let name = runtime()?.block_on(ca_ops::deny(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        &code,
+        &f.reason,
+    ))?;
+    println!("denied {name:?}.");
+    Ok(())
 }
 
 /// This host's admin-server address from its own `admin-server.json`,
