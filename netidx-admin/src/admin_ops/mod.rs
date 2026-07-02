@@ -39,6 +39,7 @@ use std::{
 pub mod delegation;
 pub mod queue;
 pub mod revoke;
+pub mod roster;
 
 /// A pinned, authenticated remote-admin session: the admin server to talk to,
 /// its confirmed identity (later connections verify against *this* CA, not a
@@ -105,6 +106,51 @@ async fn resolve_identity(
         }
     }
     Ok((server, identity))
+}
+
+/// Where an admin-roster (or other management) op runs: this host's own admin
+/// server over its local control socket, or a pinned remote admin server.
+///
+/// The two are authenticated completely differently and must not be conflated:
+/// **Local** talks to the daemon over its `0600` + `SO_PEERCRED` control
+/// socket, which trusts the connecting superuser with no glyph and no password;
+/// **Remote** is a pinned TLS session that glyph-confirms the CA and
+/// authenticates a named admin with a password. A `--server` pointing at *this*
+/// host's own CA is still `Remote` (it fetches the identity and auto-verifies
+/// against the local cert) — only the absence of `--server` selects `Local`.
+pub enum AdminTarget {
+    /// This host's admin server, over its local control socket.
+    Local { cfg_path: PathBuf },
+    /// A pinned, authenticated remote admin session.
+    Remote { session: AdminSession },
+}
+
+/// Resolve which admin server a management op runs against: `Some(addr)` opens a
+/// pinned [`AdminSession`] ([`AdminTarget::Remote`]); `None` selects this host's
+/// own admin server over its local control socket ([`AdminTarget::Local`]),
+/// erroring if this host runs none.
+pub async fn resolve_admin_target(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<Secret>,
+) -> Result<AdminTarget> {
+    match server {
+        Some(addr) => {
+            let session =
+                open_admin_session(ans, Some(addr), ca_dir, admin, password).await?;
+            Ok(AdminTarget::Remote { session })
+        }
+        None => {
+            let cfg_path = paths::discover_admin_server_config().context(
+                "no --server given and no local admin server on this host — this box \
+                 must run the admin server to manage its roster locally, or pass \
+                 --server <ip:port> to manage a remote CA",
+            )?;
+            Ok(AdminTarget::Local { cfg_path })
+        }
+    }
 }
 
 /// The one shared remote preamble: resolve the admin server + confirm its

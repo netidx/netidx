@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client, admin_local,
-    admin_ops::{queue as ca_ops, revoke as revoke_ops},
+    admin_ops::{self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops},
     admin_proto::{self, NodeKind},
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
@@ -211,14 +211,57 @@ pub(crate) enum AdminCmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminScopeArgs {
-    /// Manage admins on a REMOTE CA over the admin plane (instead of the
-    /// local vault). Authenticates as a `may_manage_admins` role admin;
-    /// the operator confirms the CA's fingerprint before any password.
+    /// Which CA to list. With `--server` this is a remote admin plane
+    /// (glyph-confirmed, `may_manage_admins` admin); without it, this host's
+    /// own admin server over its local control socket.
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+/// The policy knobs shared by `ca admin add-role` and `set-policy`. Booleans are
+/// `Option`: supplied → used; omitted → the answerer decides (required in
+/// non-interactive mode). Empty `--allow-san` / `--id-map-group` take the
+/// per-domain defaults.
+#[derive(Args, Debug)]
+pub(crate) struct PolicyFlags {
+    /// SAN glob this admin may issue (repeatable). Defaults to `*.<domain>`.
+    #[arg(long = "allow-san", num_args = 1)]
+    allow_san: Vec<String>,
+    /// Max validity this admin may issue (e.g. 730d, 10m). Default 730d.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
+    max_validity: Duration,
+    /// id-map groups this admin may assign when enrolling (repeatable; first is
+    /// primary; an explicit empty string disables registration).
+    #[arg(long = "id-map-group", num_args = 1)]
+    id_map_groups: Vec<String>,
+    /// Whether this admin may enroll new admin servers (required
+    /// non-interactively).
     #[arg(long)]
-    pub server: Option<SocketAddr>,
-    /// Override the CA directory. Defaults to `${basedir}/ca/`.
+    may_enroll_servers: Option<bool>,
+    /// Whether this admin may manage the roster — add / rescope / remove admins
+    /// (required non-interactively). The CA still enforces no-escalation.
     #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    may_manage_admins: Option<bool>,
+    /// Netidx path this admin may edit perms under (repeatable, e.g. /eu).
+    #[arg(long = "perms-scope", num_args = 1)]
+    perms_scope: Vec<String>,
+    /// Netidx path this admin may control services under (repeatable).
+    #[arg(long = "service-scope", num_args = 1)]
+    service_scope: Vec<String>,
+}
+
+impl PolicyFlags {
+    fn inputs(&self) -> roster_ops::PolicyInputs<'_> {
+        roster_ops::PolicyInputs {
+            allow_san: &self.allow_san,
+            max_validity: self.max_validity,
+            id_map_groups: &self.id_map_groups,
+            may_enroll_servers: self.may_enroll_servers,
+            may_manage_admins: self.may_manage_admins,
+            perms_scope: &self.perms_scope,
+            service_scope: &self.service_scope,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -252,89 +295,37 @@ pub(crate) struct AdminAddArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminAddRoleArgs {
-    /// Name of the new role admin. Prompted when omitted.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// SAN glob the server may sign on this role's behalf (repeatable).
-    /// Prompted when omitted; empty for a role that issues nothing.
-    #[arg(long = "allow-san", num_args = 1)]
-    pub allow_san: Vec<String>,
-    /// Max validity this role may issue (e.g. 730d, 10m). Default 730d.
-    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
-    pub max_validity: Duration,
-    /// id-map groups this role may assign when enrolling (repeatable;
-    /// first is primary). Prompted when omitted; empty disables it.
-    #[arg(long = "id-map-group", num_args = 1)]
-    pub id_map_groups: Vec<String>,
-    /// Whether this role may enroll new admin servers. Prompted when omitted.
-    #[arg(long)]
-    pub may_enroll_servers: Option<bool>,
-    /// Netidx path this role may edit perms under (repeatable, e.g. /eu,
-    /// or / for the whole tree). Prompted when omitted.
-    #[arg(long = "perms-scope", num_args = 1)]
-    pub perms_scope: Vec<String>,
-    /// Netidx path this role may control services under (restart/start/stop
-    /// the activation units of the cluster serving that path; repeatable).
-    #[arg(long = "service-scope", num_args = 1)]
-    pub service_scope: Vec<String>,
-    /// Mint the role admin on a REMOTE CA over the admin plane. The CA
-    /// enforces no-escalation (you may only grant ⊆ your own authority).
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    /// Name of the new role admin.
+    #[arg(value_name = "NAME")]
+    name: String,
+    /// Read the new role admin's initial password from a file (never on the
+    /// command line).
+    #[arg(long = "new-password-file")]
+    new_password_file: PathBuf,
+    #[command(flatten)]
+    policy: PolicyFlags,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminSetPolicyArgs {
-    /// Name of the admin whose policy to replace. Prompted when omitted.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// SAN glob this admin may issue (repeatable). Replaces the existing
-    /// list. Prompted when omitted, defaulting to `*.<ca-domain>`.
-    #[arg(long = "allow-san", num_args = 1)]
-    pub allow_san: Vec<String>,
-    /// Max validity this admin may issue (e.g. 730d, 10m). Default 730d.
-    #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
-    pub max_validity: Duration,
-    /// id-map groups for identities signed by this admin (repeatable;
-    /// first is primary). Prompted when omitted; an explicit empty
-    /// string disables registration.
-    #[arg(long = "id-map-group", num_args = 1)]
-    pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new admin servers. Prompted when
-    /// omitted.
-    #[arg(long)]
-    pub may_enroll_servers: Option<bool>,
-    /// Netidx path this admin may edit perms under (repeatable). Replaces
-    /// the existing list.
-    #[arg(long = "perms-scope", num_args = 1)]
-    pub perms_scope: Vec<String>,
-    /// Netidx path this admin may control services under (repeatable).
-    /// Replaces the existing list.
-    #[arg(long = "service-scope", num_args = 1)]
-    pub service_scope: Vec<String>,
-    /// Rescope a role admin on a REMOTE CA over the admin plane (CA enforces
-    /// no-escalation).
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    /// Name of the admin whose policy to replace (wholesale).
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[command(flatten)]
+    policy: PolicyFlags,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct AdminRemoveArgs {
-    /// Name of the admin to revoke. Prompted when omitted.
-    #[arg(long)]
-    pub name: Option<String>,
-    /// Allow removing the last admin (locks the CA permanently).
-    #[arg(long)]
-    pub force: bool,
-    /// Remove a role admin on a REMOTE CA over the admin plane.
-    #[arg(long)]
-    pub server: Option<SocketAddr>,
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
+    /// Name of the role admin to remove.
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
@@ -1708,6 +1699,35 @@ fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
     }
 }
 
+/// Read the new role admin's initial password from `--new-password-file` (never
+/// on argv) into a [`Secret`].
+fn read_new_password(path: &Path) -> Result<admin_proto::Secret> {
+    let s = std::fs::read_to_string(path)
+        .with_context(|| format!("reading --new-password-file {}", path.display()))?;
+    Ok(admin_proto::Secret(s.trim_end_matches(['\n', '\r']).to_string()))
+}
+
+/// The CA CN + domain that seed the `*.<domain>` SAN suggestion: a remote CA
+/// reports its domain in the pinned identity; a local CA is read off its own
+/// certificate.
+fn policy_context(
+    target: &admin_ops::AdminTarget,
+    ca_dir: Option<&Path>,
+) -> (String, Option<String>) {
+    match target {
+        admin_ops::AdminTarget::Remote { session } => {
+            let domain = session.identity.domain.to_string();
+            (default_ca_cn(&domain), Some(domain))
+        }
+        admin_ops::AdminTarget::Local { .. } => {
+            let dir =
+                ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
+            let cn = dir.map(|d| existing_ca_cn(&d)).unwrap_or_default();
+            (cn, None)
+        }
+    }
+}
+
 fn admin(cmd: AdminCmd) -> Result<()> {
     match cmd {
         AdminCmd::Add(_) => {
@@ -1723,174 +1743,98 @@ fn admin(cmd: AdminCmd) -> Result<()> {
                  without ever unlocking the CA key (the server signs for it)."
             )
         }
-        AdminCmd::AddRole(a) => {
-            let name = prompt::required_string("new role admin name", a.name.clone())?;
-            if ca_vault::is_reserved_admin(&name) {
-                bail!(
-                    "{name:?} is a reserved signing-slot name (recovery / autorenew) \
-                     and cannot be a role admin"
-                );
-            }
-            let policy_args = PolicyArgs {
-                allow_san: &a.allow_san,
-                max_validity: a.max_validity,
-                id_map_groups: &a.id_map_groups,
-                may_enroll_servers: a.may_enroll_servers,
-                perms_scope: &a.perms_scope,
-                service_scope: &a.service_scope,
-            };
-            // Remote: the CA enforces no-escalation (granted policy ⊆ the
-            // managing admin's). Local: on-box FS access is the authority.
-            if let Some(server) = a.server {
-                let (rt, identity, admin, password) =
-                    remote_admin_preamble(server, a.ca_dir.clone())?;
-                let policy = prompt_policy(
-                    &policy_args,
-                    false,
-                    &default_ca_cn(&identity.domain),
-                    Some(&identity.domain),
-                )?;
-                let new_pw = collect_required_password(&format!(
-                    "password for new role admin {name:?}"
-                ))?;
-                rt.block_on(admin_client::add_role_admin(
-                    server,
-                    NodeKind::Client,
-                    &identity,
-                    &admin,
-                    password.as_str(),
-                    &name,
-                    &new_pw,
-                    policy,
-                ))?;
-                println!("added role admin {name:?} on the CA at {server}");
-                return Ok(());
-            }
-            // Local: the running daemon owns the vault; it trusts this peer
-            // as a superuser over the control socket (no password). A role
-            // with no authority at all is allowed (a placeholder to scope
-            // later). The CN default is read from the local CA's public cert.
-            let cfg_path = paths::discover_admin_server_config()?;
-            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let policy = prompt_policy(
-                &policy_args,
-                false,
-                &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
-                None,
-            )?;
-            let new_pw = collect_required_password(&format!(
-                "password for new role admin {name:?}"
-            ))?;
-            rt.block_on(admin_local::add_role_admin(&cfg_path, &name, &new_pw, policy))?;
-            println!("added role admin {name:?} (via the local admin server)");
-            Ok(())
+        AdminCmd::AddRole(a) => admin_add_role(a),
+        AdminCmd::SetPolicy(a) => admin_set_policy(a),
+        AdminCmd::Remove(a) => admin_remove(a),
+        AdminCmd::List(a) => admin_list(a),
+    }
+}
+
+/// `ca admin add-role <name>` — mint a role admin (local control socket or
+/// pinned remote plane; the CA enforces no-escalation remotely).
+fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(admin_ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let (cn, domain) = policy_context(&target, a.auth.ca_dir.as_deref());
+    let policy =
+        rt.block_on(roster_ops::gather_policy(&mut ans, a.policy.inputs(), &cn, domain.as_deref()))?;
+    let new_password = read_new_password(&a.new_password_file)?;
+    rt.block_on(roster_ops::add_role_admin(&target, &a.name, &new_password, policy))?;
+    report_admin_target("added role admin", &a.name, &target);
+    Ok(())
+}
+
+/// `ca admin set-policy <name>` — replace an admin's policy wholesale.
+fn admin_set_policy(a: AdminSetPolicyArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(admin_ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let (cn, domain) = policy_context(&target, a.auth.ca_dir.as_deref());
+    let policy =
+        rt.block_on(roster_ops::gather_policy(&mut ans, a.policy.inputs(), &cn, domain.as_deref()))?;
+    rt.block_on(roster_ops::set_admin_policy(&target, &a.name, policy))?;
+    report_admin_target("updated policy for admin", &a.name, &target);
+    Ok(())
+}
+
+/// `ca admin remove <name>` — revoke a role admin (the daemon's last-manager and
+/// reserved-slot guards still apply).
+fn admin_remove(a: AdminRemoveArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(admin_ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    rt.block_on(roster_ops::remove_admin(&target, &a.name))?;
+    report_admin_target("removed role admin", &a.name, &target);
+    Ok(())
+}
+
+/// `ca admin list` — the roster (tier + policy per admin).
+fn admin_list(a: AdminScopeArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(admin_ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let admins = rt.block_on(roster_ops::list_admins(&target))?;
+    print_admin_list(&admins);
+    Ok(())
+}
+
+/// Report a roster mutation, naming which CA it hit.
+fn report_admin_target(what: &str, name: &str, target: &admin_ops::AdminTarget) {
+    match target {
+        admin_ops::AdminTarget::Remote { session } => {
+            println!("{what} {name:?} on the CA at {}", session.server)
         }
-        AdminCmd::SetPolicy(a) => {
-            let name =
-                prompt::required_string("admin whose policy to set", a.name.clone())?;
-            if ca_vault::is_reserved_admin(&name) {
-                bail!(
-                    "{name:?} is a system-managed signing slot; its narrow policy is \
-                     fixed and must not be widened. Manage authority through role admins."
-                );
-            }
-            let policy_args = PolicyArgs {
-                allow_san: &a.allow_san,
-                max_validity: a.max_validity,
-                id_map_groups: &a.id_map_groups,
-                may_enroll_servers: a.may_enroll_servers,
-                perms_scope: &a.perms_scope,
-                service_scope: &a.service_scope,
-            };
-            if let Some(server) = a.server {
-                let (rt, identity, admin, password) =
-                    remote_admin_preamble(server, a.ca_dir.clone())?;
-                let policy = prompt_policy(
-                    &policy_args,
-                    false,
-                    &default_ca_cn(&identity.domain),
-                    Some(&identity.domain),
-                )?;
-                rt.block_on(admin_client::set_admin_policy(
-                    server,
-                    NodeKind::Client,
-                    &identity,
-                    &admin,
-                    password.as_str(),
-                    &name,
-                    policy,
-                ))?;
-                println!("updated policy for admin {name:?} on the CA at {server}");
-                return Ok(());
-            }
-            // Local: rescope through the daemon (superuser over the control
-            // socket). Rescoping touches only the slot's plaintext policy,
-            // never MK.
-            let cfg_path = paths::discover_admin_server_config()?;
-            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let policy = prompt_policy(
-                &policy_args,
-                false,
-                &existing_ca_cn(&ca_dir_for(a.ca_dir.clone())?),
-                None,
-            )?;
-            rt.block_on(admin_local::set_admin_policy(&cfg_path, &name, policy))?;
-            println!("updated policy for admin {name:?} (via the local admin server)");
-            Ok(())
-        }
-        AdminCmd::Remove(a) => {
-            let name = prompt::required_string("admin to revoke", a.name.clone())?;
-            if ca_vault::is_reserved_admin(&name) {
-                bail!(
-                    "{name:?} is a system-managed signing slot and cannot be removed \
-                     directly (that would orphan the CA key or the box credential). \
-                     Rotate recovery with `netidx admin ca recovery rotate`, or \
-                     autorenew with `netidx admin ca auto-approve --rotate`."
-                );
-            }
-            if let Some(server) = a.server {
-                let (rt, identity, admin, password) =
-                    remote_admin_preamble(server, a.ca_dir.clone())?;
-                rt.block_on(admin_client::remove_admin(
-                    server,
-                    NodeKind::Client,
-                    &identity,
-                    &admin,
-                    password.as_str(),
-                    &name,
-                ))?;
-                println!("removed role admin {name:?} on the CA at {server}");
-                return Ok(());
-            }
-            // Local: revoke through the daemon (superuser over the control
-            // socket). `a.force` is ignored here — the daemon's last-manager
-            // and reserved-slot guards still apply, preventing an orphaned CA
-            // key.
-            let cfg_path = paths::discover_admin_server_config()?;
-            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            rt.block_on(admin_local::remove_admin(&cfg_path, &name))?;
-            println!("removed role admin {name:?} (via the local admin server)");
-            Ok(())
-        }
-        AdminCmd::List(a) => {
-            if let Some(server) = a.server {
-                let (rt, identity, admin, password) =
-                    remote_admin_preamble(server, a.ca_dir.clone())?;
-                let admins = rt.block_on(admin_client::list_admins(
-                    server,
-                    NodeKind::Client,
-                    &identity,
-                    &admin,
-                    password.as_str(),
-                ))?;
-                print_admin_list(&admins);
-                return Ok(());
-            }
-            let cfg_path = paths::discover_admin_server_config()?;
-            let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let admins = rt.block_on(admin_local::list_admins(&cfg_path))?;
-            print_admin_list(&admins);
-            Ok(())
+        admin_ops::AdminTarget::Local { .. } => {
+            println!("{what} {name:?} (via the local admin server)")
         }
     }
 }
