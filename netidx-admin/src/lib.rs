@@ -19,6 +19,9 @@ pub mod activation;
 /// reports progress, abstracted over the frontend (strict CLI / TUI / Atlas).
 pub mod answer;
 pub mod atomic;
+/// The install planner: the decision logic behind `admin <role> install`,
+/// driven through the [`answer::Answerer`] seam so every frontend shares it.
+pub mod plan;
 /// CA / CSR / cert generation. Unix-only because it depends on
 /// `openssl`, which on Windows requires a mingw build of OpenSSL
 /// that is impractical to install. netidx itself uses rustls

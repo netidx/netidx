@@ -3,7 +3,6 @@
 
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
-use netidx::config::DefaultAuthMech;
 // Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
@@ -17,12 +16,16 @@ use netidx_admin::{
     fingerprint::ColorMode,
     netshape::NetShape,
     paths,
+    plan::{AdminPlane, AuthKind, admin_plane_decision},
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     template::{
         self, AuthChoice, ParentRef, ReferralAuth, RenderedTemplate, TlsIdentitySpec,
         resolver::IdMapMode,
     },
 };
+// Re-exported so the sibling admin submodules keep calling
+// `init::resolve_admin_server_addr`; the impl now lives in the engine.
+pub(super) use netidx_admin::plan::{resolve_admin_server_addr, resolve_admin_server_seeds};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
@@ -42,47 +45,6 @@ use super::{prompt, service};
 // `init` stays the shared install engine + helpers.
 
 // -- Common -------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthKind {
-    Anonymous,
-    Local,
-    Krb5,
-    Tls,
-}
-
-impl FromStr for AuthKind {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "anonymous" => Ok(Self::Anonymous),
-            "local" => Ok(Self::Local),
-            "krb5" => Ok(Self::Krb5),
-            "tls" => Ok(Self::Tls),
-            _ => bail!("auth must be one of anonymous|local|krb5|tls"),
-        }
-    }
-}
-
-impl AuthKind {
-    fn default_mech(self) -> DefaultAuthMech {
-        match self {
-            Self::Anonymous => DefaultAuthMech::Anonymous,
-            Self::Local => DefaultAuthMech::Local,
-            Self::Krb5 => DefaultAuthMech::Krb5,
-            Self::Tls => DefaultAuthMech::Tls,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Anonymous => "anonymous",
-            Self::Local => "local",
-            Self::Krb5 => "krb5",
-            Self::Tls => "tls",
-        }
-    }
-}
 
 #[derive(Args, Debug, Clone)]
 struct ParentFlags {
@@ -1092,50 +1054,6 @@ impl AdminServers {
 /// prompt cascade and never re-offer a network join.
 /// [`AdminServers::NotProbed`] is returned only on a non-TTY — scripted
 /// installs use CLI flags.
-/// Resolve an operator-typed admin-server address to a single socket
-/// address (the first [`resolve_admin_server_seeds`] yields). For the
-/// commands that contact one admin server directly (`add-parent`,
-/// `review-delegation`, remote `perms`) rather than peer-walking a set of
-/// discovery seeds.
-// Those callers are all unix-only (they need the openssl-backed CA admin
-// path), so on Windows this has no non-test caller — keep it compiled
-// (the test below uses it on every platform) but don't warn there.
-#[cfg_attr(not(unix), allow(dead_code))]
-pub(super) fn resolve_admin_server_addr(input: &str) -> Result<SocketAddr> {
-    Ok(resolve_admin_server_seeds(input)?
-        .into_iter()
-        .next()
-        .expect("resolve_admin_server_seeds never returns an empty vec"))
-}
-
-/// Resolve an operator-typed admin-server address into seed socket
-/// addresses. Accepts a hostname or an IP, with or without a `:port`;
-/// when the port is omitted it defaults to the conventional admin-server
-/// port. A hostname may resolve to several addresses — all are returned,
-/// which the peer walk in [`confirm_seeds`] tries in turn.
-fn resolve_admin_server_seeds(input: &str) -> Result<Vec<SocketAddr>> {
-    use std::net::ToSocketAddrs;
-    let s = input.trim();
-    if s.is_empty() {
-        bail!("empty address");
-    }
-    // An explicit port (`ip:port`, `host:port`, `[ipv6]:port`) resolves
-    // directly. Without one, std's `&str` resolver errors for lack of a
-    // port; fall back to attaching the default admin-server port to the
-    // bare host / ip.
-    let seeds: Vec<SocketAddr> = match s.to_socket_addrs() {
-        Ok(addrs) => addrs.collect(),
-        Err(_) => (s, netidx_admin::admin_proto::DEFAULT_PORT)
-            .to_socket_addrs()
-            .with_context(|| format!("could not resolve admin server address {s:?}"))?
-            .collect(),
-    };
-    if seeds.is_empty() {
-        bail!("{s:?} resolved to no addresses");
-    }
-    Ok(seeds)
-}
-
 pub(super) fn discover_network(kind: NodeKind) -> Result<AdminServers> {
     if !prompt::stdin_is_tty() {
         return Ok(AdminServers::NotProbed);
@@ -2315,50 +2233,6 @@ pub(crate) fn run_resolver(mut f: ResolverFlags) -> Result<()> {
     )
 }
 
-/// What the resolver install does about the admin plane (the admin
-/// server, and on non-TLS networks the admin-plane CA that anchors it).
-/// This function IS the install-profile matrix — documented in
-/// design/admin-server.md (Install profiles) and exhaustively tested
-/// below; change all three together.
-// cfg(unix): only the unix-gated resolver install stands up admin
-// servers (the CA signer is openssl/unix).
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AdminPlane {
-    /// Set it up. Announce what's happening; don't ask.
-    Mandatory,
-    /// Default-yes question.
-    Ask,
-    /// Never offer (host-local auth), or the operator opted out.
-    Skip,
-}
-
-/// TLS already creates the CA on a fresh network (it signs the data
-/// plane), and krb5/anonymous still need the admin plane's TLS trust
-/// root for discovery, enrollment, and renewal — declining it on a TLS
-/// or krb5 network produces a network where certificate renewal and
-/// zero-touch installs can never work, so neither is offered as a
-/// question. Anonymous networks may genuinely not want the machinery
-/// (lab/dev setups), so they're asked. Local auth is host-local by
-/// definition: nothing to discover, nothing to enroll.
-///
-/// The same rule covers joining an existing network: enrolling a admin
-/// server queues for remote approval like any other request (the
-/// admin's `may_enroll_servers` gate runs at approval), so no admin
-/// needs to be at this keyboard and there is no reason for the join
-/// side of the matrix to differ.
-#[cfg(unix)]
-fn admin_plane_decision(kind: AuthKind, no_admin_server: bool) -> AdminPlane {
-    if no_admin_server {
-        return AdminPlane::Skip;
-    }
-    match kind {
-        AuthKind::Tls | AuthKind::Krb5 => AdminPlane::Mandatory,
-        AuthKind::Anonymous => AdminPlane::Ask,
-        AuthKind::Local => AdminPlane::Skip,
-    }
-}
-
 /// Decide how the resolver maps authenticated identities to unix
 /// uid/gid (see [`IdMapMode`]). `--no-id-map` forces `Platform` (the
 /// historical "no daemon, /bin/id" behaviour). TLS always installs the
@@ -3427,48 +3301,6 @@ mod tests {
     use netidx_admin::template::TlsCopyJob;
     use std::collections::BTreeMap;
 
-    // IP literals so the resolution is deterministic and needs no DNS;
-    // the hostname path is the same `ToSocketAddrs` call, just with a
-    // name on the left.
-    #[test]
-    fn admin_server_seeds_default_and_explicit_port() {
-        let dflt = netidx_admin::admin_proto::DEFAULT_PORT;
-        // bare ip → default admin port
-        assert_eq!(
-            resolve_admin_server_seeds("1.2.3.4").unwrap(),
-            vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
-        );
-        // explicit port wins
-        assert_eq!(
-            resolve_admin_server_seeds("1.2.3.4:9999").unwrap(),
-            vec![SocketAddr::from(([1, 2, 3, 4], 9999))],
-        );
-        // surrounding whitespace is trimmed
-        assert_eq!(
-            resolve_admin_server_seeds("  1.2.3.4  ").unwrap(),
-            vec![SocketAddr::from(([1, 2, 3, 4], dflt))],
-        );
-        // bare ipv6 → default port; bracketed ipv6 carries an explicit port
-        assert_eq!(
-            resolve_admin_server_seeds("::1").unwrap(),
-            vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, dflt))],
-        );
-        assert_eq!(
-            resolve_admin_server_seeds("[::1]:9999").unwrap(),
-            vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9999))],
-        );
-        // empty / blank is rejected (the prompt treats blank as "none"
-        // before reaching here, but the parser must not accept it either)
-        assert!(resolve_admin_server_seeds("").is_err());
-        assert!(resolve_admin_server_seeds("   ").is_err());
-        // the single-addr wrapper applies the same defaulting
-        assert_eq!(
-            resolve_admin_server_addr("1.2.3.4").unwrap(),
-            SocketAddr::from(([1, 2, 3, 4], dflt)),
-        );
-        assert!(resolve_admin_server_addr("").is_err());
-    }
-
     #[test]
     fn id_map_answer_sentinel_and_list() {
         let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3522,31 +3354,6 @@ mod tests {
             units_dir: None,
             tls_install: Vec::new(),
             warnings: Vec::new(),
-        }
-    }
-
-    // The install-profile matrix, exhaustively. This test and
-    // design/admin-server.md (Install profiles) mirror
-    // `admin_plane_decision`; change all three together.
-    #[cfg(unix)]
-    #[test]
-    fn the_admin_plane_matrix() {
-        use AuthKind::*;
-        use AdminPlane::*;
-        // Declining the admin plane on a TLS or krb5 network breaks
-        // renewal + zero-touch installs forever, so neither is a
-        // question — fresh network or joining one (enrollment queues
-        // for remote approval, so no admin is needed at this
-        // keyboard). Anonymous networks may not want the machinery;
-        // local auth has nothing to discover.
-        for (kind, want) in
-            [(Tls, Mandatory), (Krb5, Mandatory), (Anonymous, Ask), (Local, Skip)]
-        {
-            assert_eq!(admin_plane_decision(kind, false), want, "{kind:?}");
-        }
-        // The expert opt-out beats everything.
-        for kind in [Tls, Krb5, Anonymous, Local] {
-            assert_eq!(admin_plane_decision(kind, true), Skip);
         }
     }
 
