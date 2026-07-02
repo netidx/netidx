@@ -27,6 +27,7 @@ use std::{
 
 /// role install cascades.
 pub mod publisher;
+pub mod resolver;
 pub mod workstation;
 
 // -- environment-shape facade (feature-gated) ---------------------------------
