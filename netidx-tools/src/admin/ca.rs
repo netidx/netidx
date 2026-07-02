@@ -2463,18 +2463,6 @@ fn deny(f: DenyArgs) -> Result<()> {
     Ok(())
 }
 
-/// This host's admin-server address from its own `admin-server.json`,
-/// loopback-adjusted when it binds all interfaces.
-pub(super) fn local_admin_server_listen() -> Option<SocketAddr> {
-    let path = paths::discover_admin_server_config().ok()?;
-    let cfg = netidx_admin::admin_server_config::AdminServerConfig::load(&path).ok()?;
-    let mut addr = cfg.listen;
-    if addr.ip().is_unspecified() {
-        addr.set_ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    }
-    Some(addr)
-}
-
 pub(super) fn fmt_age(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")

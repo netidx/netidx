@@ -37,6 +37,7 @@ use std::{
 };
 
 pub mod delegation;
+pub mod perms;
 pub mod queue;
 pub mod revoke;
 pub mod roster;

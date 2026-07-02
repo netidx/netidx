@@ -1,25 +1,20 @@
 //! `netidx admin perms show|edit --at <path>` — remote permissions
-//! administration through the admin server, routed by the network map. No
-//! SSH: an admin contacts a admin server (glyph-confirming its CA exactly as
-//! delegation does), the map locates the cluster mounted at `<path>`, and
-//! `show` reads that cluster's perms while `edit` opens them in `$EDITOR`,
-//! validates, and hands the result to the CA — which authenticates the
-//! admin and propagates the validated file to every cluster member.
+//! administration, a thin CLI over [`netidx_admin::admin_ops::perms`]. The
+//! library reaches an admin server, glyph-confirms its CA, routes by the
+//! network map to the cluster mounted at `<path>` (re-pinning every hop to the
+//! confirmed CA), and reads or writes its perms. `edit` runs the `$EDITOR` loop
+//! and local validation here — a frontend concern — between the library's read
+//! and its authenticated write.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin::{
-    admin_client::{self, CaIdentity},
-    admin_proto::{NetworkMap, NodeKind, PeerResult},
-    perms,
-};
-use std::{collections::BTreeSet, net::SocketAddr};
-use zeroize::Zeroizing;
+use netidx_admin::{admin_ops::perms as perms_ops, admin_proto::PeerResult, perms};
 
-use super::{
-    ca::{collect_existing_password, env_user_name, local_admin_server_listen},
-    editor, init, prompt,
-};
+use super::{answer_cli::RemoteAuthFlags, editor};
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new().context("starting tokio runtime")
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -31,15 +26,12 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct Flags {
-    /// A admin server to reach the network through: a hostname or IP, with
-    /// or without a `:port` (the admin port defaults to 4565). Defaults to
-    /// this host's own admin server, else prompted.
-    #[arg(long = "server")]
-    server: Option<String>,
-    /// The hierarchy path whose cluster's perms to act on (e.g. `/eu`, or
-    /// `/` for the root cluster). Prompted when omitted.
+    /// The hierarchy path whose cluster's perms to act on (e.g. `/eu`, or `/`
+    /// for the root cluster).
     #[arg(long = "at")]
-    at: Option<String>,
+    at: String,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -49,142 +41,49 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     }
 }
 
-/// A glyph-confirmed admin server plus the network map fetched from it.
-struct Bootstrap {
-    rt: tokio::runtime::Runtime,
-    addr: SocketAddr,
-    id: CaIdentity,
-    map: NetworkMap,
-}
-
-/// Reach a admin server (flag, else this host's own, else prompted),
-/// confirm its CA glyph (the one human trust decision), and pull the map.
-fn bootstrap(server: Option<String>) -> Result<Bootstrap> {
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let addr = match server {
-        Some(s) => init::resolve_admin_server_addr(&s)?,
-        None => match local_admin_server_listen() {
-            Some(a) => a,
-            None => prompt::required_with(
-                "admin-server address (host or ip, optional :port, e.g. \
-                 203.0.113.1:4565)",
-                init::resolve_admin_server_addr,
-            )?,
-        },
-    };
-    let id = rt
-        .block_on(admin_client::fetch_identity(addr, NodeKind::Client))
-        .with_context(|| format!("contacting admin server {addr}"))?;
-    init::show_network_identity(addr, &id);
-    if !prompt::confirm("is this your network's admin server?", false)? {
-        bail!("admin-server identity was not confirmed; nothing was sent");
-    }
-    let map = rt
-        .block_on(admin_client::get_map_pinned(addr, NodeKind::Client, &id))
-        .context("fetching the network map")?;
-    Ok(Bootstrap { rt, addr, id, map })
-}
-
-/// The admin server of the cluster mounted exactly at `at` (the same
-/// exact-base match the CA uses to route the edit).
-fn route(map: &NetworkMap, at: &str) -> Result<SocketAddr> {
-    let mut bases = BTreeSet::new();
-    for s in &map.servers {
-        if let Some(c) = &s.cluster {
-            if c.base == at {
-                return Ok(s.addr);
-            }
-            bases.insert(c.base.as_str());
-        }
-    }
-    bail!(
-        "no resolver cluster is mounted at {at:?} in the network map. Known \
-         cluster bases: {}",
-        bases.into_iter().collect::<Vec<_>>().join(", ")
-    )
-}
-
-/// Run `f` against `target` with an identity pinned to the SAME CA the
-/// operator already confirmed. The map could route us at an impostor, so a
-/// target presenting a different CA cert is refused. Reuses the bootstrap
-/// identity when the target is the bootstrap host (no re-confirm).
-fn with_same_ca<T>(
-    bs: &Bootstrap,
-    target: SocketAddr,
-    f: impl FnOnce(&CaIdentity) -> Result<T>,
-) -> Result<T> {
-    if target == bs.addr {
-        return f(&bs.id);
-    }
-    let tid = bs
-        .rt
-        .block_on(admin_client::fetch_identity(target, NodeKind::Client))
-        .with_context(|| format!("contacting admin server {target}"))?;
-    if tid.fingerprint != bs.id.fingerprint {
-        bail!(
-            "the admin server at {target} presents a DIFFERENT CA than the one \
-             you confirmed — refusing to trust where the map routed us."
-        );
-    }
-    f(&tid)
-}
-
 fn show(f: Flags) -> Result<()> {
-    let at = prompt::required_string(
-        "the hierarchy path whose perms to show (e.g. /eu, or / for root)",
-        f.at,
-    )?;
-    let bs = bootstrap(f.server)?;
-    let target = route(&bs.map, &at)?;
-    let perms_json = with_same_ca(&bs, target, |id| {
-        bs.rt.block_on(admin_client::get_perms(target, NodeKind::Client, id))
-    })?;
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let perms_json = runtime()?.block_on(perms_ops::show_perms(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        &f.at,
+    ))?;
     println!("{}", pretty(&perms_json)?);
     Ok(())
 }
 
 fn edit(f: Flags) -> Result<()> {
-    let at = prompt::required_string(
-        "the hierarchy path whose perms to edit (e.g. /eu, or / for root)",
-        f.at,
-    )?;
-    let bs = bootstrap(f.server)?;
-    let ca_addr = bs.map.ca_addr.context(
-        "the network map records no CA address — cannot route an authenticated edit",
-    )?;
-    // Seed the editor with the cluster's current perms.
-    let target = route(&bs.map, &at)?;
-    let current = with_same_ca(&bs, target, |id| {
-        bs.rt.block_on(admin_client::get_perms(target, NodeKind::Client, id))
-    })?;
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let rt = runtime()?;
+    // Seed the editor with the cluster's current perms, then hand the edited,
+    // locally-validated result to the library's authenticated write.
+    let current = rt.block_on(perms_ops::show_perms(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        &f.at,
+    ))?;
     let edited = editor::edit_with_validation(&pretty(&current)?, validate)?;
-    // Authenticate to the CA, which performs the edit and propagates it.
-    let admin = match env_user_name() {
-        Some(user) => prompt::string_with_default("admin name", None, &user)?,
-        None => prompt::required_string("admin name", None)?,
-    };
-    let password = Zeroizing::new(collect_existing_password(&format!(
-        "CA password for admin {admin:?}"
-    ))?);
-    let peers = with_same_ca(&bs, ca_addr, |id| {
-        bs.rt.block_on(admin_client::edit_perms(
-            ca_addr,
-            NodeKind::Client,
-            id,
-            &admin,
-            password.as_str(),
-            &at,
-            &edited,
-        ))
-    })?;
-    report_peers(&peers, &at);
+    let peers = rt.block_on(perms_ops::edit_perms(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        &f.at,
+        &edited,
+    ))?;
+    report_peers(&peers, &f.at);
     Ok(())
 }
 
-/// Validate edited perms JSON in the editor loop: it must parse as a PMap
-/// and every entry's bits must be valid. Returns the normalized JSON to
-/// send. The CA re-validates the whole resolver config server-side; this
-/// just gives a fast local re-edit on an obvious mistake.
+/// Validate edited perms JSON in the editor loop: it must parse as a PMap and
+/// every entry's bits must be valid. Returns the normalized JSON to send. The
+/// CA re-validates the whole resolver config server-side; this just gives a
+/// fast local re-edit on an obvious mistake.
 fn validate(s: &str) -> Result<String> {
     let pmap: perms::PMap = serde_json::from_str(s).context("not valid perms JSON")?;
     for (path, entity, bits) in perms::iter(&pmap) {
