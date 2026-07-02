@@ -86,6 +86,14 @@ pub struct ServerHello {
 #[serde(transparent)]
 pub struct Secret(pub String);
 
+impl Secret {
+    /// The secret as a string slice — for passing to RPC helpers that take
+    /// `&str`. Prefer this over reaching into `.0` at call sites.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret(***)")

@@ -127,6 +127,10 @@ pub enum Field {
     RevokeName,
     /// The human-readable reason recorded for a revocation.
     RevokeReason,
+    /// The unix uid a newly signed offline identity maps to.
+    Uid,
+    /// Whether an admin may mint and scope other admins.
+    MayManageAdmins,
 }
 
 /// The presentation descriptor for a [`Field`]: what flag a script passes,
@@ -415,6 +419,19 @@ impl Field {
                 label: "revocation reason",
                 help: "A short human-readable reason recorded with the \
                        revocation.",
+            },
+            Uid => FieldInfo {
+                flag: "--uid",
+                label: "unix uid",
+                help: "The unix user id a newly signed identity maps to in the \
+                       resolver's id-map.",
+            },
+            MayManageAdmins => FieldInfo {
+                flag: "--may-manage-admins",
+                label: "may manage admins?",
+                help: "Whether this admin may mint and scope other admins — the \
+                       superuser capability. The server still forbids privilege \
+                       escalation.",
             },
         }
     }

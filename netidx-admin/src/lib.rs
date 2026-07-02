@@ -60,6 +60,12 @@ pub mod admin_client;
 /// daemon feature and the daemon is unix.
 #[cfg(unix)]
 pub mod admin_local;
+/// Remote-admin operations behind the [`answer::Answerer`] seam: the
+/// query/action (code-as-id) orchestrators — enrollment queue, delegation,
+/// revocation, admin roster, service control, perms, offline sign/issue, CA
+/// slots — that the strict CLI, the TUI, and Atlas all drive.
+#[cfg(unix)]
+pub mod admin_ops;
 /// Wire protocol (message types + framing) shared by the admin server
 /// and its clients. Cross-platform — a Windows node speaks it to a unix
 /// admin server. See [`design/ca-server.md`].
