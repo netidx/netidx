@@ -7,20 +7,20 @@
 
 use super::{
     InstallCommon, finish_with, install_renew_unit, network_provenance,
-    prompt_resolver_tls_name, prompt_resolver_port, publisher_bind_shape,
+    prompt_resolver_port, prompt_resolver_tls_name, publisher_bind_shape,
     resolve_units_dir, suggest_client_san,
 };
 use crate::{
+    admin_proto::NodeKind,
     answer::{Answerer, Field},
     plan::{
         AuthKind,
         enroll::{self, AdminServers, KeyProtArg},
-        service::{ServiceNeed},
+        service::ServiceNeed,
     },
     provenance::{InstallRecord, InstallRole},
     service::ServiceScope,
     template::{self, ReferralAuth},
-    admin_proto::NodeKind,
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
@@ -91,9 +91,13 @@ async fn publisher_per_addr_auth(
             ReferralAuth::Krb5(ArcStr::from(spn.as_str()))
         }
         AuthKind::Tls => {
-            let name =
-                prompt_resolver_tls_name(ans, first_addr, Field::TlsName, tls_server_name)
-                    .await?;
+            let name = prompt_resolver_tls_name(
+                ans,
+                first_addr,
+                Field::TlsName,
+                tls_server_name,
+            )
+            .await?;
             ReferralAuth::Tls(ArcStr::from(name.as_str()))
         }
     })
@@ -239,8 +243,11 @@ pub async fn run_publisher(
     // TLS publishers get the renewal daemon (certificates expire); everything
     // else stays service-free.
     let has_tls = !tls_identities.is_empty();
-    let units_dir =
-        if has_tls { resolve_units_dir(common.no_units, units_dir.as_deref())? } else { None };
+    let units_dir = if has_tls {
+        resolve_units_dir(common.no_units, units_dir.as_deref())?
+    } else {
+        None
+    };
     let need = if units_dir.is_some() {
         // A publisher is typically a headless host, so a system service that
         // starts at boot is the right default, like the resolver.

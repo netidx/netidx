@@ -231,8 +231,10 @@ pub fn network_provenance(
 ) -> (Option<NetworkIdentity>, Option<SocketAddr>) {
     match probe.have() {
         Some(net) => {
-            let id =
-                NetworkIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
+            let id = NetworkIdentity::new(
+                net.identity.domain.clone(),
+                &net.identity.fingerprint,
+            );
             (Some(id), net.info.reached.first().copied())
         }
         None => (None, None),
@@ -339,7 +341,10 @@ pub async fn prompt_resolver_port(
 /// client must match — and falls back to the `resolver.local` convention when
 /// the probe can't reach or read it. Either way the value is only a default
 /// the operator confirms; a wrong guess fails closed at connect time.
-pub async fn resolver_tls_name_default(ans: &mut dyn Answerer, addr: SocketAddr) -> String {
+pub async fn resolver_tls_name_default(
+    ans: &mut dyn Answerer,
+    addr: SocketAddr,
+) -> String {
     let convention = format!("{DEFAULT_RESOLVER_NAME}.{DEFAULT_TLS_DOMAIN}");
     match resolver_probe::probe_resolver_tls_name(addr).await {
         Ok(Some(name)) => {

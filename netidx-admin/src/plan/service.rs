@@ -95,13 +95,8 @@ pub async fn offer(
     if gate.no_service {
         return Ok(None);
     }
-    let install_now = ans
-        .confirm(
-            Field::Service,
-            gate.with_service.then_some(true),
-            true,
-        )
-        .await?;
+    let install_now =
+        ans.confirm(Field::Service, gate.with_service.then_some(true), true).await?;
     if install_now {
         Ok(Some(scope))
     } else {

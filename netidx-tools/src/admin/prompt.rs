@@ -116,41 +116,6 @@ pub fn required_path(label: &str, provided: Option<PathBuf>) -> Result<PathBuf> 
     Ok(PathBuf::from(s))
 }
 
-/// Prompt for a required value parseable from a string. Re-prompts on
-/// parse failure (a typo is recoverable on a TTY); a non-TTY caller,
-/// or EOF at the prompt, bails.
-pub fn required_parsed<T>(label: &str, provided: Option<T>) -> Result<T>
-where
-    T: FromStr,
-    T::Err: Display,
-{
-    if let Some(v) = provided {
-        return Ok(v);
-    }
-    if !stdin_is_tty() {
-        anyhow::bail!(
-            "{label} is required (stdin is not a TTY so I cannot prompt; \
-             pass the corresponding --flag)"
-        );
-    }
-    loop {
-        match read_line(&format!("{label}: "))? {
-            None => anyhow::bail!("{label} is required (got EOF at the prompt)"),
-            Some(line) if line.is_empty() => {
-                eprintln!("{label} must not be empty; please enter a value");
-                continue;
-            }
-            Some(line) => match line.parse::<T>() {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    eprintln!("invalid {label}: {e}; please try again");
-                    continue;
-                }
-            },
-        }
-    }
-}
-
 /// Prompt for a required value parsed by a caller-supplied `parse`
 /// function — the level-2 analogue of [`optional_with`], and the
 /// closure-taking sibling of [`required_parsed`] for when turning the
@@ -322,36 +287,6 @@ where
 
 // ---- level 1 (optional): prompt, default = `None` ----------------------
 
-/// Prompt for an optional parseable value. Blank input / EOF / non-TTY
-/// returns `None`. A bad answer on a TTY re-prompts (blank still
-/// escapes to `None`). Used when "no value" is itself a meaningful
-/// choice — e.g. "is there a network-wide parent resolver? [none]:".
-pub fn optional_parsed<T>(label: &str, provided: Option<T>) -> Result<Option<T>>
-where
-    T: FromStr,
-    T::Err: Display,
-{
-    if let Some(v) = provided {
-        return Ok(Some(v));
-    }
-    if !stdin_is_tty() {
-        return Ok(None);
-    }
-    loop {
-        match read_line(&format!("{label} [none]: "))? {
-            None => return Ok(None),
-            Some(line) if line.is_empty() => return Ok(None),
-            Some(line) => match line.parse::<T>() {
-                Ok(v) => return Ok(Some(v)),
-                Err(e) => {
-                    eprintln!("invalid {label}: {e}; try again (or blank for none)");
-                    continue;
-                }
-            },
-        }
-    }
-}
-
 /// Prompt for an optional value parsed by a caller-supplied `parse`
 /// function — for when turning the typed line into a value is more than
 /// a `FromStr` (e.g. resolving a hostname to addresses and defaulting an
@@ -431,7 +366,6 @@ mod tests {
             required_path("x", Some(PathBuf::from("/p"))).unwrap(),
             PathBuf::from("/p"),
         );
-        assert_eq!(required_parsed::<u32>("x", Some(7)).unwrap(), 7);
         assert_eq!(string_with_default("x", Some("v".into()), "d").unwrap(), "v",);
         assert_eq!(parsed_with_default::<u32>("x", Some(7), "9").unwrap(), 7,);
         assert_eq!(
@@ -444,7 +378,6 @@ mod tests {
     fn level_2_bails_without_tty() {
         assert!(required_string("flag", None).is_err());
         assert!(required_path("flag", None).is_err());
-        assert!(required_parsed::<u32>("flag", None).is_err());
     }
 
     #[test]
@@ -455,16 +388,6 @@ mod tests {
             choice_with_default::<u32>("flag", None, &["1", "2"], "2").unwrap(),
             2,
         );
-    }
-
-    #[test]
-    fn optional_parsed_provided_round_trips() {
-        assert_eq!(optional_parsed::<u32>("flag", Some(42)).unwrap(), Some(42),);
-    }
-
-    #[test]
-    fn optional_parsed_non_tty_returns_none() {
-        assert_eq!(optional_parsed::<u32>("flag", None).unwrap(), None);
     }
 
     #[test]

@@ -138,7 +138,9 @@ pub async fn run_workstation(
                     })
                 }
                 None => {
-                    match prompt_parent_referral(ans, &base, key_protection, &probe).await? {
+                    match prompt_parent_referral(ans, &base, key_protection, &probe)
+                        .await?
+                    {
                         None => None,
                         Some((parent_ref, maybe_ident)) => {
                             if let Some(si) = maybe_ident {
@@ -176,8 +178,13 @@ pub async fn run_workstation(
     let (network, admin_server) = net_prov;
     // The workstation's own resolver is local-auth; the network it refers up
     // to (if any) carries its auth inside the parent referral.
-    let record =
-        InstallRecord::new(InstallRole::Workstation, base, "local", network, admin_server);
+    let record = InstallRecord::new(
+        InstallRole::Workstation,
+        base,
+        "local",
+        network,
+        admin_server,
+    );
     finish_with(
         ans,
         rt,
@@ -284,7 +291,12 @@ async fn prompt_parent_referral(
         _ => return Ok(None),
     };
     let kind: AuthKind = ans
-        .choice(Field::ParentAuth, None, &["anonymous", "local", "krb5", "tls"], Some("tls"))
+        .choice(
+            Field::ParentAuth,
+            None,
+            &["anonymous", "local", "krb5", "tls"],
+            Some("tls"),
+        )
         .await?
         .parse()?;
     let (auth, identity) = match kind {
@@ -305,7 +317,8 @@ async fn prompt_parent_referral(
         }
         AuthKind::Tls => {
             let server_name =
-                prompt_resolver_tls_name(ans, Some(addr), Field::ParentTlsName, None).await?;
+                prompt_resolver_tls_name(ans, Some(addr), Field::ParentTlsName, None)
+                    .await?;
             // identity is required for TLS — enrolled over the admin plane (or
             // a hard bail if no admin server is reachable). Suggest our SAN as
             // `<user>.<domain>`.
@@ -317,7 +330,11 @@ async fn prompt_parent_referral(
         }
     };
     Ok(Some((
-        ParentRef { path: ArcStr::from(default_path), ttl: None, addrs: vec![(addr, auth)] },
+        ParentRef {
+            path: ArcStr::from(default_path),
+            ttl: None,
+            addrs: vec![(addr, auth)],
+        },
         identity,
     )))
 }

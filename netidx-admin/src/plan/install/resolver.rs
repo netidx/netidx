@@ -46,8 +46,8 @@ use crate::{
     atomic,
     fingerprint::Fingerprint,
     plan::{
-        AdminPlane, admin_plane_decision, ca_setup, delegation,
-        enroll::KeyProtection, server_setup,
+        AdminPlane, admin_plane_decision, ca_setup, delegation, enroll::KeyProtection,
+        server_setup,
     },
     tls,
 };
@@ -247,15 +247,20 @@ pub async fn run_resolver(
     // `_tls_staging` holds the TLS-issuance staging tempdir (Some only on the
     // local-CA-issue path). It must outlive `finish_with` below so the issued
     // cert/key survive until `apply()` copies them into place.
-    let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } = match probe
-        .have()
-    {
-        Some(net) => resolver_auth_from_network(ans, &input, net, kind).await?,
-        None => {
-            resolver_self_auth(ans, &input, Some(listen.ip()), units_dir.as_deref(), &probe)
+    let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } =
+        match probe.have() {
+            Some(net) => resolver_auth_from_network(ans, &input, net, kind).await?,
+            None => {
+                resolver_self_auth(
+                    ans,
+                    &input,
+                    Some(listen.ip()),
+                    units_dir.as_deref(),
+                    &probe,
+                )
                 .await?
-        }
-    };
+            }
+        };
     // First server of a new network with a non-TLS data plane: the admin
     // plane still needs its trust root (it is always TLS — the glyph confirm,
     // enrollment, and server-to-server pushes all hang off the CA), so create
@@ -366,9 +371,16 @@ pub async fn run_resolver(
                 let child_auth = authchoice_to_info(&auth)?;
                 let child = vec![ResolverAddr { addr: listen, auth: child_auth }];
                 let subtree = ans
-                    .text(Field::DelegateSubtree, input.delegate_subtree.clone(), None, true)
+                    .text(
+                        Field::DelegateSubtree,
+                        input.delegate_subtree.clone(),
+                        None,
+                        true,
+                    )
                     .await?
-                    .context("a subtree this resolver will own under the parent is required")?;
+                    .context(
+                        "a subtree this resolver will own under the parent is required",
+                    )?;
                 // The probe already glyph-confirmed this parent (it had to,
                 // to enroll our cert from its CA), so pass that identity in —
                 // the operator confirms the parent's glyph exactly once.
@@ -581,7 +593,9 @@ async fn resolver_self_auth(
                 spn: ArcStr::from(spn.as_str()),
             }))
         }
-        AuthKind::Tls => resolver_tls_auth(ans, input, default_ca_ip, units_dir, probe).await,
+        AuthKind::Tls => {
+            resolver_tls_auth(ans, input, default_ca_ip, units_dir, probe).await
+        }
     }
 }
 
@@ -599,7 +613,8 @@ async fn resolver_tls_auth(
 ) -> Result<ResolvedAuth> {
     let name = prompt_resolver_own_tls_name(ans, input.tls_name.clone()).await?;
     #[cfg(unix)]
-    let res = resolver_tls_generate(ans, input, &name, default_ca_ip, units_dir, probe).await;
+    let res =
+        resolver_tls_generate(ans, input, &name, default_ca_ip, units_dir, probe).await;
     #[cfg(not(unix))]
     let res = {
         // Creating a CA needs openssl (unix only), so a non-unix resolver can
@@ -734,12 +749,13 @@ async fn resolver_tls_generate(
             .map(|d| d.to_string())
             .unwrap_or_else(|_| name.to_string());
         ca_setup::announce_founding_policy(ans, &domain);
-        let setup_server = match admin_plane_decision(AuthKind::Tls, input.no_admin_server) {
-            AdminPlane::Mandatory => Some(true),
-            AdminPlane::Skip => Some(false),
-            // TLS is never a question — see the matrix.
-            AdminPlane::Ask => unreachable!("tls admin plane is not Ask"),
-        };
+        let setup_server =
+            match admin_plane_decision(AuthKind::Tls, input.no_admin_server) {
+                AdminPlane::Mandatory => Some(true),
+                AdminPlane::Skip => Some(false),
+                // TLS is never a question — see the matrix.
+                AdminPlane::Ask => unreachable!("tls admin plane is not Ask"),
+            };
         // The CA co-locates with this resolver — suggest its IP for the admin
         // server's listen address. The returned `ServiceNeed` is intentionally
         // dropped: this install always ends with a single system-service offer.
@@ -929,14 +945,15 @@ async fn post_apply_admin_server(
         // must MERGE the new resolver/id-map roles into that config — never
         // enroll a fresh admin server, whose join-shape config drops the `ca`
         // role and silently disables signing.
-        Some(net) if host_holds_ca(net) => match admin_plane_decision(kind, no_admin_server)
-        {
-            // Honor an explicit `--no-admin-server` (and Local auth) — don't
-            // advertise this resolver — even though the admin server itself
-            // keeps running here (it's the CA).
-            AdminPlane::Skip => Ok(()),
-            _ => merge_resolver_roles(ans, resolver_config, id_map),
-        },
+        Some(net) if host_holds_ca(net) => {
+            match admin_plane_decision(kind, no_admin_server) {
+                // Honor an explicit `--no-admin-server` (and Local auth) — don't
+                // advertise this resolver — even though the admin server itself
+                // keeps running here (it's the CA).
+                AdminPlane::Skip => Ok(()),
+                _ => merge_resolver_roles(ans, resolver_config, id_map),
+            }
+        }
         Some(net) => {
             enroll_admin_server(
                 ans,
@@ -1074,14 +1091,23 @@ async fn enroll_admin_server(
         let password = Zeroizing::new(std::mem::take(&mut secret.0));
         admin_client::enroll(ca_addr, &admin, password, listen, &net.identity).await?
     } else {
-        let pending = admin_client::enqueue_enroll(ca_addr, listen, &net.identity).await?;
-        ans.show_verification_code("admin-server enrollment request", &pending.fingerprint);
+        let pending =
+            admin_client::enqueue_enroll(ca_addr, listen, &net.identity).await?;
+        ans.show_verification_code(
+            "admin-server enrollment request",
+            &pending.fingerprint,
+        );
         ans.progress(Progress::new(
             Stage::WaitingApproval,
             "waiting for a CA admin to approve this admin-server enrollment…",
         ));
-        match enroll::await_issuance(ca_addr, NodeKind::AdminServer, &pending, &net.identity)
-            .await?
+        match enroll::await_issuance(
+            ca_addr,
+            NodeKind::AdminServer,
+            &pending,
+            &net.identity,
+        )
+        .await?
         {
             admin_client::PollOutcome::Issued(issued) => issued,
             admin_client::PollOutcome::Denied(reason) => {
@@ -1111,7 +1137,8 @@ async fn enroll_admin_server(
     // the CA cert at the end of the chain, exactly like the CA host's own admin
     // server.
     let dir = paths::user_config_root()?.join("admin-server");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let mut chain = issued.cert_pem.clone().into_bytes();
     chain.extend_from_slice(net.identity.ca_pem().as_bytes());
     let serving_cert = dir.join("cert.pem");

@@ -7,12 +7,12 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use netidx_admin::{
-    atomic,
-    ca::{self, Ca, SanEntry},
     admin_client,
     admin_proto::{self, NodeKind, SERVING_SAN},
     admin_server,
-    admin_server_config::{CaRole, AdminServerConfig, Roles},
+    admin_server_config::{AdminServerConfig, CaRole, Roles},
+    atomic,
+    ca::{self, Ca, SanEntry},
     netshape::NetShape,
     paths,
 };
@@ -213,24 +213,13 @@ pub(super) fn install_unit(units_dir: &Path, cfg_path: &Path) -> Result<()> {
         },
     )?;
     let dir = netidx_admin::activation::ActivationDir::open(Some(units_dir))?;
-    dir.save("admin-server", &unit).context("writing the admin-server activation unit")?;
+    dir.save("admin-server", &unit)
+        .context("writing the admin-server activation unit")?;
     println!(
         "  unit:     {}",
         netidx_admin::activation::unit_path_in(units_dir, "admin-server").display()
     );
     Ok(())
-}
-
-/// Add or replace roles on this host's admin-server config — the
-/// install flows call this after standing up the resolver / id-map so
-/// the daemon advertises what actually runs here. A missing config is
-/// an error: roles only make sense on a host that has one.
-pub(super) fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
-    let cfg_path = paths::discover_admin_server_config()?;
-    let mut cfg = AdminServerConfig::load(&cfg_path)?;
-    update(&mut cfg.roles);
-    cfg.save(&cfg_path)?;
-    Ok(cfg_path)
 }
 
 /// Point this host's CA role at the autorenew slot's `keytab`, so the

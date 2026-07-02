@@ -74,7 +74,9 @@ pub async fn delegate_under_parent(
     ));
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        match admin_client::poll_delegation(parent_conf_addr, &request_id, &identity).await? {
+        match admin_client::poll_delegation(parent_conf_addr, &request_id, &identity)
+            .await?
+        {
             DelegationPollResponse::Pending => continue,
             DelegationPollResponse::Approved { parent } => break Ok(parent),
             DelegationPollResponse::Denied { reason } => {

@@ -10,8 +10,7 @@
 //! (`server run`) stays in the CLI shell.
 
 use crate::{
-    activation,
-    admin_client,
+    activation, admin_client,
     admin_proto::{self, NodeKind, SERVING_SAN},
     admin_server_config::{AdminServerConfig, CaRole, Roles},
     answer::{Answerer, Field},
@@ -56,7 +55,10 @@ pub struct SetupArgs<'a> {
 /// admin server is a network daemon, so it needs a **system**-scope
 /// service when a unit was written, or `NONE` when `--no-units` left the
 /// operator to run it.
-pub async fn setup_server(ans: &mut dyn Answerer, a: SetupArgs<'_>) -> Result<ServiceNeed> {
+pub async fn setup_server(
+    ans: &mut dyn Answerer,
+    a: SetupArgs<'_>,
+) -> Result<ServiceNeed> {
     let server_dir = a.ca_dir.join("server");
     std::fs::create_dir_all(&server_dir)
         .with_context(|| format!("creating {}", server_dir.display()))?;

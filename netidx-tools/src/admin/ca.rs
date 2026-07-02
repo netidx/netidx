@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use netidx_admin::{
+    admin_client, admin_local,
+    admin_proto::{self, NodeKind},
     atomic,
     ca::{self, Ca, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    ca_vault, admin_client, admin_local,
-    admin_proto::{self, NodeKind},
+    ca_vault,
     fingerprint::{ColorMode, Fingerprint},
     paths, tls,
 };
@@ -1093,7 +1094,9 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         println!("automatic renewal approval enabled:");
         println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
         println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
-        println!("          rotate anytime with `netidx admin ca auto-approve --rotate`)");
+        println!(
+            "          rotate anytime with `netidx admin ca auto-approve --rotate`)"
+        );
         println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
         // The founding SUPERUSER role admin: it directs the server (mint
         // admins, edit perms, enroll servers) but wraps no MK, so its
@@ -1107,66 +1110,6 @@ pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::Service
         service::ServiceNeed::NONE
     };
     Ok((ca, need))
-}
-
-/// Build the [`NewCaOpts`] for the founding CA a resolver install stands
-/// up when it creates a network's trust root — shared by the TLS
-/// "generate" branch and the krb5/anonymous admin-plane branch so the two
-/// cannot drift. Unlike `ca init` (the explicit tuning flow, which
-/// interrogates the founding admin), an install applies a sensible
-/// zero-prompt founding-admin policy: issue `*.<domain>`, place enrolled
-/// nodes in the `users` id-map group, and may enroll admin servers. Say
-/// what it is (and how to change it) with [`announce_founding_policy`].
-pub(super) fn founding_ca_opts(
-    dir: PathBuf,
-    domain: String,
-    insecure_no_tpm: bool,
-    setup_server: Option<bool>,
-    listen_hint: Option<IpAddr>,
-    units_dir: Option<PathBuf>,
-) -> NewCaOpts {
-    let common_name = Some(default_ca_cn(&domain));
-    let allowed_san = vec![format!("*.{domain}")];
-    NewCaOpts {
-        dir,
-        common_name,
-        domain: Some(domain),
-        country: None,
-        state: None,
-        locality: None,
-        organization: None,
-        san: vec![],
-        key_bits: ca::DEFAULT_KEY_BITS,
-        ca_validity: ca::DEFAULT_CA_VALIDITY,
-        leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
-        ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
-        admin: None,
-        allowed_san,
-        max_validity: ca::DEFAULT_LEAF_VALIDITY,
-        id_map_groups: vec!["users".to_string()],
-        may_enroll_servers: Some(true),
-        insecure_no_tpm,
-        setup_server,
-        listen: None,
-        listen_hint,
-        units_dir,
-    }
-}
-
-/// Tell the operator the founding-admin policy [`founding_ca_opts`]
-/// applied, and how to change it — printed by both install branches in
-/// place of the `ca init` interrogation.
-pub(super) fn announce_founding_policy(domain: &str) {
-    println!(
-        "  the CA's founding admin will issue *.{domain} certificates, place \
-         enrolled nodes in the 'users' id-map group, and may enroll admin \
-         servers — change any of this later with `netidx admin ca admin \
-         set-policy`."
-    );
-    println!(
-        "  (chaining this CA to an existing PKI is a separate up-front choice: \
-         create it beforehand with `netidx admin ca init --external-sign`.)"
-    );
 }
 
 /// The `recovery` signing slot's policy: the same narrow, no-standing-wire-
@@ -1396,8 +1339,8 @@ impl ExternalPending {
     const FILE: &'static str = "external_pending.json";
 
     fn store(&self, dir: &Path) -> Result<()> {
-        let bytes =
-            serde_json::to_vec_pretty(self).context("encoding the external-sign marker")?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .context("encoding the external-sign marker")?;
         atomic::write_atomic(&dir.join(Self::FILE), &bytes, 0o644)
     }
 
@@ -1498,7 +1441,9 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
         // needs no CA cert, so it is minted here too.
         let keytab = setup_autorenew_slot(&cadir, &recovery_pw, opts.insecure_no_tpm)?;
         println!("provisioned the automatic-renewal (leaf) approval slot:");
-        println!("  slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)");
+        println!(
+            "  slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)"
+        );
         println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
         setup_superuser(&cadir, &opts, &common_name)?;
     }
@@ -1640,7 +1585,11 @@ fn install_external_cert(dir: &Path, signed: &Path, root: Option<&Path>) -> Resu
         );
         return service::offer(
             need,
-            service::ServiceGate { dry_run: false, no_service: false, with_service: false },
+            service::ServiceGate {
+                dry_run: false,
+                no_service: false,
+                with_service: false,
+            },
         );
     }
     // The admin server is already configured: this is a renewal. Keep
@@ -2490,7 +2439,8 @@ fn approve(p: ApproveArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     // Where's the admin server? `--server`, else this host's own admin
     // server, else discovery (browse → confirm → aggregate).
-    let (server, discovered_identity) = match p.server.or_else(local_admin_server_listen) {
+    let (server, discovered_identity) = match p.server.or_else(local_admin_server_listen)
+    {
         Some(s) => (s, None),
         None => match init::discover_network(NodeKind::Client)? {
             AdminServers::Have(net) => {
@@ -2905,7 +2855,9 @@ fn list() -> Result<()> {
                 }
             }
             _ => {
-                println!("  key:    keyslot vault (start the admin server to list admins)")
+                println!(
+                    "  key:    keyslot vault (start the admin server to list admins)"
+                )
             }
         }
     } else if dir.join("private.key").is_file() {
@@ -2914,9 +2866,9 @@ fn list() -> Result<()> {
         println!("  key:    MISSING — CA cannot sign");
     }
     // Admin server.
-    let cfg = paths::discover_admin_server_config()
-        .ok()
-        .and_then(|p| netidx_admin::admin_server_config::AdminServerConfig::load(&p).ok());
+    let cfg = paths::discover_admin_server_config().ok().and_then(|p| {
+        netidx_admin::admin_server_config::AdminServerConfig::load(&p).ok()
+    });
     match cfg {
         Some(c) => println!("  server: configured (listen {})", c.listen),
         None => println!("  server: not configured"),
@@ -2930,22 +2882,6 @@ fn list() -> Result<()> {
 // "just generate the resolver certificate" path: for a small org the
 // resolver host is commonly the CA host too, and making that one-step
 // is the whole point.
-
-/// True if the default CA location holds a usable CA — both the cert
-/// and the private key. (A cert with no key is a trust anchor we
-/// imported, not a CA we can sign with.)
-pub(super) fn default_ca_present() -> bool {
-    match paths::user_ca_dir() {
-        Ok(dir) => {
-            // A CA exists if its cert is present and *either* a vault
-            // (the current format) or a legacy unencrypted/encrypted
-            // `private.key` is alongside it.
-            dir.join("certificate.pem").is_file()
-                && (ca_vault::CAVault::exists(&dir) || dir.join("private.key").is_file())
-        }
-        Err(_) => false,
-    }
-}
 
 /// Open the CA at `dir` as a signer. Handles both formats:
 /// - **vaulted** (current): prompt for an admin password and unlock the
@@ -3035,11 +2971,6 @@ pub(super) fn open_ca(dir: &std::path::Path) -> Result<Ca> {
         }
         Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
     }
-}
-
-/// [`open_ca`] at the conventional `${basedir}/ca/` location.
-pub(super) fn open_default_ca() -> Result<Ca> {
-    open_ca(&paths::user_ca_dir()?)
 }
 
 /// Refuse to mint the admin server's reserved serving name from the
@@ -3183,43 +3114,6 @@ pub(super) fn sign_and_record(
         validity,
     )?;
     Ok(cert)
-}
-
-pub(super) fn issue_identity(
-    ca: &Ca,
-    name: &str,
-    out_dir: PathBuf,
-    password: Option<&str>,
-) -> Result<IssuedFiles> {
-    issue_identity_into(ca, name, out_dir, ca::DEFAULT_KEY_BITS, password)
-}
-
-/// Inner form of [`issue_identity`] with the destination directory
-/// and key size as parameters — lets tests issue into a tempdir with
-/// a fast key.
-fn issue_identity_into(
-    ca: &Ca,
-    name: &str,
-    out_dir: PathBuf,
-    key_bits: u32,
-    password: Option<&str>,
-) -> Result<IssuedFiles> {
-    issue_and_record(
-        ca,
-        NodeKind::Client,
-        IssueParams {
-            subject: Subject::cn(name),
-            // Exactly one DNS SAN, matching the CN — that's what the
-            // netidx TLS validator requires of a member-server cert.
-            san: vec![SanEntry::Dns(name.to_string())],
-            key_bits,
-            validity: ca::DEFAULT_LEAF_VALIDITY,
-            out_dir,
-            password: password.map(|s| s.to_string()),
-            serial: 0, // assigned by issue_and_record
-        },
-    )
-    .with_context(|| format!("issuing certificate for {name}"))
 }
 
 fn parse_sans(raw: &[String], fallback_cn: &str) -> Result<Vec<SanEntry>> {
@@ -3546,7 +3440,7 @@ mod tests {
         )
         .unwrap();
         let out = tempfile::tempdir().unwrap();
-        let issued = issue_identity_into(
+        let issued = netidx_admin::plan::ca_setup::issue_identity_into(
             &ca,
             "resolver.example.com",
             out.path().to_path_buf(),

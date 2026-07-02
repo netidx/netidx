@@ -12,23 +12,23 @@ use anyhow::{Context, Result, bail};
 use netidx::config::DefaultAuthMech;
 use std::{net::SocketAddr, str::FromStr};
 
-/// Network discovery + certificate enrollment — the keystone subgraph every
-/// role install shares, driven through the [`crate::answer::Answerer`] seam.
-pub mod enroll;
-/// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
-pub mod delegation;
-/// The OS-service setup decision seam (`ServiceNeed` / `offer`).
-pub mod service;
-/// The role install cascades (`resolver` / `workstation` / `publisher`) and
-/// the shared tail they run.
-pub mod install;
 /// The CA-creation brain (vaulted CA, superuser, recovery/autorenew slots).
 /// Unix-only — depends on `ca`/`ca_store`/`ca_vault`, all unix-only.
 #[cfg(unix)]
 pub mod ca_setup;
+/// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
+pub mod delegation;
+/// Network discovery + certificate enrollment — the keystone subgraph every
+/// role install shares, driven through the [`crate::answer::Answerer`] seam.
+pub mod enroll;
+/// The role install cascades (`resolver` / `workstation` / `publisher`) and
+/// the shared tail they run.
+pub mod install;
 /// Standing up this host's admin server (serving cert, config, unit). Unix-only.
 #[cfg(unix)]
 pub mod server_setup;
+/// The OS-service setup decision seam (`ServiceNeed` / `offer`).
+pub mod service;
 
 /// The data-plane authentication scheme a network uses: how subscribers prove
 /// who they are to publishers and resolvers.

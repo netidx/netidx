@@ -261,7 +261,11 @@ pub async fn choose_key_protection(
         Some(KeyProtArg::Password) => "password".to_string(),
         Some(KeyProtArg::None) => "none".to_string(),
         None if !ans.interactive() => {
-            if tpm { "seal".to_string() } else { "none".to_string() }
+            if tpm {
+                "seal".to_string()
+            } else {
+                "none".to_string()
+            }
         }
         None => {
             let (options, default): (&[&str], &str) = if tpm {
@@ -431,9 +435,7 @@ pub async fn discover_network(
     }
     let seeds: Vec<SocketAddr> = if domains.is_empty() {
         ans.note("no admin servers found.");
-        match manual_seeds(
-            ans.text(Field::AdminServerAddr, None, None, false).await?,
-        )? {
+        match manual_seeds(ans.text(Field::AdminServerAddr, None, None, false).await?)? {
             Some(s) => s,
             None => return Ok(AdminServers::DontHave),
         }
@@ -664,9 +666,13 @@ pub async fn join_network(
         .context("a TLS identity name is required")?;
     // Key protection is decided before the request: the operator is here now,
     // and the queued path may wait on a remote admin for a long time after.
-    let protection =
-        choose_key_protection(ans, kp, &tls::identity_dir(&name)?.join("private.key"), &name)
-            .await?;
+    let protection = choose_key_protection(
+        ans,
+        kp,
+        &tls::identity_dir(&name)?.join("private.key"),
+        &name,
+    )
+    .await?;
     let admin_here = ans.confirm(Field::AdminHere, None, false).await?;
     let issued = if admin_here {
         // The admin chooses the new identity's id-map groups here; the
@@ -679,7 +685,14 @@ pub async fn join_network(
         let mut pw_secret = ans.secret(Field::AdminPassword, None).await?;
         let password = Zeroizing::new(std::mem::take(&mut pw_secret.0));
         admin_client::request_cert(
-            addr, kind, &name, &admin, password, JOIN_VALIDITY, groups, identity,
+            addr,
+            kind,
+            &name,
+            &admin,
+            password,
+            JOIN_VALIDITY,
+            groups,
+            identity,
         )
         .await?
     } else {

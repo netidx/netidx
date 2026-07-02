@@ -16,10 +16,50 @@ use std::{io::IsTerminal, path::PathBuf};
 #[cfg(unix)]
 use std::process::Command;
 
-/// The service-setup decision types + offer now live in the library so every
-/// frontend shares them; this module keeps the clap surface and the privileged
-/// doing ([`install_with_defaults`] and escalation).
-pub(crate) use netidx_admin::plan::service::{ServiceGate, ServiceNeed, offer};
+/// The service-setup decision types live in the library so every frontend
+/// shares them; this module keeps the clap surface, the privileged doing
+/// ([`install_with_defaults`] + escalation), and — until the `ca` commands
+/// relocate (task 12) — a prompt-based [`offer`] for the still-interactive
+/// non-install callers (`ca init`). The install cascades use the library's
+/// async `offer` via `plan::install::finish_with` instead.
+pub(crate) use netidx_admin::plan::service::{ServiceGate, ServiceNeed};
+
+/// Offer OS-service setup interactively (prompt-based) for the callers that
+/// haven't yet moved onto the `Answerer` seam. A merged [`ServiceNeed`] +
+/// its flag gates in; `--with-service` installs without asking, `--no-service`
+/// / `--dry-run` skip, otherwise a TTY confirm (default yes).
+pub(super) fn offer(need: ServiceNeed, gate: ServiceGate) -> Result<()> {
+    let Some(scope) = need.scope() else { return Ok(()) };
+    let label = match scope {
+        ServiceScope::User => "user-scope (no sudo)",
+        ServiceScope::System => "system-scope (sudo required)",
+    };
+    if gate.dry_run {
+        println!("[dry-run] would offer to install netidx as a {label} OS service");
+        return Ok(());
+    }
+    if gate.no_service {
+        return Ok(());
+    }
+    let install_now = if gate.with_service {
+        true
+    } else if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        super::prompt::confirm(
+            &format!("install netidx as an OS service now ({label})?"),
+            true,
+        )?
+    } else {
+        eprintln!(
+            "note: pass --with-service to register netidx as an OS service \
+             (run `netidx admin component service install` later if you prefer)"
+        );
+        false
+    };
+    if install_now {
+        install_with_defaults(scope.into())?;
+    }
+    Ok(())
+}
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.
@@ -360,21 +400,5 @@ mod tests {
         assert_eq!(ScopeArg::from_str("System").unwrap(), ScopeArg::System);
         assert!(ScopeArg::from_str("admin").is_err());
     }
-
-    #[test]
-    fn service_need_merge_ranks_system_over_user_over_none() {
-        use ServiceNeed as N;
-        let sys = N::at(ScopeArg::System);
-        let usr = N::at(ScopeArg::User);
-        // System wins regardless of order.
-        assert_eq!(sys.merge(usr), sys);
-        assert_eq!(usr.merge(sys), sys);
-        // User beats nothing.
-        assert_eq!(N::NONE.merge(usr), usr);
-        assert_eq!(usr.merge(N::NONE), usr);
-        // Nothing merges to nothing.
-        assert_eq!(N::NONE.merge(N::NONE), N::NONE);
-        // Idempotent.
-        assert_eq!(sys.merge(sys), sys);
-    }
+    // `service_need_merge_ranks_*` moved to netidx_admin::plan::service tests.
 }

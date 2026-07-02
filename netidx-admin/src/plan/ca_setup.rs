@@ -187,8 +187,7 @@ pub fn seal_ca_recovery(
     lifetimes: CaLifetimes,
 ) -> Result<(Zeroizing<String>, ca_store::CaDir)> {
     let recovery_pw = ca_vault::gen_recovery_password();
-    let cadir =
-        ca_store::CaDir::open(dir).context("opening the new CA directory")?;
+    let cadir = ca_store::CaDir::open(dir).context("opening the new CA directory")?;
     if let Err(e) = cadir.vault.write().create(
         key_pem,
         ca_vault::RECOVERY_ADMIN,
@@ -308,7 +307,8 @@ pub async fn create_vaulted_ca(
         // with. Mandatory for a server CA. Authorized by the recovery
         // password we just minted; sealed to the TPM (or plaintext under
         // --insecure-no-tpm, which the gate above already warned about).
-        let keytab = setup_autorenew_slot(ans, &cadir, &recovery_pw, opts.insecure_no_tpm)?;
+        let keytab =
+            setup_autorenew_slot(ans, &cadir, &recovery_pw, opts.insecure_no_tpm)?;
         let cfg_path = server_setup::set_ca_autorenew(&keytab)?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
