@@ -387,7 +387,14 @@ pub fn external_status(ca_dir: &Path) -> Result<ExternalStatus> {
     let externally_signed =
         CaLifetimes::load(ca_dir).map(|l| l.externally_signed).unwrap_or(false);
     let cert_installed = ca_dir.join("certificate.pem").is_file();
-    let pending = ExternalPending::load(ca_dir).ok().map(|m| (m.cn, m.domain));
+    // The bootstrap marker persists past install (a served external CA reads its
+    // `setup_server`/domain/listen on every re-install / renewal), so "awaiting a
+    // signed cert" is specifically the init→install gap: a marker with no cert yet.
+    let pending = if cert_installed {
+        None
+    } else {
+        ExternalPending::load(ca_dir).ok().map(|m| (m.cn, m.domain))
+    };
     Ok(ExternalStatus { externally_signed, cert_installed, pending })
 }
 
@@ -444,8 +451,7 @@ mod tests {
         assert!(!s.externally_signed);
         assert!(s.cert_installed);
         assert!(s.pending.is_none());
-        // Drop a pending marker as `ca init --external-sign` would, and confirm
-        // it round-trips through load into the status.
+        // Drop a pending marker as `ca init --external-sign` would.
         ExternalPending {
             cn: "ca.example.com".to_string(),
             domain: "example.com".to_string(),
@@ -460,7 +466,15 @@ mod tests {
         }
         .store(dir.path())
         .unwrap();
+        // With the cert still on disk, the CA is installed — NOT pending — even
+        // though the marker persists for future renewals.
+        assert!(external_status(dir.path()).unwrap().pending.is_none());
+        // Simulate the true pre-install state (`ca init --external-sign` leaves a
+        // key + CSR + marker but no cert yet): remove the cert, and now it is
+        // pending its signed certificate.
+        std::fs::remove_file(dir.path().join("certificate.pem")).unwrap();
         let s = external_status(dir.path()).unwrap();
+        assert!(!s.cert_installed);
         assert_eq!(s.pending.as_ref().map(|(cn, _)| cn.as_str()), Some("ca.example.com"));
     }
 }
