@@ -17,7 +17,7 @@ use clap::Subcommand;
 use netidx_admin::id_map;
 use std::path::PathBuf;
 
-use super::{editor, prompt};
+use super::editor;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -51,8 +51,8 @@ pub(crate) enum Cmd {
     AddGroup {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Group name. Prompted when omitted.
-        name: Option<String>,
+        /// Group name.
+        name: String,
         /// Numeric gid. Auto-allocated (≥1000, above any existing gid)
         /// when omitted; an existing group keeps its current gid
         /// unless this flag is given. The resolver only reads group
@@ -63,16 +63,17 @@ pub(crate) enum Cmd {
     RemoveGroup {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Group name. Prompted when omitted.
-        name: Option<String>,
+        /// Group name.
+        name: String,
     },
     /// add an identity (or update an existing one)
     AddUser {
         #[arg(short, long)]
         file: Option<PathBuf>,
         /// Netidx name (typically the TLS SubjectAltName DNS entry).
-        /// Prompted when omitted.
-        name: Option<String>,
+        name: String,
+        /// Primary group name (must already exist).
+        primary_group: String,
         /// Numeric uid. Auto-allocated (≥1000, above any existing uid)
         /// when omitted; an existing identity keeps its current uid
         /// unless this flag is given. The resolver only reads uids in
@@ -80,10 +81,8 @@ pub(crate) enum Cmd {
         /// is normally served by `/bin/id` rather than the id-map
         /// daemon — so for any realistic id-map-daemon deployment the
         /// uid is decorative and the auto-allocated value is fine.
+        #[arg(long)]
         uid: Option<u32>,
-        /// Primary group name (must already exist). Prompted when
-        /// omitted.
-        primary_group: Option<String>,
         /// Secondary group memberships. Repeatable.
         #[arg(short, long = "group", num_args = 1)]
         groups: Vec<String>,
@@ -92,26 +91,26 @@ pub(crate) enum Cmd {
     RemoveUser {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Netidx name. Prompted when omitted.
-        name: Option<String>,
+        /// Netidx name.
+        name: String,
     },
     /// add an identity to a secondary group
     AddMember {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Netidx name. Prompted when omitted.
-        name: Option<String>,
-        /// Group name. Prompted when omitted.
-        group: Option<String>,
+        /// Netidx name.
+        name: String,
+        /// Group name.
+        group: String,
     },
     /// remove an identity from a secondary group
     RemoveMember {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Netidx name. Prompted when omitted.
-        name: Option<String>,
-        /// Group name. Prompted when omitted.
-        group: Option<String>,
+        /// Netidx name.
+        name: String,
+        /// Group name.
+        group: String,
     },
 }
 
@@ -126,38 +125,25 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::AddGroup { file, name, gid } => {
             let file = resolve(file)?;
             let m = load_or_empty(&file)?;
-            let name = prompt::required_string("group name", name)?;
             let gid = gid
                 .or_else(|| m.groups.get(name.as_str()).map(|g| g.gid))
                 .unwrap_or_else(|| next_group_gid(&m));
             add_group(file, name, gid)
         }
-        Cmd::RemoveGroup { file, name } => {
-            let name = prompt::required_string("group name", name)?;
-            remove_group(resolve(file)?, name)
-        }
+        Cmd::RemoveGroup { file, name } => remove_group(resolve(file)?, name),
         Cmd::AddUser { file, name, uid, primary_group, groups } => {
             let file = resolve(file)?;
             let m = load_or_empty(&file)?;
-            let name = prompt::required_string("identity name", name)?;
             let uid = uid
                 .or_else(|| m.identities.get(name.as_str()).map(|i| i.uid))
                 .unwrap_or_else(|| next_user_uid(&m));
-            let primary_group = prompt_primary_group(&m, primary_group)?;
             add_user(file, name, uid, primary_group, groups)
         }
-        Cmd::RemoveUser { file, name } => {
-            let name = prompt::required_string("identity name", name)?;
-            remove_user(resolve(file)?, name)
-        }
+        Cmd::RemoveUser { file, name } => remove_user(resolve(file)?, name),
         Cmd::AddMember { file, name, group } => {
-            let name = prompt::required_string("identity name", name)?;
-            let group = prompt::required_string("group name", group)?;
             add_member(resolve(file)?, name, group)
         }
         Cmd::RemoveMember { file, name, group } => {
-            let name = prompt::required_string("identity name", name)?;
-            let group = prompt::required_string("group name", group)?;
             remove_member(resolve(file)?, name, group)
         }
     }
@@ -259,25 +245,6 @@ fn next_user_uid(m: &id_map::IdMap) -> u32 {
 
 fn next_group_gid(m: &id_map::IdMap) -> u32 {
     next_id(m.groups.values().map(|g| g.gid))
-}
-
-/// Prompt for the primary group. When unprovided, list the available
-/// groups (so the operator sees the legal set) and offer `users` as
-/// the default if it exists — that's the group seeded by `init` and
-/// the conventional Linux primary for human accounts.
-fn prompt_primary_group(m: &id_map::IdMap, provided: Option<String>) -> Result<String> {
-    if let Some(g) = provided {
-        return Ok(g);
-    }
-    if !m.groups.is_empty() {
-        let names: Vec<&str> = m.groups.keys().map(|k| k.as_str()).collect();
-        println!("available groups: {}", names.join(", "));
-    }
-    if m.groups.contains_key("users") {
-        prompt::string_with_default("primary group", None, "users")
-    } else {
-        prompt::required_string("primary group", None)
-    }
 }
 
 fn add_group(file: PathBuf, name: String, gid: u32) -> Result<()> {

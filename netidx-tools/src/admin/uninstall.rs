@@ -16,10 +16,7 @@ use netidx_admin::{
 };
 use std::path::PathBuf;
 
-use super::{
-    prompt,
-    service::{self as svc_cli, ScopeArg},
-};
+use super::service::{self as svc_cli, ScopeArg};
 // Only the unix sudo re-exec path builds commands or adds error
 // context.
 #[cfg(unix)]
@@ -132,21 +129,16 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
         return Ok(());
     }
     let ca_in_plan = plan_contains_ca(&plan);
-    let confirm = if p.yes {
-        true
-    } else {
-        let q = if ca_in_plan {
-            "DESTRUCTIVE: this will remove the CA private key. \
-             Anything signed by this CA cannot be re-issued. Proceed?"
-        } else {
-            "Proceed with uninstall?"
-        };
-        // Default `false`: an unattended `echo "" | netidx admin
-        // uninstall` must not silently wipe an install.
-        prompt::confirm(q, false)?
-    };
-    if !confirm {
-        println!("aborted");
+    // Never destroy an install without explicit `--yes`; the plan above
+    // showed exactly what would be removed.
+    if !p.yes {
+        if ca_in_plan {
+            println!(
+                "DESTRUCTIVE: this will remove the CA private key — anything \
+                 signed by this CA cannot be re-issued."
+            );
+        }
+        println!("re-run with --yes to apply.");
         return Ok(());
     }
     // Drop ourselves from the CA's map before deleting the certs we'd need
@@ -199,24 +191,17 @@ fn offer_system_scope(p: &Params) -> Result<()> {
         println!("(re-run with `--scope system` to remove it)");
         return Ok(());
     }
-    if p.yes {
-        // `--yes` was scoped to the explicit request; escalating
-        // under sudo is a separate trust boundary that should not be
-        // silent. Tell the operator how to opt in.
-        println!("(re-run with `--scope system --yes` to remove it)");
-        return Ok(());
-    }
-    let ca_in_plan = plan_contains_ca(&plan);
-    let q = if ca_in_plan {
-        "Also remove the system-scope install? \
-         DESTRUCTIVE: will require sudo and will destroy the CA private key"
+    // Escalating under sudo is a separate trust boundary that must never
+    // be silent; with no interactive confirm we point the operator at the
+    // explicit command rather than escalating for them.
+    if plan_contains_ca(&plan) {
+        println!(
+            "(DESTRUCTIVE: also destroys the CA private key — re-run with \
+             `--scope system --yes` to remove it)"
+        );
     } else {
-        "Also remove the system-scope install? (will require sudo)"
-    };
-    if !prompt::confirm(q, false)? {
-        return Ok(());
+        println!("(re-run with `--scope system --yes` to remove it)");
     }
-    escalate_for_system_offer(p)?;
     Ok(())
 }
 
@@ -258,8 +243,11 @@ fn remove_system_scope_if_present(p: &Params) -> Result<()> {
     if p.dry_run {
         return Ok(());
     }
-    if !p.yes && !prompt::confirm("Also remove the system-scope service?", true)? {
-        println!("(left the system-scope service in place)");
+    if !p.yes {
+        println!(
+            "(left the system-scope service in place — re-run with --yes to \
+             remove it too)"
+        );
         return Ok(());
     }
     let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
@@ -427,49 +415,5 @@ fn escalate(_a: &Params) -> Result<()> {
     bail!(
         "system-scope uninstall on Windows requires an already-elevated shell. \
          Open an Administrator PowerShell / cmd and re-run this command."
-    )
-}
-
-/// Escalate to do the system-scope teardown the operator just
-/// confirmed via the cross-scope offer prompt. Distinct from
-/// [`escalate`] because we always pass `--yes` (the operator
-/// already confirmed) and never inherit the user-scope's
-/// `--config-dir` or `--dry-run`.
-#[cfg(unix)]
-fn escalate_for_system_offer(p: &Params) -> Result<()> {
-    let for_user = svc_cli::resolve_for_user(p.for_user.clone())?;
-    let exe = std::env::current_exe()
-        .context("could not determine current binary for sudo re-exec")?;
-    let mut cmd = Command::new(svc_cli::elevator());
-    cmd.arg("--preserve-env=NETIDX_ELEVATED")
-        .arg(&exe)
-        .arg("admin")
-        .arg("uninstall")
-        .arg("--scope")
-        .arg("system")
-        .arg("--for-user")
-        .arg(&for_user)
-        .arg("--service-name")
-        .arg(&p.service_name)
-        .arg("--yes")
-        .env(ELEVATED_ENV, "1");
-    if p.with_ca {
-        cmd.arg("--with-ca");
-    }
-    let status = cmd.status().with_context(|| {
-        format!("spawning `{}` for system-scope uninstall", svc_cli::elevator())
-    })?;
-    if !status.success() {
-        bail!("system-scope escalation failed: {status}");
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn escalate_for_system_offer(_p: &Params) -> Result<()> {
-    bail!(
-        "system-scope uninstall on Windows requires an already-elevated shell. \
-         Open an Administrator PowerShell / cmd and re-run this command \
-         with `--scope system`."
     )
 }

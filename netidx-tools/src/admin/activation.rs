@@ -21,7 +21,7 @@ use netidx_admin::{
 #[cfg(unix)]
 use netidx_admin::{admin_ops, admin_proto};
 
-use super::{answer_cli::RemoteAuthFlags, prompt};
+use super::answer_cli::RemoteAuthFlags;
 use clap::{Args, Subcommand};
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -45,8 +45,8 @@ pub(crate) enum Cmd {
     Remove {
         #[arg(short, long)]
         dir: Option<PathBuf>,
-        /// Unit basename to remove. Prompted when omitted.
-        name: Option<String>,
+        /// Unit basename to remove.
+        name: String,
     },
     /// restart units (locally, or remotely with `--server`)
     Restart(ServiceCtlArgs),
@@ -94,11 +94,11 @@ pub(crate) enum AddCmd {
 pub(crate) struct GenericAddArgs {
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
-    /// Unit basename (no `.unit` suffix). Prompted when omitted.
-    pub name: Option<String>,
-    /// Path to the executable. Prompted when omitted.
+    /// Unit basename (no `.unit` suffix).
+    pub name: String,
+    /// Path to the executable.
     #[arg(long)]
-    pub exe: Option<String>,
+    pub exe: String,
     /// Argument passed after the exe. Repeatable.
     #[arg(long = "arg", num_args = 1)]
     pub args: Vec<String>,
@@ -194,10 +194,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Add { cmd: AddCmd::Generic(args) } => add_generic(args),
         Cmd::Add { cmd: AddCmd::Container(args) } => add_container(args),
         Cmd::Add { cmd: AddCmd::IdMap(args) } => add_id_map(args),
-        Cmd::Remove { dir, name } => {
-            let name = prompt::required_string("unit name", name)?;
-            remove(dir, name)
-        }
+        Cmd::Remove { dir, name } => remove(dir, name),
         Cmd::Restart(a) => service_control(ControlOp::Restart, a),
         Cmd::Start(a) => service_control(ControlOp::Start, a),
         Cmd::Stop(a) => service_control(ControlOp::Stop, a),
@@ -318,8 +315,8 @@ fn list(dir: Option<PathBuf>) -> Result<()> {
 }
 
 fn add_generic(a: GenericAddArgs) -> Result<()> {
-    let name = prompt::required_string("unit basename", a.name)?;
-    let exe = prompt::required_string("path to the executable", a.exe)?;
+    let name = a.name;
+    let exe = a.exe;
     let trigger = if a.on_access.is_empty() {
         Trigger::OnStart
     } else {

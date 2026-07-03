@@ -3,8 +3,6 @@ use clap::Subcommand;
 use netidx_admin::{paths, perms};
 use std::path::PathBuf;
 
-use super::prompt;
-
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// list perm entries
@@ -20,23 +18,21 @@ pub(crate) enum Cmd {
     Set {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Netidx path the entry applies to. Prompted when omitted.
-        path: Option<String>,
-        /// User or group name the entry applies to. Prompted when
-        /// omitted.
-        entity: Option<String>,
-        /// Permission bits (e.g. `swlpd`). Prompted when omitted.
-        bits: Option<String>,
+        /// Netidx path the entry applies to.
+        path: String,
+        /// User or group name the entry applies to.
+        entity: String,
+        /// Permission bits (e.g. `swlpd`).
+        bits: String,
     },
     /// remove <entity>'s entry at <path>
     Remove {
         #[arg(short, long)]
         file: Option<PathBuf>,
-        /// Netidx path the entry applies to. Prompted when omitted.
-        path: Option<String>,
-        /// User or group name the entry applies to. Prompted when
-        /// omitted.
-        entity: Option<String>,
+        /// Netidx path the entry applies to.
+        path: String,
+        /// User or group name the entry applies to.
+        entity: String,
     },
 }
 
@@ -44,14 +40,9 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { file, path } => list(resolve(file)?, path),
         Cmd::Set { file, path, entity, bits } => {
-            let path = prompt::required_string("netidx path", path)?;
-            let entity = prompt::required_string("entity (user or group)", entity)?;
-            let bits = prompt::required_string("permission bits", bits)?;
             set(resolve(file)?, path, entity, bits)
         }
         Cmd::Remove { file, path, entity } => {
-            let path = prompt::required_string("netidx path", path)?;
-            let entity = prompt::required_string("entity (user or group)", entity)?;
             remove(resolve(file)?, path, entity)
         }
     }
