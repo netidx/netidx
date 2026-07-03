@@ -96,6 +96,12 @@ pub struct ResolverInput {
     pub id_map_mode: Option<String>,
     /// Skip admin-server setup entirely (expert).
     pub no_admin_server: bool,
+    /// Explicitly set up an admin server. Only meaningful for an anonymous data
+    /// plane, where the admin server is optional (`admin_plane_decision` ⇒
+    /// `Ask`): strict mode has no TTY to answer the prompt, so this supplies the
+    /// "yes". TLS/krb5 make it mandatory and Local skips it, so it's ignored
+    /// there.
+    pub with_admin_server: bool,
     /// Proceed even without a usable TPM / Secure Enclave (test CAs only).
     pub insecure_no_tpm: bool,
     /// Set this resolver up as a CHILD of an existing network: the parent's
@@ -292,7 +298,13 @@ pub async fn run_resolver(
                 );
                 true
             }
-            AdminPlane::Ask => ans.confirm(Field::SetupAdminServer, None, true).await?,
+            AdminPlane::Ask => ans
+                .confirm(
+                    Field::SetupAdminServer,
+                    input.with_admin_server.then_some(true),
+                    true,
+                )
+                .await?,
             AdminPlane::Skip => false,
         }
     {
@@ -326,6 +338,7 @@ pub async fn run_resolver(
     let id_map =
         resolve_id_map_choice(ans, &auth, input.no_id_map, input.id_map_mode.clone()).await?;
     let no_admin_server = input.no_admin_server;
+    let with_admin_server = input.with_admin_server;
     // The admin-server step after apply() needs the *actual* config paths this
     // install produces — resolve the template's defaults the same way it will.
     let resolver_config_actual = match &input.resolver_config_path {
@@ -459,6 +472,7 @@ pub async fn run_resolver(
                 probe.have(),
                 kind,
                 no_admin_server,
+                with_admin_server,
                 listen,
                 post_apply_units_dir.as_deref(),
                 resolver_config_actual,
@@ -467,7 +481,7 @@ pub async fn run_resolver(
             .await?;
             #[cfg(not(unix))]
             {
-                let _ = (&probe, kind, no_admin_server, listen);
+                let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
                 let _ = (resolver_config_actual, id_map_actual);
             }
             if let Some(d) = post_apply_units_dir.as_deref()
@@ -945,6 +959,7 @@ async fn post_apply_admin_server(
     discovered: Option<&DiscoveredNetwork>,
     kind: AuthKind,
     no_admin_server: bool,
+    with_admin_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
@@ -971,6 +986,7 @@ async fn post_apply_admin_server(
                 net,
                 kind,
                 no_admin_server,
+                with_admin_server,
                 resolver_listen,
                 units_dir,
                 resolver_config,
@@ -1038,6 +1054,7 @@ async fn enroll_admin_server(
     net: &DiscoveredNetwork,
     kind: AuthKind,
     no_admin_server: bool,
+    with_admin_server: bool,
     resolver_listen: SocketAddr,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
@@ -1059,7 +1076,10 @@ async fn enroll_admin_server(
              --no-admin-server)",
         ),
         AdminPlane::Ask => {
-            if !ans.confirm(Field::SetupAdminServer, None, true).await? {
+            if !ans
+                .confirm(Field::SetupAdminServer, with_admin_server.then_some(true), true)
+                .await?
+            {
                 ans.note(
                     "note: skipped — discovery only sees hosts running a admin \
                      server, so future installs won't learn about this resolver \

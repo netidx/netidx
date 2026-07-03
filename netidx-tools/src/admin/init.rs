@@ -641,6 +641,12 @@ pub(crate) struct ResolverFlags {
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-admin-server")]
     no_admin_server: bool,
+    /// Explicitly set up an admin server for this network. Only meaningful on an
+    /// anonymous data plane, where an admin server is optional — TLS/krb5 set one
+    /// up automatically. Required (with `--no-admin-server` as the opposite) to
+    /// make an anonymous install's choice non-interactively.
+    #[arg(long = "with-admin-server", conflicts_with = "no_admin_server")]
+    with_admin_server: bool,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// Only relevant when this install mints a new CA (the netidx-CA TLS
     /// resolver path with no existing CA, or a admin plane on a
@@ -725,6 +731,7 @@ fn resolver_input(
         no_id_map: f.no_id_map,
         id_map_mode: f.id_map_mode,
         no_admin_server: f.no_admin_server,
+        with_admin_server: f.with_admin_server,
         insecure_no_tpm: f.insecure_no_tpm,
         parent_admin_server: f.parent_admin_server,
         delegate_subtree: f.delegate_subtree,

@@ -320,12 +320,14 @@ impl Field {
                        <name>.<domain>. A full --tls-name supplies both at once.",
             },
             SetupAdminServer => FieldInfo {
-                flag: "--no-admin-server",
+                flag: "--with-admin-server",
                 label: "set up admin server?",
                 help: "Set up an admin server for this network — a small CA that \
                        secures the admin plane (discovery, enrollment, certificate \
-                       renewal). Data-plane auth is unaffected. Default yes; \
-                       --no-admin-server opts out (expert).",
+                       renewal). Data-plane auth is unaffected. On an anonymous \
+                       data plane it is optional, so strict mode needs an explicit \
+                       --with-admin-server (yes) or --no-admin-server (no); \
+                       interactive defaults to yes.",
             },
             AdminServerListenIp => FieldInfo {
                 flag: "--listen",
