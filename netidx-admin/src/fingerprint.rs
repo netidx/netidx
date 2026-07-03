@@ -171,8 +171,7 @@ impl Fingerprint {
     /// derived from the last 3 hash bytes so each CA also has a
     /// recognizable hue.
     pub fn identicon(&self, color: ColorMode) -> String {
-        let h = &self.0;
-        let (r, g, b) = (96 + h[29] / 2, 96 + h[30] / 2, 96 + h[31] / 2);
+        let (r, g, b) = self.identicon_color();
         let on: String = match color {
             ColorMode::Truecolor => format!("\x1b[38;2;{r};{g};{b}m██\x1b[0m"),
             ColorMode::Ansi256 => {
@@ -183,19 +182,41 @@ impl Fingerprint {
         let off = "  ";
         let mut out = String::new();
         out.push_str("┌────────────────┐\n");
-        for row in 0..8usize {
+        for row in self.identicon_cells() {
             out.push('│');
-            for col in 0..8usize {
-                // Mirror the right half onto the left.
-                let src = if col < 4 { col } else { 7 - col };
-                let bit = row * 4 + src; // 0..32
-                let on_bit = (h[bit / 8] >> (7 - (bit % 8))) & 1 == 1;
+            for on_bit in row {
                 out.push_str(if on_bit { on.as_str() } else { off });
             }
             out.push_str("│\n");
         }
         out.push_str("└────────────────┘");
         out
+    }
+
+    /// The identicon's 8×8 on/off grid (the same cells [`Self::identicon`]
+    /// renders): horizontally mirrored, taken from the first 32 hash bits.
+    /// Exposed so a GUI/TUI can draw the same sigil in its own styling
+    /// instead of parsing the pre-rendered ANSI string.
+    pub fn identicon_cells(&self) -> [[bool; 8]; 8] {
+        let h = &self.0;
+        let mut cells = [[false; 8]; 8];
+        for (row, cells_row) in cells.iter_mut().enumerate() {
+            for (col, cell) in cells_row.iter_mut().enumerate() {
+                // Mirror the right half onto the left.
+                let src = if col < 4 { col } else { 7 - col };
+                let bit = row * 4 + src; // 0..32
+                *cell = (h[bit / 8] >> (7 - (bit % 8))) & 1 == 1;
+            }
+        }
+        cells
+    }
+
+    /// The identicon's dominant color (biased into the bright half so it
+    /// shows on dark terminals), from the last 3 hash bytes — the same hue
+    /// [`Self::identicon`] uses.
+    pub fn identicon_color(&self) -> (u8, u8, u8) {
+        let h = &self.0;
+        (96 + h[29] / 2, 96 + h[30] / 2, 96 + h[31] / 2)
     }
 }
 

@@ -130,10 +130,10 @@ enum Opt {
         #[command(subcommand)]
         cmd: IdMapCmd,
     },
-    /// administrative control plane
+    /// administrative control plane (run with no subcommand for the interactive TUI)
     Admin {
         #[command(subcommand)]
-        params: admin::Params,
+        params: Option<admin::Params>,
     },
     /// stress test
     Stress {

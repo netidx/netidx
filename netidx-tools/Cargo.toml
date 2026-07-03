@@ -55,6 +55,8 @@ dirs = { workspace = true }
 env_logger = { workspace = true }
 escaping = { workspace = true }
 futures = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 nohash = { workspace = true }
 ahash = { workspace = true }
 poolshark = { workspace = true }

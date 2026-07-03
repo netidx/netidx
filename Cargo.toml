@@ -44,6 +44,8 @@ fs3 = "0.5"
 nohash = "0.2"
 ahash = "0.8.12"
 futures = "0.3"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 globset = "0.4"
 graphix-shell = { version = "0.9.0", path = "../graphix/graphix-shell", default-features = false }
 graphix-rt = { version = "0.9.0", path = "../graphix/graphix-rt" }

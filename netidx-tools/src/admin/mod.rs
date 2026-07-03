@@ -85,6 +85,8 @@ mod roles;
 mod server;
 mod service;
 mod tls;
+/// The interactive ratatui admin TUI, launched by bare `netidx admin`.
+mod tui;
 mod uninstall;
 
 #[derive(Subcommand, Debug)]
@@ -134,7 +136,11 @@ pub(crate) enum Params {
     },
 }
 
-pub(crate) fn run(p: Params) -> Result<()> {
+pub(crate) fn run(p: Option<Params>) -> Result<()> {
+    let p = match p {
+        Some(p) => p,
+        None => return tui::run(),
+    };
     match p {
         Params::Workstation { cmd } => roles::workstation::run(cmd),
         Params::Resolver { cmd } => roles::resolver::run(cmd),
