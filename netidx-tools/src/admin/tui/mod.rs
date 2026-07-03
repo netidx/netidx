@@ -10,21 +10,41 @@
 //! The goal is that the strict CLI is reserved for automation and the TUI is the
 //! better choice for everything else: it shows live system status and offers a
 //! guided interface for install and post-install administration.
+//!
+//! ## Shape
+//!
+//! One tokio task (the one `run` blocks on) owns the terminal, the widget state,
+//! and the crossterm event stream. An [`Action`] runs on a *spawned* task with a
+//! [`TuiAnswerer`](answer::TuiAnswerer); every question it asks arrives here as a
+//! [`UiRequest`] over a channel, is answered through a modal, and the reply is
+//! sent back over a `oneshot`. The op's final result returns as
+//! [`UiRequest::OpDone`].
 
+mod action;
+mod answer;
 mod local;
 mod remote;
 mod widgets;
 
+use action::{Action, Outcome};
+use answer::{Modal, TuiAnswerer, UiRequest};
 use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
+use netidx_admin::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap},
 };
+use std::{
+    collections::VecDeque,
+    future::{self, Future},
+    pin::Pin,
+};
+use tokio::sync::mpsc;
 
 /// Which top-level tab is focused.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,12 +70,36 @@ impl Tab {
     }
 }
 
+/// A finished action's summary, shown as a dismissible overlay.
+struct ResultView {
+    title: String,
+    lines: Vec<String>,
+    error: bool,
+}
+
 /// Top-level TUI state.
 struct App {
     tab: Tab,
     local: local::LocalState,
     remote: remote::RemoteState,
     should_quit: bool,
+    /// The question currently awaiting an answer, if any.
+    modal: Option<Modal>,
+    /// Blocking requests that arrived while a modal was already up.
+    pending: VecDeque<UiRequest>,
+    /// True while an action runs (its future is polled in the event loop).
+    busy: bool,
+    /// Label of the running action, for the activity header.
+    activity: Option<String>,
+    /// The latest progress line from the running action.
+    status: Option<String>,
+    /// An out-of-band verification code the operator must relay while an action
+    /// waits for a remote admin to approve.
+    verification: Option<(String, Fingerprint)>,
+    /// Notes and warnings from the running (or last) action.
+    log: Vec<Line<'static>>,
+    /// A finished action's result overlay.
+    result: Option<ResultView>,
 }
 
 impl App {
@@ -65,6 +109,14 @@ impl App {
             local: local::LocalState::new(),
             remote: remote::RemoteState::new(),
             should_quit: false,
+            modal: None,
+            pending: VecDeque::new(),
+            busy: false,
+            activity: None,
+            status: None,
+            verification: None,
+            log: Vec::new(),
+            result: None,
         }
     }
 
@@ -74,15 +126,97 @@ impl App {
         self.tab = Tab::ALL[i];
     }
 
-    /// Handle one key press (already filtered to `KeyEventKind::Press`).
-    /// Global keys are handled here; the rest is delegated to the focused tab.
-    fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        match code {
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true
+    /// Switch the UI into the activity view for a just-started action.
+    fn begin(&mut self, label: String) {
+        self.busy = true;
+        self.activity = Some(label);
+        self.status = None;
+        self.verification = None;
+        self.log.clear();
+        self.result = None;
+    }
+
+    /// Record a finished action's result. Leaves any still-open modal (e.g. an
+    /// un-acknowledged recovery-password modal) in place — it renders on top.
+    fn finish_op(&mut self, out: Result<Outcome>) {
+        self.busy = false;
+        self.activity = None;
+        self.status = None;
+        self.verification = None;
+        self.result = Some(match out {
+            Ok(out) => {
+                if out.refresh_local {
+                    self.local.refresh();
+                }
+                ResultView { title: out.title, lines: out.lines, error: false }
             }
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Tab => self.next_tab(),
+            Err(e) => ResultView {
+                title: "Failed".to_string(),
+                lines: vec![format!("{e:#}")],
+                error: true,
+            },
+        });
+    }
+
+    /// Apply a request from the running action. Blocking requests become a
+    /// modal, queued behind any modal already up so none is ever lost.
+    fn handle_request(&mut self, req: UiRequest) {
+        match req {
+            UiRequest::Note(m) => self.log.push(Line::from(m)),
+            UiRequest::Warn(m) => self.log.push(Line::from(Span::styled(
+                format!("warning: {m}"),
+                Style::default().fg(Color::Yellow),
+            ))),
+            UiRequest::Progress(p) => self.status = Some(p.message.to_string()),
+            UiRequest::VerificationCode { purpose, code } => {
+                self.verification = Some((purpose, code))
+            }
+            blocking => {
+                if self.modal.is_some() {
+                    self.pending.push_back(blocking);
+                } else {
+                    self.modal = Modal::from_request(blocking);
+                }
+            }
+        }
+    }
+
+    /// A modal just resolved: drop it and promote the next queued question.
+    fn advance_modal(&mut self) {
+        self.modal = self.pending.pop_front().and_then(Modal::from_request);
+    }
+
+    /// Route a key press. Global keys first, then the active overlay, then the
+    /// focused tab (which may hand back an [`Action`] to run).
+    fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Action> {
+        if let KeyCode::Char('c') = code {
+            if mods.contains(KeyModifiers::CONTROL) {
+                self.should_quit = true;
+                return None;
+            }
+        }
+        if self.modal.is_some() {
+            if self.modal.as_mut().unwrap().on_key(code) {
+                self.advance_modal();
+            }
+            return None;
+        }
+        if self.result.is_some() {
+            self.result = None;
+            return None;
+        }
+        if self.busy {
+            return None;
+        }
+        match code {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                None
+            }
+            KeyCode::Tab => {
+                self.next_tab();
+                None
+            }
             _ => match self.tab {
                 Tab::Local => self.local.on_key(code),
                 Tab::Remote => self.remote.on_key(code),
@@ -98,11 +232,21 @@ impl App {
         ])
         .split(f.area());
         self.render_tabs(f, chunks[0]);
-        match self.tab {
-            Tab::Local => self.local.render(f, chunks[1]),
-            Tab::Remote => self.remote.render(f, chunks[1]),
+        if self.busy {
+            self.render_activity(f, chunks[1]);
+        } else {
+            match self.tab {
+                Tab::Local => self.local.render(f, chunks[1]),
+                Tab::Remote => self.remote.render(f, chunks[1]),
+            }
         }
-        render_footer(f, chunks[2]);
+        self.render_footer(f, chunks[2]);
+        let area = f.area();
+        if let Some(m) = &self.modal {
+            m.render(f, area);
+        } else if let Some(r) = &self.result {
+            render_result(f, area, r);
+        }
     }
 
     fn render_tabs(&self, f: &mut Frame, area: Rect) {
@@ -111,38 +255,119 @@ impl App {
             .select(self.tab.index())
             .block(Block::default().borders(Borders::ALL).title(" netidx admin "))
             .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             );
         f.render_widget(tabs, area);
     }
+
+    /// The busy view: the running action's progress, any verification code, and
+    /// its notes/warnings so far.
+    fn render_activity(&self, f: &mut Frame, area: Rect) {
+        let title = self.activity.clone().unwrap_or_else(|| "Working".to_string());
+        let mut lines: Vec<Line> = Vec::new();
+        match &self.status {
+            Some(s) => lines.push(Line::from(vec![
+                Span::styled("● ", Style::default().fg(Color::Cyan)),
+                Span::raw(s.to_string()),
+            ])),
+            None => lines.push(Line::from("● working…".dim())),
+        }
+        if let Some((purpose, code)) = &self.verification {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("{purpose} — read this code to the approving admin:"),
+                Style::default().fg(Color::Yellow),
+            )));
+            lines.push(Line::from(Span::styled(code.text(), Style::default().fg(Color::Cyan))));
+            lines.extend(widgets::identicon_lines(code));
+        }
+        if !self.log.is_empty() {
+            lines.push(Line::from(""));
+            lines.extend(self.log.iter().cloned());
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(format!(" {title} "))),
+            area,
+        );
+    }
+
+    fn render_footer(&self, f: &mut Frame, area: Rect) {
+        let hint = if self.result.is_some() {
+            Line::from(" any key to dismiss ".dim())
+        } else if self.modal.is_some() {
+            Line::from(" answer above · Esc cancel ".dim())
+        } else if self.busy {
+            Line::from(" working… · Ctrl-C quit ".dim())
+        } else {
+            Line::from(vec![
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" switch  "),
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" navigate  "),
+                Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" quit"),
+            ])
+            .dim()
+        };
+        f.render_widget(Paragraph::new(hint), area);
+    }
 }
 
-fn render_footer(f: &mut Frame, area: Rect) {
-    let hint = Line::from(vec![
-        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" switch  "),
-        Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" navigate  "),
-        Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" quit"),
-    ])
-    .dim();
-    f.render_widget(Paragraph::new(hint), area);
+/// Render a finished action's result as a dismissible centered overlay.
+fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
+    let lines: Vec<Line> = r
+        .lines
+        .iter()
+        .flat_map(|l| l.split('\n'))
+        .map(|s| Line::from(s.to_string()))
+        .collect();
+    let h = (lines.len() as u16 + 4).clamp(6, screen.height);
+    let area = widgets::centered(72, h, screen);
+    f.render_widget(Clear, area);
+    let color = if r.error { Color::Red } else { Color::Green };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(format!(" {} ", r.title))
+        .title_bottom(Line::from(" any key to dismiss ").dim());
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
+
+/// The type of a running action's future: self-contained (owns its answerer),
+/// so it needs no borrow of the UI state and is driven directly in the loop.
+type OpFuture = Pin<Box<dyn Future<Output = Result<Outcome>>>>;
 
 /// Run the async event loop over `terminal` until the user quits.
+///
+/// One task owns everything. A running action is an [`OpFuture`] polled by a
+/// `select!` arm; when it `.await`s a modal answer it simply pends, and the same
+/// loop delivers the [`UiRequest`] and (later) the key that unblocks it. No
+/// spawn, so no `Send`/`'static` plumbing and no dyn-`AsyncFnOnce` lifetime
+/// grief.
 async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiRequest>();
     let mut app = App::new();
+    let mut op: Option<OpFuture> = None;
     let mut events = EventStream::new().fuse();
     while !app.should_quit {
         terminal.draw(|f| app.render(f))?;
         tokio::select! {
             biased;
+            Some(req) = ui_rx.recv() => app.handle_request(req),
+            out = async { match op.as_mut() { Some(f) => f.await, None => future::pending().await } } => {
+                op = None;
+                app.finish_op(out);
+            }
             ev = events.select_next_some() => match ev {
-                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => app.on_key(k.code, k.modifiers),
+                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                    if let Some(action) = app.on_key(k.code, k.modifiers) {
+                        app.begin(action.label());
+                        let ans = TuiAnswerer::new(ui_tx.clone());
+                        op = Some(Box::pin(action::run_owned(ans, action)));
+                    }
+                }
                 Ok(_) => {}
                 Err(e) => {
                     log::error!("terminal event error: {e:?}");

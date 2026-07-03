@@ -21,7 +21,9 @@ impl RemoteState {
         RemoteState {}
     }
 
-    pub(super) fn on_key(&mut self, _code: KeyCode) {}
+    pub(super) fn on_key(&mut self, _code: KeyCode) -> Option<super::action::Action> {
+        None
+    }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
         let body = if cfg!(unix) {

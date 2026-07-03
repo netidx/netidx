@@ -4,7 +4,7 @@
 //! Read-only detection today; the install / uninstall / renew actions land once
 //! the [`TuiAnswerer`](super::answer::TuiAnswerer) exists.
 
-use super::widgets;
+use super::{action::Action, widgets};
 use netidx_admin::{
     fingerprint::Fingerprint,
     paths,
@@ -135,15 +135,20 @@ impl LocalState {
         self.installs = detect();
     }
 
-    pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) {
+    pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
         use crossterm::event::KeyCode::*;
         if self.installs.is_empty() {
             match code {
                 Up | Char('k') => self.role_menu.select_previous(),
                 Down | Char('j') => self.role_menu.select_next(),
+                Enter => {
+                    let sel = self.role_menu.selected().unwrap_or(0);
+                    return Some(Action::Install { role: ROLES[sel].role, dry_run: true });
+                }
                 _ => {}
             }
         }
+        None
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -163,7 +168,7 @@ impl LocalState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Install a role ")
-                    .title_bottom(Line::from(" ↑/↓ select · Enter install ").dim()),
+                    .title_bottom(Line::from(" ↑/↓ select · Enter preview ").dim()),
             )
             .highlight_style(
                 Style::default()
