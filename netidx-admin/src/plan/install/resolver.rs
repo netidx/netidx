@@ -1092,7 +1092,13 @@ async fn enroll_admin_server(
         .context("invalid admin server listen port")?
         .unwrap_or(crate::admin_proto::DEFAULT_PORT);
     let listen = SocketAddr::new(ip, port);
-    let admin_here = ans.confirm(Field::AdminHere, None, false).await?;
+    // A non-interactive install has no admin standing by to type a password, so
+    // it always takes the queued (remote-approval) path — mirroring the cert
+    // enrollment in `enroll.rs`. Without this gate a strict install that stands
+    // up its own admin server would hard-error here, *after* apply() already
+    // wrote the config, leaving a half-finished install.
+    let admin_here =
+        ans.interactive() && ans.confirm(Field::AdminHere, None, false).await?;
     let issued = if admin_here {
         let admin = ans
             .text(Field::AdminName, None, None, true)

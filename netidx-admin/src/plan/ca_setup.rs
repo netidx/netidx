@@ -588,8 +588,12 @@ pub async fn gather_policy(
     let allowed_san = if !inputs.allow_san.is_empty() {
         inputs.allow_san.to_vec()
     } else {
+        // The issuance scope is as security-relevant as the may-enroll /
+        // may-manage grants below, so strict mode must require it explicitly
+        // rather than silently granting the `*.<domain>` suggestion (which now
+        // only pre-fills the interactive frontends). `required = true`.
         let suggestion = san_suggestion(cn, domain);
-        let answer = ans.text(Field::AllowSan, None, Some(&suggestion), false).await?;
+        let answer = ans.text(Field::AllowSan, None, Some(&suggestion), true).await?;
         vec![answer.unwrap_or(suggestion)]
     };
     let id_map_groups = if !inputs.id_map_groups.is_empty() {

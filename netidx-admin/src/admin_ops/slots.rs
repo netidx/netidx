@@ -171,17 +171,12 @@ pub async fn recovery_rotate(
             keytab.display()
         )
     })?;
-    let exists = cadir
-        .vault
-        .read()
-        .list_admins()?
-        .iter()
-        .any(|i| i.admin == ca_vault::RECOVERY_ADMIN);
-    if exists {
-        cadir.vault.write().remove_slot(ca_vault::RECOVERY_ADMIN, false)?;
-    }
+    // Atomic re-key: the old recovery slot is dropped and the new one added in a
+    // single vault write, authorized by the box's autorenew credential. A failed
+    // write leaves the old recovery slot intact — the CA is never momentarily
+    // left with no recovery credential (the former remove-then-add window).
     let new_pw = ca_vault::gen_recovery_password();
-    cadir.vault.write().add_signing_slot(
+    cadir.vault.write().replace_signing_slot(
         &autorenew_pw,
         ca_vault::RECOVERY_ADMIN,
         &new_pw,

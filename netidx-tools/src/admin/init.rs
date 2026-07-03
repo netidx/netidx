@@ -160,13 +160,29 @@ struct CommonFlags {
     /// to prompt; pass this to suppress the prompt entirely.
     #[arg(long = "no-service")]
     no_service: bool,
-    /// Read a secret (key / admin / recovery password) from this file.
-    /// Strict mode only — never pass a secret on the command line.
-    #[arg(long = "password-file")]
-    password_file: Option<PathBuf>,
-    /// Read the secret from stdin instead of a file (strict mode).
-    #[arg(long = "password-stdin")]
-    password_stdin: bool,
+    /// Read the leaf private-key encryption password (only under
+    /// `--key-protection password`) from this file. Strict mode only — never
+    /// pass a secret on the command line. Distinct from the admin / recovery
+    /// passwords so one file can't silently set two different secrets.
+    #[arg(long = "key-password-file")]
+    key_password_file: Option<PathBuf>,
+    /// Read the leaf key password from stdin instead (strict mode).
+    #[arg(long = "key-password-stdin", conflicts_with = "key_password_file")]
+    key_password_stdin: bool,
+    /// Read the founding admin's password (only when this install creates a new
+    /// CA) from this file. Strict mode only.
+    #[arg(long = "admin-password-file")]
+    admin_password_file: Option<PathBuf>,
+    /// Read the founding admin's password from stdin instead (strict mode).
+    #[arg(long = "admin-password-stdin", conflicts_with = "admin_password_file")]
+    admin_password_stdin: bool,
+    /// Read the CA recovery password (only when unlocking an existing local CA
+    /// to issue this host's certificate) from this file. Strict mode only.
+    #[arg(long = "recovery-password-file")]
+    recovery_password_file: Option<PathBuf>,
+    /// Read the CA recovery password from stdin instead (strict mode).
+    #[arg(long = "recovery-password-stdin", conflicts_with = "recovery_password_file")]
+    recovery_password_stdin: bool,
     /// A CA fingerprint obtained out of band; confirms a network's
     /// identity non-interactively (e.g. with `--parent-admin-server`).
     #[arg(long = "accept-glyph")]
@@ -187,13 +203,18 @@ impl CommonFlags {
 }
 
 /// Build the strict-CLI [`FlagAnswerer`] from an install's common flags: read
-/// the secret from `--password-file` / `--password-stdin` (never argv) and
-/// parse the out-of-band `--accept-glyph` fingerprint.
+/// the key / admin / recovery passwords from their own `--*-password-file` /
+/// `--*-password-stdin` pairs (never argv, and never collapsed to one secret)
+/// and parse the out-of-band `--accept-glyph` fingerprint.
 fn build_answerer(common: &CommonFlags) -> Result<super::answer_cli::FlagAnswerer> {
-    super::answer_cli::make_flag_answerer(
-        common.password_file.as_deref(),
-        common.password_stdin,
-        common.accept_glyph.as_deref(),
+    super::answer_cli::FlagAnswerer::install(
+        common.key_password_file.as_deref(),
+        common.key_password_stdin,
+        common.admin_password_file.as_deref(),
+        common.admin_password_stdin,
+        common.recovery_password_file.as_deref(),
+        common.recovery_password_stdin,
+        super::answer_cli::parse_glyph(common.accept_glyph.as_deref())?,
     )
 }
 
@@ -405,21 +426,44 @@ pub(crate) struct WorkstationJoinFlags {
     /// (where `join` enrolls a client certificate).
     #[arg(long = "key-protection")]
     pub key_protection: Option<KeyProtArg>,
+    /// The network's admin server (`ip:port`, or a host resolved with the
+    /// default admin port). Names the network directly instead of discovering
+    /// it — required in strict mode (discovery is interactive-only).
+    #[arg(long = "admin-server")]
+    pub admin_server: Option<String>,
+    /// The network's CA fingerprint, obtained out of band; confirms the
+    /// network's identity non-interactively (required with `--admin-server`).
+    #[arg(long = "accept-glyph")]
+    pub accept_glyph: Option<String>,
+    /// Under `--key-protection password`, read the leaf key password from this
+    /// file (strict mode; never on the command line).
+    #[arg(long = "password-file")]
+    pub password_file: Option<PathBuf>,
+    /// Read the leaf key password from stdin instead (strict mode).
+    #[arg(long = "password-stdin", conflicts_with = "password_file")]
+    pub password_stdin: bool,
 }
 
 /// `workstation join` — graduate a local-only workstation to a networked
-/// one: discover + glyph-confirm a network, enroll a client cert if it's
-/// TLS, and attach the local resolver to it via a parent referral —
-/// without a reinstall or a hand-edit. The marker records the joined
-/// (pinned) network so later `status`/`update` can re-pin to it.
+/// one: select + glyph-confirm a network (by `--admin-server` or discovery),
+/// enroll a client cert if it's TLS, and attach the local resolver to it via a
+/// parent referral — without a reinstall or a hand-edit. The marker records the
+/// joined (pinned) network so later `status`/`update` can re-pin to it.
 pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
-    // `join` has no service offer and no secret / glyph inputs — it discovers +
-    // enrolls interactively (or errors cleanly under the strict answerer, which
-    // disables discovery).
-    let mut ans = super::answer_cli::FlagAnswerer::new(None, None);
+    // The only secret is the leaf key password (under --key-protection
+    // password); the network is named by --admin-server + glyph-confirmed by
+    // --accept-glyph, so `join` works with no TTY.
+    let mut ans = super::answer_cli::make_flag_answerer(
+        f.password_file.as_deref(),
+        f.password_stdin,
+        f.accept_glyph.as_deref(),
+    )?;
+    let admin_server =
+        f.admin_server.as_deref().map(resolve_admin_server_addr).transpose()?;
     let input = netidx_admin::plan::install::workstation::WorkstationJoinInput {
         dry_run: f.dry_run,
         key_protection: lib_kp(f.key_protection),
+        admin_server,
     };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     rt.block_on(netidx_admin::plan::install::workstation::run_workstation_join(

@@ -120,8 +120,12 @@ pub async fn revoke(
         }
     };
     // The glyph gate. `spki_fp` is per public key; revoking a whole name is
-    // only unambiguous when every live cert for it shares one key.
-    enforce_glyph_gate(&targets, assert_glyph.as_ref())?;
+    // only unambiguous when every live cert for it shares one key. A by-serial
+    // selector is already unambiguous, so it needs no span guard (and, absent
+    // an asserted glyph, no glyph parse at all — a legacy cert with an empty
+    // glyph stays revocable by its unique serial).
+    let needs_span_guard = matches!(selector, RevokeSelector::Name(_));
+    enforce_glyph_gate(&targets, assert_glyph.as_ref(), needs_span_guard)?;
     let serials: Vec<u64> = targets.iter().map(|t| t.serial).collect();
     let revoked: Vec<IssuedEntry> = targets.iter().map(|t| (*t).clone()).collect();
     let warnings = admin_client::revoke(
@@ -137,14 +141,22 @@ pub async fn revoke(
 }
 
 /// Enforce the revocation glyph gate. With `assert_glyph`, it must equal the
-/// `spki_fp` of every target (refuse on any mismatch). Without it, refuse a
-/// target set spanning more than one distinct glyph — a bare-name selector that
-/// would revoke certs for two different keys must be narrowed (by serial, or by
-/// `--assert-glyph` to confirm the intended key).
+/// `spki_fp` of every target (refuse on any mismatch). Without it, and only when
+/// `needs_span_guard` (a bare-name selector that could span several keys),
+/// refuse a target set spanning more than one distinct glyph — narrow it by
+/// serial or confirm the intended key with `--assert-glyph`.
+///
+/// When there is nothing to verify — an unambiguous by-serial selector with no
+/// asserted glyph — the glyphs are not even parsed, so a legacy cert whose
+/// `spki_fp` is empty/unparseable is still revocable by its unique serial.
 fn enforce_glyph_gate(
     targets: &[&IssuedEntry],
     assert_glyph: Option<&Fingerprint>,
+    needs_span_guard: bool,
 ) -> Result<()> {
+    if assert_glyph.is_none() && !needs_span_guard {
+        return Ok(());
+    }
     let glyphs: Vec<Fingerprint> = targets
         .iter()
         .map(|e| {
@@ -203,23 +215,25 @@ mod tests {
         }
     }
 
-    fn gate(targets: &[IssuedEntry], assert: Option<&Fingerprint>) -> Result<()> {
+    /// `span` mirrors the call site's `needs_span_guard`: a bare-name selector
+    /// passes `true` (could span several keys), a by-serial selector `false`.
+    fn gate(targets: &[IssuedEntry], assert: Option<&Fingerprint>, span: bool) -> Result<()> {
         let refs: Vec<&IssuedEntry> = targets.iter().collect();
-        enforce_glyph_gate(&refs, assert)
+        enforce_glyph_gate(&refs, assert, span)
     }
 
     #[test]
     fn single_glyph_no_assert_ok() {
         let g = glyph("A");
         let t = [entry(1, "a.example", &g), entry(2, "a.example", &g)];
-        gate(&t, None).unwrap();
+        gate(&t, None, true).unwrap();
     }
 
     #[test]
     fn multi_glyph_no_assert_refused() {
         let (a, b) = (glyph("A"), glyph("B"));
         let t = [entry(1, "a.example", &a), entry(2, "a.example", &b)];
-        let e = gate(&t, None).unwrap_err();
+        let e = gate(&t, None, true).unwrap_err();
         assert!(format!("{e:#}").contains("more than one public key"));
     }
 
@@ -227,7 +241,7 @@ mod tests {
     fn assert_matches_every_target_ok() {
         let g = glyph("A");
         let t = [entry(1, "a.example", &g), entry(2, "a.example", &g)];
-        gate(&t, Some(&g)).unwrap();
+        gate(&t, Some(&g), true).unwrap();
     }
 
     #[test]
@@ -235,7 +249,7 @@ mod tests {
         let (a, b) = (glyph("A"), glyph("B"));
         // Two targets, one carries a different glyph than the asserted one.
         let t = [entry(1, "a.example", &a), entry(2, "a.example", &b)];
-        let e = gate(&t, Some(&a)).unwrap_err();
+        let e = gate(&t, Some(&a), true).unwrap_err();
         assert!(format!("{e:#}").contains("assert-glyph"));
     }
 
@@ -244,6 +258,27 @@ mod tests {
         // A serial resolves to exactly one target — always passes the gate.
         let g = glyph("C");
         let t = [entry(7, "x.example", &g)];
-        gate(&t, None).unwrap();
+        gate(&t, None, false).unwrap();
+    }
+
+    #[test]
+    fn serial_empty_glyph_still_revocable() {
+        // A legacy directly-issued cert may carry an empty/unparseable glyph.
+        // A by-serial selector with no asserted glyph must NOT be blocked on
+        // parsing that glyph — the serial is already unambiguous.
+        let mut e = entry(9, "legacy.example", &glyph("A"));
+        e.spki_fp = String::new();
+        gate(&[e], None, false).unwrap();
+    }
+
+    #[test]
+    fn empty_glyph_with_assert_refused() {
+        // But if the operator *asserts* a glyph, an unparseable stored glyph
+        // can't be verified against it — refuse rather than silently pass.
+        let g = glyph("A");
+        let mut e = entry(9, "legacy.example", &g);
+        e.spki_fp = String::new();
+        let err = gate(&[e], Some(&g), false).unwrap_err();
+        assert!(format!("{err:#}").contains("unparseable glyph"));
     }
 }

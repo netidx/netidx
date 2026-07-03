@@ -27,11 +27,7 @@ pub(crate) fn make_flag_answerer(
     accept_glyph: Option<&str>,
 ) -> Result<FlagAnswerer> {
     let password = read_secret(password_file, password_stdin, ("--password-file", "--password-stdin"))?;
-    let accept_glyph = match accept_glyph {
-        Some(s) => Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?),
-        None => None,
-    };
-    Ok(FlagAnswerer::new(password, accept_glyph))
+    Ok(FlagAnswerer::single(password, parse_glyph(accept_glyph)?))
 }
 
 /// The strict answerer for offline CA-vault ops (`ca sign` / `ca issue`): the
@@ -45,7 +41,7 @@ pub(crate) fn make_offline_answerer(
 ) -> Result<FlagAnswerer> {
     let flags = ("--recovery-password-file", "--recovery-password-stdin");
     let password = read_secret(recovery_password_file, recovery_password_stdin, flags)?;
-    Ok(FlagAnswerer::with_secret_flags(password, None, flags))
+    Ok(FlagAnswerer::offline(password))
 }
 
 /// Read a password once from a `--*-file` path or stdin (never argv), trimming a
@@ -115,36 +111,125 @@ impl RemoteAuthFlags {
     }
 }
 
-// Wired into the subcommand handlers as they convert to the Answerer.
-#[allow(dead_code)]
-pub(crate) struct FlagAnswerer {
-    /// A password read once from the secret flags, handed to any `secret()`
-    /// call that has no inline value.
-    password: Option<Zeroizing<String>>,
-    /// The CA fingerprint the operator obtained out of band; a presented
-    /// identity must match it (there is no interactive glyph confirm here).
-    accept_glyph: Option<Fingerprint>,
-    /// The (`--*-file`, `--*-stdin`) flag names a missing-secret error should
-    /// cite — `--password-file` for remote admin, `--recovery-password-file`
-    /// for offline CA-vault ops.
-    secret_flags: (&'static str, &'static str),
+/// One purpose's secret: its value (read once from a `--*-file` / `--*-stdin`
+/// pair, never argv) plus the flag names a missing-secret error should cite.
+/// Distinct slots keep an install's key / admin / recovery passwords from
+/// silently collapsing to one shared secret (an install that creates a CA reads
+/// both a founding-admin password AND, under `--key-protection password`, a leaf
+/// key password — from the same file, before the split).
+struct SecretSlot {
+    value: Option<Zeroizing<String>>,
+    flags: (&'static str, &'static str),
 }
 
-#[allow(dead_code)]
-impl FlagAnswerer {
-    pub(crate) fn new(
-        password: Option<Zeroizing<String>>,
-        accept_glyph: Option<Fingerprint>,
-    ) -> Self {
-        Self::with_secret_flags(password, accept_glyph, ("--password-file", "--password-stdin"))
+impl SecretSlot {
+    /// A slot with no supplied value; a `secret()` call on it errors, naming
+    /// `flags`. For a purpose this command doesn't accept a secret for.
+    fn none(flags: (&'static str, &'static str)) -> Self {
+        SecretSlot { value: None, flags }
     }
 
-    pub(crate) fn with_secret_flags(
+    /// Read a slot's value from its file/stdin flags (never argv).
+    fn read(
+        file: Option<&Path>,
+        stdin: bool,
+        flags: (&'static str, &'static str),
+    ) -> Result<Self> {
+        Ok(SecretSlot { value: read_secret(file, stdin, flags)?, flags })
+    }
+
+    /// The value for a `secret()` call: an inline `provided` wins; else the slot
+    /// value; else an error naming the slot's flags (never prompts).
+    fn resolve(&self, field: Field, provided: Option<Secret>) -> Result<Secret> {
+        if let Some(s) = provided {
+            return Ok(s);
+        }
+        match &self.value {
+            Some(pw) => Ok(Secret(pw.to_string())),
+            None => bail!(
+                "{} is required — supply it with {} <path> or {} (never on the \
+                 command line)",
+                field.flag(),
+                self.flags.0,
+                self.flags.1,
+            ),
+        }
+    }
+}
+
+// The distinct install secret flags — a password-protected leaf key, the
+// founding superuser, and a CA recovery unlock each get their own file.
+const KEY_FLAGS: (&str, &str) = ("--key-password-file", "--key-password-stdin");
+const ADMIN_FLAGS: (&str, &str) = ("--admin-password-file", "--admin-password-stdin");
+const RECOVERY_FLAGS: (&str, &str) = ("--recovery-password-file", "--recovery-password-stdin");
+// The single-secret flag for commands that take exactly one password (remote
+// admin, `ca init`, `component tls join`) — no collapse is possible with one.
+const PASSWORD_FLAGS: (&str, &str) = ("--password-file", "--password-stdin");
+
+/// The strict-CLI answerer: three purpose-scoped secret slots plus the CA glyph
+/// the operator obtained out of band (a presented identity must match it — there
+/// is no interactive glyph confirm here).
+pub(crate) struct FlagAnswerer {
+    key: SecretSlot,
+    admin: SecretSlot,
+    recovery: SecretSlot,
+    accept_glyph: Option<Fingerprint>,
+}
+
+impl FlagAnswerer {
+    /// One password answers any `secret()` this command makes (cited as
+    /// `--password-file`). For commands with a single distinct secret — remote
+    /// admin ops, `ca init` (the founding superuser), `component tls join` —
+    /// where no collapse is possible because only one secret is ever needed.
+    pub(crate) fn single(
         password: Option<Zeroizing<String>>,
         accept_glyph: Option<Fingerprint>,
-        secret_flags: (&'static str, &'static str),
     ) -> Self {
-        FlagAnswerer { password, accept_glyph, secret_flags }
+        FlagAnswerer {
+            key: SecretSlot { value: password.clone(), flags: PASSWORD_FLAGS },
+            admin: SecretSlot { value: password.clone(), flags: PASSWORD_FLAGS },
+            recovery: SecretSlot { value: password, flags: PASSWORD_FLAGS },
+            accept_glyph,
+        }
+    }
+
+    /// The offline CA-vault answerer: the single secret is the recovery password
+    /// (cited as `--recovery-password-file`), which also unlocks a legacy
+    /// encrypted key.
+    pub(crate) fn offline(recovery: Option<Zeroizing<String>>) -> Self {
+        FlagAnswerer {
+            key: SecretSlot { value: recovery.clone(), flags: RECOVERY_FLAGS },
+            admin: SecretSlot::none(ADMIN_FLAGS),
+            recovery: SecretSlot { value: recovery, flags: RECOVERY_FLAGS },
+            accept_glyph: None,
+        }
+    }
+
+    /// A full install answerer: distinct key / admin / recovery secrets read
+    /// from their own flags, so they can never collapse to one shared file.
+    pub(crate) fn install(
+        key_file: Option<&Path>,
+        key_stdin: bool,
+        admin_file: Option<&Path>,
+        admin_stdin: bool,
+        recovery_file: Option<&Path>,
+        recovery_stdin: bool,
+        accept_glyph: Option<Fingerprint>,
+    ) -> Result<Self> {
+        Ok(FlagAnswerer {
+            key: SecretSlot::read(key_file, key_stdin, KEY_FLAGS)?,
+            admin: SecretSlot::read(admin_file, admin_stdin, ADMIN_FLAGS)?,
+            recovery: SecretSlot::read(recovery_file, recovery_stdin, RECOVERY_FLAGS)?,
+            accept_glyph,
+        })
+    }
+}
+
+/// Parse an out-of-band `--accept-glyph` fingerprint (if present).
+pub(crate) fn parse_glyph(accept_glyph: Option<&str>) -> Result<Option<Fingerprint>> {
+    match accept_glyph {
+        Some(s) => Ok(Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?)),
+        None => Ok(None),
     }
 }
 
@@ -206,19 +291,13 @@ impl Answerer for FlagAnswerer {
     }
 
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret> {
-        if let Some(s) = provided {
-            return Ok(s);
-        }
-        match &self.password {
-            Some(pw) => Ok(Secret(pw.to_string())),
-            None => bail!(
-                "{} is required — supply it with {} <path> or {} (never on the \
-                 command line)",
-                field.flag(),
-                self.secret_flags.0,
-                self.secret_flags.1,
-            ),
-        }
+        let slot = match field {
+            Field::KeyPassword => &self.key,
+            Field::AdminPassword => &self.admin,
+            Field::RecoveryPassword => &self.recovery,
+            other => bail!("internal error: secret() requested for non-secret field {other:?}"),
+        };
+        slot.resolve(field, provided)
     }
 
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {

@@ -176,21 +176,24 @@ pub async fn open_admin_session(
     Ok(AdminSession { server, identity, admin, password })
 }
 
-/// Select exactly one item from `items` by its security **code**.
+/// Select exactly one item from `items` by its **full** security code.
 ///
-/// `code` is the grouped base32 fingerprint an operator read out of band. It
-/// may be the **full** form (52 base32 chars = the full 256-bit fingerprint, an
-/// exact match — the security-load-bearing form) or an unambiguous base32
-/// **prefix** (a convenience, e.g. the 8-char short code). Matching is
-/// whitespace- and case-insensitive. Refuses:
+/// `code` is the grouped base32 fingerprint an operator read out of band and
+/// must be the FULL form: all 52 base32 chars = the full 256-bit fingerprint.
+/// Matching is whitespace- and case-insensitive. A short prefix is deliberately
+/// **refused for actions**: a query command may show a short code for
+/// readability, but acting on a request (approve / deny / delegate) asserts all
+/// 256 bits — so a request that has since left the queue (TTL expiry, already
+/// actioned) cannot be impersonated by a cheaper prefix collision. Refuses:
+/// - a code that is not exactly a full fingerprint (`use the full code`),
+/// - a non-base32 character,
 /// - a code that matches no item (`no request matches`),
-/// - a prefix that matches more than one (`ambiguous` — use the full code),
-/// - a non-base32 character, or a code longer than a full fingerprint.
+/// - (defensively) a code that matches more than one item.
 ///
 /// `of` derives the code for a row; a row whose code cannot be derived (e.g. an
 /// unparseable CSR) yields `None` and never matches. Pure and IO-free — the
-/// security assertion is unit-testable and shared by the queue, delegation, and
-/// revocation groups.
+/// security assertion is unit-testable and shared by the queue and delegation
+/// action groups.
 pub fn find_by_code<'a, T>(
     items: &'a [T],
     code: &str,
@@ -206,20 +209,22 @@ pub fn find_by_code<'a, T>(
     {
         bail!("invalid code character {bad:?} — codes are base32 (A–Z, 2–7)");
     }
-    if norm.len() > 52 {
-        bail!("code {code:?} is longer than a full request code");
+    if norm.len() != 52 {
+        bail!(
+            "code {code:?} is not a full request code — copy all 52 base32 \
+             characters shown by the query command (a short prefix is not \
+             accepted for this action)"
+        );
     }
-    let full = norm.len() == 52;
     let mut found: Option<&T> = None;
     for it in items {
         let Some(fp) = of(it) else { continue };
         let text: String = fp.text().chars().filter(|c| *c != ' ').collect();
-        let hit = if full { text == norm } else { text.starts_with(&norm) };
-        if hit {
+        if text == norm {
             if found.is_some() {
                 bail!(
-                    "code {code:?} is ambiguous — it matches more than one request; \
-                     use the full code shown by the query command"
+                    "code {code:?} matches more than one request (duplicate \
+                     fingerprints) — refusing to act ambiguously"
                 );
             }
             found = Some(it);
@@ -246,19 +251,22 @@ mod tests {
     }
 
     #[test]
-    fn find_by_code_unambiguous_prefix() {
+    fn find_by_code_short_prefix_refused() {
+        // A short prefix that would once have matched is now refused: an action
+        // must assert the full 256-bit code, never a cheaper prefix.
         let items = [fp("A"), fp("B")];
-        // fp("A") is 32 zero bytes → text is all 'A's; "AAAAA" matches only it.
-        let got = find_by_code(&items, "AAAAA", |f| Some(*f)).unwrap();
-        assert_eq!(*got, items[0]);
+        let e = find_by_code(&items, "AAAAA", |f| Some(*f)).unwrap_err();
+        assert!(format!("{e:#}").contains("full request code"));
     }
 
     #[test]
-    fn find_by_code_ambiguous_prefix_refused() {
-        // Two identical fingerprints share every prefix.
+    fn find_by_code_duplicate_full_code_refused() {
+        // Two rows with the *same* full fingerprint — the defensive ambiguity
+        // guard still refuses rather than acting on an arbitrary one.
         let items = [fp("A"), fp("A")];
-        let e = find_by_code(&items, "AAAAA", |f| Some(*f)).unwrap_err();
-        assert!(format!("{e:#}").contains("ambiguous"));
+        let code = items[0].text();
+        let e = find_by_code(&items, &code, |f| Some(*f)).unwrap_err();
+        assert!(format!("{e:#}").contains("more than one request"));
     }
 
     #[test]

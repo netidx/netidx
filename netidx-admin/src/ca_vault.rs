@@ -340,6 +340,34 @@ impl CAVault {
         write_vault(&path, &vault)
     }
 
+    /// Atomically re-key a signing slot: recover the master key via a *different*
+    /// authorizing slot (`existing_password` — e.g. the box's autorenew
+    /// credential), drop any current slot named `admin`, and add a fresh one
+    /// under `new_password`, in a **single** `write_vault`. Unlike
+    /// [`remove_slot`](Self::remove_slot) + [`add_signing_slot`](Self::add_signing_slot),
+    /// there is no intermediate on-disk state with the slot missing — a failed
+    /// write leaves the old slot intact — so rotating the sole `recovery` slot
+    /// can't leave the CA with no recovery credential. `admin` need not already
+    /// exist (then this is a plain add).
+    pub fn replace_signing_slot(
+        &mut self,
+        existing_password: &str,
+        admin: &str,
+        new_password: &str,
+        policy: Policy,
+    ) -> Result<()> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        // Authorize via a different slot BEFORE touching anything: the caller
+        // is re-keying `admin`, so `existing_password` must be some other
+        // signing slot (recovering MK proves the authority to mint a new one).
+        let (_slot, mk) = recover_mk(&vault, existing_password)?;
+        let slot = make_slot(&mk, SlotKind::Signing, admin, new_password, policy)?;
+        vault.slots.retain(|s| s.admin != admin);
+        vault.slots.push(slot);
+        write_vault(&path, &vault)
+    }
+
     /// Add a **role** slot: a keyslot that authenticates and carries `policy`
     /// but does NOT wrap the master key, so it can never recover the CA
     /// private key. It wraps a throwaway random verifier purely so its
@@ -698,6 +726,40 @@ mod tests {
         assert_eq!(a.admin, "autorenew");
         assert_eq!(&r.ca_key_pem[..], &a.ca_key_pem[..]);
         assert_eq!(v.signing_slot_names().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replace_signing_slot_atomically_rekeys() {
+        // Rotate the recovery slot, authorized by the *autorenew* slot: the old
+        // recovery password stops working and the new one unlocks the same MK,
+        // in a single write (the old slot is never momentarily absent).
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "old-rpw", pol("*.a")).unwrap();
+        v.add_signing_slot("old-rpw", "autorenew", "apw", pol("*.b")).unwrap();
+        v.replace_signing_slot("apw", "recovery", "new-rpw", pol("*.a")).unwrap();
+        assert!(v.unlock("old-rpw").is_err(), "old recovery password must stop working");
+        let r = v.unlock("new-rpw").unwrap();
+        assert_eq!(r.admin, "recovery");
+        // The autorenew slot is untouched; still exactly two slots, one MK.
+        let a = v.unlock("apw").unwrap();
+        assert_eq!(a.admin, "autorenew");
+        assert_eq!(v.signing_slot_names().unwrap().len(), 2);
+        assert_eq!(&r.ca_key_pem[..], &a.ca_key_pem[..]);
+    }
+
+    #[test]
+    fn replace_signing_slot_needs_signing_authority_and_leaves_slot_intact() {
+        // Re-keying recovers MK first, so it needs a *signing* authority — a
+        // role password or a wrong one can't do it, and the failed attempt
+        // leaves the existing recovery slot untouched (no destructive window).
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
+        assert!(v.replace_signing_slot("epw", "recovery", "x", pol("*")).is_err());
+        assert!(v.replace_signing_slot("wrong", "recovery", "x", pol("*")).is_err());
+        assert!(v.unlock("rpw").is_ok(), "recovery slot must survive a failed re-key");
     }
 
     #[test]

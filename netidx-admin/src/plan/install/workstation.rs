@@ -80,6 +80,10 @@ pub struct WorkstationJoinInput {
     pub dry_run: bool,
     /// Private-key protection for an enrolled client cert (TLS networks).
     pub key_protection: Option<KeyProtArg>,
+    /// The network's admin server, named explicitly (`--admin-server`) —
+    /// selects + glyph-confirms the network directly, so `join` works under the
+    /// strict answerer (which disables mDNS discovery). `None` ⇒ discover.
+    pub admin_server: Option<SocketAddr>,
 }
 
 /// Install a workstation (local resolver + client), returning the OS-service
@@ -244,10 +248,16 @@ pub async fn run_workstation_join(
         .context("no resolver config found — is this a workstation install?")?;
     let cpath = paths::discover_client_config()
         .context("no client config found — is this a workstation install?")?;
-    let probe = enroll::discover_network(ans, NodeKind::Workstation).await?;
+    // An explicit `--admin-server` names the network directly (and glyph-confirms
+    // it via `--accept-glyph`); otherwise discover it (interactive only — the
+    // strict answerer disables discovery, so strict `join` needs `--admin-server`).
+    let probe = match input.admin_server {
+        Some(addr) => enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?,
+        None => enroll::discover_network(ans, NodeKind::Workstation).await?,
+    };
     let net = probe.have().context(
-        "no network was selected to join (nothing discovered, or the offer was \
-         declined)",
+        "no network was selected to join — pass --admin-server <addr> (with \
+         --accept-glyph) to name it explicitly, or run interactively to discover it",
     )?;
     let mut tls_identities: Vec<TlsIdentitySpec> = Vec::new();
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();

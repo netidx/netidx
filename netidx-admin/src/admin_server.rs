@@ -2041,6 +2041,17 @@ fn handle_enqueue(
     peer: SocketAddr,
     peer_ident: Option<&PeerIdent>,
 ) -> EnqueueResponse {
+    // Every queued request's security code IS its CSR's SPKI fingerprint, so a
+    // CSR that doesn't parse yields a code-less queue entry that no admin can
+    // ever select — to approve OR deny — leaving only TTL expiry to clear it.
+    // Reject an unparseable CSR now (covers both the admin-server enrollment and
+    // the plain signing paths below) so the enrollee hears it immediately and
+    // the queue can't be clogged with un-actionable entries.
+    if let Err(e) = admin_client::csr_fingerprint(&req.csr_pem) {
+        return EnqueueResponse::Err {
+            reason: format!("the certificate request (CSR) could not be parsed: {e:#}"),
+        };
+    }
     let mut store = ca.store.lock();
     // Admin-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
