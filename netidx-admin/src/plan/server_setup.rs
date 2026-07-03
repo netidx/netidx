@@ -16,8 +16,8 @@ use crate::{
     answer::{Answerer, Field},
     atomic,
     ca::{self, Ca, SanEntry},
-    paths,
-    plan::{ca_setup, service::ServiceNeed},
+    offline_ca, paths,
+    plan::service::ServiceNeed,
     service::ServiceScope,
     tls,
 };
@@ -68,7 +68,7 @@ pub async fn setup_server(
     // would, keeping the serving cert's serial unique and the daemon's
     // startup counter seeded past it.
     let kc = admin_client::generate_key_and_csr(SERVING_SAN)?;
-    let leaf = ca_setup::sign_and_record(
+    let leaf = offline_ca::sign_and_record(
         a.ca,
         NodeKind::AdminServer,
         kc.csr_pem.as_bytes(),

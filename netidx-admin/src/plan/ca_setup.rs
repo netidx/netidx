@@ -11,17 +11,17 @@
 
 use crate::{
     admin_proto::NodeKind,
-    admin_server::{AUTORENEW_ADMIN, read_autorenew_password},
+    admin_server::AUTORENEW_ADMIN,
     answer::{Answerer, Field},
     atomic,
     ca::{self, Ca, CaLifetimes, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     ca_store, ca_vault,
     fingerprint::Fingerprint,
-    paths,
+    offline_ca, paths,
     plan::{enroll, server_setup, service::ServiceNeed},
     tls,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
 use std::{
     net::{IpAddr, SocketAddr},
@@ -89,12 +89,6 @@ pub struct NewCaOpts {
     pub units_dir: Option<PathBuf>,
 }
 
-/// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
-/// dir: never back this file up; recreating it is one `--rotate`.
-pub fn autorenew_keytab_path() -> Result<PathBuf> {
-    Ok(paths::user_config_root()?.join("autorenew.keytab"))
-}
-
 /// Create (or replace) the autorenew slot + keytab. `recovery_password`
 /// authorizes the re-mint: the old autorenew slot is removed first, so the
 /// authorizing credential must be a *different* signing slot — in the
@@ -132,7 +126,7 @@ pub fn setup_autorenew_slot(
         &password,
         crate::ca_policy::autorenew_policy(),
     )?;
-    let keytab = autorenew_keytab_path()?;
+    let keytab = offline_ca::autorenew_keytab_path()?;
     // `available()` (which the caller's TPM gate checked) only proves the
     // device opened, NOT that a seal will succeed — a present-but-locked or
     // busy TPM fails here. The seal decision is the real one: a plaintext
@@ -239,7 +233,7 @@ pub async fn create_vaulted_ca(
     // (or loudly warn under --insecure-no-tpm) BEFORE anything touches
     // disk, so a refused init leaves the dir clean and retryable.
     tpm_gate(ans, opts.insecure_no_tpm)?;
-    let san = parse_sans(&opts.san, &common_name)?;
+    let san = offline_ca::parse_sans(&opts.san, &common_name)?;
 
     // Generate the CA (its key is returned, never written to disk in
     // plaintext) and seal it into the vault under the `recovery` slot —
@@ -472,28 +466,30 @@ pub async fn setup_superuser(
             "{name:?} is a reserved signing-slot name; choose another for the superuser"
         );
     }
-    let mut policy = prompt_policy(
+    let mut policy = gather_policy(
         ans,
-        &PolicyArgs {
+        PolicyInputs {
             allow_san: &opts.allowed_san,
             max_validity: opts.max_validity,
             id_map_groups: &opts.id_map_groups,
             may_enroll_servers: opts.may_enroll_servers,
+            // The superuser always manages admins — pass it so gather_policy
+            // doesn't ask (rather than forcing it after the fact).
+            may_manage_admins: Some(true),
             perms_scope: &[],
             service_scope: &[],
         },
-        // The superuser founds the network, so it defaults to may-enroll.
+        // The superuser founds the network, so may-enroll defaults to yes.
         true,
         cn,
         opts.domain.as_deref(),
     )
     .await?;
     // What makes it the superuser: authority over the whole tree (perms +
-    // service control) and the right to mint/scope other admins. (Issuance
-    // scope + enroll came from the prompt above.)
+    // service control). (Issuance scope, may-enroll, and admin-management
+    // came from gather_policy above.)
     policy.perms_edit_scopes = vec!["/".to_string()];
     policy.service_control_scopes = vec!["/".to_string()];
-    policy.may_manage_admins = true;
     let mut secret = ans.secret(Field::AdminPassword, None).await?;
     let pw = Zeroizing::new(std::mem::take(&mut secret.0));
     cadir.vault.write().add_role_slot(&name, &pw, policy)?;
@@ -537,64 +533,80 @@ pub fn existing_ca_cn(dir: &Path) -> String {
     tls::extract_dns_san_from_pem(&dir.join("certificate.pem")).unwrap_or_default()
 }
 
-/// CLI-provided policy inputs; whatever is absent gets prompted.
-pub struct PolicyArgs<'a> {
+/// The `*.<domain>` SAN suggestion, from an explicit domain or by stripping the
+/// CA CN's leftmost label; `*` when neither yields a domain. Prefer an explicit
+/// domain (e.g. threaded from the resolver install, which already asked for
+/// it) — `*.<domain>` matches the `<user>.<domain>` SAN convention exactly.
+fn san_suggestion(cn: &str, domain: Option<&str>) -> String {
+    match domain {
+        Some(d) if !d.is_empty() => format!("*.{d}"),
+        _ => match cn.split_once('.') {
+            Some((_, d)) if !d.is_empty() => format!("*.{d}"),
+            _ => "*".to_string(),
+        },
+    }
+}
+
+/// The raw policy knobs an admin collects before building a [`Policy`]. The
+/// booleans route through the answerer (so strict mode requires them
+/// explicitly, while an interactive frontend gets the supplied default); the
+/// scope lists are typed inputs taken straight from flags — a signing admin
+/// gets perms/service scopes only when explicitly granted.
+pub struct PolicyInputs<'a> {
+    /// SAN globs this admin may issue (empty ⇒ answerer suggests `*.<domain>`).
     pub allow_san: &'a [String],
+    /// Max validity this admin may issue.
     pub max_validity: Duration,
+    /// id-map groups this admin may assign (empty ⇒ answerer default `users`).
     pub id_map_groups: &'a [String],
+    /// Whether this admin may enroll new admin servers.
     pub may_enroll_servers: Option<bool>,
-    /// Netidx paths this admin may edit perms under. Taken straight from
-    /// the flag (no prompt) — a signing admin gets perms scopes only when
-    /// explicitly granted; role admins are minted by `admin add-role`.
+    /// Whether this admin may manage the roster (add / rescope / remove admins).
+    pub may_manage_admins: Option<bool>,
+    /// Netidx paths this admin may edit perms under.
     pub perms_scope: &'a [String],
-    /// Netidx paths this admin may control services under (restart/start/
-    /// stop the activation units of the cluster serving that path). Taken
-    /// straight from the flag, like `perms_scope`.
+    /// Netidx paths this admin may control services under.
     pub service_scope: &'a [String],
 }
 
 /// Assemble a [`Policy`](ca_vault::Policy) from the flag-supplied
-/// [`PolicyArgs`], prompting through the seam for whatever is absent.
-pub async fn prompt_policy(
+/// [`PolicyInputs`], asking the answerer for any knob not supplied by a flag.
+/// `cn`/`domain` seed the `*.<domain>` SAN suggestion. `enroll_default` is the
+/// interactive default for the may-enroll-servers confirm (strict mode ignores
+/// it and requires the flag): the founding superuser founds the network, so it
+/// defaults to yes; an added admin defaults to no.
+///
+/// Shared by the founding-superuser setup ([`setup_superuser`]) and the remote
+/// `ca admin add-role` / `set-policy` actions, so the two cannot drift.
+pub async fn gather_policy(
     ans: &mut dyn Answerer,
-    args: &PolicyArgs<'_>,
+    inputs: PolicyInputs<'_>,
     enroll_default: bool,
     cn: &str,
     domain: Option<&str>,
 ) -> Result<ca_vault::Policy> {
-    let allowed_san = if !args.allow_san.is_empty() {
-        args.allow_san.to_vec()
+    let allowed_san = if !inputs.allow_san.is_empty() {
+        inputs.allow_san.to_vec()
     } else {
-        // Prefer an explicit domain (e.g. threaded from the resolver
-        // install, which already asked for it) — `*.<domain>` matches the
-        // `<user>.<domain>` SAN convention exactly. With no domain, fall
-        // back to stripping the CN's leftmost label, which is right when
-        // the CN is `<host>.<domain>` but only a guess otherwise.
-        let suggestion = match domain {
-            Some(d) if !d.is_empty() => format!("*.{d}"),
-            _ => match cn.split_once('.') {
-                Some((_, domain)) if !domain.is_empty() => format!("*.{domain}"),
-                _ => "*".to_string(),
-            },
-        };
+        let suggestion = san_suggestion(cn, domain);
         let answer = ans.text(Field::AllowSan, None, Some(&suggestion), false).await?;
         vec![answer.unwrap_or(suggestion)]
     };
-    let id_map_groups = if !args.id_map_groups.is_empty() {
-        // `--id-map-group ''` is the explicit "none" — filter it out so
-        // the resulting policy is empty (registration disabled) rather
-        // than containing an empty group name.
-        args.id_map_groups
+    let id_map_groups = if !inputs.id_map_groups.is_empty() {
+        // `--id-map-group ''` is the explicit "none" — filter it out so the
+        // resulting policy is empty (registration disabled) rather than
+        // containing an empty group name.
+        inputs
+            .id_map_groups
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect()
     } else {
-        // The *allowed set*: which groups this admin may assign when
-        // enrolling a node (the actual choice happens per-enrollment,
-        // in the SignRequest). Blank takes the default; a bare `-`
-        // disables registration entirely (this admin's signs never
-        // register id-map identities).
+        // The *allowed set*: which groups this admin may assign when enrolling
+        // a node (the actual choice happens per-enrollment, in the
+        // SignRequest). Blank takes the default; a bare `-` disables
+        // registration entirely (this admin's signs never register identities).
         let answer = ans
             .text(Field::IdMapGroups, None, Some("users"), false)
             .await?
@@ -602,22 +614,21 @@ pub async fn prompt_policy(
         enroll::parse_id_map_answer(&answer)
     };
     let may_enroll_servers = ans
-        .confirm(Field::MayEnrollServers, args.may_enroll_servers, enroll_default)
+        .confirm(Field::MayEnrollServers, inputs.may_enroll_servers, enroll_default)
         .await?;
-    let trim_paths = |scopes: &[String]| -> Vec<String> {
+    let may_manage_admins =
+        ans.confirm(Field::MayManageAdmins, inputs.may_manage_admins, false).await?;
+    let trim = |scopes: &[String]| -> Vec<String> {
         scopes.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     };
-    let perms_edit_scopes = trim_paths(args.perms_scope);
-    let service_control_scopes = trim_paths(args.service_scope);
     Ok(ca_vault::Policy {
         allowed_san,
-        max_validity: args.max_validity,
+        max_validity: inputs.max_validity,
         id_map_groups,
         may_enroll_servers,
-        perms_edit_scopes,
-        // Phase 4 wires a --may-manage-admins flag through PolicyArgs.
-        may_manage_admins: false,
-        service_control_scopes,
+        perms_edit_scopes: trim(inputs.perms_scope),
+        may_manage_admins,
+        service_control_scopes: trim(inputs.service_scope),
     })
 }
 
@@ -635,212 +646,6 @@ pub fn default_ca_present() -> bool {
         }
         Err(_) => false,
     }
-}
-
-/// Open the CA at `dir` as a signer. Handles both formats:
-/// - **vaulted** (current): unlock with the box's autorenew credential
-///   (no human secret), falling back to the recovery password otherwise.
-/// - **legacy** `private.key`: unencrypted open, prompting only if the
-///   key turns out to be encrypted.
-///
-/// A non-interactive caller that would need a secret bails rather than
-/// hanging. This is the single CA-open entry point — every command that
-/// signs (`issue`, `sign`, the resolver's local-CA issuance) goes through
-/// it, so they all transparently handle vaulted CAs.
-pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
-    if ca_vault::CAVault::exists(dir) {
-        // Offline issuance takes the CA flock for the whole unlock — a running
-        // admin server owns the CA, so this fails fast if one is up. The handle
-        // drops at the `return` below, releasing the flock before the issue /
-        // sign paths re-open their own CaDir for serial allocation.
-        let cadir = ca_store::CaDir::open(dir).context(
-            "opening the CA to sign offline (a running admin server owns it — stop it first)",
-        )?;
-        // Daily on-box use unlocks with the box's own autorenew credential —
-        // read + unsealed from its keytab, no human secret typed. Fall back
-        // to the recovery password only when the keytab is absent or doesn't
-        // unlock this CA (an offline CA with no autorenew, a different CA dir,
-        // or a dead TPM).
-        let from_keytab = match autorenew_keytab_path().ok().filter(|k| k.exists()) {
-            None => None,
-            Some(keytab) => match read_autorenew_password(&keytab) {
-                Ok(pw) => match cadir.vault.read().unlock(&pw) {
-                    Ok(u) => Some(u),
-                    Err(e) => {
-                        ans.note(&format_compact!(
-                            "the autorenew keytab did not unlock this CA ({e:#}); \
-                             falling back to the recovery password"
-                        ));
-                        None
-                    }
-                },
-                Err(e) => {
-                    ans.note(&format_compact!(
-                        "could not read the autorenew keytab ({e:#}); falling back \
-                         to the recovery password"
-                    ));
-                    None
-                }
-            },
-        };
-        let unlocked = match from_keytab {
-            Some(u) => u,
-            None => {
-                if !ans.interactive() {
-                    bail!(
-                        "the CA at {} is vault-protected and the autorenew keytab did \
-                         not unlock it; it needs the recovery password, but this \
-                         frontend is non-interactive",
-                        dir.display(),
-                    );
-                }
-                let secret = ans.secret(Field::RecoveryPassword, None).await?;
-                let pw = ca_vault::normalize_recovery_password(&secret.0);
-                cadir.vault.read().unlock(&pw).with_context(|| {
-                    format!("unlocking the CA vault at {}", dir.display())
-                })?
-            }
-        };
-        let cert = std::fs::read(dir.join("certificate.pem"))
-            .with_context(|| format!("reading CA cert in {}", dir.display()))?;
-        return Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
-            .with_context(|| format!("loading CA at {}", dir.display()));
-    }
-    // Legacy `private.key` CA.
-    match Ca::open(dir, None) {
-        Ok(ca) => Ok(ca),
-        Err(e) if format!("{e:#}").contains("encrypted") => {
-            if !ans.interactive() {
-                bail!(
-                    "the CA at {} has an encrypted private key and this frontend is \
-                     non-interactive; cannot prompt for the password",
-                    dir.display(),
-                );
-            }
-            let mut secret = ans.secret(Field::KeyPassword, None).await?;
-            let pw = std::mem::take(&mut secret.0);
-            Ca::open(dir, Some(&pw))
-                .with_context(|| format!("opening CA at {}", dir.display()))
-        }
-        Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
-    }
-}
-
-/// [`open_ca`] at the conventional `${basedir}/ca/` location.
-pub async fn open_default_ca(ans: &mut dyn Answerer) -> Result<Ca> {
-    open_ca(ans, &paths::user_ca_dir()?).await
-}
-
-/// The first DNS SAN of a leaf — the identity name the index keys on.
-pub fn first_dns_san(san: &[SanEntry]) -> Option<String> {
-    san.iter().find_map(|s| match s {
-        SanEntry::Dns(d) => Some(d.clone()),
-        _ => None,
-    })
-}
-
-/// Record an offline (pre-daemon) issuance in the CA store, exactly as the
-/// daemon records its own. Offline issuance happens during bootstrap —
-/// before the daemon takes ownership of the CA — so it must seed the
-/// serial from, and commit back into, the same store the daemon reads:
-/// that keeps serials unique across the bootstrap certs and every later
-/// daemon issuance, and makes a bootstrap cert revocable like any other.
-/// `csr_pem` is empty when the key was generated internally (the
-/// revoke-UI glyph is then simply absent).
-pub fn record_offline_issuance(
-    store: &mut ca_store::CAStore,
-    serial: u64,
-    kind: NodeKind,
-    name: &str,
-    csr_pem: &str,
-    cert_pem: &str,
-    validity: Duration,
-) -> Result<()> {
-    let req = ca_store::QueuedReq::new(
-        kind,
-        csr_pem.to_string(),
-        name.to_string(),
-        validity,
-        "(offline issue)".to_string(),
-        None,
-        None,
-    );
-    store.commit_issuance(&req, serial, name, cert_pem, &[])
-}
-
-/// Issue a leaf offline, allocating a fresh serial and recording the
-/// issuance (see [`record_offline_issuance`]). Returns the written files.
-pub fn issue_and_record(
-    ca: &Ca,
-    kind: NodeKind,
-    mut params: IssueParams,
-) -> Result<IssuedFiles> {
-    let ca_dir = ca.directory().to_path_buf();
-    // Take the same exclusive flock the daemon holds: offline issuance is
-    // only legitimate before the daemon owns the CA, and the serial is
-    // allocated from (and committed back to) the store the daemon seeds
-    // its in-memory counter from. Without this lock a `ca issue` run
-    // against a live daemon would mint the serial the daemon allocates
-    // next, producing a duplicate X.509 serial.
-    let cadir = ca_store::CaDir::open(&ca_dir)
-        .context("cannot issue offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
-    params.serial = serial;
-    let name =
-        first_dns_san(&params.san).unwrap_or_else(|| params.subject.common_name.clone());
-    let validity = params.validity;
-    let issued = ca.issue(&params)?;
-    let cert_pem = std::fs::read_to_string(&issued.certificate).with_context(|| {
-        format!("reading issued cert {}", issued.certificate.display())
-    })?;
-    // `ca.issue` already wrote the key + cert to disk. If recording the
-    // issuance fails, roll those back: an un-recorded cert is invisible to
-    // `next_serial`, so leaving it would let its serial be handed out again.
-    if let Err(e) = record_offline_issuance(
-        &mut cadir.store.lock(),
-        serial,
-        kind,
-        &name,
-        "",
-        &cert_pem,
-        validity,
-    ) {
-        let _ = std::fs::remove_file(&issued.certificate);
-        let _ = std::fs::remove_file(&issued.private_key);
-        return Err(e);
-    }
-    Ok(issued)
-}
-
-/// Sign an external CSR offline, allocating a fresh serial and recording
-/// the issuance (see [`record_offline_issuance`]). Returns the leaf PEM.
-pub fn sign_and_record(
-    ca: &Ca,
-    kind: NodeKind,
-    csr_pem: &[u8],
-    san: &[SanEntry],
-    name: &str,
-    validity: Duration,
-) -> Result<Vec<u8>> {
-    let ca_dir = ca.directory().to_path_buf();
-    // See `issue_and_record`: hold the daemon's exclusive flock so offline
-    // signing can't race the daemon's serial counter.
-    let cadir = ca_store::CaDir::open(&ca_dir)
-        .context("cannot sign offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
-    let cert = ca.sign_request(csr_pem, san, validity, serial)?;
-    let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
-    let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
-    record_offline_issuance(
-        &mut cadir.store.lock(),
-        serial,
-        kind,
-        name,
-        csr_str,
-        cert_str,
-        validity,
-    )?;
-    Ok(cert)
 }
 
 /// Issue an identity (CN = SAN-DNS = `name`) from `ca` into `out_dir`.
@@ -870,7 +675,7 @@ pub fn issue_identity_into(
     key_bits: u32,
     password: Option<&str>,
 ) -> Result<IssuedFiles> {
-    issue_and_record(
+    offline_ca::issue_and_record(
         ca,
         NodeKind::Client,
         IssueParams {
@@ -886,32 +691,4 @@ pub fn issue_identity_into(
         },
     )
     .with_context(|| format!("issuing certificate for {name}"))
-}
-
-/// Parse raw `--san` strings into [`SanEntry`]s, defaulting to a single
-/// `dns:<fallback_cn>` when none were supplied.
-pub fn parse_sans(raw: &[String], fallback_cn: &str) -> Result<Vec<SanEntry>> {
-    if raw.is_empty() {
-        return Ok(vec![SanEntry::Dns(fallback_cn.to_string())]);
-    }
-    raw.iter().map(|s| parse_san_one(s)).collect()
-}
-
-/// Parse one `<kind>:<value>` SAN string into a [`SanEntry`].
-pub fn parse_san_one(s: &str) -> Result<SanEntry> {
-    let (kind, val) = s
-        .split_once(':')
-        .ok_or_else(|| anyhow!("SAN must be in the form <kind>:<value>: {s:?}"))?;
-    if val.is_empty() {
-        bail!("SAN value must not be empty: {s:?}");
-    }
-    Ok(match kind {
-        "dns" => SanEntry::Dns(val.to_string()),
-        "ip" => SanEntry::Ip(
-            val.parse::<IpAddr>().map_err(|e| anyhow!("invalid SAN ip {val:?}: {e}"))?,
-        ),
-        "uri" => SanEntry::Uri(val.to_string()),
-        "email" => SanEntry::Email(val.to_string()),
-        other => bail!("unknown SAN kind {other:?}; expected dns / ip / uri / email"),
-    })
 }

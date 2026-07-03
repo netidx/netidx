@@ -313,8 +313,8 @@ pub(crate) struct PolicyFlags {
 }
 
 impl PolicyFlags {
-    fn inputs(&self) -> roster_ops::PolicyInputs<'_> {
-        roster_ops::PolicyInputs {
+    fn inputs(&self) -> ca_setup::PolicyInputs<'_> {
+        ca_setup::PolicyInputs {
             allow_san: &self.allow_san,
             max_validity: self.max_validity,
             id_map_groups: &self.id_map_groups,
@@ -1315,8 +1315,15 @@ fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
         None,
     ))?;
     let (cn, domain) = policy_context(&target, a.auth.ca_dir.as_deref());
-    let policy =
-        rt.block_on(roster_ops::gather_policy(&mut ans, a.policy.inputs(), &cn, domain.as_deref()))?;
+    // Added admins default to may-enroll = no (enroll_default = false); only the
+    // founding superuser defaults to yes.
+    let policy = rt.block_on(ca_setup::gather_policy(
+        &mut ans,
+        a.policy.inputs(),
+        false,
+        &cn,
+        domain.as_deref(),
+    ))?;
     let new_password = read_new_password(&a.new_password_file)?;
     rt.block_on(roster_ops::add_role_admin(&target, &a.name, &new_password, policy))?;
     report_admin_target("added role admin", &a.name, &target);
@@ -1336,8 +1343,13 @@ fn admin_set_policy(a: AdminSetPolicyArgs) -> Result<()> {
         None,
     ))?;
     let (cn, domain) = policy_context(&target, a.auth.ca_dir.as_deref());
-    let policy =
-        rt.block_on(roster_ops::gather_policy(&mut ans, a.policy.inputs(), &cn, domain.as_deref()))?;
+    let policy = rt.block_on(ca_setup::gather_policy(
+        &mut ans,
+        a.policy.inputs(),
+        false,
+        &cn,
+        domain.as_deref(),
+    ))?;
     rt.block_on(roster_ops::set_admin_policy(&target, &a.name, policy))?;
     report_admin_target("updated policy for admin", &a.name, &target);
     Ok(())

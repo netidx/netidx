@@ -5,7 +5,7 @@
 //! over the control socket (SO_PEERCRED superuser, no secret); when it is down
 //! the op takes the CA flock itself and unlocks with the box's autorenew keytab
 //! or, failing that, the operator's recovery password (via the Answerer, always
-//! folded to canonical form by [`offline::unlock_held`] — which is the fix for
+//! folded to canonical form by [`offline_ca::unlock_held`] — which is the fix for
 //! the external path's former raw-password unlock). The only secrets are the
 //! recovery password ([`Field::RecoveryPassword`]) and a freshly minted one to
 //! show ([`ca_setup::show_recovery_password`]); everything else is a note.
@@ -14,7 +14,6 @@
 //! install flow's [`ca_setup`]/[`server_setup`] helpers, so there is one
 //! implementation of the security-critical parts.
 
-use super::offline;
 use crate::{
     admin_local,
     admin_server::read_autorenew_password,
@@ -105,7 +104,7 @@ pub struct AutorenewStatus {
 /// query, safe to run against a live daemon): whether the slot exists, whether
 /// the keytab is present and sealed, and whether the config wires it in.
 pub fn auto_approve_status(ca_dir: &Path, cfg: Option<&Path>) -> Result<AutorenewStatus> {
-    let keytab = ca_setup::autorenew_keytab_path()?;
+    let keytab = offline_ca::autorenew_keytab_path()?;
     let keytab_present = keytab.exists();
     let keytab_sealed = keytab_present
         && std::fs::read(&keytab).ok().map(|b| netidx_tpm::is_sealed(&b)).unwrap_or(false);
@@ -149,7 +148,7 @@ pub async fn recovery_rotate(
     if !CAVault::exists(&ca_dir) {
         bail!("no vault-protected CA at {}", ca_dir.display());
     }
-    let keytab = ca_setup::autorenew_keytab_path()?;
+    let keytab = offline_ca::autorenew_keytab_path()?;
     let autorenew_pw = read_autorenew_password(&keytab).with_context(|| {
         format!(
             "rotating the recovery password needs the autorenew keytab ({}); it \
@@ -207,7 +206,7 @@ pub fn recovery_status(ca_dir: &Path) -> Result<RecoveryStatus> {
             .signing_slot_names()
             .map(|names| names.iter().any(|n| n == ca_vault::RECOVERY_ADMIN))
             .unwrap_or(false);
-    let keytab_present = ca_setup::autorenew_keytab_path().map(|k| k.exists()).unwrap_or(false);
+    let keytab_present = offline_ca::autorenew_keytab_path().map(|k| k.exists()).unwrap_or(false);
     Ok(RecoveryStatus { slot_present, keytab_present })
 }
 
@@ -257,7 +256,7 @@ impl ExternalPending {
 }
 
 /// Unlock the CA key while holding the flock, then hand back both — the fixed
-/// unlock (via [`offline::unlock_held`]) folds a typed recovery password to
+/// unlock (via [`offline_ca::unlock_held`]) folds a typed recovery password to
 /// canonical form, so the grouped displayed form now works (it did not before).
 async fn external_ca_key(
     ans: &mut dyn Answerer,
@@ -265,7 +264,7 @@ async fn external_ca_key(
 ) -> Result<(Zeroizing<Vec<u8>>, CaDir)> {
     let cadir = CaDir::open(dir)
         .context("opening the CA (stop the admin server first if it is running)")?;
-    let unlocked = offline::unlock_held(ans, &cadir, dir).await?;
+    let unlocked = offline_ca::unlock_held(ans, &cadir, dir).await?;
     Ok((unlocked.ca_key_pem, cadir))
 }
 
@@ -361,11 +360,11 @@ pub async fn external_install_cert(
             },
         )
         .await?;
-        let cfg_path = server_setup::set_ca_autorenew(&ca_setup::autorenew_keytab_path()?)?;
+        let cfg_path = server_setup::set_ca_autorenew(&offline_ca::autorenew_keytab_path()?)?;
         return Ok(ExternalInstallOutcome::FirstInstall { need, cfg_path });
     }
     // Already configured: this is a renewal. Keep autorenew wired (idempotent).
-    let keytab = ca_setup::autorenew_keytab_path()?;
+    let keytab = offline_ca::autorenew_keytab_path()?;
     if keytab.exists() {
         let _ = server_setup::set_ca_autorenew(&keytab);
     }

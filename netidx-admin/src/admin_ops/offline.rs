@@ -13,98 +13,11 @@ use crate::{
     admin_proto::{NodeKind, Secret},
     answer::{Answerer, Field},
     atomic,
-    ca::{self, Ca, CsrSummary, IssueParams, SanEntry, Subject},
-    ca_store::CaDir,
-    ca_vault::{CAVault, Unlocked},
-    id_map,
-    offline_ca::{self, KeytabOutcome},
+    ca::{self, CsrSummary, IssueParams, SanEntry, Subject},
+    id_map, offline_ca,
 };
 use anyhow::{Context, Result, anyhow, bail};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
-
-// -- CA open (unlock) --------------------------------------------------------
-
-/// Open the CA at `dir` as a signer, unlocking a keyslot vault when present.
-///
-/// Vaulted (current) CAs: try the box's own autorenew keytab first (no human
-/// secret), and only if that is absent or fails ask for the off-box recovery
-/// password via the Answerer. One [`CaDir`] flock is held across **both**
-/// attempts, so a running admin server can't slip in between them; it drops
-/// before the returned [`Ca`] is used to sign (which re-opens its own `CaDir`
-/// for serial allocation). Legacy `private.key` CAs open directly, prompting
-/// for the key passphrase only if the key turns out to be encrypted.
-///
-/// The strict answerer supplies the recovery password from
-/// `--recovery-password-file` / `--recovery-password-stdin` (or errors naming
-/// them) — which replaces the old "stdin is not a TTY" guard.
-pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
-    if CAVault::exists(dir) {
-        // Scope the flock to the unlock: it drops when `unlocked` is bound,
-        // before `load_ca_from_unlocked` (which only reads the public cert) and
-        // before the caller's sign/issue re-opens its own CaDir.
-        let unlocked = {
-            let cadir = CaDir::open(dir).context(
-                "cannot open the CA offline: a running admin server owns it — stop it first",
-            )?;
-            unlock_held(ans, &cadir, dir).await?
-        };
-        offline_ca::load_ca_from_unlocked(dir, &unlocked)
-    } else {
-        // Legacy single-key CA.
-        match Ca::open(dir, None) {
-            Ok(ca) => Ok(ca),
-            Err(e) if format!("{e:#}").contains("encrypted") => {
-                let pw = ans.secret(Field::RecoveryPassword, None).await?;
-                Ca::open(dir, Some(pw.as_str()))
-                    .with_context(|| format!("opening CA at {}", dir.display()))
-            }
-            Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
-        }
-    }
-}
-
-/// Unlock the vault at `cadir` while the caller holds its flock: try the box's
-/// autorenew keytab first (no human secret), falling back to the operator's
-/// recovery password (via the Answerer) on absence or failure. Shared by
-/// offline sign/issue (which drops the flock before signing) and `ca external`
-/// (which keeps it), so both fold a typed recovery password to canonical form —
-/// the fix for the external path's raw-password unlock.
-pub async fn unlock_held(
-    ans: &mut dyn Answerer,
-    cadir: &CaDir,
-    dir: &Path,
-) -> Result<Unlocked> {
-    let keytab = offline_ca::autorenew_keytab_path()?;
-    match offline_ca::try_unlock_with_keytab(cadir, &keytab) {
-        KeytabOutcome::Unlocked(u) => Ok(u),
-        // No autorenew slot on this box — the normal offline case.
-        KeytabOutcome::Absent => recovery_unlock(ans, cadir, dir).await,
-        // A keytab was there but didn't unlock this CA (different CA dir,
-        // cleared TPM): note it, then fall back to the recovery password.
-        KeytabOutcome::Failed(e) => {
-            ans.note(&format!(
-                "the autorenew keytab did not unlock this CA ({e:#}); falling back \
-                 to the recovery password"
-            ));
-            recovery_unlock(ans, cadir, dir).await
-        }
-    }
-}
-
-/// Prompt for the recovery password (via the Answerer) and unlock `cadir` with
-/// it. The fold-back to canonical form happens in [`offline_ca::unlock_with_recovery`].
-async fn recovery_unlock(
-    ans: &mut dyn Answerer,
-    cadir: &CaDir,
-    dir: &Path,
-) -> Result<Unlocked> {
-    let typed = ans.secret(Field::RecoveryPassword, None).await?;
-    offline_ca::unlock_with_recovery(cadir, typed.as_str())
-        .with_context(|| format!("unlocking the CA vault at {}", dir.display()))
-}
+use std::{path::PathBuf, time::Duration};
 
 // -- ca sign -----------------------------------------------------------------
 
@@ -196,7 +109,7 @@ pub async fn ca_sign(
     let name = offline_ca::first_dns_san(&san)
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
-    let ca = open_ca(ans, &ca_dir).await?;
+    let ca = offline_ca::open_ca(ans, &ca_dir).await?;
     let cert_pem =
         offline_ca::sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, validity)?;
     atomic::write_atomic(&out, &cert_pem, 0o644)
@@ -356,7 +269,7 @@ pub async fn ca_issue(
 ) -> Result<IssueOutcome> {
     offline_ca::ensure_san_not_reserved(&san)?;
     let cn = subject.common_name.clone();
-    let ca = open_ca(ans, &ca_dir).await?;
+    let ca = offline_ca::open_ca(ans, &ca_dir).await?;
     let issued = offline_ca::issue_and_record(
         &ca,
         NodeKind::Client,

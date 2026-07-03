@@ -5,16 +5,20 @@
 //! "Offline" issuance runs while *no* admin server owns the CA: it takes the
 //! same exclusive flock the daemon would, allocates a serial from (and commits
 //! back into) the store the daemon reads, and records the issuance so the cert
-//! is revocable like any other. Everything here is pure of operator I/O — the
-//! CA is already unlocked and the decisions already made; the Answerer-driven
-//! orchestration lives in [`crate::admin_ops::offline`].
+//! is revocable like any other. The SAN/serial/issuance-recording primitives
+//! are pure of operator I/O — the CA is already unlocked and the decisions
+//! already made. The one Answerer-driven piece is [`open_ca`] (and the
+//! [`unlock_held`] it composes the pure unlock primitives with), the single
+//! CA-open entry point shared by the offline sign/issue orchestration
+//! ([`crate::admin_ops::offline`]), the install flow, and `ca external`.
 
 use crate::{
     admin_proto::{NodeKind, SERVING_SAN},
     admin_server::read_autorenew_password,
+    answer::{Answerer, Field},
     ca::{Ca, IssueParams, IssuedFiles, SanEntry},
     ca_store::{CAStore, CaDir, QueuedReq},
-    ca_vault::{self, Unlocked},
+    ca_vault::{self, CAVault, Unlocked},
     paths,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -273,6 +277,95 @@ pub fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
         .with_context(|| format!("reading CA cert in {}", dir.display()))?;
     Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
         .with_context(|| format!("loading CA at {}", dir.display()))
+}
+
+/// Open the CA at `dir` as a signer, unlocking a keyslot vault when present.
+///
+/// Vaulted (current) CAs: try the box's own autorenew keytab first (no human
+/// secret), and only if that is absent or fails ask for the off-box recovery
+/// password via the Answerer. One [`CaDir`] flock is held across **both**
+/// attempts, so a running admin server can't slip in between them; it drops
+/// before the returned [`Ca`] is used to sign (which re-opens its own `CaDir`
+/// for serial allocation). Legacy `private.key` CAs open directly, prompting
+/// for the key passphrase only if the key turns out to be encrypted.
+///
+/// The strict answerer supplies the recovery password from
+/// `--recovery-password-file` / `--recovery-password-stdin` (or errors naming
+/// them) — which replaces the old "stdin is not a TTY" guard; the interactive
+/// frontends prompt. This is the single CA-open entry point — every command
+/// that signs offline (`ca issue` / `ca sign`, the resolver's local-CA
+/// issuance, `ca external`) goes through it, so they all transparently handle
+/// both vault formats.
+pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
+    if CAVault::exists(dir) {
+        // Scope the flock to the unlock: it drops when `unlocked` is bound,
+        // before `load_ca_from_unlocked` (which only reads the public cert) and
+        // before the caller's sign/issue re-opens its own CaDir.
+        let unlocked = {
+            let cadir = CaDir::open(dir).context(
+                "cannot open the CA offline: a running admin server owns it — stop it first",
+            )?;
+            unlock_held(ans, &cadir, dir).await?
+        };
+        load_ca_from_unlocked(dir, &unlocked)
+    } else {
+        // Legacy single-key CA — prompt for the key passphrase only if the
+        // on-disk key turns out to be encrypted.
+        match Ca::open(dir, None) {
+            Ok(ca) => Ok(ca),
+            Err(e) if format!("{e:#}").contains("encrypted") => {
+                let pw = ans.secret(Field::KeyPassword, None).await?;
+                Ca::open(dir, Some(pw.as_str()))
+                    .with_context(|| format!("opening CA at {}", dir.display()))
+            }
+            Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
+        }
+    }
+}
+
+/// [`open_ca`] at the conventional `${basedir}/ca/` location.
+pub async fn open_default_ca(ans: &mut dyn Answerer) -> Result<Ca> {
+    open_ca(ans, &paths::user_ca_dir()?).await
+}
+
+/// Unlock the vault at `cadir` while the caller holds its flock: try the box's
+/// autorenew keytab first (no human secret), falling back to the operator's
+/// recovery password (via the Answerer) on absence or failure. Shared by
+/// [`open_ca`] (which drops the flock before signing) and `ca external` (which
+/// keeps it), so both fold a typed recovery password to canonical form — the
+/// fix for the external path's former raw-password unlock.
+pub async fn unlock_held(
+    ans: &mut dyn Answerer,
+    cadir: &CaDir,
+    dir: &Path,
+) -> Result<Unlocked> {
+    let keytab = autorenew_keytab_path()?;
+    match try_unlock_with_keytab(cadir, &keytab) {
+        KeytabOutcome::Unlocked(u) => Ok(u),
+        // No autorenew slot on this box — the normal offline case.
+        KeytabOutcome::Absent => recovery_unlock(ans, cadir, dir).await,
+        // A keytab was there but didn't unlock this CA (different CA dir,
+        // cleared TPM): note it, then fall back to the recovery password.
+        KeytabOutcome::Failed(e) => {
+            ans.note(&format!(
+                "the autorenew keytab did not unlock this CA ({e:#}); falling back \
+                 to the recovery password"
+            ));
+            recovery_unlock(ans, cadir, dir).await
+        }
+    }
+}
+
+/// Prompt for the recovery password (via the Answerer) and unlock `cadir` with
+/// it. The fold-back to canonical form happens in [`unlock_with_recovery`].
+async fn recovery_unlock(
+    ans: &mut dyn Answerer,
+    cadir: &CaDir,
+    dir: &Path,
+) -> Result<Unlocked> {
+    let typed = ans.secret(Field::RecoveryPassword, None).await?;
+    unlock_with_recovery(cadir, typed.as_str())
+        .with_context(|| format!("unlocking the CA vault at {}", dir.display()))
 }
 
 #[cfg(test)]

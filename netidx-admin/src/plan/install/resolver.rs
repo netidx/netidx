@@ -44,6 +44,7 @@ use crate::{
     answer::{Progress, Stage},
     atomic,
     fingerprint::Fingerprint,
+    offline_ca,
     plan::{
         AdminPlane, admin_plane_decision, ca_setup, delegation, enroll::KeyProtection,
         server_setup,
@@ -730,7 +731,7 @@ async fn resolver_tls_generate(
 
     let ca = if ca_setup::default_ca_present() {
         ans.note(&format_compact!("issuing from the local CA at {}", ca_dir.display()));
-        ca_setup::open_default_ca(ans).await?
+        offline_ca::open_default_ca(ans).await?
     } else {
         // No CA — this is the first resolver of a new TLS network, so the CA
         // is created right here: it signs the data plane *and* anchors the
