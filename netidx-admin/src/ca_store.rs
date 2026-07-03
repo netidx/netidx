@@ -645,7 +645,11 @@ impl CAStore {
         groups: &[String],
     ) -> Result<()> {
         let now = now_unix();
-        let spki_fp = crate::admin_client::csr_fingerprint(&req.csr_pem)
+        // Fingerprint the issued cert's public key, not the CSR's: the two keys
+        // are identical for a CSR-based issuance, but a direct `ca issue` has no
+        // CSR, and an empty-CSR fingerprint would leave those certs glyph-less
+        // (unrevokable by `--assert-glyph`).
+        let spki_fp = crate::admin_client::cert_fingerprint(cert_pem)
             .map(|f| f.text())
             .unwrap_or_default();
         let record = IssuedRecord {

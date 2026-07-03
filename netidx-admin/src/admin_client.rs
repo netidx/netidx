@@ -783,6 +783,25 @@ pub fn csr_fingerprint(csr_pem: &str) -> Result<Fingerprint> {
     Ok(Fingerprint::of_der(&csr_spki(csr_pem)?))
 }
 
+/// The SubjectPublicKeyInfo DER of a certificate's public key. The same key a
+/// CSR carries, so `cert_fingerprint` == `csr_fingerprint` for a cert issued
+/// from that CSR — but a cert always has one, even for a direct issuance
+/// (`ca issue`) that never had a CSR.
+pub(crate) fn cert_spki(cert_pem: &str) -> Result<Vec<u8>> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let der = pem_to_der(cert_pem, "CERTIFICATE")?;
+    let (_, cert) =
+        X509Certificate::from_der(&der).map_err(|e| anyhow!("parsing certificate: {e}"))?;
+    Ok(cert.public_key().raw.to_vec())
+}
+
+/// Fingerprint of a certificate's public key (its SubjectPublicKeyInfo DER) —
+/// the per-key revoke glyph. Equal to [`csr_fingerprint`] of the CSR it was
+/// issued from, and defined even for a CSR-less direct issuance.
+pub fn cert_fingerprint(cert_pem: &str) -> Result<Fingerprint> {
+    Ok(Fingerprint::of_der(&cert_spki(cert_pem)?))
+}
+
 /// Queue a signing request for asynchronous admin approval (no
 /// credentials — the default enrollment path when no admin is present
 /// at this node). Returns the pending enrollment to [`poll`] with; show
