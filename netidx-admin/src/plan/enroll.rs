@@ -405,6 +405,55 @@ fn manual_seeds(answer: Option<String>) -> Result<Option<Vec<SocketAddr>>> {
     }
 }
 
+/// A network found by [`discover_networks`]: its TLS domain, the admin-server
+/// address(es) that advertised it over mDNS, and — when one answered — the CA
+/// identity they present (whose `fingerprint` is the glyph a script passes to
+/// `--accept-glyph`), or the reason none did.
+pub struct DiscoveredNetworkReport {
+    pub domain: String,
+    pub admin_servers: Vec<SocketAddr>,
+    pub identity: Result<CaIdentity, String>,
+}
+
+/// Browse mDNS for netidx admin servers and, for each distinct network, fetch
+/// the CA identity from the first reachable server. A pure read-only QUERY —
+/// no prompts, no decisions — so, unlike the interactive [`discover_network`]
+/// cascade (which the strict CLI disables), it is valid in strict/scripted
+/// mode: a script runs it, reads a network's admin-server address + glyph, and
+/// feeds them to `--admin-server` / `--accept-glyph`.
+pub async fn discover_networks(
+    timeout: Duration,
+    kind: NodeKind,
+) -> Vec<DiscoveredNetworkReport> {
+    // The mDNS browse blocks for `timeout`; keep it off the async worker.
+    let found = tokio::task::spawn_blocking(move || discovery::browse_or_empty(timeout))
+        .await
+        .unwrap_or_default();
+    // Group the (unauthenticated, hint-only) beacons by domain; the identity
+    // fetched next is the authenticated fact.
+    let mut domains: BTreeMap<String, Vec<SocketAddr>> = BTreeMap::new();
+    for d in &found {
+        domains.entry(d.domain.clone()).or_default().extend(d.socket_addrs());
+    }
+    let mut out = Vec::new();
+    for (domain, mut admin_servers) in domains {
+        admin_servers.sort();
+        admin_servers.dedup();
+        let mut identity = Err("no advertised admin server was reachable".to_string());
+        for addr in &admin_servers {
+            match admin_client::fetch_identity(*addr, kind).await {
+                Ok(id) => {
+                    identity = Ok(id);
+                    break;
+                }
+                Err(e) => identity = Err(format_compact!("{addr}: {e:#}").into_string()),
+            }
+        }
+        out.push(DiscoveredNetworkReport { domain, admin_servers, identity });
+    }
+    out
+}
+
 /// Find the network this node should join: browse mDNS, group by domain, let
 /// the operator pick (falling back to a manual admin-server address when
 /// discovery finds nothing), then fetch and glyph-confirm the network's

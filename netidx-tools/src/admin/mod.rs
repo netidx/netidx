@@ -55,6 +55,9 @@ mod answer_cli;
 mod ca;
 mod client;
 mod component;
+// `discover` (browse mDNS for networks + print their glyphs) is a read-only
+// query over the cross-platform discovery + admin-client layers.
+mod discover;
 // `delegation` (resolver hierarchy add-parent / review-delegation) drives
 // the admin server's CA admin auth + the delegation queue, both unix-only.
 #[cfg(unix)]
@@ -117,6 +120,10 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: perms_admin::Cmd,
     },
+    /// discover netidx networks on the local network (mDNS) and print each
+    /// one's admin-server address + CA glyph — a read-only query a script can
+    /// feed to `--admin-server` / `--accept-glyph`.
+    Discover(discover::DiscoverArgs),
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
     /// low-level single-component commands (client / resolver config /
@@ -136,6 +143,7 @@ pub(crate) fn run(p: Params) -> Result<()> {
         Params::Ca { cmd } => ca::run(cmd),
         #[cfg(unix)]
         Params::Perms { cmd } => perms_admin::run(cmd),
+        Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Component { cmd } => component::run(cmd),
     }

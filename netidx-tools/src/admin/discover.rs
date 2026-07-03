@@ -1,0 +1,118 @@
+//! `netidx admin discover` — browse mDNS for netidx networks and print each
+//! one's admin-server address(es) + CA glyph. A pure read-only query: unlike
+//! the interactive install discovery (which strict mode disables), this is
+//! valid in strict/scripted mode, so a script can discover a network and feed
+//! the address + glyph to `--admin-server` / `--accept-glyph`.
+
+use anyhow::{Context, Result};
+use clap::Args;
+use netidx_admin::{
+    admin_proto::{NodeKind, Role},
+    fingerprint::ColorMode,
+    plan::enroll::{self, DiscoveredNetworkReport},
+};
+use std::time::Duration;
+
+#[derive(Args, Debug)]
+pub(crate) struct DiscoverArgs {
+    /// How long to browse mDNS, in seconds.
+    #[arg(long, default_value = "3")]
+    timeout: u64,
+    /// Emit a JSON array (domain, admin_servers, roles, glyph) for scripting,
+    /// instead of the human-readable report.
+    #[arg(long)]
+    json: bool,
+    /// Also print each reachable network's identicon (human output only).
+    #[arg(long)]
+    identicon: bool,
+}
+
+pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
+    let networks = rt.block_on(enroll::discover_networks(
+        Duration::from_secs(a.timeout),
+        NodeKind::Client,
+    ));
+    if a.json {
+        print_json(&networks);
+    } else {
+        print_human(&networks, a.identicon);
+    }
+    Ok(())
+}
+
+fn role_str(r: &Role) -> &'static str {
+    match r {
+        Role::Ca => "ca",
+        Role::Resolver => "resolver",
+        Role::IdMap => "id-map",
+    }
+}
+
+fn print_human(networks: &[DiscoveredNetworkReport], identicon: bool) {
+    if networks.is_empty() {
+        println!("no netidx networks discovered on the local network.");
+        return;
+    }
+    for n in networks {
+        println!("network {:?}", n.domain);
+        let addrs = n
+            .admin_servers
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  admin server(s): {addrs}");
+        match &n.identity {
+            Ok(id) => {
+                let roles = if id.roles.is_empty() {
+                    "none".to_string()
+                } else {
+                    id.roles.iter().map(role_str).collect::<Vec<_>>().join(", ")
+                };
+                println!("  roles:           {roles}");
+                println!("  glyph:           {}", id.fingerprint.text());
+                if identicon {
+                    println!("{}", id.fingerprint.identicon(ColorMode::detect()));
+                }
+            }
+            Err(e) => println!("  (could not fetch identity: {e})"),
+        }
+    }
+}
+
+fn print_json(networks: &[DiscoveredNetworkReport]) {
+    use serde_json::{Map, Value};
+    let arr = networks
+        .iter()
+        .map(|n| {
+            let mut obj = Map::new();
+            obj.insert("domain".into(), Value::from(n.domain.clone()));
+            obj.insert(
+                "admin_servers".into(),
+                Value::from(
+                    n.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                ),
+            );
+            match &n.identity {
+                Ok(id) => {
+                    obj.insert("reachable".into(), Value::from(true));
+                    obj.insert(
+                        "roles".into(),
+                        Value::from(id.roles.iter().map(role_str).collect::<Vec<_>>()),
+                    );
+                    obj.insert("glyph".into(), Value::from(id.fingerprint.text()));
+                }
+                Err(e) => {
+                    obj.insert("reachable".into(), Value::from(false));
+                    obj.insert("error".into(), Value::from(e.clone()));
+                }
+            }
+            Value::Object(obj)
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".into())
+    );
+}
