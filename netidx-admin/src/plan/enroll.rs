@@ -677,7 +677,14 @@ pub async fn maybe_join_ca_server(
 /// [`PollOutcome::Pending`] — it loops on it. Shared by every queued-approval
 /// flow (cert join, admin-server enroll) so they don't each re-implement the
 /// wait.
+///
+/// A comms error between polls is treated as transient and retried (the admin
+/// server may restart or blip while we wait for a human to approve; the queued
+/// request is durable server-side). Only a settled protocol outcome ends the
+/// wait — giving up on the first connection error would abandon an
+/// already-approved request on a single blip.
 pub async fn await_issuance(
+    ans: &mut dyn Answerer,
     addr: SocketAddr,
     kind: NodeKind,
     pending: &admin_client::PendingEnrollment,
@@ -685,9 +692,18 @@ pub async fn await_issuance(
 ) -> Result<PollOutcome> {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        match admin_client::poll(addr, kind, pending, identity).await? {
-            PollOutcome::Pending => continue,
-            settled => return Ok(settled),
+        match admin_client::poll(addr, kind, pending, identity).await {
+            Ok(PollOutcome::Pending) => continue,
+            Ok(settled) => return Ok(settled),
+            Err(e) => {
+                ans.progress(Progress::new(
+                    Stage::WaitingApproval,
+                    format_compact!(
+                        "admin server unreachable ({e:#}); still waiting for approval…"
+                    ),
+                ));
+                continue;
+            }
         }
     }
 }
@@ -763,7 +779,7 @@ pub async fn join_network(
             Stage::WaitingApproval,
             "waiting for a CA admin to approve this request…",
         ));
-        match await_issuance(addr, kind, &pending, identity).await? {
+        match await_issuance(ans, addr, kind, &pending, identity).await? {
             PollOutcome::Issued(issued) => issued,
             PollOutcome::Denied(reason) => {
                 bail!("the CA admin denied this request: {reason}")

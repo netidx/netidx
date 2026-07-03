@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
+use compact_str::format_compact;
 use std::{net::SocketAddr, time::Duration};
 
 /// How often a waiting child checks on its queued delegation request.
@@ -75,16 +76,32 @@ pub async fn delegate_under_parent(
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         match admin_client::poll_delegation(parent_conf_addr, &request_id, &identity)
-            .await?
+            .await
         {
-            DelegationPollResponse::Pending => continue,
-            DelegationPollResponse::Approved { parent } => break Ok(parent),
-            DelegationPollResponse::Denied { reason } => {
+            Ok(DelegationPollResponse::Pending) => continue,
+            Ok(DelegationPollResponse::Approved { parent }) => break Ok(parent),
+            Ok(DelegationPollResponse::Denied { reason }) => {
                 bail!("the parent admin denied the delegation: {reason}")
             }
-            DelegationPollResponse::Unknown => bail!(
+            Ok(DelegationPollResponse::Unknown) => bail!(
                 "the delegation request expired before approval; re-run to try again"
             ),
+            // A comms failure here is transient: the parent admin server can be
+            // restarting or briefly unreachable during the (human-paced) wait
+            // for approval. The request is durable server-side, so keep polling
+            // — only a definitive protocol response (Approved / Denied /
+            // expired) ends the wait. Giving up on the first error would derail
+            // an already-approved delegation on a single connection blip, with
+            // no config written and no clear way to recover but a manual re-run.
+            Err(e) => {
+                ans.progress(Progress::new(
+                    Stage::WaitingApproval,
+                    format_compact!(
+                        "parent admin server unreachable ({e:#}); still waiting…"
+                    ),
+                ));
+                continue;
+            }
         }
     }
 }

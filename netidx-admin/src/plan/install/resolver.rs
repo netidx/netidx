@@ -1112,6 +1112,7 @@ async fn enroll_admin_server(
             "waiting for a CA admin to approve this admin-server enrollment…",
         ));
         match enroll::await_issuance(
+            ans,
             ca_addr,
             NodeKind::AdminServer,
             &pending,
