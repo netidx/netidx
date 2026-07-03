@@ -17,49 +17,11 @@ use std::{io::IsTerminal, path::PathBuf};
 use std::process::Command;
 
 /// The service-setup decision types live in the library so every frontend
-/// shares them; this module keeps the clap surface, the privileged doing
-/// ([`install_with_defaults`] + escalation), and — until the `ca` commands
-/// relocate (task 12) — a prompt-based [`offer`] for the still-interactive
-/// non-install callers (`ca init`). The install cascades use the library's
-/// async `offer` via `plan::install::finish_with` instead.
-pub(crate) use netidx_admin::plan::service::{ServiceGate, ServiceNeed};
-
-/// Offer OS-service setup interactively (prompt-based) for the callers that
-/// haven't yet moved onto the `Answerer` seam. A merged [`ServiceNeed`] +
-/// its flag gates in; `--with-service` installs without asking, `--no-service`
-/// / `--dry-run` skip, otherwise a TTY confirm (default yes).
-pub(super) fn offer(need: ServiceNeed, gate: ServiceGate) -> Result<()> {
-    let Some(scope) = need.scope() else { return Ok(()) };
-    let label = match scope {
-        ServiceScope::User => "user-scope (no sudo)",
-        ServiceScope::System => "system-scope (sudo required)",
-    };
-    if gate.dry_run {
-        println!("[dry-run] would offer to install netidx as a {label} OS service");
-        return Ok(());
-    }
-    if gate.no_service {
-        return Ok(());
-    }
-    let install_now = if gate.with_service {
-        true
-    } else if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-        super::prompt::confirm(
-            &format!("install netidx as an OS service now ({label})?"),
-            true,
-        )?
-    } else {
-        eprintln!(
-            "note: pass --with-service to register netidx as an OS service \
-             (run `netidx admin component service install` later if you prefer)"
-        );
-        false
-    };
-    if install_now {
-        install_with_defaults(scope.into())?;
-    }
-    Ok(())
-}
+/// shares them; this module keeps the clap surface and the privileged doing
+/// ([`install_with_defaults`] + escalation). The offer *decision* is the
+/// library's async `netidx_admin::plan::service::offer`, driven through the
+/// `Answerer` seam by each flow (installs, `ca init`, `ca external install`).
+pub(crate) use netidx_admin::plan::service::ServiceNeed;
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.

@@ -69,7 +69,6 @@ mod perms;
 // pulls openssl), same as `delegation`.
 #[cfg(unix)]
 mod perms_admin;
-mod prompt;
 mod renew;
 mod resolver;
 mod roles;

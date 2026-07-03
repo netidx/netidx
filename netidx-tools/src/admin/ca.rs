@@ -7,15 +7,18 @@ use netidx_admin::{
         slots as slots_ops,
     },
     admin_proto::{self, NodeKind},
+    answer::{Answerer, Field},
     atomic,
     ca::{self, Ca, CaParams, SanEntry, Subject},
     ca_vault,
     fingerprint::{ColorMode, Fingerprint},
     offline_ca::{default_csr_filename, parse_san_one, parse_sans},
-    paths, tls,
+    paths,
+    plan::{self, ca_setup},
+    tls,
 };
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -23,7 +26,7 @@ use zeroize::Zeroizing;
 
 use super::{
     answer_cli::{RemoteAuthFlags, make_offline_answerer},
-    init, prompt, service,
+    init, service,
 };
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -113,6 +116,14 @@ pub(crate) struct ExternalInstallArgs {
     /// Override the CA directory (defaults to `${basedir}/ca/`).
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
+    /// When this install stands up the admin server (the first install of a
+    /// served external CA), also register netidx as an OS service without
+    /// asking. Mutually exclusive with `--no-service`.
+    #[arg(long = "with-service", conflicts_with = "no_service")]
+    pub with_service: bool,
+    /// Skip the OS-service offer after standing up the admin server.
+    #[arg(long = "no-service")]
+    pub no_service: bool,
     #[command(flatten)]
     pub recovery: RecoveryAuth,
 }
@@ -392,24 +403,34 @@ pub(crate) struct FingerprintArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct JoinArgs {
-    /// Admin server address (`ip:port`). When omitted, discovered over
-    /// mDNS (with a manual-address fallback prompt).
+    /// Admin server address (`ip:port`). Required — network discovery is
+    /// interactive only.
     #[arg(long)]
     pub server: Option<SocketAddr>,
-    /// The TLS identity name to request (one DNS SAN). Prompted when omitted.
+    /// The TLS identity name to request (one DNS SAN).
     #[arg(long)]
     pub name: Option<String>,
-    /// The admin name to authenticate as. Prompted when omitted.
+    /// The admin name to authenticate as.
     #[arg(long)]
     pub admin: Option<String>,
     /// Validity to request (e.g. 730d, 10m). Default 730d (capped by server policy).
     #[arg(long, value_parser = humantime::parse_duration, default_value = "730d")]
     pub validity: Duration,
     /// id-map groups to register the identity with (repeatable; first
-    /// is primary). Prompted when omitted; an explicit empty string
-    /// skips registration.
+    /// is primary); an explicit empty string skips registration. Defaults
+    /// to the per-kind default.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
+    /// The admin server's CA fingerprint, obtained out of band (view it with
+    /// `netidx admin ca fingerprint <ip:port>`); confirms the network identity.
+    #[arg(long = "accept-glyph")]
+    pub accept_glyph: Option<String>,
+    /// Read the admin password from a file (never on the command line).
+    #[arg(long = "password-file")]
+    pub password_file: Option<PathBuf>,
+    /// Read the admin password from stdin.
+    #[arg(long = "password-stdin", conflicts_with = "password_file")]
+    pub password_stdin: bool,
 }
 
 #[derive(Args, Debug)]
@@ -500,6 +521,14 @@ pub(crate) struct InitParams {
     /// Skip the OS-service prompt after setting up the CA server.
     #[arg(long = "no-service")]
     pub no_service: bool,
+    /// Read the founding superuser's password from a file (never on the
+    /// command line). Required when the CA server is set up (`--with-server`),
+    /// which mints the superuser role admin.
+    #[arg(long = "password-file")]
+    pub password_file: Option<PathBuf>,
+    /// Read the founding superuser's password from stdin instead of a file.
+    #[arg(long = "password-stdin", conflicts_with = "password_file")]
+    pub password_stdin: bool,
     /// Override the directory the CA is created in. Defaults to
     /// `${basedir}/ca/` — one CA per netidx install.
     #[arg(long)]
@@ -675,118 +704,13 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 /// `--rotate` is the one-command kill-and-replace.
 pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::admin_server::AUTORENEW_ADMIN;
 
-fn autorenew_policy() -> ca_vault::Policy {
-    netidx_admin::ca_policy::autorenew_policy()
-}
-
-/// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA
-/// dir: never back this file up; recreating it is one `--rotate`. The
-/// canonical definition lives in the library (offline sign/issue reads it
-/// too); this delegates so the two never drift.
-fn autorenew_keytab_path() -> Result<PathBuf> {
-    netidx_admin::offline_ca::autorenew_keytab_path()
-}
-
-/// A long random password for the autorenew slot (256 bits, hex). The
-/// autorenew slot is a master-key-wrapping signing credential, so keep its
-/// plaintext in a `Zeroizing` buffer that wipes on drop (it is dropped right
-/// after sealing / writing the keytab).
-fn random_password() -> Zeroizing<String> {
-    netidx_admin::ca_vault::random_signing_password()
-}
-
-/// Create (or replace) the autorenew slot + keytab. `recovery_password`
-/// authorizes the re-mint: the old autorenew slot is removed first, so the
-/// authorizing credential must be a *different* signing slot — in the
-/// server-only model that is the `recovery` password (which is also why
-/// rotating autorenew, e.g. after a TPM clear, needs the recovery
-/// password). Returns the keytab path.
-///
-/// The keytab is TPM-sealed when the host has a usable TPM 2.0: at
-/// rest the slot password is a CA-key-decryption credential (any signing
-/// slot password unlocks the vault's master key), so a plaintext keytab
-/// makes every disk image and backup of this host a CA compromise.
-/// Sealed, the file is inert anywhere but this machine. A host with no
-/// TPM (or a flaky one — setup must not dead-end) falls back to the
-/// plaintext keytab with a note saying what that costs.
-pub(super) fn setup_autorenew_slot(
-    cadir: &netidx_admin::ca_store::CaDir,
-    recovery_password: &str,
-    insecure_no_tpm: bool,
-) -> Result<PathBuf> {
-    // Replace-not-fail: rotation and re-runs both land here.
-    let exists = cadir
-        .vault
-        .read()
-        .list_admins()?
-        .iter()
-        .any(|info| info.admin == AUTORENEW_ADMIN);
-    if exists {
-        cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false)?;
-    }
-    let password = random_password();
-    cadir.vault.write().add_signing_slot(
-        recovery_password,
-        AUTORENEW_ADMIN,
-        &password,
-        autorenew_policy(),
-    )?;
-    let keytab = autorenew_keytab_path()?;
-    // `available()` (which the caller's TPM gate checked) only proves the
-    // device opened, NOT that a seal will succeed — a present-but-locked or
-    // busy TPM fails here. The seal decision is the real one: a plaintext
-    // keytab is a master-key-equivalent credential, so falling back to it
-    // silently would defeat the whole gate. Only `--insecure-no-tpm` accepts
-    // that, and then loudly; otherwise we refuse and roll the slot back.
-    match netidx_tpm::seal(password.as_bytes()) {
-        Ok(blob) => {
-            atomic::write_atomic(&keytab, &blob, 0o600)?;
-            println!(
-                "  the keytab is sealed to this machine's {} — copied \
-                 anywhere else (disk image, backup) it is useless",
-                netidx_tpm::MECHANISM
-            );
-        }
-        Err(e) if insecure_no_tpm => {
-            atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
-            eprintln!("================================================================");
-            eprintln!(
-                "WARNING: the autorenew keytab is PLAINTEXT ({} sealing failed: {e:#}).",
-                netidx_tpm::MECHANISM
-            );
-            eprintln!(
-                "Any backup or disk image of this machine now contains a credential"
-            );
-            eprintln!(
-                "that unlocks the CA key. You accepted this with --insecure-no-tpm."
-            );
-            eprintln!("================================================================");
-        }
-        Err(e) => {
-            // Refuse: undo the slot we just minted so the vault is unchanged,
-            // and don't write the plaintext keytab. The operator can fix the
-            // TPM and re-run, or opt in with --insecure-no-tpm.
-            let _ = cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false);
-            bail!(
-                "the autorenew credential could not be sealed to this host's {mech} \
-                 ({e:#}). Writing it in plaintext would be equivalent to backing up the \
-                 CA key, so this is refused. Fix the {mech} (e.g. clear an owner-auth or \
-                 dictionary-attack lockout) and re-run `netidx admin ca auto-approve`, or \
-                 pass --insecure-no-tpm to accept a plaintext keytab (test CAs only).",
-                mech = netidx_tpm::MECHANISM
-            );
-        }
-    }
-    Ok(keytab)
-}
-
 /// Set up (or rotate) the autorenew slot and point this host's
 /// admin-server config at its keytab. Approval itself is the running
 /// daemon's job now — it reads the keytab named here and approves
 /// verified renewals in-process — so this command just manages the
 /// credential. `--rotate` is the same operation framed as a leaked-keytab
-/// response: [`setup_autorenew_slot`] always replaces the slot, so enable
-/// and rotate share one path and differ only in what they print.
+/// response: the library's `setup_autorenew_slot` always replaces the slot, so
+/// enable and rotate share one path and differ only in what they print.
 fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     env_logger::init();
     let dir = ca_dir_for(None)?;
@@ -943,332 +867,6 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Inputs to [`create_vaulted_ca`], the single new-CA entry point.
-/// Fields are primitive so callers (the `ca init` command *and* the
-/// resolver install) don't need the engine's `Subject` / `SanEntry`
-/// types — `create_vaulted_ca` builds those internally.
-pub(super) struct NewCaOpts {
-    pub dir: PathBuf,
-    /// CA cert CN. `None` ⇒ prompt, defaulting to `ca.<domain>` when
-    /// `domain` is set (see [`default_ca_cn`]).
-    pub common_name: Option<String>,
-    /// The TLS domain this CA serves (e.g. `ryu-oh.org`), when known —
-    /// threaded from the resolver install, which already asks for it.
-    /// Seeds the CN default (`ca.<domain>`) and the admin policy
-    /// suggestion (`*.<domain>`). `None` for a bare `ca init` with no
-    /// `--domain`.
-    pub domain: Option<String>,
-    pub country: Option<String>,
-    pub state: Option<String>,
-    pub locality: Option<String>,
-    pub organization: Option<String>,
-    /// Raw `--san` strings for the CA cert; empty ⇒ `dns:<cn>`.
-    pub san: Vec<String>,
-    pub key_bits: u32,
-    /// Validity stamped on the CA cert itself.
-    pub ca_validity: Duration,
-    /// Default validity for leaves the CA issues (e.g. the serving cert).
-    pub leaf_validity: Duration,
-    /// Renew the CA cert once its remaining lifetime drops below this.
-    pub ca_renew_threshold: Duration,
-    /// Superuser (role) admin name; `None` ⇒ prompt, defaulting to the
-    /// current unix user. Created only when the admin server is set up
-    /// (a role admin authenticates to the daemon; an offline CA has none).
-    pub admin: Option<String>,
-    /// Superuser's server-signing scope globs; empty ⇒ prompt (default
-    /// `*.<domain>` when `domain` is set, else derived from the CN).
-    pub allowed_san: Vec<String>,
-    pub max_validity: Duration,
-    /// Superuser's id-map groups; empty ⇒ prompt (default `users`).
-    pub id_map_groups: Vec<String>,
-    /// Whether the superuser may enroll admin servers; `None` ⇒
-    /// prompt, defaulting to yes (someone has to be able to grow the
-    /// network).
-    pub may_enroll_servers: Option<bool>,
-    /// Proceed without a TPM / Secure Enclave (autorenew keytab written
-    /// in plaintext). A loud warning is printed; test CAs only.
-    pub insecure_no_tpm: bool,
-    /// `None` ⇒ prompt "set up the admin server?"; `Some(b)` ⇒ forced.
-    pub setup_server: Option<bool>,
-    /// Explicit `--listen` for the CA server (skips the prompt).
-    pub listen: Option<SocketAddr>,
-    /// IP to suggest for the CA server's listen address when prompting
-    /// (e.g. the resolver being created in the same flow). `None` ⇒
-    /// fall back to an existing resolver's IP, then the public IP.
-    pub listen_hint: Option<IpAddr>,
-    /// Where to drop the `ca` activation unit (already resolved).
-    /// `None` ⇒ don't write a unit (e.g. `--no-units`); the server is
-    /// still configured for manual `ca serve`.
-    pub units_dir: Option<PathBuf>,
-}
-
-/// Seal a freshly generated CA key into the vault's `recovery` slot and
-/// persist the lifetime policy, under one flock held for the rest of init.
-/// Shared by the self-signed [`create_vaulted_ca`] and the external-sign
-/// bootstrap. On a mid-write failure, roll back whatever init committed so
-/// the dir isn't a keyless half-CA that blocks a clean retry.
-fn seal_ca_recovery(
-    dir: &Path,
-    key_pem: &Zeroizing<Vec<u8>>,
-    lifetimes: ca::CaLifetimes,
-) -> Result<(Zeroizing<String>, netidx_admin::ca_store::CaDir)> {
-    let recovery_pw = ca_vault::gen_recovery_password();
-    let cadir = netidx_admin::ca_store::CaDir::open(dir)
-        .context("opening the new CA directory")?;
-    if let Err(e) = cadir.vault.write().create(
-        key_pem,
-        ca_vault::RECOVERY_ADMIN,
-        &recovery_pw,
-        recovery_policy(),
-    ) {
-        let _ = std::fs::remove_file(dir.join("certificate.pem"));
-        let _ = std::fs::remove_file(dir.join("serial"));
-        return Err(e).context("sealing CA key into the vault");
-    }
-    lifetimes.store(dir).context("writing CA lifetimes")?;
-    Ok((recovery_pw, cadir))
-}
-
-/// **The** entry point for building a new vaulted CA, shared verbatim
-/// by `netidx admin ca init` and the `netidx admin resolver install`
-/// "create a new CA" branch — so the operator gets the identical
-/// experience (admin/policy, identicon, the "set up the CA server?"
-/// question) either way.
-///
-/// Returns the in-memory signing [`Ca`] (use it to issue certs before
-/// it drops — e.g. the resolver issues its own identity from it) and
-/// the [`ServiceNeed`](service::ServiceNeed) the caller folds into its
-/// single service offer. This function never offers the service itself;
-/// that's the caller's end-of-process step, so a resolver install can
-/// merge this need with its own and offer once.
-pub(super) fn create_vaulted_ca(opts: NewCaOpts) -> Result<(Ca, service::ServiceNeed)> {
-    // CN first (matching the prompt order `ca init` had before this was
-    // centralized here): an explicit `--cn` / threaded value wins,
-    // otherwise prompt with the `ca.<domain>` default when we know the
-    // domain.
-    let common_name = resolve_ca_cn(opts.common_name.clone(), opts.domain.as_deref())?;
-    // The admin-server config wants a concrete domain (it's what the
-    // network is grouped by in discovery). Prefer the threaded one;
-    // fall back to the CN's domain part, which `resolve_ca_cn` makes
-    // likely (`ca.<domain>`).
-    let domain = match &opts.domain {
-        Some(d) if !d.is_empty() => d.clone(),
-        _ => match common_name.split_once('.') {
-            Some((_, d)) if !d.is_empty() => d.to_string(),
-            _ => common_name.clone(),
-        },
-    };
-    // Refuse to build a CA on a host that can't seal the box credential
-    // (or loudly warn under --insecure-no-tpm) BEFORE anything touches
-    // disk, so a refused init leaves the dir clean and retryable.
-    tpm_gate(opts.insecure_no_tpm)?;
-    let san = parse_sans(&opts.san, &common_name)?;
-
-    // Generate the CA (its key is returned, never written to disk in
-    // plaintext) and seal it into the vault under the `recovery` slot —
-    // the off-box break-glass credential whose generated password is shown
-    // once and never stored.
-    let (ca, key_pem) = Ca::init_vaulted(&CaParams {
-        directory: opts.dir.clone(),
-        subject: Subject {
-            common_name: common_name.clone(),
-            country: opts.country.clone(),
-            state: opts.state.clone(),
-            locality: opts.locality.clone(),
-            organization: opts.organization.clone(),
-        },
-        san,
-        key_bits: opts.key_bits,
-        validity: opts.ca_validity,
-    })?;
-    // Seal the key into the recovery slot and persist the lifetime policy
-    // (self-signed CA — externally_signed is false). One flock is held for
-    // the rest of init.
-    let (recovery_pw, cadir) = seal_ca_recovery(
-        &opts.dir,
-        &key_pem,
-        ca::CaLifetimes {
-            leaf_validity: opts.leaf_validity,
-            ca_renew_threshold: opts.ca_renew_threshold,
-            externally_signed: false,
-        },
-    )?;
-
-    println!("created a new CA at {}", opts.dir.display());
-    print_recovery_password(&recovery_pw);
-    show_ca_identity(&opts.dir)?;
-    println!();
-    println!(
-        "Share the fingerprint/identicon above with anyone joining, so they can\n\
-         verify they're talking to the real CA before sending a password."
-    );
-
-    let set_up_server = match opts.setup_server {
-        Some(b) => b,
-        None => prompt::confirm(
-            "set up the admin server (so nodes can discover the network and \
-             request certs over it)?",
-            true,
-        )?,
-    };
-    let need = if set_up_server {
-        // setup_server signs the serving cert through the offline issuance
-        // path, which takes the CA flock itself — so release ours first,
-        // then reacquire for the remaining slot setup. During init no daemon
-        // competes for the brand-new dir, so the brief unlock is safe; this
-        // is the same drop-and-reopen the offline `ca issue`/`sign` paths use.
-        drop(cadir);
-        let need = super::server::setup_server(super::server::SetupArgs {
-            ca_dir: &opts.dir,
-            ca: &ca,
-            domain: &domain,
-            listen: opts.listen,
-            listen_hint: opts.listen_hint,
-            units_dir: opts.units_dir.as_deref(),
-        })?;
-        let cadir = netidx_admin::ca_store::CaDir::open(&opts.dir)
-            .context("reopening the CA directory after serving-cert setup")?;
-        // The box's `autorenew` credential — the only signing key the
-        // daemon ever holds, and what it signs on a role admin's behalf
-        // with. Mandatory for a server CA. Authorized by the recovery
-        // password we just minted; sealed to the TPM (or plaintext under
-        // --insecure-no-tpm, which the gate above already warned about).
-        let keytab = setup_autorenew_slot(&cadir, &recovery_pw, opts.insecure_no_tpm)?;
-        let cfg_path = super::server::set_ca_autorenew(&keytab)?;
-        println!("automatic renewal approval enabled:");
-        println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
-        println!("  keytab: {} (0600 — do NOT back this file up;", keytab.display());
-        println!(
-            "          rotate anytime with `netidx admin ca auto-approve --rotate`)"
-        );
-        println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
-        // The founding SUPERUSER role admin: it directs the server (mint
-        // admins, edit perms, enroll servers) but wraps no MK, so its
-        // password can NEVER unlock the CA key — only the server signs.
-        setup_superuser(&cadir, &opts, &common_name)?;
-        need
-    } else {
-        // An offline CA has no daemon to sign on anyone's behalf, so it
-        // grows no autorenew slot and no role admins: the recovery password
-        // is the operator's credential for local `ca issue` / `ca sign`.
-        service::ServiceNeed::NONE
-    };
-    Ok((ca, need))
-}
-
-/// The `recovery` signing slot's policy: the same narrow, no-standing-wire-
-/// authority shape as the autorenew slot. Its power is being a *signing*
-/// slot (it unlocks the key for on-box `ca issue` / break-glass), not any
-/// issuance policy — that authority lives in role admins. Empty here keeps a
-/// leaked-then-typed recovery password from issuing arbitrary certs over the
-/// wire (it can still revoke, which every signing slot can).
-fn recovery_policy() -> ca_vault::Policy {
-    netidx_admin::ca_policy::recovery_policy()
-}
-
-/// Refuse to build a CA on a host with no usable TPM / Secure Enclave —
-/// before any disk write — unless the operator explicitly accepts the cost
-/// with `--insecure-no-tpm`, in which case warn loudly. The autorenew
-/// credential is sealed to the box's TPM precisely so a stolen backup is
-/// inert; without sealing it sits in plaintext in every backup.
-fn tpm_gate(insecure_no_tpm: bool) -> Result<()> {
-    if netidx_tpm::available() {
-        return Ok(());
-    }
-    let mech = netidx_tpm::MECHANISM;
-    if !insecure_no_tpm {
-        bail!(
-            "this host has no usable {mech}. A CA's autorenew credential is sealed \
-             to the {mech} so a stolen backup or disk image of this machine is inert \
-             on its own. Without it, that credential sits in PLAINTEXT in every \
-             backup — equivalent to backing up the CA key.\n\n\
-             Run the CA on hardware with a TPM 2.0 / Secure Enclave, or pass \
-             --insecure-no-tpm to override (test CAs only)."
-        );
-    }
-    eprintln!("================================================================");
-    eprintln!("WARNING: --insecure-no-tpm — no {mech} sealing on this host.");
-    eprintln!("The autorenew keytab will be written in PLAINTEXT, so any backup");
-    eprintln!("or disk image of this machine then contains a credential that");
-    eprintln!("unlocks the CA key. Use this for TEST CAs only.");
-    eprintln!("================================================================");
-    Ok(())
-}
-
-/// Print the recovery password exactly once, boxed, with the store-it-in-a-
-/// safe warning. It is never persisted (only the sealed autorenew keytab
-/// carries a separate box credential), so this is the only time it is shown.
-fn print_recovery_password(pw: &str) {
-    let grouped = ca_vault::group_recovery_password(pw);
-    let shown = grouped.as_str();
-    let bar = "─".repeat(shown.chars().count() + 2);
-    println!();
-    println!("┌{bar}┐");
-    println!("│ {shown} │");
-    println!("└{bar}┘");
-    println!("This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.");
-    println!("It is shown ONCE and never stored. It is the only OFF-box credential");
-    println!("that can unlock the CA key — to mint a new admin or rotate the box's");
-    println!("own credential. If you lose it AND this machine, the CA is unrecoverable;");
-    println!("while the machine lives you can mint a fresh one with");
-    println!("`netidx admin ca recovery rotate`.");
-    println!();
-}
-
-/// Create the founding superuser ROLE admin (operator names it + sets its
-/// password). Full authority — broad issuance scope, may enroll servers,
-/// edits perms anywhere, and manages other admins — yet it wraps no master
-/// key, so its password can never unlock the CA. Only minted for a server
-/// CA (a role admin authenticates to the daemon).
-fn setup_superuser(
-    cadir: &netidx_admin::ca_store::CaDir,
-    opts: &NewCaOpts,
-    cn: &str,
-) -> Result<()> {
-    let name = match env_user_name() {
-        Some(user) => prompt::string_with_default(
-            "superuser admin name",
-            opts.admin.clone(),
-            &user,
-        )?,
-        None => prompt::required_string("superuser admin name", opts.admin.clone())?,
-    };
-    if name.trim().is_empty() {
-        bail!("superuser name must not be empty");
-    }
-    if ca_vault::is_reserved_admin(&name) {
-        bail!(
-            "{name:?} is a reserved signing-slot name; choose another for the superuser"
-        );
-    }
-    let mut policy = prompt_policy(
-        &PolicyArgs {
-            allow_san: &opts.allowed_san,
-            max_validity: opts.max_validity,
-            id_map_groups: &opts.id_map_groups,
-            may_enroll_servers: opts.may_enroll_servers,
-            perms_scope: &[],
-            service_scope: &[],
-        },
-        // The superuser founds the network, so it defaults to may-enroll.
-        true,
-        cn,
-        opts.domain.as_deref(),
-    )?;
-    // What makes it the superuser: authority over the whole tree (perms +
-    // service control) and the right to mint/scope other admins. (Issuance
-    // scope + enroll came from the prompt above.)
-    policy.perms_edit_scopes = vec!["/".to_string()];
-    policy.service_control_scopes = vec!["/".to_string()];
-    policy.may_manage_admins = true;
-    let pw = collect_required_password(&format!("password for superuser {name:?}"))?;
-    cadir.vault.write().add_role_slot(&name, &pw, policy)?;
-    println!();
-    println!("superuser role admin {name:?} created — it manages admins, edits perms,");
-    println!("and enrolls servers, but never unlocks the CA key (the server signs).");
-    Ok(())
-}
-
 /// `admin ca recovery {rotate,status}`: mint a fresh recovery password on the
 /// CA box (authorized by the box's own autorenew keytab, so a lost recovery
 /// password is recoverable while the machine lives), or report the recovery
@@ -1348,39 +946,58 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     ensure_externally_signed(&dir)?;
     let mut ans = a.recovery.answerer()?;
-    let out = runtime()?.block_on(slots_ops::external_install_cert(
-        &mut ans,
-        dir,
-        &a.signed_cert,
-        a.root.as_deref(),
-    ))?;
-    report_external_install(out)
+    let gate = plan::service::ServiceGate {
+        dry_run: false,
+        no_service: a.no_service,
+        with_service: a.with_service,
+    };
+    let rt = runtime()?;
+    let scope = rt.block_on(async {
+        let out = slots_ops::external_install_cert(
+            &mut ans,
+            dir,
+            &a.signed_cert,
+            a.root.as_deref(),
+        )
+        .await?;
+        report_external_install(&mut ans, out, gate).await
+    })?;
+    if let Some(scope) = scope {
+        service::install_with_defaults(scope.into())?;
+    }
+    Ok(())
 }
 
-fn report_external_install(out: slots_ops::ExternalInstallOutcome) -> Result<()> {
+async fn report_external_install(
+    ans: &mut dyn Answerer,
+    out: slots_ops::ExternalInstallOutcome,
+    gate: plan::service::ServiceGate,
+) -> Result<Option<netidx_admin::service::ServiceScope>> {
     use slots_ops::ExternalInstallOutcome;
     match out {
         ExternalInstallOutcome::OfflineCa => {
-            println!("installed the externally-signed CA certificate.");
-            println!("CA-cert auto-renewal is DISABLED (external issuer).");
-            Ok(())
+            ans.note(
+                "installed the externally-signed CA certificate.\n\
+                 CA-cert auto-renewal is DISABLED (external issuer).",
+            );
+            Ok(None)
         }
         ExternalInstallOutcome::FirstInstall { need, cfg_path } => {
-            println!("installed the externally-signed CA certificate.");
-            println!("admin server configured ({})", cfg_path.display());
-            println!(
-                "CA-cert auto-renewal is DISABLED (external issuer); re-run \
-                 `netidx admin ca external install` when your PKI re-signs it."
-            );
-            service::offer(
-                need,
-                service::ServiceGate { dry_run: false, no_service: false, with_service: false },
-            )
+            ans.note(&format!(
+                "installed the externally-signed CA certificate.\n\
+                 admin server configured ({})\n\
+                 CA-cert auto-renewal is DISABLED (external issuer); re-run \
+                 `netidx admin ca external install` when your PKI re-signs it.",
+                cfg_path.display()
+            ));
+            plan::service::offer(ans, need, gate).await
         }
         ExternalInstallOutcome::Renewal => {
-            println!("renewed the CA certificate — enrolled nodes adopt it on their");
-            println!("next renewal (glyph unchanged; existing certificates stay valid).");
-            Ok(())
+            ans.note(
+                "renewed the CA certificate — enrolled nodes adopt it on their \
+                 next renewal (glyph unchanged; existing certificates stay valid).",
+            );
+            Ok(None)
         }
     }
 }
@@ -1412,6 +1029,8 @@ fn external_renew(a: ExternalRenewArgs) -> Result<()> {
             signed_cert,
             root: a.root,
             ca_dir: a.ca_dir,
+            with_service: false,
+            no_service: false,
             recovery: a.recovery,
         }),
     }
@@ -1423,8 +1042,13 @@ fn external_renew(a: ExternalRenewArgs) -> Result<()> {
 /// externally-signed, and write the CSR + a marker. No `certificate.pem` is
 /// written — its absence is the "awaiting external cert" state. Returns no
 /// `ServiceNeed`: the server is stood up in phase 2, once the cert exists.
-fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
-    let common_name = resolve_ca_cn(opts.common_name.clone(), opts.domain.as_deref())?;
+async fn external_bootstrap(
+    ans: &mut dyn Answerer,
+    opts: ca_setup::NewCaOpts,
+) -> Result<service::ServiceNeed> {
+    let common_name =
+        ca_setup::resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref())
+            .await?;
     let domain = match &opts.domain {
         Some(d) if !d.is_empty() => d.clone(),
         _ => match common_name.split_once('.') {
@@ -1432,18 +1056,12 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
             _ => common_name.clone(),
         },
     };
-    let set_up_server = match opts.setup_server {
-        Some(b) => b,
-        None => prompt::confirm(
-            "set up the admin server (so nodes can discover the network and \
-             request certs over it)?",
-            true,
-        )?,
-    };
+    let set_up_server =
+        ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     // The TPM gate matters only for a served CA — the autorenew keytab is
     // the sole TPM-sealed artifact; an offline external CA has none.
     if set_up_server {
-        tpm_gate(opts.insecure_no_tpm)?;
+        ca_setup::tpm_gate(ans, opts.insecure_no_tpm)?;
     }
     let san = parse_sans(&opts.san, &common_name)?;
     let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
@@ -1459,7 +1077,7 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
         key_bits: opts.key_bits,
         validity: opts.ca_validity,
     })?;
-    let (recovery_pw, cadir) = seal_ca_recovery(
+    let (recovery_pw, cadir) = ca_setup::seal_ca_recovery(
         &opts.dir,
         &key_pem,
         ca::CaLifetimes {
@@ -1468,11 +1086,11 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
             externally_signed: true,
         },
     )?;
-    println!(
+    ans.note(&format!(
         "created the CA key at {} (awaiting an externally-signed certificate)",
         opts.dir.display()
-    );
-    print_recovery_password(&recovery_pw);
+    ));
+    ca_setup::show_recovery_password(ans, &recovery_pw);
     // Write the CSR and the marker BEFORE the fallible/interactive slot
     // setup, so an interrupted bootstrap leaves a CA that `ca external
     // renew` can continue rather than a dead-ended half-CA.
@@ -1497,25 +1115,27 @@ fn external_bootstrap(opts: NewCaOpts) -> Result<service::ServiceNeed> {
         // which we hold here) so phase 2 can unlock passwordlessly; it is
         // wired to the server config in phase 2. The superuser role slot
         // needs no CA cert, so it is minted here too.
-        let keytab = setup_autorenew_slot(&cadir, &recovery_pw, opts.insecure_no_tpm)?;
-        println!("provisioned the automatic-renewal (leaf) approval slot:");
-        println!(
-            "  slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)"
-        );
-        println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
-        setup_superuser(&cadir, &opts, &common_name)?;
+        let keytab = ca_setup::setup_autorenew_slot(
+            ans,
+            &cadir,
+            &recovery_pw,
+            opts.insecure_no_tpm,
+        )?;
+        ans.note(&format!(
+            "provisioned the automatic-renewal (leaf) approval slot:\n  \
+             slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)\n  \
+             keytab: {} (0600 — do NOT back this file up)",
+            keytab.display()
+        ));
+        ca_setup::setup_superuser(ans, &cadir, &opts, &common_name).await?;
     }
-    println!();
-    println!(
-        "wrote {} — get it signed by your PKI as a subordinate CA, then run:",
+    ans.note(&format!(
+        "wrote {} — get it signed by your PKI as a subordinate CA, then run:\n  \
+         netidx admin ca external install <signed-cert.pem> [--root <root.pem>]\n\n\
+         NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
+         does not hold your PKI's key).",
         csr_path.display()
-    );
-    println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
-    println!();
-    println!(
-        "NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
-         does not hold your PKI's key)."
-    );
+    ));
     // Phase 1 stands up no server yet, so there is nothing to offer.
     Ok(service::ServiceNeed::NONE)
 }
@@ -1536,9 +1156,13 @@ fn init(p: InitParams) -> Result<()> {
     } else {
         None
     };
-    let opts = NewCaOpts {
+    // Preserve the `ca.<domain>` convenience: with a domain but no explicit
+    // --cn, derive the CN so strict mode need not demand --cn as well.
+    let common_name =
+        p.cn.or_else(|| p.domain.as_deref().map(ca_setup::default_ca_cn));
+    let opts = ca_setup::NewCaOpts {
         dir: directory,
-        common_name: p.cn,
+        common_name,
         domain: p.domain,
         country: p.country,
         state: p.state,
@@ -1557,30 +1181,42 @@ fn init(p: InitParams) -> Result<()> {
         insecure_no_tpm: p.insecure_no_tpm,
         setup_server,
         listen: p.listen,
-        // No resolver in this flow; default_ca_listen_ip falls back to
-        // an existing resolver's IP, then the public IP.
+        // No resolver in this flow; the library falls back to an existing
+        // resolver's IP, then the public IP.
         listen_hint: None,
         units_dir,
     };
-    // `--external-sign` runs the CA as an intermediate: phase 1 makes the
-    // key + a CSR and stops; `ca external install <signed-cert>` installs the
-    // signed cert. Otherwise this is the normal self-signed CA.
-    let need = if p.external_sign {
-        external_bootstrap(opts)?
-    } else {
-        create_vaulted_ca(opts)?.1
+    // The founding superuser's password (minted only when a server is set up)
+    // comes from --password-file / --password-stdin. `ca init` creates the CA,
+    // it never joins a network, so there is no glyph to confirm.
+    let mut ans = super::answer_cli::make_flag_answerer(
+        p.password_file.as_deref(),
+        p.password_stdin,
+        None,
+    )?;
+    let gate = plan::service::ServiceGate {
+        dry_run: false,
+        no_service: p.no_service,
+        with_service: p.with_service,
     };
-
-    // Single end-of-process hook — the same one the `admin install`
-    // templates use.
-    service::offer(
-        need,
-        service::ServiceGate {
-            dry_run: false,
-            no_service: p.no_service,
-            with_service: p.with_service,
-        },
-    )
+    let rt = runtime()?;
+    let scope = rt.block_on(async {
+        // `--external-sign` runs the CA as an intermediate: phase 1 makes the
+        // key + a CSR and stops; `ca external install <signed-cert>` installs
+        // the signed cert. Otherwise this is the normal self-signed CA.
+        let need = if p.external_sign {
+            external_bootstrap(&mut ans, opts).await?
+        } else {
+            ca_setup::create_vaulted_ca(&mut ans, opts).await?.1
+        };
+        // Single end-of-process hook — the same decision the `admin install`
+        // templates make; the privileged install stays in this frontend.
+        plan::service::offer(&mut ans, need, gate).await
+    })?;
+    if let Some(scope) = scope {
+        service::install_with_defaults(scope.into())?;
+    }
+    Ok(())
 }
 
 // -- ca admin -----------------------------------------------------------------
@@ -1632,7 +1268,7 @@ fn policy_context(
     match target {
         admin_ops::AdminTarget::Remote { session } => {
             let domain = session.identity.domain.to_string();
-            (default_ca_cn(&domain), Some(domain))
+            (ca_setup::default_ca_cn(&domain), Some(domain))
         }
         admin_ops::AdminTarget::Local { .. } => {
             let dir =
@@ -1779,53 +1415,51 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
 // -- ca join (the client) -----------------------------------------------------
 
 pub(crate) fn join(p: JoinArgs) -> Result<()> {
-    use super::init::{self, AdminServers};
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let (server, identity) = match p.server {
-        // An explicit address: confirm WHO we've reached before any
-        // credential is entered. `fetch_identity` sends nothing secret
-        // and closes before returning.
-        Some(server) => {
-            let identity = rt
-                .block_on(admin_client::fetch_identity(server, NodeKind::Client))
-                .with_context(|| format!("contacting admin server {server}"))?;
-            init::show_network_identity(server, &identity);
-            if !prompt::confirm("does this match what your CA admin gave you?", false)? {
-                bail!("CA identity was not confirmed; nothing was sent");
-            }
-            (server, identity)
-        }
-        // No address: this is "the CA flow not called by a higher
-        // level flow" — probe for the network ourselves (browse →
-        // confirm glyph → aggregate, with a manual-address fallback).
-        None => match init::discover_network(NodeKind::Client)? {
-            AdminServers::Have(net) => {
-                let ca = net.info.ca_addr.ok_or_else(|| {
-                    anyhow!(
-                        "network {:?} reported no CA; cannot request a certificate",
-                        net.identity.domain
-                    )
-                })?;
-                (ca, net.identity)
-            }
-            AdminServers::DontHave => {
-                bail!("no admin server found or selected; pass --server to specify one")
-            }
-            AdminServers::NotProbed => {
-                bail!("--server is required when stdin is not a TTY")
-            }
-        },
-    };
-    let name = prompt::required_string("TLS identity name to request", p.name)?;
-    let groups = init::prompt_id_map_groups(
-        &p.id_map_groups,
-        init::default_id_map_groups(NodeKind::Client),
+    let mut ans = super::answer_cli::make_flag_answerer(
+        p.password_file.as_deref(),
+        p.password_stdin,
+        p.accept_glyph.as_deref(),
     )?;
-    let admin = prompt::required_string("admin name", p.admin)?;
-    let password = Zeroizing::new(collect_existing_password(&format!(
-        "CA password for admin {admin:?}"
-    ))?);
-    let issued = rt.block_on(admin_client::request_cert(
+    let rt = runtime()?;
+    rt.block_on(join_async(&mut ans, p))
+}
+
+async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
+    // Non-interactive: the network must be named explicitly (discovery is an
+    // interactive-only step) and its identity confirmed out of band via the
+    // glyph. `fetch_identity` sends nothing secret and closes before returning.
+    let server = p.server.context(
+        "--server <ip:port> is required (network discovery is interactive only)",
+    )?;
+    let identity = admin_client::fetch_identity(server, NodeKind::Client)
+        .await
+        .with_context(|| format!("contacting admin server {server}"))?;
+    init::show_network_identity(server, &identity);
+    if !ans.confirm_identity(&identity).await? {
+        bail!("CA identity was not confirmed (--accept-glyph mismatch); nothing was sent");
+    }
+    let name = ans
+        .text(Field::TlsName, p.name, None, true)
+        .await?
+        .context("--name (the TLS identity to request) is required")?;
+    let admin = ans
+        .text(Field::AdminName, p.admin, None, true)
+        .await?
+        .context("--admin is required")?;
+    let mut secret = ans.secret(Field::AdminPassword, None).await?;
+    let password = Zeroizing::new(std::mem::take(&mut secret.0));
+    // `--id-map-group ''` (a single empty entry) is the explicit "skip
+    // registration"; otherwise the per-kind default applies.
+    let groups = if p.id_map_groups.is_empty() {
+        init::parse_id_map_answer(init::default_id_map_groups(NodeKind::Client))
+    } else {
+        p.id_map_groups
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let issued = admin_client::request_cert(
         server,
         NodeKind::Client,
         &name,
@@ -1834,7 +1468,8 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
         p.validity,
         groups,
         &identity,
-    ))?;
+    )
+    .await?;
     let dir = tls::identity_dir(&name)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
@@ -1849,9 +1484,9 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
         0o600,
     )?;
     atomic::write_atomic(&dir.join("trusted.pem"), issued.trusted_pem.as_bytes(), 0o644)?;
-    println!("installed identity {name:?} in {}", dir.display());
+    ans.note(&format!("installed identity {name:?} in {}", dir.display()));
     for w in &issued.warnings {
-        println!("  warning: {w}");
+        ans.warn(w);
     }
     Ok(())
 }
@@ -1868,134 +1503,6 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// The current unix user, if discoverable, to seed the admin-name
-/// prompt's default. `None` when neither env var is set (e.g. a daemon
-/// context), in which case the caller prompts with no default.
-pub(super) fn env_user_name() -> Option<String> {
-    for var in ["USER", "LOGNAME"] {
-        if let Ok(v) = std::env::var(var)
-            && !v.is_empty()
-        {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// CLI-provided policy inputs; whatever is absent gets prompted.
-struct PolicyArgs<'a> {
-    allow_san: &'a [String],
-    max_validity: Duration,
-    id_map_groups: &'a [String],
-    may_enroll_servers: Option<bool>,
-    /// Netidx paths this admin may edit perms under. Taken straight from
-    /// the flag (no prompt) — a signing admin gets perms scopes only when
-    /// explicitly granted; role admins are minted by `admin add-role`.
-    perms_scope: &'a [String],
-    /// Netidx paths this admin may control services under (restart/start/
-    /// stop the activation units of the cluster serving that path). Taken
-    /// straight from the flag, like `perms_scope`.
-    service_scope: &'a [String],
-}
-
-fn prompt_policy(
-    args: &PolicyArgs,
-    enroll_default: bool,
-    cn: &str,
-    domain: Option<&str>,
-) -> Result<ca_vault::Policy> {
-    let allowed_san = if !args.allow_san.is_empty() {
-        args.allow_san.to_vec()
-    } else {
-        // Prefer an explicit domain (e.g. threaded from the resolver
-        // install, which already asked for it) — `*.<domain>` matches the
-        // `<user>.<domain>` SAN convention exactly. With no domain, fall
-        // back to stripping the CN's leftmost label, which is right when
-        // the CN is `<host>.<domain>` but only a guess otherwise.
-        let suggestion = match domain {
-            Some(d) if !d.is_empty() => format!("*.{d}"),
-            _ => match cn.split_once('.') {
-                Some((_, domain)) if !domain.is_empty() => format!("*.{domain}"),
-                _ => "*".to_string(),
-            },
-        };
-        let entry = prompt::string_with_default(
-            "SAN names this admin may issue (glob, e.g. *.example.com)",
-            None,
-            &suggestion,
-        )?;
-        vec![entry]
-    };
-    let id_map_groups = if !args.id_map_groups.is_empty() {
-        // `--id-map-group ''` is the explicit "none" — filter it out so
-        // the resulting policy is empty (registration disabled) rather
-        // than containing an empty group name.
-        args.id_map_groups
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    } else {
-        // The *allowed set*: which groups this admin may assign when
-        // enrolling a node (the actual choice happens per-enrollment,
-        // in the SignRequest). Blank takes the default; a bare `-`
-        // disables registration entirely (this admin's signs never
-        // register id-map identities).
-        let entry = prompt::string_with_default(
-            "id-map groups this admin may assign when enrolling \
-             (comma-separated; Enter for default, '-' for none)",
-            None,
-            "users",
-        )?;
-        init::parse_id_map_answer(&entry)
-    };
-    let may_enroll_servers = match args.may_enroll_servers {
-        Some(b) => b,
-        None => prompt::confirm(
-            "may this admin enroll new admin servers (more privileged than any \
-             SAN glob)?",
-            enroll_default,
-        )?,
-    };
-    let trim_paths = |scopes: &[String]| -> Vec<String> {
-        scopes.iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-    };
-    let perms_edit_scopes = trim_paths(args.perms_scope);
-    let service_control_scopes = trim_paths(args.service_scope);
-    Ok(ca_vault::Policy {
-        allowed_san,
-        max_validity: args.max_validity,
-        id_map_groups,
-        may_enroll_servers,
-        perms_edit_scopes,
-        // Phase 4 wires a --may-manage-admins flag through PolicyArgs.
-        may_manage_admins: false,
-        service_control_scopes,
-    })
-}
-
-/// The default CA common name for a domain, following the same
-/// `<name>.<domain>` convention as every other netidx identity — the CA
-/// is just the `ca` node (e.g. `ryu-oh.org` → `ca.ryu-oh.org`).
-pub(super) fn default_ca_cn(domain: &str) -> String {
-    format!("ca.{domain}")
-}
-
-/// Resolve the CA common name: an explicit value wins; otherwise prompt,
-/// defaulting to `ca.<domain>` when a domain is known (non-TTY then takes
-/// that default), or requiring an explicit answer when it isn't.
-fn resolve_ca_cn(provided: Option<String>, domain: Option<&str>) -> Result<String> {
-    if let Some(cn) = provided {
-        return Ok(cn);
-    }
-    match domain {
-        Some(d) if !d.is_empty() => {
-            prompt::string_with_default("CA common name", None, &default_ca_cn(d))
-        }
-        _ => prompt::required_string("CA common name", None),
-    }
-}
-
 /// The DNS SAN on an existing CA's own cert, used to seed the policy
 /// suggestion when scoping admins on an already-built CA (`admin add` /
 /// `admin set-policy`). Empty if it can't be read — the prompt then has
@@ -2003,39 +1510,6 @@ fn resolve_ca_cn(provided: Option<String>, domain: Option<&str>) -> Result<Strin
 fn existing_ca_cn(dir: &Path) -> String {
     netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
         .unwrap_or_default()
-}
-
-/// Prompt twice for a new password (confirmed, non-empty). Bails on a
-/// non-TTY — a vaulted CA must have a real password. The result (and the
-/// confirmation temporary) are `Zeroizing` — this mints a credential, so its
-/// plaintext shouldn't linger in freed heap.
-fn collect_required_password(label: &str) -> Result<Zeroizing<String>> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        return Err(anyhow!("{label}: a password is required but stdin is not a TTY"));
-    }
-    loop {
-        let pw = Zeroizing::new(rpassword::prompt_password(format!("{label}: "))?);
-        if pw.is_empty() {
-            eprintln!("password must not be empty");
-            continue;
-        }
-        let again = Zeroizing::new(rpassword::prompt_password("again: ")?);
-        if *again != *pw {
-            eprintln!("passwords did not match; try again");
-            continue;
-        }
-        return Ok(pw);
-    }
-}
-
-/// Prompt once for an existing password (no confirmation).
-pub(super) fn collect_existing_password(label: &str) -> Result<String> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        return Err(anyhow!("{label}: stdin is not a TTY"));
-    }
-    Ok(rpassword::prompt_password(format!("{label}: "))?)
 }
 
 fn issue(p: IssueArgs) -> Result<()> {
@@ -2076,7 +1550,7 @@ fn issue(p: IssueArgs) -> Result<()> {
 }
 
 pub(crate) fn request(p: RequestArgs) -> Result<()> {
-    let cn = prompt::required_string("requested certificate common name", p.cn)?;
+    let cn = p.cn.context("--cn is required (the requested certificate common name)")?;
     // `--out-key` default is `./private.key`, but the *default* path
     // refuses to clobber: re-running `request` in the same dir would
     // otherwise silently destroy a key the operator may not have used
@@ -2739,26 +2213,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prompt_required_uses_provided_value() {
-        // Sanity: when a value is provided, no prompt fires (so the
-        // test is safe to run in CI where stdin is not a TTY).
-        assert_eq!(
-            prompt::required_string("ignored", Some("hello".to_string())).unwrap(),
-            "hello"
-        );
-    }
-
-    #[test]
-    fn prompt_required_fails_without_tty() {
-        // In test builds `prompt::stdin_is_tty()` is pinned to
-        // `false`, so an omitted required arg must bail rather than
-        // hang. We exercise the non-TTY branch by passing `None`.
-        let r = prompt::required_string("test prompt", None);
-        assert!(r.is_err());
-        let msg = format!("{:#}", r.unwrap_err());
-        assert!(msg.contains("not a TTY"), "should report non-TTY context: {msg}");
-    }
 
     /// An offline CA (no admin server) is minted with exactly one signing
     /// slot — `recovery`, holding a generated password never typed — and no
@@ -2769,31 +2223,41 @@ mod tests {
     fn offline_ca_init_makes_exactly_the_recovery_slot() {
         let scratch = tempfile::tempdir().unwrap();
         let dir = scratch.path().join("ca");
-        let (_ca, _need) = create_vaulted_ca(NewCaOpts {
-            dir: dir.clone(),
-            common_name: Some("ca.example.com".into()),
-            domain: Some("example.com".into()),
-            country: None,
-            state: None,
-            locality: None,
-            organization: None,
-            san: vec![],
-            key_bits: 2048, // test speed; production is 4096
-            ca_validity: Duration::from_secs(30 * 86400),
-            leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
-            ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
-            admin: Some("super".into()),
-            allowed_san: vec!["*.example.com".into()],
-            max_validity: Duration::from_secs(730 * 86400),
-            id_map_groups: vec!["users".into()],
-            may_enroll_servers: Some(true),
-            insecure_no_tpm: true,
-            setup_server: Some(false),
-            listen: None,
-            listen_hint: None,
-            units_dir: None,
-        })
-        .unwrap();
+        // Drive the library's create_vaulted_ca through the strict answerer —
+        // the exact path `ca init` takes. Offline (setup_server: Some(false)),
+        // so no superuser password or glyph is asked for.
+        let mut ans =
+            crate::admin::answer_cli::make_flag_answerer(None, false, None).unwrap();
+        let (_ca, _need) = runtime()
+            .unwrap()
+            .block_on(ca_setup::create_vaulted_ca(
+                &mut ans,
+                ca_setup::NewCaOpts {
+                    dir: dir.clone(),
+                    common_name: Some("ca.example.com".into()),
+                    domain: Some("example.com".into()),
+                    country: None,
+                    state: None,
+                    locality: None,
+                    organization: None,
+                    san: vec![],
+                    key_bits: 2048, // test speed; production is 4096
+                    ca_validity: Duration::from_secs(30 * 86400),
+                    leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
+                    ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
+                    admin: Some("super".into()),
+                    allowed_san: vec!["*.example.com".into()],
+                    max_validity: Duration::from_secs(730 * 86400),
+                    id_map_groups: vec!["users".into()],
+                    may_enroll_servers: Some(true),
+                    insecure_no_tpm: true,
+                    setup_server: Some(false),
+                    listen: None,
+                    listen_hint: None,
+                    units_dir: None,
+                },
+            ))
+            .unwrap();
         // Exactly the recovery signing slot, and nothing else — no autorenew
         // (no daemon), no superuser role (offline).
         assert_eq!(

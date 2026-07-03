@@ -9,22 +9,16 @@ use clap::Args;
 use netidx_admin::{
     admin_client,
     admin_proto::{NodeKind, Role},
-    discovery,
     fingerprint::ColorMode,
     plan::AuthKind,
     template::{ParentRef, ReferralAuth},
 };
 // Re-exported so the sibling admin submodules keep calling
 // `init::resolve_admin_server_addr`; the impl now lives in the engine.
-pub(super) use netidx_admin::plan::{
-    resolve_admin_server_addr, resolve_admin_server_seeds,
-};
-use std::{
-    collections::BTreeMap, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration,
-};
+pub(super) use netidx_admin::plan::resolve_admin_server_addr;
+use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
-// `ca` submodule depends on netidx_admin::ca which is unix-only.
-use super::{prompt, service};
+use super::service;
 
 // The three install entry points are exposed to the per-role command
 // modules (`admin::roles::*`), which own the `<role> install` surface.
@@ -490,170 +484,6 @@ pub(super) fn parse_id_map_answer(answer: &str) -> Vec<String> {
         .collect()
 }
 
-/// Prompt for the id-map groups to assign a new identity
-/// (comma-separated, first is primary). CLI-`provided` values
-/// short-circuit (`--id-map-group ''` is the explicit "none").
-/// Interactively, a blank answer takes `default`; a bare `-` is the
-/// explicit "no groups" sentinel (since blank is taken by the default).
-pub(super) fn prompt_id_map_groups(
-    provided: &[String],
-    default: &str,
-) -> Result<Vec<String>> {
-    if !provided.is_empty() {
-        return Ok(provided
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect());
-    }
-    let answer = prompt::string_with_default(
-        "id-map groups for this identity (comma-separated, first is \
-         primary; Enter for default, '-' for no groups)",
-        None,
-        default,
-    )?;
-    Ok(parse_id_map_answer(&answer))
-}
-
-/// How long the install flows browse mDNS for admin servers.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// A discovered-and-confirmed netidx network: the operator-confirmed
-/// admin-plane identity plus the aggregated picture of the network
-/// (every connection behind `info` was pinned to that identity).
-pub(super) struct DiscoveredNetwork {
-    pub(super) identity: admin_client::CaIdentity,
-    pub(super) info: admin_client::NetworkInfo,
-}
-
-/// What the calling flow knows about admin servers on this network.
-/// Threaded into every sub-flow that could otherwise offer a network
-/// join, so the operator is asked at most once.
-// `Have` is ~200 bytes vs the dataless variants; this is a one-shot
-// value on an interactive CLI's stack — boxing it would trade nothing
-// for an allocation.
-#[allow(clippy::large_enum_variant)]
-pub(super) enum AdminServers {
-    /// A network was discovered and its identity glyph-confirmed: use
-    /// it, ask nothing further.
-    Have(DiscoveredNetwork),
-    /// We probed (and/or the operator declined): there is none. Never
-    /// offer a network join again in this run.
-    DontHave,
-    /// Nobody has checked (CLI-flag path, dry-run, non-TTY). A
-    /// sub-flow that wants a admin server may probe itself.
-    NotProbed,
-}
-
-/// Find the network this node should join: browse mDNS, group what's
-/// found by domain, let the operator pick (falling back to a manual
-/// admin-server address when discovery finds nothing), then fetch and
-/// glyph-confirm the network's identity and aggregate `GetInfo` across
-/// its admin servers (peer walk — one reachable server is enough).
-///
-/// [`AdminServers::DontHave`] ⇒ the operator concluded there is no admin
-/// server (nothing found / declined); callers continue with the manual
-/// prompt cascade and never re-offer a network join.
-/// [`AdminServers::NotProbed`] is returned only on a non-TTY — scripted
-/// installs use CLI flags.
-pub(super) fn discover_network(kind: NodeKind) -> Result<AdminServers> {
-    if !prompt::stdin_is_tty() {
-        return Ok(AdminServers::NotProbed);
-    }
-    println!(
-        "searching for netidx admin component servers on the local network \
-         ({}s)...",
-        DISCOVERY_TIMEOUT.as_secs()
-    );
-    let found = discovery::browse_or_empty(DISCOVERY_TIMEOUT);
-    // Group the (unauthenticated, hint-only) beacons by domain.
-    let mut domains: BTreeMap<String, Vec<discovery::Discovered>> = BTreeMap::new();
-    for d in found {
-        domains.entry(d.domain.clone()).or_default().push(d);
-    }
-    let manual_fallback = || -> Result<Option<Vec<SocketAddr>>> {
-        prompt::optional_with(
-            "address of an existing admin server to join (host or ip, optional \
-             :port), blank if there is none",
-            resolve_admin_server_seeds,
-        )
-    };
-    let seeds: Vec<SocketAddr> = if domains.is_empty() {
-        println!("no admin servers found.");
-        match manual_fallback()? {
-            Some(s) => s,
-            None => return Ok(AdminServers::DontHave),
-        }
-    } else {
-        let chosen: Option<String> = if domains.len() == 1 {
-            let (domain, servers) = domains.iter().next().unwrap();
-            let use_it = prompt::confirm(
-                &format!(
-                    "found netidx network {domain:?} ({} admin server(s)) — join it?",
-                    servers.len()
-                ),
-                true,
-            )?;
-            use_it.then(|| domain.clone())
-        } else {
-            let names: Vec<String> = domains.keys().cloned().collect();
-            let opts: Vec<&str> =
-                names.iter().map(|s| s.as_str()).chain(["none"]).collect();
-            let choice: String = prompt::choice_with_default(
-                "multiple netidx networks found — which to join ('none' for \
-                 manual setup)",
-                None,
-                &opts,
-                opts[0],
-            )?;
-            (choice != "none").then_some(choice)
-        };
-        match chosen {
-            Some(domain) => {
-                let servers =
-                    domains.remove(&domain).expect("chosen domain came from the map");
-                servers.iter().flat_map(|d| d.socket_addrs()).collect()
-            }
-            None => match manual_fallback()? {
-                Some(s) => s,
-                None => return Ok(AdminServers::DontHave),
-            },
-        }
-    };
-    confirm_seeds(&seeds, kind)
-}
-
-/// Fetch the network identity from the first reachable seed and have the
-/// operator confirm it — the single human trust decision; everything after
-/// is pinned to the confirmed fingerprint. Then map the network. Shared by
-/// mDNS discovery and the explicit `--parent-admin-server` / manual-address
-/// paths, so "is a CA reachable?" has ONE answer feeding the
-/// create-vs-enroll decision.
-fn confirm_seeds(seeds: &[SocketAddr], kind: NodeKind) -> Result<AdminServers> {
-    let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let mut fetched = None;
-    for addr in seeds {
-        match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
-            Ok(id) => {
-                fetched = Some((*addr, id));
-                break;
-            }
-            Err(e) => println!("note: admin server {addr} could not be queried: {e:#}"),
-        }
-    }
-    let Some((addr, identity)) = fetched else {
-        bail!("no admin server could be reached")
-    };
-    show_network_identity(addr, &identity);
-    if !prompt::confirm("does this match what your network admin gave you?", false)? {
-        bail!("the network identity was not confirmed; nothing was sent");
-    }
-    let info = rt
-        .block_on(admin_client::aggregate(seeds, kind, &identity))
-        .context("mapping the network (GetInfo peer walk)")?;
-    Ok(AdminServers::Have(DiscoveredNetwork { identity, info }))
-}
 
 /// The `--key-protection` flag: like [`choose_key_protection`]'s
 /// interactive choice, but scriptable. `password` is inherently
