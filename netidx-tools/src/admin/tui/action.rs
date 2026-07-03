@@ -1,13 +1,17 @@
 //! Actions the TUI runs against the library, and the [`Outcome`] it shows when
 //! one finishes.
 //!
-//! An [`Action`] is spawned on the tokio runtime with a fresh
-//! [`TuiAnswerer`](super::answer::TuiAnswerer); every decision the op needs is
-//! answered through the modals the answerer raises. The op's final `Result` is
-//! sent back to the UI loop as [`UiRequest::OpDone`](super::answer::UiRequest).
+//! Most actions are async library ops driven through a [`TuiAnswerer`](super::answer::TuiAnswerer):
+//! [`run_owned`] is the self-contained future the UI loop polls. The one
+//! privileged, terminal-owning follow-up (registering a system OS service) is
+//! handed back on the [`Outcome`] and performed by the loop, which can suspend
+//! the terminal for the password prompt — see [`super::privileged`].
+//!
+//! [`Action::Uninstall`] is the exception: it is privileged from the start, so
+//! the loop runs it directly rather than as an op future.
 
 use super::answer::TuiAnswerer;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use netidx_admin::{
     plan::install::{
         InstallCommon,
@@ -15,22 +19,38 @@ use netidx_admin::{
         resolver::{ResolverInput, run_resolver},
     },
     provenance::InstallRole,
+    renewd,
     service::ServiceScope,
 };
+use std::net::SocketAddr;
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
     pub(super) title: String,
     pub(super) lines: Vec<String>,
-    /// Re-detect local installs after showing this (an install/uninstall
-    /// changed on-disk state).
+    /// Re-detect local installs after showing this (an install changed on-disk
+    /// state).
     pub(super) refresh_local: bool,
+    /// A privileged follow-up the UI loop performs with the terminal: register
+    /// the OS service at this scope. `None` ⇒ nothing to do.
+    pub(super) install_service: Option<ServiceScope>,
 }
 
-/// A unit of work the TUI runs on the runtime, driven by the answerer's modals.
+impl Outcome {
+    fn plain(title: impl Into<String>, lines: Vec<String>, refresh_local: bool) -> Outcome {
+        Outcome { title: title.into(), lines, refresh_local, install_service: None }
+    }
+}
+
+/// A unit of work the TUI runs.
 pub(super) enum Action {
     /// Install a role. `dry_run` previews the plan without writing anything.
     Install { role: InstallRole, dry_run: bool },
+    /// Renew this host's certificates now.
+    Renew { server: Option<SocketAddr> },
+    /// Tear down an install (config + OS service). Privileged; handled directly
+    /// by the UI loop, not as an op future.
+    Uninstall { scope: ServiceScope, remove_ca: bool },
 }
 
 impl Action {
@@ -41,21 +61,44 @@ impl Action {
                 let verb = if *dry_run { "Previewing" } else { "Installing" };
                 format!("{verb} {}", role.as_str())
             }
+            Action::Renew { .. } => "Renewing certificates".to_string(),
+            Action::Uninstall { .. } => "Uninstalling".to_string(),
+        }
+    }
+
+    /// A yes/no confirmation to require before running, or `None` to run
+    /// immediately. Installs are their own interactive cascade; uninstall is
+    /// destructive and must be confirmed.
+    pub(super) fn confirm_message(&self) -> Option<String> {
+        match self {
+            Action::Install { .. } | Action::Renew { .. } => None,
+            Action::Uninstall { .. } => Some(
+                "Remove this install? This stops and removes the OS service and \
+                 deletes its configuration (the CA directory is kept)."
+                    .to_string(),
+            ),
         }
     }
 }
 
 /// Run an action to completion on an owned answerer — the self-contained future
-/// the UI loop drives (no borrows of UI state, so it needs no lifetime plumbing).
+/// the UI loop drives. [`Action::Uninstall`] never reaches here (the loop runs
+/// it directly).
 pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Outcome> {
-    run(&mut ans, action).await
+    match action {
+        Action::Install { role, dry_run } => install(&mut ans, role, dry_run).await,
+        Action::Renew { server } => renew(&mut ans, server).await,
+        Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
+    }
 }
 
-/// Run an action to completion, raising modals through `ans` as it goes.
-pub(super) async fn run(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
-    match action {
-        Action::Install { role, dry_run } => install(ans, role, dry_run).await,
-    }
+async fn renew(_ans: &mut TuiAnswerer, server: Option<SocketAddr>) -> Result<Outcome> {
+    renewd::run_once(server).await?;
+    Ok(Outcome::plain(
+        "Renewed",
+        vec!["Scanned and renewed certificates due for renewal.".to_string()],
+        false,
+    ))
 }
 
 async fn install(ans: &mut TuiAnswerer, role: InstallRole, dry_run: bool) -> Result<Outcome> {
@@ -106,7 +149,7 @@ async fn run_workstation(
     _ans: &mut TuiAnswerer,
     _common: InstallCommon,
 ) -> Result<Option<ServiceScope>> {
-    anyhow::bail!("the workstation role is not supported on this platform")
+    bail!("the workstation role is not supported on this platform")
 }
 
 fn resolver_input(common: InstallCommon) -> ResolverInput {
@@ -159,28 +202,22 @@ fn publisher_input(common: InstallCommon) -> PublisherInput {
 }
 
 fn install_outcome(role: InstallRole, dry_run: bool, scope: Option<ServiceScope>) -> Outcome {
-    let mut lines = Vec::new();
     if dry_run {
-        lines.push("Preview only — nothing was written.".to_string());
+        let mut lines = vec!["Preview only — nothing was written.".to_string()];
         if scope.is_some() {
-            lines.push("A real install would then offer to register the OS service.".to_string());
+            lines.push("A real install would then register the OS service.".to_string());
         }
-        Outcome { title: format!("{} preview", role.as_str()), lines, refresh_local: false }
+        Outcome::plain(format!("{} preview", role.as_str()), lines, false)
     } else {
-        lines.push("Install complete.".to_string());
-        match scope {
-            Some(ServiceScope::System) => lines.push(
-                "Register the OS service (needs root):\n  \
-                 sudo netidx admin component service install --scope system"
-                    .to_string(),
-            ),
-            Some(ServiceScope::User) => lines.push(
-                "Register the OS service:\n  \
-                 netidx admin component service install --scope user"
-                    .to_string(),
-            ),
-            None => {}
+        let lines = match scope {
+            Some(_) => vec!["Configuration written. Registering the OS service…".to_string()],
+            None => vec!["Configuration written. No OS service was registered.".to_string()],
+        };
+        Outcome {
+            title: format!("{} installed", role.as_str()),
+            lines,
+            refresh_local: true,
+            install_service: scope,
         }
-        Outcome { title: format!("{} installed", role.as_str()), lines, refresh_local: true }
     }
 }

@@ -23,6 +23,7 @@
 mod action;
 mod answer;
 mod local;
+mod privileged;
 mod remote;
 mod widgets;
 
@@ -100,6 +101,8 @@ struct App {
     log: Vec<Line<'static>>,
     /// A finished action's result overlay.
     result: Option<ResultView>,
+    /// A destructive action awaiting yes/no confirmation before it runs.
+    confirm: Option<(String, Action)>,
 }
 
 impl App {
@@ -117,6 +120,7 @@ impl App {
             verification: None,
             log: Vec::new(),
             result: None,
+            confirm: None,
         }
     }
 
@@ -186,8 +190,10 @@ impl App {
         self.modal = self.pending.pop_front().and_then(Modal::from_request);
     }
 
-    /// Route a key press. Global keys first, then the active overlay, then the
-    /// focused tab (which may hand back an [`Action`] to run).
+    /// Route a key press. Global keys first, then the active overlay
+    /// (modal → confirm → result), then the focused tab. Returns an [`Action`]
+    /// for the event loop to run — either straight from the tab (no confirmation
+    /// needed) or from a just-accepted confirmation.
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Action> {
         if let KeyCode::Char('c') = code {
             if mods.contains(KeyModifiers::CONTROL) {
@@ -201,6 +207,16 @@ impl App {
             }
             return None;
         }
+        if self.confirm.is_some() {
+            return match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm.take().map(|(_, a)| a),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.confirm = None;
+                    None
+                }
+                _ => None,
+            };
+        }
         if self.result.is_some() {
             self.result = None;
             return None;
@@ -208,19 +224,27 @@ impl App {
         if self.busy {
             return None;
         }
-        match code {
+        let action = match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
-                None
+                return None;
             }
             KeyCode::Tab => {
                 self.next_tab();
-                None
+                return None;
             }
             _ => match self.tab {
                 Tab::Local => self.local.on_key(code),
                 Tab::Remote => self.remote.on_key(code),
             },
+        }?;
+        // Gate destructive actions behind a yes/no confirmation.
+        match action.confirm_message() {
+            Some(msg) => {
+                self.confirm = Some((msg, action));
+                None
+            }
+            None => Some(action),
         }
     }
 
@@ -244,6 +268,8 @@ impl App {
         let area = f.area();
         if let Some(m) = &self.modal {
             m.render(f, area);
+        } else if let Some((msg, _)) = &self.confirm {
+            render_confirm(f, area, msg);
         } else if let Some(r) = &self.result {
             render_result(f, area, r);
         }
@@ -298,6 +324,8 @@ impl App {
             Line::from(" any key to dismiss ".dim())
         } else if self.modal.is_some() {
             Line::from(" answer above · Esc cancel ".dim())
+        } else if self.confirm.is_some() {
+            Line::from(" y confirm · n/Esc cancel ".dim())
         } else if self.busy {
             Line::from(" working… · Ctrl-C quit ".dim())
         } else {
@@ -335,6 +363,22 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
+/// Render a destructive action's yes/no confirmation as a centered overlay.
+fn render_confirm(f: &mut Frame, screen: Rect, msg: &str) {
+    let lines = vec![
+        Line::from(msg.to_string()),
+        Line::from(""),
+        Line::from(" y confirm · n cancel ".dim()),
+    ];
+    let area = widgets::centered(66, 8, screen);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Confirm ");
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).block(block), area);
+}
+
 /// The type of a running action's future: self-contained (owns its answerer),
 /// so it needs no borrow of the UI state and is driven directly in the loop.
 type OpFuture = Pin<Box<dyn Future<Output = Result<Outcome>>>>;
@@ -358,14 +402,13 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             Some(req) = ui_rx.recv() => app.handle_request(req),
             out = async { match op.as_mut() { Some(f) => f.await, None => future::pending().await } } => {
                 op = None;
-                app.finish_op(out);
+                let result = complete_op(terminal, &mut app, out);
+                app.finish_op(result);
             }
             ev = events.select_next_some() => match ev {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                     if let Some(action) = app.on_key(k.code, k.modifiers) {
-                        app.begin(action.label());
-                        let ans = TuiAnswerer::new(ui_tx.clone());
-                        op = Some(Box::pin(action::run_owned(ans, action)));
+                        launch(terminal, &mut app, &ui_tx, &mut op, action);
                     }
                 }
                 Ok(_) => {}
@@ -377,6 +420,53 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Start an action: op-future actions (install / renew) become the polled
+/// `op`; the privileged, synchronous uninstall runs inline (it owns the
+/// terminal to suspend for a password prompt).
+fn launch(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    ui_tx: &mpsc::UnboundedSender<UiRequest>,
+    op: &mut Option<OpFuture>,
+    action: Action,
+) {
+    app.begin(action.label());
+    match action {
+        Action::Uninstall { scope, remove_ca } => {
+            let out = privileged::uninstall(terminal, scope, remove_ca).map(|msg| Outcome {
+                title: "Uninstalled".to_string(),
+                lines: vec![msg],
+                refresh_local: true,
+                install_service: None,
+            });
+            app.finish_op(out);
+        }
+        op_action => {
+            let ans = TuiAnswerer::new(ui_tx.clone());
+            *op = Some(Box::pin(action::run_owned(ans, op_action)));
+        }
+    }
+}
+
+/// Fold an op's result: on success with a pending OS-service install, perform
+/// that privileged step (suspending the terminal for its password prompt) and
+/// append its outcome.
+fn complete_op(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    out: Result<Outcome>,
+) -> Result<Outcome> {
+    let mut outcome = out?;
+    if let Some(scope) = outcome.install_service.take() {
+        app.log.push(Line::from("registering the OS service…"));
+        match privileged::install_service(terminal, scope) {
+            Ok(msg) => outcome.lines.push(msg),
+            Err(e) => outcome.lines.push(format!("OS service registration failed: {e:#}")),
+        }
+    }
+    Ok(outcome)
 }
 
 /// Entry point for bare `netidx admin`: build a runtime, take over the terminal,

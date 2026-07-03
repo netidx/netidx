@@ -121,18 +121,21 @@ fn detect() -> Vec<Detected> {
 pub(super) struct LocalState {
     installs: Vec<Detected>,
     role_menu: ListState,
+    /// Which detected install the lifecycle actions apply to.
+    selected: usize,
 }
 
 impl LocalState {
     pub(super) fn new() -> LocalState {
         let mut role_menu = ListState::default();
         role_menu.select(Some(0));
-        LocalState { installs: detect(), role_menu }
+        LocalState { installs: detect(), role_menu, selected: 0 }
     }
 
     /// Re-run detection (after an install/uninstall completes).
     pub(super) fn refresh(&mut self) {
         self.installs = detect();
+        self.selected = self.selected.min(self.installs.len().saturating_sub(1));
     }
 
     pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
@@ -142,11 +145,31 @@ impl LocalState {
                 Up | Char('k') => self.role_menu.select_previous(),
                 Down | Char('j') => self.role_menu.select_next(),
                 Enter => {
-                    let sel = self.role_menu.selected().unwrap_or(0);
-                    return Some(Action::Install { role: ROLES[sel].role, dry_run: true });
+                    let role = ROLES[self.role_menu.selected().unwrap_or(0)].role;
+                    return Some(Action::Install { role, dry_run: false });
+                }
+                Char('p') => {
+                    let role = ROLES[self.role_menu.selected().unwrap_or(0)].role;
+                    return Some(Action::Install { role, dry_run: true });
                 }
                 _ => {}
             }
+            return None;
+        }
+        match code {
+            Up | Char('k') if self.selected > 0 => self.selected -= 1,
+            Down | Char('j') if self.selected + 1 < self.installs.len() => self.selected += 1,
+            Char('u') => {
+                let d = &self.installs[self.selected];
+                return Some(Action::Uninstall { scope: scope_of(d.record.role), remove_ca: false });
+            }
+            Char('r') => {
+                let d = &self.installs[self.selected];
+                if d.record.network.is_some() {
+                    return Some(Action::Renew { server: d.record.admin_server });
+                }
+            }
+            _ => {}
         }
         None
     }
@@ -168,7 +191,7 @@ impl LocalState {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Install a role ")
-                    .title_bottom(Line::from(" ↑/↓ select · Enter preview ").dim()),
+                    .title_bottom(Line::from(" ↑/↓ select · Enter install · p preview ").dim()),
             )
             .highlight_style(
                 Style::default()
@@ -192,17 +215,37 @@ impl LocalState {
         let n = self.installs.len().max(1) as u32;
         let rows = Layout::vertical(vec![Constraint::Ratio(1, n); self.installs.len()])
             .split(area);
-        for (d, cell) in self.installs.iter().zip(rows.iter()) {
-            render_install(f, d, *cell);
+        for (i, (d, cell)) in self.installs.iter().zip(rows.iter()).enumerate() {
+            render_install(f, d, *cell, i == self.selected);
         }
     }
 }
 
+/// Which service scope a role's OS service lives at — the scope its lifecycle
+/// actions (uninstall) operate on. Mirrors [`probe_service`].
+fn scope_of(role: InstallRole) -> ServiceScope {
+    match role {
+        InstallRole::Workstation => ServiceScope::User,
+        InstallRole::Resolver | InstallRole::Publisher => ServiceScope::System,
+    }
+}
+
 /// Render one detected install: a details column on the left and, when the host
-/// joined a network, its CA identicon + fingerprint on the right.
-fn render_install(f: &mut Frame, d: &Detected, area: Rect) {
+/// joined a network, its CA identicon + fingerprint on the right. The selected
+/// install is highlighted and shows its action keys.
+fn render_install(f: &mut Frame, d: &Detected, area: Rect, selected: bool) {
     let title = format!(" {} ", role_title(d.record.role));
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let mut block = Block::default().borders(Borders::ALL).title(title);
+    if selected {
+        let hints = if d.record.network.is_some() {
+            " u uninstall · r renew "
+        } else {
+            " u uninstall "
+        };
+        block = block
+            .border_style(Style::default().fg(Color::Cyan))
+            .title_bottom(Line::from(hints).dim());
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
 
