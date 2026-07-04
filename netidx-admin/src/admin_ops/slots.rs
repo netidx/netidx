@@ -73,7 +73,8 @@ pub async fn auto_approve(
     }
     // Offline / first-time setup: same TPM gate as init (a plaintext keytab is
     // a CA-key-equivalent credential, so refuse without a TPM unless opted in).
-    ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
+    // Effective decision (flag or interactive confirm), used for the re-seal below.
+    let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
     // Re-minting autorenew removes the old slot first, so the recovery password
     // (not the old keytab) authorizes it — and after a TPM clear the old keytab
     // is unsealable anyway, so recovery is the only way in.

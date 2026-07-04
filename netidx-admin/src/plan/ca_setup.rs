@@ -232,7 +232,9 @@ pub async fn create_vaulted_ca(
     // Refuse to build a CA on a host that can't seal the box credential
     // (or loudly warn under --insecure-no-tpm) BEFORE anything touches
     // disk, so a refused init leaves the dir clean and retryable.
-    tpm_gate(ans, opts.insecure_no_tpm).await?;
+    // The effective decision (flag OR interactive confirm) — used for every
+    // seal below, not just this gate.
+    let insecure_no_tpm = tpm_gate(ans, opts.insecure_no_tpm).await?;
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
 
     // Generate the CA (its key is returned, never written to disk in
@@ -301,8 +303,7 @@ pub async fn create_vaulted_ca(
         // with. Mandatory for a server CA. Authorized by the recovery
         // password we just minted; sealed to the TPM (or plaintext under
         // --insecure-no-tpm, which the gate above already warned about).
-        let keytab =
-            setup_autorenew_slot(ans, &cadir, &recovery_pw, opts.insecure_no_tpm)?;
+        let keytab = setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
         let cfg_path = server_setup::set_ca_autorenew(&keytab)?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
@@ -392,9 +393,14 @@ pub fn announce_founding_policy(ans: &mut dyn Answerer, domain: &str) {
 /// with `--insecure-no-tpm`, in which case warn loudly. The autorenew
 /// credential is sealed to the box's TPM precisely so a stolen backup is
 /// inert; without sealing it sits in plaintext in every backup.
-pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<()> {
+/// Returns the **effective** `insecure_no_tpm` for the rest of the operation:
+/// `false` when a TPM is present (seal normally), `true` when proceeding without
+/// one. The caller MUST thread this into the downstream seal calls
+/// ([`setup_autorenew_slot`]) — the flag alone is not enough, because an
+/// interactive confirm here can turn a `false` flag into an accepted override.
+pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<bool> {
     if netidx_tpm::available() {
-        return Ok(());
+        return Ok(false);
     }
     let mech = netidx_tpm::MECHANISM;
     // The flag pre-authorizes the override; otherwise an interactive frontend
@@ -420,7 +426,7 @@ pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<(
          then contains a credential that unlocks the CA key. Use this for TEST CAs \
          only."
     ));
-    Ok(())
+    Ok(true)
 }
 
 /// Present the recovery password exactly once through the dedicated
