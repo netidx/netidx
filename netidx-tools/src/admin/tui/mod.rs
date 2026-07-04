@@ -22,6 +22,7 @@
 
 mod action;
 mod answer;
+mod lifecycle;
 mod local;
 mod privileged;
 mod remote;

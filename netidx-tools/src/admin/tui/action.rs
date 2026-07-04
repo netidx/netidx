@@ -13,6 +13,7 @@
 use super::answer::TuiAnswerer;
 use anyhow::{Result, bail};
 use netidx_admin::{
+    answer::{Answerer, Field, Progress, Stage},
     plan::install::{
         InstallCommon,
         publisher::{PublisherInput, run_publisher},
@@ -48,6 +49,12 @@ pub(super) enum Action {
     Install { role: InstallRole, dry_run: bool },
     /// Renew this host's certificates now.
     Renew { server: Option<SocketAddr> },
+    /// Reconcile this host's config with the network (add/remove peers).
+    Update { role: InstallRole },
+    /// Graduate a local-only workstation onto a network. `dry_run` previews.
+    Join { dry_run: bool },
+    /// Attach this resolver under a parent by delegation (resolver only).
+    AddParent,
     /// Tear down an install (config + OS service). Terminal-owning; handled
     /// directly by the UI loop, not as an op future. `needs_root` when a
     /// system-scope service must be removed.
@@ -68,6 +75,11 @@ impl Action {
                 format!("{verb} {}", role.as_str())
             }
             Action::Renew { .. } => "Renewing certificates".to_string(),
+            Action::Update { .. } => "Updating".to_string(),
+            Action::Join { dry_run } => {
+                if *dry_run { "Previewing join".to_string() } else { "Joining a network".to_string() }
+            }
+            Action::AddParent => "Adding a parent".to_string(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
         }
     }
@@ -77,7 +89,11 @@ impl Action {
     /// destructive and must be confirmed.
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
-            Action::Install { .. } | Action::Renew { .. } => None,
+            Action::Install { .. }
+            | Action::Renew { .. }
+            | Action::Update { .. }
+            | Action::Join { .. }
+            | Action::AddParent => None,
             Action::Uninstall { .. } => Some(
                 "Remove this install? This stops and removes the OS service and \
                  deletes its configuration (the CA directory is kept)."
@@ -94,8 +110,94 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
     match action {
         Action::Install { role, dry_run } => install(&mut ans, role, dry_run).await,
         Action::Renew { server } => renew(&mut ans, server).await,
+        Action::Update { role } => update(&mut ans, role).await,
+        Action::Join { dry_run } => join(&mut ans, dry_run).await,
+        Action::AddParent => add_parent(&mut ans).await,
         Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
     }
+}
+
+/// Reconcile config with the network and apply the resulting edit plan.
+async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
+    ans.progress(Progress::new(Stage::Discovering, "checking the network for changes…"));
+    let plan = super::lifecycle::update_plan(role).await?;
+    if plan.is_empty() {
+        return Ok(Outcome::plain(
+            "Up to date",
+            vec!["Already in sync with the network — no changes.".to_string()],
+            false,
+        ));
+    }
+    let mut lines: Vec<String> = plan.describe().lines().map(str::to_string).collect();
+    plan.apply()?;
+    lines.push(String::new());
+    lines.push(super::lifecycle::restart_hint(role).to_string());
+    Ok(Outcome { title: "Updated".to_string(), lines, refresh_local: true, install_service: None })
+}
+
+/// Graduate a local-only workstation onto a network.
+async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
+    use netidx_admin::plan::install::workstation::{WorkstationJoinInput, run_workstation_join};
+    let input = WorkstationJoinInput { dry_run, key_protection: None, admin_server: None };
+    run_workstation_join(ans, input).await?;
+    let (title, lines) = if dry_run {
+        ("Join preview", vec!["Preview only — nothing was written.".to_string()])
+    } else {
+        ("Joined", vec!["Joined the network. Restart the local resolver to use it.".to_string()])
+    };
+    Ok(Outcome { title: title.to_string(), lines, refresh_local: !dry_run, install_service: None })
+}
+
+/// Attach this resolver under a parent by delegation (child side).
+#[cfg(unix)]
+async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
+    use netidx_admin::{
+        admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
+        paths,
+        plan::resolve_admin_server_addr,
+    };
+    let rpath = paths::discover_resolver_config()?;
+    let parent = loop {
+        let s = ans.text(Field::ParentAddr, None, None, true).await?.unwrap_or_default();
+        match resolve_admin_server_addr(&s) {
+            Ok(a) => break a,
+            Err(_) if ans.interactive() => ans.warn(&format!(
+                "{s:?} is not a valid admin-server address — enter host or host:port"
+            )),
+            Err(e) => return Err(e),
+        }
+    };
+    let path = ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
+    let out = do_add_parent(ans, &rpath, parent, &path).await?;
+    let mut lines = vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
+    match out.propagation {
+        ClusterPropagation::SingleMember => {}
+        ClusterPropagation::NoAdminServer { members } => lines.push(format!(
+            "{members}-member cluster with no admin server — hand-copy the new parent \
+             block to the other members."
+        )),
+        ClusterPropagation::Pushed(peers) => {
+            let failed = peers.iter().filter(|p| p.error.is_some()).count();
+            if failed == 0 {
+                lines.push(format!("Propagated to {} cluster peer(s).", peers.len()));
+            } else {
+                lines.push(format!(
+                    "{failed} of {} cluster peer(s) could NOT be updated — re-run to converge:",
+                    peers.len()
+                ));
+                for p in peers.iter().filter(|p| p.error.is_some()) {
+                    lines.push(format!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("")));
+                }
+            }
+        }
+    }
+    lines.push("Restart your resolver server(s) to attach under the parent.".to_string());
+    Ok(Outcome { title: "Parent added".to_string(), lines, refresh_local: true, install_service: None })
+}
+
+#[cfg(not(unix))]
+async fn add_parent(_ans: &mut TuiAnswerer) -> Result<Outcome> {
+    bail!("adding a parent (delegation) is only available on unix hosts")
 }
 
 async fn renew(_ans: &mut TuiAnswerer, server: Option<SocketAddr>) -> Result<Outcome> {

@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::path::PathBuf;
 
@@ -115,6 +115,14 @@ fn detect() -> Vec<Detected> {
     out
 }
 
+/// A context menu of the actions available for the selected install — the
+/// role's `netidx admin <template> <subcommand>` surface.
+struct ActionMenu {
+    title: String,
+    items: Vec<(String, Action)>,
+    state: ListState,
+}
+
 /// Tab-1 state: the detected installs plus the role-menu cursor for the
 /// fresh-machine case.
 pub(super) struct LocalState {
@@ -122,19 +130,22 @@ pub(super) struct LocalState {
     role_menu: ListState,
     /// Which detected install the lifecycle actions apply to.
     selected: usize,
+    /// The open action menu for the selected install, if any.
+    menu: Option<ActionMenu>,
 }
 
 impl LocalState {
     pub(super) fn new() -> LocalState {
         let mut role_menu = ListState::default();
         role_menu.select(Some(0));
-        LocalState { installs: detect(), role_menu, selected: 0 }
+        LocalState { installs: detect(), role_menu, selected: 0, menu: None }
     }
 
     /// Re-run detection (after an install/uninstall completes).
     pub(super) fn refresh(&mut self) {
         self.installs = detect();
         self.selected = self.selected.min(self.installs.len().saturating_sub(1));
+        self.menu = None;
     }
 
     pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
@@ -155,22 +166,28 @@ impl LocalState {
             }
             return None;
         }
+        // With the action menu open, keys drive it.
+        if let Some(menu) = &mut self.menu {
+            match code {
+                Up | Char('k') => menu.state.select_previous(),
+                Down | Char('j') => menu.state.select_next(),
+                Esc => self.menu = None,
+                Enter => {
+                    let mut menu = self.menu.take().unwrap();
+                    let sel = menu.state.selected().unwrap_or(0).min(menu.items.len().saturating_sub(1));
+                    return Some(menu.items.remove(sel).1);
+                }
+                _ => {}
+            }
+            return None;
+        }
         match code {
             Up | Char('k') if self.selected > 0 => self.selected -= 1,
             Down | Char('j') if self.selected + 1 < self.installs.len() => self.selected += 1,
-            Char('u') => {
-                let d = &self.installs[self.selected];
-                // A resolver/publisher registers a system-scope service even
-                // with user-scope config, so removing it needs root.
-                let needs_root = d.scope == ServiceScope::System
-                    || matches!(d.record.role, InstallRole::Resolver | InstallRole::Publisher);
-                return Some(Action::Uninstall {
-                    config_scope: d.scope,
-                    config_dir: d.config_dir.clone(),
-                    needs_root,
-                    remove_ca: false,
-                });
-            }
+            // Enter opens the full action menu for the selected install.
+            Enter => self.menu = Some(action_menu(&self.installs[self.selected])),
+            // Quick shortcuts (also in the menu).
+            Char('u') => return Some(uninstall_action(&self.installs[self.selected])),
             Char('r') => {
                 let d = &self.installs[self.selected];
                 if d.record.network.is_some() {
@@ -187,6 +204,9 @@ impl LocalState {
             self.render_role_menu(f, area);
         } else {
             self.render_installs(f, area);
+        }
+        if let Some(menu) = &self.menu {
+            render_menu(f, area, menu);
         }
     }
 
@@ -229,6 +249,67 @@ impl LocalState {
     }
 }
 
+/// Build the action menu for a detected install — its role's post-install
+/// subcommand surface (`netidx admin <template> <subcommand>`).
+fn action_menu(d: &Detected) -> ActionMenu {
+    let role = d.record.role;
+    let networked = d.record.network.is_some();
+    let mut items: Vec<(String, Action)> = Vec::new();
+    if networked {
+        items.push(("Update — sync config with the network".to_string(), Action::Update { role }));
+    }
+    if role == InstallRole::Workstation && !networked {
+        items.push(("Join a network".to_string(), Action::Join { dry_run: false }));
+        items.push(("Preview join (dry run)".to_string(), Action::Join { dry_run: true }));
+    }
+    if role == InstallRole::Resolver {
+        items.push(("Add a parent (delegate under)".to_string(), Action::AddParent));
+    }
+    if networked {
+        items.push(("Renew certificates".to_string(), Action::Renew { server: d.record.admin_server }));
+    }
+    items.push(("Uninstall".to_string(), uninstall_action(d)));
+    let mut state = ListState::default();
+    state.select(Some(0));
+    ActionMenu { title: format!("{} actions", role_title(role)), items, state }
+}
+
+/// The uninstall action for a detected install (also the `u` shortcut).
+fn uninstall_action(d: &Detected) -> Action {
+    // A resolver/publisher registers a system-scope service even with user-scope
+    // config, so removing it needs root.
+    let needs_root = d.scope == ServiceScope::System
+        || matches!(d.record.role, InstallRole::Resolver | InstallRole::Publisher);
+    Action::Uninstall {
+        config_scope: d.scope,
+        config_dir: d.config_dir.clone(),
+        needs_root,
+        remove_ca: false,
+    }
+}
+
+/// Render the action menu as a centered overlay.
+fn render_menu(f: &mut Frame, screen: Rect, menu: &ActionMenu) {
+    let items: Vec<ListItem> =
+        menu.items.iter().map(|(label, _)| ListItem::new(label.clone())).collect();
+    let h = (menu.items.len() as u16 + 3).min(screen.height.saturating_sub(2));
+    let area = widgets::centered(56, h, screen);
+    f.render_widget(Clear, area);
+    let mut state = menu.state.clone();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", menu.title))
+                .title_bottom(Line::from(" ↑/↓ · Enter run · Esc close ").dim()),
+        )
+        .highlight_style(
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 /// Render one detected install: a details column on the left and, when the host
 /// joined a network, its CA identicon + fingerprint on the right. The selected
 /// install is highlighted and shows its action keys.
@@ -236,14 +317,9 @@ fn render_install(f: &mut Frame, d: &Detected, area: Rect, selected: bool) {
     let title = format!(" {} ", role_title(d.record.role));
     let mut block = Block::default().borders(Borders::ALL).title(title);
     if selected {
-        let hints = if d.record.network.is_some() {
-            " u uninstall · r renew "
-        } else {
-            " u uninstall "
-        };
         block = block
             .border_style(Style::default().fg(Color::Cyan))
-            .title_bottom(Line::from(hints).dim());
+            .title_bottom(Line::from(" Enter actions · u uninstall ").dim());
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
