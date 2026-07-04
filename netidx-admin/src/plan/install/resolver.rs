@@ -14,7 +14,7 @@ use super::{
     prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
 };
 use crate::{
-    admin_proto::{InfoAuth, NodeKind},
+    admin_proto::{InfoAuth, NodeKind, Role},
     answer::{Answerer, Field},
     paths,
     plan::{
@@ -155,6 +155,33 @@ pub async fn run_resolver(
     } else {
         AdminServers::NotProbed
     };
+    // Interactive delegation offer: if we joined an EXISTING network that runs a
+    // resolver, offer to become a delegated SUBTREE of it (its own /path,
+    // referred up to the parent) instead of a plain peer member of the root
+    // cluster. Gated on `Role::Resolver` — there must be an upstream resolver to
+    // delegate FROM, else the option is meaningless. The strict CLI drives this
+    // with --parent-admin-server/--delegate-subtree, so it only fires
+    // interactively and when neither is already set. Setting these three inputs
+    // routes the rest of the install down the existing delegated-child path.
+    #[cfg(unix)]
+    if ans.interactive()
+        && input.parent_admin_server.is_none()
+        && input.delegate_subtree.is_none()
+        && let Some(net) = probe.have()
+        && net.identity.roles.contains(&Role::Resolver)
+        && let Some(parent_addr) = net.info.reached.first().copied()
+    {
+        if let Some(subtree) = ans
+            .text(Field::DelegateSubtree, None, None, false)
+            .await?
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            input.parent_admin_server = Some(parent_addr);
+            input.delegate_subtree = Some(subtree.clone());
+            input.base = subtree;
+        }
+    }
     // A delegated child (`--parent-admin-server`) keeps the data-plane auth
     // the operator chose — a /eu subtree may run krb5 under a TLS parent —
     // so only the trust-domain/CA decision comes from the parent, never its
