@@ -264,7 +264,11 @@ fn action_menu(d: &Detected) -> ActionMenu {
     }
     if role == InstallRole::Resolver {
         items.push(("Add a parent (delegate under)".to_string(), Action::AddParent));
-        if d.record.admin_server.is_some() {
+        // Delegation requests land on the parent's *own* admin server, so offer
+        // the review shortcut when this host runs one — not when `record.
+        // admin_server` is set (that names the admin server this node enrolls
+        // against, and is `None` on the CA host, which is exactly who reviews).
+        if runs_local_admin_server() {
             items.push((
                 "Review delegation requests".to_string(),
                 Action::ReviewDelegations,
@@ -278,6 +282,18 @@ fn action_menu(d: &Detected) -> ActionMenu {
     let mut state = ListState::default();
     state.select(Some(0));
     ActionMenu { title: format!("{} actions", role_title(role)), items, state }
+}
+
+/// Whether this host runs its own admin server (so it can have a delegation
+/// queue to review). Unix-only — remote admin is unix-only.
+#[cfg(unix)]
+fn runs_local_admin_server() -> bool {
+    netidx_admin::admin_ops::local_admin_server_listen().is_some()
+}
+
+#[cfg(not(unix))]
+fn runs_local_admin_server() -> bool {
+    false
 }
 
 /// The uninstall action for a detected install (also the `u` shortcut).
