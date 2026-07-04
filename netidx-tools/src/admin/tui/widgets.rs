@@ -36,6 +36,15 @@ pub(super) fn fmt_age(secs: u64) -> String {
     }
 }
 
+/// A certificate's `not_after` unix timestamp as a `YYYY-MM-DD` expiry date
+/// (or the raw seconds if it somehow falls outside chrono's range).
+pub(super) fn fmt_expiry(not_after_unix: u64) -> String {
+    match chrono::DateTime::from_timestamp(not_after_unix as i64, 0) {
+        Some(dt) => dt.format("%Y-%m-%d").to_string(),
+        None => format!("@{not_after_unix}"),
+    }
+}
+
 /// A rectangle centered in `area`, `width`×`height` cells, clamped to `area`.
 pub(super) fn centered(width: u16, height: u16, area: Rect) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])

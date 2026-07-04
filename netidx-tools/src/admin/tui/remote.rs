@@ -42,6 +42,7 @@ pub(super) struct RemoteConn {
 pub(super) enum Panel {
     Queue,
     Delegations,
+    Revocation,
 }
 
 impl Panel {
@@ -49,6 +50,7 @@ impl Panel {
         match self {
             Panel::Queue => "Enrollment queue",
             Panel::Delegations => "Delegation requests",
+            Panel::Revocation => "Issued certificates",
         }
     }
 }
@@ -72,6 +74,10 @@ pub(super) enum RowKey {
     None,
     /// A full fingerprint code (queue enrollment, delegation request).
     Code(String),
+    /// A certificate: its serial plus the per-key glyph shown for it (`None`
+    /// when the stored glyph is empty/unparseable — a legacy directly-issued
+    /// cert, revocable by its unique serial without a glyph assertion).
+    Cert { serial: u64, glyph: Option<Fingerprint> },
 }
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
@@ -90,6 +96,9 @@ pub(super) enum RemoteAction {
     ApproveDelegation { conn: RemoteConn, code: String },
     /// Deny one pending delegation by its full code (reason prompted).
     DenyDelegation { conn: RemoteConn, code: String },
+    /// Revoke one issued certificate by serial (glyph-gated, reason prompted).
+    /// Irreversible — gated by a yes/no confirm before it runs.
+    Revoke { conn: RemoteConn, serial: u64, glyph: Option<Fingerprint> },
 }
 
 impl RemoteAction {
@@ -102,6 +111,19 @@ impl RemoteAction {
             RemoteAction::Deny { .. } => "Denying".to_string(),
             RemoteAction::ApproveDelegation { .. } => "Approving delegation".to_string(),
             RemoteAction::DenyDelegation { .. } => "Denying delegation".to_string(),
+            RemoteAction::Revoke { .. } => "Revoking certificate".to_string(),
+        }
+    }
+
+    /// A yes/no confirmation to require before running, or `None`. Only the
+    /// irreversible revoke is gated.
+    pub(super) fn confirm_message(&self) -> Option<String> {
+        match self {
+            RemoteAction::Revoke { serial, .. } => Some(format!(
+                "Revoke certificate serial {serial}? This is irreversible — the \
+                 cluster re-signs its CRL and the holder can no longer authenticate."
+            )),
+            _ => None,
         }
     }
 
@@ -115,7 +137,8 @@ impl RemoteAction {
             | RemoteAction::ApproveRenewals { conn }
             | RemoteAction::Deny { conn, .. }
             | RemoteAction::ApproveDelegation { conn, .. }
-            | RemoteAction::DenyDelegation { conn, .. } => Some(conn.confirmed_fp),
+            | RemoteAction::DenyDelegation { conn, .. }
+            | RemoteAction::Revoke { conn, .. } => Some(conn.confirmed_fp),
         }
     }
 }
@@ -141,6 +164,9 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
             approve_delegation(ans, conn, code).await
         }
         RemoteAction::DenyDelegation { conn, code } => deny_delegation(ans, conn, code).await,
+        RemoteAction::Revoke { conn, serial, glyph } => {
+            revoke(ans, conn, serial, glyph).await
+        }
     }
 }
 
@@ -191,6 +217,7 @@ async fn refresh(
     let rows = match panel {
         Panel::Queue => queue_rows(ans, &conn).await?,
         Panel::Delegations => delegation_rows(ans, &conn).await?,
+        Panel::Revocation => revocation_rows(ans, &conn).await?,
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
 }
@@ -411,6 +438,77 @@ async fn deny_delegation(
     ))
 }
 
+#[cfg(unix)]
+async fn revocation_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
+    use netidx_admin::admin_ops::revoke::issued;
+    let entries = issued(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        false, // live certificates only — the revoke target set
+        None,
+    )
+    .await?;
+    Ok(entries.iter().map(revocation_row).collect())
+}
+
+/// Format one issued certificate into a display row + its revoke key (serial +
+/// its per-key glyph, `None` when the stored glyph is empty/unparseable).
+#[cfg(unix)]
+fn revocation_row(e: &netidx_admin::admin_proto::IssuedEntry) -> PanelRow {
+    let glyph = Fingerprint::parse_text(&e.spki_fp).ok();
+    let short = match &glyph {
+        Some(g) => g.text().split(' ').take(2).collect::<Vec<_>>().join(" "),
+        None => "(no glyph)".to_string(),
+    };
+    let name = if e.name.is_empty() { "(no DNS SAN)" } else { e.name.as_str() };
+    PanelRow {
+        text: format!(
+            "#{:<6} {name}  exp {}  {short}",
+            e.serial,
+            widgets::fmt_expiry(e.not_after_unix),
+        ),
+        key: RowKey::Cert { serial: e.serial, glyph },
+    }
+}
+
+#[cfg(unix)]
+async fn revoke(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    serial: u64,
+    glyph: Option<Fingerprint>,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::{
+        admin_ops::revoke::{RevokeSelector, revoke},
+        answer::Answerer,
+    };
+    let reason = ans
+        .text(netidx_admin::answer::Field::RevokeReason, None, Some("revoked"), true)
+        .await?
+        .unwrap_or_else(|| "revoked".to_string());
+    let out = revoke(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        RevokeSelector::Serial(serial),
+        glyph, // assert the glyph we displayed (skipped for a legacy empty glyph)
+        &reason,
+    )
+    .await?;
+    let mut lines: Vec<String> =
+        out.revoked.iter().map(|e| format!("Revoked #{} {}.", e.serial, e.name)).collect();
+    for w in &out.warnings {
+        lines.push(format!("warning: {w}"));
+    }
+    let rows = revocation_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after("Revoked", lines, Panel::Revocation, rows))
+}
+
 // ---- UI state (cross-platform) --------------------------------------------
 
 /// Which Tab-2 screen is showing.
@@ -438,7 +536,7 @@ pub(super) struct RemoteState {
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 2] = [Panel::Queue, Panel::Delegations];
+const PANELS: [Panel; 3] = [Panel::Queue, Panel::Delegations, Panel::Revocation];
 
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
@@ -542,6 +640,7 @@ impl RemoteState {
             _ => match panel {
                 Panel::Queue => return self.on_key_queue(code, conn),
                 Panel::Delegations => return self.on_key_delegations(code, conn),
+                Panel::Revocation => return self.on_key_revocation(code, conn),
             },
         }
         None
@@ -572,12 +671,29 @@ impl RemoteState {
         }
     }
 
+    fn on_key_revocation(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+        match code {
+            KeyCode::Char('x') => self.selected_cert().map(|(serial, glyph)| {
+                Action::Remote(RemoteAction::Revoke { conn, serial, glyph })
+            }),
+            _ => None,
+        }
+    }
+
     /// The full code of the selected row, if it carries one (not a renewal /
     /// unparseable / non-code row).
     fn selected_code(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Code(c) => Some(c.clone()),
-            RowKey::None => None,
+            RowKey::None | RowKey::Cert { .. } => None,
+        }
+    }
+
+    /// The selected certificate's serial + glyph, if the row is a cert row.
+    fn selected_cert(&self) -> Option<(u64, Option<Fingerprint>)> {
+        match &self.rows.get(self.list.selected()?)?.key {
+            RowKey::Cert { serial, glyph } => Some((*serial, *glyph)),
+            RowKey::None | RowKey::Code(_) => None,
         }
     }
 
@@ -659,6 +775,7 @@ impl RemoteState {
         let hint = match panel {
             Panel::Queue => " a approve · d deny · R renewals · r refresh · Esc back ",
             Panel::Delegations => " a approve · d deny · r refresh · Esc back ",
+            Panel::Revocation => " x revoke · r refresh · Esc back ",
         };
         let mut st = self.list.clone();
         let list = List::new(items)

@@ -164,8 +164,8 @@ impl Action {
             | Action::Renew { .. }
             | Action::Update { .. }
             | Action::Join { .. }
-            | Action::AddParent
-            | Action::Remote(_) => None,
+            | Action::AddParent => None,
+            Action::Remote(ra) => ra.confirm_message(),
             Action::Uninstall { .. } => Some(
                 "Remove this install? This stops and removes the OS service and \
                  deletes its configuration (the CA directory is kept)."
