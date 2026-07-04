@@ -176,8 +176,8 @@ impl Field {
             Listen => FieldInfo {
                 flag: "--listen",
                 label: "listen address",
-                help: "The host:port the resolver server accepts connections \
-                       on.",
+                help: "Where the resolver server accepts connections — an IP \
+                       (you'll be asked for the port next) or a full host:port.",
             },
             Bind => FieldInfo {
                 flag: "--bind",
@@ -346,7 +346,8 @@ impl Field {
                 flag: "--parent-addr",
                 label: "parent resolver address",
                 help: "The parent resolver this node refers up to for paths \
-                       outside its own subtree.",
+                       outside its own subtree — an IP (you'll be asked for the \
+                       port) or a full host:port. Leave blank for a standalone node.",
             },
             ParentPath => FieldInfo {
                 flag: "--parent-path",

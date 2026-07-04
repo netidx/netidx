@@ -434,13 +434,14 @@ fn launch(
 ) {
     app.begin(action.label());
     match action {
-        Action::Uninstall { scope, remove_ca } => {
-            let out = privileged::uninstall(terminal, scope, remove_ca).map(|msg| Outcome {
-                title: "Uninstalled".to_string(),
-                lines: vec![msg],
-                refresh_local: true,
-                install_service: None,
-            });
+        Action::Uninstall { config_scope, config_dir, needs_root, remove_ca } => {
+            let out = privileged::uninstall(terminal, config_scope, config_dir, needs_root, remove_ca)
+                .map(|msg| Outcome {
+                    title: "Uninstalled".to_string(),
+                    lines: vec![msg],
+                    refresh_local: true,
+                    install_service: None,
+                });
             app.finish_op(out);
         }
         op_action => {

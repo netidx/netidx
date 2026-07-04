@@ -22,7 +22,7 @@ use netidx_admin::{
     renewd,
     service::ServiceScope,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
@@ -48,9 +48,15 @@ pub(super) enum Action {
     Install { role: InstallRole, dry_run: bool },
     /// Renew this host's certificates now.
     Renew { server: Option<SocketAddr> },
-    /// Tear down an install (config + OS service). Privileged; handled directly
-    /// by the UI loop, not as an op future.
-    Uninstall { scope: ServiceScope, remove_ca: bool },
+    /// Tear down an install (config + OS service). Terminal-owning; handled
+    /// directly by the UI loop, not as an op future. `needs_root` when a
+    /// system-scope service must be removed.
+    Uninstall {
+        config_scope: ServiceScope,
+        config_dir: PathBuf,
+        needs_root: bool,
+        remove_ca: bool,
+    },
 }
 
 impl Action {

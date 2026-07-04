@@ -18,6 +18,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+use std::path::PathBuf;
 
 /// A role the operator can install on a fresh machine.
 #[derive(Clone, Copy)]
@@ -57,18 +58,21 @@ const ROLES: [RoleChoice; 3] = [
 struct Detected {
     record: InstallRecord,
     service: ServiceStatus,
-    config_root: String,
+    /// Where the config + provenance record live (`~/.config` = user, `/etc` =
+    /// system) — the scope a teardown targets.
+    scope: ServiceScope,
+    config_dir: PathBuf,
     ca: Option<Fingerprint>,
 }
 
 impl Detected {
-    fn probe(record: InstallRecord, config_root: String) -> Detected {
+    fn probe(record: InstallRecord, scope: ServiceScope, config_dir: PathBuf) -> Detected {
         let ca = record
             .network
             .as_ref()
             .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok());
         let service = probe_service(&record);
-        Detected { record, service, config_root, ca }
+        Detected { record, service, scope, config_dir, ca }
     }
 }
 
@@ -97,20 +101,15 @@ fn detect() -> Vec<Detected> {
     let mut out = Vec::new();
     let user_path = paths::user_install_record().ok();
     if let Ok(Some(record)) = InstallRecord::load_default() {
-        let root = paths::user_config_root()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        out.push(Detected::probe(record, root));
+        let dir = paths::user_config_root().unwrap_or_default();
+        out.push(Detected::probe(record, ServiceScope::User, dir));
     }
     let sys_path = paths::system_install_record();
     // Skip the system record if it's the very same file we already read as the
     // user record (unusual, but possible if the two roots coincide).
     if sys_path.exists() && user_path.as_deref() != Some(sys_path.as_path()) {
         if let Ok(record) = InstallRecord::load(&sys_path) {
-            out.push(Detected::probe(
-                record,
-                paths::system_config_root().display().to_string(),
-            ));
+            out.push(Detected::probe(record, ServiceScope::System, paths::system_config_root()));
         }
     }
     out
@@ -161,7 +160,16 @@ impl LocalState {
             Down | Char('j') if self.selected + 1 < self.installs.len() => self.selected += 1,
             Char('u') => {
                 let d = &self.installs[self.selected];
-                return Some(Action::Uninstall { scope: scope_of(d.record.role), remove_ca: false });
+                // A resolver/publisher registers a system-scope service even
+                // with user-scope config, so removing it needs root.
+                let needs_root = d.scope == ServiceScope::System
+                    || matches!(d.record.role, InstallRole::Resolver | InstallRole::Publisher);
+                return Some(Action::Uninstall {
+                    config_scope: d.scope,
+                    config_dir: d.config_dir.clone(),
+                    needs_root,
+                    remove_ca: false,
+                });
             }
             Char('r') => {
                 let d = &self.installs[self.selected];
@@ -221,15 +229,6 @@ impl LocalState {
     }
 }
 
-/// Which service scope a role's OS service lives at — the scope its lifecycle
-/// actions (uninstall) operate on. Mirrors [`probe_service`].
-fn scope_of(role: InstallRole) -> ServiceScope {
-    match role {
-        InstallRole::Workstation => ServiceScope::User,
-        InstallRole::Resolver | InstallRole::Publisher => ServiceScope::System,
-    }
-}
-
 /// Render one detected install: a details column on the left and, when the host
 /// joined a network, its CA identicon + fingerprint on the right. The selected
 /// install is highlighted and shows its action keys.
@@ -283,7 +282,7 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
         lines.push(kv("Admin server", addr.to_string()));
     }
     lines.push(service_line(d.service));
-    lines.push(kv("Config", d.config_root.clone()));
+    lines.push(kv("Config", d.config_dir.display().to_string()));
     lines.push(kv("Installed", fmt_unix(r.created_unix)));
     lines
 }

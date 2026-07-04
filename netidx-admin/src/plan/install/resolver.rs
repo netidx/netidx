@@ -10,8 +10,8 @@
 
 use super::{
     DEFAULT_RESOLVER_NAME, DEFAULT_TLS_DOMAIN, InstallCommon, detect_resolver_shape,
-    finish_with, install_renew_unit, network_provenance, prompt_resolver_own_tls_name,
-    prompt_resolver_port, resolve_netidx_binary, resolve_units_dir,
+    finish_with, install_renew_unit, network_provenance, prompt_ip_or_addr,
+    prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
 };
 use crate::{
     admin_proto::{InfoAuth, NodeKind},
@@ -206,21 +206,12 @@ pub async fn run_resolver(
                  NETIDX_PUBLIC_IP / pass --listen).",
             );
         }
-        // Ask for the IP and port separately. The IP is the one thing the
-        // operator actually has to know; the port has a conventional default.
+        // Accept either a bare IP (then ask the port) or a full host:port. The
+        // IP is the one thing the operator has to know; the port defaults.
         let default_ip = s.advertised_ip.map(|ip| ip.to_string());
-        let ip: IpAddr = ans
-            .text(Field::Listen, None, default_ip.as_deref(), default_ip.is_none())
+        prompt_ip_or_addr(ans, Field::Listen, default_ip.as_deref(), default_ip.is_none())
             .await?
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<IpAddr>())
-            .transpose()
-            .context("invalid advertised IP")?
-            .or(s.advertised_ip)
-            .context("an advertised IP is required (pass --listen)")?;
-        prompt_resolver_port(ans, ip, None).await?
+            .context("an advertised address is required (pass --listen)")?
     };
     // Bind: silent in the normal case (defaults to listen.ip()), but
     // level-1 prompted in the cloud-elastic case where the resolver

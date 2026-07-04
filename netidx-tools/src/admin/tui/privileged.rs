@@ -42,47 +42,57 @@ pub(super) fn install_service(
             let for_user = super::super::service::resolve_for_user(None)?;
             let exe = current_exe()?;
             let args = install_argv(&for_user, &exe);
-            run_privileged(terminal, &exe, &args, "install the system service")?;
+            run_privileged(terminal, &exe, &args, true, "install the system service")?;
             Ok("registered the system service (netidx)".to_string())
         }
     }
 }
 
-/// Tear down an install at `scope`, returning a human summary line. User scope
-/// runs in-process; system scope runs `netidx admin uninstall` as root.
+/// Tear down an install whose config lives at `config_scope` in `config_dir`.
+///
+/// Runs the full `netidx admin uninstall` command so its cross-scope logic
+/// applies — a resolver/publisher writes **user** config but registers a
+/// **system** service, so a user-scope teardown must also drop that templated
+/// service (which needs root; `needs_root` says so). A workstation (user config
+/// + user service) needs no root. `--config-dir` is passed explicitly so it
+/// still targets the right directory when run as root, and `--for-user` names
+/// the system-service instance.
 pub(super) fn uninstall(
     terminal: &mut ratatui::DefaultTerminal,
-    scope: ServiceScope,
+    config_scope: ServiceScope,
+    config_dir: std::path::PathBuf,
+    needs_root: bool,
     remove_ca: bool,
 ) -> Result<String> {
-    use netidx_admin::uninstall::{UninstallParams, uninstall as do_uninstall};
+    let exe = current_exe()?;
+    let mut args = vec![
+        "admin".to_string(),
+        "uninstall".to_string(),
+        "--scope".to_string(),
+        scope_flag(config_scope).to_string(),
+        "--config-dir".to_string(),
+        config_dir.display().to_string(),
+        "--yes".to_string(),
+    ];
+    if needs_root {
+        // Name the templated system service's instance user explicitly — under
+        // `su` there is no $SUDO_USER for the child to infer it from.
+        let for_user = super::super::service::resolve_for_user(None)?;
+        args.push("--for-user".to_string());
+        args.push(for_user);
+    }
+    if remove_ca {
+        args.push("--with-ca".to_string());
+    }
+    run_privileged(terminal, &exe, &args, needs_root, "tear down the install")?;
+    Ok("removed the install".to_string())
+}
+
+/// The `--scope` flag value for a scope.
+fn scope_flag(scope: ServiceScope) -> &'static str {
     match scope {
-        ServiceScope::User => {
-            let report = do_uninstall(&UninstallParams {
-                scope: ServiceScope::User,
-                service_name: ServiceParams::DEFAULT_NAME.to_string(),
-                for_user: None,
-                config_dir: None,
-                remove_ca,
-                dry_run: false,
-            })?;
-            Ok(format!("removed {} path(s)", report.removed.len()))
-        }
-        ServiceScope::System => {
-            let exe = current_exe()?;
-            let mut args = vec![
-                "admin".to_string(),
-                "uninstall".to_string(),
-                "--scope".to_string(),
-                "system".to_string(),
-                "--yes".to_string(),
-            ];
-            if remove_ca {
-                args.push("--with-ca".to_string());
-            }
-            run_privileged(terminal, &exe, &args, "tear down the system install")?;
-            Ok("removed the system install".to_string())
-        }
+        ServiceScope::User => "user",
+        ServiceScope::System => "system",
     }
 }
 
@@ -117,17 +127,21 @@ fn current_exe() -> Result<std::path::PathBuf> {
     std::env::current_exe().context("could not determine the current netidx binary")
 }
 
-/// Suspend the TUI, run `<exe> <args>` as root (via sudo or su), and resume.
+/// Suspend the TUI, run `<exe> <args>` (as root via sudo/su when `become_root`,
+/// else as the current user), and resume.
 #[cfg(unix)]
 fn run_privileged(
     terminal: &mut ratatui::DefaultTerminal,
     exe: &Path,
     args: &[String],
+    become_root: bool,
     what: &str,
 ) -> Result<()> {
     with_suspended(terminal, || {
-        let esc = detect_escalation();
-        println!("\nAdministrator privileges are needed to {what}.");
+        let esc = if become_root { detect_escalation() } else { Escalation::Direct };
+        if become_root {
+            println!("\nAdministrator privileges are needed to {what}.");
+        }
         let status = match esc {
             Escalation::Direct => Command::new(exe).args(args).status(),
             Escalation::Sudo => Command::new("sudo").arg(exe).args(args).status(),
@@ -155,6 +169,7 @@ fn run_privileged(
     _terminal: &mut ratatui::DefaultTerminal,
     _exe: &Path,
     _args: &[String],
+    _become_root: bool,
     what: &str,
 ) -> Result<()> {
     bail!(

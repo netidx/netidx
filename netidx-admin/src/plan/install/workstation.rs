@@ -6,9 +6,8 @@
 //! local-only workstation onto a network without a reinstall.
 
 use super::{
-    InstallCommon, finish_with, install_renew_unit, network_provenance,
-    prompt_resolver_port, prompt_resolver_tls_name, resolve_netidx_binary,
-    resolve_units_dir, suggest_client_san,
+    InstallCommon, finish_with, install_renew_unit, network_provenance, prompt_ip_or_addr,
+    prompt_resolver_tls_name, resolve_netidx_binary, resolve_units_dir, suggest_client_san,
 };
 use crate::{
     admin_proto::NodeKind,
@@ -26,10 +25,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use compact_str::format_compact;
-use std::{
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-};
+use std::{net::SocketAddr, path::PathBuf};
 
 /// Typed inputs for [`run_workstation`] — the resolved form of the clap
 /// `WorkstationFlags`.
@@ -305,12 +301,10 @@ async fn prompt_parent_referral(
     kp: Option<KeyProtArg>,
     probe: &AdminServers,
 ) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
-    let addr = match ans.text(Field::ParentAddr, None, None, false).await? {
-        Some(s) if !s.trim().is_empty() => {
-            let ip: IpAddr = s.trim().parse().context("invalid resolver IP")?;
-            prompt_resolver_port(ans, ip, None).await?
-        }
-        _ => return Ok(None),
+    let addr = match prompt_ip_or_addr(ans, Field::ParentAddr, None, false).await? {
+        Some(addr) => addr,
+        // Blank ⇒ no parent (a standalone workstation).
+        None => return Ok(None),
     };
     let kind: AuthKind = ans
         .choice(

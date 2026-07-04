@@ -329,31 +329,65 @@ pub const DEFAULT_RESOLVER_NAME: &str = "resolver";
 /// `local` covers the single-host / no-DNS case the way `BindCfg::Local` does).
 pub const DEFAULT_TLS_DOMAIN: &str = "local";
 
-/// Prompt for a resolver port (default 4564) and pair it with `ip`.
+/// Prompt for a resolver port (default 4564) and pair it with `ip`. Re-asks on a
+/// malformed port when interactive rather than aborting the install.
 pub async fn prompt_resolver_port(
     ans: &mut dyn Answerer,
     ip: IpAddr,
     provided: Option<u16>,
 ) -> Result<SocketAddr> {
-    let port = match provided {
-        Some(p) => p,
-        None => ans
-            .text(
-                Field::ResolverPort,
-                None,
-                Some(&DEFAULT_RESOLVER_PORT.to_string()),
-                false,
-            )
-            .await?
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<u16>())
-            .transpose()
-            .context("invalid resolver port")?
-            .unwrap_or(DEFAULT_RESOLVER_PORT),
-    };
-    Ok(SocketAddr::new(ip, port))
+    if let Some(p) = provided {
+        return Ok(SocketAddr::new(ip, p));
+    }
+    let default = DEFAULT_RESOLVER_PORT.to_string();
+    loop {
+        let raw = ans.text(Field::ResolverPort, None, Some(&default), false).await?;
+        let s = raw.as_deref().map(str::trim).unwrap_or("");
+        if s.is_empty() {
+            return Ok(SocketAddr::new(ip, DEFAULT_RESOLVER_PORT));
+        }
+        match s.parse::<u16>() {
+            Ok(port) => return Ok(SocketAddr::new(ip, port)),
+            Err(_) if ans.interactive() => {
+                ans.warn(&format!("{s:?} is not a valid port (1-65535) — try again"))
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context("invalid resolver port")),
+        }
+    }
+}
+
+/// Ask for a resolver address as either a bare IP (then prompt for the port) or
+/// a full `host:port`, re-asking on a malformed entry instead of aborting the
+/// whole install. `default_ip` is offered on blank input; `required` makes a
+/// value mandatory. Returns `None` only when not required and left blank.
+///
+/// In non-interactive (strict) mode the underlying [`Answerer::text`] errors on
+/// a missing required value and this bails on a bad one, so it never loops.
+pub async fn prompt_ip_or_addr(
+    ans: &mut dyn Answerer,
+    field: Field,
+    default_ip: Option<&str>,
+    required: bool,
+) -> Result<Option<SocketAddr>> {
+    loop {
+        let raw = ans.text(field, None, default_ip, required).await?;
+        let s = raw.as_deref().map(str::trim).unwrap_or("").to_string();
+        if s.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Some(addr));
+        }
+        if let Ok(ip) = s.parse::<IpAddr>() {
+            return Ok(Some(prompt_resolver_port(ans, ip, None).await?));
+        }
+        if !ans.interactive() {
+            bail!("{s:?} is not a valid IP or host:port (pass {})", field.flag());
+        }
+        ans.warn(&format!(
+            "{s:?} is not a valid IP or host:port — enter e.g. 192.168.1.10 or 192.168.1.10:4564"
+        ));
+    }
 }
 
 /// Best-effort default for the TLS name a resolver presents. Probes the
