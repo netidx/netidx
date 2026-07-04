@@ -32,7 +32,7 @@ use action::{Action, Outcome};
 use answer::{Modal, TuiAnswerer, UiRequest};
 use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
+use futures::{StreamExt, stream::Fuse};
 use netidx_admin::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
@@ -411,7 +411,9 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiRequest>();
     let mut app = App::new();
     let mut op: Option<OpFuture> = None;
-    let mut events = EventStream::new().fuse();
+    // The crossterm reader. `None` only during a terminal-suspend, so its
+    // background thread can't fight the child (editor / sudo) for stdin.
+    let mut events: Option<Fuse<EventStream>> = Some(EventStream::new().fuse());
     while !app.should_quit {
         terminal.draw(|f| app.render(f))?;
         tokio::select! {
@@ -420,19 +422,26 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 // The editor request owns the terminal (suspend → $EDITOR →
                 // resume), so the loop services it here rather than as a modal.
                 answer::UiRequest::Editor { seed, validate, reply } => {
-                    let _ = reply.send(privileged::edit_in_terminal(terminal, &seed, validate));
+                    let edited =
+                        run_suspended(&mut events, || privileged::edit_in_terminal(terminal, &seed, validate));
+                    let _ = reply.send(edited);
                 }
                 other => app.handle_request(other),
             },
             out = async { match op.as_mut() { Some(f) => f.await, None => future::pending().await } } => {
                 op = None;
-                let result = complete_op(terminal, &mut app, out);
+                let result = complete_op(terminal, &mut app, &mut events, out);
                 app.finish_op(result);
             }
-            ev = events.select_next_some() => match ev {
+            ev = async {
+                match events.as_mut() {
+                    Some(e) => e.select_next_some().await,
+                    None => future::pending().await,
+                }
+            } => match ev {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                     if let Some(action) = app.on_key(k.code, k.modifiers) {
-                        launch(terminal, &mut app, &ui_tx, &mut op, action);
+                        launch(terminal, &mut app, &ui_tx, &mut op, &mut events, action);
                     }
                 }
                 Ok(_) => {}
@@ -446,6 +455,20 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
+/// Run `f` — a terminal-owning child (the `$EDITOR`, or a privileged
+/// subprocess) — with the crossterm reader stopped. Its background thread reads
+/// stdin continuously, so leaving it alive during a full-screen child (vim)
+/// steals the child's keystrokes and desyncs the escape-sequence parser on
+/// resume (Enter/Esc stop arriving). Dropping it first frees stdin; a fresh
+/// reader afterward starts with a clean parser and discards whatever the child
+/// left buffered — exactly what we want.
+fn run_suspended<T>(events: &mut Option<Fuse<EventStream>>, f: impl FnOnce() -> T) -> T {
+    *events = None;
+    let out = f();
+    *events = Some(EventStream::new().fuse());
+    out
+}
+
 /// Start an action: op-future actions (install / renew) become the polled
 /// `op`; the privileged, synchronous uninstall runs inline (it owns the
 /// terminal to suspend for a password prompt).
@@ -454,12 +477,15 @@ fn launch(
     app: &mut App,
     ui_tx: &mpsc::UnboundedSender<UiRequest>,
     op: &mut Option<OpFuture>,
+    events: &mut Option<Fuse<EventStream>>,
     action: Action,
 ) {
     app.begin(action.label());
     match action {
         Action::Uninstall { config_scope, config_dir, needs_root, remove_ca } => {
-            let out = privileged::uninstall(terminal, config_scope, config_dir, needs_root, remove_ca)
+            let out = run_suspended(events, || {
+                privileged::uninstall(terminal, config_scope, config_dir, needs_root, remove_ca)
+            })
                 .map(|msg| Outcome {
                     title: "Uninstalled".to_string(),
                     lines: vec![msg],
@@ -488,12 +514,13 @@ fn launch(
 fn complete_op(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
+    events: &mut Option<Fuse<EventStream>>,
     out: Result<Outcome>,
 ) -> Result<Outcome> {
     let mut outcome = out?;
     if let Some(scope) = outcome.install_service.take() {
         app.log.push(Line::from("registering the OS service…"));
-        match privileged::install_service(terminal, scope) {
+        match run_suspended(events, || privileged::install_service(terminal, scope)) {
             Ok(msg) => outcome.lines.push(msg),
             Err(e) => outcome.lines.push(format!("OS service registration failed: {e:#}")),
         }
