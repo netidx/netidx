@@ -46,6 +46,7 @@ pub(super) enum Panel {
     Delegations,
     Roster,
     Revocation,
+    Perms,
 }
 
 impl Panel {
@@ -55,7 +56,14 @@ impl Panel {
             Panel::Delegations => "Delegation requests",
             Panel::Roster => "Admin roster",
             Panel::Revocation => "Issued certificates",
+            Panel::Perms => "Permissions",
         }
+    }
+
+    /// Whether this panel first needs a target netidx path (the map routes it to
+    /// the cluster owning that path). Such panels enter through a path prompt.
+    fn path_scoped(self) -> bool {
+        matches!(self, Panel::Perms)
     }
 }
 
@@ -91,8 +99,9 @@ pub(super) enum RowKey {
 pub(super) enum RemoteAction {
     /// Establish the session to `server` (glyph confirm + login).
     Connect { server: SocketAddr },
-    /// (Re)list a panel.
-    Refresh { conn: RemoteConn, panel: Panel },
+    /// (Re)list a panel. `path` is the target path for a path-scoped panel
+    /// (perms), `None` for the rest.
+    Refresh { conn: RemoteConn, panel: Panel, path: Option<String> },
     /// Approve one queued enrollment by its full code.
     Approve { conn: RemoteConn, code: String },
     /// Approve every verified renewal (code-free batch).
@@ -112,6 +121,8 @@ pub(super) enum RemoteAction {
     SetPolicy { conn: RemoteConn, name: String },
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
     RemoveAdmin { conn: RemoteConn, name: String },
+    /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
+    EditPerms { conn: RemoteConn, at: String },
 }
 
 impl RemoteAction {
@@ -128,6 +139,7 @@ impl RemoteAction {
             RemoteAction::AddAdmin { .. } => "Adding an admin".to_string(),
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
+            RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
         }
     }
 
@@ -161,7 +173,8 @@ impl RemoteAction {
             | RemoteAction::Revoke { conn, .. }
             | RemoteAction::AddAdmin { conn }
             | RemoteAction::SetPolicy { conn, .. }
-            | RemoteAction::RemoveAdmin { conn, .. } => Some(conn.confirmed_fp),
+            | RemoteAction::RemoveAdmin { conn, .. }
+            | RemoteAction::EditPerms { conn, .. } => Some(conn.confirmed_fp),
         }
     }
 }
@@ -179,7 +192,7 @@ pub(super) enum RemoteUpdate {
 pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<super::action::Outcome> {
     match action {
         RemoteAction::Connect { server } => connect(ans, server).await,
-        RemoteAction::Refresh { conn, panel } => refresh(ans, conn, panel).await,
+        RemoteAction::Refresh { conn, panel, path } => refresh(ans, conn, panel, path).await,
         RemoteAction::Approve { conn, code } => approve(ans, conn, code).await,
         RemoteAction::ApproveRenewals { conn } => approve_renewals(ans, conn).await,
         RemoteAction::Deny { conn, code } => deny(ans, conn, code).await,
@@ -193,6 +206,7 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::AddAdmin { conn } => add_admin(ans, conn).await,
         RemoteAction::SetPolicy { conn, name } => set_policy(ans, conn, name).await,
         RemoteAction::RemoveAdmin { conn, name } => remove_admin(ans, conn, name).await,
+        RemoteAction::EditPerms { conn, at } => edit_perms(ans, conn, at).await,
     }
 }
 
@@ -239,12 +253,17 @@ async fn refresh(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
     panel: Panel,
+    path: Option<String>,
 ) -> Result<super::action::Outcome> {
     let rows = match panel {
         Panel::Queue => queue_rows(ans, &conn).await?,
         Panel::Delegations => delegation_rows(ans, &conn).await?,
         Panel::Roster => roster_rows(ans, &conn).await?,
         Panel::Revocation => revocation_rows(ans, &conn).await?,
+        Panel::Perms => {
+            let at = path.context("a target path is required for the perms panel")?;
+            perms_rows(ans, &conn, &at).await?
+        }
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
 }
@@ -694,6 +713,66 @@ async fn remove_admin(
     ))
 }
 
+#[cfg(unix)]
+async fn perms_rows(ans: &mut TuiAnswerer, conn: &RemoteConn, at: &str) -> Result<Vec<PanelRow>> {
+    use netidx_admin::admin_ops::perms::show_perms;
+    let json = show_perms(ans, Some(conn.server), None, at).await?;
+    let pretty = super::super::perms_admin::pretty(&json)?;
+    let mut rows: Vec<PanelRow> =
+        pretty.lines().map(|l| PanelRow { text: l.to_string(), key: RowKey::None }).collect();
+    if rows.is_empty() {
+        rows.push(PanelRow { text: "(no permissions set)".to_string(), key: RowKey::None });
+    }
+    Ok(rows)
+}
+
+#[cfg(unix)]
+async fn edit_perms(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    at: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::perms::{edit_perms, show_perms};
+    // Seed the editor with the cluster's current perms, validate locally, then
+    // hand the normalized result to the CA (which re-validates + propagates).
+    let current = show_perms(ans, Some(conn.server), None, &at).await?;
+    let seed = super::super::perms_admin::pretty(&current)?;
+    let validate: super::answer::EditValidator =
+        Box::new(|s: &str| super::super::perms_admin::validate(s));
+    let edited = ans.edit(seed, validate).await?;
+    let peers = edit_perms(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        &at,
+        &edited,
+    )
+    .await?;
+    let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
+    let lines = if failed.is_empty() {
+        vec![format!(
+            "Updated perms at {at:?} on {} cluster member(s). Restart the resolver \
+             server(s) to load them.",
+            peers.len()
+        )]
+    } else {
+        let mut v = vec![format!(
+            "{} of {} member(s) could NOT be updated — the cluster is INCONSISTENT; \
+             re-edit to converge:",
+            failed.len(),
+            peers.len()
+        )];
+        for p in &failed {
+            v.push(format!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?")));
+        }
+        v
+    };
+    let rows = perms_rows(ans, &conn, &at).await?;
+    Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
+}
+
 // ---- UI state (cross-platform) --------------------------------------------
 
 /// Which Tab-2 screen is showing.
@@ -702,6 +781,8 @@ enum Screen {
     Connect,
     /// Pick a panel.
     Menu,
+    /// Enter the target path for a path-scoped panel (perms) before opening it.
+    PathPrompt { panel: Panel, input: String },
     /// A panel's rows.
     Panel(Panel),
 }
@@ -718,11 +799,14 @@ pub(super) struct RemoteState {
     /// The current panel's rows + cursor.
     rows: Vec<PanelRow>,
     list: ListState,
+    /// The target path of the current path-scoped panel (perms), for its
+    /// actions and title. `None` outside such a panel.
+    panel_path: Option<String>,
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 4] =
-    [Panel::Queue, Panel::Delegations, Panel::Roster, Panel::Revocation];
+const PANELS: [Panel; 5] =
+    [Panel::Queue, Panel::Delegations, Panel::Roster, Panel::Revocation, Panel::Perms];
 
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
@@ -736,6 +820,7 @@ impl RemoteState {
             menu,
             rows: Vec::new(),
             list: ListState::default(),
+            panel_path: None,
         }
     }
 
@@ -766,6 +851,7 @@ impl RemoteState {
         match &self.screen {
             Screen::Connect => self.on_key_connect(code),
             Screen::Menu => self.on_key_menu(code),
+            Screen::PathPrompt { .. } => self.on_key_path_prompt(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
         }
     }
@@ -803,10 +889,18 @@ impl RemoteState {
             }
             KeyCode::Enter => {
                 let panel = PANELS[self.menu.selected().unwrap_or(0).min(PANELS.len() - 1)];
-                if let Some(conn) = &self.conn {
+                if panel.path_scoped() {
+                    self.error = None;
+                    self.screen = Screen::PathPrompt { panel, input: String::new() };
+                } else if let Some(conn) = &self.conn {
+                    self.panel_path = None;
                     self.list.select(None);
                     self.rows.clear();
-                    return Some(Action::Remote(RemoteAction::Refresh { conn: conn.clone(), panel }));
+                    return Some(Action::Remote(RemoteAction::Refresh {
+                        conn: conn.clone(),
+                        panel,
+                        path: None,
+                    }));
                 }
             }
             _ => {}
@@ -814,23 +908,82 @@ impl RemoteState {
         None
     }
 
+    /// The path-entry screen for a path-scoped panel (perms): collect the target
+    /// path, then open the panel against it. Each arm scopes its `self.screen`
+    /// borrow tightly so it can also touch the other fields.
+    fn on_key_path_prompt(&mut self, code: KeyCode) -> Option<Action> {
+        match code {
+            KeyCode::Char(c) => {
+                if let Screen::PathPrompt { input, .. } = &mut self.screen {
+                    input.push(c);
+                }
+                None
+            }
+            KeyCode::Backspace => {
+                if let Screen::PathPrompt { input, .. } = &mut self.screen {
+                    input.pop();
+                }
+                None
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::Menu;
+                None
+            }
+            KeyCode::Enter => {
+                let (panel, path) = match &self.screen {
+                    Screen::PathPrompt { panel, input } => (*panel, input.trim().to_string()),
+                    _ => return None,
+                };
+                if path.is_empty() {
+                    self.error = Some("a target path is required".to_string());
+                    return None;
+                }
+                let conn = self.conn.clone()?;
+                self.error = None;
+                self.panel_path = Some(path.clone());
+                self.list.select(None);
+                self.rows.clear();
+                Some(Action::Remote(RemoteAction::Refresh { conn, panel, path: Some(path) }))
+            }
+            _ => None,
+        }
+    }
+
     fn on_key_panel(&mut self, code: KeyCode, panel: Panel) -> Option<Action> {
         let conn = self.conn.clone()?;
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.list.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.list.select_next(),
-            KeyCode::Esc => self.screen = Screen::Menu,
+            KeyCode::Esc => {
+                self.panel_path = None;
+                self.screen = Screen::Menu;
+            }
             KeyCode::Char('r') => {
-                return Some(Action::Remote(RemoteAction::Refresh { conn, panel }));
+                return Some(Action::Remote(RemoteAction::Refresh {
+                    conn,
+                    panel,
+                    path: self.panel_path.clone(),
+                }));
             }
             _ => match panel {
                 Panel::Queue => return self.on_key_queue(code, conn),
                 Panel::Delegations => return self.on_key_delegations(code, conn),
                 Panel::Roster => return self.on_key_roster(code, conn),
                 Panel::Revocation => return self.on_key_revocation(code, conn),
+                Panel::Perms => return self.on_key_perms(code, conn),
             },
         }
         None
+    }
+
+    fn on_key_perms(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+        match code {
+            KeyCode::Char('e') => self
+                .panel_path
+                .clone()
+                .map(|at| Action::Remote(RemoteAction::EditPerms { conn, at })),
+            _ => None,
+        }
     }
 
     fn on_key_queue(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
@@ -919,8 +1072,33 @@ impl RemoteState {
         match &self.screen {
             Screen::Connect => self.render_connect(f, area),
             Screen::Menu => self.render_menu(f, area),
+            Screen::PathPrompt { panel, input } => self.render_path_prompt(f, area, *panel, input),
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
         }
+    }
+
+    fn render_path_prompt(&self, f: &mut Frame, area: Rect, panel: Panel, input: &str) {
+        let mut lines = vec![
+            Line::from(format!("Enter the netidx path for the {} panel.", panel.title())),
+            Line::from("It is routed to the resolver cluster mounted there (e.g. / or /eu).".dim()),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("path: "),
+                Span::styled(input.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+        ];
+        if let Some(e) = &self.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(e.clone(), Style::default().fg(Color::Red))));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(" Enter open · Esc back ".dim()));
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(format!(" {} ", panel.title()))),
+            area,
+        );
     }
 
     fn render_connect(&self, f: &mut Frame, area: Rect) {
@@ -985,13 +1163,18 @@ impl RemoteState {
             Panel::Delegations => " a approve · d deny · r refresh · Esc back ",
             Panel::Roster => " a add · e edit-policy · d remove · r refresh · Esc back ",
             Panel::Revocation => " x revoke · r refresh · Esc back ",
+            Panel::Perms => " e edit · r reload · Esc back ",
+        };
+        let title = match &self.panel_path {
+            Some(p) => format!(" {} @ {p} ", panel.title()),
+            None => format!(" {} ", panel.title()),
         };
         let mut st = self.list.clone();
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!(" {} ", panel.title()))
+                    .title(title)
                     .title_bottom(Line::from(hint).dim()),
             )
             .highlight_style(

@@ -83,8 +83,8 @@ fn edit(f: Flags) -> Result<()> {
 /// Validate edited perms JSON in the editor loop: it must parse as a PMap and
 /// every entry's bits must be valid. Returns the normalized JSON to send. The
 /// CA re-validates the whole resolver config server-side; this just gives a
-/// fast local re-edit on an obvious mistake.
-fn validate(s: &str) -> Result<String> {
+/// fast local re-edit on an obvious mistake. Shared with the TUI perms panel.
+pub(crate) fn validate(s: &str) -> Result<String> {
     let pmap: perms::PMap = serde_json::from_str(s).context("not valid perms JSON")?;
     for (path, entity, bits) in perms::iter(&pmap) {
         netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
@@ -95,8 +95,9 @@ fn validate(s: &str) -> Result<String> {
     serde_json::to_string(&pmap).context("serializing perms")
 }
 
-/// Pretty-print perms JSON for display / editor seeding.
-fn pretty(perms_json: &str) -> Result<String> {
+/// Pretty-print perms JSON for display / editor seeding. Shared with the TUI
+/// perms panel.
+pub(crate) fn pretty(perms_json: &str) -> Result<String> {
     let v: serde_json::Value =
         serde_json::from_str(perms_json).context("parsing perms JSON")?;
     serde_json::to_string_pretty(&v).context("formatting perms JSON")
