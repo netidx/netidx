@@ -172,11 +172,17 @@ impl Action {
             | Action::AddParent
             | Action::ReviewDelegations => None,
             Action::Remote(ra) => ra.confirm_message(),
-            Action::Uninstall { .. } => Some(
+            Action::Uninstall { remove_ca, .. } => Some(if *remove_ca {
+                "Remove this install AND DESTROY THE CA? This stops and removes the \
+                 OS service, deletes the configuration, and irreversibly deletes \
+                 the CA directory — the network's trust root. Every enrolled node's \
+                 certificate becomes unverifiable and unrenewable. There is no undo."
+                    .to_string()
+            } else {
                 "Remove this install? This stops and removes the OS service and \
                  deletes its configuration (the CA directory is kept)."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
         }
     }
 }

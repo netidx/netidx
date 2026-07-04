@@ -172,11 +172,21 @@ impl RemoteAction {
         }
     }
 
-    /// A yes/no confirmation to require before running, or `None`. The
-    /// irreversible revoke, the destructive admin-removal, and a service stop
-    /// (which leaves a unit down) are gated.
+    /// A yes/no confirmation to require before running, or `None`. The two
+    /// approvals show the request's full code so the admin can match it against
+    /// the one the enrollee/child read out of band (the TUI's stand-in for the
+    /// strict CLI's type-the-full-code gesture); the irreversible revoke, the
+    /// destructive admin-removal, and a service stop are gated for safety.
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
+            RemoteAction::Approve { code, .. } => Some(format!(
+                "Approve this enrollment?\n\nVerify this code matches the one the \
+                 enrollee read to you, out of band:\n\n{code}"
+            )),
+            RemoteAction::ApproveDelegation { code, .. } => Some(format!(
+                "Approve this delegation?\n\nVerify this code matches the one the \
+                 child resolver's operator read to you, out of band:\n\n{code}"
+            )),
             RemoteAction::Revoke { serial, .. } => Some(format!(
                 "Revoke certificate serial {serial}? This is irreversible — the \
                  cluster re-signs its CRL and the holder can no longer authenticate."
@@ -965,6 +975,15 @@ impl RemoteState {
             rows: Vec::new(),
             list: ListState::default(),
             panel_path: None,
+        }
+    }
+
+    /// Re-read this host's own admin-server address into the connect field when
+    /// it's still blank and we're not connected — covers founding a CA after the
+    /// TUI already started (when `default_server()` first returned nothing).
+    pub(super) fn refresh_connect_default(&mut self) {
+        if self.conn.is_none() && self.addr.trim().is_empty() {
+            self.addr = default_server();
         }
     }
 

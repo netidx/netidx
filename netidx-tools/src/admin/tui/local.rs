@@ -187,7 +187,7 @@ impl LocalState {
             // Enter opens the full action menu for the selected install.
             Enter => self.menu = Some(action_menu(&self.installs[self.selected])),
             // Quick shortcuts (also in the menu).
-            Char('u') => return Some(uninstall_action(&self.installs[self.selected])),
+            Char('u') => return Some(uninstall_action(&self.installs[self.selected], false)),
             Char('r') => {
                 let d = &self.installs[self.selected];
                 if d.record.network.is_some() {
@@ -278,7 +278,13 @@ fn action_menu(d: &Detected) -> ActionMenu {
     if networked {
         items.push(("Renew certificates".to_string(), Action::Renew { server: d.record.admin_server }));
     }
-    items.push(("Uninstall".to_string(), uninstall_action(d)));
+    items.push(("Uninstall".to_string(), uninstall_action(d, false)));
+    if owns_ca(d) {
+        items.push((
+            "Uninstall + destroy the CA".to_string(),
+            uninstall_action(d, true),
+        ));
+    }
     let mut state = ListState::default();
     state.select(Some(0));
     ActionMenu { title: format!("{} actions", role_title(role)), items, state }
@@ -297,7 +303,9 @@ fn runs_local_admin_server() -> bool {
 }
 
 /// The uninstall action for a detected install (also the `u` shortcut).
-fn uninstall_action(d: &Detected) -> Action {
+/// `remove_ca` additionally deletes the CA directory (only offered when this
+/// host actually holds one — see [`owns_ca`]).
+fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
     // A resolver/publisher registers a system-scope service even with user-scope
     // config, so removing it needs root.
     let needs_root = d.scope == ServiceScope::System
@@ -306,8 +314,15 @@ fn uninstall_action(d: &Detected) -> Action {
         config_scope: d.scope,
         config_dir: d.config_dir.clone(),
         needs_root,
-        remove_ca: false,
+        remove_ca,
     }
+}
+
+/// Whether this host holds the network's CA (so a full teardown can offer to
+/// destroy it). A plain enrolled node carries `network.ca_fingerprint` but no CA
+/// directory, so key off the directory, not the record.
+fn owns_ca(d: &Detected) -> bool {
+    d.config_dir.join("ca").is_dir()
 }
 
 /// Render the action menu as a centered overlay.

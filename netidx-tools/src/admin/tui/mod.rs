@@ -129,6 +129,12 @@ impl App {
     fn next_tab(&mut self) {
         let i = (self.tab.index() + 1) % Tab::ALL.len();
         self.tab = Tab::ALL[i];
+        // The connect default is read from this host's admin-server config,
+        // which may have been created (a fresh CA install) after the TUI
+        // started — so re-read it when the Remote tab gains focus.
+        if self.tab == Tab::Remote {
+            self.remote.refresh_connect_default();
+        }
     }
 
     /// Switch the UI into the activity view for a just-started action.
@@ -380,14 +386,16 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
-/// Render a destructive action's yes/no confirmation as a centered overlay.
+/// Render a destructive/verification yes/no confirmation as a centered overlay.
+/// The message may contain `\n` (e.g. an approval showing the request code on its
+/// own line); each becomes its own wrapped line and the popup sizes to fit.
 fn render_confirm(f: &mut Frame, screen: Rect, msg: &str) {
-    let lines = vec![
-        Line::from(msg.to_string()),
-        Line::from(""),
-        Line::from(" y confirm · n cancel ".dim()),
-    ];
-    let area = widgets::centered(66, 8, screen);
+    let mut lines: Vec<Line> =
+        msg.split('\n').map(|l| Line::from(l.to_string())).collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(" y confirm · n cancel ".dim()));
+    let h = (lines.len() as u16 + 2).clamp(8, screen.height);
+    let area = widgets::centered(70, h, screen);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
