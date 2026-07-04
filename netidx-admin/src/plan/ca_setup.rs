@@ -232,7 +232,7 @@ pub async fn create_vaulted_ca(
     // Refuse to build a CA on a host that can't seal the box credential
     // (or loudly warn under --insecure-no-tpm) BEFORE anything touches
     // disk, so a refused init leaves the dir clean and retryable.
-    tpm_gate(ans, opts.insecure_no_tpm)?;
+    tpm_gate(ans, opts.insecure_no_tpm).await?;
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
 
     // Generate the CA (its key is returned, never written to disk in
@@ -392,12 +392,19 @@ pub fn announce_founding_policy(ans: &mut dyn Answerer, domain: &str) {
 /// with `--insecure-no-tpm`, in which case warn loudly. The autorenew
 /// credential is sealed to the box's TPM precisely so a stolen backup is
 /// inert; without sealing it sits in plaintext in every backup.
-pub fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<()> {
+pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<()> {
     if netidx_tpm::available() {
         return Ok(());
     }
     let mech = netidx_tpm::MECHANISM;
-    if !insecure_no_tpm {
+    // The flag pre-authorizes the override; otherwise an interactive frontend
+    // offers the same explicit opt-in (defaulting to NO) so a no-TPM host can
+    // still found a TEST CA through the TUI, while the strict CLI (which can't
+    // prompt) still hard-requires --insecure-no-tpm.
+    let proceed = insecure_no_tpm
+        || (ans.interactive()
+            && ans.confirm(Field::InsecureNoTpm, None, false).await?);
+    if !proceed {
         bail!(
             "this host has no usable {mech}. A CA's autorenew credential is sealed \
              to the {mech} so a stolen backup or disk image of this machine is inert \

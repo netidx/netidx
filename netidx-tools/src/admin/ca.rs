@@ -1061,7 +1061,7 @@ async fn external_bootstrap(
     // The TPM gate matters only for a served CA — the autorenew keytab is
     // the sole TPM-sealed artifact; an offline external CA has none.
     if set_up_server {
-        ca_setup::tpm_gate(ans, opts.insecure_no_tpm)?;
+        ca_setup::tpm_gate(ans, opts.insecure_no_tpm).await?;
     }
     let san = parse_sans(&opts.san, &common_name)?;
     let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {

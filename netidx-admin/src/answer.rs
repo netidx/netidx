@@ -75,6 +75,7 @@ pub enum Field {
     AllowSan,
     /// Whether an admin may enroll new admin servers.
     MayEnrollServers,
+    InsecureNoTpm,
     /// The resolver-server port.
     ResolverPort,
     /// The TLS domain a resolver's certificate name is under.
@@ -275,6 +276,15 @@ impl Field {
                 label: "may enroll admin servers?",
                 help: "Whether this admin may approve new admin-server \
                        enrollments — more privileged than any SAN glob.",
+            },
+            InsecureNoTpm => FieldInfo {
+                flag: "--insecure-no-tpm",
+                label: "proceed without a TPM (insecure)?",
+                help: "This host has no usable TPM, so the CA's autorenew \
+                       credential would be written UNSEALED — in plaintext in \
+                       every backup, equivalent to backing up the CA key. Only \
+                       accept for TEST CAs; a real CA belongs on hardware with a \
+                       TPM 2.0 / Secure Enclave.",
             },
             ResolverPort => FieldInfo {
                 flag: "--listen",
