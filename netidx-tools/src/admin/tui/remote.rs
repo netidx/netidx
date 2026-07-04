@@ -41,25 +41,37 @@ pub(super) struct RemoteConn {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Panel {
     Queue,
+    Delegations,
 }
 
 impl Panel {
     fn title(self) -> &'static str {
         match self {
             Panel::Queue => "Enrollment queue",
+            Panel::Delegations => "Delegation requests",
         }
     }
 }
 
-/// A rendered panel row: display text plus the opaque key an action needs (a
-/// full code / name / serial). Cross-platform — the op formats `admin_ops` rows
-/// into these so unix-only types never reach the UI state.
+/// A rendered panel row: display text plus the typed key an action on it needs.
+/// Cross-platform — the op formats `admin_ops` rows into these so unix-only
+/// types never reach the UI state.
 #[derive(Clone)]
 pub(super) struct PanelRow {
     text: String,
-    /// The full code an action on this row uses, when it has one (a renewal or
-    /// a code-free row has `None`, so per-row approve/deny is a no-op there).
-    code: Option<String>,
+    key: RowKey,
+}
+
+/// The action key a panel row carries. Each panel keys its rows differently: an
+/// enrollment or delegation by its out-of-band **code**; an admin by **name**; a
+/// certificate by **serial** (+ its per-key glyph for the revoke gate). A row
+/// with no actionable key (a renewal, an unparseable CSR, a status line) is
+/// [`RowKey::None`].
+#[derive(Clone)]
+pub(super) enum RowKey {
+    None,
+    /// A full fingerprint code (queue enrollment, delegation request).
+    Code(String),
 }
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
@@ -74,6 +86,10 @@ pub(super) enum RemoteAction {
     ApproveRenewals { conn: RemoteConn },
     /// Deny one queued enrollment by its full code (reason prompted).
     Deny { conn: RemoteConn, code: String },
+    /// Approve one pending delegation by its full code (cluster-wide).
+    ApproveDelegation { conn: RemoteConn, code: String },
+    /// Deny one pending delegation by its full code (reason prompted).
+    DenyDelegation { conn: RemoteConn, code: String },
 }
 
 impl RemoteAction {
@@ -84,6 +100,8 @@ impl RemoteAction {
             RemoteAction::Approve { .. } => "Approving".to_string(),
             RemoteAction::ApproveRenewals { .. } => "Approving renewals".to_string(),
             RemoteAction::Deny { .. } => "Denying".to_string(),
+            RemoteAction::ApproveDelegation { .. } => "Approving delegation".to_string(),
+            RemoteAction::DenyDelegation { .. } => "Denying delegation".to_string(),
         }
     }
 
@@ -95,7 +113,9 @@ impl RemoteAction {
             RemoteAction::Refresh { conn, .. }
             | RemoteAction::Approve { conn, .. }
             | RemoteAction::ApproveRenewals { conn }
-            | RemoteAction::Deny { conn, .. } => Some(conn.confirmed_fp),
+            | RemoteAction::Deny { conn, .. }
+            | RemoteAction::ApproveDelegation { conn, .. }
+            | RemoteAction::DenyDelegation { conn, .. } => Some(conn.confirmed_fp),
         }
     }
 }
@@ -117,6 +137,10 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::Approve { conn, code } => approve(ans, conn, code).await,
         RemoteAction::ApproveRenewals { conn } => approve_renewals(ans, conn).await,
         RemoteAction::Deny { conn, code } => deny(ans, conn, code).await,
+        RemoteAction::ApproveDelegation { conn, code } => {
+            approve_delegation(ans, conn, code).await
+        }
+        RemoteAction::DenyDelegation { conn, code } => deny_delegation(ans, conn, code).await,
     }
 }
 
@@ -166,6 +190,7 @@ async fn refresh(
 ) -> Result<super::action::Outcome> {
     let rows = match panel {
         Panel::Queue => queue_rows(ans, &conn).await?,
+        Panel::Delegations => delegation_rows(ans, &conn).await?,
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
 }
@@ -195,15 +220,18 @@ fn queue_row(item: &netidx_admin::admin_ops::queue::QueueItem) -> PanelRow {
     if item.verified_renewal {
         return PanelRow {
             text: format!("↻ {name}  (renewal, {}, from {})", widgets::fmt_age(item.age_secs), item.peer),
-            code: None,
+            key: RowKey::None,
         };
     }
     let code = item.code.as_ref().map(|c| c.text());
-    let tail = match &code {
-        Some(_) => format!("{:?}  ({}, from {})", item.kind, widgets::fmt_age(item.age_secs), item.peer),
-        None => format!("{:?}  (unparseable CSR — deny only)", item.kind),
+    let (tail, key) = match code {
+        Some(c) => (
+            format!("{:?}  ({}, from {})", item.kind, widgets::fmt_age(item.age_secs), item.peer),
+            RowKey::Code(c),
+        ),
+        None => (format!("{:?}  (unparseable CSR — deny only)", item.kind), RowKey::None),
     };
-    PanelRow { text: format!("{name}  {tail}"), code }
+    PanelRow { text: format!("{name}  {tail}"), key }
 }
 
 #[cfg(unix)]
@@ -288,6 +316,101 @@ async fn deny(
     ))
 }
 
+#[cfg(unix)]
+async fn delegation_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
+    use netidx_admin::admin_ops::delegation::list_pending_delegations;
+    let items = list_pending_delegations(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+    )
+    .await?;
+    Ok(items.iter().map(delegation_row).collect())
+}
+
+/// Format one pending delegation into a display row + its action code.
+#[cfg(unix)]
+fn delegation_row(
+    item: &netidx_admin::admin_ops::delegation::PendingDelegation,
+) -> PanelRow {
+    let child = item
+        .child
+        .iter()
+        .map(|a| a.addr.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    PanelRow {
+        text: format!(
+            "{}  ({}, from {}, child {child})",
+            item.proposed_path,
+            widgets::fmt_age(item.age_secs),
+            item.peer,
+        ),
+        key: RowKey::Code(item.code.text()),
+    }
+}
+
+#[cfg(unix)]
+async fn approve_delegation(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    code: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::delegation::approve_delegation;
+    let out = approve_delegation(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        &code,
+    )
+    .await?;
+    let mut lines = vec![format!("Delegated {} to the child cluster.", out.proposed_path)];
+    let failed: Vec<_> = out.peers.iter().filter(|p| p.error.is_some()).collect();
+    if failed.is_empty() {
+        lines.push(format!("Propagated to {} cluster member(s).", out.peers.len()));
+    } else {
+        for p in &failed {
+            lines.push(format!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?")));
+        }
+    }
+    let rows = delegation_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after("Approved", lines, Panel::Delegations, rows))
+}
+
+#[cfg(unix)]
+async fn deny_delegation(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    code: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::{admin_ops::delegation::deny_delegation, answer::Answerer};
+    let reason = ans
+        .text(netidx_admin::answer::Field::RevokeReason, None, Some("denied"), true)
+        .await?
+        .unwrap_or_else(|| "denied".to_string());
+    let item = deny_delegation(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        &code,
+        &reason,
+    )
+    .await?;
+    let rows = delegation_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Denied",
+        vec![format!("Denied delegation of {}.", item.proposed_path)],
+        Panel::Delegations,
+        rows,
+    ))
+}
+
 // ---- UI state (cross-platform) --------------------------------------------
 
 /// Which Tab-2 screen is showing.
@@ -315,7 +438,7 @@ pub(super) struct RemoteState {
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 1] = [Panel::Queue];
+const PANELS: [Panel; 2] = [Panel::Queue, Panel::Delegations];
 
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
@@ -418,6 +541,7 @@ impl RemoteState {
             }
             _ => match panel {
                 Panel::Queue => return self.on_key_queue(code, conn),
+                Panel::Delegations => return self.on_key_delegations(code, conn),
             },
         }
         None
@@ -436,9 +560,25 @@ impl RemoteState {
         }
     }
 
-    /// The full code of the selected row, if it has one (not a renewal/unparseable).
+    fn on_key_delegations(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+        match code {
+            KeyCode::Char('a') => self.selected_code().map(|code| {
+                Action::Remote(RemoteAction::ApproveDelegation { conn, code })
+            }),
+            KeyCode::Char('d') => self.selected_code().map(|code| {
+                Action::Remote(RemoteAction::DenyDelegation { conn, code })
+            }),
+            _ => None,
+        }
+    }
+
+    /// The full code of the selected row, if it carries one (not a renewal /
+    /// unparseable / non-code row).
     fn selected_code(&self) -> Option<String> {
-        self.rows.get(self.list.selected()?)?.code.clone()
+        match &self.rows.get(self.list.selected()?)?.key {
+            RowKey::Code(c) => Some(c.clone()),
+            RowKey::None => None,
+        }
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -518,6 +658,7 @@ impl RemoteState {
         };
         let hint = match panel {
             Panel::Queue => " a approve · d deny · R renewals · r refresh · Esc back ",
+            Panel::Delegations => " a approve · d deny · r refresh · Esc back ",
         };
         let mut st = self.list.clone();
         let list = List::new(items)
