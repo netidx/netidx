@@ -25,6 +25,17 @@ pub(super) fn identicon_lines(fp: &Fingerprint) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// A compact "how long ago" for a queue/delegation row's age in seconds.
+pub(super) fn fmt_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// A rectangle centered in `area`, `width`×`height` cells, clamped to `area`.
 pub(super) fn centered(width: u16, height: u16, area: Rect) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])

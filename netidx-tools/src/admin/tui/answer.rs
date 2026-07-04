@@ -73,11 +73,23 @@ pub(super) enum UiRequest {
 /// sender); one per op run.
 pub(super) struct TuiAnswerer {
     tx: UnboundedSender<UiRequest>,
+    /// A pre-confirmed CA fingerprint. When set, `confirm_identity` auto-accepts
+    /// a matching identity instead of popping the modal — so remote-admin panels
+    /// don't re-ask the operator to confirm the glyph on every op after connect
+    /// (it still re-pins per op, so a changed cert errors). Mirrors
+    /// [`FlagAnswerer`](super::super::answer_cli::FlagAnswerer)'s `--accept-glyph`.
+    accept_glyph: Option<Fingerprint>,
 }
 
 impl TuiAnswerer {
     pub(super) fn new(tx: UnboundedSender<UiRequest>) -> TuiAnswerer {
-        TuiAnswerer { tx }
+        TuiAnswerer { tx, accept_glyph: None }
+    }
+
+    /// A TUI answerer that auto-accepts the given CA fingerprint (see
+    /// [`Self::accept_glyph`]).
+    pub(super) fn with_glyph(tx: UnboundedSender<UiRequest>, fp: Fingerprint) -> TuiAnswerer {
+        TuiAnswerer { tx, accept_glyph: Some(fp) }
     }
 
     /// Send a question and await its reply, mapping a dropped channel (the UI
@@ -147,6 +159,9 @@ impl Answerer for TuiAnswerer {
     }
 
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {
+        if let Some(expected) = &self.accept_glyph {
+            return Ok(&identity.fingerprint == expected);
+        }
         let identity = Box::new(identity.clone());
         self.ask(|reply| UiRequest::Identity { identity, reply }).await
     }

@@ -148,19 +148,28 @@ impl App {
         self.activity = None;
         self.status = None;
         self.verification = None;
-        self.result = Some(match out {
+        match out {
             Ok(out) => {
                 if out.refresh_local {
                     self.local.refresh();
                 }
-                ResultView { title: out.title, lines: out.lines, error: false }
+                if let Some(update) = out.remote {
+                    self.remote.apply(update);
+                }
+                // A quiet result (a silent panel re-query) shows no overlay.
+                if !out.quiet {
+                    self.result =
+                        Some(ResultView { title: out.title, lines: out.lines, error: false });
+                }
             }
-            Err(e) => ResultView {
-                title: "Failed".to_string(),
-                lines: vec![format!("{e:#}")],
-                error: true,
-            },
-        });
+            Err(e) => {
+                self.result = Some(ResultView {
+                    title: "Failed".to_string(),
+                    lines: vec![format!("{e:#}")],
+                    error: true,
+                });
+            }
+        }
     }
 
     /// Apply a request from the running action. Blocking requests become a
@@ -442,11 +451,18 @@ fn launch(
                     lines: vec![msg],
                     refresh_local: true,
                     install_service: None,
+                    remote: None,
+                    quiet: false,
                 });
             app.finish_op(out);
         }
         op_action => {
-            let ans = TuiAnswerer::new(ui_tx.clone());
+            // Reuse the confirmed CA glyph for remote panel ops so they don't
+            // re-prompt for the identity on every call after connect.
+            let ans = match op_action.accept_glyph() {
+                Some(fp) => TuiAnswerer::with_glyph(ui_tx.clone(), fp),
+                None => TuiAnswerer::new(ui_tx.clone()),
+            };
             *op = Some(Box::pin(action::run_owned(ans, op_action)));
         }
     }

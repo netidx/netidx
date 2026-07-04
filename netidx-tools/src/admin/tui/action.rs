@@ -35,11 +35,70 @@ pub(super) struct Outcome {
     /// A privileged follow-up the UI loop performs with the terminal: register
     /// the OS service at this scope. `None` ⇒ nothing to do.
     pub(super) install_service: Option<ServiceScope>,
+    /// A result to apply to the Remote tab's state (connection / panel rows).
+    pub(super) remote: Option<super::remote::RemoteUpdate>,
+    /// Suppress the result overlay (used by silent panel re-queries).
+    pub(super) quiet: bool,
 }
 
 impl Outcome {
     fn plain(title: impl Into<String>, lines: Vec<String>, refresh_local: bool) -> Outcome {
-        Outcome { title: title.into(), lines, refresh_local, install_service: None }
+        Outcome {
+            title: title.into(),
+            lines,
+            refresh_local,
+            install_service: None,
+            remote: None,
+            quiet: false,
+        }
+    }
+
+    /// A remote-tab result with a toast + a state update.
+    pub(super) fn remote_toast(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        update: super::remote::RemoteUpdate,
+    ) -> Outcome {
+        Outcome {
+            title: title.into(),
+            lines,
+            refresh_local: false,
+            install_service: None,
+            remote: Some(update),
+            quiet: false,
+        }
+    }
+
+    /// A silent remote-tab result: apply the panel rows, no overlay.
+    pub(super) fn remote_rows(
+        panel: super::remote::Panel,
+        rows: Vec<super::remote::PanelRow>,
+    ) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
+            quiet: true,
+        }
+    }
+
+    /// An action result: a toast plus the refreshed panel rows.
+    pub(super) fn remote_after(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        panel: super::remote::Panel,
+        rows: Vec<super::remote::PanelRow>,
+    ) -> Outcome {
+        Outcome {
+            title: title.into(),
+            lines,
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
+            quiet: false,
+        }
     }
 }
 
@@ -55,6 +114,8 @@ pub(super) enum Action {
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
     AddParent,
+    /// A Tab-2 remote-admin op (connect / list / approve / …).
+    Remote(super::remote::RemoteAction),
     /// Tear down an install (config + OS service). Terminal-owning; handled
     /// directly by the UI loop, not as an op future. `needs_root` when a
     /// system-scope service must be removed.
@@ -80,7 +141,17 @@ impl Action {
                 if *dry_run { "Previewing join".to_string() } else { "Joining a network".to_string() }
             }
             Action::AddParent => "Adding a parent".to_string(),
+            Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
+        }
+    }
+
+    /// The pre-confirmed CA fingerprint the answerer should auto-accept (remote
+    /// panel ops after connect), or `None` to prompt.
+    pub(super) fn accept_glyph(&self) -> Option<netidx_admin::fingerprint::Fingerprint> {
+        match self {
+            Action::Remote(ra) => ra.glyph(),
+            _ => None,
         }
     }
 
@@ -93,7 +164,8 @@ impl Action {
             | Action::Renew { .. }
             | Action::Update { .. }
             | Action::Join { .. }
-            | Action::AddParent => None,
+            | Action::AddParent
+            | Action::Remote(_) => None,
             Action::Uninstall { .. } => Some(
                 "Remove this install? This stops and removes the OS service and \
                  deletes its configuration (the CA directory is kept)."
@@ -113,6 +185,7 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Update { role } => update(&mut ans, role).await,
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent => add_parent(&mut ans).await,
+        Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
         Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
     }
 }
@@ -132,7 +205,14 @@ async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
     plan.apply()?;
     lines.push(String::new());
     lines.push(super::lifecycle::restart_hint(role).to_string());
-    Ok(Outcome { title: "Updated".to_string(), lines, refresh_local: true, install_service: None })
+    Ok(Outcome {
+        title: "Updated".to_string(),
+        lines,
+        refresh_local: true,
+        install_service: None,
+        remote: None,
+        quiet: false,
+    })
 }
 
 /// Graduate a local-only workstation onto a network.
@@ -145,7 +225,14 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     } else {
         ("Joined", vec!["Joined the network. Restart the local resolver to use it.".to_string()])
     };
-    Ok(Outcome { title: title.to_string(), lines, refresh_local: !dry_run, install_service: None })
+    Ok(Outcome {
+        title: title.to_string(),
+        lines,
+        refresh_local: !dry_run,
+        install_service: None,
+        remote: None,
+        quiet: false,
+    })
 }
 
 /// Attach this resolver under a parent by delegation (child side).
@@ -192,7 +279,14 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
         }
     }
     lines.push("Restart your resolver server(s) to attach under the parent.".to_string());
-    Ok(Outcome { title: "Parent added".to_string(), lines, refresh_local: true, install_service: None })
+    Ok(Outcome {
+        title: "Parent added".to_string(),
+        lines,
+        refresh_local: true,
+        install_service: None,
+        remote: None,
+        quiet: false,
+    })
 }
 
 #[cfg(not(unix))]
@@ -326,6 +420,8 @@ fn install_outcome(role: InstallRole, dry_run: bool, scope: Option<ServiceScope>
             lines,
             refresh_local: true,
             install_service: scope,
+            remote: None,
+            quiet: false,
         }
     }
 }
