@@ -114,6 +114,10 @@ pub(super) enum Action {
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
     AddParent,
+    /// Jump to the Remote tab's delegation panel to review this resolver's
+    /// pending delegation requests (resolver-with-admin-server only). Pure
+    /// navigation — handled by the UI loop, never an op future.
+    ReviewDelegations,
     /// A Tab-2 remote-admin op (connect / list / approve / …).
     Remote(super::remote::RemoteAction),
     /// Tear down an install (config + OS service). Terminal-owning; handled
@@ -141,6 +145,7 @@ impl Action {
                 if *dry_run { "Previewing join".to_string() } else { "Joining a network".to_string() }
             }
             Action::AddParent => "Adding a parent".to_string(),
+            Action::ReviewDelegations => "Reviewing delegations".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
         }
@@ -164,7 +169,8 @@ impl Action {
             | Action::Renew { .. }
             | Action::Update { .. }
             | Action::Join { .. }
-            | Action::AddParent => None,
+            | Action::AddParent
+            | Action::ReviewDelegations => None,
             Action::Remote(ra) => ra.confirm_message(),
             Action::Uninstall { .. } => Some(
                 "Remove this install? This stops and removes the OS service and \
@@ -186,6 +192,9 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent => add_parent(&mut ans).await,
         Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
+        Action::ReviewDelegations => {
+            bail!("internal error: review-delegations is navigation, not an op future")
+        }
         Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
     }
 }

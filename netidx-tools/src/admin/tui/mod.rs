@@ -248,6 +248,13 @@ impl App {
                 Tab::Remote => self.remote.on_key(code),
             },
         }?;
+        // Pure navigation from the Local tab: jump to the Remote tab's delegation
+        // panel rather than running an op.
+        if let Action::ReviewDelegations = action {
+            self.tab = Tab::Remote;
+            self.remote.focus_delegations();
+            return None;
+        }
         // Gate destructive actions behind a yes/no confirmation.
         match action.confirm_message() {
             Some(msg) => {

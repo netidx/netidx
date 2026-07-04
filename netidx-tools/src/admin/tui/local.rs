@@ -264,6 +264,12 @@ fn action_menu(d: &Detected) -> ActionMenu {
     }
     if role == InstallRole::Resolver {
         items.push(("Add a parent (delegate under)".to_string(), Action::AddParent));
+        if d.record.admin_server.is_some() {
+            items.push((
+                "Review delegation requests".to_string(),
+                Action::ReviewDelegations,
+            ));
+        }
     }
     if networked {
         items.push(("Renew certificates".to_string(), Action::Renew { server: d.record.admin_server }));

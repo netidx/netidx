@@ -968,6 +968,18 @@ impl RemoteState {
         }
     }
 
+    /// Pre-select the delegation panel in the menu — the target of the Local
+    /// tab's "Review delegation requests" shortcut. If already connected, land
+    /// on the menu with it highlighted; otherwise the connect screen shows first
+    /// (its address already defaults to this host's own admin server).
+    pub(super) fn focus_delegations(&mut self) {
+        let idx = PANELS.iter().position(|p| matches!(p, Panel::Delegations)).unwrap_or(0);
+        self.menu.select(Some(idx));
+        if self.conn.is_some() {
+            self.screen = Screen::Menu;
+        }
+    }
+
     /// Apply a completed op's result.
     pub(super) fn apply(&mut self, update: RemoteUpdate) {
         match update {
