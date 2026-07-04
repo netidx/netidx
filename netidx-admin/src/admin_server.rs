@@ -3366,8 +3366,18 @@ async fn handle_control_service(
             req.admin, req.target_path
         ));
     }
-    if req.targets.is_empty() {
-        return err("no units specified".to_string());
+    // start/stop/restart must name explicit unit targets, so a fat-finger can't
+    // take down a whole cluster; read-only `status` may omit them, in which case
+    // it reports every unit on every member (each supervisor expands an empty
+    // unit list to all its units).
+    if req.targets.is_empty()
+        && !matches!(req.op, netidx_activation::control::ControlOp::Status)
+    {
+        return err(
+            "no units specified — start/stop/restart require explicit unit \
+             targets (status with no units reports them all)"
+                .to_string(),
+        );
     }
     // The cluster's ordered member list — a `member` index refers to this
     // order (what `status` shows the operator).
@@ -3432,7 +3442,11 @@ async fn handle_control_service(
             .filter(|t| t.member.is_none() || t.member == Some(idx as u32))
             .map(|t| t.unit.clone())
             .collect();
-        if units.is_empty() {
+        // Empty `req.targets` ⇒ status-all (the guard above only lets Status
+        // reach here with no targets): hit every member with an empty unit list,
+        // which each supervisor expands to all its units. A *non-empty* request
+        // that merely pins nothing to this member skips it.
+        if units.is_empty() && !req.targets.is_empty() {
             continue;
         }
         let addr = SocketAddr::new(m.ip(), admin_port);
