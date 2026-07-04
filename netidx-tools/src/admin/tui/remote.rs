@@ -47,6 +47,7 @@ pub(super) enum Panel {
     Roster,
     Revocation,
     Perms,
+    Service,
 }
 
 impl Panel {
@@ -57,13 +58,14 @@ impl Panel {
             Panel::Roster => "Admin roster",
             Panel::Revocation => "Issued certificates",
             Panel::Perms => "Permissions",
+            Panel::Service => "Services",
         }
     }
 
     /// Whether this panel first needs a target netidx path (the map routes it to
     /// the cluster owning that path). Such panels enter through a path prompt.
     fn path_scoped(self) -> bool {
-        matches!(self, Panel::Perms)
+        matches!(self, Panel::Perms | Panel::Service)
     }
 }
 
@@ -93,6 +95,18 @@ pub(super) enum RowKey {
     /// when the stored glyph is empty/unparseable — a legacy directly-issued
     /// cert, revocable by its unique serial without a glyph assertion).
     Cert { serial: u64, glyph: Option<Fingerprint> },
+    /// One activation unit on one cluster member (service control).
+    Unit { unit: String, member: u32 },
+}
+
+/// A service-control verb chosen in the services panel. A cross-platform mirror
+/// of the unix-only `ControlOp` (mapped to it in the op body), so the action
+/// type stays cross-platform.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServiceOp {
+    Start,
+    Stop,
+    Restart,
 }
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
@@ -123,6 +137,16 @@ pub(super) enum RemoteAction {
     RemoveAdmin { conn: RemoteConn, name: String },
     /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
     EditPerms { conn: RemoteConn, at: String },
+    /// Start/stop/restart one activation unit on one member of the cluster
+    /// serving `path`. Stop is gated by a yes/no confirm (it leaves a service
+    /// down).
+    ServiceControl {
+        conn: RemoteConn,
+        path: String,
+        unit: String,
+        member: u32,
+        op: ServiceOp,
+    },
 }
 
 impl RemoteAction {
@@ -140,11 +164,17 @@ impl RemoteAction {
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
+            RemoteAction::ServiceControl { op, .. } => match op {
+                ServiceOp::Start => "Starting service".to_string(),
+                ServiceOp::Stop => "Stopping service".to_string(),
+                ServiceOp::Restart => "Restarting service".to_string(),
+            },
         }
     }
 
     /// A yes/no confirmation to require before running, or `None`. The
-    /// irreversible revoke and the destructive admin-removal are gated.
+    /// irreversible revoke, the destructive admin-removal, and a service stop
+    /// (which leaves a unit down) are gated.
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
             RemoteAction::Revoke { serial, .. } => Some(format!(
@@ -155,6 +185,9 @@ impl RemoteAction {
                 "Remove admin {name:?}? Their password will no longer authenticate \
                  to this CA."
             )),
+            RemoteAction::ServiceControl { op: ServiceOp::Stop, unit, member, .. } => Some(
+                format!("Stop unit {unit:?} on member {member}? It will stay down until started."),
+            ),
             _ => None,
         }
     }
@@ -174,7 +207,8 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { conn }
             | RemoteAction::SetPolicy { conn, .. }
             | RemoteAction::RemoveAdmin { conn, .. }
-            | RemoteAction::EditPerms { conn, .. } => Some(conn.confirmed_fp),
+            | RemoteAction::EditPerms { conn, .. }
+            | RemoteAction::ServiceControl { conn, .. } => Some(conn.confirmed_fp),
         }
     }
 }
@@ -207,6 +241,9 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::SetPolicy { conn, name } => set_policy(ans, conn, name).await,
         RemoteAction::RemoveAdmin { conn, name } => remove_admin(ans, conn, name).await,
         RemoteAction::EditPerms { conn, at } => edit_perms(ans, conn, at).await,
+        RemoteAction::ServiceControl { conn, path, unit, member, op } => {
+            service_control(ans, conn, path, unit, member, op).await
+        }
     }
 }
 
@@ -263,6 +300,10 @@ async fn refresh(
         Panel::Perms => {
             let at = path.context("a target path is required for the perms panel")?;
             perms_rows(ans, &conn, &at).await?
+        }
+        Panel::Service => {
+            let p = path.context("a target path is required for the services panel")?;
+            service_rows(ans, &conn, &p).await?
         }
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
@@ -773,6 +814,103 @@ async fn edit_perms(
     Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
 }
 
+#[cfg(unix)]
+async fn service_rows(ans: &mut TuiAnswerer, conn: &RemoteConn, path: &str) -> Result<Vec<PanelRow>> {
+    use netidx_activation::control::ControlOp;
+    let results = service_status(ans, conn, path, Vec::new(), ControlOp::Status).await?;
+    let mut rows: Vec<PanelRow> = Vec::new();
+    for r in &results {
+        if let Some(e) = &r.error {
+            rows.push(PanelRow {
+                text: format!("member {} ({}) — ERROR: {e}", r.member, r.addr),
+                key: RowKey::None,
+            });
+            continue;
+        }
+        if r.units.is_empty() {
+            rows.push(PanelRow {
+                text: format!("member {} ({}) — no units", r.member, r.addr),
+                key: RowKey::None,
+            });
+        }
+        for u in &r.units {
+            rows.push(PanelRow {
+                text: format!("  m{} {:<18} {}", r.member, u.unit, fmt_unit_state(&u.state)),
+                key: RowKey::Unit { unit: u.unit.clone(), member: r.member },
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// One-shot service-control RPC (shared by the status query and the control
+/// actions), forwarding to `admin_ops::service::control_remote`.
+#[cfg(unix)]
+async fn service_status(
+    ans: &mut TuiAnswerer,
+    conn: &RemoteConn,
+    path: &str,
+    targets: Vec<netidx_admin::admin_proto::UnitTarget>,
+    op: netidx_activation::control::ControlOp,
+) -> Result<Vec<netidx_admin::admin_proto::ServiceControlResult>> {
+    use netidx_admin::admin_ops::service::control_remote;
+    control_remote(
+        ans,
+        conn.server,
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+        path,
+        targets,
+        op,
+    )
+    .await
+}
+
+#[cfg(unix)]
+fn fmt_unit_state(state: &netidx_activation::control::UnitState) -> String {
+    use netidx_activation::control::UnitState;
+    match state {
+        UnitState::NotStarted => "not started".to_string(),
+        UnitState::Running { pid: Some(pid) } => format!("running (pid {pid})"),
+        UnitState::Running { pid: None } => "running".to_string(),
+        UnitState::Stopped => "stopped".to_string(),
+        UnitState::Died => "died".to_string(),
+    }
+}
+
+#[cfg(unix)]
+async fn service_control(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    path: String,
+    unit: String,
+    member: u32,
+    op: ServiceOp,
+) -> Result<super::action::Outcome> {
+    use netidx_activation::control::ControlOp;
+    let (control_op, verb) = match op {
+        ServiceOp::Start => (ControlOp::Start, "Started"),
+        ServiceOp::Stop => (ControlOp::Stop, "Stopped"),
+        ServiceOp::Restart => (ControlOp::Restart, "Restarted"),
+    };
+    let targets =
+        vec![netidx_admin::admin_proto::UnitTarget { unit: unit.clone(), member: Some(member) }];
+    let results = service_status(ans, &conn, &path, targets, control_op).await?;
+    let mut lines: Vec<String> = Vec::new();
+    for r in &results {
+        match &r.error {
+            Some(e) => lines.push(format!("member {} ({}): {e}", r.member, r.addr)),
+            None => lines.push(format!("member {} ({}): ok", r.member, r.addr)),
+        }
+    }
+    if lines.is_empty() {
+        lines.push(format!("{verb} {unit} on member {member}."));
+    }
+    let rows = service_rows(ans, &conn, &path).await?;
+    Ok(super::action::Outcome::remote_after(verb, lines, Panel::Service, rows))
+}
+
 // ---- UI state (cross-platform) --------------------------------------------
 
 /// Which Tab-2 screen is showing.
@@ -805,8 +943,14 @@ pub(super) struct RemoteState {
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 5] =
-    [Panel::Queue, Panel::Delegations, Panel::Roster, Panel::Revocation, Panel::Perms];
+const PANELS: [Panel; 6] = [
+    Panel::Queue,
+    Panel::Delegations,
+    Panel::Roster,
+    Panel::Revocation,
+    Panel::Perms,
+    Panel::Service,
+];
 
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
@@ -971,6 +1115,7 @@ impl RemoteState {
                 Panel::Roster => return self.on_key_roster(code, conn),
                 Panel::Revocation => return self.on_key_revocation(code, conn),
                 Panel::Perms => return self.on_key_perms(code, conn),
+                Panel::Service => return self.on_key_service(code, conn),
             },
         }
         None
@@ -984,6 +1129,18 @@ impl RemoteState {
                 .map(|at| Action::Remote(RemoteAction::EditPerms { conn, at })),
             _ => None,
         }
+    }
+
+    fn on_key_service(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+        let op = match code {
+            KeyCode::Char('s') => ServiceOp::Start,
+            KeyCode::Char('t') => ServiceOp::Stop,
+            KeyCode::Char('R') => ServiceOp::Restart,
+            _ => return None,
+        };
+        let path = self.panel_path.clone()?;
+        let (unit, member) = self.selected_unit()?;
+        Some(Action::Remote(RemoteAction::ServiceControl { conn, path, unit, member, op }))
     }
 
     fn on_key_queue(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
@@ -1038,7 +1195,7 @@ impl RemoteState {
     fn selected_code(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Code(c) => Some(c.clone()),
-            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } => None,
+            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } | RowKey::Unit { .. } => None,
         }
     }
 
@@ -1046,7 +1203,7 @@ impl RemoteState {
     fn selected_cert(&self) -> Option<(u64, Option<Fingerprint>)> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Cert { serial, glyph } => Some((*serial, *glyph)),
-            RowKey::None | RowKey::Code(_) | RowKey::Name(_) => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Unit { .. } => None,
         }
     }
 
@@ -1054,7 +1211,15 @@ impl RemoteState {
     fn selected_name(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Name(n) => Some(n.clone()),
-            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } | RowKey::Unit { .. } => None,
+        }
+    }
+
+    /// The selected unit + member, if the row is a service-unit row.
+    fn selected_unit(&self) -> Option<(String, u32)> {
+        match &self.rows.get(self.list.selected()?)?.key {
+            RowKey::Unit { unit, member } => Some((unit.clone(), *member)),
+            RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Cert { .. } => None,
         }
     }
 
@@ -1164,6 +1329,7 @@ impl RemoteState {
             Panel::Roster => " a add · e edit-policy · d remove · r refresh · Esc back ",
             Panel::Revocation => " x revoke · r refresh · Esc back ",
             Panel::Perms => " e edit · r reload · Esc back ",
+            Panel::Service => " s start · t stop · R restart · r reload · Esc back ",
         };
         let title = match &self.panel_path {
             Some(p) => format!(" {} @ {p} ", panel.title()),
