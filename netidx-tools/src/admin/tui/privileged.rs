@@ -88,6 +88,20 @@ pub(super) fn uninstall(
     Ok("removed the install".to_string())
 }
 
+/// Suspend the TUI and drop the operator into their `$EDITOR` on `seed`,
+/// validating (and re-editing on failure) via the shared editor loop, then
+/// resume. Returns the normalized text. Used by the roster (policy JSON) and
+/// perms (perms JSON) panels — the one place the TUI hands off to a full editor.
+pub(super) fn edit_in_terminal(
+    terminal: &mut ratatui::DefaultTerminal,
+    seed: &str,
+    validate: super::answer::EditValidator,
+) -> Result<String> {
+    with_suspended(terminal, || {
+        super::super::editor::edit_with_validation(seed, |s| validate(s))
+    })
+}
+
 /// The `--scope` flag value for a scope.
 fn scope_flag(scope: ServiceScope) -> &'static str {
     match scope {

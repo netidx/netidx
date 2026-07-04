@@ -15,6 +15,8 @@
 
 use super::{action::Action, answer::TuiAnswerer, widgets};
 use anyhow::Result;
+#[cfg(unix)]
+use anyhow::Context;
 use crossterm::event::KeyCode;
 use netidx_admin::{admin_proto::Secret, fingerprint::Fingerprint};
 use ratatui::{
@@ -42,6 +44,7 @@ pub(super) struct RemoteConn {
 pub(super) enum Panel {
     Queue,
     Delegations,
+    Roster,
     Revocation,
 }
 
@@ -50,6 +53,7 @@ impl Panel {
         match self {
             Panel::Queue => "Enrollment queue",
             Panel::Delegations => "Delegation requests",
+            Panel::Roster => "Admin roster",
             Panel::Revocation => "Issued certificates",
         }
     }
@@ -74,6 +78,9 @@ pub(super) enum RowKey {
     None,
     /// A full fingerprint code (queue enrollment, delegation request).
     Code(String),
+    /// An admin name (roster). Reserved signing slots render as [`RowKey::None`]
+    /// so the roster actions never target them.
+    Name(String),
     /// A certificate: its serial plus the per-key glyph shown for it (`None`
     /// when the stored glyph is empty/unparseable — a legacy directly-issued
     /// cert, revocable by its unique serial without a glyph assertion).
@@ -99,6 +106,12 @@ pub(super) enum RemoteAction {
     /// Revoke one issued certificate by serial (glyph-gated, reason prompted).
     /// Irreversible — gated by a yes/no confirm before it runs.
     Revoke { conn: RemoteConn, serial: u64, glyph: Option<Fingerprint> },
+    /// Mint a new role admin (name + initial password + policy via `$EDITOR`).
+    AddAdmin { conn: RemoteConn },
+    /// Replace an admin's policy (edited as JSON in `$EDITOR`).
+    SetPolicy { conn: RemoteConn, name: String },
+    /// Remove a role admin. Gated by a yes/no confirm before it runs.
+    RemoveAdmin { conn: RemoteConn, name: String },
 }
 
 impl RemoteAction {
@@ -112,16 +125,23 @@ impl RemoteAction {
             RemoteAction::ApproveDelegation { .. } => "Approving delegation".to_string(),
             RemoteAction::DenyDelegation { .. } => "Denying delegation".to_string(),
             RemoteAction::Revoke { .. } => "Revoking certificate".to_string(),
+            RemoteAction::AddAdmin { .. } => "Adding an admin".to_string(),
+            RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
+            RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
         }
     }
 
-    /// A yes/no confirmation to require before running, or `None`. Only the
-    /// irreversible revoke is gated.
+    /// A yes/no confirmation to require before running, or `None`. The
+    /// irreversible revoke and the destructive admin-removal are gated.
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
             RemoteAction::Revoke { serial, .. } => Some(format!(
                 "Revoke certificate serial {serial}? This is irreversible — the \
                  cluster re-signs its CRL and the holder can no longer authenticate."
+            )),
+            RemoteAction::RemoveAdmin { name, .. } => Some(format!(
+                "Remove admin {name:?}? Their password will no longer authenticate \
+                 to this CA."
             )),
             _ => None,
         }
@@ -138,7 +158,10 @@ impl RemoteAction {
             | RemoteAction::Deny { conn, .. }
             | RemoteAction::ApproveDelegation { conn, .. }
             | RemoteAction::DenyDelegation { conn, .. }
-            | RemoteAction::Revoke { conn, .. } => Some(conn.confirmed_fp),
+            | RemoteAction::Revoke { conn, .. }
+            | RemoteAction::AddAdmin { conn }
+            | RemoteAction::SetPolicy { conn, .. }
+            | RemoteAction::RemoveAdmin { conn, .. } => Some(conn.confirmed_fp),
         }
     }
 }
@@ -167,6 +190,9 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::Revoke { conn, serial, glyph } => {
             revoke(ans, conn, serial, glyph).await
         }
+        RemoteAction::AddAdmin { conn } => add_admin(ans, conn).await,
+        RemoteAction::SetPolicy { conn, name } => set_policy(ans, conn, name).await,
+        RemoteAction::RemoveAdmin { conn, name } => remove_admin(ans, conn, name).await,
     }
 }
 
@@ -217,6 +243,7 @@ async fn refresh(
     let rows = match panel {
         Panel::Queue => queue_rows(ans, &conn).await?,
         Panel::Delegations => delegation_rows(ans, &conn).await?,
+        Panel::Roster => roster_rows(ans, &conn).await?,
         Panel::Revocation => revocation_rows(ans, &conn).await?,
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
@@ -509,6 +536,164 @@ async fn revoke(
     Ok(super::action::Outcome::remote_after("Revoked", lines, Panel::Revocation, rows))
 }
 
+#[cfg(unix)]
+async fn admin_target(
+    ans: &mut TuiAnswerer,
+    conn: &RemoteConn,
+) -> Result<netidx_admin::admin_ops::AdminTarget> {
+    use netidx_admin::admin_ops::resolve_admin_target;
+    resolve_admin_target(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        Some(conn.password.clone()),
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn roster_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
+    use netidx_admin::admin_ops::roster::list_admins;
+    let target = admin_target(ans, conn).await?;
+    Ok(list_admins(&target).await?.iter().map(roster_row).collect())
+}
+
+/// Format one roster entry. Reserved signing slots (recovery / autorenew) are
+/// display-only ([`RowKey::None`]) — the roster actions must never target them.
+#[cfg(unix)]
+fn roster_row(a: &netidx_admin::ca_vault::AdminInfo) -> PanelRow {
+    use netidx_admin::ca_vault::{SlotKind, is_reserved_admin};
+    let tier = match a.kind {
+        SlotKind::Signing => "signing",
+        SlotKind::Role => "role",
+    };
+    let reserved = is_reserved_admin(&a.admin);
+    let tag = if reserved { "  (system slot)" } else { "" };
+    let key = if reserved { RowKey::None } else { RowKey::Name(a.admin.clone()) };
+    PanelRow {
+        text: format!("{:<18} [{tier}]{tag}  {}", a.admin, policy_summary(&a.policy)),
+        key,
+    }
+}
+
+/// A one-line summary of an admin's granted authorities for the roster row.
+#[cfg(unix)]
+fn policy_summary(p: &netidx_admin::ca_vault::Policy) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !p.allowed_san.is_empty() {
+        parts.push(format!("san={}", p.allowed_san.join("|")));
+    }
+    if p.may_enroll_servers {
+        parts.push("enroll-servers".to_string());
+    }
+    if p.may_manage_admins {
+        parts.push("manage-admins".to_string());
+    }
+    if !p.perms_edit_scopes.is_empty() {
+        parts.push(format!("perms={}", p.perms_edit_scopes.join("|")));
+    }
+    if !p.service_control_scopes.is_empty() {
+        parts.push(format!("svc={}", p.service_control_scopes.join("|")));
+    }
+    if parts.is_empty() { "(no grants)".to_string() } else { parts.join(" ") }
+}
+
+/// The `$EDITOR` validator for a policy JSON blob: it must parse as a `Policy`;
+/// returns the normalized (pretty) JSON to store.
+#[cfg(unix)]
+fn policy_validator() -> super::answer::EditValidator {
+    Box::new(|s: &str| {
+        let p: netidx_admin::ca_vault::Policy =
+            serde_json::from_str(s).context("not valid policy JSON")?;
+        serde_json::to_string_pretty(&p).context("serializing policy")
+    })
+}
+
+/// A starter policy for a new role admin — every field present (all grants off)
+/// so the editor shows exactly what can be granted.
+#[cfg(unix)]
+fn policy_template() -> netidx_admin::ca_vault::Policy {
+    netidx_admin::ca_vault::Policy {
+        allowed_san: vec![],
+        max_validity: std::time::Duration::from_secs(730 * 86400),
+        id_map_groups: vec![],
+        may_enroll_servers: false,
+        perms_edit_scopes: vec![],
+        may_manage_admins: false,
+        service_control_scopes: vec![],
+    }
+}
+
+#[cfg(unix)]
+async fn add_admin(ans: &mut TuiAnswerer, conn: RemoteConn) -> Result<super::action::Outcome> {
+    use netidx_admin::{
+        admin_ops::roster::add_role_admin,
+        answer::{Answerer, Field},
+    };
+    let name = ans
+        .text(Field::AdminName, None, None, true)
+        .await?
+        .context("an admin name is required")?;
+    let password = ans.secret(Field::AdminPassword, None).await?;
+    let seed = serde_json::to_string_pretty(&policy_template())?;
+    let edited = ans.edit(seed, policy_validator()).await?;
+    let policy: netidx_admin::ca_vault::Policy = serde_json::from_str(&edited)?;
+    let target = admin_target(ans, &conn).await?;
+    add_role_admin(&target, &name, &password, policy).await?;
+    let rows = roster_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Admin added",
+        vec![format!("Added role admin {name:?}.")],
+        Panel::Roster,
+        rows,
+    ))
+}
+
+#[cfg(unix)]
+async fn set_policy(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    name: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::roster::{list_admins, set_admin_policy};
+    let target = admin_target(ans, &conn).await?;
+    let current = list_admins(&target)
+        .await?
+        .into_iter()
+        .find(|a| a.admin == name)
+        .with_context(|| format!("admin {name:?} not found in the roster"))?;
+    let seed = serde_json::to_string_pretty(&current.policy)?;
+    let edited = ans.edit(seed, policy_validator()).await?;
+    let policy: netidx_admin::ca_vault::Policy = serde_json::from_str(&edited)?;
+    set_admin_policy(&target, &name, policy).await?;
+    let rows = roster_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Policy updated",
+        vec![format!("Updated the policy of {name:?}.")],
+        Panel::Roster,
+        rows,
+    ))
+}
+
+#[cfg(unix)]
+async fn remove_admin(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    name: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::roster::remove_admin;
+    let target = admin_target(ans, &conn).await?;
+    remove_admin(&target, &name).await?;
+    let rows = roster_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Admin removed",
+        vec![format!("Removed admin {name:?}.")],
+        Panel::Roster,
+        rows,
+    ))
+}
+
 // ---- UI state (cross-platform) --------------------------------------------
 
 /// Which Tab-2 screen is showing.
@@ -536,7 +721,8 @@ pub(super) struct RemoteState {
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 3] = [Panel::Queue, Panel::Delegations, Panel::Revocation];
+const PANELS: [Panel; 4] =
+    [Panel::Queue, Panel::Delegations, Panel::Roster, Panel::Revocation];
 
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
@@ -640,6 +826,7 @@ impl RemoteState {
             _ => match panel {
                 Panel::Queue => return self.on_key_queue(code, conn),
                 Panel::Delegations => return self.on_key_delegations(code, conn),
+                Panel::Roster => return self.on_key_roster(code, conn),
                 Panel::Revocation => return self.on_key_revocation(code, conn),
             },
         }
@@ -680,12 +867,25 @@ impl RemoteState {
         }
     }
 
+    fn on_key_roster(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+        match code {
+            KeyCode::Char('a') => Some(Action::Remote(RemoteAction::AddAdmin { conn })),
+            KeyCode::Char('e') => self
+                .selected_name()
+                .map(|name| Action::Remote(RemoteAction::SetPolicy { conn, name })),
+            KeyCode::Char('d') => self
+                .selected_name()
+                .map(|name| Action::Remote(RemoteAction::RemoveAdmin { conn, name })),
+            _ => None,
+        }
+    }
+
     /// The full code of the selected row, if it carries one (not a renewal /
     /// unparseable / non-code row).
     fn selected_code(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Code(c) => Some(c.clone()),
-            RowKey::None | RowKey::Cert { .. } => None,
+            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } => None,
         }
     }
 
@@ -693,7 +893,15 @@ impl RemoteState {
     fn selected_cert(&self) -> Option<(u64, Option<Fingerprint>)> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Cert { serial, glyph } => Some((*serial, *glyph)),
-            RowKey::None | RowKey::Code(_) => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Name(_) => None,
+        }
+    }
+
+    /// The selected admin's name, if the row is an actionable roster row.
+    fn selected_name(&self) -> Option<String> {
+        match &self.rows.get(self.list.selected()?)?.key {
+            RowKey::Name(n) => Some(n.clone()),
+            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } => None,
         }
     }
 
@@ -775,6 +983,7 @@ impl RemoteState {
         let hint = match panel {
             Panel::Queue => " a approve · d deny · R renewals · r refresh · Esc back ",
             Panel::Delegations => " a approve · d deny · r refresh · Esc back ",
+            Panel::Roster => " a add · e edit-policy · d remove · r refresh · Esc back ",
             Panel::Revocation => " x revoke · r refresh · Esc back ",
         };
         let mut st = self.list.clone();

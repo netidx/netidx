@@ -409,7 +409,14 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         terminal.draw(|f| app.render(f))?;
         tokio::select! {
             biased;
-            Some(req) = ui_rx.recv() => app.handle_request(req),
+            Some(req) = ui_rx.recv() => match req {
+                // The editor request owns the terminal (suspend → $EDITOR →
+                // resume), so the loop services it here rather than as a modal.
+                answer::UiRequest::Editor { seed, validate, reply } => {
+                    let _ = reply.send(privileged::edit_in_terminal(terminal, &seed, validate));
+                }
+                other => app.handle_request(other),
+            },
             out = async { match op.as_mut() { Some(f) => f.await, None => future::pending().await } } => {
                 op = None;
                 let result = complete_op(terminal, &mut app, out);

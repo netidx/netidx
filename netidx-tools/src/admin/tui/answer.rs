@@ -29,6 +29,12 @@ use ratatui::{
 };
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
+/// A `$EDITOR` validator: parses+normalizes the edited text, or reports why it's
+/// invalid so the operator can re-edit. Runs in the UI loop (terminal suspended)
+/// and returns the normalized text to send. Boxed so it can travel the request
+/// channel; the op supplies the right one (policy JSON, perms JSON, …).
+pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
+
 /// A request from the op task to the UI loop. The blocking question variants
 /// carry a `oneshot` the UI answers; the rest are fire-and-forget.
 pub(super) enum UiRequest {
@@ -56,6 +62,15 @@ pub(super) enum UiRequest {
     Identity {
         identity: Box<CaIdentity>,
         reply: oneshot::Sender<Result<bool>>,
+    },
+    /// Suspend the TUI, drop the operator into `$EDITOR` on `seed`, validate the
+    /// result (re-editing on failure), and reply with the normalized text. Not a
+    /// modal — the UI loop services it directly because it must own the terminal
+    /// to suspend it. See [`super::privileged::edit_in_terminal`].
+    Editor {
+        seed: String,
+        validate: EditValidator,
+        reply: oneshot::Sender<Result<String>>,
     },
     Recovery {
         password: String,
@@ -90,6 +105,15 @@ impl TuiAnswerer {
     /// [`Self::accept_glyph`]).
     pub(super) fn with_glyph(tx: UnboundedSender<UiRequest>, fp: Fingerprint) -> TuiAnswerer {
         TuiAnswerer { tx, accept_glyph: Some(fp) }
+    }
+
+    /// Edit `seed` in the operator's `$EDITOR` (via the UI loop, which suspends
+    /// the terminal), validating+normalizing with `validate`. Returns the
+    /// normalized text, or an error if the operator aborted. Inherent (not part
+    /// of [`Answerer`]) — the editor loop is a TUI-only concern, so only the
+    /// concrete op bodies that hold a `TuiAnswerer` reach it.
+    pub(super) async fn edit(&self, seed: String, validate: EditValidator) -> Result<String> {
+        self.ask(|reply| UiRequest::Editor { seed, validate, reply }).await
     }
 
     /// Send a question and await its reply, mapping a dropped channel (the UI
