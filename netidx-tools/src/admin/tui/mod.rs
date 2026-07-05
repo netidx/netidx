@@ -419,11 +419,25 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiRequest>();
     let mut app = App::new();
     let mut op: Option<OpFuture> = None;
+    // A quiet background network-sync check for the Local tab's installs. Runs
+    // off the main op slot so the status card renders instantly from local
+    // files and gains its sync line once the network answers; never sets `busy`.
+    type SyncFuture = Pin<Box<dyn Future<Output = Vec<(usize, local::SyncState)>>>>;
+    let mut sync_op: Option<SyncFuture> = None;
     // The crossterm reader. `None` only during a terminal-suspend, so its
     // background thread can't fight the child (editor / sudo) for stdin.
     let mut events: Option<Fuse<EventStream>> = Some(EventStream::new().fuse());
     while !app.should_quit {
         terminal.draw(|f| app.render(f))?;
+        // Kick off the sync check when the Local tab is focused and has an
+        // unchecked networked install. `take_pending_checks` marks them
+        // `Checking`, so this launches exactly one check per install.
+        if app.tab == Tab::Local && sync_op.is_none() {
+            let pending = app.local.take_pending_checks();
+            if !pending.is_empty() {
+                sync_op = Some(Box::pin(local::check_sync(pending)));
+            }
+        }
         tokio::select! {
             biased;
             Some(req) = ui_rx.recv() => match req {
@@ -458,6 +472,17 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                     break;
                 }
             },
+            // Lowest priority: a finished background sync check just fills in the
+            // Local tab's sync lines — no overlay, no `busy`.
+            synced = async {
+                match sync_op.as_mut() {
+                    Some(f) => f.await,
+                    None => future::pending().await,
+                }
+            } => {
+                sync_op = None;
+                app.local.apply_sync(synced);
+            }
         }
     }
     Ok(())

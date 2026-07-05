@@ -76,6 +76,25 @@ impl Detected {
     }
 }
 
+/// Network-sync state for a detected install, filled in asynchronously by a
+/// background check (the same reconcile the CLI `status`/`update` runs). Kept
+/// out of [`Detected`] because probing it is a network round-trip, while
+/// `Detected` is built synchronously from local files.
+#[derive(Clone)]
+pub(super) enum SyncState {
+    /// A networked install not yet checked; the event loop launches a check.
+    Unchecked,
+    /// A background check is in flight.
+    Checking,
+    /// The config already matches the network — nothing to apply.
+    InSync,
+    /// The network has member servers this config lacks; each string is one
+    /// pending addition (e.g. `client resolver 192.168.50.12:4564 (tls)`).
+    OutOfSync(Vec<String>),
+    /// The check couldn't reach the network; carries the error for display.
+    Failed(String),
+}
+
 /// The OS-service state for a role. Resolver / publisher register a system-scope
 /// `netidx@<user>` service even when their config is user-scope; a workstation
 /// uses a user-scope service. Probe the scope that matches.
@@ -127,6 +146,10 @@ struct ActionMenu {
 /// fresh-machine case.
 pub(super) struct LocalState {
     installs: Vec<Detected>,
+    /// Per-install network-sync state, parallel to `installs` — filled in by a
+    /// background check so the status card can render instantly from local
+    /// files and gain the sync line once the network answers.
+    sync: Vec<SyncState>,
     role_menu: ListState,
     /// Which detected install the lifecycle actions apply to.
     selected: usize,
@@ -138,14 +161,43 @@ impl LocalState {
     pub(super) fn new() -> LocalState {
         let mut role_menu = ListState::default();
         role_menu.select(Some(0));
-        LocalState { installs: detect(), role_menu, selected: 0, menu: None }
+        let installs = detect();
+        let sync = vec![SyncState::Unchecked; installs.len()];
+        LocalState { installs, sync, role_menu, selected: 0, menu: None }
     }
 
-    /// Re-run detection (after an install/uninstall completes).
+    /// Re-run detection (after an install/uninstall completes). Resets the sync
+    /// state so the loop re-checks against the network.
     pub(super) fn refresh(&mut self) {
         self.installs = detect();
+        self.sync = vec![SyncState::Unchecked; self.installs.len()];
         self.selected = self.selected.min(self.installs.len().saturating_sub(1));
         self.menu = None;
+    }
+
+    /// Networked installs whose sync hasn't been checked yet; marks each
+    /// `Checking` so the event loop launches exactly one background check per
+    /// install. Standalone (local-only) installs are never checked.
+    pub(super) fn take_pending_checks(&mut self) -> Vec<(usize, InstallRole)> {
+        let mut out = Vec::new();
+        for i in 0..self.installs.len() {
+            if self.installs[i].record.network.is_some()
+                && matches!(self.sync[i], SyncState::Unchecked)
+            {
+                self.sync[i] = SyncState::Checking;
+                out.push((i, self.installs[i].record.role));
+            }
+        }
+        out
+    }
+
+    /// Fold in a finished background check's results.
+    pub(super) fn apply_sync(&mut self, results: Vec<(usize, SyncState)>) {
+        for (i, st) in results {
+            if let Some(slot) = self.sync.get_mut(i) {
+                *slot = st;
+            }
+        }
     }
 
     pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
@@ -188,6 +240,15 @@ impl LocalState {
             Enter => self.menu = Some(action_menu(&self.installs[self.selected])),
             // Quick shortcuts (also in the menu).
             Char('u') => return Some(uninstall_action(&self.installs[self.selected], false)),
+            // Uppercase U applies the network sync (the Update action) — mnemonic
+            // and distinct from lowercase `u` (uninstall). Only meaningful for a
+            // networked install; the status card surfaces it when out of sync.
+            Char('U') => {
+                let d = &self.installs[self.selected];
+                if d.record.network.is_some() {
+                    return Some(Action::Update { role: d.record.role });
+                }
+            }
             Char('r') => {
                 let d = &self.installs[self.selected];
                 if d.record.network.is_some() {
@@ -244,7 +305,7 @@ impl LocalState {
         let rows = Layout::vertical(vec![Constraint::Ratio(1, n); self.installs.len()])
             .split(area);
         for (i, (d, cell)) in self.installs.iter().zip(rows.iter()).enumerate() {
-            render_install(f, d, *cell, i == self.selected);
+            render_install(f, d, &self.sync[i], *cell, i == self.selected);
         }
     }
 }
@@ -350,13 +411,20 @@ fn render_menu(f: &mut Frame, screen: Rect, menu: &ActionMenu) {
 /// Render one detected install: a details column on the left and, when the host
 /// joined a network, its CA identicon + fingerprint on the right. The selected
 /// install is highlighted and shows its action keys.
-fn render_install(f: &mut Frame, d: &Detected, area: Rect, selected: bool) {
+fn render_install(f: &mut Frame, d: &Detected, sync: &SyncState, area: Rect, selected: bool) {
     let title = format!(" {} ", role_title(d.record.role));
     let mut block = Block::default().borders(Borders::ALL).title(title);
     if selected {
+        // Surface the sync-apply shortcut in the hint only when there's
+        // something to apply, so it doesn't clutter the in-sync case.
+        let hint = if matches!(sync, SyncState::OutOfSync(_)) {
+            " Enter actions · U sync now · u uninstall "
+        } else {
+            " Enter actions · u uninstall "
+        };
         block = block
             .border_style(Style::default().fg(Color::Cyan))
-            .title_bottom(Line::from(" Enter actions · u uninstall ").dim());
+            .title_bottom(Line::from(hint).dim());
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -368,7 +436,9 @@ fn render_install(f: &mut Frame, d: &Detected, area: Rect, selected: bool) {
         Layout::horizontal([Constraint::Min(0)]).split(inner)
     };
 
-    f.render_widget(Paragraph::new(detail_lines(d)).wrap(Wrap { trim: false }), cols[0]);
+    let mut lines = detail_lines(d);
+    lines.extend(sync_lines(sync));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cols[0]);
 
     if let Some(fp) = &d.ca {
         let mut lines = vec![Line::from("CA glyph".dim())];
@@ -409,6 +479,79 @@ fn kv(label: &'static str, value: String) -> Line<'static> {
         ),
         Span::raw(value),
     ])
+}
+
+/// A `label: value` line whose value carries a status colour.
+fn kv_status(label: &'static str, value: String, color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:>16}: "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(value, Style::default().fg(color)),
+    ])
+}
+
+/// The status-card lines describing this install's network-sync state — the
+/// TUI counterpart of the CLI `status` "in sync / out of sync" report.
+fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
+    match sync {
+        // A local-only install never gets here (never checked); render nothing.
+        SyncState::Unchecked => Vec::new(),
+        SyncState::Checking => {
+            vec![kv_status("Network sync", "checking…".to_string(), Color::DarkGray)]
+        }
+        SyncState::InSync => {
+            vec![kv_status("Network sync", "✓ in sync".to_string(), Color::Green)]
+        }
+        SyncState::Failed(e) => vec![kv_status(
+            "Network sync",
+            format!("could not check ({e})"),
+            Color::DarkGray,
+        )],
+        SyncState::OutOfSync(changes) => {
+            let mut lines = vec![kv_status(
+                "Network sync",
+                format!(
+                    "⚠ {} new member server(s) — press U to apply",
+                    changes.len()
+                ),
+                Color::Yellow,
+            )];
+            for c in changes {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{:>18}", "")),
+                    Span::styled(
+                        format!("+ {c}"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+            }
+            lines
+        }
+    }
+}
+
+/// Background network-sync check for the given installs — the quiet counterpart
+/// of the Update action. Runs the same reconcile the CLI `status`/`update` does
+/// (via [`super::lifecycle::update_plan`]) and maps each result to a
+/// [`SyncState`]. Self-contained (owns its inputs, borrows no UI state) so the
+/// event loop can poll it as a background future without a `spawn`.
+pub(super) async fn check_sync(
+    pending: Vec<(usize, InstallRole)>,
+) -> Vec<(usize, SyncState)> {
+    let mut out = Vec::with_capacity(pending.len());
+    for (i, role) in pending {
+        let st = match super::lifecycle::update_plan(role).await {
+            Ok(plan) if plan.is_empty() => SyncState::InSync,
+            Ok(plan) => SyncState::OutOfSync(
+                plan.changes.iter().map(|c| c.text().to_string()).collect(),
+            ),
+            Err(e) => SyncState::Failed(format!("{e:#}")),
+        };
+        out.push((i, st));
+    }
+    out
 }
 
 fn service_line(status: ServiceStatus) -> Line<'static> {
