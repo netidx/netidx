@@ -264,10 +264,17 @@ pub async fn run_publisher(
         ServiceNeed::NONE
     };
     let (network, admin_server) = network_provenance(&probe);
+    // On the discovery/auto-import path `auth` is never set — the scheme comes
+    // from the network's per-referral auths — so fall back to what we actually
+    // configured rather than defaulting the record to "tls".
+    let record_auth = auth
+        .map(|k| k.as_str())
+        .or_else(|| resolved_addrs.first().map(|(_, ra)| ra.scheme_str()))
+        .unwrap_or("tls");
     let record = InstallRecord::new(
         InstallRole::Publisher,
         base.clone(),
-        auth.map(|k| k.as_str()).unwrap_or("tls"),
+        record_auth,
         network,
         admin_server,
     );

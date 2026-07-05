@@ -118,6 +118,18 @@ impl ReferralAuth {
             Self::Tls(n) => cfile::Auth::Tls(n),
         }
     }
+
+    /// The scheme's canonical lowercase name (matches `AuthKind::as_str`), for
+    /// recording the effective data-plane auth of a config assembled from
+    /// per-referral auths rather than a single chosen `AuthKind`.
+    pub(crate) fn scheme_str(&self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Local(_) => "local",
+            Self::Krb5(_) => "krb5",
+            Self::Tls(_) => "tls",
+        }
+    }
 }
 
 /// One TLS identity to install and reference from `tls.identities`.
