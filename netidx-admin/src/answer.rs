@@ -389,10 +389,10 @@ impl Field {
             DelegateSubtree => FieldInfo {
                 flag: "--delegate-subtree",
                 label: "delegated subtree",
-                help: "The subtree this resolver asks the network's resolver to \
-                       delegate to it, e.g. /eu (the parent's admin approves it). \
-                       Leave blank to instead join as a plain member of the \
-                       network's root cluster.",
+                help: "Leave blank to install this resolver as a peer of the \
+                       base cluster, or name a subtree (e.g. /eu) to request the \
+                       network delegate it to this resolver — the parent's admin \
+                       must approve the delegation.",
             },
             AdminServerAddr => FieldInfo {
                 flag: "--server",

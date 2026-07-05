@@ -663,7 +663,8 @@ pub(crate) struct ResolverFlags {
     #[arg(long = "parent-admin-server")]
     parent_admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the parent (with
-    /// `--parent-admin-server`), e.g. `/eu`. Prompted if omitted.
+    /// `--parent-admin-server`), e.g. `/eu`. Omit to install as a peer
+    /// of the base cluster instead of requesting delegation.
     #[arg(long = "delegate-subtree")]
     delegate_subtree: Option<String>,
     /// How new private keys are protected at rest: `seal` (bind to
