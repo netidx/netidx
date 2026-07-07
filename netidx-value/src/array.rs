@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize, de::Visitor, ser::SerializeSeq};
 use smallvec::{SmallVec, smallvec};
 use std::{
     borrow::Borrow,
+    collections::BTreeMap,
     fmt::Debug,
     hash::{Hash, Hasher},
     mem::{self, ManuallyDrop},
@@ -85,19 +86,22 @@ thread_local! {
     static DROP_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The deferred-drop queue. Global rather than thread-local: pushes
-/// only happen past MAX_DROP_DEPTH re-entrant frames — a degenerate
-/// case, so the mutex is not on any hot path (the per-drop probe is
-/// the relaxed load of DROP_DEFERRED_LEN) — and a global queue keeps
-/// working during thread teardown, when a TLS queue's own destructor
-/// may already have run (dropping a deep value from another TLS
-/// destructor then recursed unbounded). Entries are tagged with the
-/// address of the owning thread's DROP_DEPTH cell and only ever
-/// popped by that thread — the same discipline as immutable_chunkmap's
-/// twin (there it is load-bearing for erased lifetimes; here it keeps
-/// the drain ordering local and stays correct if pooling ever goes
-/// thread-local).
-static DROP_DEFERRED: Mutex<Vec<(usize, ValArrayBase)>> = Mutex::new(Vec::new());
+/// The deferred-drop queue, bucketed by owner tag (the address of the
+/// owning thread's DROP_DEPTH cell). Global rather than thread-local:
+/// pushes only happen past MAX_DROP_DEPTH re-entrant frames — a
+/// degenerate case, so the mutex is not on any hot path (the per-drop
+/// probe is the relaxed load of DROP_DEFERRED_LEN) — and a global
+/// queue keeps working during thread teardown, when a TLS queue's own
+/// destructor may already have run (dropping a deep value from another
+/// TLS destructor then recursed unbounded). Only the owning thread
+/// takes its bucket — the same discipline as immutable_chunkmap's twin
+/// (there it is load-bearing for erased lifetimes; here it keeps the
+/// drain ordering local and stays correct if pooling ever goes
+/// thread-local). Bucketing lets the drain take its ENTIRE bucket in
+/// one mutex op and destroy the entries outside the lock, in push
+/// order.
+static DROP_DEFERRED: Mutex<BTreeMap<usize, Vec<ValArrayBase>>> =
+    Mutex::new(BTreeMap::new());
 
 /// Cheap emptiness probe so an outermost drop with nothing deferred
 /// never touches the mutex. Relaxed suffices: only the pushing thread
@@ -105,7 +109,7 @@ static DROP_DEFERRED: Mutex<Vec<(usize, ValArrayBase)>> = Mutex::new(Vec::new())
 /// order.
 static DROP_DEFERRED_LEN: AtomicUsize = AtomicUsize::new(0);
 
-fn deferred_lock() -> MutexGuard<'static, Vec<(usize, ValArrayBase)>> {
+fn deferred_lock() -> MutexGuard<'static, BTreeMap<usize, Vec<ValArrayBase>>> {
     // a poisoned queue is structurally intact and must still drain
     match DROP_DEFERRED.lock() {
         Ok(g) => g,
@@ -143,6 +147,12 @@ impl Drop for DepthGuard {
 /// nesting depth, which is exactly the overflow this machinery
 /// exists to prevent.
 ///
+/// Each round takes the tag's ENTIRE bucket in one mutex op and
+/// destroys the entries outside the lock, in push order (a stable,
+/// deterministic drop order); destruction can re-enter and defer
+/// deeper arrays, opening a fresh bucket, so the loop runs until the
+/// bucket stays absent.
+///
 /// Each entry is destroyed under `catch_unwind` so a panicking
 /// destructor can neither strand later entries in the queue nor
 /// double-panic the process when several entries panic. The first
@@ -153,24 +163,19 @@ fn drain_deferred(tag: usize) {
     let _ = DROP_DEPTH.try_with(|d| d.set(1));
     let mut panic = None;
     loop {
-        // pop outside the lock — destruction may re-enter and push
-        let entry = {
-            let mut q = deferred_lock();
-            q.iter().position(|e| e.0 == tag).map(|i| {
-                DROP_DEFERRED_LEN.fetch_sub(1, Ordering::Relaxed);
-                q.swap_remove(i).1
-            })
-        };
-        match entry {
-            None => break,
-            Some(a) => {
-                let r = std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| drop(a)),
-                );
-                if let Err(e) = r {
-                    if panic.is_none() {
-                        panic = Some(e)
-                    }
+        // NOT `while let`: a match scrutinee's temporaries live through
+        // the body, so the guard would be held while entries are
+        // destroyed — and a drained entry's drop that defers a deeper
+        // array re-locks the queue → same-thread deadlock. The `let`
+        // ends the guard's life before the destroy loop.
+        let Some(batch) = deferred_lock().remove(&tag) else { break };
+        DROP_DEFERRED_LEN.fetch_sub(batch.len(), Ordering::Relaxed);
+        for a in batch {
+            let r =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(a)));
+            if let Err(e) = r {
+                if panic.is_none() {
+                    panic = Some(e)
                 }
             }
         }
@@ -201,7 +206,7 @@ impl Drop for ValArrayBase {
             return self.really_drop();
         };
         if depth >= MAX_DROP_DEPTH {
-            deferred_lock().push((tag, unsafe { ptr::read(self) }));
+            deferred_lock().entry(tag).or_default().push(unsafe { ptr::read(self) });
             DROP_DEFERRED_LEN.fetch_add(1, Ordering::Relaxed);
             return;
         }
