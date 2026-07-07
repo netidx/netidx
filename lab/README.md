@@ -97,6 +97,47 @@ netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f
 netidx conf component tls auto-renew run
 ```
 
+## CLI renamed: `netidx conf …` → `netidx admin …`
+
+The CLI subcommand was renamed `conf` → `admin`, and the interactive prompt
+layer was removed — `netidx admin` is now **strict** (every option is a flag or
+it errors; there is no `$EDITOR`/y-n ceremony left in the CLI). The old
+`harness/*.exp` expect scripts drive `netidx conf` with interactive prompts and
+are therefore **stale** — keep them for reference, but drive the strict CLI
+directly (flags) and drive the interactive experience through the **TUI**
+(`netidx admin`, no subcommand) over tmux (below).
+
+## Driving the TUI (tmux)
+
+The `netidx admin` TUI (ratatui) needs a real PTY, so drive it from a detached
+tmux session and snapshot the pane. Size the pane generously — the layout is
+width/height sensitive.
+
+```sh
+# start a detached, fixed-size session running the TUI on a lab host (ssh -t
+# for a PTY). Do this from the host; target any VM by ip.
+tmux new-session -d -s tui -x 220 -y 50 \
+  'ssh -tt -o StrictHostKeyChecking=no root@192.168.50.11 netidx admin'
+
+sleep 2
+tmux capture-pane -t tui -p          # snapshot the screen (pipe to a file/Read)
+
+tmux send-keys  -t tui Down Down Enter   # navigate: arrows / Enter
+tmux send-keys  -t tui Tab               # switch Local/Cluster tab
+tmux send-keys  -t tui -l 'sometext'     # literal text (-l) into a field
+tmux send-keys  -t tui Enter
+tmux send-keys  -t tui Escape            # back / dismiss a dialog
+
+tmux capture-pane -t tui -p          # re-snapshot after each step
+tmux kill-session -t tui             # done
+```
+
+Notes: `capture-pane -p` prints the current buffer (use `-e` to keep ANSI
+colors). Send one keystroke group, `sleep` briefly (the TUI polls its op future
+on the UI task), then capture — don't blind-fire a whole sequence. For a
+fresh-machine flow, teardown the host first (below) so the welcome/install path
+runs. `Ctrl-c` quits: `tmux send-keys -t tui C-c`.
+
 ## Harnesses (`harness/*.exp`)
 
 Grouped by function; names are prefixed so the directory listing sorts into
