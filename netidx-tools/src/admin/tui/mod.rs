@@ -107,8 +107,16 @@ struct App {
     /// An out-of-band verification code the operator must relay while an action
     /// waits for a remote admin to approve.
     verification: Option<(String, Fingerprint)>,
-    /// Notes and warnings from the running (or last) action.
+    /// The running transcript: every note/warning an action emits, accumulated
+    /// across the session. Never rendered in the normal flow (housekeeping text
+    /// flashing between modals is noise) — the operator opens it on demand with
+    /// `l` (see [`Self::show_log`]) to review after the fact.
     log: Vec<Line<'static>>,
+    /// Whether the on-demand log pane is open.
+    show_log: bool,
+    /// Scroll offset (top line) of the open log pane; clamped to the tail at
+    /// render, so a fresh open (`u16::MAX`) shows the most recent lines.
+    log_scroll: u16,
     /// A finished action's result overlay.
     result: Option<ResultView>,
     /// A destructive action awaiting yes/no confirmation before it runs.
@@ -130,9 +138,26 @@ impl App {
             tick: 0,
             verification: None,
             log: Vec::new(),
+            show_log: false,
+            log_scroll: 0,
             result: None,
             confirm: None,
         }
+    }
+
+    /// Open the log pane, scrolled to the most recent lines (clamped at render).
+    fn open_log(&mut self) {
+        self.show_log = true;
+        self.log_scroll = u16::MAX;
+    }
+
+    /// Append a line to the session transcript, bounding its growth.
+    fn log_line(&mut self, line: Line<'static>) {
+        const CAP: usize = 1000;
+        if self.log.len() >= CAP {
+            self.log.remove(0);
+        }
+        self.log.push(line);
     }
 
     /// Advance to the next tab (wrapping).
@@ -147,13 +172,14 @@ impl App {
         }
     }
 
-    /// Switch the UI into the activity view for a just-started action.
+    /// Switch the UI into the activity view for a just-started action. The
+    /// transcript is not cleared — it persists across the session so the
+    /// operator can review everything that happened via the log pane.
     fn begin(&mut self, label: String) {
         self.busy = true;
         self.activity = Some(label);
         self.progress = None;
         self.verification = None;
-        self.log.clear();
         self.result = None;
     }
 
@@ -199,8 +225,8 @@ impl App {
     /// modal, queued behind any modal already up so none is ever lost.
     fn handle_request(&mut self, req: UiRequest) {
         match req {
-            UiRequest::Note(m) => self.log.push(Line::from(m)),
-            UiRequest::Warn(m) => self.log.push(Line::from(Span::styled(
+            UiRequest::Note(m) => self.log_line(Line::from(m)),
+            UiRequest::Warn(m) => self.log_line(Line::from(Span::styled(
                 format!("warning: {m}"),
                 Style::default().fg(Color::Yellow),
             ))),
@@ -243,6 +269,21 @@ impl App {
             }
             return None;
         }
+        if self.show_log {
+            let last = self.log.len().saturating_sub(1) as u16;
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.log_scroll = self.log_scroll.min(last).saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.log_scroll = self.log_scroll.saturating_add(1).min(last)
+                }
+                KeyCode::PageUp => self.log_scroll = self.log_scroll.min(last).saturating_sub(10),
+                KeyCode::PageDown => self.log_scroll = self.log_scroll.saturating_add(10).min(last),
+                _ => self.show_log = false,
+            }
+            return None;
+        }
         if self.confirm.is_some() {
             return match code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm.take().map(|(_, a)| a),
@@ -254,7 +295,12 @@ impl App {
             };
         }
         if self.result.is_some() {
+            // `l` jumps from the result overlay straight into the transcript;
+            // any other key dismisses.
             self.result = None;
+            if let KeyCode::Char('l') = code {
+                self.open_log();
+            }
             return None;
         }
         if self.busy {
@@ -263,6 +309,10 @@ impl App {
         let action = match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
+                return None;
+            }
+            KeyCode::Char('l') if !self.log.is_empty() => {
+                self.open_log();
                 return None;
             }
             KeyCode::Tab => {
@@ -312,7 +362,8 @@ impl App {
         // panels, or tab bar would otherwise show through). Only the footer hint
         // line stays. Highest precedence first: a question preempts the progress
         // bar (the op is waiting on the operator, not working).
-        if self.modal.is_some()
+        if self.show_log
+            || self.modal.is_some()
             || self.confirm.is_some()
             || self.result.is_some()
             || self.progress.is_some()
@@ -320,7 +371,9 @@ impl App {
             let chunks =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
             self.render_footer(f, chunks[1]);
-            if let Some(m) = &self.modal {
+            if self.show_log {
+                self.render_log(f, screen);
+            } else if let Some(m) = &self.modal {
                 m.render(f, screen);
             } else if let Some((msg, _)) = &self.confirm {
                 render_confirm(f, screen, msg);
@@ -372,10 +425,13 @@ impl App {
     }
 
     /// The busy view — a full-screen console dialog (gray panel with a thin blue
-    /// fringe, never bare text on the backdrop) titled with the running action,
-    /// showing its notes/warnings so far. The live progress and any verification
-    /// code ride in the progress modal on top (see [`Self::render_progress`]);
-    /// this is what's behind it.
+    /// fringe, never bare text on the backdrop) titled with the running action.
+    /// The live progress rides in the progress modal on top (see
+    /// [`Self::render_progress`]); this is the quiet backdrop behind it. It shows
+    /// no transcript (housekeeping notes flashing between modals is noise — the
+    /// operator reviews them on demand via the log pane); the only thing surfaced
+    /// here is an out-of-band verification code, and only as a fallback when no
+    /// progress modal is up to carry it.
     fn render_activity(&self, f: &mut Frame, area: Rect) {
         let title = self.activity.clone().unwrap_or_else(|| "Working".to_string());
         let dlg = area.inner(Margin::new(1, 1));
@@ -383,8 +439,6 @@ impl App {
         let inner = block.inner(dlg);
         f.render_widget(block, dlg);
         let mut lines: Vec<Line> = Vec::new();
-        // Fallback: show the verification code here only if no progress modal is
-        // up to carry it.
         if self.progress.is_none()
             && let Some((purpose, code)) = &self.verification
         {
@@ -396,12 +450,38 @@ impl App {
             )));
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
             lines.extend(widgets::identicon_lines(code));
-            lines.push(Line::from(""));
         }
-        lines.extend(self.log.iter().cloned());
         f.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()),
             inner,
+        );
+    }
+
+    /// The on-demand log pane: the full session transcript in a large scrollable
+    /// dialog, opened with `l` and dismissed with any other key. This is where
+    /// every note/warning lives — kept out of the normal flow so nothing flashes,
+    /// but a keystroke away when the operator wants to review what happened.
+    fn render_log(&self, f: &mut Frame, screen: Rect) {
+        let w = screen.width.saturating_sub(6).min(110).max(20);
+        let h = screen.height.saturating_sub(4).max(6);
+        let area = widgets::centered(w, h, screen);
+        widgets::shadow(f, area, screen);
+        f.render_widget(Clear, area);
+        let block = theme::dialog_block("Log").title_bottom(Line::from(Span::styled(
+            " ↑/↓ scroll · any other key to close ",
+            theme::hint_style(),
+        )));
+        let inner_h = block.inner(area).height;
+        let max_scroll = (self.log.len() as u16).saturating_sub(inner_h);
+        let scroll = self.log_scroll.min(max_scroll);
+        let body = if self.log.is_empty() {
+            Paragraph::new(Line::from(Span::styled("(nothing logged yet)", theme::hint_style())))
+        } else {
+            Paragraph::new(self.log.clone()).scroll((scroll, 0))
+        };
+        f.render_widget(
+            body.wrap(Wrap { trim: false }).style(theme::panel_style()).block(block),
+            area,
         );
     }
 
@@ -457,8 +537,10 @@ impl App {
     fn render_footer(&self, f: &mut Frame, area: Rect) {
         let base = theme::backdrop_style();
         let key = base.add_modifier(Modifier::BOLD);
-        let hint = if self.result.is_some() {
-            Line::from(Span::styled(" any key to dismiss ", base))
+        let hint = if self.show_log {
+            Line::from(Span::styled(" ↑/↓ scroll · any other key to close ", base))
+        } else if self.result.is_some() {
+            Line::from(Span::styled(" any key to dismiss · l log ", base))
         } else if self.modal.is_some() {
             Line::from(Span::styled(" answer above · Esc cancel ", base))
         } else if self.confirm.is_some() {
@@ -466,14 +548,19 @@ impl App {
         } else if self.busy {
             Line::from(Span::styled(" working… · Ctrl-C quit ", base))
         } else if self.local.installed() {
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(" Tab", key),
                 Span::styled(" switch  ", base),
                 Span::styled("↑/↓", key),
                 Span::styled(" navigate  ", base),
-                Span::styled("q", key),
-                Span::styled(" quit", base),
-            ])
+            ];
+            if !self.log.is_empty() {
+                spans.push(Span::styled("l", key));
+                spans.push(Span::styled(" log  ", base));
+            }
+            spans.push(Span::styled("q", key));
+            spans.push(Span::styled(" quit", base));
+            Line::from(spans)
         } else {
             Line::from(vec![
                 Span::styled(" ↑/↓", key),
@@ -713,7 +800,7 @@ fn complete_op(
 ) -> Result<Outcome> {
     let mut outcome = out?;
     if let Some(scope) = outcome.install_service.take() {
-        app.log.push(Line::from("registering the OS service…"));
+        app.log_line(Line::from("registering the OS service…"));
         match run_suspended(events, || privileged::install_service(terminal, scope)) {
             Ok(msg) => outcome.lines.push(msg),
             Err(e) => outcome.lines.push(format!("OS service registration failed: {e:#}")),
@@ -874,6 +961,28 @@ mod render_tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
         assert_eq!(terminal.backend().buffer()[(0u16, 0u16)].bg, theme::BACKDROP);
+    }
+
+    #[test]
+    fn notes_do_not_show_in_the_busy_flow() {
+        // Housekeeping notes must never render inline (the flash Eric hit) —
+        // they go only to the on-demand log pane.
+        let mut app = App::new();
+        app.begin("Founding a new cluster".to_string());
+        app.handle_request(UiRequest::Note("created a new CA at /x".to_string()));
+        let s = render(&mut app);
+        assert!(!s.contains("created a new CA"), "note leaked into the busy view: {s:?}");
+    }
+
+    #[test]
+    fn log_pane_shows_the_transcript() {
+        let mut app = App::new();
+        app.handle_request(UiRequest::Note("issuing from the local CA".to_string()));
+        app.handle_request(UiRequest::Warn("key stored in plaintext".to_string()));
+        app.open_log();
+        let s = render(&mut app);
+        assert!(s.contains("issuing from the local CA"), "note missing from log pane: {s:?}");
+        assert!(s.contains("warning: key stored"), "warning missing from log pane: {s:?}");
     }
 
     #[test]
