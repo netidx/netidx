@@ -466,3 +466,83 @@ fn cast_error_to_error_is_identity() {
     let e = Value::error("boom");
     assert_eq!(e.clone().cast(Typ::Error), Some(e));
 }
+
+// Every recursive Value operation must handle ARBITRARY nesting depth
+// without overflowing the thread stack: a cons-style recursive ADT's
+// nesting depth is its LENGTH, so ~100k-deep values arise from
+// perfectly reasonable programs (and `decode` receives depth from the
+// WIRE — a hostile peer must not be able to crash the process). Drop
+// is guarded in ValArrayBase::drop (and chunkmap's Node::drop for
+// maps); hash/eq/cmp/Display/Pack are iterative (op.rs, print.rs, the
+// lib.rs Pack impl). 200k levels on a 1MiB stack — the recursive
+// versions overflowed well under 20k.
+#[test]
+fn deep_value_operations_bounded_stack() {
+    fn deep_array(n: usize) -> Value {
+        let mut v = Value::I64(42);
+        for _ in 0..n {
+            v = Value::Array(ValArray::from_iter_exact([v].into_iter()));
+        }
+        v
+    }
+    fn deep_map(n: usize) -> Value {
+        let mut v = Value::I64(42);
+        for _ in 0..n {
+            let m = Map::new().insert(Value::I64(0), v).0;
+            v = Value::Map(m);
+        }
+        v
+    }
+    fn deep_mixed(n: usize) -> Value {
+        let mut v = Value::I64(42);
+        for i in 0..n {
+            v = if i % 2 == 0 {
+                Value::Array(ValArray::from_iter_exact([v].into_iter()))
+            } else {
+                Value::Map(Map::new().insert(Value::I64(0), v).0)
+            };
+        }
+        v
+    }
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            use std::hash::{Hash, Hasher};
+            const N: usize = 200_000;
+            for v in [deep_array(N), deep_map(N), deep_mixed(N)] {
+                // hash
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                v.hash(&mut h);
+                // eq / cmp (a clone shares structure but the walk is
+                // still structural — full depth)
+                let w = v.clone();
+                assert_eq!(v, w);
+                assert_eq!(v.cmp(&w), std::cmp::Ordering::Equal);
+                // Display to a sink
+                use std::fmt::Write;
+                struct Sink(usize);
+                impl Write for Sink {
+                    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                        self.0 += s.len();
+                        Ok(())
+                    }
+                }
+                let mut sink = Sink(0);
+                write!(&mut sink, "{}", v).unwrap();
+                assert!(sink.0 > N);
+                // Pack roundtrip
+                use netidx_core::pack::Pack;
+                let mut buf = bytes::BytesMut::with_capacity(v.encoded_len());
+                v.encode(&mut buf).unwrap();
+                let decoded = Value::decode(&mut buf).unwrap();
+                assert_eq!(v, decoded);
+                drop(decoded);
+                drop(w);
+                // the last reference: the full re-entrant drop
+                drop(v);
+            }
+        })
+        .expect("spawn")
+        .join()
+        .expect("a deep-value operation overflowed the stack");
+}

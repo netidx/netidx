@@ -2,6 +2,7 @@ use crate::{Typ, ValArray, Value};
 use arcstr::literal;
 use compact_str::format_compact;
 use rust_decimal::Decimal;
+use smallvec::{smallvec, SmallVec};
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     hash::Hash,
@@ -14,7 +15,16 @@ use triomphe::Arc;
 impl Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         use std::num::FpCategory::*;
-        match self {
+        // ITERATIVE over nested containers: the recursive version
+        // consumed Rust stack proportional to the value NESTING depth
+        // (a cons-style ADT's depth is its length) and overflowed at
+        // ~100k levels. Containers push their children (in reverse,
+        // so pops preserve the original hash byte sequence exactly)
+        // instead of recursing. The twin guards live in
+        // `ValArrayBase::drop` and chunkmap's `Node::drop`.
+        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        while let Some(this) = stack.pop() {
+        match this {
             Value::U32(v) => {
                 0u8.hash(state);
                 v.hash(state)
@@ -89,13 +99,13 @@ impl Hash for Value {
                 }
                 v => {
                     21u8.hash(state);
-                    v.hash(state)
+                    stack.push(v)
                 }
             },
             Value::Array(a) => {
                 19u8.hash(state);
-                for v in a.iter() {
-                    v.hash(state)
+                for v in a.iter().rev() {
+                    stack.push(v)
                 }
             }
             Value::Decimal(d) => {
@@ -103,8 +113,13 @@ impl Hash for Value {
                 d.hash(state);
             }
             Value::Map(m) => {
+                // Replicates chunkmap's Tree::hash byte sequence: the
+                // ordered (k, v) pairs, no length prefix.
                 21u8.hash(state);
-                m.hash(state);
+                for (k, v) in m.into_iter().rev() {
+                    stack.push(v);
+                    stack.push(k);
+                }
             }
             Value::U8(v) => {
                 22u8.hash(state);
@@ -127,14 +142,20 @@ impl Hash for Value {
                 v.hash(state)
             }
         }
+        }
     }
 }
 
 impl PartialEq for Value {
     fn eq(&self, rhs: &Value) -> bool {
         use std::num::FpCategory::*;
-        Typ::get(self) == Typ::get(rhs)
-            && match (self, rhs) {
+        // ITERATIVE over nested containers — see the Hash impl's
+        // comment. Order is irrelevant for equality; containers push
+        // their child pairs instead of recursing.
+        let mut stack: SmallVec<[(&Value, &Value); 32]> = smallvec![(self, rhs)];
+        while let Some((this, rhs)) = stack.pop() {
+            let ok = Typ::get(this) == Typ::get(rhs)
+            && match (this, rhs) {
                 (Value::U8(l), Value::U8(r)) => l == r,
                 (Value::I8(l), Value::I8(r)) => l == r,
                 (Value::U16(l), Value::U16(r)) => l == r,
@@ -162,12 +183,35 @@ impl PartialEq for Value {
                 (Value::Null, Value::Null) => true,
                 (Value::String(l), Value::String(r)) => l == r,
                 (Value::Bytes(l), Value::Bytes(r)) => l == r,
-                (Value::Error(l), Value::Error(r)) => l == r,
-                (Value::Array(l), Value::Array(r)) => l == r,
-                (Value::Map(l), Value::Map(r)) => l == r,
+                (Value::Error(l), Value::Error(r)) => {
+                    stack.push((&**l, &**r));
+                    true
+                }
+                (Value::Array(l), Value::Array(r)) => {
+                    l.len() == r.len() && {
+                        for pair in l.iter().zip(r.iter()) {
+                            stack.push(pair)
+                        }
+                        true
+                    }
+                }
+                (Value::Map(l), Value::Map(r)) => {
+                    l.len() == r.len() && {
+                        for ((kl, vl), (kr, vr)) in l.into_iter().zip(r.into_iter()) {
+                            stack.push((kl, kr));
+                            stack.push((vl, vr));
+                        }
+                        true
+                    }
+                }
                 (Value::Abstract(l), Value::Abstract(r)) => l == r,
                 (_, _) => false,
+            };
+            if !ok {
+                return false;
             }
+        }
+        true
     }
 }
 
@@ -176,10 +220,32 @@ impl Eq for Value {}
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use std::num::FpCategory::*;
-        match Typ::get(self).cmp(&Typ::get(other)) {
+        // ITERATIVE over nested containers — see the Hash impl's
+        // comment. Ordering is ORDER-SENSITIVE (lexicographic,
+        // depth-first, length as the tiebreak — the slice /
+        // Iterator::partial_cmp semantics of the old recursive arms),
+        // so containers push their child pairs in REVERSE and a
+        // LenTie entry underneath, reproducing the recursive visit
+        // order exactly.
+        enum W<'a> {
+            Pair(&'a Value, &'a Value),
+            LenTie(usize, usize),
+        }
+        let mut stack: SmallVec<[W; 32]> = smallvec![W::Pair(self, other)];
+        while let Some(w) = stack.pop() {
+            let (this, other) = match w {
+                W::LenTie(l, r) => {
+                    match l.cmp(&r) {
+                        Ordering::Equal => continue,
+                        o => return Some(o),
+                    }
+                }
+                W::Pair(l, r) => (l, r),
+            };
+            let ord = match Typ::get(this).cmp(&Typ::get(other)) {
             Ordering::Greater => Some(Ordering::Greater),
             Ordering::Less => Some(Ordering::Less),
-            Ordering::Equal => match (self, other) {
+            Ordering::Equal => match (this, other) {
                 (Value::U8(l), Value::U8(r)) => l.partial_cmp(r),
                 (Value::I8(l), Value::I8(r)) => l.partial_cmp(r),
                 (Value::U16(l), Value::U16(r)) => l.partial_cmp(r),
@@ -211,13 +277,37 @@ impl PartialOrd for Value {
                 (Value::Null, Value::Null) => Some(Ordering::Equal),
                 (Value::String(l), Value::String(r)) => l.partial_cmp(r),
                 (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
-                (Value::Error(l), Value::Error(r)) => l.partial_cmp(r),
-                (Value::Array(l), Value::Array(r)) => l.partial_cmp(r),
-                (Value::Map(l), Value::Map(r)) => l.partial_cmp(r),
+                (Value::Error(l), Value::Error(r)) => {
+                    stack.push(W::Pair(&**l, &**r));
+                    Some(Ordering::Equal)
+                }
+                (Value::Array(l), Value::Array(r)) => {
+                    stack.push(W::LenTie(l.len(), r.len()));
+                    for (a, b) in l.iter().zip(r.iter()).rev() {
+                        stack.push(W::Pair(a, b));
+                    }
+                    Some(Ordering::Equal)
+                }
+                (Value::Map(l), Value::Map(r)) => {
+                    stack.push(W::LenTie(l.len(), r.len()));
+                    let pairs: SmallVec<[_; 16]> =
+                        l.into_iter().zip(r.into_iter()).collect();
+                    for ((kl, vl), (kr, vr)) in pairs.into_iter().rev() {
+                        stack.push(W::Pair(vl, vr));
+                        stack.push(W::Pair(kl, kr));
+                    }
+                    Some(Ordering::Equal)
+                }
                 (Value::Abstract(l), Value::Abstract(r)) => l.partial_cmp(r),
                 (_, _) => unreachable!(),
             },
+            };
+            match ord {
+                Some(Ordering::Equal) => continue,
+                o => return o,
+            }
         }
+        Some(Ordering::Equal)
     }
 }
 

@@ -61,14 +61,74 @@ impl Default for ValArrayBase {
     }
 }
 
+/// Bound on the RE-ENTRANT depth of array destruction. A value whose
+/// elements themselves contain arrays (or a cons-style recursive ADT,
+/// whose nesting depth is its LENGTH) drops re-entrantly — each
+/// nesting level's element drop calls back into this Drop — so the
+/// Rust stack consumed is proportional to the value nesting depth:
+/// ~100k levels overflow a 2MiB thread stack in drop glue, killing
+/// the whole runtime (SIGABRT). Past this many re-entrant frames the
+/// array is moved to a thread-local deferred queue instead, and the
+/// OUTERMOST drop frame destroys the queue iteratively, bounding
+/// stack use for arbitrary nesting. The twin of immutable_chunkmap's
+/// `Node::drop` guard (nested maps).
+const MAX_DROP_DEPTH: usize = 256;
+
+thread_local! {
+    static DROP_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+    static DROP_DEFERRED: std::cell::RefCell<Vec<ValArrayBase>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 impl Drop for ValArrayBase {
     fn drop(&mut self) {
+        // TLS destructor order during thread teardown is arbitrary
+        // (the pools are themselves thread-locals and drop cached —
+        // empty, recursion-free — arrays then), so every access is
+        // `try_with`, degrading to the plain recursive drop when
+        // unavailable.
+        let depth = DROP_DEPTH.try_with(|d| d.get()).ok();
+        if let Some(depth) = depth {
+            if depth >= MAX_DROP_DEPTH {
+                // Move this array to the deferred queue and return —
+                // the field is ManuallyDrop, so no glue runs and
+                // ownership transfers to the queue. Boxed so the Err
+                // path can reclaim it (a closure capture would be
+                // dropped un-run on Err, re-entering this Drop at the
+                // same depth).
+                let raw = Box::into_raw(Box::new(unsafe { ptr::read(self) }));
+                let pushed = DROP_DEFERRED.try_with(|q| {
+                    q.borrow_mut().push(*unsafe { Box::from_raw(raw) })
+                });
+                if pushed.is_err() {
+                    // Queue TLS gone (thread teardown): reclaim and
+                    // drop recursively — the unguarded fallback.
+                    drop(unsafe { Box::from_raw(raw) });
+                }
+                return;
+            }
+            let _ = DROP_DEPTH.try_with(|d| d.set(depth + 1));
+        }
         if ThinArc::strong_count(&self.0) > 1 {
             unsafe { ManuallyDrop::drop(&mut self.0) }
         } else {
             match self.0.header.header.upgrade() {
                 Some(pool) => pool.insert(unsafe { ptr::read(self) }),
                 None => unsafe { ManuallyDrop::drop(&mut self.0) },
+            }
+        }
+        if let Some(depth) = depth {
+            let _ = DROP_DEPTH.try_with(|d| d.set(depth));
+            if depth == 0 {
+                // Drain iteratively. Pop OUTSIDE the RefCell borrow —
+                // each destruction re-enters this Drop (bounded by the
+                // guard) and may push deeper arrays back on the queue.
+                loop {
+                    match DROP_DEFERRED.try_with(|q| q.borrow_mut().pop()) {
+                        Ok(Some(a)) => drop(a),
+                        Ok(None) | Err(_) => break,
+                    }
+                }
             }
         }
     }

@@ -164,7 +164,26 @@ impl Value {
         esc: &Escape,
         types: bool,
     ) -> fmt::Result {
-        match self {
+        // ITERATIVE over nested containers: the recursive renderer
+        // consumed Rust stack proportional to the value NESTING depth
+        // and overflowed at ~100k levels (see the op.rs Hash comment;
+        // a cons-style ADT's depth is its length). Containers write
+        // their opener now and push closer/separators/children (in
+        // reverse, so pops emit the original text exactly).
+        enum T<'a> {
+            Val(&'a Value),
+            Lit(&'static str),
+        }
+        let mut stack: smallvec::SmallVec<[T; 32]> = smallvec::smallvec![T::Val(self)];
+        while let Some(t) = stack.pop() {
+            let this = match t {
+                T::Lit(s) => {
+                    write!(f, "{}", s)?;
+                    continue;
+                }
+                T::Val(v) => v,
+            };
+            match this {
             Value::U8(v) => {
                 if types {
                     write!(f, "u8:{}", v)
@@ -307,37 +326,45 @@ impl Value {
                     write!(f, r#"error:"{}""#, esc.escape(&*s))
                 }
                 v => {
-                    write!(f, r#"error:{v}"#)
+                    write!(f, "error:")?;
+                    stack.push(T::Val(v));
+                    Ok(())
                 }
             },
             Value::Array(elts) => {
                 write!(f, "[")?;
-                for (i, v) in elts.iter().enumerate() {
-                    if i < elts.len() - 1 {
-                        v.fmt_ext(f, esc, types)?;
-                        write!(f, ", ")?
-                    } else {
-                        v.fmt_ext(f, esc, types)?
+                stack.push(T::Lit("]"));
+                let len = elts.len();
+                for i in (0..len).rev() {
+                    if i < len - 1 {
+                        stack.push(T::Lit(", "));
                     }
+                    stack.push(T::Val(&elts[i]));
                 }
-                write!(f, "]")
+                Ok(())
             }
             Value::Map(m) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in m.into_iter().enumerate() {
-                    k.fmt_ext(f, esc, types)?;
-                    write!(f, " => ")?;
-                    v.fmt_ext(f, esc, types)?;
-                    if i < m.len() - 1 {
-                        write!(f, ", ")?
+                stack.push(T::Lit("}"));
+                let pairs: smallvec::SmallVec<[(&Value, &Value); 16]> =
+                    m.into_iter().collect();
+                for i in (0..pairs.len()).rev() {
+                    let (k, v) = pairs[i];
+                    if i < pairs.len() - 1 {
+                        stack.push(T::Lit(", "));
                     }
+                    stack.push(T::Val(v));
+                    stack.push(T::Lit(" => "));
+                    stack.push(T::Val(k));
                 }
-                write!(f, "}}")
+                Ok(())
             }
             Value::Abstract(a) => {
                 let bytes = pack(a).unwrap_or_else(|_| BytesMut::new());
                 write!(f, "abstract:{}", BASE64.encode(&bytes))
             }
+        }?;
         }
+        Ok(())
     }
 }

@@ -76,14 +76,14 @@ use chrono::prelude::*;
 use compact_str::{CompactString, format_compact};
 use immutable_chunkmap::map;
 use netidx_core::{
-    pack::{self, Pack, PackError},
+    pack::{self, MAX_VEC, Pack, PackError},
     utils,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use std::{
-    any::Any, hint::unreachable_unchecked, iter, ptr, result, str::FromStr,
+    any::Any, hint::unreachable_unchecked, iter, mem, ptr, result, str::FromStr,
     time::Duration,
 };
 use triomphe::Arc;
@@ -324,184 +324,318 @@ impl FromStr for Value {
 }
 
 impl Pack for Value {
+    // All three methods are ITERATIVE over nested containers: the
+    // recursive versions consumed Rust stack proportional to the value
+    // NESTING depth and overflowed at ~100k levels — and `decode`
+    // builds values from WIRE bytes, so a malicious or buggy peer
+    // could crash any netidx process by sending a deeply nested value.
+    // The wire format is unchanged: containers emit their tag and
+    // length header in place and their children stream in the same
+    // pre-order sequence the recursion produced.
     fn encoded_len(&self) -> usize {
-        1 + match self {
-            Value::U8(v) => Pack::encoded_len(v),
-            Value::I8(v) => Pack::encoded_len(v),
-            Value::U16(v) => Pack::encoded_len(v),
-            Value::I16(v) => Pack::encoded_len(v),
-            Value::U32(v) => Pack::encoded_len(v),
-            Value::V32(v) => pack::varint_len(*v as u64),
-            Value::I32(v) => Pack::encoded_len(v),
-            Value::Z32(v) => pack::varint_len(pack::i32_zz(*v) as u64),
-            Value::U64(v) => Pack::encoded_len(v),
-            Value::V64(v) => pack::varint_len(*v),
-            Value::I64(v) => Pack::encoded_len(v),
-            Value::Z64(v) => pack::varint_len(pack::i64_zz(*v) as u64),
-            Value::F32(v) => Pack::encoded_len(v),
-            Value::F64(v) => Pack::encoded_len(v),
-            Value::DateTime(d) => Pack::encoded_len(d),
-            Value::Duration(d) => Pack::encoded_len(d),
-            Value::String(c) => Pack::encoded_len(c),
-            Value::Bytes(b) => Pack::encoded_len(b),
-            Value::Bool(_) | Value::Null => 0,
-            Value::Error(c) => match &**c {
-                Value::String(s) => Pack::encoded_len(s),
-                v => Pack::encoded_len(v),
-            },
-            Value::Array(elts) => Pack::encoded_len(elts),
-            Value::Decimal(d) => Pack::encoded_len(d),
-            Value::Map(m) => Pack::encoded_len(m),
-            Value::Abstract(v) => Pack::encoded_len(v),
+        let mut total = 0usize;
+        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        while let Some(v) = stack.pop() {
+            // the tag byte, then the payload (a pushed child accounts
+            // its own tag when popped — same sum as the recursion)
+            total += 1;
+            total += match v {
+                Value::U8(v) => Pack::encoded_len(v),
+                Value::I8(v) => Pack::encoded_len(v),
+                Value::U16(v) => Pack::encoded_len(v),
+                Value::I16(v) => Pack::encoded_len(v),
+                Value::U32(v) => Pack::encoded_len(v),
+                Value::V32(v) => pack::varint_len(*v as u64),
+                Value::I32(v) => Pack::encoded_len(v),
+                Value::Z32(v) => pack::varint_len(pack::i32_zz(*v) as u64),
+                Value::U64(v) => Pack::encoded_len(v),
+                Value::V64(v) => pack::varint_len(*v),
+                Value::I64(v) => Pack::encoded_len(v),
+                Value::Z64(v) => pack::varint_len(pack::i64_zz(*v) as u64),
+                Value::F32(v) => Pack::encoded_len(v),
+                Value::F64(v) => Pack::encoded_len(v),
+                Value::DateTime(d) => Pack::encoded_len(d),
+                Value::Duration(d) => Pack::encoded_len(d),
+                Value::String(c) => Pack::encoded_len(c),
+                Value::Bytes(b) => Pack::encoded_len(b),
+                Value::Bool(_) | Value::Null => 0,
+                Value::Error(c) => match &**c {
+                    Value::String(s) => Pack::encoded_len(s),
+                    v => {
+                        stack.push(v);
+                        0
+                    }
+                },
+                Value::Array(elts) => {
+                    for v in elts.iter() {
+                        stack.push(v)
+                    }
+                    pack::varint_len(elts.len() as u64)
+                }
+                Value::Decimal(d) => Pack::encoded_len(d),
+                Value::Map(m) => {
+                    for (k, v) in m.into_iter() {
+                        stack.push(k);
+                        stack.push(v);
+                    }
+                    pack::varint_len(m.len() as u64)
+                }
+                Value::Abstract(v) => Pack::encoded_len(v),
+            };
         }
+        total
     }
 
     // the high two bits of the tag are reserved for wrapper types,
     // max tag is therefore 0x3F
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
-        match self {
-            Value::U32(i) => {
-                buf.put_u8(0);
-                Pack::encode(i, buf)
-            }
-            Value::V32(i) => {
-                buf.put_u8(1);
-                Ok(pack::encode_varint(*i as u64, buf))
-            }
-            Value::I32(i) => {
-                buf.put_u8(2);
-                Pack::encode(i, buf)
-            }
-            Value::Z32(i) => {
-                buf.put_u8(3);
-                Ok(pack::encode_varint(pack::i32_zz(*i) as u64, buf))
-            }
-            Value::U64(i) => {
-                buf.put_u8(4);
-                Pack::encode(i, buf)
-            }
-            Value::V64(i) => {
-                buf.put_u8(5);
-                Ok(pack::encode_varint(*i, buf))
-            }
-            Value::I64(i) => {
-                buf.put_u8(6);
-                Pack::encode(i, buf)
-            }
-            Value::Z64(i) => {
-                buf.put_u8(7);
-                Ok(pack::encode_varint(pack::i64_zz(*i), buf))
-            }
-            Value::F32(i) => {
-                buf.put_u8(8);
-                Pack::encode(i, buf)
-            }
-            Value::F64(i) => {
-                buf.put_u8(9);
-                Pack::encode(i, buf)
-            }
-            Value::DateTime(dt) => {
-                buf.put_u8(10);
-                Pack::encode(dt, buf)
-            }
-            Value::Duration(d) => {
-                buf.put_u8(11);
-                Pack::encode(d, buf)
-            }
-            Value::String(s) => {
-                buf.put_u8(12);
-                Pack::encode(s, buf)
-            }
-            Value::Bytes(b) => {
-                buf.put_u8(13);
-                Pack::encode(b, buf)
-            }
-            Value::Bool(true) => Ok(buf.put_u8(14)),
-            Value::Bool(false) => Ok(buf.put_u8(15)),
-            Value::Null => Ok(buf.put_u8(16)),
-            //          OK is deprecated, but we reserve 17 for backwards compatibility
-            //          Value::Ok => Ok(buf.put_u8(17))
-            // string error is encoded as 18 for backwards compatibility
-            Value::Array(elts) => {
-                buf.put_u8(19);
-                Pack::encode(elts, buf)
-            }
-            Value::Decimal(d) => {
-                buf.put_u8(20);
-                Pack::encode(d, buf)
-            }
-            Value::Map(m) => {
-                buf.put_u8(21);
-                Pack::encode(m, buf)
-            }
-            Value::Error(e) => match &**e {
+        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        while let Some(v) = stack.pop() {
+            match v {
+                Value::U32(i) => {
+                    buf.put_u8(0);
+                    Pack::encode(i, buf)?
+                }
+                Value::V32(i) => {
+                    buf.put_u8(1);
+                    pack::encode_varint(*i as u64, buf)
+                }
+                Value::I32(i) => {
+                    buf.put_u8(2);
+                    Pack::encode(i, buf)?
+                }
+                Value::Z32(i) => {
+                    buf.put_u8(3);
+                    pack::encode_varint(pack::i32_zz(*i) as u64, buf)
+                }
+                Value::U64(i) => {
+                    buf.put_u8(4);
+                    Pack::encode(i, buf)?
+                }
+                Value::V64(i) => {
+                    buf.put_u8(5);
+                    pack::encode_varint(*i, buf)
+                }
+                Value::I64(i) => {
+                    buf.put_u8(6);
+                    Pack::encode(i, buf)?
+                }
+                Value::Z64(i) => {
+                    buf.put_u8(7);
+                    pack::encode_varint(pack::i64_zz(*i), buf)
+                }
+                Value::F32(i) => {
+                    buf.put_u8(8);
+                    Pack::encode(i, buf)?
+                }
+                Value::F64(i) => {
+                    buf.put_u8(9);
+                    Pack::encode(i, buf)?
+                }
+                Value::DateTime(dt) => {
+                    buf.put_u8(10);
+                    Pack::encode(dt, buf)?
+                }
+                Value::Duration(d) => {
+                    buf.put_u8(11);
+                    Pack::encode(d, buf)?
+                }
                 Value::String(s) => {
-                    buf.put_u8(18);
-                    Pack::encode(s, buf)
+                    buf.put_u8(12);
+                    Pack::encode(s, buf)?
                 }
-                v => {
-                    buf.put_u8(22);
-                    Pack::encode(v, buf)
+                Value::Bytes(b) => {
+                    buf.put_u8(13);
+                    Pack::encode(b, buf)?
                 }
-            },
-            Value::U8(i) => {
-                buf.put_u8(23);
-                Pack::encode(i, buf)
-            }
-            Value::I8(i) => {
-                buf.put_u8(24);
-                Pack::encode(i, buf)
-            }
-            Value::U16(i) => {
-                buf.put_u8(25);
-                Pack::encode(i, buf)
-            }
-            Value::I16(i) => {
-                buf.put_u8(26);
-                Pack::encode(i, buf)
-            }
-            Value::Abstract(v) => {
-                buf.put_u8(27);
-                Pack::encode(v, buf)
+                Value::Bool(true) => buf.put_u8(14),
+                Value::Bool(false) => buf.put_u8(15),
+                Value::Null => buf.put_u8(16),
+                //          OK is deprecated, but we reserve 17 for backwards compatibility
+                //          Value::Ok => Ok(buf.put_u8(17))
+                // string error is encoded as 18 for backwards compatibility
+                Value::Array(elts) => {
+                    buf.put_u8(19);
+                    let len = elts.len();
+                    if len * mem::size_of::<Value>() > MAX_VEC {
+                        return Err(PackError::TooBig);
+                    }
+                    pack::encode_varint(len as u64, buf);
+                    for v in elts.iter().rev() {
+                        stack.push(v)
+                    }
+                }
+                Value::Decimal(d) => {
+                    buf.put_u8(20);
+                    Pack::encode(d, buf)?
+                }
+                Value::Map(m) => {
+                    buf.put_u8(21);
+                    let len = m.len();
+                    if len * (2 * mem::size_of::<Value>()) > MAX_VEC {
+                        return Err(PackError::TooBig);
+                    }
+                    pack::encode_varint(len as u64, buf);
+                    for (k, v) in m.into_iter().rev() {
+                        stack.push(v);
+                        stack.push(k);
+                    }
+                }
+                Value::Error(e) => match &**e {
+                    Value::String(s) => {
+                        buf.put_u8(18);
+                        Pack::encode(s, buf)?
+                    }
+                    v => {
+                        buf.put_u8(22);
+                        stack.push(v)
+                    }
+                },
+                Value::U8(i) => {
+                    buf.put_u8(23);
+                    Pack::encode(i, buf)?
+                }
+                Value::I8(i) => {
+                    buf.put_u8(24);
+                    Pack::encode(i, buf)?
+                }
+                Value::U16(i) => {
+                    buf.put_u8(25);
+                    Pack::encode(i, buf)?
+                }
+                Value::I16(i) => {
+                    buf.put_u8(26);
+                    Pack::encode(i, buf)?
+                }
+                Value::Abstract(v) => {
+                    buf.put_u8(27);
+                    Pack::encode(v, buf)?
+                }
             }
         }
+        Ok(())
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
-        match <u8 as Pack>::decode(buf)? {
-            0 => Ok(Value::U32(Pack::decode(buf)?)),
-            1 => Ok(Value::V32(pack::decode_varint(buf)? as u32)),
-            2 => Ok(Value::I32(Pack::decode(buf)?)),
-            3 => Ok(Value::Z32(pack::i32_uzz(pack::decode_varint(buf)? as u32))),
-            4 => Ok(Value::U64(Pack::decode(buf)?)),
-            5 => Ok(Value::V64(pack::decode_varint(buf)?)),
-            6 => Ok(Value::I64(Pack::decode(buf)?)),
-            7 => Ok(Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?))),
-            8 => Ok(Value::F32(Pack::decode(buf)?)),
-            9 => Ok(Value::F64(Pack::decode(buf)?)),
-            10 => Ok(Value::DateTime(Pack::decode(buf)?)),
-            11 => Ok(Value::Duration(Pack::decode(buf)?)),
-            12 => Ok(Value::String(Pack::decode(buf)?)),
-            13 => Ok(Value::Bytes(Pack::decode(buf)?)),
-            14 => Ok(Value::Bool(true)),
-            15 => Ok(Value::Bool(false)),
-            16 => Ok(Value::Null),
-            17 => Ok(Value::Null), // 17 used to be Ok now translated to Null
-            18 => {
-                // backwards compatible with previous encodings of error when it
-                // was only a string
-                Ok(Value::Error(Arc::new(Value::String(<ArcStr as Pack>::decode(buf)?))))
+        // Construction frames replace the recursion: a container tag
+        // opens a frame; completed values bubble into the innermost
+        // frame until it fills, then IT completes into its parent.
+        // Frame state lives on the heap, so a hostile deeply-nested
+        // input costs memory (bounded by the existing per-container
+        // size checks) instead of the thread's stack.
+        enum Frame {
+            Array { len: usize, elts: Vec<Value> },
+            Map { len: usize, pairs: Vec<(Value, Value)>, key: Option<Value> },
+            Error,
+        }
+        let mut frames: SmallVec<[Frame; 8]> = smallvec![];
+        loop {
+            let done = match <u8 as Pack>::decode(buf)? {
+                0 => Value::U32(Pack::decode(buf)?),
+                1 => Value::V32(pack::decode_varint(buf)? as u32),
+                2 => Value::I32(Pack::decode(buf)?),
+                3 => Value::Z32(pack::i32_uzz(pack::decode_varint(buf)? as u32)),
+                4 => Value::U64(Pack::decode(buf)?),
+                5 => Value::V64(pack::decode_varint(buf)?),
+                6 => Value::I64(Pack::decode(buf)?),
+                7 => Value::Z64(pack::i64_uzz(pack::decode_varint(buf)?)),
+                8 => Value::F32(Pack::decode(buf)?),
+                9 => Value::F64(Pack::decode(buf)?),
+                10 => Value::DateTime(Pack::decode(buf)?),
+                11 => Value::Duration(Pack::decode(buf)?),
+                12 => Value::String(Pack::decode(buf)?),
+                13 => Value::Bytes(Pack::decode(buf)?),
+                14 => Value::Bool(true),
+                15 => Value::Bool(false),
+                16 => Value::Null,
+                17 => Value::Null, // 17 used to be Ok now translated to Null
+                18 => {
+                    // backwards compatible with previous encodings of error when it
+                    // was only a string
+                    Value::Error(Arc::new(Value::String(<ArcStr as Pack>::decode(
+                        buf,
+                    )?)))
+                }
+                19 => {
+                    let elts = pack::decode_varint(buf)? as usize;
+                    let sz = elts.saturating_mul(mem::size_of::<Value>());
+                    if sz > MAX_VEC || sz > buf.remaining() << 8 {
+                        return Err(PackError::TooBig);
+                    }
+                    if elts == 0 {
+                        Value::Array(ValArray::from([]))
+                    } else {
+                        frames.push(Frame::Array { len: elts, elts: Vec::with_capacity(elts) });
+                        continue;
+                    }
+                }
+                20 => Value::Decimal(Pack::decode(buf)?),
+                21 => {
+                    let elts = pack::decode_varint(buf)? as usize;
+                    let sz = elts.saturating_mul(2 * mem::size_of::<Value>());
+                    if sz > MAX_VEC || sz > buf.remaining() << 8 {
+                        return Err(PackError::TooBig);
+                    }
+                    if elts == 0 {
+                        Value::Map(Map::new())
+                    } else {
+                        frames.push(Frame::Map {
+                            len: elts,
+                            pairs: Vec::with_capacity(elts),
+                            key: None,
+                        });
+                        continue;
+                    }
+                }
+                22 => {
+                    frames.push(Frame::Error);
+                    continue;
+                }
+                23 => Value::U8(Pack::decode(buf)?),
+                24 => Value::I8(Pack::decode(buf)?),
+                25 => Value::U16(Pack::decode(buf)?),
+                26 => Value::I16(Pack::decode(buf)?),
+                27 => Value::Abstract(Pack::decode(buf)?),
+                _ => return Err(PackError::UnknownTag),
+            };
+            // Bubble the completed value into the innermost frame;
+            // each frame that fills completes into ITS parent.
+            let mut val = done;
+            loop {
+                match frames.last_mut() {
+                    None => return Ok(val),
+                    Some(Frame::Error) => {
+                        frames.pop();
+                        val = Value::Error(Arc::new(val));
+                    }
+                    Some(Frame::Array { len, elts }) => {
+                        elts.push(val);
+                        if elts.len() == *len {
+                            let a = ValArray::from_iter_exact(elts.drain(..));
+                            frames.pop();
+                            val = Value::Array(a);
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(Frame::Map { len, pairs, key }) => match key.take() {
+                        None => {
+                            *key = Some(val);
+                            break;
+                        }
+                        Some(k) => {
+                            pairs.push((k, val));
+                            if pairs.len() == *len {
+                                let m = Map::from_iter(pairs.drain(..));
+                                frames.pop();
+                                val = Value::Map(m);
+                            } else {
+                                break;
+                            }
+                        }
+                    },
+                }
             }
-            19 => Ok(Value::Array(Pack::decode(buf)?)),
-            20 => Ok(Value::Decimal(Pack::decode(buf)?)),
-            21 => Ok(Value::Map(Pack::decode(buf)?)),
-            22 => Ok(Value::Error(Arc::new(Pack::decode(buf)?))),
-            23 => Ok(Value::U8(Pack::decode(buf)?)),
-            24 => Ok(Value::I8(Pack::decode(buf)?)),
-            25 => Ok(Value::U16(Pack::decode(buf)?)),
-            26 => Ok(Value::I16(Pack::decode(buf)?)),
-            27 => Ok(Value::Abstract(Pack::decode(buf)?)),
-            _ => Err(PackError::UnknownTag),
         }
     }
 }
