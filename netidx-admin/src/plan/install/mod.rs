@@ -453,18 +453,24 @@ pub async fn prompt_resolver_tls_name(
 /// Prompt for a resolver's *own* TLS SAN in two parts — a domain (default
 /// `local`) and the leftmost name (default `resolver`) — joined into
 /// `<name>.<domain>`. A `--tls-name` value short-circuits both with the full
-/// SAN.
+/// SAN. `known_domain` (the control plane's already-chosen domain) short-
+/// circuits just the domain part: the CA issues `*.<domain>`, so the resolver's
+/// name must share that domain — we reuse it and prompt only for the label.
 pub async fn prompt_resolver_own_tls_name(
     ans: &mut dyn Answerer,
     provided: Option<String>,
+    known_domain: Option<&str>,
 ) -> Result<String> {
     if let Some(full) = provided {
         return Ok(full);
     }
-    let domain = ans
-        .text(Field::TlsDomain, None, Some(DEFAULT_TLS_DOMAIN), false)
-        .await?
-        .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
+    let domain = match known_domain {
+        Some(d) => d.to_string(),
+        None => ans
+            .text(Field::TlsDomain, None, Some(DEFAULT_TLS_DOMAIN), false)
+            .await?
+            .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string()),
+    };
     let name = ans
         .text(Field::ResolverName, None, Some(DEFAULT_RESOLVER_NAME), false)
         .await?

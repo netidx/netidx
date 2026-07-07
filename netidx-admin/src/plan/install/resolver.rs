@@ -185,57 +185,42 @@ pub async fn run_resolver(
     // A delegated child (`--parent-admin-server`) keeps the data-plane auth
     // the operator chose — a /eu subtree may run krb5 under a TLS parent —
     // so only the trust-domain/CA decision comes from the parent, never its
-    // auth. A plain discovered peer still imports its cluster's scheme.
+    // auth. A plain discovered peer still imports its cluster's scheme. The
+    // auth *choice* itself is deferred until after the control plane (below):
+    // founding a new cluster sets up the CA first, then asks how the data
+    // plane authenticates.
     let imported_auth = if input.parent_admin_server.is_some() {
         None
     } else {
         probe.have().and_then(network_auth_kind)
     };
-    let kind: AuthKind = match imported_auth {
-        Some(k) => {
-            ans.note(&format_compact!(
-                "importing auth scheme from the network: {}",
-                k.as_str()
-            ));
-            k
-        }
-        None => ans
-            .choice(
-                Field::Auth,
-                input.auth.map(|k| k.as_str().to_string()),
-                &["anonymous", "krb5", "tls"],
-                Some("tls"),
-            )
-            .await?
-            .parse()?,
-    };
-    input.auth = Some(kind);
-    // Founding a brand-new cluster is the one workflow that stands up several
-    // system components in a row (CA → admin server → resolver), so it's the
-    // one that needs explicit component framing: without it the operator gets a
-    // "resolver" dialog that abruptly detours into CA and admin-server
-    // questions. When we're founding, set the expectation up front — a CA is
-    // required regardless of the data-plane auth — and defer the "now the
-    // resolver" announce until the CA/admin-server steps are done (below).
-    // Adding a resolver to an existing cluster stands up only the resolver, so
-    // no component-boundary announce is needed there at all.
+    // Founding a brand-new cluster stands up the control plane (CA + admin
+    // server) up front — before the data-plane auth is chosen (see the control
+    // plane block below, after this host's address is resolved).
     #[cfg(unix)]
     let founding_new_cluster = probe.have().is_none()
         && input.parent_admin_server.is_none()
         && !input.common.dry_run
         && !ca_setup::default_ca_present();
+    // Frame the whole "new cluster" install up front, before any machine or CA
+    // questions, so they have context: administering netidx is always
+    // authenticated over TLS by the CA no matter how the data plane
+    // authenticates, so the control plane comes first and the data-plane auth
+    // choice is deferred. `--no-admin-server` is the expert escape to a
+    // control-plane-less resolver (never chosen interactively).
     #[cfg(unix)]
-    if founding_new_cluster && matches!(kind, AuthKind::Tls | AuthKind::Krb5) {
+    let founded_admin_plane = founding_new_cluster && !input.no_admin_server;
+    #[cfg(unix)]
+    if founded_admin_plane {
         ans.announce(
             "New admin cluster",
-            &format_compact!(
-                "You're setting up the first server of a new admin cluster. A \
-                 certificate authority (CA) is required no matter which data-plane \
-                 auth you chose ({}) — the admin plane itself (discovery, \
-                 enrollment, and certificate renewal) is always secured by the CA. \
-                 So we'll set up the CA first, then this machine's resolver server.",
-                kind.as_str()
-            ),
+            "You're founding a new admin cluster. Administering netidx — this \
+             admin tool, discovery, enrollment, and certificate renewal — is \
+             always secured by a certificate authority (CA) over TLS, no matter \
+             how the data plane authenticates. So the control plane (the CA and \
+             this host's admin server) is set up first: a few questions about \
+             this machine and the CA, then you choose how the data plane \
+             authenticates.",
         )
         .await?;
     }
@@ -306,6 +291,88 @@ pub async fn run_resolver(
     // CA server, its `ca.unit` must land in the *same* dir as the resolver /
     // id-map units so the one supervisor runs them all.
     let units_dir = resolve_units_dir(input.common.no_units, input.units_dir.as_deref())?;
+    // ── Control plane ── For a new cluster the CA and this host's admin server
+    // are set up FIRST, before the data-plane auth is even chosen. Administering
+    // netidx — this admin tool, discovery, enrollment, and certificate renewal —
+    // is always authenticated over TLS by the CA, no matter how the *data* plane
+    // authenticates; the control plane is not optional and does not depend on the
+    // data-plane choice, so asking auth first only invites the "I picked
+    // anonymous, why a CA?" confusion. `--no-admin-server` is the expert escape
+    // to a control-plane-less resolver (never chosen interactively). The domain
+    // is a control-plane fact (the CA's `ca.<domain>` CN) and flows into the data
+    // plane below so a founding TLS resolver's own name shares it.
+    #[cfg(unix)]
+    let control_plane_domain: Option<String> = if founded_admin_plane {
+        // The network domain — the CA's `ca.<domain>` CN, and the domain the
+        // founding TLS resolver's own SAN reuses. Default it from an explicit
+        // `--tls-name` when present (strict TLS derives the domain from the
+        // resolver's SAN, so the CA and the cert agree); else the conventional
+        // default.
+        let domain_default = input
+            .tls_name
+            .as_deref()
+            .and_then(|n| tls::domain_from_san(n).ok())
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
+        let domain = ans
+            .text(Field::NetworkDomain, None, Some(&domain_default), false)
+            .await?
+            .unwrap_or(domain_default);
+        ca_setup::announce_founding_policy(ans, &domain);
+        // The founding CA + this host's admin server + the superuser admin. The
+        // returned `ServiceNeed` is intentionally dropped: this install ends with
+        // one system-service offer, and the admin-server unit lands in the shared
+        // units dir. `Some(true)` — a new cluster always stands up its admin
+        // server (the `--no-admin-server` escape is handled by the gate above).
+        let (_ca, _need) = ca_setup::create_vaulted_ca(
+            ans,
+            ca_setup::founding_ca_opts(
+                paths::user_ca_dir()?,
+                domain.clone(),
+                input.insecure_no_tpm,
+                Some(true),
+                Some(listen.ip()),
+                units_dir.clone(),
+            ),
+        )
+        .await?;
+        ans.announce(
+            "Resolver server",
+            "The control plane is ready. Now this host's resolver server — the \
+             directory that maps paths to publishers. First choose how its data \
+             plane authenticates (how subscribers and publishers prove who they \
+             are); then its address and options.",
+        )
+        .await?;
+        Some(domain)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let control_plane_domain: Option<String> = None;
+    // ── Data plane ── the auth scheme (imported when joining a network, else
+    // chosen now that the control plane exists) and the resolver's own identity
+    // for it. On the founding TLS path the CA was created above, so
+    // `resolver_self_auth` only issues this resolver's certificate from it.
+    let kind: AuthKind = match imported_auth {
+        Some(k) => {
+            ans.note(&format_compact!(
+                "importing auth scheme from the network: {}",
+                k.as_str()
+            ));
+            k
+        }
+        None => ans
+            .choice(
+                Field::Auth,
+                input.auth.map(|k| k.as_str().to_string()),
+                &["anonymous", "krb5", "tls"],
+                Some("tls"),
+            )
+            .await?
+            .parse()?,
+    };
+    input.auth = Some(kind);
     // `_tls_staging` holds the TLS-issuance staging tempdir (Some only on the
     // local-CA-issue path). It must outlive `finish_with` below so the issued
     // cert/key survive until `apply()` copies them into place.
@@ -319,85 +386,11 @@ pub async fn run_resolver(
                     Some(listen.ip()),
                     units_dir.as_deref(),
                     &probe,
+                    control_plane_domain.as_deref(),
                 )
                 .await?
             }
         };
-    // Whether this flow just stood up the admin plane (CA [+ admin server]) as
-    // part of founding a new cluster — the TLS path mints inside
-    // `resolver_self_auth`, the krb5/anon block below mints explicitly. Drives
-    // the deferred "now the resolver" component-boundary announce.
-    #[cfg(unix)]
-    let mut founded_admin_plane = founding_new_cluster && matches!(kind, AuthKind::Tls);
-    // First server of a new network with a non-TLS data plane: the admin
-    // plane still needs its trust root (it is always TLS — the glyph confirm,
-    // enrollment, and server-to-server pushes all hang off the CA), so create
-    // one even though the data plane is krb5/anonymous. Mandatory on krb5, a
-    // question on anonymous — see [`admin_plane_decision`]. The TLS path gets
-    // its CA inside `resolver_tls_generate`.
-    #[cfg(unix)]
-    if probe.have().is_none()
-        && input.parent_admin_server.is_none()
-        && !input.common.dry_run
-        && matches!(kind, AuthKind::Krb5 | AuthKind::Anonymous)
-        && !ca_setup::default_ca_present()
-        && match admin_plane_decision(kind, input.no_admin_server) {
-            AdminPlane::Mandatory => {
-                ans.note(
-                    "setting up the admin server for this network. The admin plane \
-                     is TLS even on a krb5 data plane — it anchors discovery, \
-                     enrollment, and certificate renewal. (expert opt-out: \
-                     --no-admin-server)",
-                );
-                true
-            }
-            AdminPlane::Ask => ans
-                .confirm(
-                    Field::SetupAdminServer,
-                    input.with_admin_server.then_some(true),
-                    true,
-                )
-                .await?,
-            AdminPlane::Skip => false,
-        }
-    {
-        let domain = ans
-            .text(Field::NetworkDomain, None, Some(DEFAULT_TLS_DOMAIN), false)
-            .await?
-            .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
-        ca_setup::announce_founding_policy(ans, &domain);
-        // Same founding CA an install stands up on the TLS path — the admin
-        // plane's trust root, with the sensible zero-prompt admin policy. The
-        // returned `ServiceNeed` is intentionally dropped: this resolver
-        // install always ends with a single system-service offer, and the
-        // admin-server unit lands in the resolver's own units dir.
-        let (_ca, _need) = ca_setup::create_vaulted_ca(
-            ans,
-            ca_setup::founding_ca_opts(
-                paths::user_ca_dir()?,
-                domain,
-                input.insecure_no_tpm,
-                Some(true),
-                Some(listen.ip()),
-                units_dir.clone(),
-            ),
-        )
-        .await?;
-        founded_admin_plane = true;
-    }
-    // Component boundary: the CA (and admin server) are done, so frame the
-    // switch back to the resolver. Only when we actually founded the admin
-    // plane just now — adding a resolver to an existing cluster stands up only
-    // the resolver, so an announce there would state the obvious.
-    #[cfg(unix)]
-    if founded_admin_plane {
-        ans.announce(
-            "Resolver server",
-            "The admin plane is ready. Now setting up the resolver server itself \
-             — the directory that maps paths to publishers for this network.",
-        )
-        .await?;
-    }
     let perms_seed = match &input.perms_seed {
         Some(p) => Some(crate::perms::load_perms(p)?),
         None => None,
@@ -658,6 +651,7 @@ async fn resolver_self_auth(
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
     probe: &AdminServers,
+    control_plane_domain: Option<&str>,
 ) -> Result<ResolvedAuth> {
     let auth = input.auth.expect("auth resolved before resolver_self_auth");
     match auth {
@@ -686,7 +680,15 @@ async fn resolver_self_auth(
             }))
         }
         AuthKind::Tls => {
-            resolver_tls_auth(ans, input, default_ca_ip, units_dir, probe).await
+            resolver_tls_auth(
+                ans,
+                input,
+                default_ca_ip,
+                units_dir,
+                probe,
+                control_plane_domain,
+            )
+            .await
         }
     }
 }
@@ -702,8 +704,14 @@ async fn resolver_tls_auth(
     default_ca_ip: Option<IpAddr>,
     units_dir: Option<&Path>,
     probe: &AdminServers,
+    control_plane_domain: Option<&str>,
 ) -> Result<ResolvedAuth> {
-    let name = prompt_resolver_own_tls_name(ans, input.tls_name.clone()).await?;
+    // When the control plane was just founded, its domain is fixed (the CA
+    // issues `*.<domain>`), so the resolver's own TLS name reuses it and we
+    // prompt only for the leftmost label instead of re-asking the domain.
+    let name =
+        prompt_resolver_own_tls_name(ans, input.tls_name.clone(), control_plane_domain)
+            .await?;
     #[cfg(unix)]
     let res =
         resolver_tls_generate(ans, input, &name, default_ca_ip, units_dir, probe).await;
