@@ -23,6 +23,7 @@
 use crate::{admin_client::CaIdentity, admin_proto::Secret, fingerprint::Fingerprint};
 use anyhow::Result;
 use compact_str::CompactString;
+use std::time::Duration;
 
 /// Every decision the admin surface can ask the operator to make.
 ///
@@ -61,6 +62,9 @@ pub enum Field {
     JoinNetwork,
     /// Which of several discovered networks to join.
     WhichNetwork,
+    /// With no network found: create a new cluster or connect to an existing
+    /// one by address.
+    ClusterMode,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
     /// The owner principal a workstation grants admin over its subtree.
@@ -134,6 +138,14 @@ pub enum Field {
     AcceptCsrSan,
     /// Whether an admin may mint and scope other admins.
     MayManageAdmins,
+    /// The founding root user's name (a new server CA's superuser).
+    RootAdminName,
+    /// Re-entry of a new admin password, to confirm it matches.
+    AdminPasswordConfirm,
+    /// Path to a CA certificate an external PKI signed (external-CA install).
+    SignedCert,
+    /// Path to an external PKI's root certificate (external-CA install).
+    ExternalRoot,
 }
 
 /// The presentation descriptor for a [`Field`]: what flag a script passes,
@@ -196,14 +208,19 @@ impl Field {
             KeyProtection => FieldInfo {
                 flag: "--key-protection",
                 label: "private-key protection",
-                help: "How the private key is kept at rest: seal (TPM-bound, \
-                       passwordless), password (you type one), or none.",
+                help: "This node's private key is stored on disk. How would you \
+                       like to protect it? seal (bound to this machine's TPM, \
+                       unlocked automatically at startup), password (you enter it \
+                       every time the service starts), or none (stored \
+                       unencrypted).",
             },
             KeyPassword => FieldInfo {
                 flag: "--key-password-file",
                 label: "private-key password",
-                help: "A password to encrypt this private key at rest. Supplied \
-                       from a file or stdin for scripts; never echoed.",
+                help: "A password to encrypt this private key at rest. You will \
+                       need to enter it every time the service starts (from the \
+                       system keychain or an askpass helper). Supplied from a file \
+                       or stdin for scripts; never echoed.",
             },
             Askpass => FieldInfo {
                 flag: "--askpass",
@@ -234,6 +251,13 @@ impl Field {
                 label: "network to join",
                 help: "Which of the discovered netidx networks to join ('none' \
                        for manual setup).",
+            },
+            ClusterMode => FieldInfo {
+                flag: "--server",
+                label: "no admin server found",
+                help: "No admin server was found on the local network. Create a \
+                       new netidx cluster on this machine, or connect to an \
+                       existing cluster by entering its admin-server address.",
             },
             IdMapMode => FieldInfo {
                 flag: "--id-map",
@@ -325,9 +349,11 @@ impl Field {
             ResolverName => FieldInfo {
                 flag: "--tls-name",
                 label: "resolver name",
-                help: "The leftmost label of this resolver's certificate name \
-                       (default 'resolver'); combined with the TLS domain into \
-                       <name>.<domain>. A full --tls-name supplies both at once.",
+                help: "The leftmost label of this resolver's certificate name. It \
+                       is joined to the TLS domain to form the full certificate \
+                       name (SAN) that subscribers verify — e.g. 'resolver' plus \
+                       'example.com' becomes resolver.example.com. Defaults to \
+                       'resolver'; a full --tls-name sets both at once.",
             },
             SetupAdminServer => FieldInfo {
                 flag: "--with-admin-server",
@@ -457,6 +483,33 @@ impl Field {
                        superuser capability. The server still forbids privilege \
                        escalation.",
             },
+            RootAdminName => FieldInfo {
+                flag: "--admin",
+                label: "root user name",
+                help: "Create a root user for this network's certificate authority. \
+                       The root user can sign certificates and perform any other \
+                       administrative function, including creating other users. \
+                       Defaults to your current login name.",
+            },
+            AdminPasswordConfirm => FieldInfo {
+                flag: "--password",
+                label: "confirm password",
+                help: "Re-enter the password to confirm it — the two entries must \
+                       match.",
+            },
+            SignedCert => FieldInfo {
+                flag: "--signed-cert",
+                label: "signed certificate path",
+                help: "Path to the CA certificate your external PKI signed from the \
+                       emitted CSR.",
+            },
+            ExternalRoot => FieldInfo {
+                flag: "--root",
+                label: "external root certificate path",
+                help: "Path to your external PKI's root certificate, if the signed \
+                       certificate does not already carry the chain. Leave blank to \
+                       use the chain in the signed certificate.",
+            },
         }
     }
 
@@ -500,12 +553,22 @@ pub struct Progress {
     pub stage: Stage,
     /// A one-line human message.
     pub message: CompactString,
+    /// The expected length of this step, when known — a frontend can drive a
+    /// determinate progress bar over it. `None` ⇒ open-ended (a frontend shows
+    /// an indeterminate/marquee indicator).
+    pub duration: Option<Duration>,
 }
 
 impl Progress {
-    /// Build a progress note.
+    /// Build an open-ended progress note (indeterminate).
     pub fn new(stage: Stage, message: impl Into<CompactString>) -> Self {
-        Progress { stage, message: message.into() }
+        Progress { stage, message: message.into(), duration: None }
+    }
+
+    /// Build a progress note for a step of known length, so a frontend can
+    /// drive a determinate bar over `duration`.
+    pub fn timed(stage: Stage, message: impl Into<CompactString>, duration: Duration) -> Self {
+        Progress { stage, message: message.into(), duration: Some(duration) }
     }
 }
 
@@ -555,6 +618,12 @@ pub trait Answerer: Send {
 
     /// Ask for a secret (password). Never echoed, never defaulted.
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret>;
+
+    /// Announce a new section or component of the flow — a short informational
+    /// dialog the operator acknowledges before the next questions (e.g. "Now
+    /// setting up the resolver server"). Blocks until acknowledged by an
+    /// interactive frontend; a non-interactive one returns immediately.
+    async fn announce(&mut self, title: &str, body: &str) -> Result<()>;
 
     /// The security gesture: present the admin server's identity (domain,
     /// roles, and CA fingerprint — which a frontend renders as text and an

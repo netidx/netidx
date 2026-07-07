@@ -293,11 +293,16 @@ impl Answerer for FlagAnswerer {
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret> {
         let slot = match field {
             Field::KeyPassword => &self.key,
-            Field::AdminPassword => &self.admin,
+            Field::AdminPassword | Field::AdminPasswordConfirm => &self.admin,
             Field::RecoveryPassword => &self.recovery,
             other => bail!("internal error: secret() requested for non-secret field {other:?}"),
         };
         slot.resolve(field, provided)
+    }
+
+    async fn announce(&mut self, _title: &str, _body: &str) -> Result<()> {
+        // Section headers are an interactive nicety; scripted runs skip them.
+        Ok(())
     }
 
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {

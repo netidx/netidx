@@ -1051,7 +1051,7 @@ where
                 .context("writing GetPermsResponse")
         }
         Request::EditPerms(req) => {
-            let resp = handle_edit_perms(state, &signs, &req).await;
+            let resp = handle_edit_perms(state, &signs, &req, local).await;
             admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing EditPermsResponse")
@@ -3248,6 +3248,7 @@ async fn handle_edit_perms(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,
     req: &EditPermsRequest,
+    local: bool,
 ) -> EditPermsResponse {
     let err = |reason: String| EditPermsResponse::Err { reason };
     if state.ca.is_none() {
@@ -3259,25 +3260,36 @@ async fn handle_edit_perms(
     // the CA and do anything); a role admin needs a `perms_edit_scopes`
     // entry covering the target path. The Argon2 runs under the sign
     // semaphore so an anonymous flood can't pin unbounded memory.
-    let auth = {
-        let state = state.clone();
-        let admin = req.admin.clone();
-        let pw = req.password.0.clone();
-        run_signing(signs, move || {
-            state
-                .ca
-                .as_ref()
-                .expect("CA role held")
-                .vault
-                .read()
-                .authenticate(&admin, &pw)
-        })
-        .await
-    };
-    let authd = match auth {
-        Ok(Ok(a)) => a,
-        Ok(Err(_)) => return err("authentication failed".to_string()),
-        Err(e) => return err(format!("auth task panicked: {e}")),
+    //
+    // A `local` request arrived over the `0600` + `SO_PEERCRED` control
+    // socket: reaching it already proves on-box authority, so it authorizes
+    // as a signing superuser with no password (exactly like
+    // [`authorize_admin_mgmt`] and the other local-bypass handlers). The
+    // route + peer push below is unchanged, so a local edit still propagates
+    // to every cluster member the same way a remote signing admin's does.
+    let authd = if local {
+        local_superuser()
+    } else {
+        let auth = {
+            let state = state.clone();
+            let admin = req.admin.clone();
+            let pw = req.password.0.clone();
+            run_signing(signs, move || {
+                state
+                    .ca
+                    .as_ref()
+                    .expect("CA role held")
+                    .vault
+                    .read()
+                    .authenticate(&admin, &pw)
+            })
+            .await
+        };
+        match auth {
+            Ok(Ok(a)) => a,
+            Ok(Err(_)) => return err("authentication failed".to_string()),
+            Err(e) => return err(format!("auth task panicked: {e}")),
+        }
     };
     let authorized = authd.kind == ca_vault::SlotKind::Signing
         || perms_scope_covers(&authd.policy.perms_edit_scopes, &req.target_path);
@@ -7834,6 +7846,60 @@ mod tests {
             ca_vault::CAVault::new(dir.path().to_path_buf()).list_admins().unwrap();
         let eu = admins.iter().find(|a| a.admin == "eu-ops").expect("eu-ops minted");
         assert_eq!(eu.kind, ca_vault::SlotKind::Role);
+    }
+
+    /// A perms edit over the local control socket (`local = true`) is
+    /// authorized as a signing-tier superuser with NO password — the
+    /// SO_PEERCRED gate is the authorization — while the same request over the
+    /// network (`local = false`) with bogus credentials is refused and leaves
+    /// the file untouched. The local path still routes by the map and
+    /// propagates to the cluster (a loopback apply here), so a local edit is
+    /// as cluster-consistent as a remote signing-admin edit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_socket_authorizes_perms_edit_without_password() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#)
+            .unwrap();
+        let rpath = write_resolver_with_perms(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
+            resolver: Some(ResolverRole { config: rpath }),
+            id_map: None,
+        };
+        let (addr, state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let id = admin_client::fetch_identity(addr, NodeKind::Client).await.unwrap();
+        let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
+        let req = EditPermsRequest {
+            admin: "nobody".to_string(),
+            password: Secret("wrong".to_string()),
+            target_path: "/".to_string(),
+            perms_json: r#"{"/foo":{"bob":"swl"}}"#.to_string(),
+        };
+
+        // Network path with bogus credentials is refused, file untouched.
+        match handle_edit_perms(&state, &signs, &req, false).await {
+            EditPermsResponse::Err { reason } => {
+                assert!(reason.contains("authentication failed"), "got {reason}")
+            }
+            EditPermsResponse::Ok { .. } => panic!("bogus creds must be refused"),
+        }
+        let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p.contains("users") && !p.contains("bob"), "deny must not mutate: {p}");
+
+        // Local path: no password needed, authorized as a signing-tier
+        // superuser, and the edit routes + propagates (loopback to self).
+        match handle_edit_perms(&state, &signs, &req, true).await {
+            EditPermsResponse::Ok { peers } => {
+                assert!(peers.iter().all(|p| p.error.is_none()), "all peers applied: {peers:?}")
+            }
+            EditPermsResponse::Err { reason } => panic!("local edit refused: {reason}"),
+        }
+        let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
+        assert!(p.contains("bob") && !p.contains("users"), "local edit applied: {p}");
     }
 
     /// `RotateRecovery` is refused over the network and, over the local

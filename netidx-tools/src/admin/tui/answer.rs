@@ -11,7 +11,7 @@
 //! block until acknowledged, which is safe because it runs on the spawned op
 //! task, never the UI task.
 
-use super::widgets;
+use super::{theme, widgets};
 use anyhow::{Result, anyhow};
 use crossterm::event::KeyCode;
 use netidx_admin::{
@@ -22,10 +22,10 @@ use netidx_admin::{
 };
 use ratatui::{
     Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -58,6 +58,11 @@ pub(super) enum UiRequest {
         field: Field,
         default: bool,
         reply: oneshot::Sender<Result<bool>>,
+    },
+    Announce {
+        title: String,
+        body: String,
+        reply: oneshot::Sender<Result<()>>,
     },
     Identity {
         identity: Box<CaIdentity>,
@@ -182,6 +187,11 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Secret { field, reply }).await
     }
 
+    async fn announce(&mut self, title: &str, body: &str) -> Result<()> {
+        let (title, body) = (title.to_string(), body.to_string());
+        self.ask(|reply| UiRequest::Announce { title, body, reply }).await
+    }
+
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {
         if let Some(expected) = &self.accept_glyph {
             return Ok(&identity.fingerprint == expected);
@@ -219,9 +229,11 @@ impl Answerer for TuiAnswerer {
 pub(super) enum Modal {
     Text {
         field: Field,
-        default: Option<String>,
         required: bool,
         secret: bool,
+        /// The live edit buffer — seeded from the field's default so the
+        /// operator sees and edits the value the install would use, rather than
+        /// an empty box with a hidden fallback.
         input: String,
         error: Option<String>,
         reply: Option<TextReply>,
@@ -240,6 +252,11 @@ pub(super) enum Modal {
     Identity {
         identity: Box<CaIdentity>,
         reply: Option<oneshot::Sender<Result<bool>>>,
+    },
+    Announce {
+        title: String,
+        body: String,
+        reply: Option<oneshot::Sender<Result<()>>>,
     },
     Recovery {
         password: String,
@@ -260,16 +277,16 @@ impl Modal {
         match req {
             UiRequest::Text { field, default, required, reply } => Some(Modal::Text {
                 field,
-                default,
                 required,
                 secret: false,
-                input: String::new(),
+                // Pre-fill the default so it's visible and editable (Debian
+                // style); an empty box now means "no value".
+                input: default.unwrap_or_default(),
                 error: None,
                 reply: Some(TextReply::Text(reply)),
             }),
             UiRequest::Secret { field, reply } => Some(Modal::Text {
                 field,
-                default: None,
                 required: true,
                 secret: true,
                 input: String::new(),
@@ -290,6 +307,9 @@ impl Modal {
             UiRequest::Identity { identity, reply } => {
                 Some(Modal::Identity { identity, reply: Some(reply) })
             }
+            UiRequest::Announce { title, body, reply } => {
+                Some(Modal::Announce { title, body, reply: Some(reply) })
+            }
             UiRequest::Recovery { password } => Some(Modal::Recovery { password }),
             _ => None,
         }
@@ -302,7 +322,7 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
-            Modal::Identity { .. } | Modal::Recovery { .. } => None,
+            Modal::Identity { .. } | Modal::Announce { .. } | Modal::Recovery { .. } => None,
         }
     }
 
@@ -310,26 +330,22 @@ impl Modal {
     /// and should be removed.
     pub(super) fn on_key(&mut self, code: KeyCode) -> bool {
         match self {
-            Modal::Text { required, default, secret, input, error, reply, .. } => match code {
+            Modal::Text { required, secret, input, error, reply, .. } => match code {
                 KeyCode::Esc => {
                     send_text(reply.take(), Err(anyhow!("cancelled")));
                     true
                 }
                 KeyCode::Enter => {
+                    // The answer is whatever's in the field. Empty is rejected
+                    // when required, else means "no value" (the default, if any,
+                    // was pre-filled and could have been left in place).
                     if input.is_empty() {
-                        match (default.as_ref(), *required) {
-                            (Some(d), _) => {
-                                resolve_text(reply.take(), Some(d.clone()), *secret);
-                                true
-                            }
-                            (None, true) => {
-                                *error = Some("a value is required".to_string());
-                                false
-                            }
-                            (None, false) => {
-                                resolve_text(reply.take(), None, *secret);
-                                true
-                            }
+                        if *required {
+                            *error = Some("a value is required".to_string());
+                            false
+                        } else {
+                            resolve_text(reply.take(), None, *secret);
+                            true
                         }
                     } else {
                         resolve_text(reply.take(), Some(std::mem::take(input)), *secret);
@@ -354,11 +370,14 @@ impl Modal {
                     true
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    state.select_previous();
+                    let i = state.selected().unwrap_or(0).saturating_sub(1);
+                    state.select(Some(i));
                     false
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    state.select_next();
+                    let last = choices.len().saturating_sub(1);
+                    let i = state.selected().map_or(0, |i| (i + 1).min(last));
+                    state.select(Some(i));
                     false
                 }
                 KeyCode::Enter => {
@@ -417,6 +436,21 @@ impl Modal {
                 }
                 _ => false,
             },
+            Modal::Announce { reply, .. } => match code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Ok(()));
+                    }
+                    true
+                }
+                KeyCode::Esc => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Err(anyhow!("cancelled")));
+                    }
+                    true
+                }
+                _ => false,
+            },
             Modal::Recovery { .. } => matches!(code, KeyCode::Enter | KeyCode::Char(' ')),
         }
     }
@@ -425,93 +459,163 @@ impl Modal {
         match self {
             Modal::Text { secret, input, error, .. } => {
                 let field = self.field().unwrap();
+                let w = 64u16.min(screen.width.saturating_sub(4)).max(30);
+                // Size the help area to the wrapped help so it's never truncated.
+                let help_h = widgets::wrapped_rows(field.help(), w - 2);
+                let inner_rows = help_h + 1 /*spacer*/ + 1 /*field*/ + 1 /*error*/ + 1 /*spacer*/ + 1 /*buttons*/;
+                let h = (inner_rows + 2).min(screen.height);
+                let area = widgets::centered(w, h, screen);
+                widgets::shadow(f, area, screen);
+                f.render_widget(Clear, area);
+                let block = theme::dialog_block(field.label());
+                let inner = block.inner(area);
+                f.render_widget(block, area);
+                let rows = Layout::vertical([
+                    Constraint::Length(help_h), // help
+                    Constraint::Length(1),      // spacer
+                    Constraint::Length(1),      // input field
+                    Constraint::Length(1),      // error (if any)
+                    Constraint::Length(1),      // spacer
+                    Constraint::Length(1),      // buttons
+                    Constraint::Min(0),
+                ])
+                .split(inner);
+                f.render_widget(
+                    Paragraph::new(field.help()).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    rows[0],
+                );
                 let shown = if *secret { "•".repeat(input.chars().count()) } else { input.clone() };
-                let mut lines = vec![
-                    Line::from(field.help().dim()),
-                    Line::from(""),
-                    Line::from(vec![Span::raw("> "), Span::styled(shown, Style::default().add_modifier(Modifier::BOLD))]),
-                ];
+                let field_row = rows[2];
+                f.render_widget(Paragraph::new(shown).style(theme::field_style()), field_row);
                 if let Some(e) = error {
-                    lines.push(Line::from(Span::styled(e.clone(), Style::default().fg(Color::Red))));
+                    let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
+                    f.render_widget(Paragraph::new(e.clone()).style(err), rows[3]);
                 }
-                lines.push(Line::from(""));
-                lines.push(Line::from(" Enter accept · Esc cancel ".dim()));
-                popup(f, screen, field.label(), lines, 60, 9);
+                let buttons =
+                    Line::from(vec![theme::button("Continue", true), Span::raw("  "), theme::button("Cancel", false)]);
+                f.render_widget(
+                    Paragraph::new(buttons).alignment(Alignment::Center).style(theme::panel_style()),
+                    rows[5],
+                );
+                // Focus: put the terminal cursor at the end of the field.
+                let cx = field_row.x + (input.chars().count() as u16).min(field_row.width.saturating_sub(1));
+                f.set_cursor_position((cx, field_row.y));
             }
             Modal::Choice { field, choices, state, .. } => {
-                let items: Vec<ListItem> = choices.iter().map(|c| ListItem::new(c.clone())).collect();
-                let height = (choices.len() as u16 + 4).min(screen.height.saturating_sub(4));
-                let area = widgets::centered(50, height, screen);
+                let sel = state.selected().unwrap_or(0).min(choices.len().saturating_sub(1));
+                let w = 64u16.min(screen.width.saturating_sub(4)).max(30);
+                let help_h = widgets::wrapped_rows(field.help(), w - 2);
+                let list_h = choices.len() as u16;
+                let h = (help_h + 1 + list_h + 2).min(screen.height);
+                let area = widgets::centered(w, h, screen);
+                widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let mut st = state.clone();
+                let block = theme::dialog_block(field.label()).title_bottom(Line::from(Span::styled(
+                    " ↑/↓ move · Enter select · Esc cancel ",
+                    theme::hint_style(),
+                )));
+                let inner = block.inner(area);
+                f.render_widget(block, area);
+                let rows = Layout::vertical([
+                    Constraint::Length(help_h), // help
+                    Constraint::Length(1),      // spacer
+                    Constraint::Min(0),         // radio list
+                ])
+                .split(inner);
+                f.render_widget(
+                    Paragraph::new(field.help()).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    rows[0],
+                );
+                let items: Vec<ListItem> = choices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let marker = if i == sel { "(*) " } else { "( ) " };
+                        ListItem::new(format!("{marker}{c}"))
+                    })
+                    .collect();
+                let mut st = *state;
                 let list = List::new(items)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(format!(" {} ", field.label()))
-                            .title_bottom(Line::from(" ↑/↓ · Enter select · Esc cancel ").dim()),
-                    )
-                    .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
-                    .highlight_symbol("▸ ");
-                f.render_stateful_widget(list, area, &mut st);
+                    .style(theme::panel_style())
+                    .highlight_style(theme::selected_style());
+                f.render_stateful_widget(list, rows[2], &mut st);
             }
             Modal::Confirm { field, yes, .. } => {
-                let opts = Line::from(vec![
-                    button("Yes", *yes),
-                    Span::raw("   "),
-                    button("No", !*yes),
-                ]);
+                let opts =
+                    Line::from(vec![theme::button("Yes", *yes), Span::raw("   "), theme::button("No", !*yes)]);
                 let lines = vec![
-                    Line::from(field.help().dim()),
+                    Line::from(Span::styled(field.help(), theme::hint_style())),
                     Line::from(""),
                     opts,
                     Line::from(""),
-                    Line::from(" ←/→ · y/n · Enter · Esc cancel ".dim()),
+                    Line::from(Span::styled(" ←/→ · y/n · Enter · Esc cancel ", theme::hint_style())),
                 ];
-                popup(f, screen, field.label(), lines, 60, 9);
+                popup(f, screen, field.label(), lines, 60);
             }
             Modal::Identity { identity, .. } => {
-                let roles = identity
-                    .roles
-                    .iter()
-                    .map(|r| format!("{r:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let roles =
+                    identity.roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", ");
+                let label = |s: &str| Span::styled(s.to_string(), theme::hint_style());
+                let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
-                    Line::from("Verify this is the network you intend to trust, out of band,"),
-                    Line::from("then accept. Everything after is pinned to this fingerprint.".dim()),
+                    Line::from(Span::styled(
+                        "Verify this is the network you intend to trust, out of band,",
+                        theme::panel_style(),
+                    )),
+                    Line::from(Span::styled(
+                        "then accept. Everything after is pinned to this fingerprint.",
+                        theme::hint_style(),
+                    )),
                     Line::from(""),
-                    Line::from(vec![Span::styled("  domain: ".to_string(), Style::default().dim()), Span::raw(identity.domain.clone())]),
-                    Line::from(vec![Span::styled("   roles: ".to_string(), Style::default().dim()), Span::raw(roles)]),
+                    Line::from(vec![label("  domain: "), val(identity.domain.clone())]),
+                    Line::from(vec![label("   roles: "), val(roles)]),
                     Line::from(""),
                 ];
                 lines.extend(widgets::identicon_lines(&identity.fingerprint));
                 lines.push(Line::from(""));
+                let fp = Style::default().bg(theme::PANEL_BG).fg(Color::Rgb(0, 0, 150)).add_modifier(Modifier::BOLD);
                 for chunk in group_fingerprint(&identity.fingerprint) {
-                    lines.push(Line::from(Span::styled(chunk, Style::default().fg(Color::Cyan))));
+                    lines.push(Line::from(Span::styled(chunk, fp)));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(" a/Enter accept · Esc/r reject ".dim()));
-                popup(f, screen, "Confirm network identity", lines, 60, 22);
+                lines.push(Line::from(Span::styled(" a/Enter accept · Esc/r reject ", theme::hint_style())));
+                popup(f, screen, "Confirm network identity", lines, 60);
+            }
+            Modal::Announce { title, body, .. } => {
+                let lines = vec![
+                    Line::from(Span::styled(body.clone(), theme::panel_style())),
+                    Line::from(""),
+                    Line::from(Span::styled(" Press Enter to continue ", theme::selected_style())),
+                ];
+                popup(f, screen, title, lines, 64);
             }
             Modal::Recovery { password, .. } => {
+                let heading = theme::panel_style().add_modifier(Modifier::BOLD);
+                let pw = Style::default()
+                    .bg(Color::Rgb(255, 249, 196))
+                    .fg(Color::Rgb(0, 0, 0))
+                    .add_modifier(Modifier::BOLD);
                 let lines = vec![
-                    Line::from(Span::styled(
-                        "CA RECOVERY PASSWORD — shown once, never stored.",
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    )),
+                    Line::from(Span::styled("Your certificate authority has been created.", heading)),
                     Line::from(""),
                     Line::from(Span::styled(
-                        password.clone(),
-                        Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                        "CA recovery password — shown once, never stored:",
+                        theme::panel_style(),
                     )),
                     Line::from(""),
-                    Line::from("Write it down and lock it in a safe now. It is the only off-box"),
-                    Line::from("credential that can unlock the CA key. There is no second chance.".dim()),
+                    Line::from(Span::styled(password.clone(), pw)),
                     Line::from(""),
-                    Line::from(Span::styled(" Enter — I have saved it ", Style::default().fg(Color::Black).bg(Color::Yellow))),
+                    Line::from(Span::styled(
+                        "Use this password to unlock the CA key in an emergency. Write it \
+                         down and store it in a safe place now — it is the only off-box \
+                         credential that can unlock the CA key, and there is no second \
+                         chance to read it.",
+                        theme::panel_style(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(" Enter — I have saved it ", theme::selected_style())),
                 ];
-                popup(f, screen, "Save this now", lines, 66, 12);
+                popup(f, screen, "Certificate authority created", lines, 66);
             }
         }
     }
@@ -542,16 +646,6 @@ fn send_text(reply: Option<TextReply>, err: Result<()>) {
     }
 }
 
-/// A highlighted/plain button span for the confirm modal.
-fn button(label: &str, selected: bool) -> Span<'static> {
-    let text = format!("  {label}  ");
-    if selected {
-        Span::styled(text, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
-    } else {
-        Span::styled(text, Style::default().add_modifier(Modifier::DIM))
-    }
-}
-
 /// The fingerprint text split into its space-separated 5-char groups, four per
 /// line, for a compact block in the identity modal.
 fn group_fingerprint(fp: &Fingerprint) -> Vec<String> {
@@ -560,12 +654,16 @@ fn group_fingerprint(fp: &Fingerprint) -> Vec<String> {
     groups.chunks(4).map(|c| c.join(" ")).collect()
 }
 
-/// Draw a bordered, centered popup with the given title and body lines.
-fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w: u16, h: u16) {
+/// Draw a shadowed, centered dialog popup with the given title and body lines,
+/// sized to the height the lines wrap to at width `w` so nothing is truncated.
+fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w: u16) {
+    let h = (widgets::wrapped_height(&lines, w.saturating_sub(2)) + 2).min(screen.height);
     let area = widgets::centered(w, h, screen);
+    widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
     let body = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(format!(" {title} ")));
+        .style(theme::panel_style())
+        .block(theme::dialog_block(title));
     f.render_widget(body, area);
 }

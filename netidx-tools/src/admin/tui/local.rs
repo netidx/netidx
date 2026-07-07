@@ -4,7 +4,8 @@
 //! Read-only detection today; the install / uninstall / renew actions land once
 //! the [`TuiAnswerer`](super::answer::TuiAnswerer) exists.
 
-use super::{action::Action, widgets};
+use super::{action::Action, theme, widgets};
+use netidx_activation::{control::ControlOp, runtime::default_units_dir};
 use netidx_admin::{
     fingerprint::Fingerprint,
     paths,
@@ -14,11 +15,11 @@ use netidx_admin::{
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A role the operator can install on a fresh machine.
 #[derive(Clone, Copy)]
@@ -63,6 +64,27 @@ struct Detected {
     scope: ServiceScope,
     config_dir: PathBuf,
     ca: Option<Fingerprint>,
+    /// Local admin-server CA tooling, present only when this install owns a CA.
+    local_ca: Option<LocalCa>,
+}
+
+/// The local (no-auth, control-socket) admin-server CA tooling available on an
+/// install that owns a CA — the paths its ops need plus a snapshot of the
+/// credential state, computed once at detection (the `slots` status calls are
+/// pure but touch the vault, so we don't repeat them every render frame).
+struct LocalCa {
+    ca_dir: PathBuf,
+    cfg: Option<PathBuf>,
+    /// The auto-approve (autorenew) credential slot exists.
+    auto_approve_present: bool,
+    /// The daemon config wires the autorenew keytab in.
+    auto_approve_wired: bool,
+    /// The recovery-password slot exists.
+    recovery_present: bool,
+    /// This CA is signed by an external PKI.
+    external_signed: bool,
+    /// The externally-signed cert is installed (vs awaiting a signature).
+    external_installed: bool,
 }
 
 impl Detected {
@@ -72,8 +94,39 @@ impl Detected {
             .as_ref()
             .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok());
         let service = probe_service(&record);
-        Detected { record, service, scope, config_dir, ca }
+        let local_ca = probe_local_ca(&config_dir);
+        Detected { record, service, scope, config_dir, ca, local_ca }
     }
+}
+
+/// Probe the local admin-server CA credential state for an install (unix-only —
+/// the `slots` ops drive the `SO_PEERCRED` control socket).
+#[cfg(unix)]
+fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
+    use netidx_admin::admin_ops::slots;
+    let ca_dir = config_dir.join("ca");
+    if !ca_dir.is_dir() {
+        return None;
+    }
+    let cfg = paths::discover_admin_server_config().ok();
+    let aa = slots::auto_approve_status(&ca_dir, cfg.as_deref()).ok();
+    let ext = slots::external_status(&ca_dir).ok();
+    let recovery_present =
+        slots::recovery_status(&ca_dir).map(|s| s.slot_present).unwrap_or(false);
+    Some(LocalCa {
+        auto_approve_present: aa.as_ref().map(|s| s.slot_present).unwrap_or(false),
+        auto_approve_wired: aa.as_ref().map(|s| s.wired_in_config).unwrap_or(false),
+        recovery_present,
+        external_signed: ext.as_ref().map(|s| s.externally_signed).unwrap_or(false),
+        external_installed: ext.as_ref().map(|s| s.cert_installed).unwrap_or(false),
+        ca_dir,
+        cfg,
+    })
+}
+
+#[cfg(not(unix))]
+fn probe_local_ca(_config_dir: &Path) -> Option<LocalCa> {
+    None
 }
 
 /// Network-sync state for a detected install, filled in asynchronously by a
@@ -155,6 +208,13 @@ pub(super) struct LocalState {
     selected: usize,
     /// The open action menu for the selected install, if any.
     menu: Option<ActionMenu>,
+    /// On a fresh machine, whether the operator has dismissed the "not
+    /// installed" welcome dialog and dropped into the install choices.
+    welcome_seen: bool,
+    /// The open local admin-server panel surface (roster, …) over the control
+    /// socket, if the operator chose "Manage admins". Takes over the tab while
+    /// open; shares the panel machinery with the Cluster tab (a `Local` target).
+    admin: Option<super::remote::RemoteState>,
 }
 
 impl LocalState {
@@ -163,7 +223,33 @@ impl LocalState {
         role_menu.select(Some(0));
         let installs = detect();
         let sync = vec![SyncState::Unchecked; installs.len()];
-        LocalState { installs, sync, role_menu, selected: 0, menu: None }
+        LocalState {
+            installs,
+            sync,
+            role_menu,
+            selected: 0,
+            menu: None,
+            welcome_seen: false,
+            admin: None,
+        }
+    }
+
+    /// Open the local admin-server panel surface over the control socket (no
+    /// auth) — the "Manage admins" entry. Takes over the Local tab until closed.
+    pub(super) fn open_admin(&mut self, cfg_path: PathBuf, ca_dir: PathBuf) {
+        self.admin = Some(super::remote::RemoteState::local(cfg_path, ca_dir));
+    }
+
+    /// Apply a completed local-admin op's panel rows to the admin surface.
+    pub(super) fn apply_admin(&mut self, update: super::remote::RemoteUpdate) {
+        if let Some(admin) = &mut self.admin {
+            admin.apply(update);
+        }
+    }
+
+    /// Whether the local admin panel surface is open.
+    pub(super) fn admin_open(&self) -> bool {
+        self.admin.is_some()
     }
 
     /// Re-run detection (after an install/uninstall completes). Resets the sync
@@ -173,6 +259,9 @@ impl LocalState {
         self.sync = vec![SyncState::Unchecked; self.installs.len()];
         self.selected = self.selected.min(self.installs.len().saturating_sub(1));
         self.menu = None;
+        // If the machine is fresh again (everything was uninstalled), re-show
+        // the welcome dialog.
+        self.welcome_seen = self.welcome_seen && !self.installs.is_empty();
     }
 
     /// Networked installs whose sync hasn't been checked yet; marks each
@@ -191,6 +280,18 @@ impl LocalState {
         out
     }
 
+    /// Whether netidx is installed on this machine (any detected install).
+    pub(super) fn installed(&self) -> bool {
+        !self.installs.is_empty()
+    }
+
+    /// Whether this is a fresh machine (no detected install) — the welcome +
+    /// role-menu state.
+    #[cfg(test)]
+    pub(super) fn is_fresh(&self) -> bool {
+        self.installs.is_empty()
+    }
+
     /// Fold in a finished background check's results.
     pub(super) fn apply_sync(&mut self, results: Vec<(usize, SyncState)>) {
         for (i, st) in results {
@@ -202,7 +303,22 @@ impl LocalState {
 
     pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
         use crossterm::event::KeyCode::*;
+        // The local admin panel surface takes over the tab while open; Esc from
+        // its top menu closes it back to the Local tab.
+        if self.admin.is_some() {
+            let at_menu = self.admin.as_ref().unwrap().at_menu();
+            if matches!(code, Esc) && at_menu {
+                self.admin = None;
+                return None;
+            }
+            return self.admin.as_mut().unwrap().on_key(code);
+        }
         if self.installs.is_empty() {
+            // The welcome dialog is up: any key dismisses it into the choices.
+            if !self.welcome_seen {
+                self.welcome_seen = true;
+                return None;
+            }
             match code {
                 Up | Char('k') => self.role_menu.select_previous(),
                 Down | Char('j') => self.role_menu.select_next(),
@@ -261,8 +377,15 @@ impl LocalState {
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
+        if let Some(admin) = &mut self.admin {
+            admin.render(f, area);
+            return;
+        }
         if self.installs.is_empty() {
             self.render_role_menu(f, area);
+            if !self.welcome_seen {
+                render_welcome(f, area);
+            }
         } else {
             self.render_installs(f, area);
         }
@@ -276,27 +399,19 @@ impl LocalState {
             Layout::horizontal([Constraint::Length(24), Constraint::Min(0)]).split(area);
         let items: Vec<ListItem> = ROLES.iter().map(|r| ListItem::new(r.title)).collect();
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Install a role ")
-                    .title_bottom(Line::from(" ↑/↓ select · Enter install · p preview ").dim()),
-            )
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Install a role ", theme::title_style())).title_bottom(
+                Line::from(Span::styled(" ↑/↓ select · Enter install · p preview ", theme::hint_style())),
+            ))
+            .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, cols[0], &mut self.role_menu);
 
         let sel = self.role_menu.selected().unwrap_or(0);
-        let blurb = Paragraph::new(ROLES[sel].blurb).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", ROLES[sel].title)),
-        );
+        let blurb = Paragraph::new(ROLES[sel].blurb)
+            .wrap(Wrap { trim: true })
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(format!(" {} ", ROLES[sel].title), theme::title_style())));
         f.render_widget(blurb, cols[1]);
     }
 
@@ -338,6 +453,66 @@ fn action_menu(d: &Detected) -> ActionMenu {
     }
     if networked {
         items.push(("Renew certificates".to_string(), Action::Renew { server: d.record.admin_server }));
+    }
+    // Local service control over the activation supervisor's control socket (no
+    // auth). Present whenever this machine has a supervisor unit directory.
+    if let Some(units_dir) = default_units_dir() {
+        items.push((
+            "Restart services".to_string(),
+            Action::ServiceControl { op: ControlOp::Restart, units_dir: units_dir.clone() },
+        ));
+        items.push((
+            "Stop services".to_string(),
+            Action::ServiceControl { op: ControlOp::Stop, units_dir: units_dir.clone() },
+        ));
+        items.push((
+            "Start services".to_string(),
+            Action::ServiceControl { op: ControlOp::Start, units_dir },
+        ));
+    }
+    // Local admin-server CA tools — no auth (control socket), only for a node
+    // that owns a CA. Most nodes have no `local_ca` and skip this entirely.
+    if let Some(lca) = &d.local_ca {
+        // Roster/perms/… over the local control socket, when an admin server is
+        // configured on this box.
+        if let Some(cfg_path) = &lca.cfg {
+            items.push((
+                "Manage admins & permissions".to_string(),
+                Action::ManageLocalAdmins {
+                    cfg_path: cfg_path.clone(),
+                    ca_dir: lca.ca_dir.clone(),
+                },
+            ));
+        }
+        if lca.auto_approve_present {
+            items.push((
+                "Rotate auto-approve credential".to_string(),
+                Action::AutoApprove { rotate: true, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+            ));
+        } else {
+            items.push((
+                "Enable auto-approve".to_string(),
+                Action::AutoApprove { rotate: false, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+            ));
+        }
+        if lca.recovery_present {
+            items.push((
+                "Rotate recovery password".to_string(),
+                Action::RecoveryRotate { ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+            ));
+        }
+        if lca.external_signed {
+            items.push((
+                "Emit renewal CSR (external CA)".to_string(),
+                Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
+            ));
+            let label = if lca.external_installed {
+                "Install renewed certificate (external CA)"
+            } else {
+                "Install signed certificate (external CA)"
+            };
+            items.push((label.to_string(), Action::ExternalInstall { ca_dir: lca.ca_dir.clone() }));
+        }
     }
     items.push(("Uninstall".to_string(), uninstall_action(d, false)));
     if owns_ca(d) {
@@ -386,24 +561,49 @@ fn owns_ca(d: &Detected) -> bool {
     d.config_dir.join("ca").is_dir()
 }
 
+/// The one-time "netidx isn't installed" welcome dialog on a fresh machine.
+/// The prose is one continuous string per paragraph so ratatui's `Paragraph`
+/// wraps it to the dialog width at any terminal size; the box is sized to the
+/// wrapped height via [`wrapped_rows`].
+fn render_welcome(f: &mut Frame, screen: Rect) {
+    let heading = "netidx isn't installed on this machine.";
+    let body = "Choose an install option — a Workstation for a laptop or desktop, a \
+                Resolver to run a network's directory, or a Publisher.";
+    let prompt = " Press Enter to continue ";
+    let w = 64.min(screen.width.saturating_sub(4)).max(24);
+    let lines = vec![
+        Line::from(Span::styled(heading, theme::panel_style().add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(Span::styled(body, theme::panel_style())),
+        Line::from(""),
+        Line::from(Span::styled(prompt, theme::selected_style())),
+    ];
+    let h = (widgets::wrapped_height(&lines, w - 2) + 2).min(screen.height); // + borders
+    let area = widgets::centered(w, h, screen);
+    widgets::shadow(f, area, screen);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()).block(theme::dialog_block("Welcome to netidx")),
+        area,
+    );
+}
+
 /// Render the action menu as a centered overlay.
 fn render_menu(f: &mut Frame, screen: Rect, menu: &ActionMenu) {
     let items: Vec<ListItem> =
         menu.items.iter().map(|(label, _)| ListItem::new(label.clone())).collect();
     let h = (menu.items.len() as u16 + 3).min(screen.height.saturating_sub(2));
     let area = widgets::centered(56, h, screen);
+    widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
-    let mut state = menu.state.clone();
+    let mut state = menu.state;
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", menu.title))
-                .title_bottom(Line::from(" ↑/↓ · Enter run · Esc close ").dim()),
-        )
-        .highlight_style(
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )
+        .style(theme::panel_style())
+        .block(theme::dialog_block(&menu.title).title_bottom(Line::from(Span::styled(
+            " ↑/↓ · Enter run · Esc close ",
+            theme::hint_style(),
+        ))))
+        .highlight_style(theme::selected_style())
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, area, &mut state);
 }
@@ -413,7 +613,7 @@ fn render_menu(f: &mut Frame, screen: Rect, menu: &ActionMenu) {
 /// install is highlighted and shows its action keys.
 fn render_install(f: &mut Frame, d: &Detected, sync: &SyncState, area: Rect, selected: bool) {
     let title = format!(" {} ", role_title(d.record.role));
-    let mut block = Block::default().borders(Borders::ALL).title(title);
+    let mut block = theme::panel_block().title(Span::styled(title, theme::title_style()));
     if selected {
         // Surface the sync-apply shortcut in the hint only when there's
         // something to apply, so it doesn't clutter the in-sync case.
@@ -423,8 +623,8 @@ fn render_install(f: &mut Frame, d: &Detected, sync: &SyncState, area: Rect, sel
             " Enter actions · u uninstall "
         };
         block = block
-            .border_style(Style::default().fg(Color::Cyan))
-            .title_bottom(Line::from(hint).dim());
+            .border_style(Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT))
+            .title_bottom(Line::from(Span::styled(hint, theme::hint_style())));
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -438,12 +638,12 @@ fn render_install(f: &mut Frame, d: &Detected, sync: &SyncState, area: Rect, sel
 
     let mut lines = detail_lines(d);
     lines.extend(sync_lines(sync));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cols[0]);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()), cols[0]);
 
     if let Some(fp) = &d.ca {
-        let mut lines = vec![Line::from("CA glyph".dim())];
+        let mut lines = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
         lines.extend(widgets::identicon_lines(fp));
-        f.render_widget(Paragraph::new(lines), cols[1]);
+        f.render_widget(Paragraph::new(lines).style(theme::panel_style()), cols[1]);
     }
 }
 
@@ -464,31 +664,48 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
     if let Some(addr) = r.admin_server {
         lines.push(kv("Admin server", addr.to_string()));
     }
+    if let Some(lca) = &d.local_ca {
+        let (aa, aa_c) = if lca.auto_approve_present {
+            if lca.auto_approve_wired {
+                ("active", theme::OK)
+            } else {
+                ("present (not wired)", theme::WARN)
+            }
+        } else {
+            ("not set up", theme::HINT_FG)
+        };
+        lines.push(kv_status("Auto-approve", aa.to_string(), aa_c));
+        let (rec, rec_c) =
+            if lca.recovery_present { ("set", theme::OK) } else { ("MISSING", theme::WARN) };
+        lines.push(kv_status("Recovery slot", rec.to_string(), rec_c));
+        if lca.external_signed {
+            let (ext, ext_c) = if lca.external_installed {
+                ("installed", theme::OK)
+            } else {
+                ("awaiting signature", theme::WARN)
+            };
+            lines.push(kv_status("External CA", ext.to_string(), ext_c));
+        }
+    }
     lines.push(service_line(d.service));
     lines.push(kv("Config", d.config_dir.display().to_string()));
     lines.push(kv("Installed", fmt_unix(r.created_unix)));
     lines
 }
 
-/// A `label: value` line with a dim label.
+/// A `label: value` line with a muted label.
 fn kv(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:>16}: "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(value),
+        Span::styled(format!("{label:>16}: "), theme::hint_style()),
+        Span::styled(value, theme::panel_style()),
     ])
 }
 
 /// A `label: value` line whose value carries a status colour.
 fn kv_status(label: &'static str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(
-            format!("{label:>16}: "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(value, Style::default().fg(color)),
+        Span::styled(format!("{label:>16}: "), theme::hint_style()),
+        Span::styled(value, Style::default().bg(theme::PANEL_BG).fg(color)),
     ])
 }
 
@@ -499,15 +716,15 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
         // A local-only install never gets here (never checked); render nothing.
         SyncState::Unchecked => Vec::new(),
         SyncState::Checking => {
-            vec![kv_status("Network sync", "checking…".to_string(), Color::DarkGray)]
+            vec![kv_status("Network sync", "checking…".to_string(), theme::HINT_FG)]
         }
         SyncState::InSync => {
-            vec![kv_status("Network sync", "✓ in sync".to_string(), Color::Green)]
+            vec![kv_status("Network sync", "✓ in sync".to_string(), theme::OK)]
         }
         SyncState::Failed(e) => vec![kv_status(
             "Network sync",
             format!("could not check ({e})"),
-            Color::DarkGray,
+            theme::HINT_FG,
         )],
         SyncState::OutOfSync(changes) => {
             let mut lines = vec![kv_status(
@@ -516,15 +733,12 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
                     "⚠ {} new member server(s) — press U to apply",
                     changes.len()
                 ),
-                Color::Yellow,
+                theme::WARN,
             )];
             for c in changes {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{:>18}", "")),
-                    Span::styled(
-                        format!("+ {c}"),
-                        Style::default().fg(Color::Yellow),
-                    ),
+                    Span::styled(format!("+ {c}"), Style::default().bg(theme::PANEL_BG).fg(theme::WARN)),
                 ]));
             }
             lines
@@ -556,17 +770,11 @@ pub(super) async fn check_sync(
 
 fn service_line(status: ServiceStatus) -> Line<'static> {
     let (text, color) = match status {
-        ServiceStatus::Active => ("active (running)", Color::Green),
-        ServiceStatus::Inactive => ("installed, not running", Color::Yellow),
-        ServiceStatus::NotInstalled => ("not installed", Color::DarkGray),
+        ServiceStatus::Active => ("active (running)", theme::OK),
+        ServiceStatus::Inactive => ("installed, not running", theme::WARN),
+        ServiceStatus::NotInstalled => ("not installed", theme::HINT_FG),
     };
-    Line::from(vec![
-        Span::styled(
-            format!("{:>16}: ", "OS service"),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(text, Style::default().fg(color)),
-    ])
+    kv_status("OS service", text.to_string(), color)
 }
 
 fn role_title(role: InstallRole) -> &'static str {

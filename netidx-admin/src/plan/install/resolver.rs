@@ -210,6 +210,35 @@ pub async fn run_resolver(
             .parse()?,
     };
     input.auth = Some(kind);
+    // Founding a brand-new cluster is the one workflow that stands up several
+    // system components in a row (CA → admin server → resolver), so it's the
+    // one that needs explicit component framing: without it the operator gets a
+    // "resolver" dialog that abruptly detours into CA and admin-server
+    // questions. When we're founding, set the expectation up front — a CA is
+    // required regardless of the data-plane auth — and defer the "now the
+    // resolver" announce until the CA/admin-server steps are done (below).
+    // Adding a resolver to an existing cluster stands up only the resolver, so
+    // no component-boundary announce is needed there at all.
+    #[cfg(unix)]
+    let founding_new_cluster = probe.have().is_none()
+        && input.parent_admin_server.is_none()
+        && !input.common.dry_run
+        && !ca_setup::default_ca_present();
+    #[cfg(unix)]
+    if founding_new_cluster && matches!(kind, AuthKind::Tls | AuthKind::Krb5) {
+        ans.announce(
+            "New admin cluster",
+            &format_compact!(
+                "You're setting up the first server of a new admin cluster. A \
+                 certificate authority (CA) is required no matter which data-plane \
+                 auth you chose ({}) — the admin plane itself (discovery, \
+                 enrollment, and certificate renewal) is always secured by the CA. \
+                 So we'll set up the CA first, then this machine's resolver server.",
+                kind.as_str()
+            ),
+        )
+        .await?;
+    }
     // Shape detection (incl. cloud-metadata probe) only fires when we
     // actually need a default — i.e. when `--listen` or `--bind` weren't
     // given explicitly. Computed at most once, up front, so the two prompts
@@ -294,6 +323,12 @@ pub async fn run_resolver(
                 .await?
             }
         };
+    // Whether this flow just stood up the admin plane (CA [+ admin server]) as
+    // part of founding a new cluster — the TLS path mints inside
+    // `resolver_self_auth`, the krb5/anon block below mints explicitly. Drives
+    // the deferred "now the resolver" component-boundary announce.
+    #[cfg(unix)]
+    let mut founded_admin_plane = founding_new_cluster && matches!(kind, AuthKind::Tls);
     // First server of a new network with a non-TLS data plane: the admin
     // plane still needs its trust root (it is always TLS — the glyph confirm,
     // enrollment, and server-to-server pushes all hang off the CA), so create
@@ -346,6 +381,20 @@ pub async fn run_resolver(
                 Some(listen.ip()),
                 units_dir.clone(),
             ),
+        )
+        .await?;
+        founded_admin_plane = true;
+    }
+    // Component boundary: the CA (and admin server) are done, so frame the
+    // switch back to the resolver. Only when we actually founded the admin
+    // plane just now — adding a resolver to an existing cluster stands up only
+    // the resolver, so an announce there would state the obvious.
+    #[cfg(unix)]
+    if founded_admin_plane {
+        ans.announce(
+            "Resolver server",
+            "The admin plane is ready. Now setting up the resolver server itself \
+             — the directory that maps paths to publishers for this network.",
         )
         .await?;
     }

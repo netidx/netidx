@@ -1,4 +1,4 @@
-//! Tab 2 — **Remote admin**: connect to a (local or remote) admin server and
+//! Tab 2 — **Cluster**: connect to a (local or remote) admin server and
 //! drive its enrollment queue (and, in later slices, delegations, roster,
 //! perms, service control, revocation) over `netidx_admin::admin_ops`.
 //!
@@ -13,7 +13,7 @@
 //! render `admin_ops` rows into plain [`PanelRow`]s), so the UI compiles
 //! everywhere and simply reports "unavailable" off unix.
 
-use super::{action::Action, answer::TuiAnswerer, widgets};
+use super::{action::Action, answer::TuiAnswerer, theme, widgets};
 use anyhow::Result;
 #[cfg(unix)]
 use anyhow::Context;
@@ -21,12 +21,12 @@ use crossterm::event::KeyCode;
 use netidx_admin::{admin_proto::Secret, fingerprint::Fingerprint};
 use ratatui::{
     Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 /// A pinned, authenticated remote-admin session, captured once at connect and
 /// reused by every panel op. All fields are cross-platform.
@@ -37,6 +37,61 @@ pub(super) struct RemoteConn {
     pub(super) confirmed_fp: Fingerprint,
     pub(super) admin: String,
     pub(super) password: Secret,
+}
+
+/// Where an admin-panel op runs: this box's own admin server over its local
+/// control socket (no auth, `SO_PEERCRED` superuser), or a pinned authenticated
+/// remote session. The same panel surface serves the Local tab (a `Local`
+/// target, opened directly) and the Cluster tab (a `Remote` target, after the
+/// connect form).
+#[derive(Clone)]
+pub(super) enum PanelTarget {
+    /// This box's own admin server over its `SO_PEERCRED` control socket. Carries
+    /// the CA directory so a perms *read* can auto-verify the admin server's
+    /// identity against the local CA cert (glyph-free) — the write is authorized
+    /// by the socket itself.
+    Local { cfg_path: PathBuf, ca_dir: PathBuf },
+    Remote(RemoteConn),
+}
+
+impl PanelTarget {
+    /// The pre-confirmed CA fingerprint for a remote session (so the answerer
+    /// auto-accepts the identity), or `None` for a local target.
+    fn glyph(&self) -> Option<Fingerprint> {
+        match self {
+            PanelTarget::Remote(c) => Some(c.confirmed_fp),
+            PanelTarget::Local { .. } => None,
+        }
+    }
+
+    /// Borrow the remote session, or error for a local target (a remote-only op).
+    fn remote(&self) -> Result<&RemoteConn> {
+        match self {
+            PanelTarget::Remote(c) => Ok(c),
+            PanelTarget::Local { .. } => {
+                anyhow::bail!("this operation requires connecting to a cluster")
+            }
+        }
+    }
+
+    /// Consume into the remote session, or error for a local target.
+    fn into_remote(self) -> Result<RemoteConn> {
+        match self {
+            PanelTarget::Remote(c) => Ok(c),
+            PanelTarget::Local { .. } => {
+                anyhow::bail!("this operation requires connecting to a cluster")
+            }
+        }
+    }
+
+    /// The panels valid for this target — a local target has no no-auth backend
+    /// for the enrollment queue, delegations, revocation, or (yet) perms.
+    fn panels(&self) -> &'static [Panel] {
+        match self {
+            PanelTarget::Local { .. } => &LOCAL_PANELS,
+            PanelTarget::Remote(_) => &PANELS,
+        }
+    }
 }
 
 /// Which panel a set of rows belongs to.
@@ -111,37 +166,37 @@ pub(super) enum ServiceOp {
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
 pub(super) enum RemoteAction {
-    /// Establish the session to `server` (glyph confirm + login).
-    Connect { server: SocketAddr },
+    /// Establish the session to `server` (glyph confirm + login) as `admin`.
+    Connect { server: SocketAddr, admin: String, password: Secret },
     /// (Re)list a panel. `path` is the target path for a path-scoped panel
     /// (perms), `None` for the rest.
-    Refresh { conn: RemoteConn, panel: Panel, path: Option<String> },
+    Refresh { target: PanelTarget, panel: Panel, path: Option<String> },
     /// Approve one queued enrollment by its full code.
-    Approve { conn: RemoteConn, code: String },
+    Approve { target: PanelTarget, code: String },
     /// Approve every verified renewal (code-free batch).
-    ApproveRenewals { conn: RemoteConn },
+    ApproveRenewals { target: PanelTarget },
     /// Deny one queued enrollment by its full code (reason prompted).
-    Deny { conn: RemoteConn, code: String },
+    Deny { target: PanelTarget, code: String },
     /// Approve one pending delegation by its full code (cluster-wide).
-    ApproveDelegation { conn: RemoteConn, code: String },
+    ApproveDelegation { target: PanelTarget, code: String },
     /// Deny one pending delegation by its full code (reason prompted).
-    DenyDelegation { conn: RemoteConn, code: String },
+    DenyDelegation { target: PanelTarget, code: String },
     /// Revoke one issued certificate by serial (glyph-gated, reason prompted).
     /// Irreversible — gated by a yes/no confirm before it runs.
-    Revoke { conn: RemoteConn, serial: u64, glyph: Option<Fingerprint> },
+    Revoke { target: PanelTarget, serial: u64, glyph: Option<Fingerprint> },
     /// Mint a new role admin (name + initial password + policy via `$EDITOR`).
-    AddAdmin { conn: RemoteConn },
+    AddAdmin { target: PanelTarget },
     /// Replace an admin's policy (edited as JSON in `$EDITOR`).
-    SetPolicy { conn: RemoteConn, name: String },
+    SetPolicy { target: PanelTarget, name: String },
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
-    RemoveAdmin { conn: RemoteConn, name: String },
+    RemoveAdmin { target: PanelTarget, name: String },
     /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
-    EditPerms { conn: RemoteConn, at: String },
+    EditPerms { target: PanelTarget, at: String },
     /// Start/stop/restart one activation unit on one member of the cluster
     /// serving `path`. Stop is gated by a yes/no confirm (it leaves a service
     /// down).
     ServiceControl {
-        conn: RemoteConn,
+        target: PanelTarget,
         path: String,
         unit: String,
         member: u32,
@@ -207,18 +262,18 @@ impl RemoteAction {
     pub(super) fn glyph(&self) -> Option<Fingerprint> {
         match self {
             RemoteAction::Connect { .. } => None,
-            RemoteAction::Refresh { conn, .. }
-            | RemoteAction::Approve { conn, .. }
-            | RemoteAction::ApproveRenewals { conn }
-            | RemoteAction::Deny { conn, .. }
-            | RemoteAction::ApproveDelegation { conn, .. }
-            | RemoteAction::DenyDelegation { conn, .. }
-            | RemoteAction::Revoke { conn, .. }
-            | RemoteAction::AddAdmin { conn }
-            | RemoteAction::SetPolicy { conn, .. }
-            | RemoteAction::RemoveAdmin { conn, .. }
-            | RemoteAction::EditPerms { conn, .. }
-            | RemoteAction::ServiceControl { conn, .. } => Some(conn.confirmed_fp),
+            RemoteAction::Refresh { target, .. }
+            | RemoteAction::Approve { target, .. }
+            | RemoteAction::ApproveRenewals { target }
+            | RemoteAction::Deny { target, .. }
+            | RemoteAction::ApproveDelegation { target, .. }
+            | RemoteAction::DenyDelegation { target, .. }
+            | RemoteAction::Revoke { target, .. }
+            | RemoteAction::AddAdmin { target }
+            | RemoteAction::SetPolicy { target, .. }
+            | RemoteAction::RemoveAdmin { target, .. }
+            | RemoteAction::EditPerms { target, .. }
+            | RemoteAction::ServiceControl { target, .. } => target.glyph(),
         }
     }
 }
@@ -235,24 +290,32 @@ pub(super) enum RemoteUpdate {
 #[cfg(unix)]
 pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<super::action::Outcome> {
     match action {
-        RemoteAction::Connect { server } => connect(ans, server).await,
-        RemoteAction::Refresh { conn, panel, path } => refresh(ans, conn, panel, path).await,
-        RemoteAction::Approve { conn, code } => approve(ans, conn, code).await,
-        RemoteAction::ApproveRenewals { conn } => approve_renewals(ans, conn).await,
-        RemoteAction::Deny { conn, code } => deny(ans, conn, code).await,
-        RemoteAction::ApproveDelegation { conn, code } => {
-            approve_delegation(ans, conn, code).await
+        RemoteAction::Connect { server, admin, password } => {
+            connect(ans, server, admin, password).await
         }
-        RemoteAction::DenyDelegation { conn, code } => deny_delegation(ans, conn, code).await,
-        RemoteAction::Revoke { conn, serial, glyph } => {
-            revoke(ans, conn, serial, glyph).await
+        RemoteAction::Refresh { target, panel, path } => refresh(ans, target, panel, path).await,
+        RemoteAction::Approve { target, code } => {
+            approve(ans, target.into_remote()?, code).await
         }
-        RemoteAction::AddAdmin { conn } => add_admin(ans, conn).await,
-        RemoteAction::SetPolicy { conn, name } => set_policy(ans, conn, name).await,
-        RemoteAction::RemoveAdmin { conn, name } => remove_admin(ans, conn, name).await,
-        RemoteAction::EditPerms { conn, at } => edit_perms(ans, conn, at).await,
-        RemoteAction::ServiceControl { conn, path, unit, member, op } => {
-            service_control(ans, conn, path, unit, member, op).await
+        RemoteAction::ApproveRenewals { target } => {
+            approve_renewals(ans, target.into_remote()?).await
+        }
+        RemoteAction::Deny { target, code } => deny(ans, target.into_remote()?, code).await,
+        RemoteAction::ApproveDelegation { target, code } => {
+            approve_delegation(ans, target.into_remote()?, code).await
+        }
+        RemoteAction::DenyDelegation { target, code } => {
+            deny_delegation(ans, target.into_remote()?, code).await
+        }
+        RemoteAction::Revoke { target, serial, glyph } => {
+            revoke(ans, target.into_remote()?, serial, glyph).await
+        }
+        RemoteAction::AddAdmin { target } => add_admin(ans, target).await,
+        RemoteAction::SetPolicy { target, name } => set_policy(ans, target, name).await,
+        RemoteAction::RemoveAdmin { target, name } => remove_admin(ans, target, name).await,
+        RemoteAction::EditPerms { target, at } => edit_perms(ans, target, at).await,
+        RemoteAction::ServiceControl { target, path, unit, member, op } => {
+            service_control(ans, target.into_remote()?, path, unit, member, op).await
         }
     }
 }
@@ -266,21 +329,17 @@ pub(super) async fn run(
 }
 
 #[cfg(unix)]
-async fn connect(ans: &mut TuiAnswerer, server: SocketAddr) -> Result<super::action::Outcome> {
-    use netidx_admin::{
-        admin_client::fetch_identity, admin_proto::NodeKind, answer::Answerer,
-        plan::enroll::current_username,
-    };
+async fn connect(
+    ans: &mut TuiAnswerer,
+    server: SocketAddr,
+    admin: String,
+    password: Secret,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::{admin_client::fetch_identity, admin_proto::NodeKind, answer::Answerer};
     let id = fetch_identity(server, NodeKind::Client).await?;
     if !ans.confirm_identity(&id).await? {
         anyhow::bail!("connection cancelled — identity not confirmed");
     }
-    let default_user = current_username();
-    let admin = ans
-        .text(netidx_admin::answer::Field::AdminName, None, default_user.as_deref(), true)
-        .await?
-        .unwrap_or_default();
-    let password = ans.secret(netidx_admin::answer::Field::AdminPassword, None).await?;
     let conn = RemoteConn {
         server,
         domain: id.domain.clone(),
@@ -298,22 +357,22 @@ async fn connect(ans: &mut TuiAnswerer, server: SocketAddr) -> Result<super::act
 #[cfg(unix)]
 async fn refresh(
     ans: &mut TuiAnswerer,
-    conn: RemoteConn,
+    target: PanelTarget,
     panel: Panel,
     path: Option<String>,
 ) -> Result<super::action::Outcome> {
     let rows = match panel {
-        Panel::Queue => queue_rows(ans, &conn).await?,
-        Panel::Delegations => delegation_rows(ans, &conn).await?,
-        Panel::Roster => roster_rows(ans, &conn).await?,
-        Panel::Revocation => revocation_rows(ans, &conn).await?,
+        Panel::Queue => queue_rows(ans, target.remote()?).await?,
+        Panel::Delegations => delegation_rows(ans, target.remote()?).await?,
+        Panel::Roster => roster_rows(ans, &target).await?,
+        Panel::Revocation => revocation_rows(ans, target.remote()?).await?,
         Panel::Perms => {
             let at = path.context("a target path is required for the perms panel")?;
-            perms_rows(ans, &conn, &at).await?
+            perms_rows(ans, &target, &at).await?
         }
         Panel::Service => {
             let p = path.context("a target path is required for the services panel")?;
-            service_rows(ans, &conn, &p).await?
+            service_rows(ans, target.remote()?, &p).await?
         }
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
@@ -609,24 +668,31 @@ async fn revoke(
 #[cfg(unix)]
 async fn admin_target(
     ans: &mut TuiAnswerer,
-    conn: &RemoteConn,
+    target: &PanelTarget,
 ) -> Result<netidx_admin::admin_ops::AdminTarget> {
-    use netidx_admin::admin_ops::resolve_admin_target;
-    resolve_admin_target(
-        ans,
-        Some(conn.server),
-        None,
-        Some(conn.admin.clone()),
-        Some(conn.password.clone()),
-    )
-    .await
+    use netidx_admin::admin_ops::{AdminTarget, resolve_admin_target};
+    match target {
+        PanelTarget::Local { cfg_path, .. } => {
+            Ok(AdminTarget::Local { cfg_path: cfg_path.clone() })
+        }
+        PanelTarget::Remote(conn) => {
+            resolve_admin_target(
+                ans,
+                Some(conn.server),
+                None,
+                Some(conn.admin.clone()),
+                Some(conn.password.clone()),
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(unix)]
-async fn roster_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
+async fn roster_rows(ans: &mut TuiAnswerer, target: &PanelTarget) -> Result<Vec<PanelRow>> {
     use netidx_admin::admin_ops::roster::list_admins;
-    let target = admin_target(ans, conn).await?;
-    Ok(list_admins(&target).await?.iter().map(roster_row).collect())
+    let at = admin_target(ans, target).await?;
+    Ok(list_admins(&at).await?.iter().map(roster_row).collect())
 }
 
 /// Format one roster entry. Reserved signing slots (recovery / autorenew) are
@@ -696,7 +762,7 @@ fn policy_template() -> netidx_admin::ca_vault::Policy {
 }
 
 #[cfg(unix)]
-async fn add_admin(ans: &mut TuiAnswerer, conn: RemoteConn) -> Result<super::action::Outcome> {
+async fn add_admin(ans: &mut TuiAnswerer, target: PanelTarget) -> Result<super::action::Outcome> {
     use netidx_admin::{
         admin_ops::roster::add_role_admin,
         answer::{Answerer, Field},
@@ -709,9 +775,9 @@ async fn add_admin(ans: &mut TuiAnswerer, conn: RemoteConn) -> Result<super::act
     let seed = serde_json::to_string_pretty(&policy_template())?;
     let edited = ans.edit(seed, policy_validator()).await?;
     let policy: netidx_admin::ca_vault::Policy = serde_json::from_str(&edited)?;
-    let target = admin_target(ans, &conn).await?;
-    add_role_admin(&target, &name, &password, policy).await?;
-    let rows = roster_rows(ans, &conn).await?;
+    let at = admin_target(ans, &target).await?;
+    add_role_admin(&at, &name, &password, policy).await?;
+    let rows = roster_rows(ans, &target).await?;
     Ok(super::action::Outcome::remote_after(
         "Admin added",
         vec![format!("Added role admin {name:?}.")],
@@ -723,12 +789,12 @@ async fn add_admin(ans: &mut TuiAnswerer, conn: RemoteConn) -> Result<super::act
 #[cfg(unix)]
 async fn set_policy(
     ans: &mut TuiAnswerer,
-    conn: RemoteConn,
+    target: PanelTarget,
     name: String,
 ) -> Result<super::action::Outcome> {
     use netidx_admin::admin_ops::roster::{list_admins, set_admin_policy};
-    let target = admin_target(ans, &conn).await?;
-    let current = list_admins(&target)
+    let at = admin_target(ans, &target).await?;
+    let current = list_admins(&at)
         .await?
         .into_iter()
         .find(|a| a.admin == name)
@@ -736,8 +802,8 @@ async fn set_policy(
     let seed = serde_json::to_string_pretty(&current.policy)?;
     let edited = ans.edit(seed, policy_validator()).await?;
     let policy: netidx_admin::ca_vault::Policy = serde_json::from_str(&edited)?;
-    set_admin_policy(&target, &name, policy).await?;
-    let rows = roster_rows(ans, &conn).await?;
+    set_admin_policy(&at, &name, policy).await?;
+    let rows = roster_rows(ans, &target).await?;
     Ok(super::action::Outcome::remote_after(
         "Policy updated",
         vec![format!("Updated the policy of {name:?}.")],
@@ -749,13 +815,13 @@ async fn set_policy(
 #[cfg(unix)]
 async fn remove_admin(
     ans: &mut TuiAnswerer,
-    conn: RemoteConn,
+    target: PanelTarget,
     name: String,
 ) -> Result<super::action::Outcome> {
     use netidx_admin::admin_ops::roster::remove_admin;
-    let target = admin_target(ans, &conn).await?;
-    remove_admin(&target, &name).await?;
-    let rows = roster_rows(ans, &conn).await?;
+    let at = admin_target(ans, &target).await?;
+    remove_admin(&at, &name).await?;
+    let rows = roster_rows(ans, &target).await?;
     Ok(super::action::Outcome::remote_after(
         "Admin removed",
         vec![format!("Removed admin {name:?}.")],
@@ -764,10 +830,24 @@ async fn remove_admin(
     ))
 }
 
+/// Read the perms of the cluster mounted at `at`, for either target. A remote
+/// target reads over its pinned session; a local target reads with no
+/// `--server`, which on the CA host auto-verifies against the local CA cert
+/// (glyph-free) and reads within the trust domain (password-free).
 #[cfg(unix)]
-async fn perms_rows(ans: &mut TuiAnswerer, conn: &RemoteConn, at: &str) -> Result<Vec<PanelRow>> {
+async fn show_perms_for(ans: &mut TuiAnswerer, target: &PanelTarget, at: &str) -> Result<String> {
     use netidx_admin::admin_ops::perms::show_perms;
-    let json = show_perms(ans, Some(conn.server), None, at).await?;
+    match target {
+        PanelTarget::Remote(conn) => show_perms(ans, Some(conn.server), None, at).await,
+        PanelTarget::Local { ca_dir, .. } => {
+            show_perms(ans, None, Some(ca_dir.clone()), at).await
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn perms_rows(ans: &mut TuiAnswerer, target: &PanelTarget, at: &str) -> Result<Vec<PanelRow>> {
+    let json = show_perms_for(ans, target, at).await?;
     let pretty = super::super::perms_admin::pretty(&json)?;
     let mut rows: Vec<PanelRow> =
         pretty.lines().map(|l| PanelRow { text: l.to_string(), key: RowKey::None }).collect();
@@ -780,27 +860,34 @@ async fn perms_rows(ans: &mut TuiAnswerer, conn: &RemoteConn, at: &str) -> Resul
 #[cfg(unix)]
 async fn edit_perms(
     ans: &mut TuiAnswerer,
-    conn: RemoteConn,
+    target: PanelTarget,
     at: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::admin_ops::perms::{edit_perms, show_perms};
+    use netidx_admin::admin_ops::perms::{edit_perms, edit_perms_local};
     // Seed the editor with the cluster's current perms, validate locally, then
     // hand the normalized result to the CA (which re-validates + propagates).
-    let current = show_perms(ans, Some(conn.server), None, &at).await?;
+    let current = show_perms_for(ans, &target, &at).await?;
     let seed = super::super::perms_admin::pretty(&current)?;
     let validate: super::answer::EditValidator =
         Box::new(|s: &str| super::super::perms_admin::validate(s));
     let edited = ans.edit(seed, validate).await?;
-    let peers = edit_perms(
-        ans,
-        Some(conn.server),
-        None,
-        Some(conn.admin.clone()),
-        Some(conn.password.clone()),
-        &at,
-        &edited,
-    )
-    .await?;
+    let peers = match &target {
+        PanelTarget::Remote(conn) => {
+            edit_perms(
+                ans,
+                Some(conn.server),
+                None,
+                Some(conn.admin.clone()),
+                Some(conn.password.clone()),
+                &at,
+                &edited,
+            )
+            .await?
+        }
+        PanelTarget::Local { cfg_path, .. } => {
+            edit_perms_local(cfg_path, &at, &edited).await?
+        }
+    };
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     let lines = if failed.is_empty() {
         vec![format!(
@@ -820,7 +907,7 @@ async fn edit_perms(
         }
         v
     };
-    let rows = perms_rows(ans, &conn, &at).await?;
+    let rows = perms_rows(ans, &target, &at).await?;
     Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
 }
 
@@ -936,11 +1023,46 @@ enum Screen {
 }
 
 /// Tab-2 state.
+/// Which field of the connect form has focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectFocus {
+    User,
+    Password,
+    Server,
+}
+
+impl ConnectFocus {
+    fn next(self) -> Self {
+        match self {
+            ConnectFocus::User => ConnectFocus::Password,
+            ConnectFocus::Password => ConnectFocus::Server,
+            ConnectFocus::Server => ConnectFocus::User,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            ConnectFocus::User => ConnectFocus::Server,
+            ConnectFocus::Password => ConnectFocus::User,
+            ConnectFocus::Server => ConnectFocus::Password,
+        }
+    }
+}
+
 pub(super) struct RemoteState {
-    conn: Option<RemoteConn>,
+    /// The panel target once established: a `Remote` session after the connect
+    /// form (Cluster tab), or a `Local` control-socket target (Local tab).
+    target: Option<PanelTarget>,
     screen: Screen,
-    /// The connect-screen address field.
+    /// The connect-form admin username.
+    user: String,
+    /// The connect-form admin password.
+    password: String,
+    /// The connect-form admin-server address (this machine's cluster by
+    /// default; edit to reach a different cluster).
     addr: String,
+    /// Which connect-form field has focus.
+    focus: ConnectFocus,
     error: Option<String>,
     /// The panel-menu cursor.
     menu: ListState,
@@ -962,14 +1084,24 @@ const PANELS: [Panel; 6] = [
     Panel::Service,
 ];
 
+/// The panels a local (no-auth) target can serve: the admin roster over the
+/// control socket, and perms — read glyph-free against the local CA cert,
+/// written over the control socket (the daemon authorizes the local superuser
+/// and propagates the edit to the cluster). The queue, delegations, and
+/// revocation have no no-auth local backend and stay Cluster-only.
+const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
+
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
         let mut menu = ListState::default();
         menu.select(Some(0));
         RemoteState {
-            conn: None,
+            target: None,
             screen: Screen::Connect,
+            user: default_user(),
+            password: String::new(),
             addr: default_server(),
+            focus: ConnectFocus::User,
             error: None,
             menu,
             rows: Vec::new(),
@@ -978,11 +1110,28 @@ impl RemoteState {
         }
     }
 
+    /// A panel surface for this machine's own admin server over its local
+    /// control socket (no auth) — the Local tab's "Manage admins" surface. It
+    /// starts at the panel menu (no connect form) with only the locally-valid
+    /// panels.
+    pub(super) fn local(cfg_path: PathBuf, ca_dir: PathBuf) -> RemoteState {
+        let mut s = RemoteState::new();
+        s.target = Some(PanelTarget::Local { cfg_path, ca_dir });
+        s.screen = Screen::Menu;
+        s
+    }
+
+    /// Whether the surface is at its top-level menu — the host clears a Local
+    /// surface on Esc from here (there's no connect screen to fall back to).
+    pub(super) fn at_menu(&self) -> bool {
+        matches!(self.screen, Screen::Menu)
+    }
+
     /// Re-read this host's own admin-server address into the connect field when
     /// it's still blank and we're not connected — covers founding a CA after the
     /// TUI already started (when `default_server()` first returned nothing).
     pub(super) fn refresh_connect_default(&mut self) {
-        if self.conn.is_none() && self.addr.trim().is_empty() {
+        if self.target.is_none() && self.addr.trim().is_empty() {
             self.addr = default_server();
         }
     }
@@ -994,7 +1143,7 @@ impl RemoteState {
     pub(super) fn focus_delegations(&mut self) {
         let idx = PANELS.iter().position(|p| matches!(p, Panel::Delegations)).unwrap_or(0);
         self.menu.select(Some(idx));
-        if self.conn.is_some() {
+        if self.target.is_some() {
             self.screen = Screen::Menu;
         }
     }
@@ -1003,7 +1152,7 @@ impl RemoteState {
     pub(super) fn apply(&mut self, update: RemoteUpdate) {
         match update {
             RemoteUpdate::Connected(conn) => {
-                self.conn = Some(conn);
+                self.target = Some(PanelTarget::Remote(conn));
                 self.screen = Screen::Menu;
                 self.error = None;
             }
@@ -1033,19 +1182,48 @@ impl RemoteState {
 
     fn on_key_connect(&mut self, code: KeyCode) -> Option<Action> {
         match code {
+            KeyCode::Down => self.focus = self.focus.next(),
+            KeyCode::Up | KeyCode::BackTab => self.focus = self.focus.prev(),
             KeyCode::Char(c) => {
-                self.addr.push(c);
+                match self.focus {
+                    ConnectFocus::User => self.user.push(c),
+                    ConnectFocus::Password => self.password.push(c),
+                    ConnectFocus::Server => self.addr.push(c),
+                }
                 self.error = None;
             }
-            KeyCode::Backspace => {
-                self.addr.pop();
-            }
+            KeyCode::Backspace => match self.focus {
+                ConnectFocus::User => {
+                    self.user.pop();
+                }
+                ConnectFocus::Password => {
+                    self.password.pop();
+                }
+                ConnectFocus::Server => {
+                    self.addr.pop();
+                }
+            },
             KeyCode::Enter => {
-                match netidx_admin::plan::resolve_admin_server_addr(self.addr.trim()) {
-                    Ok(server) => {
-                        return Some(Action::Remote(RemoteAction::Connect { server }));
+                if self.user.trim().is_empty() {
+                    self.error = Some("enter an admin username".to_string());
+                    self.focus = ConnectFocus::User;
+                } else if self.password.is_empty() {
+                    self.error = Some("enter the admin password".to_string());
+                    self.focus = ConnectFocus::Password;
+                } else {
+                    match netidx_admin::plan::resolve_admin_server_addr(self.addr.trim()) {
+                        Ok(server) => {
+                            return Some(Action::Remote(RemoteAction::Connect {
+                                server,
+                                admin: self.user.trim().to_string(),
+                                password: Secret(std::mem::take(&mut self.password)),
+                            }));
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("{e:#}"));
+                            self.focus = ConnectFocus::Server;
+                        }
                     }
-                    Err(e) => self.error = Some(format!("{e:#}")),
                 }
             }
             _ => {}
@@ -1058,21 +1236,26 @@ impl RemoteState {
             KeyCode::Up | KeyCode::Char('k') => self.menu.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.menu.select_next(),
             KeyCode::Esc => {
-                // Back to the connect screen (disconnect).
-                self.conn = None;
+                // Back to the connect screen (disconnect); drop the cached
+                // password and re-focus the credentials. (A Local surface is
+                // instead closed by its host, which intercepts Esc-at-menu.)
+                self.target = None;
+                self.password.clear();
+                self.focus = ConnectFocus::User;
                 self.screen = Screen::Connect;
             }
             KeyCode::Enter => {
-                let panel = PANELS[self.menu.selected().unwrap_or(0).min(PANELS.len() - 1)];
+                let panels = self.target.as_ref().map(PanelTarget::panels).unwrap_or(&PANELS);
+                let panel = panels[self.menu.selected().unwrap_or(0).min(panels.len() - 1)];
                 if panel.path_scoped() {
                     self.error = None;
                     self.screen = Screen::PathPrompt { panel, input: String::new() };
-                } else if let Some(conn) = &self.conn {
+                } else if let Some(target) = &self.target {
                     self.panel_path = None;
                     self.list.select(None);
                     self.rows.clear();
                     return Some(Action::Remote(RemoteAction::Refresh {
-                        conn: conn.clone(),
+                        target: target.clone(),
                         panel,
                         path: None,
                     }));
@@ -1113,19 +1296,19 @@ impl RemoteState {
                     self.error = Some("a target path is required".to_string());
                     return None;
                 }
-                let conn = self.conn.clone()?;
+                let target = self.target.clone()?;
                 self.error = None;
                 self.panel_path = Some(path.clone());
                 self.list.select(None);
                 self.rows.clear();
-                Some(Action::Remote(RemoteAction::Refresh { conn, panel, path: Some(path) }))
+                Some(Action::Remote(RemoteAction::Refresh { target, panel, path: Some(path) }))
             }
             _ => None,
         }
     }
 
     fn on_key_panel(&mut self, code: KeyCode, panel: Panel) -> Option<Action> {
-        let conn = self.conn.clone()?;
+        let target = self.target.clone()?;
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.list.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.list.select_next(),
@@ -1135,34 +1318,34 @@ impl RemoteState {
             }
             KeyCode::Char('r') => {
                 return Some(Action::Remote(RemoteAction::Refresh {
-                    conn,
+                    target,
                     panel,
                     path: self.panel_path.clone(),
                 }));
             }
             _ => match panel {
-                Panel::Queue => return self.on_key_queue(code, conn),
-                Panel::Delegations => return self.on_key_delegations(code, conn),
-                Panel::Roster => return self.on_key_roster(code, conn),
-                Panel::Revocation => return self.on_key_revocation(code, conn),
-                Panel::Perms => return self.on_key_perms(code, conn),
-                Panel::Service => return self.on_key_service(code, conn),
+                Panel::Queue => return self.on_key_queue(code, target),
+                Panel::Delegations => return self.on_key_delegations(code, target),
+                Panel::Roster => return self.on_key_roster(code, target),
+                Panel::Revocation => return self.on_key_revocation(code, target),
+                Panel::Perms => return self.on_key_perms(code, target),
+                Panel::Service => return self.on_key_service(code, target),
             },
         }
         None
     }
 
-    fn on_key_perms(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_perms(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
             KeyCode::Char('e') => self
                 .panel_path
                 .clone()
-                .map(|at| Action::Remote(RemoteAction::EditPerms { conn, at })),
+                .map(|at| Action::Remote(RemoteAction::EditPerms { target, at })),
             _ => None,
         }
     }
 
-    fn on_key_service(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_service(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         let op = match code {
             KeyCode::Char('s') => ServiceOp::Start,
             KeyCode::Char('t') => ServiceOp::Stop,
@@ -1171,52 +1354,52 @@ impl RemoteState {
         };
         let path = self.panel_path.clone()?;
         let (unit, member) = self.selected_unit()?;
-        Some(Action::Remote(RemoteAction::ServiceControl { conn, path, unit, member, op }))
+        Some(Action::Remote(RemoteAction::ServiceControl { target, path, unit, member, op }))
     }
 
-    fn on_key_queue(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_queue(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
-            KeyCode::Char('R') => Some(Action::Remote(RemoteAction::ApproveRenewals { conn })),
+            KeyCode::Char('R') => Some(Action::Remote(RemoteAction::ApproveRenewals { target })),
             KeyCode::Char('a') => self.selected_code().map(|code| {
-                Action::Remote(RemoteAction::Approve { conn, code })
+                Action::Remote(RemoteAction::Approve { target, code })
             }),
             KeyCode::Char('d') => self
                 .selected_code()
-                .map(|code| Action::Remote(RemoteAction::Deny { conn, code })),
+                .map(|code| Action::Remote(RemoteAction::Deny { target, code })),
             _ => None,
         }
     }
 
-    fn on_key_delegations(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_delegations(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
             KeyCode::Char('a') => self.selected_code().map(|code| {
-                Action::Remote(RemoteAction::ApproveDelegation { conn, code })
+                Action::Remote(RemoteAction::ApproveDelegation { target, code })
             }),
             KeyCode::Char('d') => self.selected_code().map(|code| {
-                Action::Remote(RemoteAction::DenyDelegation { conn, code })
+                Action::Remote(RemoteAction::DenyDelegation { target, code })
             }),
             _ => None,
         }
     }
 
-    fn on_key_revocation(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_revocation(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
             KeyCode::Char('x') => self.selected_cert().map(|(serial, glyph)| {
-                Action::Remote(RemoteAction::Revoke { conn, serial, glyph })
+                Action::Remote(RemoteAction::Revoke { target, serial, glyph })
             }),
             _ => None,
         }
     }
 
-    fn on_key_roster(&mut self, code: KeyCode, conn: RemoteConn) -> Option<Action> {
+    fn on_key_roster(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
-            KeyCode::Char('a') => Some(Action::Remote(RemoteAction::AddAdmin { conn })),
+            KeyCode::Char('a') => Some(Action::Remote(RemoteAction::AddAdmin { target })),
             KeyCode::Char('e') => self
                 .selected_name()
-                .map(|name| Action::Remote(RemoteAction::SetPolicy { conn, name })),
+                .map(|name| Action::Remote(RemoteAction::SetPolicy { target, name })),
             KeyCode::Char('d') => self
                 .selected_name()
-                .map(|name| Action::Remote(RemoteAction::RemoveAdmin { conn, name })),
+                .map(|name| Action::Remote(RemoteAction::RemoveAdmin { target, name })),
             _ => None,
         }
     }
@@ -1261,7 +1444,8 @@ impl RemoteState {
                  openssl-backed CA admin path).",
             )
             .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title(" Remote admin "));
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Cluster ", theme::title_style())));
             f.render_widget(msg, area);
             return;
         }
@@ -1274,83 +1458,87 @@ impl RemoteState {
     }
 
     fn render_path_prompt(&self, f: &mut Frame, area: Rect, panel: Panel, input: &str) {
-        let mut lines = vec![
-            Line::from(format!("Enter the netidx path for the {} panel.", panel.title())),
-            Line::from("It is routed to the resolver cluster mounted there (e.g. / or /eu).".dim()),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("path: "),
-                Span::styled(input.to_string(), Style::default().add_modifier(Modifier::BOLD)),
-            ]),
-        ];
-        if let Some(e) = &self.error {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(e.clone(), Style::default().fg(Color::Red))));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(" Enter open · Esc back ".dim()));
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).title(format!(" {} ", panel.title()))),
+        let help = format!("Enter the netidx path for the {} panel.", panel.title());
+        render_form(
+            f,
             area,
+            panel.title(),
+            &[help.as_str(), "Routed to the resolver cluster mounted there (e.g. / or /eu)."],
+            input,
+            self.error.as_deref(),
+            " Enter open · Esc back ",
         );
     }
 
     fn render_connect(&self, f: &mut Frame, area: Rect) {
-        let mut lines = vec![
-            Line::from("Connect to an admin server to manage its network."),
-            Line::from("Leave blank for this host's own admin server.".dim()),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("server: "),
-                Span::styled(
-                    self.addr.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
-        if let Some(e) = &self.error {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                e.clone(),
-                Style::default().fg(Color::Red),
-            )));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(" Enter connect ".dim()));
+        let block = theme::panel_block().title(Span::styled(" Connect ", theme::title_style()));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let rows = Layout::vertical([
+            Constraint::Length(3), // help
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // user
+            Constraint::Length(1), // password
+            Constraint::Length(1), // server
+            Constraint::Length(1), // error
+            Constraint::Length(1), // spacer
+            Constraint::Length(1), // hint
+            Constraint::Min(0),
+        ])
+        .split(inner);
         f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).title(" Connect ")),
-            area,
+            Paragraph::new(
+                "Enter admin credentials for this machine's cluster. To manage a \
+                 different cluster instead, edit the admin-server address.",
+            )
+            .style(theme::hint_style())
+            .wrap(Wrap { trim: true }),
+            rows[0],
         );
+        let cursor = labeled_field(f, rows[2], "User", &self.user, false, self.focus == ConnectFocus::User)
+            .or(labeled_field(f, rows[3], "Password", &self.password, true, self.focus == ConnectFocus::Password))
+            .or(labeled_field(f, rows[4], "Server", &self.addr, false, self.focus == ConnectFocus::Server));
+        if let Some(e) = &self.error {
+            let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
+            f.render_widget(Paragraph::new(e.clone()).style(err), rows[5]);
+        }
+        f.render_widget(
+            Paragraph::new(" ↑/↓ field · Enter connect · Esc back ").style(theme::hint_style()),
+            rows[7],
+        );
+        if let Some(pos) = cursor {
+            f.set_cursor_position(pos);
+        }
     }
 
     fn render_menu(&self, f: &mut Frame, area: Rect) {
-        let title = match &self.conn {
-            Some(c) => format!(" {} — {} ", c.domain, c.admin),
-            None => " Remote admin ".to_string(),
+        let (title, hint) = match &self.target {
+            Some(PanelTarget::Remote(c)) => {
+                (format!(" {} — {} ", c.domain, c.admin), " ↑/↓ · Enter open · Esc disconnect ")
+            }
+            Some(PanelTarget::Local { .. }) => {
+                (" Local admin server ".to_string(), " ↑/↓ · Enter open · Esc back ")
+            }
+            None => (" Cluster ".to_string(), " ↑/↓ · Enter open · Esc disconnect "),
         };
-        let items: Vec<ListItem> = PANELS.iter().map(|p| ListItem::new(p.title())).collect();
-        let mut st = self.menu.clone();
+        let panels = self.target.as_ref().map(PanelTarget::panels).unwrap_or(&PANELS);
+        let items: Vec<ListItem> = panels.iter().map(|p| ListItem::new(p.title())).collect();
+        let mut st = self.menu;
         let list = List::new(items)
+            .style(theme::panel_style())
             .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .title_bottom(Line::from(" ↑/↓ · Enter open · Esc disconnect ").dim()),
+                theme::panel_block()
+                    .title(Span::styled(title, theme::title_style()))
+                    .title_bottom(Line::from(Span::styled(hint, theme::hint_style()))),
             )
-            .highlight_style(
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, area, &mut st);
     }
 
     fn render_panel(&self, f: &mut Frame, area: Rect, panel: Panel) {
         let items: Vec<ListItem> = if self.rows.is_empty() {
-            vec![ListItem::new(Line::from("(empty)".dim()))]
+            vec![ListItem::new(Line::from(Span::styled("(empty)", theme::hint_style())))]
         } else {
             self.rows.iter().map(|r| ListItem::new(r.text.clone())).collect()
         };
@@ -1366,20 +1554,56 @@ impl RemoteState {
             Some(p) => format!(" {} @ {p} ", panel.title()),
             None => format!(" {} ", panel.title()),
         };
-        let mut st = self.list.clone();
+        let mut st = self.list;
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .title_bottom(Line::from(hint).dim()),
-            )
-            .highlight_style(
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(title, theme::title_style())).title_bottom(
+                Line::from(Span::styled(hint, theme::hint_style())),
+            ))
+            .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, area, &mut st);
     }
+}
+
+/// Render a single-field form (connect / path prompt) as a themed panel filling
+/// `area`, with the value in a focused white field and the terminal cursor at
+/// its end.
+fn render_form(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    help: &[&str],
+    value: &str,
+    error: Option<&str>,
+    hint: &str,
+) {
+    let block = theme::panel_block().title(Span::styled(format!(" {title} "), theme::title_style()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(help.len() as u16),
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // field
+        Constraint::Length(1), // error
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // hint
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let help_lines: Vec<Line> =
+        help.iter().map(|h| Line::from(Span::styled(h.to_string(), theme::hint_style()))).collect();
+    f.render_widget(Paragraph::new(help_lines).style(theme::hint_style()), rows[0]);
+    let fw = inner.width.saturating_sub(2).clamp(1, 48);
+    let field_row = Rect { x: rows[2].x, y: rows[2].y, width: fw, height: 1 };
+    f.render_widget(Paragraph::new(value.to_string()).style(theme::field_style()), field_row);
+    if let Some(e) = error {
+        let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
+        f.render_widget(Paragraph::new(e.to_string()).style(err), rows[3]);
+    }
+    f.render_widget(Paragraph::new(hint.to_string()).style(theme::hint_style()), rows[5]);
+    let cx = field_row.x + (value.chars().count() as u16).min(field_row.width.saturating_sub(1));
+    f.set_cursor_position((cx, field_row.y));
 }
 
 /// The default connect address: this host's own admin server, if it runs one.
@@ -1393,4 +1617,36 @@ fn default_server() -> String {
 #[cfg(not(unix))]
 fn default_server() -> String {
     String::new()
+}
+
+/// The default admin username — the current OS user.
+fn default_user() -> String {
+    netidx_admin::plan::enroll::current_username().unwrap_or_default()
+}
+
+/// Render a `label: [ value ]` form row (value masked when `secret`). Returns the
+/// cursor position when `focused` so the caller can place the terminal cursor.
+fn labeled_field(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    secret: bool,
+    focused: bool,
+) -> Option<(u16, u16)> {
+    let cols = Layout::horizontal([Constraint::Length(10), Constraint::Min(0)]).split(area);
+    let label_style = if focused {
+        Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT)
+    } else {
+        theme::hint_style()
+    };
+    f.render_widget(Paragraph::new(format!("{label}:")).style(label_style), cols[0]);
+    let shown = if secret { "•".repeat(value.chars().count()) } else { value.to_string() };
+    let fw = cols[1].width.clamp(1, 42);
+    let fr = Rect { x: cols[1].x, y: cols[1].y, width: fw, height: 1 };
+    f.render_widget(Paragraph::new(shown).style(theme::field_style()), fr);
+    focused.then(|| {
+        let cx = fr.x + (value.chars().count() as u16).min(fr.width.saturating_sub(1));
+        (cx, fr.y)
+    })
 }

@@ -16,6 +16,7 @@
 use super::resolve_identity;
 use crate::{
     admin_client::{self, CaIdentity},
+    admin_local,
     admin_proto::{NetworkMap, NodeKind, PeerResult, Secret},
     answer::{Answerer, Field},
     plan::enroll::current_username,
@@ -142,4 +143,23 @@ pub async fn edit_perms(
         edited,
     )
     .await
+}
+
+/// The Local-tab `perms edit` action: hand the already-edited, already-
+/// validated `edited` perms JSON to *this host's own* CA over its local
+/// control socket — no glyph, no admin password (the `SO_PEERCRED` superuser
+/// gate is the authorization). The daemon re-validates, routes by the network
+/// map, and propagates the edit to every member of the cluster mounted at
+/// `target_path`, so a local edit is as cluster-consistent as a remote one.
+///
+/// The *read* side has no Local variant: on the CA host [`show_perms`] with no
+/// `--server` already auto-verifies against the local CA cert (glyph-free) and
+/// reads perms within the trust domain (password-free), so it serves the Local
+/// tab unchanged.
+pub async fn edit_perms_local(
+    cfg_path: &Path,
+    target_path: &str,
+    edited: &str,
+) -> Result<Vec<PeerResult>> {
+    admin_local::edit_perms(cfg_path, target_path, edited).await
 }

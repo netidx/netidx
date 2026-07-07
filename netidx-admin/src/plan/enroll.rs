@@ -466,27 +466,45 @@ pub async fn discover_network(
     ans: &mut dyn Answerer,
     kind: NodeKind,
 ) -> Result<AdminServers> {
+    const CREATE_NEW: &str = "Create a new cluster";
+    const CONNECT_EXISTING: &str = "Connect to an existing cluster";
     if !ans.interactive() {
         return Ok(AdminServers::NotProbed);
     }
-    ans.progress(Progress::new(
+    ans.progress(Progress::timed(
         Stage::Discovering,
         format_compact!(
             "searching for netidx admin servers on the local network ({}s)…",
             DISCOVERY_TIMEOUT.as_secs()
         ),
+        DISCOVERY_TIMEOUT,
     ));
-    let found = discovery::browse_or_empty(DISCOVERY_TIMEOUT);
+    // The mDNS browse blocks for the whole timeout; keep it off the async
+    // worker so a frontend can paint and animate the discovery progress while
+    // it runs (the TUI polls the op future inline on its render task).
+    let found = tokio::task::spawn_blocking(move || discovery::browse_or_empty(DISCOVERY_TIMEOUT))
+        .await
+        .unwrap_or_default();
     // Group the (unauthenticated, hint-only) beacons by domain.
     let mut domains: BTreeMap<String, Vec<discovery::Discovered>> = BTreeMap::new();
     for d in found {
         domains.entry(d.domain.clone()).or_default().push(d);
     }
     let seeds: Vec<SocketAddr> = if domains.is_empty() {
-        ans.note("no admin servers found.");
-        match manual_seeds(ans.text(Field::AdminServerAddr, None, None, false).await?)? {
-            Some(s) => s,
-            None => return Ok(AdminServers::DontHave),
+        // Nothing on the network: create a new cluster here, or connect to an
+        // existing one by address. Default to creating a new cluster.
+        let choice =
+            ans.choice(Field::ClusterMode, None, &[CREATE_NEW, CONNECT_EXISTING], Some(CREATE_NEW)).await?;
+        if choice != CONNECT_EXISTING {
+            return Ok(AdminServers::DontHave);
+        }
+        loop {
+            let typed = ans.text(Field::AdminServerAddr, None, None, true).await?;
+            match manual_seeds(typed) {
+                Ok(Some(s)) => break s,
+                Ok(None) => return Ok(AdminServers::DontHave),
+                Err(e) => ans.warn(&format_compact!("{e:#}")),
+            }
         }
     } else {
         let chosen: Option<String> = if domains.len() == 1 {

@@ -11,7 +11,7 @@
 //! the loop runs it directly rather than as an op future.
 
 use super::answer::TuiAnswerer;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use netidx_admin::{
     answer::{Answerer, Field, Progress, Stage},
     plan::install::{
@@ -23,7 +23,11 @@ use netidx_admin::{
     renewd,
     service::ServiceScope,
 };
-use std::{net::SocketAddr, path::PathBuf};
+use netidx_activation::control::ControlOp;
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
@@ -129,6 +133,22 @@ pub(super) enum Action {
         needs_root: bool,
         remove_ca: bool,
     },
+    /// Rotate (or first-enable) this box's local admin server auto-approve
+    /// credential — a local, no-auth CA op over the control socket.
+    AutoApprove { rotate: bool, ca_dir: PathBuf, cfg: Option<PathBuf> },
+    /// Mint a fresh CA recovery password on this box (local, no-auth).
+    RecoveryRotate { ca_dir: PathBuf, cfg: Option<PathBuf> },
+    /// Re-emit a renewal CSR for this box's externally-signed CA (local).
+    ExternalEmitCsr { ca_dir: PathBuf },
+    /// Install an externally-signed CA certificate on this box (local).
+    ExternalInstall { ca_dir: PathBuf },
+    /// Control this machine's activation-supervisor units over its local control
+    /// socket (no auth) — start/stop/restart the resolver/id-map/… units.
+    ServiceControl { op: ControlOp, units_dir: PathBuf },
+    /// Open the Local tab's local admin-server panel surface (roster, perms) over
+    /// the control socket. Pure navigation — handled by the UI loop, not an op.
+    /// `ca_dir` lets the perms read auto-verify against the local CA cert.
+    ManageLocalAdmins { cfg_path: PathBuf, ca_dir: PathBuf },
 }
 
 impl Action {
@@ -148,6 +168,22 @@ impl Action {
             Action::ReviewDelegations => "Reviewing delegations".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
+            Action::AutoApprove { rotate, .. } => {
+                if *rotate { "Rotating auto-approve credential" } else { "Enabling auto-approve" }
+                    .to_string()
+            }
+            Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
+            Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
+            Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
+            Action::ServiceControl { op, .. } => match op {
+                ControlOp::Restart => "Restarting services",
+                ControlOp::Start => "Starting services",
+                ControlOp::Stop => "Stopping services",
+                ControlOp::Status => "Checking services",
+                ControlOp::Reload => "Reloading services",
+            }
+            .to_string(),
+            Action::ManageLocalAdmins { .. } => "Managing admins".to_string(),
         }
     }
 
@@ -170,7 +206,25 @@ impl Action {
             | Action::Update { .. }
             | Action::Join { .. }
             | Action::AddParent
-            | Action::ReviewDelegations => None,
+            | Action::ReviewDelegations
+            | Action::AutoApprove { rotate: false, .. }
+            | Action::ExternalEmitCsr { .. }
+            | Action::ExternalInstall { .. }
+            | Action::ManageLocalAdmins { .. } => None,
+            Action::AutoApprove { rotate: true, .. } => Some(
+                "Rotate the auto-approve credential? The current keytab stops \
+                 working; the admin server re-mints and re-seals it."
+                    .to_string(),
+            ),
+            Action::RecoveryRotate { .. } => Some(
+                "Rotate the CA recovery password? The current recovery password \
+                 stops working and a new one is shown once — save it."
+                    .to_string(),
+            ),
+            Action::ServiceControl { op: ControlOp::Stop, .. } => {
+                Some("Stop this machine's netidx services? Running units stop.".to_string())
+            }
+            Action::ServiceControl { .. } => None,
             Action::Remote(ra) => ra.confirm_message(),
             Action::Uninstall { remove_ca, .. } => Some(if *remove_ca {
                 "Remove this install AND DESTROY THE CA? This stops and removes the \
@@ -202,6 +256,186 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
             bail!("internal error: review-delegations is navigation, not an op future")
         }
         Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
+        Action::ManageLocalAdmins { .. } => {
+            bail!("internal error: manage-local-admins is navigation, not an op future")
+        }
+        a @ (Action::AutoApprove { .. }
+        | Action::RecoveryRotate { .. }
+        | Action::ExternalEmitCsr { .. }
+        | Action::ExternalInstall { .. }) => local_ca_op(&mut ans, a).await,
+        Action::ServiceControl { op, units_dir } => service_control(op, units_dir).await,
+    }
+}
+
+/// Control this machine's activation-supervisor units over its local control
+/// socket (no auth). Cross-platform — unlike the CA ops.
+async fn service_control(op: ControlOp, units_dir: PathBuf) -> Result<Outcome> {
+    use netidx_activation::control::{ControlRequest, ControlResponse, UnitState, control};
+    let req = ControlRequest { op, units: Vec::new() };
+    let title = match op {
+        ControlOp::Restart => "Services restarted",
+        ControlOp::Start => "Services started",
+        ControlOp::Stop => "Services stopped",
+        ControlOp::Status => "Service status",
+        ControlOp::Reload => "Services reloaded",
+    };
+    match control(&units_dir, &req).await? {
+        ControlResponse::Ok { units } => {
+            let mut lines: Vec<String> = units
+                .iter()
+                .map(|u| {
+                    let state = match &u.state {
+                        UnitState::NotStarted => "not started".to_string(),
+                        UnitState::Running { pid: Some(p) } => format!("running (pid {p})"),
+                        UnitState::Running { pid: None } => "running".to_string(),
+                        UnitState::Stopped => "stopped".to_string(),
+                        UnitState::Died => "died".to_string(),
+                    };
+                    format!("{}: {state}", u.unit)
+                })
+                .collect();
+            if lines.is_empty() {
+                lines.push("No units.".to_string());
+            }
+            Ok(Outcome::plain(title, lines, false))
+        }
+        ControlResponse::Err { reason } => bail!("{reason}"),
+    }
+}
+
+/// Dispatch a local (no-auth, control-socket) CA op. These drive
+/// `netidx_admin::admin_ops::slots`, which is unix-only.
+#[cfg(unix)]
+async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
+    match action {
+        Action::AutoApprove { rotate, ca_dir, cfg } => auto_approve(ans, rotate, ca_dir, cfg).await,
+        Action::RecoveryRotate { ca_dir, cfg } => recovery_rotate(ans, ca_dir, cfg).await,
+        Action::ExternalEmitCsr { ca_dir } => external_emit_csr(ans, ca_dir).await,
+        Action::ExternalInstall { ca_dir } => external_install(ans, ca_dir).await,
+        _ => unreachable!("local_ca_op called with a non-CA action"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn local_ca_op(_ans: &mut TuiAnswerer, _action: Action) -> Result<Outcome> {
+    bail!("local admin-server CA operations are only available on unix hosts")
+}
+
+/// Rotate/enable the local admin server's auto-approve credential.
+#[cfg(unix)]
+async fn auto_approve(
+    ans: &mut TuiAnswerer,
+    rotate: bool,
+    ca_dir: PathBuf,
+    cfg: Option<PathBuf>,
+) -> Result<Outcome> {
+    use netidx_admin::admin_ops::slots::{AutoApproveOutcome, auto_approve};
+    let out = auto_approve(ans, ca_dir, cfg, rotate, false).await?;
+    let lines = match out {
+        AutoApproveOutcome::HotSwapped { warning } => {
+            let mut l = vec![
+                "The running admin server rotated its auto-approve credential in place \
+                 (no downtime)."
+                    .to_string(),
+            ];
+            l.extend(warning);
+            l
+        }
+        AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error } => {
+            let verb = if rotate { "rotated" } else { "enabled" };
+            let mut l = vec![format!("Auto-approve {verb}. Keytab: {}", keytab.display())];
+            match (cfg_path, cfg_error) {
+                (Some(p), _) => l.push(format!("Config updated: {}", p.display())),
+                (None, Some(e)) => l.push(format!("Config update failed (non-fatal): {e}")),
+                (None, None) => {}
+            }
+            l
+        }
+    };
+    let title = if rotate { "Auto-approve rotated" } else { "Auto-approve enabled" };
+    Ok(Outcome::plain(title, lines, true))
+}
+
+/// Mint a fresh CA recovery password on this box.
+#[cfg(unix)]
+async fn recovery_rotate(
+    ans: &mut TuiAnswerer,
+    ca_dir: PathBuf,
+    cfg: Option<PathBuf>,
+) -> Result<Outcome> {
+    use netidx_admin::admin_ops::slots::{RecoveryRotateOutcome, recovery_rotate};
+    let out = recovery_rotate(ans, ca_dir, cfg).await?;
+    let lines = match out {
+        RecoveryRotateOutcome::HotSwapped => vec![
+            "The running admin server minted a new recovery password (shown above) in \
+             place."
+                .to_string(),
+        ],
+        RecoveryRotateOutcome::Offline { .. } => {
+            vec!["Minted a new recovery password (shown above).".to_string()]
+        }
+    };
+    Ok(Outcome::plain("Recovery password rotated", lines, true))
+}
+
+/// Re-emit a renewal CSR for an externally-signed CA.
+#[cfg(unix)]
+async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
+    let csr = netidx_admin::admin_ops::slots::external_emit_csr(ans, ca_dir).await?;
+    Ok(Outcome::plain(
+        "CSR emitted",
+        vec![format!(
+            "Wrote a renewal CSR to {}. Have your external PKI sign it, then install the \
+             signed certificate.",
+            csr.display()
+        )],
+        false,
+    ))
+}
+
+/// Install an externally-signed CA certificate.
+#[cfg(unix)]
+async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
+    use netidx_admin::admin_ops::slots::{ExternalInstallOutcome, external_install_cert};
+    let signed = ans
+        .text(Field::SignedCert, None, None, true)
+        .await?
+        .context("a signed certificate path is required")?;
+    let root =
+        ans.text(Field::ExternalRoot, None, None, false).await?.filter(|s| !s.trim().is_empty());
+    let out = external_install_cert(
+        ans,
+        ca_dir,
+        Path::new(&signed),
+        root.as_deref().map(Path::new),
+    )
+    .await?;
+    match out {
+        ExternalInstallOutcome::OfflineCa => Ok(Outcome::plain(
+            "Certificate installed",
+            vec!["Installed the externally-signed CA certificate (offline CA).".to_string()],
+            true,
+        )),
+        ExternalInstallOutcome::Renewal => Ok(Outcome::plain(
+            "Certificate renewed",
+            vec![
+                "Renewed the CA certificate — enrolled nodes adopt it on their next \
+                 renewal (glyph unchanged; existing certificates stay valid)."
+                    .to_string(),
+            ],
+            true,
+        )),
+        ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
+            title: "Certificate installed".to_string(),
+            lines: vec![
+                format!("Installed the externally-signed CA certificate; admin server configured ({}).", cfg_path.display()),
+                "CA-cert auto-renewal is DISABLED (external issuer); re-run install when your PKI re-signs it.".to_string(),
+            ],
+            refresh_local: true,
+            install_service: need.scope(),
+            remote: None,
+            quiet: false,
+        }),
     }
 }
 

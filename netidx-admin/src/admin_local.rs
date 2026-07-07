@@ -13,9 +13,9 @@
 
 use crate::admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
-    EnrollRequest, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, RemoveAdminRequest,
-    Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
-    SetAdminPolicyRequest, SignResponse,
+    EditPermsRequest, EditPermsResponse, EnrollRequest, ListAdminsRequest, NodeKind,
+    PROTOCOL_VERSION, PeerResult, RemoveAdminRequest, Request, RotateAutorenewResponse,
+    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
@@ -175,6 +175,35 @@ pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminI
     match admin_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Replace the `target_path` cluster's permissions with `perms_json`. The
+/// daemon authorizes this local caller as a signing superuser (the
+/// `SO_PEERCRED` gate is the authorization — no admin password), then routes
+/// by the network map and propagates the edit to every member of the target
+/// cluster exactly as a remote signing-admin edit would. Returns the per-peer
+/// results so a partial (cluster-inconsistent) failure surfaces.
+pub async fn edit_perms(
+    cfg_path: &Path,
+    target_path: &str,
+    perms_json: &str,
+) -> Result<Vec<PeerResult>> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    admin_proto::write_msg(
+        &mut s,
+        &Request::EditPerms(EditPermsRequest {
+            admin,
+            password,
+            target_path: target_path.to_string(),
+            perms_json: perms_json.to_string(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, EditPermsResponse>(&mut s).await? {
+        EditPermsResponse::Ok { peers } => Ok(peers),
+        EditPermsResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
 

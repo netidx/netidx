@@ -10,7 +10,7 @@
 //! keytab) stay hard `bail!`s.
 
 use crate::{
-    admin_proto::NodeKind,
+    admin_proto::{NodeKind, Secret},
     admin_server::AUTORENEW_ADMIN,
     answer::{Answerer, Field},
     atomic,
@@ -212,6 +212,17 @@ pub async fn create_vaulted_ca(
     ans: &mut dyn Answerer,
     opts: NewCaOpts,
 ) -> Result<(Ca, ServiceNeed)> {
+    // This path only runs when there is no CA to enroll under, so announcing an
+    // unconditional "one will be created" here is correct — a node joining an
+    // existing network never reaches it.
+    ans.announce(
+        "Certificate authority",
+        "A certificate authority is required for netidx admin and TLS to work. \
+         One will be created on this machine now — it signs this resolver's \
+         certificate and anchors discovery, enrollment, and certificate renewal \
+         for the network.",
+    )
+    .await?;
     // CN first (matching the prompt order `ca init` had before this was
     // centralized here): an explicit `--cn` / threaded value wins,
     // otherwise prompt with the `ca.<domain>` default when we know the
@@ -278,6 +289,12 @@ pub async fn create_vaulted_ca(
     let set_up_server =
         ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     let need = if set_up_server {
+        ans.announce(
+            "Admin server",
+            "Now setting up the admin server. It secures the admin plane — \
+             discovery, enrollment, and certificate renewal — for this network.",
+        )
+        .await?;
         // setup_server signs the serving cert through the offline issuance
         // path, which takes the CA flock itself — so release ours first,
         // then reacquire for the remaining slot setup. During init no daemon
@@ -448,6 +465,27 @@ pub fn show_ca_identity(ans: &mut dyn Answerer, ca_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prompt for a NEW admin password, then a confirmation, re-prompting until the
+/// two entries match. Interactive only — a non-interactive frontend supplies the
+/// value once (from `--password-file`), so it takes `field`'s value directly.
+async fn confirm_new_password(ans: &mut dyn Answerer, field: Field) -> Result<Secret> {
+    if !ans.interactive() {
+        return ans.secret(field, None).await;
+    }
+    loop {
+        let first = ans.secret(field, None).await?;
+        if first.0.is_empty() {
+            ans.warn("password must not be empty");
+            continue;
+        }
+        let again = ans.secret(Field::AdminPasswordConfirm, None).await?;
+        if first.0 == again.0 {
+            return Ok(first);
+        }
+        ans.warn("the passwords did not match — try again");
+    }
+}
+
 /// Create the founding superuser ROLE admin (operator names it + sets its
 /// password). Full authority — broad issuance scope, may enroll servers,
 /// edits perms anywhere, and manages other admins — yet it wraps no master
@@ -461,7 +499,7 @@ pub async fn setup_superuser(
 ) -> Result<()> {
     let name = ans
         .text(
-            Field::AdminName,
+            Field::RootAdminName,
             opts.admin.clone(),
             enroll::current_username().as_deref(),
             // Not a required-explicit decision: the founding admin defaults to
@@ -503,7 +541,7 @@ pub async fn setup_superuser(
     // came from gather_policy above.)
     policy.perms_edit_scopes = vec!["/".to_string()];
     policy.service_control_scopes = vec!["/".to_string()];
-    let mut secret = ans.secret(Field::AdminPassword, None).await?;
+    let mut secret = confirm_new_password(ans, Field::AdminPassword).await?;
     let pw = Zeroizing::new(std::mem::take(&mut secret.0));
     cadir.vault.write().add_role_slot(&name, &pw, policy)?;
     ans.note(&format_compact!(
