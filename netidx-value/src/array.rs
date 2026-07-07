@@ -20,7 +20,10 @@ use std::{
     ops::{Bound, Deref, RangeBounds},
     ptr,
     slice::Iter,
-    sync::LazyLock,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        LazyLock, Mutex, MutexGuard,
+    },
 };
 use triomphe::{Arc, ThinArc};
 
@@ -75,60 +78,149 @@ impl Default for ValArrayBase {
 const MAX_DROP_DEPTH: usize = 256;
 
 thread_local! {
-    static DROP_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
-    static DROP_DEFERRED: std::cell::RefCell<Vec<ValArrayBase>> =
-        std::cell::RefCell::new(Vec::new());
+    // const-init with no drop glue: std registers NO TLS destructor
+    // for this cell, so on native-TLS platforms it stays accessible
+    // even while other TLS destructors run during thread teardown —
+    // the guard keeps working for values dropped by TLS destructors.
+    static DROP_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The deferred-drop queue. Global rather than thread-local: pushes
+/// only happen past MAX_DROP_DEPTH re-entrant frames — a degenerate
+/// case, so the mutex is not on any hot path (the per-drop probe is
+/// the relaxed load of DROP_DEFERRED_LEN) — and a global queue keeps
+/// working during thread teardown, when a TLS queue's own destructor
+/// may already have run (dropping a deep value from another TLS
+/// destructor then recursed unbounded). Entries are tagged with the
+/// address of the owning thread's DROP_DEPTH cell and only ever
+/// popped by that thread — the same discipline as immutable_chunkmap's
+/// twin (there it is load-bearing for erased lifetimes; here it keeps
+/// the drain ordering local and stays correct if pooling ever goes
+/// thread-local).
+static DROP_DEFERRED: Mutex<Vec<(usize, ValArrayBase)>> = Mutex::new(Vec::new());
+
+/// Cheap emptiness probe so an outermost drop with nothing deferred
+/// never touches the mutex. Relaxed suffices: only the pushing thread
+/// drains its own entries, and it sees its own increments in program
+/// order.
+static DROP_DEFERRED_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn deferred_lock() -> MutexGuard<'static, Vec<(usize, ValArrayBase)>> {
+    // a poisoned queue is structurally intact and must still drain
+    match DROP_DEFERRED.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    }
+}
+
+/// Restores DROP_DEPTH and, at the outermost frame, drains the
+/// deferred queue. An RAII guard rather than straight-line code in
+/// the Drop below so it also runs when unwinding: leaving the depth
+/// inflated would permanently disable the outermost drain on this
+/// thread, leaking every array deferred afterwards.
+struct DepthGuard {
+    depth: usize,
+    tag: usize,
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        let _ = DROP_DEPTH.try_with(|d| d.set(self.depth));
+        if self.depth == 0 && DROP_DEFERRED_LEN.load(Ordering::Relaxed) > 0 {
+            drain_deferred(self.tag)
+        }
+    }
+}
+
+/// Destroy every deferred array pushed by this thread. Runs only at
+/// the outermost drop frame — including while it is unwinding.
+///
+/// The depth is HELD AT 1 for the duration so a drained array's own
+/// drop (entering at depth 1) never sees 0 and never drains NESTED
+/// inside this loop: every deferred array is destroyed by this
+/// frame's loop and the stack stays flat. A nested drain grows the
+/// stack by a few frames per deferred entry — linear in the total
+/// nesting depth, which is exactly the overflow this machinery
+/// exists to prevent.
+///
+/// Each entry is destroyed under `catch_unwind` so a panicking
+/// destructor can neither strand later entries in the queue nor
+/// double-panic the process when several entries panic. The first
+/// panic resumes once the queue is empty; later ones are dropped, and
+/// if a panic is already unwinding through this frame the resume is
+/// suppressed entirely — resuming would double-panic and abort.
+fn drain_deferred(tag: usize) {
+    let _ = DROP_DEPTH.try_with(|d| d.set(1));
+    let mut panic = None;
+    loop {
+        // pop outside the lock — destruction may re-enter and push
+        let entry = {
+            let mut q = deferred_lock();
+            q.iter().position(|e| e.0 == tag).map(|i| {
+                DROP_DEFERRED_LEN.fetch_sub(1, Ordering::Relaxed);
+                q.swap_remove(i).1
+            })
+        };
+        match entry {
+            None => break,
+            Some(a) => {
+                let r = std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| drop(a)),
+                );
+                if let Err(e) = r {
+                    if panic.is_none() {
+                        panic = Some(e)
+                    }
+                }
+            }
+        }
+    }
+    let _ = DROP_DEPTH.try_with(|d| d.set(0));
+    if let Some(e) = panic {
+        if !std::thread::panicking() {
+            std::panic::resume_unwind(e)
+        }
+    }
 }
 
 impl Drop for ValArrayBase {
     fn drop(&mut self) {
-        // TLS destructor order during thread teardown is arbitrary
-        // (the pools are themselves thread-locals and drop cached —
-        // empty, recursion-free — arrays then), so every access is
-        // `try_with`, degrading to the plain recursive drop when
-        // unavailable.
-        let depth = DROP_DEPTH.try_with(|d| d.get()).ok();
-        if let Some(depth) = depth {
-            if depth >= MAX_DROP_DEPTH {
-                // Move this array to the deferred queue and return —
-                // the field is ManuallyDrop, so no glue runs and
-                // ownership transfers to the queue. Boxed so the Err
-                // path can reclaim it (a closure capture would be
-                // dropped un-run on Err, re-entering this Drop at the
-                // same depth).
-                let raw = Box::into_raw(Box::new(unsafe { ptr::read(self) }));
-                let pushed = DROP_DEFERRED.try_with(|q| {
-                    q.borrow_mut().push(*unsafe { Box::from_raw(raw) })
-                });
-                if pushed.is_err() {
-                    // Queue TLS gone (thread teardown): reclaim and
-                    // drop recursively — the unguarded fallback.
-                    drop(unsafe { Box::from_raw(raw) });
-                }
-                return;
-            }
-            let _ = DROP_DEPTH.try_with(|d| d.set(depth + 1));
+        // Re-entrancy guard: see MAX_DROP_DEPTH. Past the limit, move
+        // this array to the deferred queue and return — the field is
+        // ManuallyDrop, so no glue runs and ownership transfers to
+        // the queue; the outermost frame below destroys it
+        // iteratively (via its DepthGuard, so the drain also runs
+        // when unwinding). DROP_DEPTH is const-init with no drop glue
+        // and normally survives thread teardown; only if it is
+        // inaccessible (platforms without native TLS) degrade to the
+        // plain recursive drop.
+        let cell = DROP_DEPTH
+            .try_with(|d| (d.get(), d as *const std::cell::Cell<usize> as usize))
+            .ok();
+        let Some((depth, tag)) = cell else {
+            return self.really_drop();
+        };
+        if depth >= MAX_DROP_DEPTH {
+            deferred_lock().push((tag, unsafe { ptr::read(self) }));
+            DROP_DEFERRED_LEN.fetch_add(1, Ordering::Relaxed);
+            return;
         }
+        let _guard = DepthGuard { depth, tag };
+        let _ = DROP_DEPTH.try_with(|d| d.set(depth + 1));
+        self.really_drop()
+    }
+}
+
+impl ValArrayBase {
+    /// The unguarded destructor body; only called from `drop`, under
+    /// the DepthGuard whenever the TLS is accessible.
+    fn really_drop(&mut self) {
         if ThinArc::strong_count(&self.0) > 1 {
             unsafe { ManuallyDrop::drop(&mut self.0) }
         } else {
             match self.0.header.header.upgrade() {
                 Some(pool) => pool.insert(unsafe { ptr::read(self) }),
                 None => unsafe { ManuallyDrop::drop(&mut self.0) },
-            }
-        }
-        if let Some(depth) = depth {
-            let _ = DROP_DEPTH.try_with(|d| d.set(depth));
-            if depth == 0 {
-                // Drain iteratively. Pop OUTSIDE the RefCell borrow —
-                // each destruction re-enters this Drop (bounded by the
-                // guard) and may push deeper arrays back on the queue.
-                loop {
-                    match DROP_DEFERRED.try_with(|q| q.borrow_mut().pop()) {
-                        Ok(Some(a)) => drop(a),
-                        Ok(None) | Err(_) => break,
-                    }
-                }
             }
         }
     }

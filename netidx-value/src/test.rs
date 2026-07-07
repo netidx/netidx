@@ -507,7 +507,7 @@ fn deep_value_operations_bounded_stack() {
     std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
-            use std::hash::{Hash, Hasher};
+            use std::hash::Hash;
             const N: usize = 200_000;
             for v in [deep_array(N), deep_map(N), deep_mixed(N)] {
                 // hash
@@ -545,4 +545,37 @@ fn deep_value_operations_bounded_stack() {
         .expect("spawn")
         .join()
         .expect("a deep-value operation overflowed the stack");
+}
+
+// A deeply nested value dropped by a TLS destructor DURING THREAD
+// TEARDOWN. The drop guard (array.rs — and chunkmap's twin, for the
+// Map levels) must keep working there: DROP_DEPTH is a const-init
+// no-destructor TLS (accessible while other TLS destructors run) and
+// the deferred queue is a global — a TLS queue's own destructor could
+// run before SLOT's, and the old fallback for that case recursed
+// unbounded and overflowed the stack, aborting the process.
+#[test]
+fn deep_value_drop_at_thread_teardown() {
+    use std::cell::RefCell;
+    std::thread_local! {
+        static SLOT: RefCell<Option<Value>> = RefCell::new(None);
+    }
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            SLOT.with(|s| assert!(s.borrow().is_none()));
+            let mut v = Value::I64(42);
+            for i in 0..200_000 {
+                v = if i % 2 == 0 {
+                    Value::Array(ValArray::from_iter_exact([v].into_iter()))
+                } else {
+                    Value::Map(Map::new().insert(Value::I64(0), v).0)
+                };
+            }
+            SLOT.with(|s| *s.borrow_mut() = Some(v));
+            // dropped by SLOT's TLS destructor after thread exit
+        })
+        .expect("spawn")
+        .join()
+        .expect("teardown drop of a deep value overflowed the stack");
 }
