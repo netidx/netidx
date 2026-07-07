@@ -64,6 +64,11 @@ pub(super) enum UiRequest {
         body: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    AnnounceIdentity {
+        body: String,
+        code: Fingerprint,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Identity {
         identity: Box<CaIdentity>,
         reply: oneshot::Sender<Result<bool>>,
@@ -192,6 +197,11 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Announce { title, body, reply }).await
     }
 
+    async fn announce_identity(&mut self, body: &str, code: &Fingerprint) -> Result<()> {
+        let (body, code) = (body.to_string(), *code);
+        self.ask(|reply| UiRequest::AnnounceIdentity { body, code, reply }).await
+    }
+
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {
         if let Some(expected) = &self.accept_glyph {
             return Ok(&identity.fingerprint == expected);
@@ -258,6 +268,11 @@ pub(super) enum Modal {
         body: String,
         reply: Option<oneshot::Sender<Result<()>>>,
     },
+    AnnounceIdentity {
+        body: String,
+        code: Fingerprint,
+        reply: Option<oneshot::Sender<Result<()>>>,
+    },
     Recovery {
         password: String,
     },
@@ -310,6 +325,9 @@ impl Modal {
             UiRequest::Announce { title, body, reply } => {
                 Some(Modal::Announce { title, body, reply: Some(reply) })
             }
+            UiRequest::AnnounceIdentity { body, code, reply } => {
+                Some(Modal::AnnounceIdentity { body, code, reply: Some(reply) })
+            }
             UiRequest::Recovery { password } => Some(Modal::Recovery { password }),
             _ => None,
         }
@@ -322,7 +340,10 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
-            Modal::Identity { .. } | Modal::Announce { .. } | Modal::Recovery { .. } => None,
+            Modal::Identity { .. }
+            | Modal::Announce { .. }
+            | Modal::AnnounceIdentity { .. }
+            | Modal::Recovery { .. } => None,
         }
     }
 
@@ -436,7 +457,8 @@ impl Modal {
                 }
                 _ => false,
             },
-            Modal::Announce { reply, .. } => match code {
+            Modal::Announce { reply, .. } | Modal::AnnounceIdentity { reply, .. } => match code
+            {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(()));
@@ -589,15 +611,33 @@ impl Modal {
                 ];
                 popup(f, screen, title, lines, 64);
             }
+            Modal::AnnounceIdentity { body, code, .. } => {
+                let mut lines = vec![
+                    Line::from(Span::styled(body.clone(), theme::panel_style())),
+                    Line::from(""),
+                ];
+                lines.extend(widgets::identicon_lines(code));
+                lines.push(Line::from(""));
+                let fp = Style::default()
+                    .bg(theme::PANEL_BG)
+                    .fg(Color::Rgb(0, 0, 150))
+                    .add_modifier(Modifier::BOLD);
+                for chunk in group_fingerprint(code) {
+                    lines.push(Line::from(Span::styled(chunk, fp)));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Press Enter to continue ",
+                    theme::selected_style(),
+                )));
+                popup(f, screen, "Certificate authority created", lines, 64);
+            }
             Modal::Recovery { password, .. } => {
-                let heading = theme::panel_style().add_modifier(Modifier::BOLD);
                 let pw = Style::default()
                     .bg(Color::Rgb(255, 249, 196))
                     .fg(Color::Rgb(0, 0, 0))
                     .add_modifier(Modifier::BOLD);
                 let lines = vec![
-                    Line::from(Span::styled("Your certificate authority has been created.", heading)),
-                    Line::from(""),
                     Line::from(Span::styled(
                         "CA recovery password — shown once, never stored:",
                         theme::panel_style(),
@@ -615,7 +655,7 @@ impl Modal {
                     Line::from(""),
                     Line::from(Span::styled(" Enter — I have saved it ", theme::selected_style())),
                 ];
-                popup(f, screen, "Certificate authority created", lines, 66);
+                popup(f, screen, "CA recovery password", lines, 66);
             }
         }
     }

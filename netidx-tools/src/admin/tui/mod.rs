@@ -307,6 +307,30 @@ impl App {
         // Fill the whole screen with the installer backdrop so nothing renders
         // blue-on-blue and every panel floats on the blue field.
         f.render_widget(Block::default().style(theme::backdrop_style()), screen);
+        // A dialog owns the whole screen: it renders on the plain backdrop with
+        // NOTHING behind it (never text behind a dialog — the streaming notes,
+        // panels, or tab bar would otherwise show through). Only the footer hint
+        // line stays. Highest precedence first: a question preempts the progress
+        // bar (the op is waiting on the operator, not working).
+        if self.modal.is_some()
+            || self.confirm.is_some()
+            || self.result.is_some()
+            || self.progress.is_some()
+        {
+            let chunks =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+            self.render_footer(f, chunks[1]);
+            if let Some(m) = &self.modal {
+                m.render(f, screen);
+            } else if let Some((msg, _)) = &self.confirm {
+                render_confirm(f, screen, msg);
+            } else if let Some(r) = &self.result {
+                render_result(f, screen, r);
+            } else {
+                self.render_progress(f, screen);
+            }
+            return;
+        }
         if self.busy {
             // Full-screen wizard: the tab bar goes away while an op runs (you
             // can't do remote admin mid-install).
@@ -334,17 +358,6 @@ impl App {
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
             self.local.render(f, chunks[0]);
             self.render_footer(f, chunks[1]);
-        }
-        // Overlays, highest precedence first: a question hides the progress bar
-        // (the op is waiting on the operator, not working).
-        if let Some(m) = &self.modal {
-            m.render(f, screen);
-        } else if let Some((msg, _)) = &self.confirm {
-            render_confirm(f, screen, msg);
-        } else if let Some(r) = &self.result {
-            render_result(f, screen, r);
-        } else if self.progress.is_some() {
-            self.render_progress(f, screen);
         }
     }
 

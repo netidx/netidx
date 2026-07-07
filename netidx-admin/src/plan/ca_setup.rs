@@ -212,17 +212,12 @@ pub async fn create_vaulted_ca(
     ans: &mut dyn Answerer,
     opts: NewCaOpts,
 ) -> Result<(Ca, ServiceNeed)> {
-    // This path only runs when there is no CA to enroll under, so announcing an
-    // unconditional "one will be created" here is correct — a node joining an
-    // existing network never reaches it.
-    ans.announce(
-        "Certificate authority",
-        "A certificate authority is required for netidx admin and TLS to work. \
-         One will be created on this machine now — it signs this resolver's \
-         certificate and anchors discovery, enrollment, and certificate renewal \
-         for the network.",
-    )
-    .await?;
+    // No "a CA will be created" announce here: the caller already framed it
+    // (the resolver install's opening "new admin cluster" dialog, or the
+    // explicit `ca init` command), and the CA's creation + identity are
+    // announced once it exists (below). This path only runs when there is no CA
+    // to enroll under — a node joining an existing network never reaches it.
+    //
     // CN first (matching the prompt order `ca init` had before this was
     // centralized here): an explicit `--cn` / threaded value wins,
     // otherwise prompt with the `ca.<domain>` default when we know the
@@ -279,22 +274,27 @@ pub async fn create_vaulted_ca(
     )?;
 
     ans.note(&format_compact!("created a new CA at {}", opts.dir.display()));
+    // Present the new CA's identity (the glyph joiners verify) in a dialog, then
+    // the one-time recovery secret.
+    let ca_fp = {
+        let cert = std::fs::read(opts.dir.join("certificate.pem"))
+            .with_context(|| format!("reading CA cert in {}", opts.dir.display()))?;
+        Fingerprint::of_cert_pem(&cert)?
+    };
+    ans.announce_identity(
+        "Your new certificate authority has been created. This glyph is its \
+         identity — it is shown to anyone joining the cluster so they can verify \
+         they are trusting the real CA before sending a password.",
+        &ca_fp,
+    )
+    .await?;
     show_recovery_password(ans, &recovery_pw);
-    show_ca_identity(ans, &opts.dir)?;
-    ans.note(
-        "Share the fingerprint/identicon above with anyone joining, so they \
-         can verify they're talking to the real CA before sending a password.",
-    );
 
+    // No "now setting up the admin server" announce: standing up this host's
+    // admin server is part of founding the cluster the caller already framed.
     let set_up_server =
         ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     let need = if set_up_server {
-        ans.announce(
-            "Admin server",
-            "Now setting up the admin server. It secures the admin plane — \
-             discovery, enrollment, and certificate renewal — for this network.",
-        )
-        .await?;
         // setup_server signs the serving cert through the offline issuance
         // path, which takes the CA flock itself — so release ours first,
         // then reacquire for the remaining slot setup. During init no daemon

@@ -369,8 +369,9 @@ impl Field {
                 flag: "--listen",
                 label: "admin server listen IP",
                 help: "The IP the admin server on this host listens on for \
-                       discovery, enrollment, and CSR signing; usually the \
-                       co-located resolver's IP.",
+                       discovery, enrollment, and CSR signing; usually this \
+                       machine's advertised IP (the resolver co-located here \
+                       will share it).",
             },
             AdminServerListenPort => FieldInfo {
                 flag: "--listen",
@@ -624,6 +625,12 @@ pub trait Answerer: Send {
     /// setting up the resolver server"). Blocks until acknowledged by an
     /// interactive frontend; a non-interactive one returns immediately.
     async fn announce(&mut self, title: &str, body: &str) -> Result<()>;
+
+    /// Like [`announce`], but the dialog also shows a fingerprint's identicon —
+    /// for presenting a freshly-created CA's identity (the glyph joiners will
+    /// verify) inline, rather than as loose text. Blocks until acknowledged; a
+    /// non-interactive frontend prints the code and returns.
+    async fn announce_identity(&mut self, body: &str, code: &Fingerprint) -> Result<()>;
 
     /// The security gesture: present the admin server's identity (domain,
     /// roles, and CA fingerprint — which a frontend renders as text and an

@@ -305,6 +305,13 @@ impl Answerer for FlagAnswerer {
         Ok(())
     }
 
+    async fn announce_identity(&mut self, body: &str, code: &Fingerprint) -> Result<()> {
+        // The glyph is out-of-band data, not just a header — print the body and
+        // the code text so a scripted run still surfaces the CA identity.
+        let _ = writeln!(std::io::stderr(), "{body}\nCA identity code: {}", code.text());
+        Ok(())
+    }
+
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {
         match &self.accept_glyph {
             Some(expected) => Ok(&identity.fingerprint == expected),

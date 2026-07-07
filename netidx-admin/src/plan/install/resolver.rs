@@ -224,72 +224,28 @@ pub async fn run_resolver(
         )
         .await?;
     }
-    // Shape detection (incl. cloud-metadata probe) only fires when we
-    // actually need a default — i.e. when `--listen` or `--bind` weren't
-    // given explicitly. Computed at most once, up front, so the two prompts
-    // below share the single probe.
+    // Shape detection (incl. cloud-metadata probe) only fires when we actually
+    // need a default — i.e. when `--listen` or `--bind` weren't given
+    // explicitly. Computed once, up front, and shared by the admin server's
+    // listen prompt (control plane) and the resolver's (data plane).
     let shape: Option<super::ResolverShape> =
         if input.listen.is_none() || input.bind.is_none() {
             Some(detect_resolver_shape().await)
         } else {
             None
         };
-    let listen: SocketAddr = if let Some(l) = input.listen {
-        l
-    } else {
-        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
-        if s.needs_operator_hint {
-            ans.warn(
-                "detected container environment with no NETIDX_PUBLIC_IP env var \
-                 and no reachable cloud metadata. The suggested IP is the \
-                 container's private IP — only useful for internal traffic. \
-                 Override with the externally-visible address (or set \
-                 NETIDX_PUBLIC_IP / pass --listen).",
-            );
-        }
-        // Accept either a bare IP (then ask the port) or a full host:port. The
-        // IP is the one thing the operator has to know; the port defaults.
-        let default_ip = s.advertised_ip.map(|ip| ip.to_string());
-        prompt_ip_or_addr(ans, Field::Listen, default_ip.as_deref(), default_ip.is_none())
-            .await?
-            .context("an advertised address is required (pass --listen)")?
-    };
-    // Bind: silent in the normal case (defaults to listen.ip()), but
-    // level-1 prompted in the cloud-elastic case where the resolver
-    // advertises a public IP while binding to a private NIC.
-    let bind = if let Some(b) = input.bind {
-        Some(b)
-    } else {
-        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
-        match s.bind_override {
-            Some(private) => {
-                let default = private.to_string();
-                let b: IpAddr = ans
-                    .text(Field::Bind, None, Some(&default), false)
-                    .await?
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.parse::<IpAddr>())
-                    .transpose()
-                    .context("invalid bind address")?
-                    .unwrap_or(private);
-                Some(b)
-            }
-            None => None,
-        }
-    };
-    // Local-client bind override: when the resolver listens on a public IP
-    // while binding to a private NIC (cloud-elastic), the local client's
-    // publisher must advertise the public IP but bind the private subnet.
-    // Only kicks in when shape was actually detected.
-    let local_client_bind = shape.as_ref().and_then(|s| s.elastic_local_client_bind.clone());
-    // The auth-scheme sub-args (tls cert paths, krb5 spn, local socket) are
-    // level-2 prompts inside `resolver_self_auth`.
-    //
-    // Resolve the activation units dir up front: if the TLS flow stands up a
-    // CA server, its `ca.unit` must land in the *same* dir as the resolver /
-    // id-map units so the one supervisor runs them all.
+    // This host's advertised IP, shared by the admin server (control plane) and
+    // the resolver (data plane): an explicit `--listen` pins it, else shape
+    // detection suggests it. Each component's own listen prompt defaults to it,
+    // so the admin server's address is asked (and defaulted) up front, before
+    // the resolver's.
+    let machine_ip: Option<IpAddr> = input
+        .listen
+        .map(|l| l.ip())
+        .or_else(|| shape.as_ref().and_then(|s| s.advertised_ip));
+    // Resolve the activation units dir up front: if the flow stands up a CA
+    // server, its `ca.unit` must land in the *same* dir as the resolver / id-map
+    // units so the one supervisor runs them all.
     let units_dir = resolve_units_dir(input.common.no_units, input.units_dir.as_deref())?;
     // ── Control plane ── For a new cluster the CA and this host's admin server
     // are set up FIRST, before the data-plane auth is even chosen. Administering
@@ -331,7 +287,7 @@ pub async fn run_resolver(
                 domain.clone(),
                 input.insecure_no_tpm,
                 Some(true),
-                Some(listen.ip()),
+                machine_ip,
                 units_dir.clone(),
             ),
         )
@@ -383,7 +339,7 @@ pub async fn run_resolver(
                 resolver_self_auth(
                     ans,
                     &input,
-                    Some(listen.ip()),
+                    machine_ip,
                     units_dir.as_deref(),
                     &probe,
                     control_plane_domain.as_deref(),
@@ -391,6 +347,60 @@ pub async fn run_resolver(
                 .await?
             }
         };
+    // ── This host's resolver address (data plane) ── asked only now, after the
+    // control plane's admin-server address and the auth choice. Its IP defaults
+    // to the same `machine_ip` the admin server took, so on a single-homed host
+    // the operator just confirms it.
+    let listen: SocketAddr = if let Some(l) = input.listen {
+        l
+    } else {
+        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
+        if s.needs_operator_hint {
+            ans.warn(
+                "detected container environment with no NETIDX_PUBLIC_IP env var \
+                 and no reachable cloud metadata. The suggested IP is the \
+                 container's private IP — only useful for internal traffic. \
+                 Override with the externally-visible address (or set \
+                 NETIDX_PUBLIC_IP / pass --listen).",
+            );
+        }
+        // Accept either a bare IP (then ask the port) or a full host:port. The
+        // IP is the one thing the operator has to know; the port defaults.
+        let default_ip = machine_ip.map(|ip| ip.to_string());
+        prompt_ip_or_addr(ans, Field::Listen, default_ip.as_deref(), default_ip.is_none())
+            .await?
+            .context("an advertised address is required (pass --listen)")?
+    };
+    // Bind: silent in the normal case (defaults to listen.ip()), but level-1
+    // prompted in the cloud-elastic case where the resolver advertises a public
+    // IP while binding to a private NIC.
+    let bind = if let Some(b) = input.bind {
+        Some(b)
+    } else {
+        let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
+        match s.bind_override {
+            Some(private) => {
+                let default = private.to_string();
+                let b: IpAddr = ans
+                    .text(Field::Bind, None, Some(&default), false)
+                    .await?
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse::<IpAddr>())
+                    .transpose()
+                    .context("invalid bind address")?
+                    .unwrap_or(private);
+                Some(b)
+            }
+            None => None,
+        }
+    };
+    // Local-client bind override: when the resolver listens on a public IP while
+    // binding to a private NIC (cloud-elastic), the local client's publisher
+    // must advertise the public IP but bind the private subnet. Only kicks in
+    // when shape was actually detected.
+    let local_client_bind = shape.as_ref().and_then(|s| s.elastic_local_client_bind.clone());
     let perms_seed = match &input.perms_seed {
         Some(p) => Some(crate::perms::load_perms(p)?),
         None => None,
