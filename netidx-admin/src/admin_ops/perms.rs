@@ -107,6 +107,20 @@ pub async fn show_perms(
     admin_client::get_perms(target, NodeKind::Client, &id).await
 }
 
+/// List every level (resolver-cluster base) in the network map — the exact
+/// `--at` targets a perms read/edit can route to. Deduped and sorted. The
+/// cluster-scope perms UI offers these instead of a free-text path.
+pub async fn list_levels(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<PathBuf>,
+) -> Result<Vec<String>> {
+    let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
+    let bases: BTreeSet<String> =
+        bs.map.servers.iter().filter_map(|s| s.cluster.as_ref()).map(|c| c.base.clone()).collect();
+    Ok(bases.into_iter().collect())
+}
+
 /// The `perms edit --at <path>` action: hand the already-edited, already-
 /// validated `edited` perms JSON to the CA (authenticated), which re-validates
 /// and propagates it to every cluster member. Returns the per-peer results so a

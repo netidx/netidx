@@ -28,6 +28,14 @@ pub(super) fn identicon_lines(fp: &Fingerprint) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// A fingerprint's grouped-base32 text laid out four 5-char groups per line — a
+/// compact hash block to pair with an identicon.
+pub(super) fn group_fingerprint(fp: &Fingerprint) -> Vec<String> {
+    let text = fp.text();
+    let groups: Vec<&str> = text.split(' ').collect();
+    groups.chunks(4).map(|c| c.join(" ")).collect()
+}
+
 /// A compact "how long ago" for a queue/delegation row's age in seconds.
 pub(super) fn fmt_age(secs: u64) -> String {
     if secs < 60 {

@@ -676,7 +676,7 @@ impl Modal {
                             .bg(theme::PANEL_BG)
                             .fg(Color::Rgb(0, 0, 150))
                             .add_modifier(Modifier::BOLD);
-                        for chunk in group_fingerprint(&n.identity.fingerprint) {
+                        for chunk in widgets::group_fingerprint(&n.identity.fingerprint) {
                             lines.push(Line::from(Span::styled(chunk, fp)));
                         }
                         lines
@@ -712,7 +712,7 @@ impl Modal {
                 let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
                     Line::from(Span::styled(
-                        "Verify this is the network you intend to trust, out of band,",
+                        "Verify this is the cluster you intend to trust, out of band,",
                         theme::panel_style(),
                     )),
                     Line::from(Span::styled(
@@ -727,12 +727,12 @@ impl Modal {
                 lines.extend(widgets::identicon_lines(&identity.fingerprint));
                 lines.push(Line::from(""));
                 let fp = Style::default().bg(theme::PANEL_BG).fg(Color::Rgb(0, 0, 150)).add_modifier(Modifier::BOLD);
-                for chunk in group_fingerprint(&identity.fingerprint) {
+                for chunk in widgets::group_fingerprint(&identity.fingerprint) {
                     lines.push(Line::from(Span::styled(chunk, fp)));
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(" a/Enter accept · Esc/r reject ", theme::hint_style())));
-                popup(f, screen, "Confirm network identity", lines, 60);
+                popup(f, screen, "Confirm cluster identity", lines, 60);
             }
             Modal::Announce { title, body, .. } => {
                 let lines = vec![
@@ -753,7 +753,7 @@ impl Modal {
                     .bg(theme::PANEL_BG)
                     .fg(Color::Rgb(0, 0, 150))
                     .add_modifier(Modifier::BOLD);
-                for chunk in group_fingerprint(code) {
+                for chunk in widgets::group_fingerprint(code) {
                     lines.push(Line::from(Span::styled(chunk, fp)));
                 }
                 lines.push(Line::from(""));
@@ -815,14 +815,6 @@ fn send_text(reply: Option<TextReply>, err: Result<()>) {
         }
         None => {}
     }
-}
-
-/// The fingerprint text split into its space-separated 5-char groups, four per
-/// line, for a compact block in the identity modal.
-fn group_fingerprint(fp: &Fingerprint) -> Vec<String> {
-    let text = fp.text();
-    let groups: Vec<&str> = text.split(' ').collect();
-    groups.chunks(4).map(|c| c.join(" ")).collect()
 }
 
 /// Draw a shadowed, centered dialog popup with the given title and body lines,

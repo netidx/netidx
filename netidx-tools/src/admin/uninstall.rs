@@ -28,14 +28,14 @@ use std::process::Command;
 
 #[derive(Args, Debug)]
 pub(crate) struct Params {
-    /// User or system scope. System-scope re-execs under sudo. The
-    /// config root and the OS service are both per-scope. As a
-    /// convenience, an unelevated `--scope user` run also probes for
-    /// a matching system-scope install (which the resolver and
-    /// publisher templates register via sudo) and offers to escalate
-    /// + remove it.
-    #[arg(long, default_value = "user")]
-    pub scope: ScopeArg,
+    /// User or system scope. Omit to auto-detect from the install record:
+    /// a resolver / publisher writes user-scope config but registers a
+    /// system-scope service, so a full teardown spans both — this resolves
+    /// the primary scope and escalates (sudo, prompting for credentials) to
+    /// remove the system-scope parts as needed. Pass `--scope` only to
+    /// target one scope precisely. System scope re-execs under sudo.
+    #[arg(long)]
+    pub scope: Option<ScopeArg>,
     /// Service name to disable + remove. Default "netidx".
     #[arg(long, default_value = "netidx")]
     pub service_name: String,
@@ -62,7 +62,14 @@ pub(crate) struct Params {
 }
 
 pub(crate) fn run(p: Params) -> Result<()> {
-    let scope: ServiceScope = p.scope.into();
+    // No `--scope` ⇒ auto-detect from the install record: a resolver /
+    // publisher keeps user-scope config but a system-scope service, so the
+    // primary scope is user and the system service is caught by the cross-probe
+    // below. An explicit `--scope` targets exactly that scope.
+    let scope: ServiceScope = match p.scope {
+        Some(s) => s.into(),
+        None => detect_primary_scope(),
+    };
     // Elevate before doing anything else so the plan we print
     // reflects what root sees (e.g. /etc/netidx that the unelevated
     // process couldn't list).
@@ -98,7 +105,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     if let Some(rec) = load_install_record(p, scope) {
         match &rec.network {
             Some(net) => println!(
-                "tearing down {} install (joined to network {:?})",
+                "tearing down {} install (cluster {:?})",
                 rec.role.as_str(),
                 net.domain,
             ),
@@ -188,21 +195,36 @@ fn offer_system_scope(p: &Params) -> Result<()> {
     );
     print_report(&plan, false);
     if p.dry_run {
-        println!("(re-run with `--scope system` to remove it)");
+        println!("(this would be removed too — sudo escalates for it)");
         return Ok(());
     }
-    // Escalating under sudo is a separate trust boundary that must never
-    // be silent; with no interactive confirm we point the operator at the
-    // explicit command rather than escalating for them.
-    if plan_contains_ca(&plan) {
-        println!(
-            "(DESTRUCTIVE: also destroys the CA private key — re-run with \
-             `--scope system --yes` to remove it)"
-        );
-    } else {
-        println!("(re-run with `--scope system --yes` to remove it)");
+    // Removing a system-scope service needs root. `--yes` is the operator's
+    // go-ahead, so escalate and remove it in one command — sudo's own password
+    // prompt is the credential check (never silent). Without `--yes` we've shown
+    // the plan; point at the flag rather than escalating unbidden.
+    if !p.yes {
+        if plan_contains_ca(&plan) {
+            println!(
+                "(DESTRUCTIVE: also destroys the CA private key — re-run with \
+                 `--yes` to remove it)"
+            );
+        } else {
+            println!("(re-run with `--yes` to remove the system-scope service too)");
+        }
+        return Ok(());
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        println!("removing the system-scope install (sudo may prompt for your password)…");
+        escalate(p)
+    }
+    #[cfg(not(unix))]
+    {
+        println!(
+            "(run this again from an elevated shell to remove the system-scope service)"
+        );
+        Ok(())
+    }
 }
 
 /// Already-root counterpart to [`offer_system_scope`]: a `--scope user`
@@ -276,6 +298,24 @@ fn load_install_record(p: &Params, scope: ServiceScope) -> Option<InstallRecord>
 
 fn plan_contains_ca(r: &UninstallReport) -> bool {
     r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
+}
+
+/// The scope to tear down when the operator passed no `--scope`: prefer a
+/// user-scope install record (the common templated case — user config, plus a
+/// system service the cross-probe below escalates to remove), else a
+/// system-scope record, else user (nothing to remove, or a stray system service
+/// the user-scope cross-probe still catches).
+fn detect_primary_scope() -> ServiceScope {
+    let user_record = paths::user_config_root()
+        .map(|r| r.join("install.json").exists())
+        .unwrap_or(false);
+    if user_record {
+        return ServiceScope::User;
+    }
+    if paths::system_config_root().join("install.json").exists() {
+        return ServiceScope::System;
+    }
+    ServiceScope::User
 }
 
 /// The config root this teardown targets (honouring `--config-dir`).

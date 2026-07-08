@@ -22,7 +22,7 @@ use crate::{
         enroll::{self, AdminServers, DiscoveredNetwork, KeyProtArg},
         service::ServiceNeed,
     },
-    provenance::{InstallRecord, InstallRole},
+    provenance::{InstallRecord, InstallRole, NetworkIdentity},
     service::ServiceScope,
     template::{self, AuthChoice, ParentRef, resolver::IdMapMode},
 };
@@ -252,6 +252,12 @@ pub async fn run_resolver(
     // to a control-plane-less resolver (never chosen interactively). The domain
     // is a control-plane fact (the CA's `ca.<domain>` CN) and flows into the data
     // plane below so a founding TLS resolver's own name shares it.
+    // The cluster this resolver belongs to, recorded in install.json so its
+    // status view can show the cluster glyph: a founding resolver records the
+    // cluster it just created (its own domain + CA fingerprint); a joining one
+    // pins the discovered network's identity via `network_provenance` below.
+    #[allow(unused_mut)]
+    let mut founding_identity: Option<NetworkIdentity> = None;
     #[cfg(unix)]
     let control_plane_domain: Option<String> = if founded_admin_plane {
         // The network domain — the CA's `ca.<domain>` CN, and the domain the
@@ -275,7 +281,7 @@ pub async fn run_resolver(
         // one system-service offer, and the admin-server unit lands in the shared
         // units dir. `Some(true)` — a new cluster always stands up its admin
         // server (the `--no-admin-server` escape is handled by the gate above).
-        let (_ca, _need) = ca_setup::create_vaulted_ca(
+        let (ca, _need) = ca_setup::create_vaulted_ca(
             ans,
             ca_setup::founding_ca_opts(
                 paths::user_ca_dir()?,
@@ -287,6 +293,12 @@ pub async fn run_resolver(
             ),
         )
         .await?;
+        // Record the cluster this host just founded, so it reads back like a
+        // joined cluster everywhere downstream (status glyph, saved-cluster list).
+        founding_identity = Some(NetworkIdentity::new(
+            domain.clone(),
+            &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?,
+        ));
         ans.announce(
             "Resolver server",
             "Admin cluster setup complete, now installing the resolver server.",
@@ -305,7 +317,7 @@ pub async fn run_resolver(
     let kind: AuthKind = match imported_auth {
         Some(k) => {
             ans.note(&format_compact!(
-                "importing auth scheme from the network: {}",
+                "importing auth scheme from the cluster: {}",
                 k.as_str()
             ));
             k
@@ -419,9 +431,12 @@ pub async fn run_resolver(
     };
     let post_apply_units_dir = units_dir.clone();
     // Build the install record before the post-apply closure moves `probe`. A
-    // resolver joining a discovered network pins that network's identity; a
-    // fresh first resolver records none (it is the root).
-    let (network, admin_server) = network_provenance(&probe);
+    // founding resolver records the cluster it just created; a joining one pins
+    // the discovered network's identity and a reachable admin-server address.
+    let (network, admin_server) = match founding_identity {
+        Some(id) => (Some(id), None),
+        None => network_provenance(&probe),
+    };
     let record = InstallRecord::new(
         InstallRole::Resolver,
         input.base.clone(),
@@ -838,7 +853,7 @@ async fn resolver_tls_generate(
             );
         }
         ans.note(&format_compact!(
-            "no CA found at {} — creating the network's CA (it signs this \
+            "no CA found at {} — creating the cluster's CA (it signs this \
              resolver's certificate and anchors discovery, enrollment, and \
              renewal)",
             ca_dir.display()
@@ -957,7 +972,7 @@ async fn resolver_auth_from_network(
     match kind {
         AuthKind::Anonymous => Ok(ResolvedAuth::external(AuthChoice::Anonymous)),
         AuthKind::Local => bail!(
-            "a network-discovered resolver cannot use local auth (it is host-local \
+            "a resolver joined to a discovered cluster cannot use local auth (it is host-local \
              by definition)"
         ),
         AuthKind::Krb5 => {
@@ -966,7 +981,7 @@ async fn resolver_auth_from_network(
                 _ => None,
             }) {
                 ans.note(&format_compact!(
-                    "note: an existing resolver on this network uses SPN {example:?}"
+                    "note: an existing resolver on this cluster uses SPN {example:?}"
                 ));
             }
             let spn = ans
@@ -980,7 +995,7 @@ async fn resolver_auth_from_network(
         AuthKind::Tls => {
             let Some(ca_addr) = net.info.ca_addr else {
                 bail!(
-                    "network {:?} uses TLS but none of its admin servers reported a \
+                    "cluster {:?} uses TLS but none of its admin servers reported a \
                      CA — cannot obtain the resolver certificate",
                     net.identity.domain,
                 )
@@ -1139,7 +1154,7 @@ async fn enroll_admin_server(
 ) -> Result<()> {
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
-            "note: network {:?} reported no CA; skipping admin-server setup on this \
+            "note: cluster {:?} reported no CA; skipping admin-server setup on this \
              host",
             net.identity.domain,
         ));

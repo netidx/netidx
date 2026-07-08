@@ -5,7 +5,7 @@
 //! the [`TuiAnswerer`](super::answer::TuiAnswerer) exists.
 
 use super::{action::Action, theme, widgets};
-use netidx_activation::{control::ControlOp, runtime::default_units_dir};
+use netidx_activation::runtime::default_units_dir;
 use netidx_admin::{
     fingerprint::Fingerprint,
     paths,
@@ -89,6 +89,8 @@ struct LocalCa {
 
 impl Detected {
     fn probe(record: InstallRecord, scope: ServiceScope, config_dir: PathBuf) -> Detected {
+        // The CA glyph comes from the cluster identity recorded at install — set
+        // for both a founding host (its own cluster) and a joining one.
         let ca = record
             .network
             .as_ref()
@@ -209,6 +211,10 @@ pub(super) struct LocalState {
     /// socket, if the operator chose "Manage admins". Takes over the tab while
     /// open; shares the panel machinery with the Cluster tab (a `Local` target).
     admin: Option<super::remote::RemoteState>,
+    /// The open Services surface (list + control + local unit CRUD) over the
+    /// local activation supervisor, if the operator chose "Services". Takes over
+    /// the tab while open.
+    services: Option<super::services::ServicesState>,
 }
 
 impl LocalState {
@@ -228,13 +234,23 @@ impl LocalState {
             show_status: false,
             welcome_seen: false,
             admin: None,
+            services: None,
         }
     }
 
-    /// Open the local admin-server panel surface over the control socket (no
-    /// auth) — the "Manage admins" entry. Takes over the Local tab until closed.
-    pub(super) fn open_admin(&mut self, cfg_path: PathBuf, ca_dir: PathBuf) {
-        self.admin = Some(super::remote::RemoteState::local(cfg_path, ca_dir));
+    /// Open the local admin-server panel surface (control socket, no auth)
+    /// directly on `panel` — the split "Admins" / "Permissions" entries. Takes
+    /// over the Local tab until closed; returns the initial panel-refresh op.
+    pub(super) fn open_admin(
+        &mut self,
+        cfg_path: PathBuf,
+        ca_dir: PathBuf,
+        panel: super::remote::Panel,
+    ) -> Option<Action> {
+        let (state, initial) =
+            super::remote::RemoteState::local_panel(cfg_path, ca_dir, panel);
+        self.admin = Some(state);
+        initial
     }
 
     /// Apply a completed local-admin op's panel rows to the admin surface.
@@ -249,6 +265,42 @@ impl LocalState {
         self.admin.is_some()
     }
 
+    /// Open the Services surface over the local activation supervisor at
+    /// `units_dir` (always `default_units_dir()`).
+    pub(super) fn open_services(&mut self, units_dir: PathBuf) {
+        self.services = Some(super::services::ServicesState::new(units_dir));
+    }
+
+    /// Apply a completed services op's refreshed rows to the Services surface.
+    pub(super) fn apply_services(&mut self, update: super::services::ServicesUpdate) {
+        if let Some(services) = &mut self.services {
+            services.apply(update);
+        }
+    }
+
+    /// Whether the Services surface is open.
+    pub(super) fn services_open(&self) -> bool {
+        self.services.is_some()
+    }
+
+    /// Whether the Services surface has a text field focused (the name prompt).
+    pub(super) fn services_capturing_text(&self) -> bool {
+        self.services.as_ref().is_some_and(|s| s.capturing_text())
+    }
+
+    /// When drilled into a tool (the Services surface or the local admin panel
+    /// surface), the tool's gutter keys — the App hides the tab bar and shows
+    /// these instead of the global keys. `None` at the action list / role menu.
+    pub(super) fn gutter(&self) -> Option<String> {
+        if let Some(s) = &self.services {
+            return Some(s.gutter().to_string());
+        }
+        if let Some(admin) = &self.admin {
+            return admin.gutter();
+        }
+        None
+    }
+
     /// Re-run detection (after an install/uninstall completes). Resets the sync
     /// state so the loop re-checks against the network.
     pub(super) fn refresh(&mut self) {
@@ -257,6 +309,7 @@ impl LocalState {
         self.selected = self.selected.min(self.installs.len().saturating_sub(1));
         self.menu_state.select(Some(0));
         self.show_status = false;
+        self.services = None;
         // If the machine is fresh again (everything was uninstalled), re-show
         // the welcome dialog.
         self.welcome_seen = self.welcome_seen && !self.installs.is_empty();
@@ -307,6 +360,16 @@ impl LocalState {
 
     pub(super) fn on_key(&mut self, code: crossterm::event::KeyCode) -> Option<Action> {
         use crossterm::event::KeyCode::*;
+        // The Services surface takes over the tab while open; Esc from its unit
+        // list closes it back to the Local tab.
+        if self.services.is_some() {
+            let at_list = self.services.as_ref().unwrap().at_list();
+            if matches!(code, Esc) && at_list {
+                self.services = None;
+                return None;
+            }
+            return self.services.as_mut().unwrap().on_key(code);
+        }
         // The local admin panel surface takes over the tab while open; Esc from
         // its top menu closes it back to the Local tab.
         if self.admin.is_some() {
@@ -391,6 +454,10 @@ impl LocalState {
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
+        if let Some(services) = &mut self.services {
+            services.render(f, area);
+            return;
+        }
         if let Some(admin) = &mut self.admin {
             admin.render(f, area);
             return;
@@ -419,7 +486,7 @@ impl LocalState {
         let items: Vec<ListItem> = ROLES.iter().map(|r| ListItem::new(r.title)).collect();
         let list = List::new(items)
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Install a role ", theme::title_style())).title_bottom(
+            .block(theme::panel_block().title(Span::styled(" Install a Role ", theme::title_style())).title_bottom(
                 Line::from(Span::styled(" ↑/↓ select · Enter install · p preview ", theme::hint_style())),
             ))
             .highlight_style(theme::selected_style())
@@ -443,7 +510,7 @@ impl LocalState {
             Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
         let d = &self.installs[self.selected];
         let acts = action_items(d);
-        let mut labels = vec!["Status — full details".to_string()];
+        let mut labels = vec!["Status".to_string()];
         labels.extend(acts.iter().map(|(l, _)| l.clone()));
         let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
         let title = format!(" {} ({}) ", role_title(d.record.role), service_word(d.service));
@@ -480,7 +547,7 @@ impl LocalState {
 /// The Status item's description in the tool detail pane.
 const STATUS_DESC: &str =
     "Full status detail for this install: its config, whether it is in sync with \
-     the network, and its CA glyph.";
+     the cluster, and its CA glyph.";
 
 /// A one-line description of a Local-tab action, shown in the menu detail pane.
 fn action_desc(action: &Action) -> &'static str {
@@ -490,14 +557,18 @@ fn action_desc(action: &Action) -> &'static str {
         Install { dry_run: true, .. } => {
             "Preview installing this role — show the plan without changing anything."
         }
-        Renew { .. } => "Renew this host's TLS certificates from the network's CA now.",
+        Renew { .. } => {
+            "Renew this host's TLS certificates from the cluster's CA now. The \
+             auto-renew service does this automatically unless it has been turned off."
+        }
         Update { .. } => {
-            "Reconcile this host's config with the network, adding or removing cluster peers."
+            "Reconcile this host's resolver list with the cluster, adding or removing \
+             resolvers as necessary."
         }
         Join { dry_run: false } => {
-            "Graduate this local-only workstation onto a network, enrolling a TLS identity."
+            "Graduate this local-only workstation onto a cluster, enrolling a TLS identity."
         }
-        Join { dry_run: true } => "Preview joining a network, without changing anything.",
+        Join { dry_run: true } => "Preview joining a cluster, without changing anything.",
         AddParent => "Attach this resolver under a parent resolver by delegation.",
         ReviewDelegations => {
             "Review and approve requests from resolvers asking to attach under this one."
@@ -508,20 +579,31 @@ fn action_desc(action: &Action) -> &'static str {
             "Remove this install and destroy its certificate authority. Irreversible."
         }
         AutoApprove { rotate: true, .. } => {
-            "Rotate this admin server's automatic-renewal credential."
+            "Rotate this admin server's auto-renew credential. The auto-renew service \
+             automatically renews expiring certificates for the cluster's members."
         }
         AutoApprove { rotate: false, .. } => {
-            "Enable automatic approval of certificate renewals on this admin server."
+            "Enable the auto-renew service, which automatically renews expiring \
+             certificates for the cluster's members, without an admin approving each one."
         }
-        RecoveryRotate { .. } => "Mint a fresh CA recovery password, retiring the old one.",
+        RecoveryRotate { .. } => {
+            "Mint a fresh CA recovery password. Use this if you lost or forgot the old \
+             one — it retires the old password. Works only locally, on the CA machine."
+        }
         ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
         ExternalInstall { .. } => "Install the externally-signed CA certificate returned by your PKI.",
-        ServiceControl { op: ControlOp::Restart, .. } => "Restart this machine's netidx services.",
-        ServiceControl { op: ControlOp::Stop, .. } => "Stop this machine's netidx services.",
-        ServiceControl { op: ControlOp::Start, .. } => "Start this machine's netidx services.",
-        ServiceControl { .. } => "Control this machine's netidx services.",
+        OpenServices { .. } => {
+            "Manage netidx services on this machine — list them, start/stop/restart, \
+             and create, edit, or delete units."
+        }
+        // Never a menu item (dispatched from within the Services surface); present
+        // only for exhaustiveness.
+        Services(_) => "",
+        ManageLocalAdmins { panel: super::remote::Panel::Perms, .. } => {
+            "View and edit this host's permissions."
+        }
         ManageLocalAdmins { .. } => {
-            "Manage this admin server's roster of admins and their permissions."
+            "Manage this admin server's admins and their scopes."
         }
     }
 }
@@ -537,12 +619,17 @@ fn service_word(status: ServiceStatus) -> &'static str {
 
 /// The detailed-status overlay — the former always-on card, now shown on demand
 /// over the action list (any key closes). Left column is the record + sync
-/// detail; the right column carries the CA glyph when this host joined a network.
+/// detail; the right column carries the cluster's CA glyph and fingerprint when
+/// this host belongs to a network.
 fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncState) {
     let mut lines = detail_lines(d);
     lines.extend(sync_lines(sync));
+    // The right column (when present) is the glyph label + 8 identicon rows + a
+    // blank + the grouped fingerprint; size the dialog to whichever column is
+    // taller so neither is clipped.
+    let glyph_h = d.ca.as_ref().map_or(0, |fp| 10 + widgets::group_fingerprint(fp).len());
     let w = 90.min(screen.width.saturating_sub(4)).max(24);
-    let h = (lines.len() as u16 + 2).min(screen.height); // + borders
+    let h = ((lines.len().max(glyph_h)) as u16 + 2).min(screen.height); // + borders
     let area = widgets::centered(w, h, screen);
     widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
@@ -551,7 +638,7 @@ fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncS
     let inner = block.inner(area);
     f.render_widget(block, area);
     let cols = if d.ca.is_some() {
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(inner)
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).split(inner)
     } else {
         Layout::horizontal([Constraint::Min(0)]).split(inner)
     };
@@ -562,6 +649,14 @@ fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncS
     if let Some(fp) = &d.ca {
         let mut g = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
         g.extend(widgets::identicon_lines(fp));
+        g.push(Line::from(""));
+        let hash = Style::default()
+            .bg(theme::PANEL_BG)
+            .fg(Color::Rgb(0, 0, 150))
+            .add_modifier(Modifier::BOLD);
+        for chunk in widgets::group_fingerprint(fp) {
+            g.push(Line::from(Span::styled(chunk, hash)));
+        }
         f.render_widget(Paragraph::new(g).style(theme::panel_style()), cols[1]);
     }
 }
@@ -574,95 +669,90 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let networked = d.record.network.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
     if networked {
-        items.push(("Update — sync config with the network".to_string(), Action::Update { role }));
+        items.push(("Update Resolvers".to_string(), Action::Update { role }));
     }
     if role == InstallRole::Workstation && !networked {
-        items.push(("Join a network".to_string(), Action::Join { dry_run: false }));
-        items.push(("Preview join (dry run)".to_string(), Action::Join { dry_run: true }));
+        items.push(("Join a Cluster".to_string(), Action::Join { dry_run: false }));
+        items.push(("Preview Join (Dry Run)".to_string(), Action::Join { dry_run: true }));
     }
     if role == InstallRole::Resolver {
-        items.push(("Add a parent (delegate under)".to_string(), Action::AddParent));
+        items.push(("Add a Parent".to_string(), Action::AddParent));
         // Delegation requests land on the parent's *own* admin server, so offer
         // the review shortcut when this host runs one — not when `record.
         // admin_server` is set (that names the admin server this node enrolls
         // against, and is `None` on the CA host, which is exactly who reviews).
         if runs_local_admin_server() {
             items.push((
-                "Review delegation requests".to_string(),
+                "Review Delegation Requests".to_string(),
                 Action::ReviewDelegations,
             ));
         }
     }
     if networked {
-        items.push(("Renew certificates".to_string(), Action::Renew { server: d.record.admin_server }));
+        items.push(("Renew Certificates".to_string(), Action::Renew { server: d.record.admin_server }));
     }
-    // Local service control over the activation supervisor's control socket (no
-    // auth). Present whenever this machine has a supervisor unit directory.
+    // One Services surface over the local activation supervisor (no auth): list +
+    // status, start/stop/restart, and local-only unit create/edit/delete. Present
+    // whenever this machine has a supervisor unit directory.
     if let Some(units_dir) = default_units_dir() {
-        items.push((
-            "Restart services".to_string(),
-            Action::ServiceControl { op: ControlOp::Restart, units_dir: units_dir.clone() },
-        ));
-        items.push((
-            "Stop services".to_string(),
-            Action::ServiceControl { op: ControlOp::Stop, units_dir: units_dir.clone() },
-        ));
-        items.push((
-            "Start services".to_string(),
-            Action::ServiceControl { op: ControlOp::Start, units_dir },
-        ));
+        items.push(("Services".to_string(), Action::OpenServices { units_dir }));
     }
     // Local admin-server CA tools — no auth (control socket), only for a node
     // that owns a CA. Most nodes have no `local_ca` and skip this entirely.
     if let Some(lca) = &d.local_ca {
-        // Roster/perms/… over the local control socket, when an admin server is
-        // configured on this box.
+        // The admin roster and this host's own permissions over the local control
+        // socket, when an admin server is configured on this box.
         if let Some(cfg_path) = &lca.cfg {
             items.push((
-                "Manage admins & permissions".to_string(),
+                "Admins".to_string(),
                 Action::ManageLocalAdmins {
                     cfg_path: cfg_path.clone(),
                     ca_dir: lca.ca_dir.clone(),
+                    panel: super::remote::Panel::Roster,
+                },
+            ));
+            items.push((
+                "Permissions".to_string(),
+                Action::ManageLocalAdmins {
+                    cfg_path: cfg_path.clone(),
+                    ca_dir: lca.ca_dir.clone(),
+                    panel: super::remote::Panel::Perms,
                 },
             ));
         }
         if lca.auto_approve_present {
             items.push((
-                "Rotate auto-approve credential".to_string(),
+                "Rotate Auto-Renew Credential".to_string(),
                 Action::AutoApprove { rotate: true, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
             ));
         } else {
             items.push((
-                "Enable auto-approve".to_string(),
+                "Enable Auto-Renew".to_string(),
                 Action::AutoApprove { rotate: false, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
             ));
         }
         if lca.recovery_present {
             items.push((
-                "Rotate recovery password".to_string(),
+                "Rotate Recovery Password".to_string(),
                 Action::RecoveryRotate { ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
             ));
         }
         if lca.external_signed {
             items.push((
-                "Emit renewal CSR (external CA)".to_string(),
+                "Emit Renewal CSR (External CA)".to_string(),
                 Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
             ));
             let label = if lca.external_installed {
-                "Install renewed certificate (external CA)"
+                "Install Renewed Certificate (External CA)"
             } else {
-                "Install signed certificate (external CA)"
+                "Install Signed Certificate (External CA)"
             };
             items.push((label.to_string(), Action::ExternalInstall { ca_dir: lca.ca_dir.clone() }));
         }
     }
+    // One Uninstall item; when this host owns a CA, the confirm flow asks whether
+    // to also destroy it (see the chained confirm in the App loop).
     items.push(("Uninstall".to_string(), uninstall_action(d, false)));
-    if owns_ca(d) {
-        items.push((
-            "Uninstall + destroy the CA".to_string(),
-            uninstall_action(d, true),
-        ));
-    }
     items
 }
 
@@ -694,12 +784,6 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
     }
 }
 
-/// Whether this host holds the network's CA (so a full teardown can offer to
-/// destroy it). A plain enrolled node carries `network.ca_fingerprint` but no CA
-/// directory, so key off the directory, not the record.
-fn owns_ca(d: &Detected) -> bool {
-    d.config_dir.join("ca").is_dir()
-}
 
 /// The one-time "netidx isn't installed" welcome dialog on a fresh machine.
 /// The prose is one continuous string per paragraph so ratatui's `Paragraph`
@@ -737,10 +821,10 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
     ];
     match &r.network {
         Some(net) => {
-            lines.push(kv("Network", net.domain.clone()));
+            lines.push(kv("Cluster", net.domain.clone()));
             lines.push(kv("CA fingerprint", net.ca_fingerprint.clone()));
         }
-        None => lines.push(kv("Network", "standalone (local-only)".to_string())),
+        None => lines.push(kv("Cluster", "standalone (local-only)".to_string())),
     }
     if let Some(addr) = r.admin_server {
         lines.push(kv("Admin server", addr.to_string()));
@@ -797,19 +881,19 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
         // A local-only install never gets here (never checked); render nothing.
         SyncState::Unchecked => Vec::new(),
         SyncState::Checking => {
-            vec![kv_status("Network sync", "checking…".to_string(), theme::HINT_FG)]
+            vec![kv_status("Cluster sync", "checking…".to_string(), theme::HINT_FG)]
         }
         SyncState::InSync => {
-            vec![kv_status("Network sync", "✓ in sync".to_string(), theme::OK)]
+            vec![kv_status("Cluster sync", "✓ in sync".to_string(), theme::OK)]
         }
         SyncState::Failed(e) => vec![kv_status(
-            "Network sync",
+            "Cluster sync",
             format!("could not check ({e})"),
             theme::HINT_FG,
         )],
         SyncState::OutOfSync(changes) => {
             let mut lines = vec![kv_status(
-                "Network sync",
+                "Cluster sync",
                 format!(
                     "⚠ {} new member server(s) — press U to apply",
                     changes.len()

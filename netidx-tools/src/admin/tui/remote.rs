@@ -113,10 +113,10 @@ pub(super) enum Panel {
 impl Panel {
     fn title(self) -> &'static str {
         match self {
-            Panel::Queue => "Enrollment queue",
-            Panel::Delegations => "Delegation requests",
-            Panel::Roster => "Admin roster",
-            Panel::Revocation => "Issued certificates",
+            Panel::Queue => "Enrollment Queue",
+            Panel::Delegations => "Delegation Requests",
+            Panel::Roster => "Admin Roster",
+            Panel::Revocation => "Issued Certificates",
             Panel::Perms => "Permissions",
             Panel::Service => "Services",
         }
@@ -138,6 +138,18 @@ impl Panel {
     /// the cluster owning that path). Such panels enter through a path prompt.
     fn path_scoped(self) -> bool {
         matches!(self, Panel::Perms | Panel::Service)
+    }
+
+    /// The panel's action keys, shown in the App gutter while the panel is open.
+    fn keys(self) -> &'static str {
+        match self {
+            Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
+            Panel::Delegations => "a approve · d deny · r refresh · Esc back",
+            Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
+            Panel::Revocation => "x revoke · r refresh · Esc back",
+            Panel::Perms => "e edit · r reload · Esc back",
+            Panel::Service => "s start · t stop · R restart · r reload · Esc back",
+        }
     }
 }
 
@@ -212,6 +224,9 @@ pub(super) enum RemoteAction {
     SetPolicy { target: PanelTarget, name: String },
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
     RemoveAdmin { target: PanelTarget, name: String },
+    /// List the cluster's permission levels (resolver bases) from the map, to
+    /// pick one to view/edit — replaces free-text path entry for cluster perms.
+    ListLevels { target: PanelTarget },
     /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
     EditPerms { target: PanelTarget, at: String },
     /// Start/stop/restart one activation unit on one member of the cluster
@@ -241,6 +256,7 @@ impl RemoteAction {
             RemoteAction::AddAdmin { .. } => "Adding an admin".to_string(),
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
+            RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
             RemoteAction::ServiceControl { op, .. } => match op {
                 ServiceOp::Start => "Starting service".to_string(),
@@ -295,6 +311,7 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { target }
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
+            | RemoteAction::ListLevels { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ServiceControl { target, .. } => target.glyph(),
         }
@@ -307,6 +324,8 @@ pub(super) enum RemoteUpdate {
     Rows { panel: Panel, rows: Vec<PanelRow> },
     /// The saved cluster registry after a discover pass — refreshes the list.
     Clusters(Vec<KnownCluster>),
+    /// The cluster's permission levels — opens the level picker for a panel.
+    Levels { panel: Panel, levels: Vec<String> },
 }
 
 // ---- op bodies (unix-only: they call admin_ops) ---------------------------
@@ -320,6 +339,7 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         }
         RemoteAction::Discover => discover(ans).await,
         RemoteAction::Refresh { target, panel, path } => refresh(ans, target, panel, path).await,
+        RemoteAction::ListLevels { target } => list_levels(ans, target).await,
         RemoteAction::Approve { target, code } => {
             approve(ans, target.into_remote()?, code).await
         }
@@ -944,6 +964,21 @@ async fn show_perms_for(ans: &mut TuiAnswerer, target: &PanelTarget, at: &str) -
     }
 }
 
+/// Fetch the cluster's permission levels (resolver bases) and open the level
+/// picker for the Perms panel — the cluster-scope replacement for typing a path.
+#[cfg(unix)]
+async fn list_levels(ans: &mut TuiAnswerer, target: PanelTarget) -> Result<super::action::Outcome> {
+    let levels = match &target {
+        PanelTarget::Remote(conn) => {
+            netidx_admin::admin_ops::perms::list_levels(ans, Some(conn.server), None).await?
+        }
+        PanelTarget::Local { ca_dir, .. } => {
+            netidx_admin::admin_ops::perms::list_levels(ans, None, Some(ca_dir.clone())).await?
+        }
+    };
+    Ok(super::action::Outcome::levels(Panel::Perms, levels))
+}
+
 #[cfg(unix)]
 async fn perms_rows(ans: &mut TuiAnswerer, target: &PanelTarget, at: &str) -> Result<Vec<PanelRow>> {
     let json = show_perms_for(ans, target, at).await?;
@@ -1117,8 +1152,12 @@ enum Screen {
     Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
     Menu,
-    /// Enter the target path for a path-scoped panel (perms) before opening it.
+    /// Enter the target path for a path-scoped panel (cluster services) before
+    /// opening it.
     PathPrompt { panel: Panel, input: String },
+    /// Pick one of the cluster's permission levels (from the map) before opening
+    /// the perms panel — the cluster-scope replacement for `PathPrompt` on Perms.
+    LevelPick { panel: Panel, levels: Vec<String>, state: ListState },
     /// A panel's rows.
     Panel(Panel),
 }
@@ -1179,6 +1218,15 @@ const PANELS: [Panel; 6] = [
 /// revocation have no no-auth local backend and stay Cluster-only.
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
+/// This host's own resolver base — the single level a local (control-socket)
+/// perms edit is allowed to touch. Best-effort from the local resolver config,
+/// falling back to the root; the admin server enforces the confinement anyway.
+fn local_own_base() -> String {
+    netidx_admin::resolver::ResolverConfig::load_default()
+        .map(|c| c.base_path())
+        .unwrap_or_else(|_| "/".to_string())
+}
+
 /// Load the saved cluster registry, ensuring this host's own cluster (when it
 /// runs an admin server) is included so a locally-created cluster shows up
 /// without a manual discover, and persisting that addition.
@@ -1212,15 +1260,25 @@ impl RemoteState {
         }
     }
 
-    /// A panel surface for this machine's own admin server over its local
-    /// control socket (no auth) — the Local tab's "Manage admins" surface. It
-    /// starts at the panel menu (no cluster list) with only the locally-valid
-    /// panels.
-    pub(super) fn local(cfg_path: PathBuf, ca_dir: PathBuf) -> RemoteState {
+    /// A local admin surface opened **directly** onto `panel` (skipping the panel
+    /// menu) — the Local tab's split "Admins" / "Permissions" items. For the
+    /// path-scoped Perms panel there is no path prompt: local perms are confined
+    /// to this host's own resolver base. Returns the initial refresh op to run.
+    pub(super) fn local_panel(
+        cfg_path: PathBuf,
+        ca_dir: PathBuf,
+        panel: Panel,
+    ) -> (RemoteState, Option<Action>) {
         let mut s = RemoteState::new();
-        s.target = Some(PanelTarget::Local { cfg_path, ca_dir });
-        s.screen = Screen::Menu;
-        s
+        let target = PanelTarget::Local { cfg_path, ca_dir };
+        s.target = Some(target.clone());
+        // Local perms are always this host's own level — no prompt, no picking
+        // another resolver's permissions.
+        let path = panel.path_scoped().then(local_own_base);
+        s.panel_path = path.clone();
+        s.screen = Screen::Panel(panel);
+        let initial = Action::Remote(RemoteAction::Refresh { target, panel, path });
+        (s, Some(initial))
     }
 
     /// Whether the surface is at its top-level menu — the host clears a Local
@@ -1319,6 +1377,12 @@ impl RemoteState {
                 self.screen = Screen::Clusters;
                 self.error = None;
             }
+            RemoteUpdate::Levels { panel, levels } => {
+                let mut state = ListState::default();
+                state.select((!levels.is_empty()).then_some(0));
+                self.screen = Screen::LevelPick { panel, levels, state };
+                self.error = None;
+            }
         }
     }
 
@@ -1327,6 +1391,26 @@ impl RemoteState {
     /// paths routinely contain those letters).
     pub(super) fn capturing_text(&self) -> bool {
         matches!(self.screen, Screen::Manual { .. } | Screen::PathPrompt { .. })
+    }
+
+    /// The tool keys for the App gutter when this surface is drilled in (a
+    /// connected cluster or a sub-form), or `None` at the cluster-list landing
+    /// (where the tab bar + global gutter show instead).
+    pub(super) fn gutter(&self) -> Option<String> {
+        let keys = match &self.screen {
+            Screen::Clusters => return None,
+            Screen::Manual { .. } => "Enter connect · Esc back",
+            // A Local surface (Local tab) closes back to the tab; a Remote one
+            // disconnects.
+            Screen::Menu => match self.target {
+                Some(PanelTarget::Local { .. }) => "↑/↓ · Enter open · Esc back",
+                _ => "↑/↓ · Enter open · Esc disconnect",
+            },
+            Screen::PathPrompt { .. } => "Enter open · Esc back",
+            Screen::LevelPick { .. } => "↑/↓ · Enter open · Esc back",
+            Screen::Panel(panel) => panel.keys(),
+        };
+        Some(format!(" {keys} "))
     }
 
     pub(super) fn on_key(&mut self, code: KeyCode) -> Option<Action> {
@@ -1338,7 +1422,43 @@ impl RemoteState {
             Screen::Manual { .. } => self.on_key_manual(code),
             Screen::Menu => self.on_key_menu(code),
             Screen::PathPrompt { .. } => self.on_key_path_prompt(code),
+            Screen::LevelPick { .. } => self.on_key_level_pick(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
+        }
+    }
+
+    /// Pick a cluster permission level from the map-derived list, then open the
+    /// perms panel against it.
+    fn on_key_level_pick(&mut self, code: KeyCode) -> Option<Action> {
+        let Screen::LevelPick { panel, levels, state } = &mut self.screen else { return None };
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = state.selected().unwrap_or(0).saturating_sub(1);
+                state.select(Some(i));
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = levels.len().saturating_sub(1);
+                let i = state.selected().map_or(0, |i| (i + 1).min(last));
+                state.select(Some(i));
+                None
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::Menu;
+                None
+            }
+            KeyCode::Enter => {
+                let sel = state.selected()?;
+                let path = levels.get(sel)?.clone();
+                let panel = *panel;
+                let target = self.target.clone()?;
+                self.panel_path = Some(path.clone());
+                self.list.select(None);
+                self.rows.clear();
+                self.screen = Screen::Panel(panel);
+                Some(Action::Remote(RemoteAction::Refresh { target, panel, path: Some(path) }))
+            }
+            _ => None,
         }
     }
 
@@ -1436,7 +1556,15 @@ impl RemoteState {
             KeyCode::Enter => {
                 let panels = self.target.as_ref().map(PanelTarget::panels).unwrap_or(&PANELS);
                 let panel = panels[self.menu.selected().unwrap_or(0).min(panels.len() - 1)];
-                if panel.path_scoped() {
+                if matches!(panel, Panel::Perms) {
+                    // Cluster perms: pick a level from the map, not a typed path.
+                    self.error = None;
+                    if let Some(target) = &self.target {
+                        return Some(Action::Remote(RemoteAction::ListLevels {
+                            target: target.clone(),
+                        }));
+                    }
+                } else if panel.path_scoped() {
                     self.error = None;
                     self.screen = Screen::PathPrompt { panel, input: String::new() };
                 } else if let Some(target) = &self.target {
@@ -1645,8 +1773,39 @@ impl RemoteState {
             }
             Screen::Menu => self.render_menu(f, area),
             Screen::PathPrompt { panel, input } => self.render_path_prompt(f, area, *panel, input),
+            Screen::LevelPick { panel, levels, state } => {
+                self.render_level_pick(f, area, *panel, levels, &mut state.clone())
+            }
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
         }
+    }
+
+    /// The cluster permission-level picker: a list of the map's resolver bases.
+    fn render_level_pick(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        panel: Panel,
+        levels: &[String],
+        state: &mut ListState,
+    ) {
+        let items: Vec<ListItem> = if levels.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "(no levels found in the cluster map)",
+                theme::hint_style(),
+            )))]
+        } else {
+            levels.iter().map(|l| ListItem::new(l.clone())).collect()
+        };
+        let list = List::new(items)
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(
+                format!(" {} — pick a level ", panel.title()),
+                theme::title_style(),
+            )))
+            .highlight_style(theme::selected_style())
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(list, area, state);
     }
 
     fn render_path_prompt(&self, f: &mut Frame, area: Rect, panel: Panel, input: &str) {
@@ -1658,7 +1817,7 @@ impl RemoteState {
             &[help.as_str(), "Routed to the resolver cluster mounted there (e.g. / or /eu)."],
             input,
             self.error.as_deref(),
-            " Enter open · Esc back ",
+            "",
         );
     }
 
@@ -1762,14 +1921,10 @@ impl RemoteState {
     }
 
     fn render_menu(&self, f: &mut Frame, area: Rect) {
-        let (title, hint) = match &self.target {
-            Some(PanelTarget::Remote(c)) => {
-                (format!(" {} — {} ", c.domain, c.admin), " ↑/↓ · Enter open · Esc disconnect ")
-            }
-            Some(PanelTarget::Local { .. }) => {
-                (" Local admin server ".to_string(), " ↑/↓ · Enter open · Esc back ")
-            }
-            None => (" Cluster ".to_string(), " ↑/↓ · Enter open · Esc disconnect "),
+        let title = match &self.target {
+            Some(PanelTarget::Remote(c)) => format!(" {} — {} ", c.domain, c.admin),
+            Some(PanelTarget::Local { .. }) => " Local admin server ".to_string(),
+            None => " Cluster ".to_string(),
         };
         let cols =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
@@ -1778,11 +1933,7 @@ impl RemoteState {
         let mut st = self.menu;
         let list = List::new(items)
             .style(theme::panel_style())
-            .block(
-                theme::panel_block()
-                    .title(Span::styled(title, theme::title_style()))
-                    .title_bottom(Line::from(Span::styled(hint, theme::hint_style()))),
-            )
+            .block(theme::panel_block().title(Span::styled(title, theme::title_style())))
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, cols[0], &mut st);
@@ -1801,14 +1952,6 @@ impl RemoteState {
         } else {
             self.rows.iter().map(|r| ListItem::new(r.text.clone())).collect()
         };
-        let hint = match panel {
-            Panel::Queue => " a approve · d deny · R renewals · r refresh · Esc back ",
-            Panel::Delegations => " a approve · d deny · r refresh · Esc back ",
-            Panel::Roster => " a add · e edit-policy · d remove · r refresh · Esc back ",
-            Panel::Revocation => " x revoke · r refresh · Esc back ",
-            Panel::Perms => " e edit · r reload · Esc back ",
-            Panel::Service => " s start · t stop · R restart · r reload · Esc back ",
-        };
         let title = match &self.panel_path {
             Some(p) => format!(" {} @ {p} ", panel.title()),
             None => format!(" {} ", panel.title()),
@@ -1816,9 +1959,7 @@ impl RemoteState {
         let mut st = self.list;
         let list = List::new(items)
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(title, theme::title_style())).title_bottom(
-                Line::from(Span::styled(hint, theme::hint_style())),
-            ))
+            .block(theme::panel_block().title(Span::styled(title, theme::title_style())))
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, area, &mut st);
@@ -1828,7 +1969,7 @@ impl RemoteState {
 /// Render a single-field form (connect / path prompt) as a themed panel filling
 /// `area`, with the value in a focused white field and the terminal cursor at
 /// its end.
-fn render_form(
+pub(super) fn render_form(
     f: &mut Frame,
     area: Rect,
     title: &str,
@@ -1938,6 +2079,36 @@ mod tests {
         let mut s = clusters_state(vec![], vec![]);
         let out = render(&mut s, 100, 20);
         assert!(out.contains("No saved clusters"), "empty hint missing: {out:?}");
+    }
+
+    #[test]
+    fn panel_titles_are_title_case() {
+        assert_eq!(Panel::Queue.title(), "Enrollment Queue");
+        assert_eq!(Panel::Delegations.title(), "Delegation Requests");
+        assert_eq!(Panel::Roster.title(), "Admin Roster");
+        assert_eq!(Panel::Revocation.title(), "Issued Certificates");
+    }
+
+    #[test]
+    fn gutter_none_at_cluster_list_some_when_drilled() {
+        // The cluster list is the tab landing (tab bar + global gutter).
+        let mut s = clusters_state(vec![], vec![]);
+        assert!(s.gutter().is_none(), "cluster list should not be drilled in");
+        // Drilling into a level picker (a tool) owns the gutter.
+        s.apply(RemoteUpdate::Levels { panel: Panel::Perms, levels: vec!["/".to_string()] });
+        assert!(s.gutter().is_some(), "a drilled-in screen should provide gutter keys");
+    }
+
+    #[test]
+    fn level_pick_lists_cluster_levels() {
+        let mut s = RemoteState::new();
+        s.apply(RemoteUpdate::Levels {
+            panel: Panel::Perms,
+            levels: vec!["/".to_string(), "/eu".to_string()],
+        });
+        let out = render(&mut s, 100, 20);
+        assert!(out.contains("pick a level"), "picker title missing: {out:?}");
+        assert!(out.contains("/eu"), "cluster level missing: {out:?}");
     }
 
     #[test]

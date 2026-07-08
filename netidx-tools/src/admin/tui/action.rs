@@ -23,7 +23,6 @@ use netidx_admin::{
     renewd,
     service::ServiceScope,
 };
-use netidx_activation::control::ControlOp;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -41,6 +40,8 @@ pub(super) struct Outcome {
     pub(super) install_service: Option<ServiceScope>,
     /// A result to apply to the Remote tab's state (connection / panel rows).
     pub(super) remote: Option<super::remote::RemoteUpdate>,
+    /// A result to apply to the Local tab's Services surface (refreshed rows).
+    pub(super) services: Option<super::services::ServicesUpdate>,
     /// Suppress the result overlay (used by silent panel re-queries).
     pub(super) quiet: bool,
 }
@@ -53,6 +54,7 @@ impl Outcome {
             refresh_local,
             install_service: None,
             remote: None,
+            services: None,
             quiet: false,
         }
     }
@@ -69,6 +71,7 @@ impl Outcome {
             refresh_local: false,
             install_service: None,
             remote: Some(update),
+            services: None,
             quiet: false,
         }
     }
@@ -84,6 +87,7 @@ impl Outcome {
             refresh_local: false,
             install_service: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
+            services: None,
             quiet: true,
         }
     }
@@ -101,6 +105,50 @@ impl Outcome {
             refresh_local: false,
             install_service: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
+            services: None,
+            quiet: false,
+        }
+    }
+
+    /// A silent result that opens a panel's level picker (cluster perms).
+    pub(super) fn levels(panel: super::remote::Panel, levels: Vec<String>) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::Levels { panel, levels }),
+            services: None,
+            quiet: true,
+        }
+    }
+
+    /// A silent Services-surface refresh: apply the rows, no overlay.
+    pub(super) fn services_rows(rows: Vec<super::services::ServiceRow>) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: None,
+            services: Some(super::services::ServicesUpdate { rows }),
+            quiet: true,
+        }
+    }
+
+    /// A Services action result: a toast plus the refreshed unit rows.
+    pub(super) fn services_after(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        rows: Vec<super::services::ServiceRow>,
+    ) -> Outcome {
+        Outcome {
+            title: title.into(),
+            lines,
+            refresh_local: false,
+            install_service: None,
+            remote: None,
+            services: Some(super::services::ServicesUpdate { rows }),
             quiet: false,
         }
     }
@@ -142,13 +190,19 @@ pub(super) enum Action {
     ExternalEmitCsr { ca_dir: PathBuf },
     /// Install an externally-signed CA certificate on this box (local).
     ExternalInstall { ca_dir: PathBuf },
-    /// Control this machine's activation-supervisor units over its local control
-    /// socket (no auth) — start/stop/restart the resolver/id-map/… units.
-    ServiceControl { op: ControlOp, units_dir: PathBuf },
+    /// Open the Local tab's Services surface over the local activation
+    /// supervisor's control socket (no auth). Pure navigation — the UI loop opens
+    /// the surface and hands back the initial refresh op.
+    OpenServices { units_dir: PathBuf },
+    /// A local activation-services op (refresh / control / create / edit /
+    /// delete), run from within the Services surface. Unit definition is
+    /// local-only: this is the sole path to `ActivationDir`.
+    Services(super::services::ServicesAction),
     /// Open the Local tab's local admin-server panel surface (roster, perms) over
-    /// the control socket. Pure navigation — handled by the UI loop, not an op.
-    /// `ca_dir` lets the perms read auto-verify against the local CA cert.
-    ManageLocalAdmins { cfg_path: PathBuf, ca_dir: PathBuf },
+    /// the control socket, landing directly on `panel`. Pure navigation — handled
+    /// by the UI loop, not an op. `ca_dir` lets the perms read auto-verify against
+    /// the local CA cert.
+    ManageLocalAdmins { cfg_path: PathBuf, ca_dir: PathBuf, panel: super::remote::Panel },
 }
 
 impl Action {
@@ -162,7 +216,7 @@ impl Action {
             Action::Renew { .. } => "Renewing certificates".to_string(),
             Action::Update { .. } => "Updating".to_string(),
             Action::Join { dry_run } => {
-                if *dry_run { "Previewing join".to_string() } else { "Joining a network".to_string() }
+                if *dry_run { "Previewing join".to_string() } else { "Joining a cluster".to_string() }
             }
             Action::AddParent => "Adding a parent".to_string(),
             Action::ReviewDelegations => "Reviewing delegations".to_string(),
@@ -175,14 +229,8 @@ impl Action {
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
             Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
-            Action::ServiceControl { op, .. } => match op {
-                ControlOp::Restart => "Restarting services",
-                ControlOp::Start => "Starting services",
-                ControlOp::Stop => "Stopping services",
-                ControlOp::Status => "Checking services",
-                ControlOp::Reload => "Reloading services",
-            }
-            .to_string(),
+            Action::OpenServices { .. } => "Services".to_string(),
+            Action::Services(sa) => sa.label(),
             Action::ManageLocalAdmins { .. } => "Managing admins".to_string(),
         }
     }
@@ -221,10 +269,8 @@ impl Action {
                  stops working and a new one is shown once — save it."
                     .to_string(),
             ),
-            Action::ServiceControl { op: ControlOp::Stop, .. } => {
-                Some("Stop this machine's netidx services? Running units stop.".to_string())
-            }
-            Action::ServiceControl { .. } => None,
+            Action::OpenServices { .. } => None,
+            Action::Services(sa) => sa.confirm_message(),
             Action::Remote(ra) => ra.confirm_message(),
             Action::Uninstall { remove_ca, .. } => Some(if *remove_ca {
                 "Remove this install AND DESTROY THE CA? This stops and removes the \
@@ -259,47 +305,14 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::ManageLocalAdmins { .. } => {
             bail!("internal error: manage-local-admins is navigation, not an op future")
         }
+        Action::OpenServices { .. } => {
+            bail!("internal error: open-services is navigation, not an op future")
+        }
         a @ (Action::AutoApprove { .. }
         | Action::RecoveryRotate { .. }
         | Action::ExternalEmitCsr { .. }
         | Action::ExternalInstall { .. }) => local_ca_op(&mut ans, a).await,
-        Action::ServiceControl { op, units_dir } => service_control(op, units_dir).await,
-    }
-}
-
-/// Control this machine's activation-supervisor units over its local control
-/// socket (no auth). Cross-platform — unlike the CA ops.
-async fn service_control(op: ControlOp, units_dir: PathBuf) -> Result<Outcome> {
-    use netidx_activation::control::{ControlRequest, ControlResponse, UnitState, control};
-    let req = ControlRequest { op, units: Vec::new() };
-    let title = match op {
-        ControlOp::Restart => "Services restarted",
-        ControlOp::Start => "Services started",
-        ControlOp::Stop => "Services stopped",
-        ControlOp::Status => "Service status",
-        ControlOp::Reload => "Services reloaded",
-    };
-    match control(&units_dir, &req).await? {
-        ControlResponse::Ok { units } => {
-            let mut lines: Vec<String> = units
-                .iter()
-                .map(|u| {
-                    let state = match &u.state {
-                        UnitState::NotStarted => "not started".to_string(),
-                        UnitState::Running { pid: Some(p) } => format!("running (pid {p})"),
-                        UnitState::Running { pid: None } => "running".to_string(),
-                        UnitState::Stopped => "stopped".to_string(),
-                        UnitState::Died => "died".to_string(),
-                    };
-                    format!("{}: {state}", u.unit)
-                })
-                .collect();
-            if lines.is_empty() {
-                lines.push("No units.".to_string());
-            }
-            Ok(Outcome::plain(title, lines, false))
-        }
-        ControlResponse::Err { reason } => bail!("{reason}"),
+        Action::Services(sa) => super::services::run(&mut ans, sa).await,
     }
 }
 
@@ -434,6 +447,7 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             refresh_local: true,
             install_service: need.scope(),
             remote: None,
+            services: None,
             quiet: false,
         }),
     }
@@ -441,12 +455,12 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
 
 /// Reconcile config with the network and apply the resulting edit plan.
 async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
-    ans.progress(Progress::new(Stage::Discovering, "checking the network for changes…"));
+    ans.progress(Progress::new(Stage::Discovering, "checking the cluster for changes…"));
     let plan = super::lifecycle::update_plan(role).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
             "Up to date",
-            vec!["Already in sync with the network — no changes.".to_string()],
+            vec!["Already in sync with the cluster — no changes.".to_string()],
             false,
         ));
     }
@@ -460,6 +474,7 @@ async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
         refresh_local: true,
         install_service: None,
         remote: None,
+        services: None,
         quiet: false,
     })
 }
@@ -472,7 +487,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     let (title, lines) = if dry_run {
         ("Join preview", vec!["Preview only — nothing was written.".to_string()])
     } else {
-        ("Joined", vec!["Joined the network. Restart the local resolver to use it.".to_string()])
+        ("Joined", vec!["Joined the cluster. Restart the local resolver to use it.".to_string()])
     };
     Ok(Outcome {
         title: title.to_string(),
@@ -480,6 +495,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
         refresh_local: !dry_run,
         install_service: None,
         remote: None,
+        services: None,
         quiet: false,
     })
 }
@@ -534,6 +550,7 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
         refresh_local: true,
         install_service: None,
         remote: None,
+        services: None,
         quiet: false,
     })
 }
@@ -670,6 +687,7 @@ fn install_outcome(role: InstallRole, dry_run: bool, scope: Option<ServiceScope>
             refresh_local: true,
             install_service: scope,
             remote: None,
+            services: None,
             quiet: false,
         }
     }

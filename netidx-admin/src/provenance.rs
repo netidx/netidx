@@ -77,9 +77,10 @@ pub struct InstallRecord {
     pub base: String,
     /// The data-plane auth chosen at install (`anonymous`/`local`/`krb5`/`tls`).
     pub auth: String,
-    /// The network this host joined, when it joined one — carrying the
-    /// pinned CA identity. `None` for a standalone/local-only install (a
-    /// workstation with no parent, or a fresh first resolver).
+    /// The admin cluster this host belongs to — the cluster it founded or the
+    /// one it joined — carrying that cluster's CA identity (domain + glyph).
+    /// `None` for a standalone/local-only install (a workstation with no
+    /// parent, or a resolver with no admin server).
     #[serde(default)]
     pub network: Option<NetworkIdentity>,
     /// A admin-server address known at install time, if any — a starting

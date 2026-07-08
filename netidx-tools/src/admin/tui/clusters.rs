@@ -106,37 +106,39 @@ impl KnownClusters {
     }
 }
 
-/// If this host runs its own admin server — i.e. a cluster was founded (or
-/// joined) here — make sure that cluster is in the saved set, so it appears on
-/// the Cluster tab without a manual discover. The identity comes from this
-/// host's install record (the domain + CA fingerprint pinned at install, no
-/// network round-trip); the on-entry poll then verifies it live like any other
-/// saved cluster. Returns whether the saved set changed (worth saving).
+/// If this host runs its own admin server — i.e. it founded or joined a cluster
+/// and hosts a member of it — make sure that cluster is in the saved set, so it
+/// appears on the Cluster tab without a manual discover. The identity is the one
+/// recorded in this host's install record (`network`); the admin-server address
+/// is this host's own listen address (a CA host records no upstream one). The
+/// on-entry poll then verifies it live like any other saved cluster. Returns
+/// whether the saved set changed (worth saving).
 #[cfg(unix)]
 pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
     let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen() else {
         return false;
     };
-    let Some(net) = local_network_identity() else { return false };
-    match Fingerprint::parse_text(&net.ca_fingerprint) {
-        Ok(fp) => clusters.upsert(&net.domain, addr, fp),
-        Err(_) => false,
+    match local_cluster_identity() {
+        Some((domain, fp)) => clusters.upsert(&domain, addr, fp),
+        None => false,
     }
 }
 
-/// The network identity (domain + CA fingerprint) this host pinned at install —
-/// the same CA its own admin server presents. Prefers the user-scope record,
-/// falling back to the system-scope one.
+/// The admin cluster this host belongs to (domain + CA fingerprint), from its
+/// install record — the user-scope record, else the system-scope one.
 #[cfg(unix)]
-fn local_network_identity() -> Option<netidx_admin::provenance::NetworkIdentity> {
+fn local_cluster_identity() -> Option<(String, Fingerprint)> {
     use netidx_admin::provenance::InstallRecord;
-    if let Ok(Some(r)) = InstallRecord::load_default()
-        && r.network.is_some()
-    {
-        return r.network;
-    }
     let sys = paths::system_install_record();
-    sys.exists().then(|| InstallRecord::load(&sys).ok()?.network).flatten()
+    let records = [
+        InstallRecord::load_default().ok().flatten(),
+        sys.exists().then(|| InstallRecord::load(&sys).ok()).flatten(),
+    ];
+    records
+        .into_iter()
+        .flatten()
+        .find_map(|r| r.network)
+        .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok().map(|fp| (n.domain, fp)))
 }
 
 #[cfg(not(unix))]

@@ -548,7 +548,7 @@ pub async fn confirm_seeds(
         bail!("no admin server could be reached")
     };
     if !ans.confirm_identity(&identity).await? {
-        bail!("the network identity was not confirmed; nothing was sent");
+        bail!("the cluster identity was not confirmed; nothing was sent");
     }
     let info = admin_client::aggregate(seeds, kind, &identity)
         .await
@@ -585,14 +585,14 @@ pub async fn network_addrs_and_identity(
 ) -> Result<Vec<(SocketAddr, ReferralAuth)>> {
     if net.info.resolvers.is_empty() {
         bail!(
-            "the admin servers of network {:?} reported no resolvers — is the \
+            "the admin servers of cluster {:?} reported no resolvers — is the \
              resolver host's admin server down? (manual setup: re-run and leave \
              the admin-server prompts blank)",
             net.identity.domain,
         );
     }
     ans.note(&format_compact!(
-        "network {:?}: {} resolver(s)",
+        "cluster {:?}: {} resolver(s)",
         net.identity.domain,
         net.info.resolvers.len()
     ));
@@ -613,7 +613,7 @@ pub async fn network_addrs_and_identity(
     if needs_tls && !have_identity {
         let Some(ca_addr) = net.info.ca_addr else {
             bail!(
-                "network {:?} uses TLS but none of its admin servers reported a \
+                "cluster {:?} uses TLS but none of its admin servers reported a \
                  CA — cannot obtain a client certificate",
                 net.identity.domain,
             )
@@ -661,7 +661,7 @@ pub async fn maybe_join_ca_server(
     };
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
-            "network {:?} reported no CA; falling back to local certificate setup",
+            "cluster {:?} reported no CA; falling back to local certificate setup",
             net.identity.domain,
         ));
         return Ok(None);

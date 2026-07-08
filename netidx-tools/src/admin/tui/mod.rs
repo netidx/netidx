@@ -27,6 +27,7 @@ mod lifecycle;
 mod local;
 mod privileged;
 mod remote;
+mod services;
 mod theme;
 mod widgets;
 
@@ -121,7 +122,11 @@ struct App {
     /// A finished action's result overlay.
     result: Option<ResultView>,
     /// A destructive action awaiting yes/no confirmation before it runs.
-    confirm: Option<(String, Action)>,
+    /// A pending yes/no confirmation: `(message, on_yes, on_no)`. `on_no` is
+    /// `None` for a plain confirm (No cancels); `Some` for a three-way prompt
+    /// where No runs a *different* action (Esc always cancels) — used by
+    /// Uninstall on a CA host (destroy the CA / keep it / cancel).
+    confirm: Option<(String, Action, Option<Action>)>,
 }
 
 impl App {
@@ -205,6 +210,13 @@ impl App {
                         self.remote.apply(update);
                     }
                 }
+                if let Some(update) = out.services {
+                    // Refreshed unit rows only ever come from the Local tab's
+                    // Services surface (the sole `ServicesAction` source).
+                    if self.tab == Tab::Local && self.local.services_open() {
+                        self.local.apply_services(update);
+                    }
+                }
                 // A quiet result (a silent panel re-query) shows no overlay.
                 if !out.quiet {
                     self.result =
@@ -286,8 +298,14 @@ impl App {
         }
         if self.confirm.is_some() {
             return match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm.take().map(|(_, a)| a),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm.take().map(|(_, yes, _)| yes)
+                }
+                // No runs the alternate action (three-way) or cancels (plain).
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.confirm.take().and_then(|(_, _, no)| no)
+                }
+                KeyCode::Esc => {
                     self.confirm = None;
                     None
                 }
@@ -312,6 +330,7 @@ impl App {
         // hostnames and paths routinely contain 'q'/'l'.
         match self.tab {
             Tab::Local if self.local.status_open() => return self.local.on_key(code),
+            Tab::Local if self.local.services_capturing_text() => return self.local.on_key(code),
             Tab::Remote if self.remote.capturing_text() => return self.remote.on_key(code),
             _ => {}
         }
@@ -325,8 +344,13 @@ impl App {
                 return None;
             }
             KeyCode::Tab => {
-                // No tabs on a fresh machine — there's nothing to switch to.
-                if self.local.installed() {
+                // No tabs on a fresh machine, and none while drilled into a tool
+                // (the bar is hidden — Esc backs out to the tab first).
+                let drilled = match self.tab {
+                    Tab::Local => self.local.gutter().is_some(),
+                    Tab::Remote => self.remote.gutter().is_some(),
+                };
+                if self.local.installed() && !drilled {
                     self.next_tab();
                 }
                 return None;
@@ -345,15 +369,52 @@ impl App {
                 self.remote.focus_delegations();
                 None
             }
-            // Pure navigation: open the Local tab's local admin panel surface.
-            Action::ManageLocalAdmins { cfg_path, ca_dir } => {
-                self.local.open_admin(cfg_path, ca_dir);
+            // Open the Local tab's local admin panel surface directly on the
+            // requested panel (Admins / Permissions), kicking off its refresh.
+            Action::ManageLocalAdmins { cfg_path, ca_dir, panel } => {
+                self.local.open_admin(cfg_path, ca_dir, panel)
+            }
+            // Pure navigation: open the Local tab's Services surface and kick off
+            // its first refresh.
+            Action::OpenServices { units_dir } => {
+                self.local.open_services(units_dir.clone());
+                Some(Action::Services(services::ServicesAction::Refresh { units_dir }))
+            }
+            // Gate destructive actions behind a confirmation.
+            action => self.arm_action(action),
+        }
+    }
+
+    /// Arm the confirmation for an action, or return it to run at once. Uninstall
+    /// on a CA-owning host gets a three-way prompt (also destroy the CA / keep it
+    /// / cancel); everything else is a plain yes/no (or runs immediately).
+    fn arm_action(&mut self, action: Action) -> Option<Action> {
+        match action {
+            Action::Uninstall { config_scope, config_dir, needs_root, remove_ca: false }
+                if config_dir.join("ca").is_dir() =>
+            {
+                let destroy = Action::Uninstall {
+                    config_scope,
+                    config_dir: config_dir.clone(),
+                    needs_root,
+                    remove_ca: true,
+                };
+                let keep = Action::Uninstall { config_scope, config_dir, needs_root, remove_ca: false };
+                self.confirm = Some((
+                    "This install holds the cluster's certificate authority. Also \
+                     destroy it? Destroying the CA is irreversible — every enrolled \
+                     node's certificate becomes unverifiable and unrenewable.\n\n\
+                     y = destroy the CA and uninstall · n = keep the CA and uninstall \
+                     · Esc = cancel"
+                        .to_string(),
+                    destroy,
+                    Some(keep),
+                ));
                 None
             }
-            // Gate destructive actions behind a yes/no confirmation.
             action => match action.confirm_message() {
                 Some(msg) => {
-                    self.confirm = Some((msg, action));
+                    self.confirm = Some((msg, action, None));
                     None
                 }
                 None => Some(action),
@@ -384,8 +445,8 @@ impl App {
                 self.render_log(f, screen);
             } else if let Some(m) = &self.modal {
                 m.render(f, screen);
-            } else if let Some((msg, _)) = &self.confirm {
-                render_confirm(f, screen, msg);
+            } else if let Some((msg, _, on_no)) = &self.confirm {
+                render_confirm(f, screen, msg, on_no.is_some());
             } else if let Some(r) = &self.result {
                 render_result(f, screen, r);
             } else {
@@ -408,18 +469,39 @@ impl App {
             }
             self.render_footer(f, chunks[1]);
         } else if self.local.installed() {
-            let chunks = Layout::vertical([
-                Constraint::Length(3), // tab bar
-                Constraint::Min(0),    // body
-                Constraint::Length(1), // footer / key hints
-            ])
-            .split(screen);
-            self.render_tabs(f, chunks[0]);
-            match self.tab {
-                Tab::Local => self.local.render(f, chunks[1]),
-                Tab::Remote => self.remote.render(f, chunks[1]),
+            // Drilled into a tool (Services, a cluster panel, …): the tab bar
+            // goes away — you're inside a tool, not switching tabs — and the
+            // gutter shows the tool's keys instead of the global tab/quit keys.
+            let gutter = match self.tab {
+                Tab::Local => self.local.gutter(),
+                Tab::Remote => self.remote.gutter(),
+            };
+            if let Some(keys) = gutter {
+                let chunks =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+                match self.tab {
+                    Tab::Local => self.local.render(f, chunks[0]),
+                    Tab::Remote => self.remote.render(f, chunks[0]),
+                }
+                let base = theme::backdrop_style();
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(keys, base))).style(base),
+                    chunks[1],
+                );
+            } else {
+                let chunks = Layout::vertical([
+                    Constraint::Length(3), // tab bar
+                    Constraint::Min(0),    // body
+                    Constraint::Length(1), // footer / key hints
+                ])
+                .split(screen);
+                self.render_tabs(f, chunks[0]);
+                match self.tab {
+                    Tab::Local => self.local.render(f, chunks[1]),
+                    Tab::Remote => self.remote.render(f, chunks[1]),
+                }
+                self.render_footer(f, chunks[2]);
             }
-            self.render_footer(f, chunks[2]);
         } else {
             // Fresh machine: the install flow only — no tabs, no remote admin
             // (there's no local cluster to administer yet).
@@ -629,11 +711,15 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
 /// Render a destructive/verification yes/no confirmation as a centered overlay.
 /// The message may contain `\n` (e.g. an approval showing the request code on its
 /// own line); each becomes its own wrapped line and the popup sizes to fit.
-fn render_confirm(f: &mut Frame, screen: Rect, msg: &str) {
+fn render_confirm(f: &mut Frame, screen: Rect, msg: &str, three_way: bool) {
     let mut lines: Vec<Line> =
         msg.split('\n').map(|l| Line::from(Span::styled(l.to_string(), theme::panel_style()))).collect();
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" y confirm · n cancel ", theme::hint_style())));
+    // A three-way prompt (n runs an alternate action) spells its keys out in the
+    // body, so only the plain y/n case needs the generic footer.
+    if !three_way {
+        lines.push(Line::from(Span::styled(" y confirm · n cancel ", theme::hint_style())));
+    }
     let h = (lines.len() as u16 + 2).clamp(8, screen.height);
     let area = widgets::centered(70, h, screen);
     widgets::shadow(f, area, screen);
@@ -811,6 +897,7 @@ fn launch(
                     refresh_local: true,
                     install_service: None,
                     remote: None,
+                    services: None,
                     quiet: false,
                 });
             app.finish_op(out);
@@ -906,7 +993,7 @@ mod render_tests {
         // Dismiss the welcome dialog to reveal the role menu behind it.
         app.local.on_key(KeyCode::Enter);
         let s = render(&mut app);
-        assert!(s.contains("Install a role"), "role menu missing: {s:?}");
+        assert!(s.contains("Install a Role"), "role menu missing: {s:?}");
         assert!(!s.contains("Cluster"), "tab bar should be hidden on a fresh machine: {s:?}");
     }
 
@@ -973,21 +1060,17 @@ mod render_tests {
     }
 
     #[test]
-    fn local_admin_surface_shows_only_local_panels() {
-        // The Local tab's admin surface (a Local target) offers only the
-        // no-auth panels — Roster and Permissions — not the authenticated
-        // Cluster-only panels (enrollment queue, delegations, revocation).
+    fn local_admin_surface_opens_on_chosen_panel() {
+        // The split "Admins" / "Permissions" items open the local admin surface
+        // directly on the requested panel (no panel menu, no path prompt).
         let mut app = App::new();
-        app.local.open_admin(
+        let _ = app.local.open_admin(
             std::path::PathBuf::from("/nonexistent/admin-server.json"),
             std::path::PathBuf::from("/nonexistent/ca"),
+            remote::Panel::Roster,
         );
         let s = render(&mut app);
-        assert!(s.contains("Local admin server"), "local surface title missing: {s:?}");
-        assert!(s.contains("Admin roster"), "roster panel missing: {s:?}");
-        assert!(s.contains("Permissions"), "perms panel missing locally: {s:?}");
-        assert!(!s.contains("Enrollment"), "queue panel should be absent locally: {s:?}");
-        assert!(!s.contains("Delegation"), "delegation panel should be absent locally: {s:?}");
+        assert!(s.contains("Admin Roster"), "roster panel not opened: {s:?}");
     }
 
     #[cfg(unix)]

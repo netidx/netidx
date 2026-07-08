@@ -2987,6 +2987,12 @@ fn self_entry(cfg: &AdminServerConfig) -> ServerEntry {
     ServerEntry { addr: cfg.listen, roles: roles_of(cfg), cluster }
 }
 
+/// This host's own resolver base (the single level a local, control-socket
+/// caller may edit permissions at). `None` when this host serves no resolver.
+fn own_base(state: &Server) -> Option<String> {
+    self_entry(&state.cfg.lock()).cluster.map(|c| c.base)
+}
+
 /// CA-side: register/update a admin server's facts in the authoritative
 /// map and persist it. Peer-cert-gated at the dispatch. The CA is the
 /// map's only writer, so a non-CA host refuses.
@@ -3291,6 +3297,21 @@ async fn handle_edit_perms(
             Err(e) => return err(format!("auth task panicked: {e}")),
         }
     };
+    // A local (control-socket) caller is the on-box superuser, but confined to
+    // this host's OWN level: it may not reach across the cluster map to edit
+    // another resolver's permissions. (Remote admins are bounded by their
+    // `perms_edit_scopes` below.)
+    if local {
+        let base = own_base(state);
+        if base.as_deref() != Some(req.target_path.as_str()) {
+            return err(format!(
+                "local perms edits are confined to this host's own level ({}); \
+                 refusing to edit {:?}",
+                base.as_deref().unwrap_or("<none>"),
+                req.target_path,
+            ));
+        }
+    }
     let authorized = authd.kind == ca_vault::SlotKind::Signing
         || perms_scope_covers(&authd.policy.perms_edit_scopes, &req.target_path);
     if !authorized {
@@ -7900,6 +7921,41 @@ mod tests {
         }
         let p = admin_client::get_perms(addr, NodeKind::Client, &id).await.unwrap();
         assert!(p.contains("bob") && !p.contains("users"), "local edit applied: {p}");
+    }
+
+    /// A local (control-socket) caller is the on-box superuser, but confined to
+    /// this host's own resolver level — it cannot reach across the map to edit
+    /// another cluster's permissions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_perms_edit_is_confined_to_own_level() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_ca(dir.path());
+        std::fs::write(dir.path().join("perms.json"), r#"{"/":{"users":"swl"}}"#).unwrap();
+        let rpath = write_resolver_with_perms(dir.path());
+        let roles = Roles {
+            ca: Some(CaRole {
+                dir: dir.path().to_path_buf(),
+                autorenew: Some(autorenew_keytab(dir.path())),
+            }),
+            resolver: Some(ResolverRole { config: rpath }),
+            id_map: None,
+        };
+        let (_addr, state) = spawn_server_with(dir.path(), roles, vec![]).await;
+        let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
+        // This host's own resolver base is "/"; a local edit at another level is
+        // refused even though local auth is a signing-tier superuser.
+        let req = EditPermsRequest {
+            admin: String::new(),
+            password: Secret(String::new()),
+            target_path: "/somewhere/else".to_string(),
+            perms_json: r#"{"/x":{"bob":"swl"}}"#.to_string(),
+        };
+        match handle_edit_perms(&state, &signs, &req, true).await {
+            EditPermsResponse::Err { reason } => {
+                assert!(reason.contains("confined to this host's own level"), "got {reason}")
+            }
+            EditPermsResponse::Ok { .. } => panic!("a local edit at a non-own level must be refused"),
+        }
     }
 
     /// `RotateRecovery` is refused over the network and, over the local

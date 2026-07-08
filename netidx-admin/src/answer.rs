@@ -169,7 +169,7 @@ impl Field {
                 label: "auth scheme",
                 help: "How clients prove who they are: anonymous (no auth), \
                        local (unix peer creds), krb5 (Kerberos), or tls \
-                       (certificates issued by this network's CA).",
+                       (certificates issued by this cluster's CA).",
             },
             Spn => FieldInfo {
                 flag: "--spn",
@@ -315,14 +315,14 @@ impl Field {
             },
             NetworkDomain => FieldInfo {
                 flag: "--domain",
-                label: "network domain",
-                help: "The domain this network is grouped under in discovery, \
+                label: "cluster domain",
+                help: "The domain this cluster is grouped under in discovery, \
                        e.g. ryu-oh.org.",
             },
             Domain => FieldInfo {
                 flag: "--domain",
-                label: "network domain",
-                help: "The domain this network's CA is named for, e.g. \
+                label: "cluster domain",
+                help: "The domain this cluster's CA is named for, e.g. \
                        example.com.",
             },
             ResolverAddr => FieldInfo {
@@ -349,7 +349,7 @@ impl Field {
             SetupAdminServer => FieldInfo {
                 flag: "--with-admin-server",
                 label: "set up admin server?",
-                help: "Set up an admin server for this network — a small CA that \
+                help: "Set up an admin server for this cluster — a small CA that \
                        secures the admin plane (discovery, enrollment, certificate \
                        renewal). Data-plane auth is unaffected. On an anonymous \
                        data plane it is optional, so strict mode needs an explicit \
@@ -478,7 +478,7 @@ impl Field {
             RootAdminName => FieldInfo {
                 flag: "--admin",
                 label: "root user name",
-                help: "Create a root user for this network's certificate authority. \
+                help: "Create a root user for this cluster's certificate authority. \
                        The root user can sign certificates and perform any other \
                        administrative function, including creating other users. \
                        Defaults to your current login name.",
