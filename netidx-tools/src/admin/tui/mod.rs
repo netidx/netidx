@@ -386,10 +386,17 @@ impl App {
         }
         if self.busy {
             // Full-screen wizard: the tab bar goes away while an op runs (you
-            // can't do remote admin mid-install).
+            // can't do remote admin mid-install). With no question up, the blue
+            // backdrop *is* the working state — the footer says "working…". Only
+            // paint a dialog when there's something to say, else an empty titled
+            // box would flash between two real dialogs. The one thing worth
+            // surfacing here is an out-of-band verification code with no progress
+            // modal to carry it.
             let chunks =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
-            self.render_activity(f, chunks[0]);
+            if self.verification.is_some() {
+                self.render_activity(f, chunks[0]);
+            }
             self.render_footer(f, chunks[1]);
         } else if self.local.installed() {
             let chunks = Layout::vertical([
@@ -424,14 +431,11 @@ impl App {
         f.render_widget(tabs, area);
     }
 
-    /// The busy view — a full-screen console dialog (gray panel with a thin blue
-    /// fringe, never bare text on the backdrop) titled with the running action.
-    /// The live progress rides in the progress modal on top (see
-    /// [`Self::render_progress`]); this is the quiet backdrop behind it. It shows
-    /// no transcript (housekeeping notes flashing between modals is noise — the
-    /// operator reviews them on demand via the log pane); the only thing surfaced
-    /// here is an out-of-band verification code, and only as a fallback when no
-    /// progress modal is up to carry it.
+    /// Surface an out-of-band verification code while an op runs, in the rare
+    /// case one is issued with no progress modal up to carry it. Only called when
+    /// [`Self::verification`] is set; otherwise the busy state is just the blue
+    /// backdrop (housekeeping notes never flash here — the operator reviews them
+    /// on demand via the log pane).
     fn render_activity(&self, f: &mut Frame, area: Rect) {
         let title = self.activity.clone().unwrap_or_else(|| "Working".to_string());
         let dlg = area.inner(Margin::new(1, 1));
@@ -972,6 +976,31 @@ mod render_tests {
         app.handle_request(UiRequest::Note("created a new CA at /x".to_string()));
         let s = render(&mut app);
         assert!(!s.contains("created a new CA"), "note leaked into the busy view: {s:?}");
+    }
+
+    #[test]
+    fn bare_busy_state_paints_no_dialog_frame() {
+        // Between two real dialogs an op is briefly busy with no question up. That
+        // gap must show only the blue backdrop (+ the "working…" footer), never an
+        // empty titled box — the flash Eric hit. The activity label must not
+        // appear anywhere on screen.
+        let mut app = App::new();
+        app.begin("Installing resolver".to_string());
+        let s = render(&mut app);
+        assert!(!s.contains("Installing resolver"), "empty activity dialog flashed: {s:?}");
+        assert!(s.contains("working…"), "busy footer hint missing: {s:?}");
+    }
+
+    #[test]
+    fn verification_code_still_shows_in_busy_state() {
+        // The one thing the busy view still surfaces: an out-of-band verification
+        // code issued with no progress modal to carry it.
+        let mut app = App::new();
+        app.begin("Enrolling".to_string());
+        let fp = Fingerprint::of_der(b"a fake spki for the test");
+        app.verification = Some(("Approve this node".to_string(), fp));
+        let s = render(&mut app);
+        assert!(s.contains("read this code to the approving admin"), "verification code missing: {s:?}");
     }
 
     #[test]

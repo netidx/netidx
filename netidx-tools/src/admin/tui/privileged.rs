@@ -16,7 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use netidx_admin::service::{self, ServiceParams, ServiceScope};
+use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{
     io::{Write, stdout},
     path::Path,
@@ -42,8 +42,31 @@ pub(super) fn install_service(
             let for_user = super::super::service::resolve_for_user(None)?;
             let exe = current_exe()?;
             let args = install_argv(&for_user, &exe);
-            run_privileged(terminal, &exe, &args, true, "install the system service")?;
-            Ok("registered the system service (netidx)".to_string())
+            let params = ServiceParams {
+                scope: ServiceScope::System,
+                for_user: Some(for_user),
+                binary: exe.clone(),
+                service_name: ServiceParams::DEFAULT_NAME.to_string(),
+                activation_dir: None,
+            };
+            let ran = run_privileged(terminal, &exe, &args, true, "install the system service");
+            // The privileged handoff (suspend → sudo/su → resume) is inherently
+            // flaky: a lost tty or a bumpy terminal resume can report failure even
+            // when the child already installed the unit. The unit's real state is
+            // authoritative, and querying it needs no privilege — so consult it
+            // before believing a reported failure.
+            match service::status(&params) {
+                Ok(ServiceStatus::Active) | Ok(ServiceStatus::Inactive) => {
+                    Ok("registered the system service (netidx)".to_string())
+                }
+                Ok(ServiceStatus::NotInstalled) => {
+                    ran?;
+                    bail!("the system service install reported success but no unit is installed");
+                }
+                Err(status_err) => ran
+                    .map(|()| "registered the system service (netidx)".to_string())
+                    .map_err(|e| e.context(status_err)),
+            }
         }
     }
 }
