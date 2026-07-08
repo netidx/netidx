@@ -296,6 +296,31 @@ fn arith_no_panics() {
     );
     let big = Value::Duration(Arc::new(Duration::MAX));
     assert!(matches!(big.clone() + big.clone(), Value::Error(_)));
+
+    // Unchecked datetime ± duration SATURATES to the datetime range on
+    // overflow: chrono's own operators panic, and the panic aborts when
+    // it unwinds through a cranelift frame (soak jul08g crash 3). A
+    // duration too large for chrono::Duration saturates the same way.
+    let dt = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(0, 0).unwrap()));
+    let huge = Value::Duration(Arc::new(Duration::from_secs(9999999999999)));
+    assert_eq!(
+        dt.clone() - huge.clone(),
+        Value::DateTime(Arc::new(DateTime::<Utc>::MIN_UTC))
+    );
+    assert_eq!(
+        dt.clone() + huge.clone(),
+        Value::DateTime(Arc::new(DateTime::<Utc>::MAX_UTC))
+    );
+    assert_eq!(
+        dt.clone() + Value::Duration(Arc::new(Duration::MAX)),
+        Value::DateTime(Arc::new(DateTime::<Utc>::MAX_UTC))
+    );
+    // in-range datetime arithmetic still works
+    let day = Value::Duration(Arc::new(Duration::from_secs(86400)));
+    assert_eq!(
+        dt.clone() + day.clone(),
+        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(86400, 0).unwrap()))
+    );
 }
 
 #[test]
@@ -333,6 +358,18 @@ fn checked_methods() {
         dur.clone().checked_sub(dur.clone()).checked_sub(dur.clone()),
         Value::Error(_)
     ));
+
+    // checked datetime ± duration REPORTS range overflow as an Error —
+    // unlike unchecked + and -, which saturate (see `arith_no_panics`)
+    let dt = Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(0, 0).unwrap()));
+    let huge = Value::Duration(Arc::new(Duration::from_secs(9999999999999)));
+    assert!(matches!(dt.clone().checked_sub(huge.clone()), Value::Error(_)));
+    assert!(matches!(dt.clone().checked_add(huge.clone()), Value::Error(_)));
+    let day = Value::Duration(Arc::new(Duration::from_secs(86400)));
+    assert_eq!(
+        dt.clone().checked_add(day),
+        Value::DateTime(Arc::new(DateTime::<Utc>::from_timestamp(86400, 0).unwrap()))
+    );
 
     // cross-type checked
     assert!(matches!(Value::I64(i64::MAX).checked_add(Value::I32(1)), Value::Error(_)));

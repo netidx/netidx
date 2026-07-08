@@ -347,6 +347,33 @@ macro_rules! checked_dur {
     };
 }
 
+macro_rules! checked_dt {
+    ($expr:expr) => {
+        match $expr {
+            Some(v) => Value::DateTime(Arc::new(v)),
+            None => return Value::error(literal!("datetime arithmetic error")),
+        }
+    };
+}
+
+// Chrono's DateTime ± Duration operators PANIC on overflow. The
+// UNCHECKED graphix ops saturate to the datetime range instead (see
+// the duration sub note below for why unchecked ops can't produce
+// errors); a duration too large for chrono::Duration would saturate
+// anyway, so the conversion failure folds into the same clamp.
+macro_rules! saturating_dt {
+    ($dt:expr, $d:expr, $checked:ident, $bound:ident) => {
+        match chrono::Duration::from_std(*$d) {
+            Ok(d) => Value::DateTime(Arc::new(
+                $dt.$checked(d).unwrap_or(chrono::DateTime::<chrono::Utc>::$bound),
+            )),
+            Err(_) => {
+                Value::DateTime(Arc::new(chrono::DateTime::<chrono::Utc>::$bound))
+            }
+        }
+    };
+}
+
 macro_rules! dur_from_f64 {
     ($expr:expr) => {
         match Duration::try_from_secs_f64($expr) {
@@ -562,10 +589,7 @@ impl Add for Value {
             self, rhs, 0., +, wrapping, wrapping_add, checked_add,
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
-                    match chrono::Duration::from_std(*d) {
-                        Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
-                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
-                    }
+                    saturating_dt!(dt, d, checked_add_signed, MAX_UTC)
                 },
             (Value::Duration(d0), Value::Duration(d1)) => {
                 checked_dur!(d0.checked_add(*d1))
@@ -588,10 +612,7 @@ impl Sub for Value {
             self, rhs, 0., -, wrapping, wrapping_sub, checked_sub,
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
-                    match chrono::Duration::from_std(*d) {
-                        Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
-                        Err(e) => Value::error(format_compact!("{}", e).as_str()),
-                    }
+                    saturating_dt!(dt, d, checked_sub_signed, MIN_UTC)
                 },
             // Duration is unsigned (no negative durations), so the
             // UNCHECKED `-` SATURATES to zero on underflow (1s - 2s = 0s)
@@ -712,7 +733,7 @@ impl Value {
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(*d) {
-                        Ok(d) => Value::DateTime(Arc::new((*dt) + d)),
+                        Ok(d) => checked_dt!(dt.checked_add_signed(d)),
                         Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
                 },
@@ -734,7 +755,7 @@ impl Value {
             (Value::DateTime(dt), Value::Duration(d))
                 | (Value::Duration(d), Value::DateTime(dt)) => {
                     match chrono::Duration::from_std(*d) {
-                        Ok(d) => Value::DateTime(Arc::new((*dt) - d)),
+                        Ok(d) => checked_dt!(dt.checked_sub_signed(d)),
                         Err(e) => Value::error(format_compact!("{}", e).as_str()),
                     }
                 },
