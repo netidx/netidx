@@ -164,6 +164,3 @@ members = [
     "examples",
 ]
 exclude = ["cfg/tls/id-win"]
-
-[patch.crates-io]
-immutable-chunkmap = { path = "../immutable-chunkmap" }
