@@ -69,7 +69,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     let server = init::resolve_admin_server_addr(&f.server)?;
     let mut ans =
         super::answer_cli::make_flag_answerer(None, false, f.accept_glyph.as_deref())?;
-    let out = runtime()?.block_on(ops::add_parent(&mut ans, &rpath, server, &f.path))?;
+    let out = runtime()?.block_on(ops::add_parent(&mut ans, &rpath, server, &f.path, None))?;
     match out.propagation {
         ClusterPropagation::SingleMember => {}
         ClusterPropagation::NoAdminServer { members } => eprintln!(

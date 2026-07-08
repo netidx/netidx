@@ -35,6 +35,23 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 /// channel; the op supplies the right one (policy JSON, perms JSON, …).
 pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
 
+/// One selectable resolver in the parent picker — display only; the caller holds
+/// the parallel address data (the `ResolverAddr` + owning admin) by index.
+pub(super) struct ParentRow {
+    /// e.g. `resolver-eu-a  10.0.60.15:4564`.
+    pub(super) label: String,
+    /// The resolver's hierarchy level (its cluster's base), shown as info.
+    pub(super) level: String,
+}
+
+/// The operator's pick from the parent picker.
+pub(super) enum ParentSelection {
+    /// The ticked resolver rows (indices into the offered slice).
+    Resolvers(Vec<usize>),
+    /// None of them — enter an admin-server address manually instead.
+    Manual,
+}
+
 /// A request from the op task to the UI loop. The blocking question variants
 /// carry a `oneshot` the UI answers; the rest are fire-and-forget.
 pub(super) enum UiRequest {
@@ -59,6 +76,12 @@ pub(super) enum UiRequest {
     SelectNetwork {
         networks: Vec<NetworkOption>,
         reply: oneshot::Sender<Result<NetworkChoice>>,
+    },
+    /// Multi-select the parent's resolver servers (each with its level), or the
+    /// trailing "enter an address manually" option.
+    SelectParent {
+        rows: Vec<ParentRow>,
+        reply: oneshot::Sender<Result<ParentSelection>>,
     },
     Confirm {
         field: Field,
@@ -130,6 +153,13 @@ impl TuiAnswerer {
     /// concrete op bodies that hold a `TuiAnswerer` reach it.
     pub(super) async fn edit(&self, seed: String, validate: EditValidator) -> Result<String> {
         self.ask(|reply| UiRequest::Editor { seed, validate, reply }).await
+    }
+
+    /// Multi-select the parent's resolver servers from the network map, or fall
+    /// back to a typed address. Inherent (TUI-only), like [`Self::edit`] — the
+    /// strict CLI takes an explicit `--parent-*` instead.
+    pub(super) async fn select_parent(&self, rows: Vec<ParentRow>) -> Result<ParentSelection> {
+        self.ask(|reply| UiRequest::SelectParent { rows, reply }).await
     }
 
     /// Send a question and await its reply, mapping a dropped channel (the UI
@@ -273,6 +303,15 @@ pub(super) enum Modal {
         state: ListState,
         reply: Option<oneshot::Sender<Result<NetworkChoice>>>,
     },
+    /// Multi-select parent resolvers (checkbox per row) with a trailing
+    /// manual-entry row. `checked` parallels `rows`; the cursor index
+    /// `rows.len()` is the manual row.
+    SelectParent {
+        rows: Vec<ParentRow>,
+        checked: Vec<bool>,
+        state: ListState,
+        reply: Option<oneshot::Sender<Result<ParentSelection>>>,
+    },
     Confirm {
         field: Field,
         yes: bool,
@@ -340,6 +379,12 @@ impl Modal {
                 state.select(Some(0));
                 Some(Modal::SelectNetwork { networks, state, reply: Some(reply) })
             }
+            UiRequest::SelectParent { rows, reply } => {
+                let mut state = ListState::default();
+                state.select(Some(0));
+                let checked = vec![false; rows.len()];
+                Some(Modal::SelectParent { rows, checked, state, reply: Some(reply) })
+            }
             UiRequest::Confirm { field, default, reply } => {
                 Some(Modal::Confirm { field, yes: default, reply: Some(reply) })
             }
@@ -365,6 +410,7 @@ impl Modal {
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
             Modal::SelectNetwork { .. }
+            | Modal::SelectParent { .. }
             | Modal::Identity { .. }
             | Modal::Announce { .. }
             | Modal::AnnounceIdentity { .. }
@@ -460,6 +506,51 @@ impl Modal {
                         NetworkChoice::Manual
                     } else {
                         NetworkChoice::Discovered(sel)
+                    };
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Ok(choice));
+                    }
+                    true
+                }
+                _ => false,
+            },
+            // rows.len() rows + one trailing manual row; Space ticks a resolver,
+            // Enter confirms the ticked set (or the cursor row if none ticked),
+            // Enter on the manual row picks Manual.
+            Modal::SelectParent { rows, checked, state, reply } => match code {
+                KeyCode::Esc => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Err(anyhow!("cancelled")));
+                    }
+                    true
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let i = state.selected().unwrap_or(0).saturating_sub(1);
+                    state.select(Some(i));
+                    false
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let i = state.selected().map_or(0, |i| (i + 1).min(rows.len()));
+                    state.select(Some(i));
+                    false
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(c) = state.selected().and_then(|i| checked.get_mut(i)) {
+                        *c = !*c;
+                    }
+                    false
+                }
+                KeyCode::Enter => {
+                    let sel = state.selected().unwrap_or(0).min(rows.len());
+                    let choice = if sel == rows.len() {
+                        ParentSelection::Manual
+                    } else {
+                        let picks: Vec<usize> =
+                            checked.iter().enumerate().filter_map(|(i, &c)| c.then_some(i)).collect();
+                        // Enter with nothing ticked picks the row under the cursor,
+                        // so a single-parent choice needs no Space.
+                        let picks = if picks.is_empty() { vec![sel] } else { picks };
+                        ParentSelection::Resolvers(picks)
                     };
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(choice));
@@ -687,6 +778,58 @@ impl Modal {
                     cols[1],
                 );
             }
+            Modal::SelectParent { rows, checked, state, .. } => {
+                const MANUAL: &str = "Enter an address manually…";
+                let w = 76u16.min(screen.width.saturating_sub(4)).max(48);
+                let body_h = (rows.len() as u16 + 1).max(6);
+                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2 /*borders*/).min(screen.height);
+                let area = widgets::centered(w, h, screen);
+                widgets::shadow(f, area, screen);
+                f.render_widget(Clear, area);
+                let block = theme::dialog_block("Select the parent resolver(s)").title_bottom(
+                    Line::from(Span::styled(
+                        " ↑/↓ move · Space tick · Enter confirm · Esc cancel ",
+                        theme::hint_style(),
+                    )),
+                );
+                let inner = block.inner(area);
+                f.render_widget(block, area);
+                let vrows = Layout::vertical([
+                    Constraint::Length(1), // header
+                    Constraint::Length(1), // spacer
+                    Constraint::Min(0),    // list
+                ])
+                .split(inner);
+                let header = if rows.is_empty() {
+                    "No resolver servers in the map — enter an address manually:"
+                } else {
+                    "Tick the resolvers that make up the parent, then Enter:"
+                };
+                f.render_widget(
+                    Paragraph::new(header).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    vrows[0],
+                );
+                let items: Vec<ListItem> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let marker = if checked.get(i).copied().unwrap_or(false) { "[x]" } else { "[ ]" };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(format!("{marker} {:<40}", r.label), theme::panel_style()),
+                            Span::styled(r.level.clone(), theme::hint_style()),
+                        ]))
+                    })
+                    .chain(std::iter::once(ListItem::new(Line::from(Span::styled(
+                        MANUAL,
+                        theme::hint_style(),
+                    )))))
+                    .collect();
+                let mut st = *state;
+                let list = List::new(items)
+                    .style(theme::panel_style())
+                    .highlight_style(theme::selected_style());
+                f.render_stateful_widget(list, vrows[2], &mut st);
+            }
             Modal::Confirm { field, yes, .. } => {
                 let opts =
                     Line::from(vec![theme::button("Yes", *yes), Span::raw("   "), theme::button("No", !*yes)]);
@@ -823,4 +966,92 @@ fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w:
         .style(theme::panel_style())
         .block(theme::dialog_block(title));
     f.render_widget(body, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn rows() -> Vec<ParentRow> {
+        vec![
+            ParentRow { label: "10.0.0.1:4564".to_string(), level: "/".to_string() },
+            ParentRow { label: "10.0.60.1:4564".to_string(), level: "/ap".to_string() },
+        ]
+    }
+
+    fn select_parent_modal() -> (Modal, oneshot::Receiver<Result<ParentSelection>>) {
+        let (tx, rx) = oneshot::channel();
+        let modal =
+            Modal::from_request(UiRequest::SelectParent { rows: rows(), reply: tx }).unwrap();
+        (modal, rx)
+    }
+
+    fn render(modal: &Modal, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| modal.render(f, f.area())).unwrap();
+        t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn renders_checkboxes_levels_and_manual_row() {
+        let (modal, _rx) = select_parent_modal();
+        let out = render(&modal, 90, 16);
+        assert!(out.contains("[ ]"), "unticked marker missing: {out:?}");
+        assert!(out.contains("10.0.0.1:4564") && out.contains("10.0.60.1:4564"), "labels: {out:?}");
+        assert!(out.contains("/ap"), "level column missing: {out:?}");
+        assert!(out.contains("Enter an address manually"), "manual row missing: {out:?}");
+    }
+
+    #[test]
+    fn space_ticks_the_cursor_row() {
+        let (mut modal, _rx) = select_parent_modal();
+        assert!(!modal.on_key(KeyCode::Char(' ')), "Space must not close the modal");
+        let out = render(&modal, 90, 16);
+        assert!(out.contains("[x]"), "ticked marker missing after Space: {out:?}");
+    }
+
+    #[test]
+    fn enter_confirms_the_ticked_set() {
+        let (mut modal, mut rx) = select_parent_modal();
+        modal.on_key(KeyCode::Char(' ')); // tick row 0
+        modal.on_key(KeyCode::Down); // move cursor to row 1
+        modal.on_key(KeyCode::Char(' ')); // tick row 1
+        assert!(modal.on_key(KeyCode::Enter), "Enter must close the modal");
+        match rx.try_recv().unwrap().unwrap() {
+            ParentSelection::Resolvers(idxs) => assert_eq!(idxs, vec![0, 1]),
+            ParentSelection::Manual => panic!("expected Resolvers, got Manual"),
+        }
+    }
+
+    #[test]
+    fn enter_with_nothing_ticked_picks_the_cursor_row() {
+        let (mut modal, mut rx) = select_parent_modal();
+        modal.on_key(KeyCode::Down); // cursor on row 1, nothing ticked
+        assert!(modal.on_key(KeyCode::Enter));
+        match rx.try_recv().unwrap().unwrap() {
+            ParentSelection::Resolvers(idxs) => assert_eq!(idxs, vec![1]),
+            ParentSelection::Manual => panic!("expected Resolvers, got Manual"),
+        }
+    }
+
+    #[test]
+    fn enter_on_the_manual_row_picks_manual() {
+        let (mut modal, mut rx) = select_parent_modal();
+        // Two rows + a trailing manual row: from row 0, two Downs lands on it.
+        modal.on_key(KeyCode::Down);
+        modal.on_key(KeyCode::Down);
+        assert!(modal.on_key(KeyCode::Enter));
+        match rx.try_recv().unwrap().unwrap() {
+            ParentSelection::Manual => {}
+            ParentSelection::Resolvers(_) => panic!("expected Manual, got Resolvers"),
+        }
+    }
+
+    #[test]
+    fn esc_cancels() {
+        let (mut modal, mut rx) = select_parent_modal();
+        assert!(modal.on_key(KeyCode::Esc), "Esc must close the modal");
+        assert!(rx.try_recv().unwrap().is_err(), "Esc must send a cancel error");
+    }
 }

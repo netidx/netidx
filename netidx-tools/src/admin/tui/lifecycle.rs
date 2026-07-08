@@ -59,6 +59,19 @@ pub(super) async fn update_plan(role: InstallRole) -> Result<EditPlan> {
     }
 }
 
+/// Fetch the network map as this host, pinned to the CA identity recorded at
+/// install — for map-driven UI (the parent picker). Errors if this host isn't
+/// part of a cluster or no admin server answers with the pinned identity.
+pub(super) async fn fetch_local_map() -> Result<NetworkMap> {
+    let rec = InstallRecord::load_default()?
+        .context("no install record (install.json) found on this host")?;
+    let net_id = rec
+        .network
+        .as_ref()
+        .context("this host is not part of a cluster (local-only)")?;
+    fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
+}
+
 /// A one-line "now restart X" hint for a role after an update applies.
 pub(super) fn restart_hint(role: InstallRole) -> &'static str {
     match role {

@@ -500,27 +500,117 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     })
 }
 
-/// Attach this resolver under a parent by delegation (child side).
+/// The admin server that can approve a delegation to the ticked resolvers: the
+/// one whose cluster contains ALL of them. `None` when the ticks span clusters
+/// (no single cluster holds them all) — the operator must pick resolvers served
+/// by one parent cluster.
 #[cfg(unix)]
-async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
-    use netidx_admin::{
-        admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
-        paths,
-        plan::resolve_admin_server_addr,
-    };
-    let rpath = paths::discover_resolver_config()?;
-    let parent = loop {
+fn parent_admin_for(
+    map: &netidx_admin::admin_proto::NetworkMap,
+    picked: &[SocketAddr],
+) -> Option<SocketAddr> {
+    map.servers
+        .iter()
+        .find(|s| {
+            s.cluster.as_ref().is_some_and(|c| {
+                picked.iter().all(|a| c.members.iter().any(|m| m.addr == *a))
+            })
+        })
+        .map(|s| s.addr)
+}
+
+/// Prompt for the parent's admin-server address (the manual fallback when the
+/// parent isn't in this host's network map).
+#[cfg(unix)]
+async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
+    use netidx_admin::plan::resolve_admin_server_addr;
+    loop {
         let s = ans.text(Field::ParentAddr, None, None, true).await?.unwrap_or_default();
         match resolve_admin_server_addr(&s) {
-            Ok(a) => break a,
+            Ok(a) => break Ok(a),
             Err(_) if ans.interactive() => ans.warn(&format!(
                 "{s:?} is not a valid admin-server address — enter host or host:port"
             )),
-            Err(e) => return Err(e),
+            Err(e) => break Err(e),
+        }
+    }
+}
+
+/// Attach this resolver under a parent by delegation (child side).
+#[cfg(unix)]
+async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
+    use super::answer::{ParentRow, ParentSelection};
+    use netidx_admin::{
+        admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
+        admin_proto::ResolverAddr,
+        paths,
+        resolver::ResolverConfig,
+    };
+    use std::collections::HashSet;
+    let rpath = paths::discover_resolver_config()?;
+
+    // Candidate parents come from the network map (each resolver + its level),
+    // minus this host's own resolvers. If the map is unreachable or offers no
+    // other resolver, fall back to typing an admin-server address.
+    let map = super::lifecycle::fetch_local_map().await.ok();
+    let own: HashSet<SocketAddr> = ResolverConfig::load(&rpath)
+        .map(|c| c.resolver_addrs().into_iter().map(|r| r.addr).collect())
+        .unwrap_or_default();
+    // (resolver addr+auth, its cluster base) — the source of truth for the picker.
+    let cand: Vec<(ResolverAddr, String)> = match &map {
+        Some(map) => {
+            let mut seen = HashSet::new();
+            let mut cand = Vec::new();
+            for s in &map.servers {
+                if let Some(c) = &s.cluster {
+                    for m in &c.members {
+                        if own.contains(&m.addr) || !seen.insert(m.addr) {
+                            continue;
+                        }
+                        cand.push((m.clone(), c.base.clone()));
+                    }
+                }
+            }
+            cand
+        }
+        None => Vec::new(),
+    };
+
+    // (parent admin-server addr, optional referral override) — the two things the
+    // delegation op needs.
+    let (parent, referral): (SocketAddr, Option<Vec<ResolverAddr>>) = if cand.is_empty() {
+        (prompt_parent_admin(ans).await?, None)
+    } else {
+        let map = map.as_ref().expect("cand non-empty implies a map");
+        loop {
+            let rows: Vec<ParentRow> = cand
+                .iter()
+                .map(|(r, level)| ParentRow { label: r.addr.to_string(), level: level.clone() })
+                .collect();
+            match ans.select_parent(rows).await? {
+                ParentSelection::Manual => break (prompt_parent_admin(ans).await?, None),
+                ParentSelection::Resolvers(idxs) => {
+                    let picked: Vec<ResolverAddr> =
+                        idxs.iter().filter_map(|&i| cand.get(i).map(|(r, _)| r.clone())).collect();
+                    if picked.is_empty() {
+                        continue;
+                    }
+                    // The approving admin server is the one whose cluster contains
+                    // ALL the ticked resolvers (any of a multi-admin cluster works).
+                    let want: Vec<SocketAddr> = picked.iter().map(|r| r.addr).collect();
+                    match parent_admin_for(map, &want) {
+                        Some(admin) => break (admin, Some(picked)),
+                        None => ans.warn(
+                            "those resolvers aren't all in one parent cluster — pick \
+                             resolvers served by a single cluster",
+                        ),
+                    }
+                }
+            }
         }
     };
     let path = ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
-    let out = do_add_parent(ans, &rpath, parent, &path).await?;
+    let out = do_add_parent(ans, &rpath, parent, &path, referral).await?;
     let mut lines = vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
     match out.propagation {
         ClusterPropagation::SingleMember => {}
@@ -666,6 +756,65 @@ fn publisher_input(common: InstallCommon) -> PublisherInput {
         units_dir: None,
         key_protection: None,
         common,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use netidx_admin::admin_proto::{
+        ClusterFacts, InfoAuth, NetworkMap, ResolverAddr, ServerEntry,
+    };
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    fn resolver(a: &str) -> ResolverAddr {
+        ResolverAddr { addr: addr(a), auth: InfoAuth::Anonymous }
+    }
+
+    fn server(admin: &str, base: &str, members: &[&str]) -> ServerEntry {
+        ServerEntry {
+            addr: addr(admin),
+            roles: vec![],
+            cluster: Some(ClusterFacts {
+                members: members.iter().map(|m| resolver(m)).collect(),
+                base: base.to_string(),
+                parent: None,
+                children: vec![],
+            }),
+        }
+    }
+
+    fn map(servers: Vec<ServerEntry>) -> NetworkMap {
+        NetworkMap { version: 0, ca_addr: None, servers }
+    }
+
+    #[test]
+    fn parent_admin_is_the_cluster_holding_all_ticks() {
+        // Two independent clusters, both rooted at `/` (the base-collision case).
+        let m = map(vec![
+            server("10.0.0.1:4565", "/", &["10.0.0.1:4564", "10.0.0.2:4564"]),
+            server("10.0.60.1:4565", "/", &["10.0.60.1:4564"]),
+        ]);
+        // Ticking both US root resolvers resolves to the US admin server.
+        let admin = parent_admin_for(&m, &[addr("10.0.0.1:4564"), addr("10.0.0.2:4564")]);
+        assert_eq!(admin, Some(addr("10.0.0.1:4565")));
+        // Ticking the lone Asia resolver resolves to the Asia admin server.
+        let admin = parent_admin_for(&m, &[addr("10.0.60.1:4564")]);
+        assert_eq!(admin, Some(addr("10.0.60.1:4565")));
+    }
+
+    #[test]
+    fn ticks_spanning_clusters_have_no_single_admin() {
+        let m = map(vec![
+            server("10.0.0.1:4565", "/", &["10.0.0.1:4564"]),
+            server("10.0.60.1:4565", "/", &["10.0.60.1:4564"]),
+        ]);
+        // One resolver from each cluster: no single cluster holds both.
+        let admin = parent_admin_for(&m, &[addr("10.0.0.1:4564"), addr("10.0.60.1:4564")]);
+        assert_eq!(admin, None);
     }
 }
 

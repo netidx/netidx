@@ -203,6 +203,7 @@ pub async fn add_parent(
     resolver_config: &Path,
     parent_server: SocketAddr,
     proposed_path: &str,
+    referral: Option<Vec<ResolverAddr>>,
 ) -> Result<AddParentOutcome> {
     let rcfg = ResolverConfig::load(resolver_config)?;
     if rcfg.as_file().parent.is_some() {
@@ -219,9 +220,14 @@ pub async fn add_parent(
         );
     }
     let n_members = child.len();
-    // Queue the request, glyph-confirm the parent, and poll until approved.
-    let parent =
+    // Queue the request, glyph-confirm the parent, and poll until approved. The
+    // approval is authoritative regardless of which parent resolvers we then
+    // reference; `referral` (when the operator picked a subset from the map) sets
+    // exactly which of the parent's resolvers this child contacts, else we take
+    // the full set the parent returned at approval.
+    let approved =
         delegate_under_parent(ans, parent_server, proposed_path, child, None).await?;
+    let parent = referral.unwrap_or(approved);
     let parent_ref = ParentRef {
         path: ArcStr::from(proposed_path),
         ttl: None,
