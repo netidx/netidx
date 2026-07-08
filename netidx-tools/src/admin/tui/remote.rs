@@ -16,7 +16,7 @@
 use super::{
     action::Action,
     answer::TuiAnswerer,
-    clusters::{KnownCluster, KnownClusters, PollState},
+    clusters::{self, KnownCluster, KnownClusters, PollState},
     theme, widgets,
 };
 use anyhow::Result;
@@ -119,6 +119,18 @@ impl Panel {
             Panel::Revocation => "Issued certificates",
             Panel::Perms => "Permissions",
             Panel::Service => "Services",
+        }
+    }
+
+    /// A one-line description shown in the menu's detail pane.
+    fn desc(self) -> &'static str {
+        match self {
+            Panel::Queue => "Review and approve certificate-enrollment requests from nodes joining the cluster.",
+            Panel::Delegations => "Review and approve requests from resolvers asking to attach under this cluster.",
+            Panel::Roster => "The cluster's admins and their scopes — mint, scope, or remove admins.",
+            Panel::Revocation => "Certificates this CA has issued — revoke one to bar the holder from the cluster.",
+            Panel::Perms => "View and edit the permissions on a netidx path.",
+            Panel::Service => "Start, stop, or restart the netidx services on a cluster member.",
         }
     }
 
@@ -1167,13 +1179,24 @@ const PANELS: [Panel; 6] = [
 /// revocation have no no-auth local backend and stay Cluster-only.
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
+/// Load the saved cluster registry, ensuring this host's own cluster (when it
+/// runs an admin server) is included so a locally-created cluster shows up
+/// without a manual discover, and persisting that addition.
+fn load_seeded_clusters() -> KnownClusters {
+    let mut known = KnownClusters::load();
+    if clusters::seed_local_cluster(&mut known) {
+        let _ = known.save();
+    }
+    known
+}
+
 impl RemoteState {
     pub(super) fn new() -> RemoteState {
         let mut menu = ListState::default();
         menu.select(Some(0));
         let mut cluster_list = ListState::default();
         cluster_list.select(Some(0));
-        let known = KnownClusters::load();
+        let known = load_seeded_clusters();
         let poll = vec![PollState::Unpolled; known.clusters.len()];
         RemoteState {
             target: None,
@@ -1218,7 +1241,7 @@ impl RemoteState {
     /// Reload the saved registry from disk and mark everything unpolled so the
     /// event loop re-verifies it.
     fn reload_clusters(&mut self) {
-        let known = KnownClusters::load();
+        let known = load_seeded_clusters();
         self.clusters = known.clusters;
         self.poll = vec![PollState::Unpolled; self.clusters.len()];
     }
@@ -1748,6 +1771,8 @@ impl RemoteState {
             }
             None => (" Cluster ".to_string(), " ↑/↓ · Enter open · Esc disconnect "),
         };
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
         let panels = self.target.as_ref().map(PanelTarget::panels).unwrap_or(&PANELS);
         let items: Vec<ListItem> = panels.iter().map(|p| ListItem::new(p.title())).collect();
         let mut st = self.menu;
@@ -1760,7 +1785,14 @@ impl RemoteState {
             )
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
-        f.render_stateful_widget(list, area, &mut st);
+        f.render_stateful_widget(list, cols[0], &mut st);
+        let sel = self.menu.selected().unwrap_or(0).min(panels.len().saturating_sub(1));
+        let desc = panels.get(sel).map_or("", |p| p.desc());
+        let blurb = Paragraph::new(desc)
+            .wrap(Wrap { trim: true })
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Description ", theme::title_style())));
+        f.render_widget(blurb, cols[1]);
     }
 
     fn render_panel(&self, f: &mut Frame, area: Rect, panel: Panel) {

@@ -12,7 +12,7 @@ use super::resolve_admin_server_seeds;
 use crate::{
     admin_client::{self, CaIdentity, NetworkInfo, PollOutcome},
     admin_proto::{InfoAuth, NodeKind},
-    answer::{Answerer, Field, Progress, Stage},
+    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress, Stage},
     atomic,
     discovery::{self},
     template::{AuthChoice, ReferralAuth, TlsIdentitySpec},
@@ -471,71 +471,53 @@ pub async fn discover_network(
     if !ans.interactive() {
         return Ok(AdminServers::NotProbed);
     }
+    // Decide first, discover second — so the flow is identical however many
+    // clusters happen to be on the network. Found a new cluster here, or go
+    // looking for one to join.
+    let choice =
+        ans.choice(Field::ClusterMode, None, &[CREATE_NEW, CONNECT_EXISTING], Some(CREATE_NEW)).await?;
+    if choice != CONNECT_EXISTING {
+        return Ok(AdminServers::DontHave);
+    }
+    // Connecting: browse the local network for clusters and fetch each one's CA
+    // identity, so the operator can recognize the one they mean by its glyph.
     ans.progress(Progress::timed(
         Stage::Discovering,
         format_compact!(
-            "searching for netidx admin servers on the local network ({}s)…",
+            "searching for netidx clusters on the local network ({}s)…",
             DISCOVERY_TIMEOUT.as_secs()
         ),
         DISCOVERY_TIMEOUT,
     ));
-    // The mDNS browse blocks for the whole timeout; keep it off the async
-    // worker so a frontend can paint and animate the discovery progress while
-    // it runs (the TUI polls the op future inline on its render task).
-    let found = tokio::task::spawn_blocking(move || discovery::browse_or_empty(DISCOVERY_TIMEOUT))
-        .await
-        .unwrap_or_default();
-    // Group the (unauthenticated, hint-only) beacons by domain.
-    let mut domains: BTreeMap<String, Vec<discovery::Discovered>> = BTreeMap::new();
-    for d in found {
-        domains.entry(d.domain.clone()).or_default().push(d);
-    }
-    let seeds: Vec<SocketAddr> = if domains.is_empty() {
-        // Nothing on the network: create a new cluster here, or connect to an
-        // existing one by address. Default to creating a new cluster.
-        let choice =
-            ans.choice(Field::ClusterMode, None, &[CREATE_NEW, CONNECT_EXISTING], Some(CREATE_NEW)).await?;
-        if choice != CONNECT_EXISTING {
-            return Ok(AdminServers::DontHave);
+    let reports = discover_networks(DISCOVERY_TIMEOUT, kind).await;
+    // Only clusters whose admin server answered carry a glyph to show; note the
+    // rest and drop them from the pick list.
+    let mut options: Vec<NetworkOption> = Vec::new();
+    let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
+    for r in reports {
+        match r.identity {
+            Ok(identity) => {
+                options.push(NetworkOption { domain: r.domain, identity });
+                servers.push(r.admin_servers);
+            }
+            Err(e) => ans.note(&format_compact!("skipping {:?}: {e}", r.domain)),
         }
-        loop {
+    }
+    // Always the same next step: pick a discovered cluster by its glyph, or
+    // enter an admin-server address manually (the final list option).
+    let seeds: Vec<SocketAddr> = match ans.select_network(&options).await? {
+        NetworkChoice::Discovered(i) => match servers.get(i) {
+            Some(s) => s.clone(),
+            None => return Ok(AdminServers::DontHave),
+        },
+        NetworkChoice::Manual => loop {
             let typed = ans.text(Field::AdminServerAddr, None, None, true).await?;
             match manual_seeds(typed) {
                 Ok(Some(s)) => break s,
                 Ok(None) => return Ok(AdminServers::DontHave),
                 Err(e) => ans.warn(&format_compact!("{e:#}")),
             }
-        }
-    } else {
-        let chosen: Option<String> = if domains.len() == 1 {
-            let (domain, servers) = domains.iter().next().unwrap();
-            ans.note(&format_compact!(
-                "found netidx network {domain:?} ({} admin server(s))",
-                servers.len()
-            ));
-            let use_it = ans.confirm(Field::JoinNetwork, None, true).await?;
-            use_it.then(|| domain.clone())
-        } else {
-            let names: Vec<String> = domains.keys().cloned().collect();
-            let opts: Vec<&str> =
-                names.iter().map(|s| s.as_str()).chain(["none"]).collect();
-            let choice =
-                ans.choice(Field::WhichNetwork, None, &opts, Some(opts[0])).await?;
-            (choice != "none").then_some(choice)
-        };
-        match chosen {
-            Some(domain) => {
-                let servers =
-                    domains.remove(&domain).expect("chosen domain came from the map");
-                servers.iter().flat_map(|d| d.socket_addrs()).collect()
-            }
-            None => match manual_seeds(
-                ans.text(Field::AdminServerAddr, None, None, false).await?,
-            )? {
-                Some(s) => s,
-                None => return Ok(AdminServers::DontHave),
-            },
-        }
+        },
     };
     confirm_seeds(ans, &seeds, kind).await
 }

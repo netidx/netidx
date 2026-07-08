@@ -17,7 +17,7 @@ use crossterm::event::KeyCode;
 use netidx_admin::{
     admin_client::CaIdentity,
     admin_proto::Secret,
-    answer::{Answerer, Field, Progress},
+    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress},
     fingerprint::Fingerprint,
 };
 use ratatui::{
@@ -53,6 +53,12 @@ pub(super) enum UiRequest {
         choices: Vec<String>,
         default: Option<String>,
         reply: oneshot::Sender<Result<String>>,
+    },
+    /// Pick a discovered cluster (each shown with its CA glyph + fingerprint),
+    /// or the trailing "enter an address manually" option.
+    SelectNetwork {
+        networks: Vec<NetworkOption>,
+        reply: oneshot::Sender<Result<NetworkChoice>>,
     },
     Confirm {
         field: Field,
@@ -173,6 +179,11 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Choice { field, choices, default, reply }).await
     }
 
+    async fn select_network(&mut self, networks: &[NetworkOption]) -> Result<NetworkChoice> {
+        let networks = networks.to_vec();
+        self.ask(|reply| UiRequest::SelectNetwork { networks, reply }).await
+    }
+
     async fn confirm(
         &mut self,
         field: Field,
@@ -254,6 +265,14 @@ pub(super) enum Modal {
         state: ListState,
         reply: Option<oneshot::Sender<Result<String>>>,
     },
+    /// Pick one of the discovered clusters (rendered with its glyph +
+    /// fingerprint) or the trailing manual-entry row. Selection index
+    /// `networks.len()` is the manual row.
+    SelectNetwork {
+        networks: Vec<NetworkOption>,
+        state: ListState,
+        reply: Option<oneshot::Sender<Result<NetworkChoice>>>,
+    },
     Confirm {
         field: Field,
         yes: bool,
@@ -316,6 +335,11 @@ impl Modal {
                 state.select(Some(sel));
                 Some(Modal::Choice { field, choices, state, reply: Some(reply) })
             }
+            UiRequest::SelectNetwork { networks, reply } => {
+                let mut state = ListState::default();
+                state.select(Some(0));
+                Some(Modal::SelectNetwork { networks, state, reply: Some(reply) })
+            }
             UiRequest::Confirm { field, default, reply } => {
                 Some(Modal::Confirm { field, yes: default, reply: Some(reply) })
             }
@@ -340,7 +364,8 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
-            Modal::Identity { .. }
+            Modal::SelectNetwork { .. }
+            | Modal::Identity { .. }
             | Modal::Announce { .. }
             | Modal::AnnounceIdentity { .. }
             | Modal::Recovery { .. } => None,
@@ -405,6 +430,39 @@ impl Modal {
                     let sel = state.selected().unwrap_or(0).min(choices.len().saturating_sub(1));
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(choices[sel].clone()));
+                    }
+                    true
+                }
+                _ => false,
+            },
+            // The list is the discovered networks followed by one manual-entry
+            // row, so the last selectable index (`networks.len()`) is Manual.
+            Modal::SelectNetwork { networks, state, reply } => match code {
+                KeyCode::Esc => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Err(anyhow!("cancelled")));
+                    }
+                    true
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let i = state.selected().unwrap_or(0).saturating_sub(1);
+                    state.select(Some(i));
+                    false
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let i = state.selected().map_or(0, |i| (i + 1).min(networks.len()));
+                    state.select(Some(i));
+                    false
+                }
+                KeyCode::Enter => {
+                    let sel = state.selected().unwrap_or(0).min(networks.len());
+                    let choice = if sel == networks.len() {
+                        NetworkChoice::Manual
+                    } else {
+                        NetworkChoice::Discovered(sel)
+                    };
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Ok(choice));
                     }
                     true
                 }
@@ -561,6 +619,79 @@ impl Modal {
                     .style(theme::panel_style())
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, rows[2], &mut st);
+            }
+            Modal::SelectNetwork { networks, state, .. } => {
+                const MANUAL: &str = "Enter an address manually…";
+                let sel = state.selected().unwrap_or(0).min(networks.len());
+                let w = 68u16.min(screen.width.saturating_sub(4)).max(40);
+                // Body holds the list (left) beside the selected glyph (right, 8
+                // identicon rows + a blank + up to 3 fingerprint lines).
+                let body_h = (networks.len() as u16 + 1).max(12);
+                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2 /*borders*/).min(screen.height);
+                let area = widgets::centered(w, h, screen);
+                widgets::shadow(f, area, screen);
+                f.render_widget(Clear, area);
+                let block = theme::dialog_block(Field::SelectNetwork.label()).title_bottom(
+                    Line::from(Span::styled(
+                        " ↑/↓ move · Enter select · Esc cancel ",
+                        theme::hint_style(),
+                    )),
+                );
+                let inner = block.inner(area);
+                f.render_widget(block, area);
+                let rows = Layout::vertical([
+                    Constraint::Length(1), // header
+                    Constraint::Length(1), // spacer
+                    Constraint::Min(0),    // list | glyph
+                ])
+                .split(inner);
+                let header = if networks.is_empty() {
+                    "No clusters found on the local network."
+                } else {
+                    "netidx clusters discovered on the local network:"
+                };
+                f.render_widget(
+                    Paragraph::new(header).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    rows[0],
+                );
+                let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(26)])
+                    .split(rows[2]);
+                let items: Vec<ListItem> = networks
+                    .iter()
+                    .map(|n| ListItem::new(n.domain.clone()))
+                    .chain(std::iter::once(ListItem::new(MANUAL)))
+                    .collect();
+                let mut st = *state;
+                let list = List::new(items)
+                    .style(theme::panel_style())
+                    .highlight_style(theme::selected_style());
+                f.render_stateful_widget(list, cols[0], &mut st);
+                // Right: the selected network's glyph + grouped fingerprint, or a
+                // hint for the manual-entry row.
+                let glyph = match networks.get(sel) {
+                    Some(n) => {
+                        let mut lines = widgets::identicon_lines(&n.identity.fingerprint);
+                        lines.push(Line::from(""));
+                        let fp = Style::default()
+                            .bg(theme::PANEL_BG)
+                            .fg(Color::Rgb(0, 0, 150))
+                            .add_modifier(Modifier::BOLD);
+                        for chunk in group_fingerprint(&n.identity.fingerprint) {
+                            lines.push(Line::from(Span::styled(chunk, fp)));
+                        }
+                        lines
+                    }
+                    None => vec![Line::from(Span::styled(
+                        "Type an admin-server address (host:port) to connect directly.",
+                        theme::hint_style(),
+                    ))],
+                };
+                // trim:false — the identicon rows carry leading "off" cells as
+                // spaces; trimming them would shift the glyph and corrupt it.
+                f.render_widget(
+                    Paragraph::new(glyph).style(theme::panel_style()).wrap(Wrap { trim: false }),
+                    cols[1],
+                );
             }
             Modal::Confirm { field, yes, .. } => {
                 let opts =

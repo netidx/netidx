@@ -214,13 +214,8 @@ pub async fn run_resolver(
     if founded_admin_plane {
         ans.announce(
             "New admin cluster",
-            "You're founding a new admin cluster. Administering netidx — this \
-             admin tool, discovery, enrollment, and certificate renewal — is \
-             always secured by a certificate authority (CA) over TLS, no matter \
-             how the data plane authenticates. So the control plane (the CA and \
-             this host's admin server) is set up first: a few questions about \
-             this machine and the CA, then you choose how the data plane \
-             authenticates.",
+            "Founding a new admin cluster requires a certificate authority. We \
+             will set that up now.",
         )
         .await?;
     }
@@ -294,10 +289,7 @@ pub async fn run_resolver(
         .await?;
         ans.announce(
             "Resolver server",
-            "The control plane is ready. Now this host's resolver server — the \
-             directory that maps paths to publishers. First choose how its data \
-             plane authenticates (how subscribers and publishers prove who they \
-             are); then its address and options.",
+            "Admin cluster setup complete, now installing the resolver server.",
         )
         .await?;
         Some(domain)

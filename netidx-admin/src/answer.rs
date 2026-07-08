@@ -58,13 +58,10 @@ pub enum Field {
     IdMapGroups,
     /// Whether a CA admin is present to authorize an enrollment now.
     AdminHere,
-    /// Whether to join a discovered network.
-    JoinNetwork,
-    /// Which of several discovered networks to join.
-    WhichNetwork,
-    /// With no network found: create a new cluster or connect to an existing
-    /// one by address.
+    /// Whether to found a new cluster here or connect to an existing one.
     ClusterMode,
+    /// Which discovered cluster to connect to (or enter an address manually).
+    SelectNetwork,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
     /// The owner principal a workstation grants admin over its subtree.
@@ -241,23 +238,17 @@ impl Field {
                 help: "Yes: a CA admin at this machine authorizes now with their \
                        password. No: queue the request for remote approval.",
             },
-            JoinNetwork => FieldInfo {
-                flag: "--join",
-                label: "join this network?",
-                help: "Whether to join the discovered netidx network.",
-            },
-            WhichNetwork => FieldInfo {
-                flag: "--network",
-                label: "network to join",
-                help: "Which of the discovered netidx networks to join ('none' \
-                       for manual setup).",
-            },
             ClusterMode => FieldInfo {
                 flag: "--server",
-                label: "no admin server found",
-                help: "No admin server was found on the local network. Create a \
-                       new netidx cluster on this machine, or connect to an \
-                       existing cluster by entering its admin-server address.",
+                label: "create or join a cluster",
+                help: "Create a new netidx cluster on this machine, or connect \
+                       to an existing cluster on your network.",
+            },
+            SelectNetwork => FieldInfo {
+                flag: "--admin-server",
+                label: "connect to a cluster",
+                help: "Choose a discovered netidx cluster by its glyph, or enter \
+                       an admin-server address manually.",
             },
             IdMapMode => FieldInfo {
                 flag: "--id-map",
@@ -573,6 +564,25 @@ impl Progress {
     }
 }
 
+/// A netidx cluster discovered on the local network, offered to the operator by
+/// [`Answerer::select_network`]: the TLS domain that groups it in discovery and
+/// the CA identity (glyph + fingerprint) fetched from one of its reachable admin
+/// servers.
+#[derive(Clone)]
+pub struct NetworkOption {
+    pub domain: String,
+    pub identity: CaIdentity,
+}
+
+/// The operator's pick from [`Answerer::select_network`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkChoice {
+    /// The discovered network at this index in the offered slice.
+    Discovered(usize),
+    /// None of the above — enter an admin-server address manually instead.
+    Manual,
+}
+
 /// How the admin engine asks the operator questions and reports progress,
 /// abstracted over the frontend driving it (strict CLI / TUI / Atlas).
 ///
@@ -608,6 +618,12 @@ pub trait Answerer: Send {
         choices: &[&str],
         default: Option<&str>,
     ) -> Result<String>;
+
+    /// Present the netidx clusters discovered on the local network — each shown
+    /// with its CA glyph and fingerprint — plus a trailing "enter an address
+    /// manually" option, and return which the operator picked. Interactive
+    /// only: the strict answerer never discovers, so it errors.
+    async fn select_network(&mut self, networks: &[NetworkOption]) -> Result<NetworkChoice>;
 
     /// Ask a yes/no question with the given default.
     async fn confirm(

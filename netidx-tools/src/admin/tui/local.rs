@@ -435,12 +435,16 @@ impl LocalState {
     }
 
     /// The installed view: the selected install's action list, titled with the
-    /// role and live service state (`Resolver (running)` / `Resolver (stopped)`).
-    /// Index 0 is the Status item; the rest are the role's actions.
+    /// role and live service state (`Resolver (running)` / `Resolver (stopped)`),
+    /// beside a pane describing the highlighted tool. Index 0 is the Status item;
+    /// the rest are the role's actions.
     fn render_actions(&self, f: &mut Frame, area: Rect) {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
         let d = &self.installs[self.selected];
+        let acts = action_items(d);
         let mut labels = vec!["Status — full details".to_string()];
-        labels.extend(action_items(d).into_iter().map(|(l, _)| l));
+        labels.extend(acts.iter().map(|(l, _)| l.clone()));
         let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
         let title = format!(" {} ({}) ", role_title(d.record.role), service_word(d.service));
         let hint = if self.installs.len() > 1 {
@@ -458,7 +462,67 @@ impl LocalState {
             )
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
-        f.render_stateful_widget(list, area, &mut st);
+        f.render_stateful_widget(list, cols[0], &mut st);
+        let sel = self.menu_state.selected().unwrap_or(0);
+        let desc = if sel == 0 {
+            STATUS_DESC
+        } else {
+            acts.get(sel - 1).map_or("", |(_, a)| action_desc(a))
+        };
+        let blurb = Paragraph::new(desc)
+            .wrap(Wrap { trim: true })
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Description ", theme::title_style())));
+        f.render_widget(blurb, cols[1]);
+    }
+}
+
+/// The Status item's description in the tool detail pane.
+const STATUS_DESC: &str =
+    "Full status detail for this install: its config, whether it is in sync with \
+     the network, and its CA glyph.";
+
+/// A one-line description of a Local-tab action, shown in the menu detail pane.
+fn action_desc(action: &Action) -> &'static str {
+    use Action::*;
+    match action {
+        Install { dry_run: false, .. } => "Install this role on the machine.",
+        Install { dry_run: true, .. } => {
+            "Preview installing this role — show the plan without changing anything."
+        }
+        Renew { .. } => "Renew this host's TLS certificates from the network's CA now.",
+        Update { .. } => {
+            "Reconcile this host's config with the network, adding or removing cluster peers."
+        }
+        Join { dry_run: false } => {
+            "Graduate this local-only workstation onto a network, enrolling a TLS identity."
+        }
+        Join { dry_run: true } => "Preview joining a network, without changing anything.",
+        AddParent => "Attach this resolver under a parent resolver by delegation.",
+        ReviewDelegations => {
+            "Review and approve requests from resolvers asking to attach under this one."
+        }
+        Remote(_) => "Connect to a remote admin server.",
+        Uninstall { remove_ca: false, .. } => "Remove this install — its config and OS service.",
+        Uninstall { remove_ca: true, .. } => {
+            "Remove this install and destroy its certificate authority. Irreversible."
+        }
+        AutoApprove { rotate: true, .. } => {
+            "Rotate this admin server's automatic-renewal credential."
+        }
+        AutoApprove { rotate: false, .. } => {
+            "Enable automatic approval of certificate renewals on this admin server."
+        }
+        RecoveryRotate { .. } => "Mint a fresh CA recovery password, retiring the old one.",
+        ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
+        ExternalInstall { .. } => "Install the externally-signed CA certificate returned by your PKI.",
+        ServiceControl { op: ControlOp::Restart, .. } => "Restart this machine's netidx services.",
+        ServiceControl { op: ControlOp::Stop, .. } => "Stop this machine's netidx services.",
+        ServiceControl { op: ControlOp::Start, .. } => "Start this machine's netidx services.",
+        ServiceControl { .. } => "Control this machine's netidx services.",
+        ManageLocalAdmins { .. } => {
+            "Manage this admin server's roster of admins and their permissions."
+        }
     }
 }
 

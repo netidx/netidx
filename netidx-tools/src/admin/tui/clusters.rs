@@ -106,6 +106,44 @@ impl KnownClusters {
     }
 }
 
+/// If this host runs its own admin server — i.e. a cluster was founded (or
+/// joined) here — make sure that cluster is in the saved set, so it appears on
+/// the Cluster tab without a manual discover. The identity comes from this
+/// host's install record (the domain + CA fingerprint pinned at install, no
+/// network round-trip); the on-entry poll then verifies it live like any other
+/// saved cluster. Returns whether the saved set changed (worth saving).
+#[cfg(unix)]
+pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
+    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen() else {
+        return false;
+    };
+    let Some(net) = local_network_identity() else { return false };
+    match Fingerprint::parse_text(&net.ca_fingerprint) {
+        Ok(fp) => clusters.upsert(&net.domain, addr, fp),
+        Err(_) => false,
+    }
+}
+
+/// The network identity (domain + CA fingerprint) this host pinned at install —
+/// the same CA its own admin server presents. Prefers the user-scope record,
+/// falling back to the system-scope one.
+#[cfg(unix)]
+fn local_network_identity() -> Option<netidx_admin::provenance::NetworkIdentity> {
+    use netidx_admin::provenance::InstallRecord;
+    if let Ok(Some(r)) = InstallRecord::load_default()
+        && r.network.is_some()
+    {
+        return r.network;
+    }
+    let sys = paths::system_install_record();
+    sys.exists().then(|| InstallRecord::load(&sys).ok()?.network).flatten()
+}
+
+#[cfg(not(unix))]
+pub(super) fn seed_local_cluster(_clusters: &mut KnownClusters) -> bool {
+    false
+}
+
 /// Where an on-entry poll of a known cluster landed.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PollState {

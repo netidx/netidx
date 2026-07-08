@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use netidx_admin::{
     admin_client::CaIdentity,
     admin_proto::Secret,
-    answer::{Answerer, Field, Progress},
+    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress},
     fingerprint::Fingerprint,
 };
 use std::{
@@ -288,6 +288,12 @@ impl Answerer for FlagAnswerer {
         _default: bool,
     ) -> Result<bool> {
         provided.ok_or_else(|| missing(field))
+    }
+
+    async fn select_network(&mut self, _networks: &[NetworkOption]) -> Result<NetworkChoice> {
+        // Discovery is interactive-only; the strict CLI takes an explicit
+        // --admin-server instead and never reaches this.
+        Err(missing(Field::SelectNetwork))
     }
 
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret> {

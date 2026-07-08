@@ -1073,6 +1073,18 @@ mod render_tests {
     }
 
     #[test]
+    fn select_network_empty_shows_manual_option() {
+        // With nothing discovered the picker still appears (the flow is always
+        // the same) — an empty-state header plus the trailing manual-entry row.
+        let mut app = App::new();
+        let (tx, _rx) = oneshot::channel();
+        app.modal = Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx });
+        let s = render(&mut app);
+        assert!(s.contains("No clusters found"), "empty-state header missing: {s:?}");
+        assert!(s.contains("Enter an address manually"), "manual-entry row missing: {s:?}");
+    }
+
+    #[test]
     fn choice_modal_shows_radio() {
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
