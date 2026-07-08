@@ -13,7 +13,12 @@
 //! render `admin_ops` rows into plain [`PanelRow`]s), so the UI compiles
 //! everywhere and simply reports "unavailable" off unix.
 
-use super::{action::Action, answer::TuiAnswerer, theme, widgets};
+use super::{
+    action::Action,
+    answer::TuiAnswerer,
+    clusters::{KnownCluster, KnownClusters, PollState},
+    theme, widgets,
+};
 use anyhow::Result;
 #[cfg(unix)]
 use anyhow::Context;
@@ -166,8 +171,13 @@ pub(super) enum ServiceOp {
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
 pub(super) enum RemoteAction {
-    /// Establish the session to `server` (glyph confirm + login) as `admin`.
-    Connect { server: SocketAddr, admin: String, password: Secret },
+    /// Establish a session to `server`: fetch + confirm the CA glyph (always,
+    /// before any credential), then prompt admin name + password. `expected_fp`
+    /// is a saved cluster's fingerprint, flagged if the live identity differs.
+    Connect { server: SocketAddr, expected_fp: Option<Fingerprint> },
+    /// Browse mDNS for admin servers, verify each, and merge them into the saved
+    /// cluster registry.
+    Discover,
     /// (Re)list a panel. `path` is the target path for a path-scoped panel
     /// (perms), `None` for the rest.
     Refresh { target: PanelTarget, panel: Panel, path: Option<String> },
@@ -208,6 +218,7 @@ impl RemoteAction {
     pub(super) fn label(&self) -> String {
         match self {
             RemoteAction::Connect { .. } => "Connecting".to_string(),
+            RemoteAction::Discover => "Discovering clusters".to_string(),
             RemoteAction::Refresh { .. } => "Loading".to_string(),
             RemoteAction::Approve { .. } => "Approving".to_string(),
             RemoteAction::ApproveRenewals { .. } => "Approving renewals".to_string(),
@@ -261,7 +272,7 @@ impl RemoteAction {
     /// auto-accepts the identity), or `None` for the first connect.
     pub(super) fn glyph(&self) -> Option<Fingerprint> {
         match self {
-            RemoteAction::Connect { .. } => None,
+            RemoteAction::Connect { .. } | RemoteAction::Discover => None,
             RemoteAction::Refresh { target, .. }
             | RemoteAction::Approve { target, .. }
             | RemoteAction::ApproveRenewals { target }
@@ -282,6 +293,8 @@ impl RemoteAction {
 pub(super) enum RemoteUpdate {
     Connected(RemoteConn),
     Rows { panel: Panel, rows: Vec<PanelRow> },
+    /// The saved cluster registry after a discover pass — refreshes the list.
+    Clusters(Vec<KnownCluster>),
 }
 
 // ---- op bodies (unix-only: they call admin_ops) ---------------------------
@@ -290,9 +303,10 @@ pub(super) enum RemoteUpdate {
 #[cfg(unix)]
 pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<super::action::Outcome> {
     match action {
-        RemoteAction::Connect { server, admin, password } => {
-            connect(ans, server, admin, password).await
+        RemoteAction::Connect { server, expected_fp } => {
+            connect(ans, server, expected_fp).await
         }
+        RemoteAction::Discover => discover(ans).await,
         RemoteAction::Refresh { target, panel, path } => refresh(ans, target, panel, path).await,
         RemoteAction::Approve { target, code } => {
             approve(ans, target.into_remote()?, code).await
@@ -332,14 +346,35 @@ pub(super) async fn run(
 async fn connect(
     ans: &mut TuiAnswerer,
     server: SocketAddr,
-    admin: String,
-    password: Secret,
+    expected_fp: Option<Fingerprint>,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::{admin_client::fetch_identity, admin_proto::NodeKind, answer::Answerer};
+    use netidx_admin::{
+        admin_client::fetch_identity,
+        admin_proto::NodeKind,
+        answer::{Answerer, Field},
+    };
+    // Glyph first — always, before any credential. Fetch the live identity and,
+    // when we saved this cluster before, flag a fingerprint that has changed
+    // since (a CA rotation, or a different cluster reusing the address) so the
+    // operator scrutinises the glyph rather than rubber-stamping it.
     let id = fetch_identity(server, NodeKind::Client).await?;
+    if let Some(fp) = expected_fp
+        && fp != id.fingerprint
+    {
+        ans.warn(
+            "this cluster's CA glyph has CHANGED since you last saved it — verify \
+             the glyph below out of band before continuing.",
+        );
+    }
     if !ans.confirm_identity(&id).await? {
         anyhow::bail!("connection cancelled — identity not confirmed");
     }
+    // Only now, against a confirmed CA, collect the credentials.
+    let admin = ans
+        .text(Field::AdminName, None, Some(&default_user()), true)
+        .await?
+        .unwrap_or_default();
+    let password = ans.secret(Field::AdminPassword, None).await?;
     let conn = RemoteConn {
         server,
         domain: id.domain.clone(),
@@ -347,10 +382,62 @@ async fn connect(
         admin,
         password,
     };
+    // Remember this cluster (by its confirmed identity) for next time.
+    let mut known = KnownClusters::load();
+    if known.upsert(&id.domain, server, id.fingerprint) {
+        if let Err(e) = known.save() {
+            ans.warn(&format!("could not save the cluster list: {e:#}"));
+        }
+    }
     Ok(super::action::Outcome::remote_toast(
         "Connected",
         vec![format!("Connected to {} at {} as {}.", id.domain, server, conn.admin)],
         RemoteUpdate::Connected(conn),
+    ))
+}
+
+/// Browse mDNS for admin servers, confirm each is reachable + fetch its full CA
+/// fingerprint, merge them into the saved cluster registry, and hand the updated
+/// list back to the Cluster tab. Runs behind the shared discovery progress bar.
+#[cfg(unix)]
+async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
+    use netidx_admin::{
+        admin_client::fetch_identity,
+        admin_proto::NodeKind,
+        answer::{Answerer, Progress, Stage},
+        discovery,
+    };
+    let timeout = super::lifecycle::DISCOVERY_TIMEOUT;
+    ans.progress(Progress::timed(Stage::Discovering, "browsing for clusters…", timeout));
+    let found = discovery::browse(timeout).await.unwrap_or_default();
+    let mut known = KnownClusters::load();
+    let mut added = 0usize;
+    for d in &found {
+        // Confirm the advertised address really answers, and learn its full
+        // fingerprint (mDNS carries only a short hint) before recording it. The
+        // timeout guards against an address that was advertised then vanished.
+        for addr in d.socket_addrs() {
+            let fetched =
+                tokio::time::timeout(timeout, fetch_identity(addr, NodeKind::Client)).await;
+            if let Ok(Ok(id)) = fetched
+                && known.upsert(&id.domain, addr, id.fingerprint)
+            {
+                added += 1;
+            }
+        }
+    }
+    if let Err(e) = known.save() {
+        ans.warn(&format!("could not save the cluster list: {e:#}"));
+    }
+    let summary = format!(
+        "Discovery found {} advertised server(s); {} new cluster address(es) saved.",
+        found.len(),
+        added
+    );
+    Ok(super::action::Outcome::remote_toast(
+        "Discovery complete",
+        vec![summary],
+        RemoteUpdate::Clusters(known.clusters),
     ))
 }
 
@@ -1012,8 +1099,10 @@ async fn service_control(
 
 /// Which Tab-2 screen is showing.
 enum Screen {
-    /// Enter an admin-server address to connect to.
-    Connect,
+    /// The known-cluster list — the Cluster tab's landing screen.
+    Clusters,
+    /// Manually enter an admin-server host + port to connect to directly.
+    Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
     Menu,
     /// Enter the target path for a path-scoped panel (perms) before opening it.
@@ -1022,47 +1111,34 @@ enum Screen {
     Panel(Panel),
 }
 
-/// Tab-2 state.
-/// Which field of the connect form has focus.
+/// Which field of the manual-connect form has focus.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ConnectFocus {
-    User,
-    Password,
-    Server,
+enum ManualFocus {
+    Host,
+    Port,
 }
 
-impl ConnectFocus {
-    fn next(self) -> Self {
+impl ManualFocus {
+    fn toggle(self) -> Self {
         match self {
-            ConnectFocus::User => ConnectFocus::Password,
-            ConnectFocus::Password => ConnectFocus::Server,
-            ConnectFocus::Server => ConnectFocus::User,
-        }
-    }
-
-    fn prev(self) -> Self {
-        match self {
-            ConnectFocus::User => ConnectFocus::Server,
-            ConnectFocus::Password => ConnectFocus::User,
-            ConnectFocus::Server => ConnectFocus::Password,
+            ManualFocus::Host => ManualFocus::Port,
+            ManualFocus::Port => ManualFocus::Host,
         }
     }
 }
 
 pub(super) struct RemoteState {
-    /// The panel target once established: a `Remote` session after the connect
-    /// form (Cluster tab), or a `Local` control-socket target (Local tab).
+    /// The panel target once established: a `Remote` session after connecting
+    /// (Cluster tab), or a `Local` control-socket target (Local tab).
     target: Option<PanelTarget>,
     screen: Screen,
-    /// The connect-form admin username.
-    user: String,
-    /// The connect-form admin password.
-    password: String,
-    /// The connect-form admin-server address (this machine's cluster by
-    /// default; edit to reach a different cluster).
-    addr: String,
-    /// Which connect-form field has focus.
-    focus: ConnectFocus,
+    /// The saved cluster registry (loaded from disk). The landing list shows the
+    /// subset whose CA identity currently verifies (`poll` == `Present`).
+    clusters: Vec<KnownCluster>,
+    /// Per-cluster poll state, parallel to `clusters`.
+    poll: Vec<PollState>,
+    /// Cursor over the *visible* (Present) clusters on the landing screen.
+    cluster_list: ListState,
     error: Option<String>,
     /// The panel-menu cursor.
     menu: ListState,
@@ -1095,13 +1171,16 @@ impl RemoteState {
     pub(super) fn new() -> RemoteState {
         let mut menu = ListState::default();
         menu.select(Some(0));
+        let mut cluster_list = ListState::default();
+        cluster_list.select(Some(0));
+        let known = KnownClusters::load();
+        let poll = vec![PollState::Unpolled; known.clusters.len()];
         RemoteState {
             target: None,
-            screen: Screen::Connect,
-            user: default_user(),
-            password: String::new(),
-            addr: default_server(),
-            focus: ConnectFocus::User,
+            screen: Screen::Clusters,
+            clusters: known.clusters,
+            poll,
+            cluster_list,
             error: None,
             menu,
             rows: Vec::new(),
@@ -1112,7 +1191,7 @@ impl RemoteState {
 
     /// A panel surface for this machine's own admin server over its local
     /// control socket (no auth) — the Local tab's "Manage admins" surface. It
-    /// starts at the panel menu (no connect form) with only the locally-valid
+    /// starts at the panel menu (no cluster list) with only the locally-valid
     /// panels.
     pub(super) fn local(cfg_path: PathBuf, ca_dir: PathBuf) -> RemoteState {
         let mut s = RemoteState::new();
@@ -1122,30 +1201,76 @@ impl RemoteState {
     }
 
     /// Whether the surface is at its top-level menu — the host clears a Local
-    /// surface on Esc from here (there's no connect screen to fall back to).
+    /// surface on Esc from here (there's no cluster list to fall back to).
     pub(super) fn at_menu(&self) -> bool {
         matches!(self.screen, Screen::Menu)
     }
 
-    /// Re-read this host's own admin-server address into the connect field when
-    /// it's still blank and we're not connected — covers founding a CA after the
-    /// TUI already started (when `default_server()` first returned nothing).
-    pub(super) fn refresh_connect_default(&mut self) {
-        if self.target.is_none() && self.addr.trim().is_empty() {
-            self.addr = default_server();
+    /// Cluster tab regained focus: on the landing list (not mid-session), reload
+    /// the saved registry — a cluster may have been saved this session — and
+    /// re-poll it.
+    pub(super) fn on_focus(&mut self) {
+        if matches!(self.screen, Screen::Clusters) {
+            self.reload_clusters();
         }
     }
 
+    /// Reload the saved registry from disk and mark everything unpolled so the
+    /// event loop re-verifies it.
+    fn reload_clusters(&mut self) {
+        let known = KnownClusters::load();
+        self.clusters = known.clusters;
+        self.poll = vec![PollState::Unpolled; self.clusters.len()];
+    }
+
+    /// The saved clusters currently verified `Present`, each with the address to
+    /// connect to — exactly the rows the landing list shows.
+    fn visible(&self) -> Vec<(usize, SocketAddr)> {
+        self.clusters
+            .iter()
+            .enumerate()
+            .filter_map(|(i, _)| {
+                self.poll.get(i).and_then(PollState::present_addr).map(|a| (i, a))
+            })
+            .collect()
+    }
+
+    /// Saved clusters not yet polled; marks each `Polling` so the event loop
+    /// launches exactly one poll pass. Only polls on the landing screen.
+    pub(super) fn take_pending_poll(&mut self) -> Vec<(usize, KnownCluster)> {
+        if !matches!(self.screen, Screen::Clusters) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for i in 0..self.clusters.len() {
+            if matches!(self.poll[i], PollState::Unpolled) {
+                self.poll[i] = PollState::Polling;
+                out.push((i, self.clusters[i].clone()));
+            }
+        }
+        out
+    }
+
+    /// Fold in a finished poll pass, keeping the list cursor in range.
+    pub(super) fn apply_poll(&mut self, results: Vec<(usize, PollState)>) {
+        for (i, st) in results {
+            if let Some(slot) = self.poll.get_mut(i) {
+                *slot = st;
+            }
+        }
+        let n = self.visible().len();
+        let sel = self.cluster_list.selected().unwrap_or(0);
+        self.cluster_list.select(Some(sel.min(n.saturating_sub(1))));
+    }
+
     /// Pre-select the delegation panel in the menu — the target of the Local
-    /// tab's "Review delegation requests" shortcut. If already connected, land
-    /// on the menu with it highlighted; otherwise the connect screen shows first
-    /// (its address already defaults to this host's own admin server).
+    /// tab's "Review delegation requests" shortcut. If already connected, land on
+    /// the menu with it highlighted; otherwise the cluster list shows first so
+    /// the operator connects.
     pub(super) fn focus_delegations(&mut self) {
         let idx = PANELS.iter().position(|p| matches!(p, Panel::Delegations)).unwrap_or(0);
         self.menu.select(Some(idx));
-        if self.target.is_some() {
-            self.screen = Screen::Menu;
-        }
+        self.screen = if self.target.is_some() { Screen::Menu } else { Screen::Clusters };
     }
 
     /// Apply a completed op's result.
@@ -1165,7 +1290,20 @@ impl RemoteState {
                 self.list.select(Some(sel.min(self.rows.len().saturating_sub(1))));
                 self.screen = Screen::Panel(panel);
             }
+            RemoteUpdate::Clusters(clusters) => {
+                self.clusters = clusters;
+                self.poll = vec![PollState::Unpolled; self.clusters.len()];
+                self.screen = Screen::Clusters;
+                self.error = None;
+            }
         }
+    }
+
+    /// True when a text field is focused, so the App loop must route keystrokes
+    /// here rather than treating 'q'/'l'/Tab as global shortcuts (hostnames and
+    /// paths routinely contain those letters).
+    pub(super) fn capturing_text(&self) -> bool {
+        matches!(self.screen, Screen::Manual { .. } | Screen::PathPrompt { .. })
     }
 
     pub(super) fn on_key(&mut self, code: KeyCode) -> Option<Action> {
@@ -1173,57 +1311,85 @@ impl RemoteState {
             return None;
         }
         match &self.screen {
-            Screen::Connect => self.on_key_connect(code),
+            Screen::Clusters => self.on_key_clusters(code),
+            Screen::Manual { .. } => self.on_key_manual(code),
             Screen::Menu => self.on_key_menu(code),
             Screen::PathPrompt { .. } => self.on_key_path_prompt(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
         }
     }
 
-    fn on_key_connect(&mut self, code: KeyCode) -> Option<Action> {
+    /// The landing screen: navigate the verified-present clusters, connect to the
+    /// selected one (glyph + login handled by the op), discover, or connect
+    /// directly by address.
+    fn on_key_clusters(&mut self, code: KeyCode) -> Option<Action> {
         match code {
-            KeyCode::Down => self.focus = self.focus.next(),
-            KeyCode::Up | KeyCode::BackTab => self.focus = self.focus.prev(),
+            KeyCode::Up | KeyCode::Char('k') => self.cluster_list.select_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.cluster_list.select_next(),
+            KeyCode::Char('d') => return Some(Action::Remote(RemoteAction::Discover)),
+            KeyCode::Char('c') => {
+                self.error = None;
+                self.screen = Screen::Manual {
+                    host: String::new(),
+                    port: DEFAULT_ADMIN_PORT.to_string(),
+                    focus: ManualFocus::Host,
+                };
+            }
+            KeyCode::Char('r') => self.reload_clusters(),
+            KeyCode::Enter => {
+                let visible = self.visible();
+                if visible.is_empty() {
+                    return None;
+                }
+                let sel = self.cluster_list.selected().unwrap_or(0).min(visible.len() - 1);
+                let (ci, addr) = visible[sel];
+                return Some(Action::Remote(RemoteAction::Connect {
+                    server: addr,
+                    expected_fp: self.clusters[ci].fp(),
+                }));
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The manual host/port form — connect directly to an admin server by
+    /// address. The op fetches + confirms the glyph before any credential.
+    fn on_key_manual(&mut self, code: KeyCode) -> Option<Action> {
+        let Screen::Manual { host, port, focus } = &mut self.screen else { return None };
+        match code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => *focus = focus.toggle(),
             KeyCode::Char(c) => {
-                match self.focus {
-                    ConnectFocus::User => self.user.push(c),
-                    ConnectFocus::Password => self.password.push(c),
-                    ConnectFocus::Server => self.addr.push(c),
+                match focus {
+                    ManualFocus::Host => host.push(c),
+                    ManualFocus::Port => port.push(c),
                 }
                 self.error = None;
             }
-            KeyCode::Backspace => match self.focus {
-                ConnectFocus::User => {
-                    self.user.pop();
+            KeyCode::Backspace => match focus {
+                ManualFocus::Host => {
+                    host.pop();
                 }
-                ConnectFocus::Password => {
-                    self.password.pop();
-                }
-                ConnectFocus::Server => {
-                    self.addr.pop();
+                ManualFocus::Port => {
+                    port.pop();
                 }
             },
+            KeyCode::Esc => {
+                self.error = None;
+                self.screen = Screen::Clusters;
+            }
             KeyCode::Enter => {
-                if self.user.trim().is_empty() {
-                    self.error = Some("enter an admin username".to_string());
-                    self.focus = ConnectFocus::User;
-                } else if self.password.is_empty() {
-                    self.error = Some("enter the admin password".to_string());
-                    self.focus = ConnectFocus::Password;
-                } else {
-                    match netidx_admin::plan::resolve_admin_server_addr(self.addr.trim()) {
-                        Ok(server) => {
-                            return Some(Action::Remote(RemoteAction::Connect {
-                                server,
-                                admin: self.user.trim().to_string(),
-                                password: Secret(std::mem::take(&mut self.password)),
-                            }));
-                        }
-                        Err(e) => {
-                            self.error = Some(format!("{e:#}"));
-                            self.focus = ConnectFocus::Server;
-                        }
+                let spec = format!("{}:{}", host.trim(), port.trim());
+                match netidx_admin::plan::resolve_admin_server_addr(&spec) {
+                    Ok(server) => {
+                        self.screen = Screen::Clusters;
+                        self.error = None;
+                        return Some(Action::Remote(RemoteAction::Connect {
+                            server,
+                            expected_fp: None,
+                        }));
                     }
+                    Err(e) => self.error = Some(format!("{e:#}")),
                 }
             }
             _ => {}
@@ -1236,13 +1402,13 @@ impl RemoteState {
             KeyCode::Up | KeyCode::Char('k') => self.menu.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.menu.select_next(),
             KeyCode::Esc => {
-                // Back to the connect screen (disconnect); drop the cached
-                // password and re-focus the credentials. (A Local surface is
-                // instead closed by its host, which intercepts Esc-at-menu.)
+                // Back to the cluster list (disconnect); the cached session is
+                // dropped. Reload so the cluster we just connected to (now saved)
+                // appears. (A Local surface is instead closed by its host, which
+                // intercepts Esc-at-menu.)
                 self.target = None;
-                self.password.clear();
-                self.focus = ConnectFocus::User;
-                self.screen = Screen::Connect;
+                self.screen = Screen::Clusters;
+                self.reload_clusters();
             }
             KeyCode::Enter => {
                 let panels = self.target.as_ref().map(PanelTarget::panels).unwrap_or(&PANELS);
@@ -1450,7 +1616,10 @@ impl RemoteState {
             return;
         }
         match &self.screen {
-            Screen::Connect => self.render_connect(f, area),
+            Screen::Clusters => self.render_clusters(f, area),
+            Screen::Manual { host, port, focus } => {
+                self.render_manual(f, area, host, port, *focus)
+            }
             Screen::Menu => self.render_menu(f, area),
             Screen::PathPrompt { panel, input } => self.render_path_prompt(f, area, *panel, input),
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
@@ -1470,16 +1639,75 @@ impl RemoteState {
         );
     }
 
-    fn render_connect(&self, f: &mut Frame, area: Rect) {
-        let block = theme::panel_block().title(Span::styled(" Connect ", theme::title_style()));
+    /// The landing screen: the verified-present clusters on the left, the
+    /// selected cluster's CA glyph on the right (same split as the Local tab's
+    /// install card).
+    fn render_clusters(&self, f: &mut Frame, area: Rect) {
+        let visible = self.visible();
+        let hint = " Enter connect · d discover · c connect direct · r refresh ";
+        let block = theme::panel_block()
+            .title(Span::styled(" Clusters ", theme::title_style()))
+            .title_bottom(Line::from(Span::styled(hint, theme::hint_style())));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if visible.is_empty() {
+            let checking = self
+                .poll
+                .iter()
+                .any(|p| matches!(p, PollState::Unpolled | PollState::Polling));
+            let msg = if self.clusters.is_empty() {
+                "No saved clusters yet. Press d to discover clusters on the local \
+                 network, or c to connect to one by address."
+            } else if checking {
+                "Checking saved clusters…"
+            } else {
+                "No saved cluster is reachable here right now (a cluster only shows \
+                 when its CA glyph verifies). Press d to discover, c to connect, or r \
+                 to re-check."
+            };
+            f.render_widget(
+                Paragraph::new(msg).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
+        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(inner);
+        let items: Vec<ListItem> = visible
+            .iter()
+            .map(|(ci, addr)| {
+                let c = &self.clusters[*ci];
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", c.domain), theme::panel_style()),
+                    Span::styled(format!("({addr})"), theme::hint_style()),
+                ]))
+            })
+            .collect();
+        let mut st = self.cluster_list;
+        let list = List::new(items)
+            .style(theme::panel_style())
+            .highlight_style(theme::selected_style())
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(list, cols[0], &mut st);
+        // The selected cluster's glyph.
+        let sel = st.selected().unwrap_or(0).min(visible.len() - 1);
+        if let Some(fp) = self.clusters[visible[sel].0].fp() {
+            let mut lines = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
+            lines.extend(widgets::identicon_lines(&fp));
+            f.render_widget(Paragraph::new(lines).style(theme::panel_style()), cols[1]);
+        }
+    }
+
+    /// The manual host/port connect form.
+    fn render_manual(&self, f: &mut Frame, area: Rect, host: &str, port: &str, focus: ManualFocus) {
+        let block =
+            theme::panel_block().title(Span::styled(" Connect direct ", theme::title_style()));
         let inner = block.inner(area);
         f.render_widget(block, area);
         let rows = Layout::vertical([
-            Constraint::Length(3), // help
+            Constraint::Length(2), // help
             Constraint::Length(1), // spacer
-            Constraint::Length(1), // user
-            Constraint::Length(1), // password
-            Constraint::Length(1), // server
+            Constraint::Length(1), // host
+            Constraint::Length(1), // port
             Constraint::Length(1), // error
             Constraint::Length(1), // spacer
             Constraint::Length(1), // hint
@@ -1488,23 +1716,22 @@ impl RemoteState {
         .split(inner);
         f.render_widget(
             Paragraph::new(
-                "Enter admin credentials for this machine's cluster. To manage a \
-                 different cluster instead, edit the admin-server address.",
+                "Enter an admin server's host and port. You'll confirm its CA glyph \
+                 before entering any credentials.",
             )
             .style(theme::hint_style())
             .wrap(Wrap { trim: true }),
             rows[0],
         );
-        let cursor = labeled_field(f, rows[2], "User", &self.user, false, self.focus == ConnectFocus::User)
-            .or(labeled_field(f, rows[3], "Password", &self.password, true, self.focus == ConnectFocus::Password))
-            .or(labeled_field(f, rows[4], "Server", &self.addr, false, self.focus == ConnectFocus::Server));
+        let cursor = labeled_field(f, rows[2], "Host", host, false, focus == ManualFocus::Host)
+            .or(labeled_field(f, rows[3], "Port", port, false, focus == ManualFocus::Port));
         if let Some(e) = &self.error {
             let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
-            f.render_widget(Paragraph::new(e.clone()).style(err), rows[5]);
+            f.render_widget(Paragraph::new(e.clone()).style(err), rows[4]);
         }
         f.render_widget(
-            Paragraph::new(" ↑/↓ field · Enter connect · Esc back ").style(theme::hint_style()),
-            rows[7],
+            Paragraph::new(" Tab field · Enter connect · Esc back ").style(theme::hint_style()),
+            rows[6],
         );
         if let Some(pos) = cursor {
             f.set_cursor_position(pos);
@@ -1606,20 +1833,11 @@ fn render_form(
     f.set_cursor_position((cx, field_row.y));
 }
 
-/// The default connect address: this host's own admin server, if it runs one.
-#[cfg(unix)]
-fn default_server() -> String {
-    netidx_admin::admin_ops::local_admin_server_listen()
-        .map(|a| a.to_string())
-        .unwrap_or_default()
-}
-
-#[cfg(not(unix))]
-fn default_server() -> String {
-    String::new()
-}
+/// The conventional admin-server port, pre-filled in the manual-connect form.
+const DEFAULT_ADMIN_PORT: u16 = 4565;
 
 /// The default admin username — the current OS user.
+#[cfg(unix)]
 fn default_user() -> String {
     netidx_admin::plan::enroll::current_username().unwrap_or_default()
 }
@@ -1649,4 +1867,77 @@ fn labeled_field(
         let cx = fr.x + (value.chars().count() as u16).min(fr.width.saturating_sub(1));
         (cx, fr.y)
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// Render a `RemoteState` into a test terminal and flatten the buffer to text.
+    fn render(state: &mut RemoteState, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| {
+            let area = f.area();
+            state.render(f, area);
+        })
+        .unwrap();
+        t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// A `RemoteState` on the Clusters screen with injected clusters + poll state
+    /// (bypassing the on-disk registry so the test is deterministic).
+    fn clusters_state(clusters: Vec<KnownCluster>, poll: Vec<PollState>) -> RemoteState {
+        let mut s = RemoteState::new();
+        s.clusters = clusters;
+        s.poll = poll;
+        s.screen = Screen::Clusters;
+        s
+    }
+
+    fn cluster(domain: &str, addr: &str, seed: &[u8]) -> (KnownCluster, SocketAddr) {
+        let addr: SocketAddr = addr.parse().unwrap();
+        let fp = Fingerprint::of_der(seed);
+        (KnownCluster { domain: domain.to_string(), fingerprint: fp.text(), addrs: vec![addr] }, addr)
+    }
+
+    #[test]
+    fn empty_cluster_list_shows_hint() {
+        let mut s = clusters_state(vec![], vec![]);
+        let out = render(&mut s, 100, 20);
+        assert!(out.contains("No saved clusters"), "empty hint missing: {out:?}");
+    }
+
+    #[test]
+    fn present_cluster_shows_domain_and_glyph() {
+        let (c, addr) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
+        let mut s = clusters_state(vec![c], vec![PollState::Present { addr }]);
+        let out = render(&mut s, 100, 20);
+        assert!(out.contains("hq.local"), "domain missing: {out:?}");
+        assert!(out.contains("CA glyph"), "glyph label missing: {out:?}");
+    }
+
+    #[test]
+    fn unverified_cluster_is_hidden() {
+        // A saved cluster whose identity did not verify (Absent) never shows —
+        // the address may now be a different CA on this network.
+        let (c, _) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
+        let mut s = clusters_state(vec![c], vec![PollState::Absent]);
+        let out = render(&mut s, 100, 20);
+        assert!(!out.contains("hq.local"), "unverified cluster leaked into the list: {out:?}");
+        assert!(out.contains("No saved cluster is reachable"), "absent hint missing: {out:?}");
+    }
+
+    #[test]
+    fn manual_form_shows_host_and_port() {
+        let mut s = RemoteState::new();
+        s.screen = Screen::Manual {
+            host: "10.0.0.9".to_string(),
+            port: "4565".to_string(),
+            focus: ManualFocus::Host,
+        };
+        let out = render(&mut s, 100, 20);
+        assert!(out.contains("Host"), "host field missing: {out:?}");
+        assert!(out.contains("10.0.0.9"), "host value missing: {out:?}");
+    }
 }

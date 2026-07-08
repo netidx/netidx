@@ -17,7 +17,7 @@ use netidx_admin::{
 };
 use std::{net::SocketAddr, time::Duration};
 
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Build the config-reconciliation plan for this host's role, checking it
 /// against the network (pinned to the CA identity recorded at install). The

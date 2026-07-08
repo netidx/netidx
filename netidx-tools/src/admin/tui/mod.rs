@@ -22,6 +22,7 @@
 
 mod action;
 mod answer;
+mod clusters;
 mod lifecycle;
 mod local;
 mod privileged;
@@ -164,11 +165,10 @@ impl App {
     fn next_tab(&mut self) {
         let i = (self.tab.index() + 1) % Tab::ALL.len();
         self.tab = Tab::ALL[i];
-        // The connect default is read from this host's admin-server config,
-        // which may have been created (a fresh CA install) after the TUI
-        // started — so re-read it when the Remote tab gains focus.
+        // Re-read the saved cluster registry (a cluster may have been saved this
+        // session) and re-poll it when the Cluster tab regains focus.
         if self.tab == Tab::Remote {
-            self.remote.refresh_connect_default();
+            self.remote.on_focus();
         }
     }
 
@@ -305,6 +305,15 @@ impl App {
         }
         if self.busy {
             return None;
+        }
+        // A tab screen that owns the keyboard gets keys routed to it before the
+        // global q/l/Tab shortcuts: a Local status overlay swallows any key to
+        // dismiss, and a Remote text field must receive every keystroke because
+        // hostnames and paths routinely contain 'q'/'l'.
+        match self.tab {
+            Tab::Local if self.local.status_open() => return self.local.on_key(code),
+            Tab::Remote if self.remote.capturing_text() => return self.remote.on_key(code),
+            _ => {}
         }
         let action = match code {
             KeyCode::Char('q') => {
@@ -661,6 +670,11 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     // files and gains its sync line once the network answers; never sets `busy`.
     type SyncFuture = Pin<Box<dyn Future<Output = Vec<(usize, local::SyncState)>>>>;
     let mut sync_op: Option<SyncFuture> = None;
+    // The Cluster tab's on-entry poll: verify each saved cluster's CA identity is
+    // still reachable before showing it. Same background slot idea as `sync_op` —
+    // never sets `busy`, so the cluster list renders instantly and fills in.
+    type ClusterFuture = Pin<Box<dyn Future<Output = Vec<(usize, clusters::PollState)>>>>;
+    let mut cluster_op: Option<ClusterFuture> = None;
     // The crossterm reader. `None` only during a terminal-suspend, so its
     // background thread can't fight the child (editor / sudo) for stdin.
     let mut events: Option<Fuse<EventStream>> = Some(EventStream::new().fuse());
@@ -677,6 +691,15 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             let pending = app.local.take_pending_checks();
             if !pending.is_empty() {
                 sync_op = Some(Box::pin(local::check_sync(pending)));
+            }
+        }
+        // Kick off the cluster poll when the Cluster tab is focused and has
+        // unpolled saved clusters. `take_pending_poll` marks them `Polling`, so
+        // this launches exactly one poll pass per pending set.
+        if app.tab == Tab::Remote && cluster_op.is_none() {
+            let pending = app.remote.take_pending_poll();
+            if !pending.is_empty() {
+                cluster_op = Some(Box::pin(clusters::poll_clusters(pending)));
             }
         }
         tokio::select! {
@@ -723,6 +746,17 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             } => {
                 sync_op = None;
                 app.local.apply_sync(synced);
+            }
+            // Lowest priority: a finished cluster poll fills in the Cluster tab's
+            // reachability/glyph state — no overlay, no `busy`.
+            polled = async {
+                match cluster_op.as_mut() {
+                    Some(f) => f.await,
+                    None => future::pending().await,
+                }
+            } => {
+                cluster_op = None;
+                app.remote.apply_poll(polled);
             }
             // Lowest priority: advance the animation frame while a progress
             // modal is up so the bar/marquee redraws; inert otherwise.
@@ -954,6 +988,30 @@ mod render_tests {
         assert!(s.contains("Permissions"), "perms panel missing locally: {s:?}");
         assert!(!s.contains("Enrollment"), "queue panel should be absent locally: {s:?}");
         assert!(!s.contains("Delegation"), "delegation panel should be absent locally: {s:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manual_form_captures_q_and_l() {
+        // A focused text field must receive every keystroke: hostnames routinely
+        // contain 'q' and 'l', which must not fire the global quit / open-log
+        // shortcuts. Seed a non-empty log so 'l' would open it if it leaked.
+        let mut app = App::new();
+        app.log_line(Line::raw("seed"));
+        app.tab = Tab::Remote;
+        // Enter the manual host/port form via the cluster screen's 'c' action.
+        app.remote.on_key(KeyCode::Char('c'));
+        for ch in "qlab".chars() {
+            assert!(app.on_key(KeyCode::Char(ch), KeyModifiers::NONE).is_none());
+        }
+        assert!(!app.should_quit, "'q' leaked to the global quit shortcut");
+        assert!(!app.show_log, "'l' leaked to the global open-log shortcut");
+        // Render the Remote widget directly — the full-app view depends on host
+        // install state, but the field's contents don't.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.remote.render(f, f.area())).unwrap();
+        let s: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(s.contains("qlab"), "typed hostname not captured by the field: {s:?}");
     }
 
     #[test]

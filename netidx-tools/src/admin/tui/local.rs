@@ -187,27 +187,21 @@ fn detect() -> Vec<Detected> {
     out
 }
 
-/// A context menu of the actions available for the selected install — the
-/// role's `netidx admin <template> <subcommand>` surface.
-struct ActionMenu {
-    title: String,
-    items: Vec<(String, Action)>,
-    state: ListState,
-}
-
 /// Tab-1 state: the detected installs plus the role-menu cursor for the
 /// fresh-machine case.
 pub(super) struct LocalState {
     installs: Vec<Detected>,
     /// Per-install network-sync state, parallel to `installs` — filled in by a
-    /// background check so the status card can render instantly from local
-    /// files and gain the sync line once the network answers.
+    /// background check so the status view can render instantly from local files
+    /// and gain the sync line once the network answers.
     sync: Vec<SyncState>,
     role_menu: ListState,
-    /// Which detected install the lifecycle actions apply to.
+    /// Which detected install the action list + status apply to.
     selected: usize,
-    /// The open action menu for the selected install, if any.
-    menu: Option<ActionMenu>,
+    /// Cursor over the selected install's inline action list (index 0 = Status).
+    menu_state: ListState,
+    /// Whether the detailed-status overlay is open over the action list.
+    show_status: bool,
     /// On a fresh machine, whether the operator has dismissed the "not
     /// installed" welcome dialog and dropped into the install choices.
     welcome_seen: bool,
@@ -221,6 +215,8 @@ impl LocalState {
     pub(super) fn new() -> LocalState {
         let mut role_menu = ListState::default();
         role_menu.select(Some(0));
+        let mut menu_state = ListState::default();
+        menu_state.select(Some(0));
         let installs = detect();
         let sync = vec![SyncState::Unchecked; installs.len()];
         LocalState {
@@ -228,7 +224,8 @@ impl LocalState {
             sync,
             role_menu,
             selected: 0,
-            menu: None,
+            menu_state,
+            show_status: false,
             welcome_seen: false,
             admin: None,
         }
@@ -258,10 +255,17 @@ impl LocalState {
         self.installs = detect();
         self.sync = vec![SyncState::Unchecked; self.installs.len()];
         self.selected = self.selected.min(self.installs.len().saturating_sub(1));
-        self.menu = None;
+        self.menu_state.select(Some(0));
+        self.show_status = false;
         // If the machine is fresh again (everything was uninstalled), re-show
         // the welcome dialog.
         self.welcome_seen = self.welcome_seen && !self.installs.is_empty();
+    }
+
+    /// Whether the detailed-status overlay is open — the host routes keys here
+    /// before its global shortcuts so any key dismisses it.
+    pub(super) fn status_open(&self) -> bool {
+        self.show_status
     }
 
     /// Networked installs whose sync hasn't been checked yet; marks each
@@ -334,31 +338,41 @@ impl LocalState {
             }
             return None;
         }
-        // With the action menu open, keys drive it.
-        if let Some(menu) = &mut self.menu {
-            match code {
-                Up | Char('k') => menu.state.select_previous(),
-                Down | Char('j') => menu.state.select_next(),
-                Esc => self.menu = None,
-                Enter => {
-                    let mut menu = self.menu.take().unwrap();
-                    let sel = menu.state.selected().unwrap_or(0).min(menu.items.len().saturating_sub(1));
-                    return Some(menu.items.remove(sel).1);
-                }
-                _ => {}
-            }
+        // The detailed-status overlay swallows keys — any key dismisses it.
+        if self.show_status {
+            self.show_status = false;
             return None;
         }
+        // The action list is the main view. Index 0 is Status; the rest are the
+        // selected install's actions.
+        let n_items = 1 + action_items(&self.installs[self.selected]).len();
         match code {
-            Up | Char('k') if self.selected > 0 => self.selected -= 1,
-            Down | Char('j') if self.selected + 1 < self.installs.len() => self.selected += 1,
-            // Enter opens the full action menu for the selected install.
-            Enter => self.menu = Some(action_menu(&self.installs[self.selected])),
-            // Quick shortcuts (also in the menu).
+            Up | Char('k') => self.menu_state.select_previous(),
+            Down | Char('j') => self.menu_state.select_next(),
+            // Switch between multiple installs (a host with both a user- and a
+            // system-scope install); no-op with a single install.
+            Left if self.selected > 0 => {
+                self.selected -= 1;
+                self.menu_state.select(Some(0));
+            }
+            Right if self.selected + 1 < self.installs.len() => {
+                self.selected += 1;
+                self.menu_state.select(Some(0));
+            }
+            Enter => {
+                let sel = self.menu_state.selected().unwrap_or(0).min(n_items - 1);
+                if sel == 0 {
+                    self.show_status = true;
+                    return None;
+                }
+                let mut items = action_items(&self.installs[self.selected]);
+                return Some(items.remove(sel - 1).1);
+            }
+            // Quick shortcuts (also in the list).
             Char('u') => return Some(uninstall_action(&self.installs[self.selected], false)),
             // Uppercase U applies the network sync (the Update action) — mnemonic
             // and distinct from lowercase `u` (uninstall). Only meaningful for a
-            // networked install; the status card surfaces it when out of sync.
+            // networked install; the status overlay surfaces it when out of sync.
             Char('U') => {
                 let d = &self.installs[self.selected];
                 if d.record.network.is_some() {
@@ -386,11 +400,16 @@ impl LocalState {
             if !self.welcome_seen {
                 render_welcome(f, area);
             }
-        } else {
-            self.render_installs(f, area);
+            return;
         }
-        if let Some(menu) = &self.menu {
-            render_menu(f, area, menu);
+        self.render_actions(f, area);
+        if self.show_status {
+            render_status_overlay(
+                f,
+                area,
+                &self.installs[self.selected],
+                &self.sync[self.selected],
+            );
         }
     }
 
@@ -415,19 +434,78 @@ impl LocalState {
         f.render_widget(blurb, cols[1]);
     }
 
-    fn render_installs(&self, f: &mut Frame, area: Rect) {
-        let n = self.installs.len().max(1) as u32;
-        let rows = Layout::vertical(vec![Constraint::Ratio(1, n); self.installs.len()])
-            .split(area);
-        for (i, (d, cell)) in self.installs.iter().zip(rows.iter()).enumerate() {
-            render_install(f, d, &self.sync[i], *cell, i == self.selected);
-        }
+    /// The installed view: the selected install's action list, titled with the
+    /// role and live service state (`Resolver (running)` / `Resolver (stopped)`).
+    /// Index 0 is the Status item; the rest are the role's actions.
+    fn render_actions(&self, f: &mut Frame, area: Rect) {
+        let d = &self.installs[self.selected];
+        let mut labels = vec!["Status — full details".to_string()];
+        labels.extend(action_items(d).into_iter().map(|(l, _)| l));
+        let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
+        let title = format!(" {} ({}) ", role_title(d.record.role), service_word(d.service));
+        let hint = if self.installs.len() > 1 {
+            " ↑/↓ select · Enter run · ‹/› switch install "
+        } else {
+            " ↑/↓ select · Enter run "
+        };
+        let mut st = self.menu_state;
+        let list = List::new(items)
+            .style(theme::panel_style())
+            .block(
+                theme::panel_block()
+                    .title(Span::styled(title, theme::title_style()))
+                    .title_bottom(Line::from(Span::styled(hint, theme::hint_style()))),
+            )
+            .highlight_style(theme::selected_style())
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(list, area, &mut st);
     }
 }
 
-/// Build the action menu for a detected install — its role's post-install
-/// subcommand surface (`netidx admin <template> <subcommand>`).
-fn action_menu(d: &Detected) -> ActionMenu {
+/// The parenthetical service state shown in an install's title.
+fn service_word(status: ServiceStatus) -> &'static str {
+    match status {
+        ServiceStatus::Active => "running",
+        ServiceStatus::Inactive => "stopped",
+        ServiceStatus::NotInstalled => "no service",
+    }
+}
+
+/// The detailed-status overlay — the former always-on card, now shown on demand
+/// over the action list (any key closes). Left column is the record + sync
+/// detail; the right column carries the CA glyph when this host joined a network.
+fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncState) {
+    let mut lines = detail_lines(d);
+    lines.extend(sync_lines(sync));
+    let w = 90.min(screen.width.saturating_sub(4)).max(24);
+    let h = (lines.len() as u16 + 2).min(screen.height); // + borders
+    let area = widgets::centered(w, h, screen);
+    widgets::shadow(f, area, screen);
+    f.render_widget(Clear, area);
+    let block = theme::dialog_block(&format!("{} status", role_title(d.record.role)))
+        .title_bottom(Line::from(Span::styled(" any key to close ", theme::hint_style())));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let cols = if d.ca.is_some() {
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(inner)
+    } else {
+        Layout::horizontal([Constraint::Min(0)]).split(inner)
+    };
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()),
+        cols[0],
+    );
+    if let Some(fp) = &d.ca {
+        let mut g = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
+        g.extend(widgets::identicon_lines(fp));
+        f.render_widget(Paragraph::new(g).style(theme::panel_style()), cols[1]);
+    }
+}
+
+/// Build the action list for a detected install — its role's post-install
+/// subcommand surface (`netidx admin <template> <subcommand>`). The Status entry
+/// is prepended by the caller; these are the actionable items.
+fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let role = d.record.role;
     let networked = d.record.network.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
@@ -521,9 +599,7 @@ fn action_menu(d: &Detected) -> ActionMenu {
             uninstall_action(d, true),
         ));
     }
-    let mut state = ListState::default();
-    state.select(Some(0));
-    ActionMenu { title: format!("{} actions", role_title(role)), items, state }
+    items
 }
 
 /// Whether this host runs its own admin server (so it can have a delegation
@@ -586,65 +662,6 @@ fn render_welcome(f: &mut Frame, screen: Rect) {
         Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()).block(theme::dialog_block("Welcome to netidx")),
         area,
     );
-}
-
-/// Render the action menu as a centered overlay.
-fn render_menu(f: &mut Frame, screen: Rect, menu: &ActionMenu) {
-    let items: Vec<ListItem> =
-        menu.items.iter().map(|(label, _)| ListItem::new(label.clone())).collect();
-    let h = (menu.items.len() as u16 + 3).min(screen.height.saturating_sub(2));
-    let area = widgets::centered(56, h, screen);
-    widgets::shadow(f, area, screen);
-    f.render_widget(Clear, area);
-    let mut state = menu.state;
-    let list = List::new(items)
-        .style(theme::panel_style())
-        .block(theme::dialog_block(&menu.title).title_bottom(Line::from(Span::styled(
-            " ↑/↓ · Enter run · Esc close ",
-            theme::hint_style(),
-        ))))
-        .highlight_style(theme::selected_style())
-        .highlight_symbol("▸ ");
-    f.render_stateful_widget(list, area, &mut state);
-}
-
-/// Render one detected install: a details column on the left and, when the host
-/// joined a network, its CA identicon + fingerprint on the right. The selected
-/// install is highlighted and shows its action keys.
-fn render_install(f: &mut Frame, d: &Detected, sync: &SyncState, area: Rect, selected: bool) {
-    let title = format!(" {} ", role_title(d.record.role));
-    let mut block = theme::panel_block().title(Span::styled(title, theme::title_style()));
-    if selected {
-        // Surface the sync-apply shortcut in the hint only when there's
-        // something to apply, so it doesn't clutter the in-sync case.
-        let hint = if matches!(sync, SyncState::OutOfSync(_)) {
-            " Enter actions · U sync now · u uninstall "
-        } else {
-            " Enter actions · u uninstall "
-        };
-        block = block
-            .border_style(Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT))
-            .title_bottom(Line::from(Span::styled(hint, theme::hint_style())));
-    }
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let has_glyph = d.ca.is_some();
-    let cols = if has_glyph {
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(inner)
-    } else {
-        Layout::horizontal([Constraint::Min(0)]).split(inner)
-    };
-
-    let mut lines = detail_lines(d);
-    lines.extend(sync_lines(sync));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()), cols[0]);
-
-    if let Some(fp) = &d.ca {
-        let mut lines = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
-        lines.extend(widgets::identicon_lines(fp));
-        f.render_widget(Paragraph::new(lines).style(theme::panel_style()), cols[1]);
-    }
 }
 
 fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
@@ -791,5 +808,18 @@ fn fmt_unix(secs: u64) -> String {
     match chrono::DateTime::from_timestamp(secs as i64, 0) {
         Some(dt) => dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
         None => secs.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_word_matches_state() {
+        // The words Eric asked for in the install-title, e.g. `Resolver (running)`.
+        assert_eq!(service_word(ServiceStatus::Active), "running");
+        assert_eq!(service_word(ServiceStatus::Inactive), "stopped");
+        assert_eq!(service_word(ServiceStatus::NotInstalled), "no service");
     }
 }
