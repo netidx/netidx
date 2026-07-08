@@ -32,6 +32,7 @@ pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
     let networks = rt.block_on(enroll::discover_networks(
         Duration::from_secs(a.timeout),
         NodeKind::Client,
+        false,
     ));
     if a.json {
         print_json(&networks);

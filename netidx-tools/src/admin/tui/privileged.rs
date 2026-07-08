@@ -291,7 +291,16 @@ fn with_suspended<T>(
     let resumed = (|| {
         enable_raw_mode().context("re-entering raw mode")?;
         execute!(stdout(), EnterAlternateScreen).context("re-entering the alternate screen")?;
-        terminal.clear().context("clearing the terminal")?;
+        // Force a full repaint. `Terminal::clear` can't be trusted here: in
+        // ratatui 0.30 it opens with a cursor-position DSR round-trip on stdin,
+        // which is unreliable immediately after a child process and an
+        // alternate-screen switch — if it misparses, the back buffer is never
+        // reset and the next draw diffs against the pre-suspend frame, leaving
+        // the child's output on screen. `resize` does the same clear + back-
+        // buffer reset with no stdin round-trip, so the next draw repaints every
+        // cell.
+        let size = terminal.size().context("querying terminal size")?;
+        terminal.resize(size.into()).context("repainting the terminal")?;
         Ok(())
     })();
     // The child's result takes priority; surface a resume failure only if the

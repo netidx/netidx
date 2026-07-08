@@ -153,11 +153,14 @@ impl Discovered {
     }
 }
 
-/// Browse for admin servers for `timeout`, blocking the calling thread.
-/// Returns every distinct service resolved in the window — possibly
-/// from multiple networks (group by `domain` + confirm fingerprints
-/// before trusting anything).
-pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
+/// Browse for admin servers up to `timeout`, blocking the calling thread. When
+/// `stop_on_first`, returns as soon as the first admin server resolves — a local
+/// network almost always hosts a single cluster, so waiting the full window only
+/// slows the common case; the join flow walks the rest of a cluster's members
+/// from any one of its admin servers. When `false`, waits the whole window and
+/// returns every distinct service resolved (possibly from multiple networks —
+/// group by `domain` + confirm fingerprints before trusting anything).
+fn browse_inner(timeout: Duration, stop_on_first: bool) -> Result<Vec<Discovered>> {
     let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
     let receiver = daemon.browse(SERVICE_TYPE).context("browsing for admin servers")?;
     // Keyed by service fullname so re-resolutions overwrite instead of
@@ -191,6 +194,9 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
                     info.get_fullname().to_string(),
                     Discovered { addrs, port: info.get_port(), domain, roles, fp_short },
                 );
+                if stop_on_first {
+                    break;
+                }
             }
             Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                 found.remove(&fullname);
@@ -208,6 +214,14 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
     Ok(found.into_values().collect())
 }
 
+/// Browse for admin servers for the full `timeout`, blocking the calling thread.
+/// Returns every distinct service resolved in the window — possibly from
+/// multiple networks (group by `domain` + confirm fingerprints before trusting
+/// anything).
+pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
+    browse_inner(timeout, false)
+}
+
 /// Async wrapper for [`browse_blocking`] — runs it on the blocking
 /// pool so a admin server can browse mid-request without stalling the
 /// runtime.
@@ -222,6 +236,19 @@ pub async fn browse(timeout: Duration) -> Result<Vec<Discovered>> {
 /// missing/blocked mDNS stack must not break manual setup.
 pub fn browse_or_empty(timeout: Duration) -> Vec<Discovered> {
     match browse_blocking(timeout) {
+        Ok(found) => found,
+        Err(e) => {
+            warn!("mDNS browse failed (manual setup still available): {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// Like [`browse_or_empty`], but returns as soon as the first admin server
+/// resolves (or after `timeout`, whichever comes first). For the interactive
+/// join, where the local network is expected to host exactly one cluster.
+pub fn browse_first_or_empty(timeout: Duration) -> Vec<Discovered> {
+    match browse_inner(timeout, true) {
         Ok(found) => found,
         Err(e) => {
             warn!("mDNS browse failed (manual setup still available): {e:#}");

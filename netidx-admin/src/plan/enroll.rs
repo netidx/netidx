@@ -30,8 +30,11 @@ use std::{
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-/// How long the install flows browse mDNS for admin servers.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// The upper bound the interactive install flows browse mDNS for admin servers.
+/// A local network is expected to host a single cluster, so discovery returns as
+/// soon as the first admin server answers — this is only the ceiling for the
+/// case where mDNS is slow or nothing is there.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Validity requested from a CA server. The server caps it to the admin's
 /// policy, so this is just an upper bound.
 const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
@@ -424,11 +427,20 @@ pub struct DiscoveredNetworkReport {
 pub async fn discover_networks(
     timeout: Duration,
     kind: NodeKind,
+    stop_on_first: bool,
 ) -> Vec<DiscoveredNetworkReport> {
     // The mDNS browse blocks for `timeout`; keep it off the async worker.
-    let found = tokio::task::spawn_blocking(move || discovery::browse_or_empty(timeout))
-        .await
-        .unwrap_or_default();
+    // `stop_on_first` returns as soon as one cluster is found (the interactive
+    // join); the strict enumerator waits the full window to list every network.
+    let found = tokio::task::spawn_blocking(move || {
+        if stop_on_first {
+            discovery::browse_first_or_empty(timeout)
+        } else {
+            discovery::browse_or_empty(timeout)
+        }
+    })
+    .await
+    .unwrap_or_default();
     // Group the (unauthenticated, hint-only) beacons by domain; the identity
     // fetched next is the authenticated fact.
     let mut domains: BTreeMap<String, Vec<SocketAddr>> = BTreeMap::new();
@@ -483,13 +495,10 @@ pub async fn discover_network(
     // identity, so the operator can recognize the one they mean by its glyph.
     ans.progress(Progress::timed(
         Stage::Discovering,
-        format_compact!(
-            "searching for netidx clusters on the local network ({}s)…",
-            DISCOVERY_TIMEOUT.as_secs()
-        ),
+        "searching for a netidx cluster on the local network…",
         DISCOVERY_TIMEOUT,
     ));
-    let reports = discover_networks(DISCOVERY_TIMEOUT, kind).await;
+    let reports = discover_networks(DISCOVERY_TIMEOUT, kind, true).await;
     // Only clusters whose admin server answered carry a glyph to show; note the
     // rest and drop them from the pick list.
     let mut options: Vec<NetworkOption> = Vec::new();
