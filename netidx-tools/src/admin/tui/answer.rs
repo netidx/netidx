@@ -22,7 +22,7 @@ use netidx_admin::{
 };
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -542,7 +542,9 @@ impl Modal {
                 let w = 64u16.min(screen.width.saturating_sub(4)).max(30);
                 // Size the help area to the wrapped help so it's never truncated.
                 let help_h = widgets::wrapped_rows(field.help(), w - 2);
-                let inner_rows = help_h + 1 /*spacer*/ + 1 /*field*/ + 1 /*error*/ + 1 /*spacer*/ + 1 /*buttons*/;
+                // No buttons: the field is the whole interaction — Enter submits,
+                // Esc cancels (the footer says so). The value is the answer.
+                let inner_rows = help_h + 1 /*spacer*/ + 1 /*field*/ + 1 /*error*/;
                 let h = (inner_rows + 2).min(screen.height);
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
@@ -555,8 +557,6 @@ impl Modal {
                     Constraint::Length(1),      // spacer
                     Constraint::Length(1),      // input field
                     Constraint::Length(1),      // error (if any)
-                    Constraint::Length(1),      // spacer
-                    Constraint::Length(1),      // buttons
                     Constraint::Min(0),
                 ])
                 .split(inner);
@@ -571,12 +571,6 @@ impl Modal {
                     let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
                     f.render_widget(Paragraph::new(e.clone()).style(err), rows[3]);
                 }
-                let buttons =
-                    Line::from(vec![theme::button("Continue", true), Span::raw("  "), theme::button("Cancel", false)]);
-                f.render_widget(
-                    Paragraph::new(buttons).alignment(Alignment::Center).style(theme::panel_style()),
-                    rows[5],
-                );
                 // Focus: put the terminal cursor at the end of the field.
                 let cx = field_row.x + (input.chars().count() as u16).min(field_row.width.saturating_sub(1));
                 f.set_cursor_position((cx, field_row.y));

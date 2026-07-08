@@ -1281,12 +1281,6 @@ impl RemoteState {
         (s, Some(initial))
     }
 
-    /// Whether the surface is at its top-level menu — the host clears a Local
-    /// surface on Esc from here (there's no cluster list to fall back to).
-    pub(super) fn at_menu(&self) -> bool {
-        matches!(self.screen, Screen::Menu)
-    }
-
     /// Cluster tab regained focus: on the landing list (not mid-session), reload
     /// the saved registry — a cluster may have been saved this session — and
     /// re-poll it.

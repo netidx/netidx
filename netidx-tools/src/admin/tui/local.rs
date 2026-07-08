@@ -370,11 +370,11 @@ impl LocalState {
             }
             return self.services.as_mut().unwrap().on_key(code);
         }
-        // The local admin panel surface takes over the tab while open; Esc from
-        // its top menu closes it back to the Local tab.
+        // The local admin panel surface opens directly on a panel (Admins /
+        // Permissions are their own top-level items), so Esc backs straight out
+        // to the action list — there is no intermediate panel menu.
         if self.admin.is_some() {
-            let at_menu = self.admin.as_ref().unwrap().at_menu();
-            if matches!(code, Esc) && at_menu {
+            if matches!(code, Esc) {
                 self.admin = None;
                 return None;
             }

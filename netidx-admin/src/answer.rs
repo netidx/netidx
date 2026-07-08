@@ -375,7 +375,7 @@ impl Field {
                 label: "parent resolver address",
                 help: "The parent resolver this node refers up to for paths \
                        outside its own subtree — an IP (you'll be asked for the \
-                       port) or a full host:port. Leave blank for a standalone node.",
+                       port) or a full host:port.",
             },
             ParentPath => FieldInfo {
                 flag: "--parent-path",
