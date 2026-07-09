@@ -10,6 +10,7 @@ use derive_builder::Builder;
 use netidx_core::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::PathBuf,
 };
 
@@ -28,6 +29,16 @@ pub enum Restart {
 impl Default for Restart {
     fn default() -> Self {
         Self::RateLimited(1.0)
+    }
+}
+
+impl fmt::Display for Restart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Restart::No => write!(f, "no"),
+            Restart::Yes => write!(f, "yes"),
+            Restart::RateLimited(s) => write!(f, "rate-limited ({s}s)"),
+        }
     }
 }
 
@@ -60,6 +71,24 @@ pub enum Trigger {
 impl Default for Trigger {
     fn default() -> Self {
         Self::OnStart
+    }
+}
+
+impl fmt::Display for Trigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Trigger::OnStart => write!(f, "OnStart"),
+            Trigger::OnAccess(paths) => {
+                write!(f, "OnAccess(")?;
+                for (i, p) in paths.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ")")
+            }
+        }
     }
 }
 

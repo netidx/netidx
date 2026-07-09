@@ -15,7 +15,7 @@ use crate::{
     answer::Answerer,
 };
 use anyhow::{Context, Result};
-use netidx_activation::control::{ControlOp, UnitStatus};
+use netidx_activation::control::ControlOp;
 use std::{net::SocketAddr, path::PathBuf};
 
 /// One admin server the operator can control services on — its listen address,
@@ -65,7 +65,7 @@ pub async fn control_remote(
     target_server: SocketAddr,
     units: Vec<String>,
     op: ControlOp,
-) -> Result<Vec<UnitStatus>> {
+) -> Result<Vec<crate::admin_proto::ServiceUnit>> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
     admin_client::control_service(
         sess.server,

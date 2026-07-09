@@ -515,7 +515,7 @@ pub async fn control_service(
     target_server: SocketAddr,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<netidx_activation::control::UnitStatus>> {
+) -> Result<Vec<admin_proto::ServiceUnit>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -543,7 +543,7 @@ pub async fn push_service_control(
     roots: rustls::RootCertStore,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<netidx_activation::control::UnitStatus>> {
+) -> Result<Vec<admin_proto::ServiceUnit>> {
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;

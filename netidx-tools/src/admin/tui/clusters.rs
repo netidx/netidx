@@ -115,30 +115,34 @@ impl KnownClusters {
 /// whether the saved set changed (worth saving).
 #[cfg(unix)]
 pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
-    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen() else {
+    let Some((domain, fp, recorded)) = local_cluster_identity() else { return false };
+    // The address to reach this cluster's CA: this host's own admin-server listen
+    // if it hosts a member (a CA / resolver), else the upstream admin server this
+    // host enrolled against, recorded at join (a workstation / publisher runs no
+    // admin server of its own). Either reaches the same CA; the on-entry poll
+    // verifies the fingerprint live.
+    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen().or(recorded) else {
         return false;
     };
-    match local_cluster_identity() {
-        Some((domain, fp)) => clusters.upsert(&domain, addr, fp),
-        None => false,
-    }
+    clusters.upsert(&domain, addr, fp)
 }
 
-/// The admin cluster this host belongs to (domain + CA fingerprint), from its
-/// install record — the user-scope record, else the system-scope one.
+/// The admin cluster this host belongs to — domain, CA fingerprint, and the
+/// admin-server address recorded at install (the upstream one it joined, if
+/// any) — from its install record: the user-scope record, else the system one.
 #[cfg(unix)]
-fn local_cluster_identity() -> Option<(String, Fingerprint)> {
+fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
     use netidx_admin::provenance::InstallRecord;
     let sys = paths::system_install_record();
     let records = [
         InstallRecord::load_default().ok().flatten(),
         sys.exists().then(|| InstallRecord::load(&sys).ok()).flatten(),
     ];
-    records
-        .into_iter()
-        .flatten()
-        .find_map(|r| r.network)
-        .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok().map(|fp| (n.domain, fp)))
+    records.into_iter().flatten().find_map(|r| {
+        let net = r.network?;
+        let fp = Fingerprint::parse_text(&net.ca_fingerprint).ok()?;
+        Some((net.domain, fp, r.admin_server))
+    })
 }
 
 #[cfg(not(unix))]

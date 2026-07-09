@@ -34,7 +34,8 @@ use crate::{
         NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
         QueueEntry, ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
         RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
-        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
+        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse, ServiceUnit,
+        ServiceUnitDef,
         SERVING_SAN, Secret, ServerEntry, ServerHello, SetAdminPolicyRequest,
         SignRequest, SignResponse,
     },
@@ -3486,13 +3487,30 @@ async fn handle_apply_service_control(
         }
     };
     let creq = control::ControlRequest { op: req.op, units: req.units.clone() };
-    match control::control(&dir, &creq).await {
-        Ok(control::ControlResponse::Ok { units }) => {
-            ApplyServiceControlResponse::Ok { units }
-        }
-        Ok(control::ControlResponse::Err { reason }) => err(reason),
-        Err(e) => err(format!("contacting the local activation supervisor: {e:#}")),
-    }
+    let statuses = match control::control(&dir, &creq).await {
+        Ok(control::ControlResponse::Ok { units }) => units,
+        Ok(control::ControlResponse::Err { reason }) => return err(reason),
+        Err(e) => return err(format!("contacting the local activation supervisor: {e:#}")),
+    };
+    // Merge each reported unit's on-disk definition (this member holds the unit
+    // files) so the operator's panel shows the same status + definition the
+    // local Services surface does. A read failure just omits definitions.
+    let defs = crate::activation::ActivationDir::open(Some(&dir))
+        .and_then(|ad| ad.list())
+        .unwrap_or_default();
+    let units = statuses
+        .into_iter()
+        .map(|u| {
+            let definition = defs.get(&u.unit).map(|unit| ServiceUnitDef {
+                exe: unit.process.exe.clone(),
+                args: unit.process.args.clone(),
+                trigger: unit.trigger.to_string(),
+                restart: unit.process.restart.to_string(),
+            });
+            ServiceUnit { unit: u.unit, state: u.state, definition }
+        })
+        .collect();
+    ApplyServiceControlResponse::Ok { units }
 }
 
 // -- remote admin management --------------------------------------------------

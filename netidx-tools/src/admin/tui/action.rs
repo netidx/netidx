@@ -76,6 +76,21 @@ impl Outcome {
         }
     }
 
+    /// A silent Cluster-tab discovery result: refresh the known-cluster list and
+    /// return to the landing screen with no overlay — the list is the result, and
+    /// the landing screen re-polls it to show the verified clusters.
+    pub(super) fn remote_clusters(clusters: Vec<super::clusters::KnownCluster>) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::Clusters(clusters)),
+            services: None,
+            quiet: true,
+        }
+    }
+
     /// A silent remote-tab result: apply the panel rows, no overlay.
     pub(super) fn remote_rows(
         panel: super::remote::Panel,
@@ -136,6 +151,38 @@ impl Outcome {
             remote: Some(super::remote::RemoteUpdate::ServiceServers { servers }),
             services: None,
             quiet: true,
+        }
+    }
+
+    /// A silent Cluster-tab services listing: apply the rows and open the
+    /// services panel with no overlay — selecting a server drops straight into
+    /// the units, and a refresh doesn't flash a toast.
+    pub(super) fn remote_service_rows(rows: Vec<super::services::ServiceRow>) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
+            services: None,
+            quiet: true,
+        }
+    }
+
+    /// A Cluster-tab service-control result: a toast plus the refreshed units.
+    pub(super) fn remote_service_after(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        rows: Vec<super::services::ServiceRow>,
+    ) -> Outcome {
+        Outcome {
+            title: title.into(),
+            lines,
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
+            services: None,
+            quiet: false,
         }
     }
 

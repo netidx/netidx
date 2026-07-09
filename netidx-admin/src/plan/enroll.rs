@@ -37,6 +37,12 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// least this long so a second cluster (a VM, a satellite office) that answers a
 /// beat later still makes the list, then early-exit once we have anything.
 const DISCOVERY_SETTLE: Duration = Duration::from_secs(3);
+/// Per-address bound on the CA-identity fetch a discovered beacon triggers.
+/// mDNS is LAN-only, so an advertised address that doesn't answer promptly (a
+/// stale or virtual-interface address — a docker bridge, a downed member) is
+/// unreachable; time it out and try the beacon's next address rather than
+/// blocking the whole discovery on one black-hole address.
+const IDENTITY_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Validity requested from a CA server. The server caps it to the admin's
 /// policy, so this is just an upper bound.
 const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
@@ -458,12 +464,21 @@ pub async fn discover_networks(
         admin_servers.dedup();
         let mut identity = Err("no advertised admin server was reachable".to_string());
         for addr in &admin_servers {
-            match admin_client::fetch_identity(*addr, kind).await {
-                Ok(id) => {
+            let fetched =
+                tokio::time::timeout(IDENTITY_FETCH_TIMEOUT, admin_client::fetch_identity(*addr, kind))
+                    .await;
+            match fetched {
+                Ok(Ok(id)) => {
                     identity = Ok(id);
                     break;
                 }
-                Err(e) => identity = Err(format_compact!("{addr}: {e:#}").into_string()),
+                Ok(Err(e)) => identity = Err(format_compact!("{addr}: {e:#}").into_string()),
+                Err(_) => {
+                    identity = Err(format_compact!(
+                        "{addr}: no response within {IDENTITY_FETCH_TIMEOUT:?}"
+                    )
+                    .into_string())
+                }
             }
         }
         out.push(DiscoveredNetworkReport { domain, admin_servers, identity });

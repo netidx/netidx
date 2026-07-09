@@ -18,7 +18,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -899,7 +899,7 @@ pub struct ControlServiceRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlServiceResponse {
-    Ok { units: Vec<netidx_activation::control::UnitStatus> },
+    Ok { units: Vec<ServiceUnit> },
     Err { reason: String },
 }
 
@@ -913,8 +913,31 @@ pub struct ApplyServiceControlRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApplyServiceControlResponse {
-    Ok { units: Vec<netidx_activation::control::UnitStatus> },
+    Ok { units: Vec<ServiceUnit> },
     Err { reason: String },
+}
+
+/// A cluster member's unit as reported to the service panel: its live run
+/// state plus, when a definition file exists on that member, the display
+/// fields the panel shows (so the remote services view has the same
+/// list + status + definition layout as the local one). The member fills
+/// `definition` from its own unit directory — the operator never has it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceUnit {
+    pub unit: String,
+    pub state: netidx_activation::control::UnitState,
+    /// `None` when the supervisor reports a unit with no definition file.
+    pub definition: Option<ServiceUnitDef>,
+}
+
+/// The display fields of a unit's definition, pre-formatted on the member
+/// (matching what the local Services surface shows).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceUnitDef {
+    pub exe: String,
+    pub args: Vec<String>,
+    pub trigger: String,
+    pub restart: String,
 }
 
 // -- local control socket (CA box only) ---------------------------------------

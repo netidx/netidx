@@ -149,7 +149,7 @@ impl Panel {
             Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
             Panel::Revocation => "x revoke · r refresh · Esc back",
             Panel::Perms => "e edit · r reload · Esc back",
-            Panel::Service => "s start · t stop · R restart · r reload · Esc back",
+            Panel::Service => "s start · t stop · R restart · r refresh · Esc back",
         }
     }
 }
@@ -161,6 +161,17 @@ impl Panel {
 pub(super) struct PanelRow {
     text: String,
     key: RowKey,
+    /// Pre-formatted `(label, value)` lines for a detail pane below the list —
+    /// the roster's readable policy breakdown. Empty for panels with no
+    /// key/value detail pane (glyph panels derive their detail from `key`).
+    detail: Vec<(String, String)>,
+}
+
+impl PanelRow {
+    /// A row with no key/value detail pane (the common case).
+    fn plain(text: String, key: RowKey) -> PanelRow {
+        PanelRow { text, key, detail: Vec::new() }
+    }
 }
 
 /// The action key a panel row carries. Each panel keys its rows differently: an
@@ -180,9 +191,6 @@ pub(super) enum RowKey {
     /// when the stored glyph is empty/unparseable — a legacy directly-issued
     /// cert, revocable by its unique serial without a glyph assertion).
     Cert { serial: u64, glyph: Option<Fingerprint> },
-    /// One activation unit on the selected admin server (service control). The
-    /// server comes from `RemoteState::service_target`, not the row.
-    Unit { unit: String },
 }
 
 /// A service-control verb chosen in the services panel. A cross-platform mirror
@@ -193,8 +201,6 @@ pub(super) enum ServiceOp {
     Start,
     Stop,
     Restart,
-    /// Reload the supervisor's unit directory from disk.
-    Reload,
     /// Read-only: list the server's units + state (the initial list + refresh).
     Status,
 }
@@ -238,8 +244,8 @@ pub(super) enum RemoteAction {
     /// List the cluster's admin servers from the map, to pick one whose services
     /// to control — replaces free-text path entry for cluster services.
     ListServiceServers { target: PanelTarget },
-    /// Control services on ONE admin server (`server`): `Status`/`Reload` carry
-    /// no units and (re)list; `Start`/`Stop`/`Restart` carry the selected unit.
+    /// Control services on ONE admin server (`server`): `Status` carries no
+    /// units and (re)lists; `Start`/`Stop`/`Restart` carry the selected unit.
     /// Per-server by design — never a cluster-wide fanout. Stop is confirm-gated.
     ServiceControl {
         target: PanelTarget,
@@ -271,7 +277,6 @@ impl RemoteAction {
                 ServiceOp::Start => "Starting service".to_string(),
                 ServiceOp::Stop => "Stopping service".to_string(),
                 ServiceOp::Restart => "Restarting service".to_string(),
-                ServiceOp::Reload => "Reloading units".to_string(),
                 ServiceOp::Status => "Loading services".to_string(),
             },
         }
@@ -364,6 +369,9 @@ pub(super) enum RemoteUpdate {
     Levels { panel: Panel, levels: Vec<String> },
     /// The cluster's admin servers — opens the service-control server picker.
     ServiceServers { servers: Vec<ServiceServerRow> },
+    /// The selected server's units — the services panel rows (shared type with
+    /// the Local Services surface, so the two views render identically).
+    ServiceRows { rows: Vec<super::services::ServiceRow> },
 }
 
 // ---- op bodies (unix-only: they call admin_ops) ---------------------------
@@ -467,49 +475,70 @@ async fn connect(
     ))
 }
 
-/// Browse mDNS for admin servers, confirm each is reachable + fetch its full CA
-/// fingerprint, merge them into the saved cluster registry, and hand the updated
-/// list back to the Cluster tab. Runs behind the shared discovery progress bar.
+/// Discover admin clusters on the local network and refresh the Cluster tab's
+/// list — the same browse + per-network CA-identity fetch the install flow and
+/// `netidx admin discover` use (via [`enroll::discover_networks`]), not a private
+/// copy. Merges every reachable cluster into the saved registry, then hands the
+/// list back so the landing screen re-polls and shows the verified ones — no
+/// toast to dismiss, just the list, like discovery everywhere else.
 #[cfg(unix)]
 async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     use netidx_admin::{
-        admin_client::fetch_identity,
         admin_proto::NodeKind,
         answer::{Answerer, Progress, Stage},
-        discovery,
+        plan::enroll,
     };
     let timeout = super::lifecycle::DISCOVERY_TIMEOUT;
     ans.progress(Progress::timed(Stage::Discovering, "browsing for clusters…", timeout));
-    let found = discovery::browse(timeout).await.unwrap_or_default();
+    // `None` enumerates every cluster in the window — the tab may manage several,
+    // unlike the install flow's early-exit-on-first-found.
+    let reports = enroll::discover_networks(timeout, NodeKind::Client, None).await;
     let mut known = KnownClusters::load();
-    let mut added = 0usize;
-    for d in &found {
-        // Confirm the advertised address really answers, and learn its full
-        // fingerprint (mDNS carries only a short hint) before recording it. The
-        // timeout guards against an address that was advertised then vanished.
-        for addr in d.socket_addrs() {
-            let fetched =
-                tokio::time::timeout(timeout, fetch_identity(addr, NodeKind::Client)).await;
-            if let Ok(Ok(id)) = fetched
-                && known.upsert(&id.domain, addr, id.fingerprint)
-            {
-                added += 1;
+    let mut verified = 0usize;
+    let mut unverified: Vec<String> = Vec::new();
+    for r in &reports {
+        let addrs =
+            r.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+        match &r.identity {
+            Ok(id) => {
+                verified += 1;
+                for addr in &r.admin_servers {
+                    known.upsert(&r.domain, *addr, id.fingerprint);
+                }
+                ans.note(&format!("discovered cluster {:?} at {addrs}", r.domain));
+            }
+            Err(e) => {
+                ans.warn(&format!("beacon for {:?} at [{addrs}] did not verify: {e}", r.domain));
+                unverified.push(format!("{:?} at {addrs}: {e}", r.domain));
             }
         }
     }
     if let Err(e) = known.save() {
         ans.warn(&format!("could not save the cluster list: {e:#}"));
     }
-    let summary = format!(
-        "Discovery found {} advertised server(s); {} new cluster address(es) saved.",
-        found.len(),
-        added
-    );
-    Ok(super::action::Outcome::remote_toast(
-        "Discovery complete",
-        vec![summary],
-        RemoteUpdate::Clusters(known.clusters),
-    ))
+    // Success is silent — the refreshed list is the result. But if beacons were
+    // seen yet none verified (the confusing empty-after-discover case), surface
+    // the addresses + reason so an unreachable advertised address is diagnosable
+    // instead of looking like "discovery found nothing".
+    if verified == 0 && !unverified.is_empty() {
+        let mut lines = vec![format!(
+            "Found {} advertised admin server(s), but none answered with a CA identity:",
+            unverified.len()
+        )];
+        lines.extend(unverified);
+        lines.push(String::new());
+        lines.push(
+            "The admin server may be advertising an address this host can't reach \
+             (check its listen address / firewall)."
+                .to_string(),
+        );
+        return Ok(super::action::Outcome::remote_toast(
+            "Discovery",
+            lines,
+            RemoteUpdate::Clusters(known.clusters),
+        ));
+    }
+    Ok(super::action::Outcome::remote_clusters(known.clusters))
 }
 
 #[cfg(unix)]
@@ -559,10 +588,10 @@ fn queue_row(item: &netidx_admin::admin_ops::queue::QueueItem) -> PanelRow {
         item.requested_name.clone()
     };
     if item.verified_renewal {
-        return PanelRow {
-            text: format!("↻ {name}  (renewal, {}, from {})", widgets::fmt_age(item.age_secs), item.peer),
-            key: RowKey::None,
-        };
+        return PanelRow::plain(
+            format!("↻ {name}  (renewal, {}, from {})", widgets::fmt_age(item.age_secs), item.peer),
+            RowKey::None,
+        );
     }
     let code = item.code.as_ref().map(|c| c.text());
     let (tail, key) = match code {
@@ -572,7 +601,7 @@ fn queue_row(item: &netidx_admin::admin_ops::queue::QueueItem) -> PanelRow {
         ),
         None => (format!("{:?}  (unparseable CSR — deny only)", item.kind), RowKey::None),
     };
-    PanelRow { text: format!("{name}  {tail}"), key }
+    PanelRow::plain(format!("{name}  {tail}"), key)
 }
 
 #[cfg(unix)]
@@ -682,15 +711,15 @@ fn delegation_row(
         .map(|a| a.addr.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    PanelRow {
-        text: format!(
+    PanelRow::plain(
+        format!(
             "{}  ({}, from {}, child {child})",
             item.proposed_path,
             widgets::fmt_age(item.age_secs),
             item.peer,
         ),
-        key: RowKey::Code(item.code.text()),
-    }
+        RowKey::Code(item.code.text()),
+    )
 }
 
 #[cfg(unix)]
@@ -778,14 +807,14 @@ fn revocation_row(e: &netidx_admin::admin_proto::IssuedEntry) -> PanelRow {
         None => "(no glyph)".to_string(),
     };
     let name = if e.name.is_empty() { "(no DNS SAN)" } else { e.name.as_str() };
-    PanelRow {
-        text: format!(
+    PanelRow::plain(
+        format!(
             "#{:<6} {name}  exp {}  {short}",
             e.serial,
             widgets::fmt_expiry(e.not_after_unix),
         ),
-        key: RowKey::Cert { serial: e.serial, glyph },
-    }
+        RowKey::Cert { serial: e.serial, glyph },
+    )
 }
 
 #[cfg(unix)]
@@ -865,32 +894,43 @@ fn roster_row(a: &netidx_admin::ca_vault::AdminInfo) -> PanelRow {
     let reserved = is_reserved_admin(&a.admin);
     let tag = if reserved { "  (system slot)" } else { "" };
     let key = if reserved { RowKey::None } else { RowKey::Name(a.admin.clone()) };
+    // The list line is just identity; the granted authorities go in the detail
+    // pane below, spelled out rather than crammed into a cryptic one-liner.
     PanelRow {
-        text: format!("{:<18} [{tier}]{tag}  {}", a.admin, policy_summary(&a.policy)),
+        text: format!("{:<20} [{tier}]{tag}", a.admin),
         key,
+        detail: policy_detail(a),
     }
 }
 
-/// A one-line summary of an admin's granted authorities for the roster row.
+/// An admin's granted authorities as readable `(label, value)` lines for the
+/// roster detail pane. A signing slot holds the CA master key, so its authority
+/// is total and the granular policy doesn't apply; a role admin is the sum of
+/// its explicit grants (an empty scope reads as "none", not "any").
 #[cfg(unix)]
-fn policy_summary(p: &netidx_admin::ca_vault::Policy) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !p.allowed_san.is_empty() {
-        parts.push(format!("san={}", p.allowed_san.join("|")));
+fn policy_detail(a: &netidx_admin::ca_vault::AdminInfo) -> Vec<(String, String)> {
+    use netidx_admin::ca_vault::SlotKind;
+    if matches!(a.kind, SlotKind::Signing) {
+        return vec![
+            ("Kind".to_string(), "signing slot (recovery / auto-renew credential)".to_string()),
+            (
+                "Authority".to_string(),
+                "full — holds the CA master key; can issue or revoke any certificate".to_string(),
+            ),
+        ];
     }
-    if p.may_enroll_servers {
-        parts.push("enroll-servers".to_string());
-    }
-    if p.may_manage_admins {
-        parts.push("manage-admins".to_string());
-    }
-    if !p.perms_edit_scopes.is_empty() {
-        parts.push(format!("perms={}", p.perms_edit_scopes.join("|")));
-    }
-    if !p.service_control_scopes.is_empty() {
-        parts.push(format!("svc={}", p.service_control_scopes.join("|")));
-    }
-    if parts.is_empty() { "(no grants)".to_string() } else { parts.join(" ") }
+    let p = &a.policy;
+    let scope = |v: &[String]| if v.is_empty() { "(none)".to_string() } else { v.join(", ") };
+    let yesno = |b: bool| if b { "yes".to_string() } else { "no".to_string() };
+    vec![
+        ("May issue certs for (SAN)".to_string(), scope(&p.allowed_san)),
+        ("Max validity it may grant".to_string(), format!("{} days", p.max_validity.as_secs() / 86400)),
+        ("Id-map groups it may grant".to_string(), scope(&p.id_map_groups)),
+        ("Approve admin-server enrollments".to_string(), yesno(p.may_enroll_servers)),
+        ("Manage other admins".to_string(), yesno(p.may_manage_admins)),
+        ("Edit permissions under".to_string(), scope(&p.perms_edit_scopes)),
+        ("Control services under".to_string(), scope(&p.service_control_scopes)),
+    ]
 }
 
 /// The `$EDITOR` validator for a policy JSON blob: it must parse as a `Policy`;
@@ -1023,9 +1063,9 @@ async fn perms_rows(ans: &mut TuiAnswerer, target: &PanelTarget, at: &str) -> Re
     let json = show_perms_for(ans, target, at).await?;
     let pretty = super::super::perms_admin::pretty(&json)?;
     let mut rows: Vec<PanelRow> =
-        pretty.lines().map(|l| PanelRow { text: l.to_string(), key: RowKey::None }).collect();
+        pretty.lines().map(|l| PanelRow::plain(l.to_string(), RowKey::None)).collect();
     if rows.is_empty() {
-        rows.push(PanelRow { text: "(no permissions set)".to_string(), key: RowKey::None });
+        rows.push(PanelRow::plain("(no permissions set)".to_string(), RowKey::None));
     }
     Ok(rows)
 }
@@ -1108,34 +1148,23 @@ async fn list_service_servers(
     Ok(super::action::Outcome::service_servers(rows))
 }
 
-/// The selected server's units, as panel rows. A status query to that one
-/// server (`units` empty ⇒ all), each unit keyed by name (the server comes
-/// from `RemoteState::service_target`).
+/// The selected server's units as shared [`ServiceRow`]s (state + definition),
+/// so the remote panel renders identically to the Local Services surface. A
+/// status query to that one server (`units` empty ⇒ all).
 #[cfg(unix)]
-async fn service_rows(
+async fn fetch_service_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
     server: SocketAddr,
-) -> Result<Vec<PanelRow>> {
+) -> Result<Vec<super::services::ServiceRow>> {
     use netidx_activation::control::ControlOp;
     let units = service_op(ans, conn, server, Vec::new(), ControlOp::Status).await?;
-    if units.is_empty() {
-        return Ok(vec![PanelRow {
-            text: format!("{server} — no units"),
-            key: RowKey::None,
-        }]);
-    }
-    Ok(units
-        .iter()
-        .map(|u| PanelRow {
-            text: format!("{:<20} {}", u.unit, fmt_unit_state(&u.state)),
-            key: RowKey::Unit { unit: u.unit.clone() },
-        })
-        .collect())
+    Ok(units.iter().map(super::services::ServiceRow::from_service_unit).collect())
 }
 
 /// One-shot service-control RPC against a single admin server, forwarding to
-/// `admin_ops::service::control_remote`.
+/// `admin_ops::service::control_remote`. Returns each unit's state + (from the
+/// member) its definition.
 #[cfg(unix)]
 async fn service_op(
     ans: &mut TuiAnswerer,
@@ -1143,7 +1172,7 @@ async fn service_op(
     server: SocketAddr,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<netidx_activation::control::UnitStatus>> {
+) -> Result<Vec<netidx_admin::admin_proto::ServiceUnit>> {
     use netidx_admin::admin_ops::service::control_remote;
     control_remote(
         ans,
@@ -1159,18 +1188,6 @@ async fn service_op(
 }
 
 #[cfg(unix)]
-fn fmt_unit_state(state: &netidx_activation::control::UnitState) -> String {
-    use netidx_activation::control::UnitState;
-    match state {
-        UnitState::NotStarted => "not started".to_string(),
-        UnitState::Running { pid: Some(pid) } => format!("running (pid {pid})"),
-        UnitState::Running { pid: None } => "running".to_string(),
-        UnitState::Stopped => "stopped".to_string(),
-        UnitState::Died => "died".to_string(),
-    }
-}
-
-#[cfg(unix)]
 async fn service_control(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1183,18 +1200,23 @@ async fn service_control(
         ServiceOp::Start => (ControlOp::Start, "Started"),
         ServiceOp::Stop => (ControlOp::Stop, "Stopped"),
         ServiceOp::Restart => (ControlOp::Restart, "Restarted"),
-        ServiceOp::Reload => (ControlOp::Reload, "Reloaded"),
         ServiceOp::Status => (ControlOp::Status, "Services"),
     };
     let result = service_op(ans, &conn, server, units.clone(), control_op).await;
     // Whatever the op did, re-list the server so the panel reflects reality.
-    let rows = service_rows(ans, &conn, server).await?;
+    let rows = fetch_service_rows(ans, &conn, server).await?;
+    // The initial listing / a refresh opens the panel silently — no toast the
+    // operator has to dismiss before seeing the units (Eric's ask). An explicit
+    // start/stop/restart reports its outcome.
+    if matches!(op, ServiceOp::Status) {
+        return Ok(super::action::Outcome::remote_service_rows(rows));
+    }
     let lines = match (&result, units.first()) {
         (Ok(_), Some(u)) => vec![format!("{verb} {u} on {server}.")],
         (Ok(_), None) => vec![format!("{verb} on {server}.")],
         (Err(e), _) => vec![format!("{server}: {e:#}")],
     };
-    Ok(super::action::Outcome::remote_after(verb, lines, Panel::Service, rows))
+    Ok(super::action::Outcome::remote_service_after(verb, lines, rows))
 }
 
 // ---- UI state (cross-platform) --------------------------------------------
@@ -1258,6 +1280,10 @@ pub(super) struct RemoteState {
     /// The admin server the open services panel controls (picked from the map).
     /// `None` outside the services panel.
     service_target: Option<SocketAddr>,
+    /// The services panel's units (state + definition), shared type with the
+    /// Local Services surface so both render via `services::render_units`. The
+    /// generic `rows` above stays empty while the services panel is open.
+    service_rows: Vec<super::services::ServiceRow>,
 }
 
 /// The panels offered in the menu (label + which panel).
@@ -1317,6 +1343,7 @@ impl RemoteState {
             list: ListState::default(),
             panel_path: None,
             service_target: None,
+            service_rows: Vec::new(),
         }
     }
 
@@ -1431,6 +1458,16 @@ impl RemoteState {
                 let mut state = ListState::default();
                 state.select((!servers.is_empty()).then_some(0));
                 self.screen = Screen::ServerPick { servers, state };
+                self.error = None;
+            }
+            RemoteUpdate::ServiceRows { rows } => {
+                self.service_rows = rows;
+                if self.list.selected().is_none() && !self.service_rows.is_empty() {
+                    self.list.select(Some(0));
+                }
+                let sel = self.list.selected().unwrap_or(0);
+                self.list.select(Some(sel.min(self.service_rows.len().saturating_sub(1))));
+                self.screen = Screen::Panel(Panel::Service);
                 self.error = None;
             }
         }
@@ -1681,9 +1718,26 @@ impl RemoteState {
 
     fn on_key_panel(&mut self, code: KeyCode, panel: Panel) -> Option<Action> {
         let target = self.target.clone()?;
+        // The services panel navigates its own `service_rows`, clamped to their
+        // bounds like the Local surface; every other panel walks `rows`.
+        let svc_len = matches!(panel, Panel::Service).then(|| self.service_rows.len());
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.list.select_previous(),
-            KeyCode::Down | KeyCode::Char('j') => self.list.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => match svc_len {
+                Some(0) => {}
+                Some(_) => {
+                    let i = self.list.selected().unwrap_or(0).saturating_sub(1);
+                    self.list.select(Some(i));
+                }
+                None => self.list.select_previous(),
+            },
+            KeyCode::Down | KeyCode::Char('j') => match svc_len {
+                Some(0) => {}
+                Some(len) => {
+                    let i = self.list.selected().map_or(0, |i| (i + 1).min(len - 1));
+                    self.list.select(Some(i));
+                }
+                None => self.list.select_next(),
+            },
             KeyCode::Esc => {
                 self.panel_path = None;
                 self.service_target = None;
@@ -1691,14 +1745,15 @@ impl RemoteState {
             }
             KeyCode::Char('r') => {
                 return match panel {
-                    // The services panel reloads the one server's unit dir (and
-                    // re-lists); it has no path, so it can't go through Refresh.
+                    // The services panel re-lists the one server's units with a
+                    // silent status query; it has no path, so it can't go through
+                    // Refresh (which is path-scoped and toasts).
                     Panel::Service => self.service_target.map(|server| {
                         Action::Remote(RemoteAction::ServiceControl {
                             target,
                             server,
                             units: Vec::new(),
-                            op: ServiceOp::Reload,
+                            op: ServiceOp::Status,
                         })
                     }),
                     _ => Some(Action::Remote(RemoteAction::Refresh {
@@ -1799,7 +1854,7 @@ impl RemoteState {
     fn selected_code(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Code(c) => Some(c.clone()),
-            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } | RowKey::Unit { .. } => None,
+            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } => None,
         }
     }
 
@@ -1807,7 +1862,7 @@ impl RemoteState {
     fn selected_cert(&self) -> Option<(u64, Option<Fingerprint>)> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Cert { serial, glyph } => Some((*serial, *glyph)),
-            RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Unit { .. } => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Name(_) => None,
         }
     }
 
@@ -1815,16 +1870,18 @@ impl RemoteState {
     fn selected_name(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Name(n) => Some(n.clone()),
-            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } | RowKey::Unit { .. } => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } => None,
         }
     }
 
-    /// The selected unit + member, if the row is a service-unit row.
+    /// The name of the selected unit in the services panel (clamped to the
+    /// visible selection, matching what `render_units` highlights).
     fn selected_unit(&self) -> Option<String> {
-        match &self.rows.get(self.list.selected()?)?.key {
-            RowKey::Unit { unit } => Some(unit.clone()),
-            RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Cert { .. } => None,
+        if self.service_rows.is_empty() {
+            return None;
         }
+        let i = self.list.selected()?.min(self.service_rows.len() - 1);
+        self.service_rows.get(i).map(|r| r.name.clone())
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -2041,14 +2098,69 @@ impl RemoteState {
         // the screenshot before approving) and issued certificates (the glyph the
         // admin may have saved) — split into a list over a detail pane showing the
         // selected row's glyph + hash.
-        if matches!(panel, Panel::Queue | Panel::Delegations | Panel::Revocation) {
+        if matches!(panel, Panel::Service) {
+            // The services panel shares the Local Services surface's renderer —
+            // unit list + Status + Definition — so the remote and local views
+            // look and behave identically (remote just omits create/edit/delete).
+            // A full-width header names the target server (the narrow list column
+            // can't hold an address); the shared view renders below it.
+            let header = match self.service_target {
+                Some(server) => format!("Services @ {server}"),
+                None => "Services".to_string(),
+            };
+            let split = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(header, theme::title_style())))
+                    .style(theme::panel_style()),
+                split[0],
+            );
+            super::services::render_units(f, split[1], &self.service_rows, &self.list, " Services ");
+        } else if matches!(panel, Panel::Queue | Panel::Delegations | Panel::Revocation) {
             let split = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
             self.render_panel_list(f, split[0], panel);
             self.render_panel_detail(f, split[1], panel);
+        } else if matches!(panel, Panel::Roster) {
+            // List of admins on top, the selected admin's granted authorities
+            // spelled out below — the same list-over-detail shape as the glyph
+            // panels, giving the policy room to be readable rather than cryptic.
+            let split = Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(area);
+            self.render_panel_list(f, split[0], panel);
+            self.render_roster_detail(f, split[1]);
         } else {
             self.render_panel_list(f, area, panel);
         }
+    }
+
+    /// The detail pane under the admin roster: the selected admin's name and its
+    /// granted authorities as readable label/value lines (from the row's
+    /// pre-formatted `detail`).
+    fn render_roster_detail(&self, f: &mut Frame, area: Rect) {
+        let block = theme::panel_block().title(Span::styled(" Authority ", theme::title_style()));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let row = self.list.selected().and_then(|i| self.rows.get(i));
+        let lines: Vec<Line> = match row {
+            None => vec![Line::from(Span::styled("(no admin selected)", theme::hint_style()))],
+            Some(r) => {
+                let mut ls = vec![
+                    Line::from(Span::styled(r.text.clone(), theme::title_style())),
+                    Line::from(""),
+                ];
+                for (label, value) in &r.detail {
+                    ls.push(Line::from(vec![
+                        Span::styled(format!("{label}: "), theme::hint_style()),
+                        Span::styled(value.clone(), theme::panel_style()),
+                    ]));
+                }
+                ls
+            }
+        };
+        f.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()),
+            inner,
+        );
     }
 
     fn render_panel_list(&self, f: &mut Frame, area: Rect, panel: Panel) {
@@ -2057,12 +2169,11 @@ impl RemoteState {
         } else {
             self.rows.iter().map(|r| ListItem::new(r.text.clone())).collect()
         };
-        // The services panel is scoped to one admin server; other path-scoped
-        // panels (perms) show their level. Otherwise just the panel name.
-        let title = match (panel, &self.service_target, &self.panel_path) {
-            (Panel::Service, Some(server), _) => format!(" {} @ {server} ", panel.title()),
-            (_, _, Some(p)) => format!(" {} @ {p} ", panel.title()),
-            _ => format!(" {} ", panel.title()),
+        // A path-scoped panel (perms) shows its level; otherwise just the name.
+        // (The services panel renders elsewhere, via the shared units view.)
+        let title = match &self.panel_path {
+            Some(p) => format!(" {} @ {p} ", panel.title()),
+            None => format!(" {} ", panel.title()),
         };
         let mut st = self.list;
         let list = List::new(items)
@@ -2312,10 +2423,10 @@ mod tests {
         let mut s = RemoteState::new();
         let fp = Fingerprint::of_der(b"a fake enrollment spki");
         s.screen = Screen::Panel(Panel::Queue);
-        s.rows = vec![PanelRow {
-            text: "workstation-eu  Client  (12s, from 10.0.60.11)".to_string(),
-            key: RowKey::Code(fp.text()),
-        }];
+        s.rows = vec![PanelRow::plain(
+            "workstation-eu  Client  (12s, from 10.0.60.11)".to_string(),
+            RowKey::Code(fp.text()),
+        )];
         s.list.select(Some(0));
         let out = render(&mut s, 100, 30);
         assert!(out.contains("Enrollment Queue"), "queue title missing: {out:?}");
@@ -2325,6 +2436,30 @@ mod tests {
         // slice of the fingerprint text.
         let chunk = widgets::group_fingerprint(&fp).remove(0);
         assert!(out.contains(chunk.as_str()), "glyph hash missing from detail: {out:?}");
+    }
+
+    #[test]
+    fn roster_panel_spells_out_policy_in_a_detail_pane() {
+        // The roster is a two-pane view: a plain admin list on top, the selected
+        // admin's authorities spelled out below — not crammed into the list line.
+        let mut s = RemoteState::new();
+        s.screen = Screen::Panel(Panel::Roster);
+        s.rows = vec![PanelRow {
+            text: "eu-ops               [role]".to_string(),
+            key: RowKey::Name("eu-ops".to_string()),
+            detail: vec![
+                ("May issue certs for (SAN)".to_string(), "*.eu.ryu-oh.org".to_string()),
+                ("Manage other admins".to_string(), "no".to_string()),
+                ("Control services under".to_string(), "/eu".to_string()),
+            ],
+        }];
+        s.list.select(Some(0));
+        let out = render(&mut s, 100, 30);
+        assert!(out.contains("Admin Roster"), "roster title missing: {out:?}");
+        assert!(out.contains("Authority"), "detail-pane title missing: {out:?}");
+        assert!(out.contains("May issue certs for"), "policy label missing: {out:?}");
+        assert!(out.contains("*.eu.ryu-oh.org"), "policy value missing: {out:?}");
+        assert!(out.contains("Control services under"), "service-scope label missing: {out:?}");
     }
 
     fn a_conn(server: &str) -> RemoteConn {
@@ -2382,5 +2517,45 @@ mod tests {
         }
         // The picked server is remembered for the panel's control keys.
         assert_eq!(s.service_target, Some(addr));
+    }
+
+    #[test]
+    fn remote_services_render_like_local_with_definition() {
+        // The remote services panel shares the Local Services surface's renderer:
+        // a unit list plus the selected unit's Status and Definition, the latter
+        // populated from the member-supplied definition over the wire. Selecting a
+        // unit + 's' targets exactly that unit on the picked server.
+        use netidx_activation::control::UnitState;
+        use netidx_admin::admin_proto::{ServiceUnit, ServiceUnitDef};
+        let mut s = RemoteState::new();
+        s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
+        s.service_target = Some("10.0.60.11:4565".parse().unwrap());
+        let su = ServiceUnit {
+            unit: "resolver".to_string(),
+            state: UnitState::Running { pid: Some(42) },
+            definition: Some(ServiceUnitDef {
+                exe: "/usr/bin/netidx".to_string(),
+                args: vec!["resolver-server".to_string()],
+                trigger: "OnStart".to_string(),
+                restart: "rate-limited (1s)".to_string(),
+            }),
+        };
+        s.apply(RemoteUpdate::ServiceRows {
+            rows: vec![super::super::services::ServiceRow::from_service_unit(&su)],
+        });
+        let out = render(&mut s, 110, 20);
+        assert!(out.contains("Services @ 10.0.60.11:4565"), "server-scoped title missing: {out:?}");
+        assert!(out.contains("resolver"), "unit name missing: {out:?}");
+        assert!(out.contains("status:") && out.contains("running"), "status pane missing: {out:?}");
+        assert!(out.contains("42"), "pid missing: {out:?}");
+        assert!(out.contains("/usr/bin/netidx"), "definition exe missing: {out:?}");
+        match s.on_key(KeyCode::Char('s')) {
+            Some(Action::Remote(RemoteAction::ServiceControl { server, units, op, .. })) => {
+                assert_eq!(server, "10.0.60.11:4565".parse().unwrap());
+                assert!(matches!(op, ServiceOp::Start), "expected Start");
+                assert_eq!(units, vec!["resolver".to_string()], "must target the selected unit");
+            }
+            _ => panic!("expected a ServiceControl Start for the selected unit"),
+        }
     }
 }

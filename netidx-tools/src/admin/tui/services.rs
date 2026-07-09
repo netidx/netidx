@@ -22,7 +22,7 @@ use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, control,
 };
 use netidx_admin::activation::{
-    ActivationDir, ProcessCfgBuilder, Restart, Trigger, Unit, UnitBuilder, validate,
+    ActivationDir, ProcessCfgBuilder, Unit, UnitBuilder, validate,
 };
 use ratatui::{
     Frame,
@@ -51,6 +51,28 @@ pub(super) struct ServiceRow {
     args: Vec<String>,
     trigger: String,
     restart: String,
+}
+
+impl ServiceRow {
+    /// Build a display row from a cluster member's reported unit (the Cluster
+    /// tab's remote services panel). The member pre-formats the definition
+    /// fields, so this is a pure mapping — no `ActivationDir` access, which
+    /// stays local-only.
+    pub(super) fn from_service_unit(su: &netidx_admin::admin_proto::ServiceUnit) -> ServiceRow {
+        let (exe, args, trigger, restart) = match &su.definition {
+            Some(d) => (d.exe.clone(), d.args.clone(), d.trigger.clone(), d.restart.clone()),
+            None => (String::new(), Vec::new(), String::new(), String::new()),
+        };
+        ServiceRow {
+            name: su.unit.clone(),
+            defined: su.definition.is_some(),
+            state: Some(su.state.clone()),
+            exe,
+            args,
+            trigger,
+            restart,
+        }
+    }
 }
 
 /// The refreshed rows a completed services op applies to [`ServicesState`].
@@ -200,8 +222,8 @@ async fn svc_rows(units_dir: &Path) -> Result<Vec<ServiceRow>> {
                 Some(u) => (
                     u.process.exe.clone(),
                     u.process.args.clone(),
-                    fmt_trigger(&u.trigger),
-                    fmt_restart(&u.process.restart),
+                    u.trigger.to_string(),
+                    u.process.restart.to_string(),
                 ),
                 None => (String::new(), Vec::new(), String::new(), String::new()),
             };
@@ -253,24 +275,6 @@ fn template_unit_json() -> String {
         .build()
         .expect("template unit");
     serde_json::to_string_pretty(&unit).expect("serializing template unit")
-}
-
-fn fmt_trigger(t: &Trigger) -> String {
-    match t {
-        Trigger::OnStart => "OnStart".to_string(),
-        Trigger::OnAccess(paths) => {
-            let ps: Vec<String> = paths.iter().map(|p| format!("{p}")).collect();
-            format!("OnAccess({})", ps.join(", "))
-        }
-    }
-}
-
-fn fmt_restart(r: &Restart) -> String {
-    match r {
-        Restart::No => "no".to_string(),
-        Restart::Yes => "yes".to_string(),
-        Restart::RateLimited(s) => format!("rate-limited ({s}s)"),
-    }
 }
 
 /// A row's bare status word + color for the Status pane (the pid is a separate
@@ -436,70 +440,85 @@ impl ServicesState {
             );
             return;
         }
-        let label = |s: &str| Span::styled(s.to_string(), theme::hint_style());
-        let val = |s: String| Span::styled(s, theme::panel_style());
-        let sel = self.list.selected().unwrap_or(0).min(self.rows.len().saturating_sub(1));
-        // Narrow name list on the left; the freed width goes to the stacked
-        // Status (top) and Definition (bottom) panes on the right.
-        let cols = Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).split(area);
-        let right = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(cols[1]);
-        let items: Vec<ListItem> = if self.rows.is_empty() {
-            vec![ListItem::new(Line::from(Span::styled("(no units)", theme::hint_style())))]
-        } else {
-            self.rows.iter().map(|r| ListItem::new(r.name.clone())).collect()
-        };
-        let mut st = self.list;
-        let list = List::new(items)
-            .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Services ", theme::title_style())))
-            .highlight_style(theme::selected_style())
-            .highlight_symbol("▸ ");
-        f.render_stateful_widget(list, cols[0], &mut st);
-        // Top-right: the selected unit's run status.
-        let status: Vec<Line> = match self.rows.get(sel) {
-            Some(r) => {
-                let (word, color) = state_word(r);
-                let pid = match &r.state {
-                    Some(UnitState::Running { pid: Some(p) }) => p.to_string(),
-                    _ => "—".to_string(),
-                };
-                vec![
-                    Line::from(vec![
-                        label("status: "),
-                        Span::styled(word, Style::default().bg(theme::PANEL_BG).fg(color)),
-                    ]),
-                    Line::from(vec![label("pid:    "), val(pid)]),
-                ]
-            }
-            None => vec![Line::from(label("No unit selected."))],
-        };
-        f.render_widget(
-            Paragraph::new(status)
-                .style(theme::panel_style())
-                .block(theme::panel_block().title(Span::styled(" Status ", theme::title_style()))),
-            right[0],
-        );
-        // Bottom-right: the selected unit's definition.
-        let detail: Vec<Line> = match self.rows.get(sel) {
-            Some(r) if r.defined => vec![
-                Line::from(vec![label("exe:     "), val(r.exe.clone())]),
-                Line::from(vec![label("args:    "), val(r.args.join(" "))]),
-                Line::from(vec![label("trigger: "), val(r.trigger.clone())]),
-                Line::from(vec![label("restart: "), val(r.restart.clone())]),
-            ],
-            Some(_) => vec![Line::from(label(
-                "Reported by the supervisor with no definition file — press r to refresh.",
-            ))],
-            None => vec![Line::from(label("No unit selected."))],
-        };
-        f.render_widget(
-            Paragraph::new(detail)
-                .wrap(Wrap { trim: true })
-                .style(theme::panel_style())
-                .block(theme::panel_block().title(Span::styled(" Definition ", theme::title_style()))),
-            right[1],
-        );
+        render_units(f, area, &self.rows, &self.list, " Services ");
     }
+}
+
+/// Render the shared Services view — a narrow unit-name list on the left, the
+/// selected unit's run Status (top-right) and Definition (bottom-right) stacked
+/// beside it. Used by both the Local surface here and the Cluster tab's remote
+/// services panel, so the two look and behave identically (the remote one just
+/// omits create / edit / delete). `title` names the list block.
+pub(super) fn render_units(
+    f: &mut Frame,
+    area: Rect,
+    rows: &[ServiceRow],
+    list: &ListState,
+    title: &str,
+) {
+    let label = |s: &str| Span::styled(s.to_string(), theme::hint_style());
+    let val = |s: String| Span::styled(s, theme::panel_style());
+    let sel = list.selected().unwrap_or(0).min(rows.len().saturating_sub(1));
+    // Narrow name list on the left; the freed width goes to the stacked
+    // Status (top) and Definition (bottom) panes on the right.
+    let cols = Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).split(area);
+    let right = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(cols[1]);
+    let items: Vec<ListItem> = if rows.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled("(no units)", theme::hint_style())))]
+    } else {
+        rows.iter().map(|r| ListItem::new(r.name.clone())).collect()
+    };
+    let mut st = list.clone();
+    let widget = List::new(items)
+        .style(theme::panel_style())
+        .block(theme::panel_block().title(Span::styled(title.to_string(), theme::title_style())))
+        .highlight_style(theme::selected_style())
+        .highlight_symbol("▸ ");
+    f.render_stateful_widget(widget, cols[0], &mut st);
+    // Top-right: the selected unit's run status.
+    let status: Vec<Line> = match rows.get(sel) {
+        Some(r) => {
+            let (word, color) = state_word(r);
+            let pid = match &r.state {
+                Some(UnitState::Running { pid: Some(p) }) => p.to_string(),
+                _ => "—".to_string(),
+            };
+            vec![
+                Line::from(vec![
+                    label("status: "),
+                    Span::styled(word, Style::default().bg(theme::PANEL_BG).fg(color)),
+                ]),
+                Line::from(vec![label("pid:    "), val(pid)]),
+            ]
+        }
+        None => vec![Line::from(label("No unit selected."))],
+    };
+    f.render_widget(
+        Paragraph::new(status)
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Status ", theme::title_style()))),
+        right[0],
+    );
+    // Bottom-right: the selected unit's definition.
+    let detail: Vec<Line> = match rows.get(sel) {
+        Some(r) if r.defined => vec![
+            Line::from(vec![label("exe:     "), val(r.exe.clone())]),
+            Line::from(vec![label("args:    "), val(r.args.join(" "))]),
+            Line::from(vec![label("trigger: "), val(r.trigger.clone())]),
+            Line::from(vec![label("restart: "), val(r.restart.clone())]),
+        ],
+        Some(_) => vec![Line::from(label(
+            "Reported by the supervisor with no definition file — press r to refresh.",
+        ))],
+        None => vec![Line::from(label("No unit selected."))],
+    };
+    f.render_widget(
+        Paragraph::new(detail)
+            .wrap(Wrap { trim: true })
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(" Definition ", theme::title_style()))),
+        right[1],
+    );
 }
 
 #[cfg(test)]

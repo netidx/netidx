@@ -230,7 +230,7 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
                 a.units,
                 op,
             ))?;
-            print_unit_statuses(&units);
+            print_service_units(&units);
             Ok(())
         }
         #[cfg(not(unix))]
@@ -273,6 +273,19 @@ fn print_unit_statuses(units: &[UnitStatus]) {
     }
     for u in units {
         println!("  {}: {}", u.unit, fmt_state(&u.state));
+    }
+}
+
+#[cfg(unix)]
+fn print_service_units(units: &[netidx_admin::admin_proto::ServiceUnit]) {
+    if units.is_empty() {
+        println!("  (no units)");
+    }
+    for u in units {
+        println!("  {}: {}", u.unit, fmt_state(&u.state));
+        if let Some(d) = &u.definition {
+            println!("    exe={} args=[{}]", d.exe, d.args.join(" "));
+        }
     }
 }
 
