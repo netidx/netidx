@@ -222,11 +222,20 @@ fn systemctl_command(scope: ServiceScope) -> Command {
 }
 
 fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
+    // Capture systemctl's output rather than inherit it: a caller may be a live
+    // full-screen TUI, and systemctl's "Created symlink …" chatter on enable
+    // would scribble on the alternate screen and desync its cell diff. Nothing
+    // it prints on success is worth showing; on failure its stderr goes into the
+    // error instead.
     let mut cmd = systemctl_command(scope);
-    cmd.args(args);
-    let status = cmd.status().context("spawning systemctl (is it installed?)")?;
-    if !status.success() {
-        bail!("systemctl {args:?} failed: {status}");
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let out = cmd.output().context("spawning systemctl (is it installed?)")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match stderr.trim() {
+            "" => bail!("systemctl {args:?} failed: {}", out.status),
+            msg => bail!("systemctl {args:?} failed: {}: {msg}", out.status),
+        }
     }
     Ok(())
 }

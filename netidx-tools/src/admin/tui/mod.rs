@@ -591,9 +591,14 @@ impl App {
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
             lines.extend(widgets::identicon_lines(code));
         }
-        let body_h = lines.len() as u16;
+        // Size the body to its *wrapped* height, not its line count: the prompt
+        // and the code text each wrap to two rows at this width, so counting them
+        // as one row apiece would reserve too little and clip the bottom of the
+        // identicon.
+        let width = 60u16.min(screen.width);
+        let body_h = widgets::wrapped_height(&lines, width.saturating_sub(2));
         let h = (body_h + 5).min(screen.height);
-        let area = widgets::centered(60, h, screen);
+        let area = widgets::centered(width, h, screen);
         widgets::shadow(f, area, screen);
         f.render_widget(Clear, area);
         let block = theme::dialog_block(stage_title(progress.stage));
@@ -1038,6 +1043,28 @@ mod render_tests {
         app.progress = Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
         let s = render(&mut app);
         assert!(s.contains("Waiting for approval"), "stage title missing: {s:?}");
+    }
+
+    #[test]
+    fn progress_glyph_not_clipped() {
+        // The waiting-for-approval modal carries the enrollee's identicon. Its
+        // prompt and code lines each wrap to two rows at the fixed modal width,
+        // so the body must be sized by wrapped height — otherwise the bottom
+        // identicon rows are clipped (Eric hit this on a normal terminal). Every
+        // identicon row that has an "on" cell must survive to the buffer.
+        let mut app = App::new();
+        app.busy = true;
+        app.progress = Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
+        let fp = Fingerprint::of_der(b"a fake spki for the glyph clip test");
+        app.verification = Some(("enrollment request".to_string(), fp));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rendered = (0..buf.area().height)
+            .filter(|&y| (0..buf.area().width).any(|x| buf[(x, y)].symbol() == "█"))
+            .count();
+        let expected = fp.identicon_cells().iter().filter(|row| row.iter().any(|&c| c)).count();
+        assert_eq!(rendered, expected, "identicon clipped: {rendered} of {expected} rows rendered");
     }
 
     #[test]

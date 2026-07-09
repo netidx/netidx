@@ -143,6 +143,30 @@ impl IssuedRecord {
     pub fn live(&self, now_unix: u64) -> bool {
         self.revoked.is_none() && self.not_after_unix > now_unix
     }
+
+    /// A one-line human description for operator-facing messages: serial,
+    /// issue and expiry dates, and the key glyph — enough to recognise a
+    /// pre-existing certificate and find it in `ca issued` to revoke. Matches
+    /// the fields `ca issued` prints (glyph == `spki_fp`).
+    pub fn describe(&self) -> String {
+        format!(
+            "serial {}, issued {}, expires {}, glyph {}",
+            self.serial,
+            fmt_day(self.issued_unix),
+            fmt_day(self.not_after_unix),
+            self.spki_fp,
+        )
+    }
+}
+
+/// A unix timestamp as a UTC `YYYY-MM-DD` day, or `@<secs>` if it falls
+/// outside the representable range. Uses only date accessors, so it needs no
+/// `time` formatting feature.
+fn fmt_day(unix: u64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp(unix as i64) {
+        Ok(d) => format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day()),
+        Err(_) => format!("@{unix}"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -901,6 +925,38 @@ mod tests {
             _ => panic!("expected Denied"),
         }
         assert!(!ca.store.lock().queue_path(&r.id).exists());
+    }
+
+    #[test]
+    fn deny_creates_no_certificate() {
+        // Denying a queued request must never leave an issued/live cert behind:
+        // the enqueue one-live check would then refuse a fresh re-enrollment of
+        // the same name. A denial only records a DeniedRecord; the issuance
+        // index stays empty, so a later request for the same name is free to
+        // queue.
+        let dir = tempfile::tempdir().unwrap();
+        let ca = CaDir::open(dir.path()).unwrap();
+        let r = req("eric.ryu-oh.org");
+        ca.store.lock().enqueue(&r).unwrap();
+        ca.store.lock().deny(&r, "not this time").unwrap();
+        assert!(
+            ca.store.lock().live_for_name("eric.ryu-oh.org").unwrap().is_empty(),
+            "a denied request must not create a live certificate"
+        );
+        assert!(!ca.store.lock().issued_path(&r.id).exists());
+        assert!(ca.store.lock().list_signed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_names_serial_dates_and_glyph() {
+        // The operator-facing one-line description must carry the serial, an
+        // ISO day for issue + expiry, and the glyph — so a re-enroll refusal
+        // makes clear it's a pre-existing cert findable in `ca issued`.
+        let rec = issued(req("eric.ryu-oh.org"), 42, "eric.ryu-oh.org", 1_800_000_000);
+        let d = rec.describe();
+        assert!(d.contains("serial 42"), "{d}");
+        assert!(d.contains("expires 2027-01-15"), "{d}");
+        assert!(d.contains("glyph fp42"), "{d}");
     }
 
     #[test]

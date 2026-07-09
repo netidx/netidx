@@ -1797,10 +1797,7 @@ fn issue_locked(
         let live = store.live_for_name(name).context("checking the issuance index")?;
         if !live.is_empty() {
             return Ok(Signed {
-                resp: reject(&format!(
-                    "an unexpired certificate already exists for {name:?}; an admin \
-                     must revoke it first (`netidx admin ca revoke`)"
-                )),
+                resp: reject(&one_live_refusal(name, &live)),
                 push: None,
             });
         }
@@ -2132,12 +2129,7 @@ fn handle_enqueue(
         // be refused.
         match store.live_for_name(name) {
             Ok(live) if !live.is_empty() => {
-                return EnqueueResponse::Err {
-                    reason: format!(
-                        "an unexpired certificate already exists for {name:?}; an \
-                         admin must revoke it first (`netidx admin ca revoke`)"
-                    ),
-                };
+                return EnqueueResponse::Err { reason: one_live_refusal(name, &live) };
             }
             Ok(_) => (),
             Err(e) => {
@@ -4255,6 +4247,26 @@ fn delegation_authority(authd: &ca_vault::Authenticated, path: &str) -> bool {
 
 fn reject(reason: &str) -> SignResponse {
     SignResponse::Err { reason: reason.to_string() }
+}
+
+/// The one-live-cert refusal message, shared by the enqueue and sign paths.
+/// `live` is the non-empty set of live certs already issued for `name`.
+/// Naming the existing cert (serial/dates/glyph) makes clear this is a
+/// *previously-issued* certificate, not one this request created — the point
+/// of confusion when re-enrolling a node that was enrolled before.
+fn one_live_refusal(name: &str, live: &[ca_store::IssuedRecord]) -> String {
+    let existing = match live {
+        [rec] => format!("The existing certificate — {}.", rec.describe()),
+        [rec, ..] => {
+            format!("{} live certificates exist, e.g. {}.", live.len(), rec.describe())
+        }
+        [] => "The existing certificate is already live.".to_string(),
+    };
+    format!(
+        "an unexpired certificate already exists for {name:?} — this is a \
+         previously-issued certificate, not one this request created. {existing} \
+         An admin must revoke it first (`netidx admin ca revoke {name}`), then re-enroll."
+    )
 }
 
 /// Append a line to the CA's audit log (best-effort — a failed write
