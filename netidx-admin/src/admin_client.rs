@@ -503,9 +503,8 @@ pub async fn list_admins(
     }
 }
 
-/// Admin → CA (pinned): control services on the cluster serving
-/// `target_path`. Returns one result per targeted cluster member so the
-/// caller can surface a partial failure or per-host status.
+/// Admin → CA (pinned): control services on the single admin server
+/// `target_server`. Returns that server's per-unit statuses.
 #[allow(clippy::too_many_arguments)]
 pub async fn control_service(
     addr: SocketAddr,
@@ -513,24 +512,24 @@ pub async fn control_service(
     expected: &CaIdentity,
     admin: &str,
     password: &str,
-    target_path: &str,
-    targets: Vec<admin_proto::UnitTarget>,
+    target_server: SocketAddr,
+    units: Vec<String>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<admin_proto::ServiceControlResult>> {
+) -> Result<Vec<netidx_activation::control::UnitStatus>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ControlService(ControlServiceRequest {
             admin: admin.to_string(),
             password: admin_proto::Secret(password.to_string()),
-            target_path: target_path.to_string(),
-            targets,
+            target_server,
+            units,
             op,
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
-        ControlServiceResponse::Ok { results } => Ok(results),
+        ControlServiceResponse::Ok { units } => Ok(units),
         ControlServiceResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }

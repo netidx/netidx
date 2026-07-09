@@ -570,9 +570,6 @@ fn action_desc(action: &Action) -> &'static str {
         }
         Join { dry_run: true } => "Preview joining a cluster, without changing anything.",
         AddParent => "Attach this resolver under a parent resolver by delegation.",
-        ReviewDelegations => {
-            "Review and approve requests from resolvers asking to attach under this one."
-        }
         Remote(_) => "Connect to a remote admin server.",
         Uninstall { remove_ca: false, .. } => "Remove this install — its config and OS service.",
         Uninstall { remove_ca: true, .. } => {
@@ -677,16 +674,11 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     }
     if role == InstallRole::Resolver {
         items.push(("Add a Parent".to_string(), Action::AddParent));
-        // Delegation requests land on the parent's *own* admin server, so offer
-        // the review shortcut when this host runs one — not when `record.
-        // admin_server` is set (that names the admin server this node enrolls
-        // against, and is `None` on the CA host, which is exactly who reviews).
-        if runs_local_admin_server() {
-            items.push((
-                "Review Delegation Requests".to_string(),
-                Action::ReviewDelegations,
-            ));
-        }
+        // Delegation review is deliberately NOT offered here: the daemon's
+        // delegation handlers require an authenticated admin password and have no
+        // local-superuser control-socket bypass (unlike roster/perms/rotate), so
+        // it can't run over the local control socket. Review delegations from the
+        // Cluster tab (connect to this host's own admin server).
     }
     if networked {
         items.push(("Renew Certificates".to_string(), Action::Renew { server: d.record.admin_server }));
@@ -754,18 +746,6 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     // to also destroy it (see the chained confirm in the App loop).
     items.push(("Uninstall".to_string(), uninstall_action(d, false)));
     items
-}
-
-/// Whether this host runs its own admin server (so it can have a delegation
-/// queue to review). Unix-only — remote admin is unix-only.
-#[cfg(unix)]
-fn runs_local_admin_server() -> bool {
-    netidx_admin::admin_ops::local_admin_server_listen().is_some()
-}
-
-#[cfg(not(unix))]
-fn runs_local_admin_server() -> bool {
-    false
 }
 
 /// The uninstall action for a detected install (also the `u` shortcut).

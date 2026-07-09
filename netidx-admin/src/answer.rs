@@ -58,8 +58,12 @@ pub enum Field {
     IdMapGroups,
     /// Whether a CA admin is present to authorize an enrollment now.
     AdminHere,
-    /// Whether to found a new cluster here or connect to an existing one.
+    /// Whether to found a new cluster here or connect to an existing one
+    /// (resolver install — the role that can found a cluster).
     ClusterMode,
+    /// Whether to join an existing cluster or run this machine stand-alone,
+    /// for a role that can't found a cluster (workstation, publisher).
+    Membership,
     /// Which discovered cluster to connect to (or enter an address manually).
     SelectNetwork,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
@@ -243,6 +247,12 @@ impl Field {
                 label: "create or join a cluster",
                 help: "Create a new netidx cluster on this machine, or connect \
                        to an existing cluster on your network.",
+            },
+            Membership => FieldInfo {
+                flag: "--server",
+                label: "stand-alone or join a cluster",
+                help: "Join an existing netidx cluster on your network, or set \
+                       up this machine on its own.",
             },
             SelectNetwork => FieldInfo {
                 flag: "--admin-server",
@@ -581,6 +591,8 @@ pub enum NetworkChoice {
     Discovered(usize),
     /// None of the above — enter an admin-server address manually instead.
     Manual,
+    /// Browse again and add any newly-discovered clusters to the list.
+    PollMore,
 }
 
 /// How the admin engine asks the operator questions and reports progress,

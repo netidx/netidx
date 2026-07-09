@@ -363,12 +363,6 @@ impl App {
             },
         }?;
         match action {
-            // Pure navigation: jump to the Remote tab's delegation panel.
-            Action::ReviewDelegations => {
-                self.tab = Tab::Remote;
-                self.remote.focus_delegations();
-                None
-            }
             // Open the Local tab's local admin panel surface directly on the
             // requested panel (Admins / Permissions), kicking off its refresh.
             Action::ManageLocalAdmins { cfg_path, ca_dir, panel } => {
@@ -445,8 +439,8 @@ impl App {
                 self.render_log(f, screen);
             } else if let Some(m) = &self.modal {
                 m.render(f, screen);
-            } else if let Some((msg, _, on_no)) = &self.confirm {
-                render_confirm(f, screen, msg, on_no.is_some());
+            } else if let Some((msg, action, on_no)) = &self.confirm {
+                render_confirm(f, screen, msg, on_no.is_some(), action.confirm_glyph().as_ref());
             } else if let Some(r) = &self.result {
                 render_result(f, screen, r);
             } else {
@@ -540,7 +534,7 @@ impl App {
             let accent =
                 Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD);
             lines.push(Line::from(Span::styled(
-                format!("{purpose} — read this code to the approving admin:"),
+                format!("{purpose} — send a screenshot of this window to the approving admin:"),
                 accent,
             )));
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
@@ -591,7 +585,7 @@ impl App {
             let accent = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD);
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{purpose} — read this code to the approving admin:"),
+                format!("{purpose} — send a screenshot of this window to the approving admin:"),
                 accent,
             )));
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
@@ -612,8 +606,11 @@ impl App {
             Constraint::Min(0),
         ])
         .split(inner);
+        // trim:false — a verification identicon's leading "off" cells are spaces
+        // that must survive, or the glyph shifts and misrenders (the message and
+        // prompt lines have no significant leading whitespace).
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()),
+            Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()),
             rows[0],
         );
         match progress.duration {
@@ -711,9 +708,21 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
 /// Render a destructive/verification yes/no confirmation as a centered overlay.
 /// The message may contain `\n` (e.g. an approval showing the request code on its
 /// own line); each becomes its own wrapped line and the popup sizes to fit.
-fn render_confirm(f: &mut Frame, screen: Rect, msg: &str, three_way: bool) {
+fn render_confirm(
+    f: &mut Frame,
+    screen: Rect,
+    msg: &str,
+    three_way: bool,
+    glyph: Option<&Fingerprint>,
+) {
     let mut lines: Vec<Line> =
         msg.split('\n').map(|l| Line::from(Span::styled(l.to_string(), theme::panel_style()))).collect();
+    // The approve dialogs carry the request's glyph: show the identicon so the
+    // admin matches it against the screenshot, not just the code text.
+    if let Some(fp) = glyph {
+        lines.push(Line::from(""));
+        lines.extend(widgets::identicon_lines(fp));
+    }
     lines.push(Line::from(""));
     // A three-way prompt (n runs an alternate action) spells its keys out in the
     // body, so only the plain y/n case needs the generic footer.
@@ -730,8 +739,10 @@ fn render_confirm(f: &mut Frame, screen: Rect, msg: &str, three_way: bool) {
         .border_style(theme::panel_style())
         .style(theme::panel_style())
         .title(Span::styled(" Confirm ", title));
+    // trim:false — the identicon rows carry leading "off" cells as spaces that
+    // must survive; the message lines have no significant leading whitespace.
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()).block(block),
+        Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()).block(block),
         area,
     );
 }
@@ -1141,7 +1152,7 @@ mod render_tests {
         let fp = Fingerprint::of_der(b"a fake spki for the test");
         app.verification = Some(("Approve this node".to_string(), fp));
         let s = render(&mut app);
-        assert!(s.contains("read this code to the approving admin"), "verification code missing: {s:?}");
+        assert!(s.contains("send a screenshot of this window"), "verification prompt missing: {s:?}");
     }
 
     #[test]
@@ -1158,12 +1169,14 @@ mod render_tests {
     #[test]
     fn select_network_empty_shows_manual_option() {
         // With nothing discovered the picker still appears (the flow is always
-        // the same) — an empty-state header plus the trailing manual-entry row.
+        // the same) — an empty-state header plus the trailing poll-more and
+        // manual-entry rows.
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
         app.modal = Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx });
         let s = render(&mut app);
         assert!(s.contains("No clusters found"), "empty-state header missing: {s:?}");
+        assert!(s.contains("Search again for more"), "poll-more row missing: {s:?}");
         assert!(s.contains("Enter an address manually"), "manual-entry row missing: {s:?}");
     }
 

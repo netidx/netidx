@@ -18,7 +18,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -237,11 +237,11 @@ pub enum Request {
     /// [`AdminListResponse`].
     ListAdmins(ListAdminsRequest),
     /// Admin-authenticated, sent to the **CA**: restart / start / stop /
-    /// status the activation units on the admin servers of the cluster serving
-    /// `target_path`. Gated on the caller's `service_control_scopes` covering
-    /// the path (or a signing slot). The CA fans out
-    /// [`Request::ApplyServiceControl`] to the targeted members. Answered with
-    /// [`ControlServiceResponse`].
+    /// status the activation units on **one** admin server (`target_server`).
+    /// Gated on the caller's `service_control_scopes` covering that server's
+    /// cluster base (or a signing slot). The CA forwards a single
+    /// [`Request::ApplyServiceControl`] to `target_server` (applying locally when
+    /// it is the CA itself). Answered with [`ControlServiceResponse`].
     ControlService(ControlServiceRequest),
     /// Server-to-server: apply a service-control op to this host's local
     /// activation supervisor (via its control socket). Peer-cert-gated like
@@ -881,41 +881,25 @@ pub enum AdminListResponse {
 
 // -- remote service control (over the admin plane) -----------------------------
 
-/// One unit to act on, optionally pinned to a single cluster member by index
-/// (`resolver:0`). `member: None` ⇒ every member of the cluster — `member:
-/// Some(i)` ⇒ only the i-th member (the map's member order), which lets an
-/// admin stagger restarts so a cluster isn't interrupted all at once.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnitTarget {
-    pub unit: String,
-    pub member: Option<u32>,
-}
-
-/// Admin → CA: control services on the cluster serving `target_path`. The op
-/// (start/stop/restart/status) and the unit names are reused from the
-/// activation control protocol.
+/// Admin → CA: control services on **one** admin server (`target_server`, its
+/// listen address from the network map). Restart is deliberately per-server, not
+/// cluster-wide — an operator restarts one resolver at a time so readers never
+/// see a gap. Authorized by the caller's `service_control_scopes` covering that
+/// server's cluster base (or a signing slot). `units` empty ⇒ every unit (for
+/// [`netidx_activation::control::ControlOp::Status`]); the op + unit names come
+/// from the activation control protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlServiceRequest {
     pub admin: String,
     pub password: Secret,
-    pub target_path: String,
-    pub targets: Vec<UnitTarget>,
+    pub target_server: SocketAddr,
+    pub units: Vec<String>,
     pub op: netidx_activation::control::ControlOp,
-}
-
-/// One cluster member's outcome: which member (index + address), an error if
-/// it couldn't be reached / refused, and the per-unit statuses it reported.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceControlResult {
-    pub member: u32,
-    pub addr: SocketAddr,
-    pub error: Option<String>,
-    pub units: Vec<netidx_activation::control::UnitStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlServiceResponse {
-    Ok { results: Vec<ServiceControlResult> },
+    Ok { units: Vec<netidx_activation::control::UnitStatus> },
     Err { reason: String },
 }
 

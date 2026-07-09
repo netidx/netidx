@@ -21,7 +21,7 @@ use super::{
 };
 use anyhow::Result;
 #[cfg(unix)]
-use anyhow::Context;
+use anyhow::{Context, bail};
 use crossterm::event::KeyCode;
 use netidx_admin::{admin_proto::Secret, fingerprint::Fingerprint};
 use ratatui::{
@@ -135,9 +135,10 @@ impl Panel {
     }
 
     /// Whether this panel first needs a target netidx path (the map routes it to
-    /// the cluster owning that path). Such panels enter through a path prompt.
+    /// the cluster owning that path). Only cluster Perms — a level pick from the
+    /// map. Services picks an admin server (also from the map), not a path.
     fn path_scoped(self) -> bool {
-        matches!(self, Panel::Perms | Panel::Service)
+        matches!(self, Panel::Perms)
     }
 
     /// The panel's action keys, shown in the App gutter while the panel is open.
@@ -179,8 +180,9 @@ pub(super) enum RowKey {
     /// when the stored glyph is empty/unparseable — a legacy directly-issued
     /// cert, revocable by its unique serial without a glyph assertion).
     Cert { serial: u64, glyph: Option<Fingerprint> },
-    /// One activation unit on one cluster member (service control).
-    Unit { unit: String, member: u32 },
+    /// One activation unit on the selected admin server (service control). The
+    /// server comes from `RemoteState::service_target`, not the row.
+    Unit { unit: String },
 }
 
 /// A service-control verb chosen in the services panel. A cross-platform mirror
@@ -191,6 +193,10 @@ pub(super) enum ServiceOp {
     Start,
     Stop,
     Restart,
+    /// Reload the supervisor's unit directory from disk.
+    Reload,
+    /// Read-only: list the server's units + state (the initial list + refresh).
+    Status,
 }
 
 /// A remote-admin op the event loop runs (via [`Action::Remote`]).
@@ -229,14 +235,16 @@ pub(super) enum RemoteAction {
     ListLevels { target: PanelTarget },
     /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
     EditPerms { target: PanelTarget, at: String },
-    /// Start/stop/restart one activation unit on one member of the cluster
-    /// serving `path`. Stop is gated by a yes/no confirm (it leaves a service
-    /// down).
+    /// List the cluster's admin servers from the map, to pick one whose services
+    /// to control — replaces free-text path entry for cluster services.
+    ListServiceServers { target: PanelTarget },
+    /// Control services on ONE admin server (`server`): `Status`/`Reload` carry
+    /// no units and (re)list; `Start`/`Stop`/`Restart` carry the selected unit.
+    /// Per-server by design — never a cluster-wide fanout. Stop is confirm-gated.
     ServiceControl {
         target: PanelTarget,
-        path: String,
-        unit: String,
-        member: u32,
+        server: SocketAddr,
+        units: Vec<String>,
         op: ServiceOp,
     },
 }
@@ -258,28 +266,32 @@ impl RemoteAction {
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
+            RemoteAction::ListServiceServers { .. } => "Loading servers".to_string(),
             RemoteAction::ServiceControl { op, .. } => match op {
                 ServiceOp::Start => "Starting service".to_string(),
                 ServiceOp::Stop => "Stopping service".to_string(),
                 ServiceOp::Restart => "Restarting service".to_string(),
+                ServiceOp::Reload => "Reloading units".to_string(),
+                ServiceOp::Status => "Loading services".to_string(),
             },
         }
     }
 
     /// A yes/no confirmation to require before running, or `None`. The two
-    /// approvals show the request's full code so the admin can match it against
-    /// the one the enrollee/child read out of band (the TUI's stand-in for the
-    /// strict CLI's type-the-full-code gesture); the irreversible revoke, the
-    /// destructive admin-removal, and a service stop are gated for safety.
+    /// approvals show the request's glyph + code (see [`Self::confirm_glyph`]) so
+    /// the admin can match them against the screenshot the enrollee/child sent
+    /// out of band (the TUI's stand-in for the strict CLI's type-the-full-code
+    /// gesture); the irreversible revoke, the destructive admin-removal, and a
+    /// service stop are gated for safety.
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
             RemoteAction::Approve { code, .. } => Some(format!(
-                "Approve this enrollment?\n\nVerify this code matches the one the \
-                 enrollee read to you, out of band:\n\n{code}"
+                "Approve this enrollment?\n\nVerify this glyph and code match the \
+                 screenshot the enrollee sent you, out of band:\n\n{code}"
             )),
             RemoteAction::ApproveDelegation { code, .. } => Some(format!(
-                "Approve this delegation?\n\nVerify this code matches the one the \
-                 child resolver's operator read to you, out of band:\n\n{code}"
+                "Approve this delegation?\n\nVerify this glyph and code match the \
+                 screenshot the child resolver's operator sent you, out of band:\n\n{code}"
             )),
             RemoteAction::Revoke { serial, .. } => Some(format!(
                 "Revoke certificate serial {serial}? This is irreversible — the \
@@ -289,9 +301,24 @@ impl RemoteAction {
                 "Remove admin {name:?}? Their password will no longer authenticate \
                  to this CA."
             )),
-            RemoteAction::ServiceControl { op: ServiceOp::Stop, unit, member, .. } => Some(
-                format!("Stop unit {unit:?} on member {member}? It will stay down until started."),
+            RemoteAction::ServiceControl { op: ServiceOp::Stop, units, server, .. } => Some(
+                format!(
+                    "Stop {} on {server}? It will stay down until started.",
+                    units.first().map(|u| format!("unit {u:?}")).unwrap_or_else(|| "services".to_string())
+                ),
             ),
+            _ => None,
+        }
+    }
+
+    /// The request's own glyph to show on the approve confirmation — the enrollee
+    /// or child's code parsed back into a fingerprint, so the admin verifies the
+    /// identicon against the screenshot. `None` for actions with no request glyph.
+    pub(super) fn confirm_glyph(&self) -> Option<Fingerprint> {
+        match self {
+            RemoteAction::Approve { code, .. } | RemoteAction::ApproveDelegation { code, .. } => {
+                Fingerprint::parse_text(code).ok()
+            }
             _ => None,
         }
     }
@@ -313,9 +340,18 @@ impl RemoteAction {
             | RemoteAction::RemoveAdmin { target, .. }
             | RemoteAction::ListLevels { target }
             | RemoteAction::EditPerms { target, .. }
+            | RemoteAction::ListServiceServers { target }
             | RemoteAction::ServiceControl { target, .. } => target.glyph(),
         }
     }
+}
+
+/// One admin server offered in the service-control server picker: its address
+/// (the target of the op) plus a display label carrying its level.
+#[derive(Clone)]
+pub(super) struct ServiceServerRow {
+    pub(super) addr: SocketAddr,
+    pub(super) label: String,
 }
 
 /// A result a completed op applies to [`RemoteState`].
@@ -326,6 +362,8 @@ pub(super) enum RemoteUpdate {
     Clusters(Vec<KnownCluster>),
     /// The cluster's permission levels — opens the level picker for a panel.
     Levels { panel: Panel, levels: Vec<String> },
+    /// The cluster's admin servers — opens the service-control server picker.
+    ServiceServers { servers: Vec<ServiceServerRow> },
 }
 
 // ---- op bodies (unix-only: they call admin_ops) ---------------------------
@@ -340,6 +378,7 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::Discover => discover(ans).await,
         RemoteAction::Refresh { target, panel, path } => refresh(ans, target, panel, path).await,
         RemoteAction::ListLevels { target } => list_levels(ans, target).await,
+        RemoteAction::ListServiceServers { target } => list_service_servers(ans, target).await,
         RemoteAction::Approve { target, code } => {
             approve(ans, target.into_remote()?, code).await
         }
@@ -360,8 +399,8 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: RemoteAction) -> Result<s
         RemoteAction::SetPolicy { target, name } => set_policy(ans, target, name).await,
         RemoteAction::RemoveAdmin { target, name } => remove_admin(ans, target, name).await,
         RemoteAction::EditPerms { target, at } => edit_perms(ans, target, at).await,
-        RemoteAction::ServiceControl { target, path, unit, member, op } => {
-            service_control(ans, target.into_remote()?, path, unit, member, op).await
+        RemoteAction::ServiceControl { target, server, units, op } => {
+            service_control(ans, target.into_remote()?, server, units, op).await
         }
     }
 }
@@ -489,10 +528,10 @@ async fn refresh(
             let at = path.context("a target path is required for the perms panel")?;
             perms_rows(ans, &target, &at).await?
         }
-        Panel::Service => {
-            let p = path.context("a target path is required for the services panel")?;
-            service_rows(ans, target.remote()?, &p).await?
-        }
+        // Services are never opened/refreshed via `Refresh`: they go through
+        // `ServiceControl` (which carries the one target server), because a
+        // service listing is scoped to a single admin server, not a path.
+        Panel::Service => bail!("the services panel is driven by ServiceControl, not Refresh"),
     };
     Ok(super::action::Outcome::remote_rows(panel, rows))
 }
@@ -1045,45 +1084,66 @@ async fn edit_perms(
     Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
 }
 
+/// The cluster's admin servers, from the map — the service-control server
+/// picker (level 1). Each row's address is the target of a control op.
 #[cfg(unix)]
-async fn service_rows(ans: &mut TuiAnswerer, conn: &RemoteConn, path: &str) -> Result<Vec<PanelRow>> {
-    use netidx_activation::control::ControlOp;
-    let results = service_status(ans, conn, path, Vec::new(), ControlOp::Status).await?;
-    let mut rows: Vec<PanelRow> = Vec::new();
-    for r in &results {
-        if let Some(e) = &r.error {
-            rows.push(PanelRow {
-                text: format!("member {} ({}) — ERROR: {e}", r.member, r.addr),
-                key: RowKey::None,
-            });
-            continue;
-        }
-        if r.units.is_empty() {
-            rows.push(PanelRow {
-                text: format!("member {} ({}) — no units", r.member, r.addr),
-                key: RowKey::None,
-            });
-        }
-        for u in &r.units {
-            rows.push(PanelRow {
-                text: format!("  m{} {:<18} {}", r.member, u.unit, fmt_unit_state(&u.state)),
-                key: RowKey::Unit { unit: u.unit.clone(), member: r.member },
-            });
-        }
-    }
-    Ok(rows)
+async fn list_service_servers(
+    ans: &mut TuiAnswerer,
+    target: PanelTarget,
+) -> Result<super::action::Outcome> {
+    let conn = target.remote()?;
+    let servers = netidx_admin::admin_ops::service::list_service_servers(
+        ans,
+        conn.server,
+        None,
+    )
+    .await?;
+    let rows: Vec<ServiceServerRow> = servers
+        .into_iter()
+        .map(|s| ServiceServerRow {
+            addr: s.addr,
+            label: format!("{:<22} {}", s.addr.to_string(), s.base),
+        })
+        .collect();
+    Ok(super::action::Outcome::service_servers(rows))
 }
 
-/// One-shot service-control RPC (shared by the status query and the control
-/// actions), forwarding to `admin_ops::service::control_remote`.
+/// The selected server's units, as panel rows. A status query to that one
+/// server (`units` empty ⇒ all), each unit keyed by name (the server comes
+/// from `RemoteState::service_target`).
 #[cfg(unix)]
-async fn service_status(
+async fn service_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
-    path: &str,
-    targets: Vec<netidx_admin::admin_proto::UnitTarget>,
+    server: SocketAddr,
+) -> Result<Vec<PanelRow>> {
+    use netidx_activation::control::ControlOp;
+    let units = service_op(ans, conn, server, Vec::new(), ControlOp::Status).await?;
+    if units.is_empty() {
+        return Ok(vec![PanelRow {
+            text: format!("{server} — no units"),
+            key: RowKey::None,
+        }]);
+    }
+    Ok(units
+        .iter()
+        .map(|u| PanelRow {
+            text: format!("{:<20} {}", u.unit, fmt_unit_state(&u.state)),
+            key: RowKey::Unit { unit: u.unit.clone() },
+        })
+        .collect())
+}
+
+/// One-shot service-control RPC against a single admin server, forwarding to
+/// `admin_ops::service::control_remote`.
+#[cfg(unix)]
+async fn service_op(
+    ans: &mut TuiAnswerer,
+    conn: &RemoteConn,
+    server: SocketAddr,
+    units: Vec<String>,
     op: netidx_activation::control::ControlOp,
-) -> Result<Vec<netidx_admin::admin_proto::ServiceControlResult>> {
+) -> Result<Vec<netidx_activation::control::UnitStatus>> {
     use netidx_admin::admin_ops::service::control_remote;
     control_remote(
         ans,
@@ -1091,8 +1151,8 @@ async fn service_status(
         None,
         Some(conn.admin.clone()),
         Some(conn.password.clone()),
-        path,
-        targets,
+        server,
+        units,
         op,
     )
     .await
@@ -1114,9 +1174,8 @@ fn fmt_unit_state(state: &netidx_activation::control::UnitState) -> String {
 async fn service_control(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
-    path: String,
-    unit: String,
-    member: u32,
+    server: SocketAddr,
+    units: Vec<String>,
     op: ServiceOp,
 ) -> Result<super::action::Outcome> {
     use netidx_activation::control::ControlOp;
@@ -1124,21 +1183,17 @@ async fn service_control(
         ServiceOp::Start => (ControlOp::Start, "Started"),
         ServiceOp::Stop => (ControlOp::Stop, "Stopped"),
         ServiceOp::Restart => (ControlOp::Restart, "Restarted"),
+        ServiceOp::Reload => (ControlOp::Reload, "Reloaded"),
+        ServiceOp::Status => (ControlOp::Status, "Services"),
     };
-    let targets =
-        vec![netidx_admin::admin_proto::UnitTarget { unit: unit.clone(), member: Some(member) }];
-    let results = service_status(ans, &conn, &path, targets, control_op).await?;
-    let mut lines: Vec<String> = Vec::new();
-    for r in &results {
-        match &r.error {
-            Some(e) => lines.push(format!("member {} ({}): {e}", r.member, r.addr)),
-            None => lines.push(format!("member {} ({}): ok", r.member, r.addr)),
-        }
-    }
-    if lines.is_empty() {
-        lines.push(format!("{verb} {unit} on member {member}."));
-    }
-    let rows = service_rows(ans, &conn, &path).await?;
+    let result = service_op(ans, &conn, server, units.clone(), control_op).await;
+    // Whatever the op did, re-list the server so the panel reflects reality.
+    let rows = service_rows(ans, &conn, server).await?;
+    let lines = match (&result, units.first()) {
+        (Ok(_), Some(u)) => vec![format!("{verb} {u} on {server}.")],
+        (Ok(_), None) => vec![format!("{verb} on {server}.")],
+        (Err(e), _) => vec![format!("{server}: {e:#}")],
+    };
     Ok(super::action::Outcome::remote_after(verb, lines, Panel::Service, rows))
 }
 
@@ -1152,12 +1207,13 @@ enum Screen {
     Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
     Menu,
-    /// Enter the target path for a path-scoped panel (cluster services) before
-    /// opening it.
-    PathPrompt { panel: Panel, input: String },
     /// Pick one of the cluster's permission levels (from the map) before opening
-    /// the perms panel — the cluster-scope replacement for `PathPrompt` on Perms.
+    /// the perms panel — the cluster-scope map-driven pick.
     LevelPick { panel: Panel, levels: Vec<String>, state: ListState },
+    /// Pick one of the cluster's admin servers (from the map) before opening the
+    /// services panel — service control is per-server, so you pick the one to
+    /// manage.
+    ServerPick { servers: Vec<ServiceServerRow>, state: ListState },
     /// A panel's rows.
     Panel(Panel),
 }
@@ -1199,6 +1255,9 @@ pub(super) struct RemoteState {
     /// The target path of the current path-scoped panel (perms), for its
     /// actions and title. `None` outside such a panel.
     panel_path: Option<String>,
+    /// The admin server the open services panel controls (picked from the map).
+    /// `None` outside the services panel.
+    service_target: Option<SocketAddr>,
 }
 
 /// The panels offered in the menu (label + which panel).
@@ -1257,6 +1316,7 @@ impl RemoteState {
             rows: Vec::new(),
             list: ListState::default(),
             panel_path: None,
+            service_target: None,
         }
     }
 
@@ -1338,16 +1398,6 @@ impl RemoteState {
         self.cluster_list.select(Some(sel.min(n.saturating_sub(1))));
     }
 
-    /// Pre-select the delegation panel in the menu — the target of the Local
-    /// tab's "Review delegation requests" shortcut. If already connected, land on
-    /// the menu with it highlighted; otherwise the cluster list shows first so
-    /// the operator connects.
-    pub(super) fn focus_delegations(&mut self) {
-        let idx = PANELS.iter().position(|p| matches!(p, Panel::Delegations)).unwrap_or(0);
-        self.menu.select(Some(idx));
-        self.screen = if self.target.is_some() { Screen::Menu } else { Screen::Clusters };
-    }
-
     /// Apply a completed op's result.
     pub(super) fn apply(&mut self, update: RemoteUpdate) {
         match update {
@@ -1377,6 +1427,12 @@ impl RemoteState {
                 self.screen = Screen::LevelPick { panel, levels, state };
                 self.error = None;
             }
+            RemoteUpdate::ServiceServers { servers } => {
+                let mut state = ListState::default();
+                state.select((!servers.is_empty()).then_some(0));
+                self.screen = Screen::ServerPick { servers, state };
+                self.error = None;
+            }
         }
     }
 
@@ -1384,7 +1440,7 @@ impl RemoteState {
     /// here rather than treating 'q'/'l'/Tab as global shortcuts (hostnames and
     /// paths routinely contain those letters).
     pub(super) fn capturing_text(&self) -> bool {
-        matches!(self.screen, Screen::Manual { .. } | Screen::PathPrompt { .. })
+        matches!(self.screen, Screen::Manual { .. })
     }
 
     /// The tool keys for the App gutter when this surface is drilled in (a
@@ -1400,8 +1456,8 @@ impl RemoteState {
                 Some(PanelTarget::Local { .. }) => "↑/↓ · Enter open · Esc back",
                 _ => "↑/↓ · Enter open · Esc disconnect",
             },
-            Screen::PathPrompt { .. } => "Enter open · Esc back",
             Screen::LevelPick { .. } => "↑/↓ · Enter open · Esc back",
+            Screen::ServerPick { .. } => "↑/↓ · Enter open · Esc back",
             Screen::Panel(panel) => panel.keys(),
         };
         Some(format!(" {keys} "))
@@ -1415,8 +1471,8 @@ impl RemoteState {
             Screen::Clusters => self.on_key_clusters(code),
             Screen::Manual { .. } => self.on_key_manual(code),
             Screen::Menu => self.on_key_menu(code),
-            Screen::PathPrompt { .. } => self.on_key_path_prompt(code),
             Screen::LevelPick { .. } => self.on_key_level_pick(code),
+            Screen::ServerPick { .. } => self.on_key_server_pick(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
         }
     }
@@ -1451,6 +1507,46 @@ impl RemoteState {
                 self.rows.clear();
                 self.screen = Screen::Panel(panel);
                 Some(Action::Remote(RemoteAction::Refresh { target, panel, path: Some(path) }))
+            }
+            _ => None,
+        }
+    }
+
+    /// Pick a cluster admin server from the map-derived list, then open the
+    /// services panel scoped to that one server.
+    fn on_key_server_pick(&mut self, code: KeyCode) -> Option<Action> {
+        let Screen::ServerPick { servers, state } = &mut self.screen else { return None };
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = state.selected().unwrap_or(0).saturating_sub(1);
+                state.select(Some(i));
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = servers.len().saturating_sub(1);
+                let i = state.selected().map_or(0, |i| (i + 1).min(last));
+                state.select(Some(i));
+                None
+            }
+            KeyCode::Esc => {
+                self.screen = Screen::Menu;
+                None
+            }
+            KeyCode::Enter => {
+                let sel = state.selected()?;
+                let server = servers.get(sel)?.addr;
+                let target = self.target.clone()?;
+                self.service_target = Some(server);
+                self.list.select(None);
+                self.rows.clear();
+                self.screen = Screen::Panel(Panel::Service);
+                // Initial listing: a read-only status query against the server.
+                Some(Action::Remote(RemoteAction::ServiceControl {
+                    target,
+                    server,
+                    units: Vec::new(),
+                    op: ServiceOp::Status,
+                }))
             }
             _ => None,
         }
@@ -1558,9 +1654,15 @@ impl RemoteState {
                             target: target.clone(),
                         }));
                     }
-                } else if panel.path_scoped() {
+                } else if matches!(panel, Panel::Service) {
+                    // Cluster services: pick an admin server from the map, then
+                    // control that one server (never a cluster-wide fanout).
                     self.error = None;
-                    self.screen = Screen::PathPrompt { panel, input: String::new() };
+                    if let Some(target) = &self.target {
+                        return Some(Action::Remote(RemoteAction::ListServiceServers {
+                            target: target.clone(),
+                        }));
+                    }
                 } else if let Some(target) = &self.target {
                     self.panel_path = None;
                     self.list.select(None);
@@ -1577,47 +1679,6 @@ impl RemoteState {
         None
     }
 
-    /// The path-entry screen for a path-scoped panel (perms): collect the target
-    /// path, then open the panel against it. Each arm scopes its `self.screen`
-    /// borrow tightly so it can also touch the other fields.
-    fn on_key_path_prompt(&mut self, code: KeyCode) -> Option<Action> {
-        match code {
-            KeyCode::Char(c) => {
-                if let Screen::PathPrompt { input, .. } = &mut self.screen {
-                    input.push(c);
-                }
-                None
-            }
-            KeyCode::Backspace => {
-                if let Screen::PathPrompt { input, .. } = &mut self.screen {
-                    input.pop();
-                }
-                None
-            }
-            KeyCode::Esc => {
-                self.screen = Screen::Menu;
-                None
-            }
-            KeyCode::Enter => {
-                let (panel, path) = match &self.screen {
-                    Screen::PathPrompt { panel, input } => (*panel, input.trim().to_string()),
-                    _ => return None,
-                };
-                if path.is_empty() {
-                    self.error = Some("a target path is required".to_string());
-                    return None;
-                }
-                let target = self.target.clone()?;
-                self.error = None;
-                self.panel_path = Some(path.clone());
-                self.list.select(None);
-                self.rows.clear();
-                Some(Action::Remote(RemoteAction::Refresh { target, panel, path: Some(path) }))
-            }
-            _ => None,
-        }
-    }
-
     fn on_key_panel(&mut self, code: KeyCode, panel: Panel) -> Option<Action> {
         let target = self.target.clone()?;
         match code {
@@ -1625,14 +1686,27 @@ impl RemoteState {
             KeyCode::Down | KeyCode::Char('j') => self.list.select_next(),
             KeyCode::Esc => {
                 self.panel_path = None;
+                self.service_target = None;
                 self.screen = Screen::Menu;
             }
             KeyCode::Char('r') => {
-                return Some(Action::Remote(RemoteAction::Refresh {
-                    target,
-                    panel,
-                    path: self.panel_path.clone(),
-                }));
+                return match panel {
+                    // The services panel reloads the one server's unit dir (and
+                    // re-lists); it has no path, so it can't go through Refresh.
+                    Panel::Service => self.service_target.map(|server| {
+                        Action::Remote(RemoteAction::ServiceControl {
+                            target,
+                            server,
+                            units: Vec::new(),
+                            op: ServiceOp::Reload,
+                        })
+                    }),
+                    _ => Some(Action::Remote(RemoteAction::Refresh {
+                        target,
+                        panel,
+                        path: self.panel_path.clone(),
+                    })),
+                };
             }
             _ => match panel {
                 Panel::Queue => return self.on_key_queue(code, target),
@@ -1663,9 +1737,14 @@ impl RemoteState {
             KeyCode::Char('R') => ServiceOp::Restart,
             _ => return None,
         };
-        let path = self.panel_path.clone()?;
-        let (unit, member) = self.selected_unit()?;
-        Some(Action::Remote(RemoteAction::ServiceControl { target, path, unit, member, op }))
+        let server = self.service_target?;
+        let unit = self.selected_unit()?;
+        Some(Action::Remote(RemoteAction::ServiceControl {
+            target,
+            server,
+            units: vec![unit],
+            op,
+        }))
     }
 
     fn on_key_queue(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
@@ -1741,9 +1820,9 @@ impl RemoteState {
     }
 
     /// The selected unit + member, if the row is a service-unit row.
-    fn selected_unit(&self) -> Option<(String, u32)> {
+    fn selected_unit(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
-            RowKey::Unit { unit, member } => Some((unit.clone(), *member)),
+            RowKey::Unit { unit } => Some(unit.clone()),
             RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Cert { .. } => None,
         }
     }
@@ -1766,9 +1845,11 @@ impl RemoteState {
                 self.render_manual(f, area, host, port, *focus)
             }
             Screen::Menu => self.render_menu(f, area),
-            Screen::PathPrompt { panel, input } => self.render_path_prompt(f, area, *panel, input),
             Screen::LevelPick { panel, levels, state } => {
                 self.render_level_pick(f, area, *panel, levels, &mut state.clone())
+            }
+            Screen::ServerPick { servers, state } => {
+                self.render_server_pick(f, area, servers, &mut state.clone())
             }
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
         }
@@ -1802,17 +1883,32 @@ impl RemoteState {
         f.render_stateful_widget(list, area, state);
     }
 
-    fn render_path_prompt(&self, f: &mut Frame, area: Rect, panel: Panel, input: &str) {
-        let help = format!("Enter the netidx path for the {} panel.", panel.title());
-        render_form(
-            f,
-            area,
-            panel.title(),
-            &[help.as_str(), "Routed to the resolver cluster mounted there (e.g. / or /eu)."],
-            input,
-            self.error.as_deref(),
-            "",
-        );
+    /// The service-control server picker: the cluster's admin servers, each
+    /// labelled with its level. Pick one to control its services.
+    fn render_server_pick(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        servers: &[ServiceServerRow],
+        state: &mut ListState,
+    ) {
+        let items: Vec<ListItem> = if servers.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "(no admin servers found in the cluster map)",
+                theme::hint_style(),
+            )))]
+        } else {
+            servers.iter().map(|s| ListItem::new(s.label.clone())).collect()
+        };
+        let list = List::new(items)
+            .style(theme::panel_style())
+            .block(theme::panel_block().title(Span::styled(
+                " Services — pick an admin server ",
+                theme::title_style(),
+            )))
+            .highlight_style(theme::selected_style())
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(list, area, state);
     }
 
     /// The landing screen: the verified-present clusters on the left, the
@@ -1941,14 +2037,32 @@ impl RemoteState {
     }
 
     fn render_panel(&self, f: &mut Frame, area: Rect, panel: Panel) {
+        // The glyph-bearing panels — the enrollment queue and delegations (match
+        // the screenshot before approving) and issued certificates (the glyph the
+        // admin may have saved) — split into a list over a detail pane showing the
+        // selected row's glyph + hash.
+        if matches!(panel, Panel::Queue | Panel::Delegations | Panel::Revocation) {
+            let split = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            self.render_panel_list(f, split[0], panel);
+            self.render_panel_detail(f, split[1], panel);
+        } else {
+            self.render_panel_list(f, area, panel);
+        }
+    }
+
+    fn render_panel_list(&self, f: &mut Frame, area: Rect, panel: Panel) {
         let items: Vec<ListItem> = if self.rows.is_empty() {
             vec![ListItem::new(Line::from(Span::styled("(empty)", theme::hint_style())))]
         } else {
             self.rows.iter().map(|r| ListItem::new(r.text.clone())).collect()
         };
-        let title = match &self.panel_path {
-            Some(p) => format!(" {} @ {p} ", panel.title()),
-            None => format!(" {} ", panel.title()),
+        // The services panel is scoped to one admin server; other path-scoped
+        // panels (perms) show their level. Otherwise just the panel name.
+        let title = match (panel, &self.service_target, &self.panel_path) {
+            (Panel::Service, Some(server), _) => format!(" {} @ {server} ", panel.title()),
+            (_, _, Some(p)) => format!(" {} @ {p} ", panel.title()),
+            _ => format!(" {} ", panel.title()),
         };
         let mut st = self.list;
         let list = List::new(items)
@@ -1957,6 +2071,61 @@ impl RemoteState {
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, area, &mut st);
+    }
+
+    /// The detail pane under a glyph-bearing list: the selected row's glyph
+    /// identicon (left) beside its summary + grouped hash (right) — the request
+    /// code (queue / delegations) or the certificate's per-key glyph (issued
+    /// certs). Laid out horizontally so the 8-row identicon never clips the hash.
+    fn render_panel_detail(&self, f: &mut Frame, area: Rect, panel: Panel) {
+        let title = if matches!(panel, Panel::Revocation) { " Certificate " } else { " Request " };
+        let block = theme::panel_block().title(Span::styled(title, theme::title_style()));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let row = self.list.selected().and_then(|i| self.rows.get(i));
+        let glyph = row.and_then(|r| match &r.key {
+            RowKey::Code(code) => Fingerprint::parse_text(code).ok(),
+            RowKey::Cert { glyph, .. } => glyph.clone(),
+            _ => None,
+        });
+        let cols =
+            Layout::horizontal([Constraint::Length(20), Constraint::Min(20)]).split(inner);
+        // Left: the identicon (trim:false — its leading "off" cells are spaces).
+        if let Some(fp) = &glyph {
+            f.render_widget(
+                Paragraph::new(widgets::identicon_lines(fp))
+                    .wrap(Wrap { trim: false })
+                    .style(theme::panel_style()),
+                cols[0],
+            );
+        }
+        // Right: the request summary, then its grouped hash (or why there's none).
+        let mut right: Vec<Line> = match row {
+            None => vec![Line::from(Span::styled("(no request selected)", theme::hint_style()))],
+            Some(row) => vec![Line::from(Span::styled(row.text.clone(), theme::panel_style()))],
+        };
+        if row.is_some() {
+            right.push(Line::from(""));
+            match &glyph {
+                Some(fp) => {
+                    for chunk in widgets::group_fingerprint(fp) {
+                        right.push(Line::from(Span::styled(chunk, theme::title_style())));
+                    }
+                }
+                None => right.push(Line::from(Span::styled(
+                    if matches!(panel, Panel::Revocation) {
+                        "(no glyph — legacy directly-issued certificate)"
+                    } else {
+                        "(no glyph for this request)"
+                    },
+                    theme::hint_style(),
+                ))),
+            }
+        }
+        f.render_widget(
+            Paragraph::new(right).wrap(Wrap { trim: true }).style(theme::panel_style()),
+            cols[1],
+        );
     }
 }
 
@@ -2136,5 +2305,82 @@ mod tests {
         let out = render(&mut s, 100, 20);
         assert!(out.contains("Host"), "host field missing: {out:?}");
         assert!(out.contains("10.0.0.9"), "host value missing: {out:?}");
+    }
+
+    #[test]
+    fn queue_panel_shows_request_detail_with_glyph() {
+        let mut s = RemoteState::new();
+        let fp = Fingerprint::of_der(b"a fake enrollment spki");
+        s.screen = Screen::Panel(Panel::Queue);
+        s.rows = vec![PanelRow {
+            text: "workstation-eu  Client  (12s, from 10.0.60.11)".to_string(),
+            key: RowKey::Code(fp.text()),
+        }];
+        s.list.select(Some(0));
+        let out = render(&mut s, 100, 30);
+        assert!(out.contains("Enrollment Queue"), "queue title missing: {out:?}");
+        assert!(out.contains("workstation-eu"), "request summary missing: {out:?}");
+        assert!(out.contains("Request"), "detail-pane title missing: {out:?}");
+        // The detail pane shows the request's grouped hash; its first chunk is a
+        // slice of the fingerprint text.
+        let chunk = widgets::group_fingerprint(&fp).remove(0);
+        assert!(out.contains(chunk.as_str()), "glyph hash missing from detail: {out:?}");
+    }
+
+    fn a_conn(server: &str) -> RemoteConn {
+        RemoteConn {
+            server: server.parse().unwrap(),
+            domain: "example.com".to_string(),
+            confirmed_fp: Fingerprint::of_der(b"ca"),
+            admin: "eric".to_string(),
+            password: Secret("pw".to_string()),
+        }
+    }
+
+    #[test]
+    fn server_pick_lists_admin_servers_with_level() {
+        let mut s = RemoteState::new();
+        let mut state = ListState::default();
+        state.select(Some(0));
+        s.screen = Screen::ServerPick {
+            servers: vec![
+                ServiceServerRow {
+                    addr: "10.0.0.11:4565".parse().unwrap(),
+                    label: "10.0.0.11:4565         /".to_string(),
+                },
+                ServiceServerRow {
+                    addr: "10.0.60.11:4565".parse().unwrap(),
+                    label: "10.0.60.11:4565        /ap".to_string(),
+                },
+            ],
+            state,
+        };
+        let out = render(&mut s, 100, 20);
+        assert!(out.contains("pick an admin server"), "picker title missing: {out:?}");
+        assert!(out.contains("10.0.0.11:4565"), "first server missing: {out:?}");
+        assert!(out.contains("/ap"), "level column missing: {out:?}");
+    }
+
+    #[test]
+    fn server_pick_enter_targets_that_one_server() {
+        let mut s = RemoteState::new();
+        s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
+        let mut state = ListState::default();
+        state.select(Some(0));
+        let addr: SocketAddr = "10.0.60.11:4565".parse().unwrap();
+        s.screen = Screen::ServerPick {
+            servers: vec![ServiceServerRow { addr, label: "10.0.60.11:4565  /ap".to_string() }],
+            state,
+        };
+        match s.on_key(KeyCode::Enter) {
+            Some(Action::Remote(RemoteAction::ServiceControl { server, op, units, .. })) => {
+                assert_eq!(server, addr, "must target the picked server, not the connected CA");
+                assert!(matches!(op, ServiceOp::Status), "initial open is a status listing");
+                assert!(units.is_empty(), "initial listing carries no units");
+            }
+            _ => panic!("expected a ServiceControl action for the picked server"),
+        }
+        // The picked server is remembered for the panel's control keys.
+        assert_eq!(s.service_target, Some(addr));
     }
 }

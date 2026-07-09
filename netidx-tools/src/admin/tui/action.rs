@@ -123,6 +123,22 @@ impl Outcome {
         }
     }
 
+    /// A silent result that opens the service-control server picker (cluster
+    /// services): the map's admin servers, one to pick and control.
+    pub(super) fn service_servers(
+        servers: Vec<super::remote::ServiceServerRow>,
+    ) -> Outcome {
+        Outcome {
+            title: String::new(),
+            lines: Vec::new(),
+            refresh_local: false,
+            install_service: None,
+            remote: Some(super::remote::RemoteUpdate::ServiceServers { servers }),
+            services: None,
+            quiet: true,
+        }
+    }
+
     /// A silent Services-surface refresh: apply the rows, no overlay.
     pub(super) fn services_rows(rows: Vec<super::services::ServiceRow>) -> Outcome {
         Outcome {
@@ -166,10 +182,6 @@ pub(super) enum Action {
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
     AddParent,
-    /// Jump to the Remote tab's delegation panel to review this resolver's
-    /// pending delegation requests (resolver-with-admin-server only). Pure
-    /// navigation — handled by the UI loop, never an op future.
-    ReviewDelegations,
     /// A Tab-2 remote-admin op (connect / list / approve / …).
     Remote(super::remote::RemoteAction),
     /// Tear down an install (config + OS service). Terminal-owning; handled
@@ -219,7 +231,6 @@ impl Action {
                 if *dry_run { "Previewing join".to_string() } else { "Joining a cluster".to_string() }
             }
             Action::AddParent => "Adding a parent".to_string(),
-            Action::ReviewDelegations => "Reviewing delegations".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
             Action::AutoApprove { rotate, .. } => {
@@ -254,7 +265,6 @@ impl Action {
             | Action::Update { .. }
             | Action::Join { .. }
             | Action::AddParent
-            | Action::ReviewDelegations
             | Action::AutoApprove { rotate: false, .. }
             | Action::ExternalEmitCsr { .. }
             | Action::ExternalInstall { .. }
@@ -285,6 +295,16 @@ impl Action {
             }),
         }
     }
+
+    /// The request glyph to show alongside a confirmation (the approve dialogs),
+    /// so the admin verifies the identicon against the screenshot. `None` for
+    /// confirmations with no associated glyph.
+    pub(super) fn confirm_glyph(&self) -> Option<netidx_admin::fingerprint::Fingerprint> {
+        match self {
+            Action::Remote(ra) => ra.confirm_glyph(),
+            _ => None,
+        }
+    }
 }
 
 /// Run an action to completion on an owned answerer — the self-contained future
@@ -298,9 +318,6 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent => add_parent(&mut ans).await,
         Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
-        Action::ReviewDelegations => {
-            bail!("internal error: review-delegations is navigation, not an op future")
-        }
         Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
         Action::ManageLocalAdmins { .. } => {
             bail!("internal error: manage-local-admins is navigation, not an op future")

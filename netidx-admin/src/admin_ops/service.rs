@@ -8,47 +8,64 @@
 //! `netidx-activation`) needs no CA and works on Windows, so it stays in the
 //! tools `activation` module rather than this unix-only group.
 
-use super::open_admin_session;
+use super::{open_admin_session, resolve_identity};
 use crate::{
     admin_client,
-    admin_proto::{NodeKind, Secret, ServiceControlResult, UnitTarget},
+    admin_proto::{NodeKind, Role, Secret},
     answer::Answerer,
 };
 use anyhow::{Context, Result};
-use netidx_activation::control::ControlOp;
+use netidx_activation::control::{ControlOp, UnitStatus};
 use std::{net::SocketAddr, path::PathBuf};
 
-/// Parse `unit[:member]` tokens into [`UnitTarget`]s. A trailing `:<n>` pins the
-/// unit to cluster member `n` (so an admin can stagger a rolling restart);
-/// otherwise it targets every member.
-pub fn parse_unit_targets(toks: &[String]) -> Result<Vec<UnitTarget>> {
-    toks.iter()
-        .map(|t| match t.rsplit_once(':') {
-            Some((unit, idx)) => {
-                let member = idx
-                    .parse::<u32>()
-                    .with_context(|| format!("invalid member index in {t:?}"))?;
-                Ok(UnitTarget { unit: unit.to_string(), member: Some(member) })
-            }
-            None => Ok(UnitTarget { unit: t.clone(), member: None }),
-        })
-        .collect()
+/// One admin server the operator can control services on — its listen address,
+/// its resolver cluster's base path (the authorization scope), and its roles.
+/// The `addr` is what the UI shows and what a service-control op targets.
+#[derive(Debug, Clone)]
+pub struct ServiceServer {
+    pub addr: SocketAddr,
+    pub base: String,
+    pub roles: Vec<Role>,
 }
 
-/// Remote service control over the admin plane: glyph-confirm + authenticate,
-/// then apply `op` to `targets` on the cluster serving `path`. The CA enforces
-/// the caller's `service_control_scopes` covering `path`. Returns one result per
-/// targeted cluster member, so a partial failure surfaces per member.
+/// Every admin server that runs a resolver, read from the CA network map — the
+/// pick list for cluster service control. Sourced entirely from the map, so the
+/// operator picks a server by identity rather than typing a namespace path.
+pub async fn list_service_servers(
+    ans: &mut dyn Answerer,
+    server: SocketAddr,
+    ca_dir: Option<PathBuf>,
+) -> Result<Vec<ServiceServer>> {
+    let (addr, id) = resolve_identity(ans, Some(server), ca_dir.as_deref()).await?;
+    let map = admin_client::get_map_pinned(addr, NodeKind::Client, &id)
+        .await
+        .context("fetching the network map")?;
+    let mut out: Vec<ServiceServer> = map
+        .servers
+        .into_iter()
+        .filter_map(|s| {
+            s.cluster.map(|c| ServiceServer { addr: s.addr, base: c.base, roles: s.roles })
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.base, a.addr).cmp(&(&b.base, b.addr)));
+    Ok(out)
+}
+
+/// Remote service control over the admin plane: glyph-confirm + authenticate to
+/// `server` (the CA), then apply `op` to `units` on the single admin server
+/// `target_server`. The CA enforces the caller's `service_control_scopes`
+/// covering that server's cluster base. Returns that server's per-unit statuses.
+#[allow(clippy::too_many_arguments)]
 pub async fn control_remote(
     ans: &mut dyn Answerer,
     server: SocketAddr,
     ca_dir: Option<PathBuf>,
     admin: Option<String>,
     password: Option<Secret>,
-    path: &str,
-    targets: Vec<UnitTarget>,
+    target_server: SocketAddr,
+    units: Vec<String>,
     op: ControlOp,
-) -> Result<Vec<ServiceControlResult>> {
+) -> Result<Vec<UnitStatus>> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
     admin_client::control_service(
         sess.server,
@@ -56,32 +73,9 @@ pub async fn control_remote(
         &sess.identity,
         &sess.admin,
         sess.password.as_str(),
-        path,
-        targets,
+        target_server,
+        units,
         op,
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unit_target_parsing() {
-        let t = parse_unit_targets(&[
-            "resolver".to_string(),
-            "resolver:0".to_string(),
-            "id-map:12".to_string(),
-        ])
-        .unwrap();
-        assert_eq!(t[0].unit, "resolver");
-        assert_eq!(t[0].member, None);
-        assert_eq!(t[1].unit, "resolver");
-        assert_eq!(t[1].member, Some(0));
-        assert_eq!(t[2].unit, "id-map");
-        assert_eq!(t[2].member, Some(12));
-        // A non-numeric index is a clear error, not a silent unit name.
-        assert!(parse_unit_targets(&["resolver:abc".to_string()]).is_err());
-    }
 }

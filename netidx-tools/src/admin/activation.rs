@@ -19,7 +19,7 @@ use netidx_admin::{
 // Remote, admin-plane control is unix-only (it needs the CA/openssl modules);
 // the local control path below is cross-platform.
 #[cfg(unix)]
-use netidx_admin::{admin_ops, admin_proto};
+use netidx_admin::admin_ops;
 
 use super::answer_cli::RemoteAuthFlags;
 use clap::{Args, Subcommand};
@@ -60,14 +60,13 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct ServiceCtlArgs {
-    /// The resolver-cluster path whose services to control — the RBAC scope.
-    /// Required with `--server`; ignored locally. e.g. `/eu`.
+    /// The admin server to control (its `host:port` listen address). With
+    /// `--server` this is the ONE server whose services to act on — restart is
+    /// per-server, so you restart one resolver at a time. Defaults to `--server`
+    /// (control the server you connect to). Ignored locally.
     #[arg(long)]
-    pub path: Option<String>,
-    /// Units to act on (empty ⇒ every unit). With `--server`, a unit may be
-    /// pinned to one cluster member by index — `resolver:0` restarts the
-    /// resolver on the first member, `resolver:1` the second, so an admin
-    /// can stagger restarts. Locally, just unit names.
+    pub target: Option<String>,
+    /// Units to act on (empty ⇒ every unit). Plain unit names in both modes.
     pub units: Vec<String>,
     /// Activation directory (local mode). Default: the user activation dir.
     #[arg(long)]
@@ -213,23 +212,25 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
         // control path below is the one that matters.
         #[cfg(unix)]
         Some(server) => {
-            let path = a.path.clone().ok_or_else(|| {
-                anyhow!("--path <resolver-cluster-path> is required with --server")
-            })?;
-            let targets = admin_ops::service::parse_unit_targets(&a.units)?;
+            // The server to control: an explicit --target, else the --server we
+            // connect to. Restart is per-server, so this names exactly one host.
+            let target = match &a.target {
+                Some(t) => super::init::resolve_admin_server_addr(t)?,
+                None => server,
+            };
             let mut ans = a.auth.answerer()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let results = rt.block_on(admin_ops::service::control_remote(
+            let units = rt.block_on(admin_ops::service::control_remote(
                 &mut ans,
                 server,
                 a.auth.ca_dir.clone(),
                 a.auth.admin.clone(),
                 None,
-                &path,
-                targets,
+                target,
+                a.units,
                 op,
             ))?;
-            print_service_results(&results);
+            print_unit_statuses(&units);
             Ok(())
         }
         #[cfg(not(unix))]
@@ -272,22 +273,6 @@ fn print_unit_statuses(units: &[UnitStatus]) {
     }
     for u in units {
         println!("  {}: {}", u.unit, fmt_state(&u.state));
-    }
-}
-
-#[cfg(unix)]
-fn print_service_results(results: &[admin_proto::ServiceControlResult]) {
-    if results.is_empty() {
-        println!("(no cluster members matched)");
-    }
-    for r in results {
-        match &r.error {
-            Some(e) => println!("member {} ({}): ERROR {e}", r.member, r.addr),
-            None => {
-                println!("member {} ({}):", r.member, r.addr);
-                print_unit_statuses(&r.units);
-            }
-        }
     }
 }
 

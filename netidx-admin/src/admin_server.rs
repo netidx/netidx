@@ -35,8 +35,8 @@ use crate::{
         QueueEntry, ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
         RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
         RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
-        SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceControlResult,
-        SetAdminPolicyRequest, SignRequest, SignResponse,
+        SERVING_SAN, Secret, ServerEntry, ServerHello, SetAdminPolicyRequest,
+        SignRequest, SignResponse,
     },
     admin_server_config::AdminServerConfig,
     delegation_store, discovery, id_map, netmap,
@@ -3197,7 +3197,8 @@ fn perms_scope_covers(scopes: &[String], target: &str) -> bool {
 }
 
 /// The resolver member addresses of the cluster whose base path is
-/// `target_path`, from the map. `None` if no such cluster.
+/// `target_path`, from the map. `None` if no such cluster. Used by the
+/// (correctly) path-scoped perms-edit fanout.
 fn cluster_members_for(map: &NetworkMap, target_path: &str) -> Option<Vec<SocketAddr>> {
     let mut members: Vec<SocketAddr> = Vec::new();
     for s in &map.servers {
@@ -3343,27 +3344,36 @@ async fn handle_edit_perms(
 
 // -- remote service control ---------------------------------------------------
 
-/// Whether `authd` may control services on the cluster serving `path`: a
-/// signing slot (founding authority) or a role admin whose
-/// `service_control_scopes` cover the path. (Distinct from perms-edit and
+/// Whether `authd` may control services on an admin server whose cluster base
+/// is `base`: a signing slot (founding authority) or a role admin whose
+/// `service_control_scopes` cover `base`. (Distinct from perms-edit and
 /// admin-management authority — restarting services is its own grant.)
 ///
-/// The scope is the *cluster path*, which selects which member HOSTS the op
-/// reaches; on a reached host the admin may control any unit that host's
-/// supervisor manages. That is intentional: a host running a `/eu` admin
-/// server is a `/eu` host, and a `/eu` service-control admin controls its
-/// services — co-locating a different cluster's services on it would merge
-/// the two clusters' control trust, which is the operator's choice.
-fn service_control_authority(authd: &ca_vault::Authenticated, path: &str) -> bool {
+/// Authorization is still path-scoped (a `/eu` service-control admin may
+/// control any server in a cluster based under `/eu`), but the *action* it
+/// authorizes is per-server: one `ControlService` call touches exactly one
+/// admin server, so it can never take a whole level down at once.
+fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> bool {
     matches!(authd.kind, ca_vault::SlotKind::Signing)
-        || perms_scope_covers(&authd.policy.service_control_scopes, path)
+        || perms_scope_covers(&authd.policy.service_control_scopes, base)
+}
+
+/// The cluster base of the admin server whose listen address is `addr`, from
+/// the map — the authorization scope for controlling that server's services.
+/// `None` if the server isn't in the map or runs no resolver cluster.
+fn base_for_server(map: &NetworkMap, addr: &SocketAddr) -> Option<String> {
+    map.servers
+        .iter()
+        .find(|s| &s.addr == addr)
+        .and_then(|s| s.cluster.as_ref())
+        .map(|c| c.base.clone())
 }
 
 /// CA-side: authenticate the admin, authorize by service-control scope, and
-/// fan the op out to the targeted members of the cluster serving
-/// `target_path` (peer-cert-gated `ApplyServiceControl`). A `UnitTarget`'s
-/// `member` index selects one member of the cluster (so an admin can stagger
-/// restarts); `None` hits every member. Mirrors [`handle_edit_perms`].
+/// apply the op to **one** admin server (`req.target_server`) — forwarding a
+/// single peer-cert-gated [`Request::ApplyServiceControl`], or applying locally
+/// when the target is the CA itself. Per-server by design: restart is never
+/// cluster-wide, so a careful operator restarts one resolver at a time.
 async fn handle_control_service(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,
@@ -3393,128 +3403,68 @@ async fn handle_control_service(
         Ok(Err(_)) => return err("authentication failed".to_string()),
         Err(e) => return err(format!("auth task panicked: {e}")),
     };
-    if !service_control_authority(&authd, &req.target_path) {
+    // The target server's cluster base is its authorization scope. A server not
+    // in the map (or running no resolver) has no base — only a signing slot may
+    // control it, so an unknown target can't be reached by a scoped role admin.
+    let base = base_for_server(&state.map.lock(), &req.target_server);
+    let authorized = match &base {
+        Some(base) => service_control_authority(&authd, base),
+        None => matches!(authd.kind, ca_vault::SlotKind::Signing),
+    };
+    if !authorized {
         return err(format!(
-            "admin {:?} is not authorized to control services at {:?}",
-            req.admin, req.target_path
+            "admin {:?} is not authorized to control services on {}",
+            req.admin, req.target_server
         ));
     }
-    // start/stop/restart must name explicit unit targets, so a fat-finger can't
-    // take down a whole cluster; read-only `status` may omit them, in which case
-    // it reports every unit on every member (each supervisor expands an empty
-    // unit list to all its units).
-    if req.targets.is_empty()
+    // start/stop/restart must name explicit units, so a fat-finger can't take a
+    // server down blind; read-only `status` may omit them (the supervisor
+    // expands an empty unit list to all its units).
+    if req.units.is_empty()
         && !matches!(req.op, netidx_activation::control::ControlOp::Status)
     {
         return err(
-            "no units specified — start/stop/restart require explicit unit \
-             targets (status with no units reports them all)"
+            "no units specified — start/stop/restart require explicit units \
+             (status with no units reports them all)"
                 .to_string(),
         );
     }
-    // The cluster's ordered member list — a `member` index refers to this
-    // order (what `status` shows the operator).
-    let members = {
-        let map = state.map.lock();
-        match cluster_members_for(&map, &req.target_path) {
-            Some(m) => m,
-            None => {
-                return err(format!(
-                    "no resolver cluster serving {:?} in the network map",
-                    req.target_path
-                ));
-            }
-        }
-    };
-    for t in &req.targets {
-        if let Some(i) = t.member
-            && i as usize >= members.len()
-        {
-            return err(format!(
-                "member index {i} is out of range (the cluster at {:?} has {} members)",
-                req.target_path,
-                members.len()
-            ));
-        }
-    }
-    let (cert, key) = state.outbound_identity();
-    let (my_listen, roots) = {
-        let cfg = state.cfg.lock();
-        (cfg.listen, state.roots.clone())
-    };
-    let admin_port = my_listen.port();
-    // Audit the *intent* before acting: the ops take effect on the members
-    // immediately, and a slow op can outlive the connection timeout — so the
-    // audit must record who/what/where up front, including the unit targets.
-    let targets_desc: Vec<String> = req
-        .targets
-        .iter()
-        .map(|t| match t.member {
-            Some(i) => format!("{}:{i}", t.unit),
-            None => t.unit.clone(),
-        })
-        .collect();
+    // Audit the *intent* before acting — a slow op can outlive the connection.
     let ca_dir = state.ca.as_ref().expect("CA role held").dir().to_path_buf();
     audit(
         &ca_dir,
         &authd.admin,
         "control-service",
-        &format!("{:?} {} at {}", req.op, targets_desc.join(","), req.target_path),
+        &format!("{:?} {} on {}", req.op, req.units.join(","), req.target_server),
         Duration::ZERO,
     );
-    // Fan out to the targeted members concurrently, so a multi-member op is
-    // bounded by the slowest member, not the sum (staggering is the operator's
-    // job, via separate per-member-index commands).
-    let mut set = tokio::task::JoinSet::new();
-    for (idx, m) in members.iter().enumerate() {
-        // Units pinned to this member, plus unpinned units (which hit every
-        // member).
-        let units: Vec<String> = req
-            .targets
-            .iter()
-            .filter(|t| t.member.is_none() || t.member == Some(idx as u32))
-            .map(|t| t.unit.clone())
-            .collect();
-        // Empty `req.targets` ⇒ status-all (the guard above only lets Status
-        // reach here with no targets): hit every member with an empty unit list,
-        // which each supervisor expands to all its units. A *non-empty* request
-        // that merely pins nothing to this member skips it.
-        if units.is_empty() && !req.targets.is_empty() {
-            continue;
+    let my_listen = state.cfg.lock().listen;
+    // Apply to the one target: locally when it's this CA host, else one
+    // peer-cert-gated hop to that admin server (its real map listen address).
+    let applied = if req.target_server == my_listen {
+        let apply = ApplyServiceControlRequest { units: req.units.clone(), op: req.op };
+        match handle_apply_service_control(state, &apply).await {
+            ApplyServiceControlResponse::Ok { units } => Ok(units),
+            ApplyServiceControlResponse::Err { reason } => Err(reason),
         }
-        let addr = SocketAddr::new(m.ip(), admin_port);
-        let (cert, key, roots, op) = (cert.clone(), key.clone(), roots.clone(), req.op);
-        set.spawn(async move {
-            match admin_client::push_service_control(addr, &cert, &key, roots, units, op)
-                .await
-            {
-                Ok(units) => {
-                    ServiceControlResult { member: idx as u32, addr, error: None, units }
-                }
-                Err(e) => ServiceControlResult {
-                    member: idx as u32,
-                    addr,
-                    error: Some(format!("{e:#}")),
-                    units: vec![],
-                },
-            }
-        });
+    } else {
+        let (cert, key) = state.outbound_identity();
+        let roots = state.roots.clone();
+        admin_client::push_service_control(
+            req.target_server,
+            &cert,
+            &key,
+            roots,
+            req.units.clone(),
+            req.op,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))
+    };
+    match applied {
+        Ok(units) => ControlServiceResponse::Ok { units },
+        Err(reason) => err(reason),
     }
-    let mut results = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(r) => results.push(r),
-            Err(e) => results.push(ServiceControlResult {
-                member: u32::MAX,
-                addr: my_listen,
-                error: Some(format!("fan-out task panicked: {e}")),
-                units: vec![],
-            }),
-        }
-    }
-    // Tasks complete out of order; sort by member for a stable view.
-    results.sort_by_key(|r| r.member);
-    ControlServiceResponse::Ok { results }
 }
 
 /// Server-to-server (peer-cert-gated): apply a service-control op to THIS

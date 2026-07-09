@@ -30,11 +30,13 @@ use std::{
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-/// The upper bound the interactive install flows browse mDNS for admin servers.
-/// A local network is expected to host a single cluster, so discovery returns as
-/// soon as the first admin server answers — this is only the ceiling for the
-/// case where mDNS is slow or nothing is there.
+/// The upper bound the interactive install flows browse mDNS for admin servers —
+/// the ceiling for the case where mDNS is slow or nothing is there.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The minimum the interactive flows browse before an early exit: collect at
+/// least this long so a second cluster (a VM, a satellite office) that answers a
+/// beat later still makes the list, then early-exit once we have anything.
+const DISCOVERY_SETTLE: Duration = Duration::from_secs(3);
 /// Validity requested from a CA server. The server caps it to the admin's
 /// policy, so this is just an upper bound.
 const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
@@ -424,20 +426,23 @@ pub struct DiscoveredNetworkReport {
 /// cascade (which the strict CLI disables), it is valid in strict/scripted
 /// mode: a script runs it, reads a network's admin-server address + glyph, and
 /// feeds them to `--admin-server` / `--accept-glyph`.
+///
+/// `early_exit = Some(settle)` browses at least `settle` and then returns as
+/// soon as a cluster is found (up to `timeout`) — the interactive join, where
+/// one cluster is expected. `None` browses the whole `timeout` to enumerate
+/// every network — the strict enumerator.
 pub async fn discover_networks(
     timeout: Duration,
     kind: NodeKind,
-    stop_on_first: bool,
+    early_exit: Option<Duration>,
 ) -> Vec<DiscoveredNetworkReport> {
     // The mDNS browse blocks for `timeout`; keep it off the async worker.
-    // `stop_on_first` returns as soon as one cluster is found (the interactive
-    // join); the strict enumerator waits the full window to list every network.
-    let found = tokio::task::spawn_blocking(move || {
-        if stop_on_first {
-            discovery::browse_first_or_empty(timeout)
-        } else {
-            discovery::browse_or_empty(timeout)
-        }
+    // `early_exit = Some(settle)` waits at least `settle` then early-exits once a
+    // cluster is found (the interactive join); `None` waits the full window to
+    // list every network (the strict enumerator).
+    let found = tokio::task::spawn_blocking(move || match early_exit {
+        Some(settle) => discovery::browse_first_or_empty(timeout, settle),
+        None => discovery::browse_or_empty(timeout),
     })
     .await
     .unwrap_or_default();
@@ -478,57 +483,94 @@ pub async fn discover_network(
     ans: &mut dyn Answerer,
     kind: NodeKind,
 ) -> Result<AdminServers> {
-    const CREATE_NEW: &str = "Create a new cluster";
-    const CONNECT_EXISTING: &str = "Connect to an existing cluster";
     if !ans.interactive() {
         return Ok(AdminServers::NotProbed);
     }
+    // Role-specific framing: a resolver can found a new cluster, so it defaults
+    // to that; a workstation or publisher can't found one, so it either joins a
+    // cluster (the default) or installs stand-alone. Either way the non-join
+    // option means "no parent cluster" → `DontHave`.
+    let (field, standalone, join, default) = match kind {
+        NodeKind::Resolver => (
+            Field::ClusterMode,
+            "Create a new cluster",
+            "Connect to an existing cluster",
+            "Create a new cluster",
+        ),
+        _ => (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster"),
+    };
     // Decide first, discover second — so the flow is identical however many
-    // clusters happen to be on the network. Found a new cluster here, or go
-    // looking for one to join.
-    let choice =
-        ans.choice(Field::ClusterMode, None, &[CREATE_NEW, CONNECT_EXISTING], Some(CREATE_NEW)).await?;
-    if choice != CONNECT_EXISTING {
+    // clusters happen to be on the network.
+    let choice = ans.choice(field, None, &[standalone, join], Some(default)).await?;
+    if choice != join {
         return Ok(AdminServers::DontHave);
     }
     // Connecting: browse the local network for clusters and fetch each one's CA
-    // identity, so the operator can recognize the one they mean by its glyph.
+    // identity, so the operator can recognize the one they mean by its glyph. The
+    // operator can browse again ("poll for more") to pick up a cluster that
+    // answered late; new ones are appended, deduped by domain.
+    let mut options: Vec<NetworkOption> = Vec::new();
+    let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
+    discover_into(ans, kind, &mut options, &mut servers).await;
+    // Pick a discovered cluster by its glyph, enter an admin-server address
+    // manually, or poll again for more.
+    let seeds: Vec<SocketAddr> = 'pick: loop {
+        match ans.select_network(&options).await? {
+            NetworkChoice::Discovered(i) => match servers.get(i) {
+                Some(s) => break 'pick s.clone(),
+                None => return Ok(AdminServers::DontHave),
+            },
+            NetworkChoice::Manual => loop {
+                let typed = ans.text(Field::AdminServerAddr, None, None, true).await?;
+                match manual_seeds(typed) {
+                    Ok(Some(s)) => break 'pick s,
+                    Ok(None) => return Ok(AdminServers::DontHave),
+                    Err(e) => ans.warn(&format_compact!("{e:#}")),
+                }
+            },
+            NetworkChoice::PollMore => {
+                match discover_into(ans, kind, &mut options, &mut servers).await {
+                    0 => ans.note("no additional clusters found"),
+                    n => ans.note(&format_compact!("found {n} more cluster(s)")),
+                }
+            }
+        }
+    };
+    confirm_seeds(ans, &seeds, kind).await
+}
+
+/// Browse the network once and append any newly-discovered clusters (deduped by
+/// domain) to `options`/`servers`, fetching each one's CA identity so it can be
+/// picked by its glyph. Returns how many were newly added. A previously-listed
+/// cluster is skipped; a previously-unreachable one is re-attempted (it may
+/// answer now), which is exactly what "poll for more" is for.
+async fn discover_into(
+    ans: &mut dyn Answerer,
+    kind: NodeKind,
+    options: &mut Vec<NetworkOption>,
+    servers: &mut Vec<Vec<SocketAddr>>,
+) -> usize {
     ans.progress(Progress::timed(
         Stage::Discovering,
         "searching for a netidx cluster on the local network…",
         DISCOVERY_TIMEOUT,
     ));
-    let reports = discover_networks(DISCOVERY_TIMEOUT, kind, true).await;
-    // Only clusters whose admin server answered carry a glyph to show; note the
-    // rest and drop them from the pick list.
-    let mut options: Vec<NetworkOption> = Vec::new();
-    let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
+    let reports = discover_networks(DISCOVERY_TIMEOUT, kind, Some(DISCOVERY_SETTLE)).await;
+    let mut added = 0;
     for r in reports {
+        if options.iter().any(|o| o.domain == r.domain) {
+            continue;
+        }
         match r.identity {
             Ok(identity) => {
                 options.push(NetworkOption { domain: r.domain, identity });
                 servers.push(r.admin_servers);
+                added += 1;
             }
             Err(e) => ans.note(&format_compact!("skipping {:?}: {e}", r.domain)),
         }
     }
-    // Always the same next step: pick a discovered cluster by its glyph, or
-    // enter an admin-server address manually (the final list option).
-    let seeds: Vec<SocketAddr> = match ans.select_network(&options).await? {
-        NetworkChoice::Discovered(i) => match servers.get(i) {
-            Some(s) => s.clone(),
-            None => return Ok(AdminServers::DontHave),
-        },
-        NetworkChoice::Manual => loop {
-            let typed = ans.text(Field::AdminServerAddr, None, None, true).await?;
-            match manual_seeds(typed) {
-                Ok(Some(s)) => break s,
-                Ok(None) => return Ok(AdminServers::DontHave),
-                Err(e) => ans.warn(&format_compact!("{e:#}")),
-            }
-        },
-    };
-    confirm_seeds(ans, &seeds, kind).await
+    added
 }
 
 /// Fetch the network identity from the first reachable seed and have the

@@ -481,8 +481,9 @@ impl Modal {
                 }
                 _ => false,
             },
-            // The list is the discovered networks followed by one manual-entry
-            // row, so the last selectable index (`networks.len()`) is Manual.
+            // The list is the discovered networks, then a "poll for more" row,
+            // then a manual-entry row: indices `networks.len()` and
+            // `networks.len() + 1` respectively.
             Modal::SelectNetwork { networks, state, reply } => match code {
                 KeyCode::Esc => {
                     if let Some(tx) = reply.take() {
@@ -496,13 +497,15 @@ impl Modal {
                     false
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let i = state.selected().map_or(0, |i| (i + 1).min(networks.len()));
+                    let i = state.selected().map_or(0, |i| (i + 1).min(networks.len() + 1));
                     state.select(Some(i));
                     false
                 }
                 KeyCode::Enter => {
-                    let sel = state.selected().unwrap_or(0).min(networks.len());
+                    let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
                     let choice = if sel == networks.len() {
+                        NetworkChoice::PollMore
+                    } else if sel == networks.len() + 1 {
                         NetworkChoice::Manual
                     } else {
                         NetworkChoice::Discovered(sel)
@@ -706,12 +709,14 @@ impl Modal {
                 f.render_stateful_widget(list, rows[2], &mut st);
             }
             Modal::SelectNetwork { networks, state, .. } => {
+                const POLL_MORE: &str = "Search again for more clusters";
                 const MANUAL: &str = "Enter an address manually…";
-                let sel = state.selected().unwrap_or(0).min(networks.len());
+                let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
                 let w = 68u16.min(screen.width.saturating_sub(4)).max(40);
                 // Body holds the list (left) beside the selected glyph (right, 8
-                // identicon rows + a blank + up to 3 fingerprint lines).
-                let body_h = (networks.len() as u16 + 1).max(12);
+                // identicon rows + a blank + up to 3 fingerprint lines). The list
+                // is the networks plus the poll-more and manual-entry rows.
+                let body_h = (networks.len() as u16 + 2).max(12);
                 let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2 /*borders*/).min(screen.height);
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
@@ -744,7 +749,7 @@ impl Modal {
                 let items: Vec<ListItem> = networks
                     .iter()
                     .map(|n| ListItem::new(n.domain.clone()))
-                    .chain(std::iter::once(ListItem::new(MANUAL)))
+                    .chain([ListItem::new(POLL_MORE), ListItem::new(MANUAL)])
                     .collect();
                 let mut st = *state;
                 let list = List::new(items)
@@ -752,7 +757,7 @@ impl Modal {
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, cols[0], &mut st);
                 // Right: the selected network's glyph + grouped fingerprint, or a
-                // hint for the manual-entry row.
+                // hint for the poll-more / manual-entry rows.
                 let glyph = match networks.get(sel) {
                     Some(n) => {
                         let mut lines = widgets::identicon_lines(&n.identity.fingerprint);
@@ -766,6 +771,10 @@ impl Modal {
                         }
                         lines
                     }
+                    None if sel == networks.len() => vec![Line::from(Span::styled(
+                        "Browse the network again and add any clusters that answer.",
+                        theme::hint_style(),
+                    ))],
                     None => vec![Line::from(Span::styled(
                         "Type an admin-server address (host:port) to connect directly.",
                         theme::hint_style(),
@@ -1053,5 +1062,28 @@ mod tests {
         let (mut modal, mut rx) = select_parent_modal();
         assert!(modal.on_key(KeyCode::Esc), "Esc must close the modal");
         assert!(rx.try_recv().unwrap().is_err(), "Esc must send a cancel error");
+    }
+
+    fn select_network_modal() -> (Modal, oneshot::Receiver<Result<NetworkChoice>>) {
+        // Empty network list: index 0 is the poll-more row, index 1 the manual row.
+        let (tx, rx) = oneshot::channel();
+        let modal =
+            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx }).unwrap();
+        (modal, rx)
+    }
+
+    #[test]
+    fn select_network_enter_polls_more() {
+        let (mut modal, mut rx) = select_network_modal();
+        assert!(modal.on_key(KeyCode::Enter), "Enter must close the modal");
+        assert_eq!(rx.try_recv().unwrap().unwrap(), NetworkChoice::PollMore);
+    }
+
+    #[test]
+    fn select_network_manual_is_the_last_row() {
+        let (mut modal, mut rx) = select_network_modal();
+        modal.on_key(KeyCode::Down); // past poll-more, onto manual
+        assert!(modal.on_key(KeyCode::Enter));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), NetworkChoice::Manual);
     }
 }

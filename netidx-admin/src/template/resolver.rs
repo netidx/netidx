@@ -313,6 +313,11 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         "-c".to_string(),
         resolver_cfg_path.to_string_lossy().into_owned(),
         "-f".to_string(),
+        // Delay serving reads until publishers have had a chance to
+        // re-register (~2× the writer TTL) so a restarted member never
+        // serves an incomplete view — this is what makes a careful
+        // one-at-a-time rolling restart of a cluster invisible to readers.
+        "--delay-reads".to_string(),
     ];
     units.insert(
         "resolver".to_string(),
@@ -537,6 +542,20 @@ mod tests {
         rt.apply().unwrap();
         assert!(out.path().join("resolver.json").exists());
         assert!(out.path().join("activation/resolver.unit").exists());
+    }
+
+    /// The resolver unit must run with `--delay-reads` by default so a
+    /// one-at-a-time rolling restart never serves readers an incomplete view.
+    #[test]
+    fn resolver_unit_delays_reads_by_default() {
+        let out = tempfile::tempdir().unwrap();
+        let rt = resolver(&anon_params(&out)).unwrap();
+        let unit = rt.units.get("resolver").expect("resolver unit emitted");
+        assert!(
+            unit.process.args.iter().any(|a| a == "--delay-reads"),
+            "resolver unit args must include --delay-reads: {:?}",
+            unit.process.args,
+        );
     }
 
     #[test]

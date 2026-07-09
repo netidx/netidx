@@ -12,7 +12,7 @@
 use crate::admin_proto::Role;
 use anyhow::{Context, Result};
 use log::{debug, warn};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{Receiver, ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
@@ -153,20 +153,34 @@ impl Discovered {
     }
 }
 
-/// Browse for admin servers up to `timeout`, blocking the calling thread. When
-/// `stop_on_first`, returns as soon as the first admin server resolves — a local
-/// network almost always hosts a single cluster, so waiting the full window only
-/// slows the common case; the join flow walks the rest of a cluster's members
-/// from any one of its admin servers. When `false`, waits the whole window and
-/// returns every distinct service resolved (possibly from multiple networks —
-/// group by `domain` + confirm fingerprints before trusting anything).
-fn browse_inner(timeout: Duration, stop_on_first: bool) -> Result<Vec<Discovered>> {
-    let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
-    let receiver = daemon.browse(SERVICE_TYPE).context("browsing for admin servers")?;
-    // Keyed by service fullname so re-resolutions overwrite instead of
-    // duplicating.
-    let mut found: BTreeMap<String, Discovered> = BTreeMap::new();
-    let deadline = Instant::now() + timeout;
+/// Parse a resolved service beacon into `(fullname, Discovered)`, or `None` if
+/// it is malformed (no domain / no addresses).
+fn parse_resolved(info: &ResolvedService) -> Option<(String, Discovered)> {
+    let domain = info.get_property_val_str("domain").unwrap_or_default().to_string();
+    let roles = roles_from_txt(info.get_property_val_str("roles").unwrap_or_default());
+    let fp_short = info.get_property_val_str("fp").unwrap_or_default().to_string();
+    let addrs: Vec<IpAddr> = info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
+    if domain.is_empty() || addrs.is_empty() {
+        debug!("ignoring malformed admin-server record {}", info.get_fullname());
+        return None;
+    }
+    Some((
+        info.get_fullname().to_string(),
+        Discovered { addrs, port: info.get_port(), domain, roles, fp_short },
+    ))
+}
+
+/// Drain resolve/remove events into `found` until `deadline`. When
+/// `stop_on_first`, return as soon as a valid service resolves. Keyed by service
+/// fullname so re-resolutions overwrite instead of duplicating. The `recv`
+/// timeout is bounded by `deadline`, so a timeout there means the deadline is
+/// reached (the daemon is held alive by the caller, so the channel won't drop).
+fn collect_until(
+    receiver: &Receiver<ServiceEvent>,
+    found: &mut BTreeMap<String, Discovered>,
+    deadline: Instant,
+    stop_on_first: bool,
+) {
     loop {
         let now = Instant::now();
         if now >= deadline {
@@ -174,35 +188,46 @@ fn browse_inner(timeout: Duration, stop_on_first: bool) -> Result<Vec<Discovered
         }
         match receiver.recv_timeout(deadline - now) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let domain =
-                    info.get_property_val_str("domain").unwrap_or_default().to_string();
-                let roles = roles_from_txt(
-                    info.get_property_val_str("roles").unwrap_or_default(),
-                );
-                let fp_short =
-                    info.get_property_val_str("fp").unwrap_or_default().to_string();
-                let addrs: Vec<IpAddr> =
-                    info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
-                if domain.is_empty() || addrs.is_empty() {
-                    debug!(
-                        "ignoring malformed admin-server record {}",
-                        info.get_fullname()
-                    );
-                    continue;
-                }
-                found.insert(
-                    info.get_fullname().to_string(),
-                    Discovered { addrs, port: info.get_port(), domain, roles, fp_short },
-                );
-                if stop_on_first {
-                    break;
+                if let Some((name, d)) = parse_resolved(&info) {
+                    found.insert(name, d);
+                    if stop_on_first {
+                        break;
+                    }
                 }
             }
             Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                 found.remove(&fullname);
             }
             Ok(_) => (),
-            Err(_) => break, // timeout or channel closed
+            Err(_) => break, // deadline reached (or channel closed)
+        }
+    }
+}
+
+/// Browse for admin servers up to `timeout`, blocking the calling thread.
+///
+/// `settle` = `None` waits the whole window and returns every distinct service
+/// resolved (possibly from multiple networks — group by `domain` + confirm
+/// fingerprints before trusting anything). This is for the scripted enumerator.
+///
+/// `settle` = `Some(d)` is the interactive-join mode: collect for at least `d`
+/// (so slow-to-answer clusters — a VM, a second office — still make the list),
+/// then early-exit if we found anything; if nothing answered within `d`, keep
+/// waiting up to `timeout`, returning on the first cluster to appear.
+fn browse_inner(timeout: Duration, settle: Option<Duration>) -> Result<Vec<Discovered>> {
+    let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
+    let receiver = daemon.browse(SERVICE_TYPE).context("browsing for admin servers")?;
+    let mut found: BTreeMap<String, Discovered> = BTreeMap::new();
+    let start = Instant::now();
+    let deadline = start + timeout;
+    match settle {
+        None => collect_until(&receiver, &mut found, deadline, false),
+        Some(d) => {
+            let settle_deadline = (start + d).min(deadline);
+            collect_until(&receiver, &mut found, settle_deadline, false);
+            if found.is_empty() {
+                collect_until(&receiver, &mut found, deadline, true);
+            }
         }
     }
     if let Err(e) = daemon.stop_browse(SERVICE_TYPE) {
@@ -219,7 +244,7 @@ fn browse_inner(timeout: Duration, stop_on_first: bool) -> Result<Vec<Discovered
 /// multiple networks (group by `domain` + confirm fingerprints before trusting
 /// anything).
 pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
-    browse_inner(timeout, false)
+    browse_inner(timeout, None)
 }
 
 /// Async wrapper for [`browse_blocking`] — runs it on the blocking
@@ -244,11 +269,11 @@ pub fn browse_or_empty(timeout: Duration) -> Vec<Discovered> {
     }
 }
 
-/// Like [`browse_or_empty`], but returns as soon as the first admin server
-/// resolves (or after `timeout`, whichever comes first). For the interactive
-/// join, where the local network is expected to host exactly one cluster.
-pub fn browse_first_or_empty(timeout: Duration) -> Vec<Discovered> {
-    match browse_inner(timeout, true) {
+/// Like [`browse_or_empty`], but the interactive-join browse: collect for at
+/// least `settle`, then early-exit if anything answered, waiting up to `timeout`
+/// for the first cluster if nothing did. See [`browse_inner`].
+pub fn browse_first_or_empty(timeout: Duration, settle: Duration) -> Vec<Discovered> {
+    match browse_inner(timeout, Some(settle)) {
         Ok(found) => found,
         Err(e) => {
             warn!("mDNS browse failed (manual setup still available): {e:#}");
