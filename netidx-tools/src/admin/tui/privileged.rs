@@ -56,6 +56,12 @@ pub(super) fn install_service(
             // authoritative, and querying it needs no privilege — so consult it
             // before believing a reported failure.
             match service::status(&params) {
+                // CR codex for estokes: Inactive is not evidence that installation
+                // succeeded: the backend writes the unit file before `enable
+                // --now`, so a failed child leaves exactly an Inactive unit and
+                // `ran` contains the failure that this arm masks. Only override a
+                // dubious child status after verifying the unit is enabled/running;
+                // otherwise propagate `ran` and present the install as incomplete.
                 Ok(ServiceStatus::Active) | Ok(ServiceStatus::Inactive) => {
                     Ok("registered the system service (netidx)".to_string())
                 }

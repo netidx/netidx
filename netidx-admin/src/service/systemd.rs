@@ -168,6 +168,11 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
     let for_user = resolve_for_user(p)?;
     let id = service_id(p, &for_user);
     let path = unit_path(p)?;
+    // CR codex for estokes: Ignoring this error and then deleting the unit makes
+    // `component service uninstall` report success even when `--now` failed and
+    // the daemon is still running. "Already stopped/not loaded" needs a narrow
+    // idempotent case; other disable/stop errors must propagate, and the unit file
+    // should only be removed after the service is confirmed inactive.
     // Best-effort disable + stop; the unit may already be stopped.
     let _ = run_systemctl(p.scope, &["disable", "--now", &id]);
     if path.exists() {

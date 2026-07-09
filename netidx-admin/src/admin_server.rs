@@ -76,6 +76,13 @@ const MAX_CONNECTIONS: usize = 768;
 /// pin: roughly `MAX_CONCURRENT_SIGNS × 64 MiB`. Tune for the CA box's
 /// RAM (e.g. 64 ≈ 4 GiB). Signing runs on `spawn_blocking`, so this also
 /// keeps Argon2/openssl off the async worker threads.
+// CR codex for estokes: Any network client can reach the Argon2 password check
+// with bogus credentials, so this hard-coded budget lets an attacker drive about
+// 4 GiB of working memory plus sustained CPU on every CA host. That will OOM many
+// plausible resolver VMs before the semaphore has done its job. Make the budget
+// deployment-configurable with a conservative memory-derived default, and add a
+// pre-KDF/per-source rate limit so authenticated work is not starved by a cheap
+// remote flood.
 const MAX_CONCURRENT_SIGNS: usize = 64;
 
 /// Upper bound on a single connection's whole lifetime (handshake +
@@ -561,6 +568,15 @@ async fn serve_request<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
+    // CR codex for estokes: This makes possession of any CA-valid certificate
+    // carrying the shared serving SAN a domain-wide write credential. A
+    // compromised member (or a member of another CA in a federated trust bundle
+    // that can mint the same SAN) can ApplyPermsEdit/AddIdentity/ApplyReferralEdit/
+    // ApplyServiceControl on any reachable host and can Register/Deregister
+    // arbitrary map addresses; none of those requests is bound to this peer's
+    // serial/SPKI or authorized against the map topology. Please give each server
+    // an authenticated identity/role and authorize every mutation against that
+    // identity rather than treating the common endpoint name as a capability.
     let peer_is_admin_server = peer_ident
         .as_ref()
         .map(|p| p.san.eq_ignore_ascii_case(SERVING_SAN))
@@ -3223,6 +3239,13 @@ async fn push_perms_edit_to_peers(
         let cfg = state.cfg.lock();
         (cfg.listen, state.roots.clone())
     };
+    // CR codex for estokes: This synthesizes admin endpoints from resolver IPs
+    // plus our own port even though configs permit arbitrary admin listen ports
+    // and the map already records actual ServerEntry addresses. A mixed-port,
+    // NAT, VIP, or multihomed cluster silently pushes permissions to the wrong
+    // socket. Model the resolver-member -> admin-server relationship explicitly
+    // and route through the map (the referral fanout below has the same issue),
+    // or reject unsupported topology during install/validation.
     let admin_port = my_listen.port();
     let mut targets: Vec<SocketAddr> = Vec::new();
     for m in member_addrs {

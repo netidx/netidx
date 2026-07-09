@@ -757,6 +757,14 @@ async fn run_workstation(
         units_dir: None,
         netidx_binary: None,
         key_protection: None,
+        // CR codex for estokes: The guided TUI silently chooses the CLI's two
+        // expert opt-outs: it omits the default container and, more seriously,
+        // writes a workstation resolver with no auto-seeded owner permissions.
+        // That local resolver denies normal operations, while `workstation
+        // install` in the strict CLI enables both defaults. Resolve the current
+        // Local-auth identity and seed its grant here (and keep the container
+        // default), or ask the operator explicitly rather than making the two
+        // frontends produce materially different/broken installs.
         with_container: false,
         owner: None,
         with_perms_file: false,

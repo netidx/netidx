@@ -114,6 +114,12 @@ pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
         && report.service_was_installed
         && let Err(e) = service::uninstall(&sparams)
     {
+        // CR codex for estokes: Continuing into the config/CA wipe after the
+        // service failed to stop can leave live resolver/admin processes holding
+        // listeners and loaded credentials while deleting the files needed to
+        // manage or restart them. The command also returns Ok, so automation sees
+        // a successful uninstall. A confirmed stop should be a prerequisite for
+        // destructive cleanup; make bypassing that an explicit force operation.
         // Best-effort: don't block the config wipe. The CLI
         // surfaces this in the printed outcome.
         report.service_error = Some(format!("{e:#}"));

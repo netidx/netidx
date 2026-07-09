@@ -91,6 +91,13 @@ async fn resolve_identity(
     let identity = admin_client::fetch_identity(server, NodeKind::Client)
         .await
         .with_context(|| format!("contacting admin server {server}"))?;
+    // CR codex for estokes: Confirming the CA glyph authenticates the trust
+    // domain, not this endpoint as the CA host. Every enrolled admin server has
+    // the same SERVING_SAN and can claim Role::Ca in ServerHello, so a compromised
+    // member selected here can receive the reusable role-admin password on the
+    // next request. Resolve and authenticate a uniquely identified CA service
+    // (and refuse a non-CA endpoint) before collecting/sending credentials; the
+    // shared serving certificate is not sufficient endpoint authorization.
     // On the CA host (or any box holding the CA dir) the local CA cert is the
     // trust anchor — verify against it rather than asking the operator to
     // confirm their own glyph.

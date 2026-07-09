@@ -18,6 +18,12 @@ use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// CR codex for estokes: Both ends require exact equality, so the next
+// incompatible bump makes rolling upgrades impossible: enrollment, renewal,
+// admin operations, and map refresh all fail until every host runs the same
+// binary. Please define a supported version range/capability negotiation and
+// exercise at least N/N-1 interoperability before this becomes an IT-managed
+// fleet protocol.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Conventional admin-server port (resolver is 4564).

@@ -281,6 +281,13 @@ pub async fn create_vaulted_ca(
             .with_context(|| format!("reading CA cert in {}", opts.dir.display()))?;
         Fingerprint::of_cert_pem(&cert)?
     };
+    // CR codex for estokes: The CA and its only recovery slot are already
+    // durable, but recovery_pw exists only in memory and is not shown until after
+    // this cancellable await. Esc, Ctrl-C, or a UI/channel error here drops the
+    // sole credential, leaves an unlockable default CA, and makes a retry refuse
+    // the existing directory. There must be no cancellation point between the
+    // vault commit and acknowledged delivery of the recovery secret; stage and
+    // roll back the CA, or make secret delivery an acknowledged part of commit.
     ans.announce_identity(
         "Your new certificate authority has been created. This glyph is its \
          identity — it is shown to anyone joining the cluster so they can verify \

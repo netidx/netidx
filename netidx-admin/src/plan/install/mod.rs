@@ -300,6 +300,13 @@ pub async fn finish_with(
     ans.note(&rt.describe());
     if !common.dry_run {
         check_no_overwrite(&rt, common.force)?;
+        // CR codex for estokes: This is a user-facing install transaction, but
+        // apply writes several files without rollback, post_apply performs more
+        // durable setup, and install.json is written only after both. Any failure
+        // leaves an unrecorded partial install whose retry is then rejected as an
+        // overwrite unless the operator diagnoses it and uses --force. Preflight
+        // and stage the whole bundle, then commit/roll back it as one operation (or
+        // persist an explicit incomplete record with a supported repair path).
         rt.apply().context("applying template")?;
         ans.note("ok");
         post_apply(ans).await?;
