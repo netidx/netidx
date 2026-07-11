@@ -51,12 +51,17 @@ use rustls::{
 };
 use rustls_pki_types::CertificateDer;
 use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
     fs::OpenOptions,
     io::Write,
-    net::SocketAddr,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::{TcpListener, TcpStream, UnixListener},
@@ -70,20 +75,19 @@ use zeroize::Zeroizing;
 /// / task fan-out.
 const MAX_CONNECTIONS: usize = 768;
 
-/// Max simultaneous *signs*. Each sign runs an Argon2id derivation
-/// (~64 MiB) to unlock the vault, so this — not `MAX_CONNECTIONS` — is
-/// what bounds the memory a flood of (even wrong-password) requests can
-/// pin: roughly `MAX_CONCURRENT_SIGNS × 64 MiB`. Tune for the CA box's
-/// RAM (e.g. 64 ≈ 4 GiB). Signing runs on `spawn_blocking`, so this also
-/// keeps Argon2/openssl off the async worker threads.
-// CR codex for estokes: Any network client can reach the Argon2 password check
-// with bogus credentials, so this hard-coded budget lets an attacker drive about
-// 4 GiB of working memory plus sustained CPU on every CA host. That will OOM many
-// plausible resolver VMs before the semaphore has done its job. Make the budget
-// deployment-configurable with a conservative memory-derived default, and add a
-// pre-KDF/per-source rate limit so authenticated work is not starved by a cheap
-// remote flood.
+/// Max simultaneous Argon2/signing operations. The per-source password limiter
+/// below is the normal brute-force/resource-exhaustion defence; this semaphore
+/// is the hard global memory ceiling for genuinely distributed traffic.
 const MAX_CONCURRENT_SIGNS: usize = 64;
+
+/// Failed password attempts remain in the source's sliding window this long.
+const PASSWORD_FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Linear backoff: N recent failures require N seconds before the next KDF.
+const PASSWORD_BACKOFF_STEP: Duration = Duration::from_secs(1);
+/// Bound unauthenticated source tracking. At the connection limit there can be
+/// at most 768 live entries; the rest are recent failures retained for the
+/// sliding window. Eviction affects throttling only, never authentication.
+const PASSWORD_LIMIT_MAX_SOURCES: usize = 16_384;
 
 /// Upper bound on a single connection's whole lifetime (handshake +
 /// request + sign + push + response). Without it a client that connects
@@ -110,6 +114,259 @@ pub const AUTORENEW_ADMIN: &str = "autorenew";
 /// are submitted by the per-host `renewd` on a multi-hour cadence and are
 /// not latency-sensitive, so a slow poll is plenty.
 const AUTORENEW_POLL: Duration = Duration::from_secs(60);
+
+/// Source key for password throttling. IPv4 is keyed by address; IPv6 is
+/// keyed by /64 so rotating privacy/interface addresses cannot bypass the
+/// limiter cheaply.
+fn password_source(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) => IpAddr::V4(ip),
+        IpAddr::V6(ip) => {
+            let mut octets = ip.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PasswordLimitEntry {
+    failures: VecDeque<Instant>,
+    in_flight: bool,
+    last_seen: Instant,
+}
+
+#[derive(Debug, Default)]
+struct PasswordLimiter {
+    entries: Mutex<HashMap<IpAddr, PasswordLimitEntry>>,
+}
+
+impl PasswordLimiter {
+    /// Reserve this source's one password attempt. The returned duration is
+    /// slept asynchronously before acquiring the global Argon2 semaphore.
+    fn reserve_at(&self, source: IpAddr, now: Instant) -> Result<Duration> {
+        let source = password_source(source);
+        let mut entries = self.entries.lock();
+        if entries.len() >= PASSWORD_LIMIT_MAX_SOURCES && !entries.contains_key(&source) {
+            entries.retain(|_, entry| {
+                entry.in_flight
+                    || now.saturating_duration_since(entry.last_seen)
+                        < PASSWORD_FAILURE_WINDOW
+            });
+            if entries.len() >= PASSWORD_LIMIT_MAX_SOURCES
+                && let Some(oldest) = entries
+                    .iter()
+                    .filter(|(_, entry)| !entry.in_flight)
+                    .min_by_key(|(_, entry)| entry.last_seen)
+                    .map(|(source, _)| *source)
+            {
+                entries.remove(&oldest);
+            }
+        }
+        let entry = entries.entry(source).or_insert_with(|| PasswordLimitEntry {
+            failures: VecDeque::new(),
+            in_flight: false,
+            last_seen: now,
+        });
+        while entry.failures.front().is_some_and(|failure| {
+            now.saturating_duration_since(*failure) >= PASSWORD_FAILURE_WINDOW
+        }) {
+            entry.failures.pop_front();
+        }
+        if entry.in_flight {
+            bail!("another password attempt from this source is already in progress");
+        }
+        let delay = entry
+            .failures
+            .back()
+            .map(|last| {
+                let penalty = PASSWORD_BACKOFF_STEP
+                    .saturating_mul(entry.failures.len().min(u32::MAX as usize) as u32)
+                    .min(PASSWORD_FAILURE_WINDOW);
+                last.checked_add(penalty)
+                    .map(|eligible| eligible.saturating_duration_since(now))
+                    .unwrap_or(PASSWORD_FAILURE_WINDOW)
+            })
+            .unwrap_or(Duration::ZERO);
+        entry.in_flight = true;
+        entry.last_seen = now;
+        Ok(delay)
+    }
+
+    fn complete_at(&self, source: IpAddr, success: Option<bool>, now: Instant) {
+        let source = password_source(source);
+        let mut entries = self.entries.lock();
+        let Some(entry) = entries.get_mut(&source) else { return };
+        entry.in_flight = false;
+        entry.last_seen = now;
+        while entry.failures.front().is_some_and(|failure| {
+            now.saturating_duration_since(*failure) >= PASSWORD_FAILURE_WINDOW
+        }) {
+            entry.failures.pop_front();
+        }
+        if success == Some(false) {
+            entry.failures.push_back(now);
+        }
+    }
+
+    async fn begin(self: &Arc<Self>, source: IpAddr) -> Result<PasswordAttempt> {
+        let delay = self.reserve_at(source, Instant::now())?;
+        let attempt = PasswordAttempt(Arc::new(PasswordAttemptInner {
+            limiter: self.clone(),
+            source: password_source(source),
+            finished: AtomicBool::new(false),
+        }));
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(attempt)
+    }
+}
+
+#[derive(Clone)]
+struct PasswordAttempt(Arc<PasswordAttemptInner>);
+
+struct PasswordAttemptInner {
+    limiter: Arc<PasswordLimiter>,
+    source: IpAddr,
+    finished: AtomicBool,
+}
+
+impl PasswordAttempt {
+    fn finish(&self, success: bool) {
+        if !self.0.finished.swap(true, Ordering::AcqRel) {
+            self.0.limiter.complete_at(self.0.source, Some(success), Instant::now());
+        }
+    }
+}
+
+impl Drop for PasswordAttemptInner {
+    fn drop(&mut self) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            self.limiter.complete_at(self.source, None, Instant::now());
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The network request's password reservation. `run_signing` copies it
+    /// into the blocking thread where the actual vault authentication occurs.
+    static REQUEST_PASSWORD_ATTEMPT: Option<PasswordAttempt>;
+}
+
+thread_local! {
+    static CURRENT_PASSWORD_ATTEMPT: RefCell<Option<PasswordAttempt>> =
+        const { RefCell::new(None) };
+}
+
+struct CurrentPasswordAttemptGuard(Option<PasswordAttempt>);
+
+impl Drop for CurrentPasswordAttemptGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CURRENT_PASSWORD_ATTEMPT.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+fn with_password_attempt<T>(
+    attempt: Option<PasswordAttempt>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = CURRENT_PASSWORD_ATTEMPT.with(|slot| slot.replace(attempt));
+    let _guard = CurrentPasswordAttemptGuard(previous);
+    f()
+}
+
+fn record_password_auth_result(success: bool) {
+    let attempt = CURRENT_PASSWORD_ATTEMPT.with(|slot| slot.borrow().clone());
+    if let Some(attempt) = attempt {
+        attempt.finish(success);
+    }
+}
+
+#[cfg(test)]
+mod password_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn failures_apply_linear_backoff_and_expire_on_the_sliding_window() {
+        let limiter = PasswordLimiter::default();
+        let source: IpAddr = "192.0.2.10".parse().unwrap();
+        let start = Instant::now();
+
+        assert_eq!(limiter.reserve_at(source, start).unwrap(), Duration::ZERO);
+        assert!(limiter.reserve_at(source, start).is_err(), "only one KDF per IP");
+        limiter.complete_at(source, Some(false), start);
+
+        assert_eq!(limiter.reserve_at(source, start).unwrap(), Duration::from_secs(1));
+        limiter.complete_at(source, Some(false), start + Duration::from_secs(1));
+        assert_eq!(
+            limiter.reserve_at(source, start + Duration::from_secs(1)).unwrap(),
+            Duration::from_secs(2)
+        );
+        // A success releases the source but does not erase recent failures.
+        limiter.complete_at(source, Some(true), start + Duration::from_secs(3));
+        assert_eq!(
+            limiter.reserve_at(source, start + Duration::from_secs(3)).unwrap(),
+            Duration::ZERO
+        );
+        limiter.complete_at(source, Some(false), start + Duration::from_secs(3));
+        assert_eq!(
+            limiter.reserve_at(source, start + Duration::from_secs(3)).unwrap(),
+            Duration::from_secs(3)
+        );
+        limiter.complete_at(source, Some(true), start + Duration::from_secs(6));
+
+        let expired = start + PASSWORD_FAILURE_WINDOW + Duration::from_secs(4);
+        assert_eq!(limiter.reserve_at(source, expired).unwrap(), Duration::ZERO);
+        limiter.complete_at(source, Some(true), expired);
+    }
+
+    #[test]
+    fn ipv6_privacy_addresses_share_a_64_bit_source_key() {
+        let limiter = PasswordLimiter::default();
+        let start = Instant::now();
+        let first: IpAddr = "2001:db8:1234:5678::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1234:5678:ffff::2".parse().unwrap();
+        let other_64: IpAddr = "2001:db8:1234:5679::1".parse().unwrap();
+
+        limiter.reserve_at(first, start).unwrap();
+        assert!(limiter.reserve_at(same_64, start).is_err());
+        assert_eq!(limiter.reserve_at(other_64, start).unwrap(), Duration::ZERO);
+        limiter.complete_at(first, Some(true), start);
+        limiter.complete_at(other_64, Some(true), start);
+    }
+
+    #[tokio::test]
+    async fn abandoned_attempt_releases_the_source_without_recording_a_failure() {
+        let limiter = Arc::new(PasswordLimiter::default());
+        let source: IpAddr = "198.51.100.7".parse().unwrap();
+        let attempt = limiter.begin(source).await.unwrap();
+        drop(attempt);
+        let next = limiter.begin(source).await.unwrap();
+        next.finish(true);
+    }
+
+    #[tokio::test]
+    async fn request_scope_reaches_the_blocking_authentication_task() {
+        let limiter = Arc::new(PasswordLimiter::default());
+        let source: IpAddr = "203.0.113.9".parse().unwrap();
+        let attempt = limiter.begin(source).await.unwrap();
+        let signs = Arc::new(Semaphore::new(1));
+        REQUEST_PASSWORD_ATTEMPT
+            .scope(Some(attempt), async {
+                run_signing(&signs, || record_password_auth_result(false)).await.unwrap();
+            })
+            .await;
+
+        let delay = limiter.reserve_at(source, Instant::now()).unwrap();
+        assert!(
+            delay > Duration::from_millis(800) && delay <= Duration::from_secs(1),
+            "the blocking authentication failure must reach the source limiter: {delay:?}"
+        );
+        limiter.complete_at(source, Some(true), Instant::now() + delay);
+    }
+}
 
 /// Shared state of a running admin server.
 pub struct Server {
@@ -150,6 +407,9 @@ pub struct Server {
     /// (the CA is its only writer); on every other host an in-memory cache
     /// the refresh loop keeps current. Served whole to clients in one shot.
     map: Mutex<NetworkMap>,
+    /// Failed-password sliding windows and one-in-flight gates, keyed by the
+    /// network source. Used only for network requests handled by a CA.
+    password_limiter: Arc<PasswordLimiter>,
 }
 
 impl Server {
@@ -278,6 +538,7 @@ impl Server {
             id_map_lock: Mutex::new(()),
             resolver_edit_lock: Mutex::new(()),
             map: Mutex::new(map),
+            password_limiter: Arc::new(PasswordLimiter::default()),
         }))
     }
 
@@ -597,6 +858,53 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
     }
 }
 
+/// The credential of a request that can actually invoke the password KDF.
+/// `Logout` deliberately is not included: it accepts only a session token and
+/// rejects a password without consulting the vault.
+fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
+    use Request::*;
+    let credential = match req {
+        Login(req) => &req.credential,
+        Sign(req) => &req.credential,
+        Enroll(req) => &req.credential,
+        ListQueue(req) => &req.credential,
+        Approve(req) => &req.credential,
+        Deny(req) => &req.credential,
+        Revoke(req) => &req.credential,
+        ListIssued(req) => &req.credential,
+        ListDelegations(req) => &req.credential,
+        ApproveDelegation(req) => &req.credential,
+        DenyDelegation(req) => &req.credential,
+        RemoveServer(req) => &req.credential,
+        EditPerms(req) => &req.credential,
+        AddRoleAdmin(req) => &req.credential,
+        SetAdminPolicy(req) => &req.credential,
+        RemoveAdmin(req) => &req.credential,
+        ListAdmins(req) => &req.credential,
+        ControlService(req) => &req.credential,
+        GetInfo
+        | Logout(_)
+        | AddIdentity(_)
+        | Enqueue(_)
+        | Poll(_)
+        | GetCrl
+        | RequestDelegation(_)
+        | PollDelegation(_)
+        | ApplyReferralEdit(_)
+        | Register(_)
+        | Deregister(_)
+        | GetMapVersion
+        | GetMap
+        | GetPerms
+        | ApplyPermsEdit(_)
+        | ApplyServiceControl(_)
+        | RotateRecovery
+        | RotateAutorenew => return None,
+    };
+    matches!(credential, admin_proto::AdminCredential::Password { .. })
+        .then_some(credential)
+}
+
 fn authorize_request_class(
     class: RequestAuthorization,
     local: bool,
@@ -724,115 +1032,144 @@ where
     ) {
         bail!(reason);
     }
-    match req {
-        Request::GetInfo => {
-            let resp = get_info(state);
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing GetInfoResponse")
-        }
-        Request::Login(req) => {
-            let resp = match state.ca.as_ref() {
-                None => admin_proto::LoginResponse::Err {
-                    reason: "login must be sent to the CA controller".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    run_signing(&signs, move || {
-                        let ca = state.ca.as_ref().expect("CA role held");
-                        ca.sessions.login(&ca.vault.read(), &req.credential)
-                    })
-                    .await?
+    // Only a CA can run a password KDF. Reserve the source before dispatch,
+    // sleeping outside the global Argon2 semaphore when recent failures impose
+    // a delay. Local-control requests are kernel-credential authorized and do
+    // not participate in network throttling.
+    let password_attempt =
+        if !local && state.ca.is_some() && password_credential(&req).is_some() {
+            Some(state.password_limiter.begin(peer.ip()).await?)
+        } else {
+            None
+        };
+    REQUEST_PASSWORD_ATTEMPT
+        .scope(password_attempt, async move {
+            match req {
+                Request::GetInfo => {
+                    let resp = get_info(state);
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing GetInfoResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp).await.context("writing LoginResponse")
-        }
-        Request::Logout(req) => {
-            let resp = match state.ca.as_ref() {
-                None => admin_proto::LogoutResponse::Err {
-                    reason: "logout must be sent to the CA controller".to_string(),
-                },
-                Some(ca) => ca.sessions.logout(&req.credential),
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing LogoutResponse")
-        }
-        Request::Sign(req) => {
-            let resp = match ca_dir(state) {
-                None => reject("this host does not hold the CA"),
-                Some(_) => {
-                    let signed = run_signing(&signs, {
-                        let state = state.clone();
-                        move || {
-                            handle_sign_request(
-                                state.ca.as_ref().expect("CA role held"),
-                                &req,
-                            )
+                Request::Login(req) => {
+                    let resp = match state.ca.as_ref() {
+                        None => admin_proto::LoginResponse::Err {
+                            reason: "login must be sent to the CA controller".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            run_signing(&signs, move || {
+                                let ca = state.ca.as_ref().expect("CA role held");
+                                let is_password = matches!(
+                                    &req.credential,
+                                    admin_proto::AdminCredential::Password { .. }
+                                );
+                                let response =
+                                    ca.sessions.login(&ca.vault.read(), &req.credential);
+                                if is_password {
+                                    record_password_auth_result(matches!(
+                                        &response,
+                                        admin_proto::LoginResponse::Ok { .. }
+                                    ));
+                                }
+                                response
+                            })
+                            .await?
                         }
-                    })
-                    .await?;
-                    match (signed.resp, signed.push) {
-                        (resp @ SignResponse::Err { .. }, _) => resp,
-                        (resp @ SignResponse::Ok { .. }, None) => resp,
-                        (
-                            SignResponse::Ok {
-                                signed_cert_pem,
-                                trusted_pem,
-                                mut warnings,
-                                ..
-                            },
-                            Some(plan),
-                        ) => {
-                            let (operation_id, push_warnings) =
-                                push_registrations(state, &plan).await;
-                            warnings.extend(push_warnings);
-                            SignResponse::Ok {
-                                signed_cert_pem,
-                                trusted_pem,
-                                warnings,
-                                operation_id: Some(operation_id),
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing LoginResponse")
+                }
+                Request::Logout(req) => {
+                    let resp = match state.ca.as_ref() {
+                        None => admin_proto::LogoutResponse::Err {
+                            reason: "logout must be sent to the CA controller"
+                                .to_string(),
+                        },
+                        Some(ca) => ca.sessions.logout(&req.credential),
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing LogoutResponse")
+                }
+                Request::Sign(req) => {
+                    let resp = match ca_dir(state) {
+                        None => reject("this host does not hold the CA"),
+                        Some(_) => {
+                            let signed = run_signing(&signs, {
+                                let state = state.clone();
+                                move || {
+                                    handle_sign_request(
+                                        state.ca.as_ref().expect("CA role held"),
+                                        &req,
+                                    )
+                                }
+                            })
+                            .await?;
+                            match (signed.resp, signed.push) {
+                                (resp @ SignResponse::Err { .. }, _) => resp,
+                                (resp @ SignResponse::Ok { .. }, None) => resp,
+                                (
+                                    SignResponse::Ok {
+                                        signed_cert_pem,
+                                        trusted_pem,
+                                        mut warnings,
+                                        ..
+                                    },
+                                    Some(plan),
+                                ) => {
+                                    let (operation_id, push_warnings) =
+                                        push_registrations(state, &plan).await;
+                                    warnings.extend(push_warnings);
+                                    SignResponse::Ok {
+                                        signed_cert_pem,
+                                        trusted_pem,
+                                        warnings,
+                                        operation_id: Some(operation_id),
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
-        }
-        Request::Enroll(req) => {
-            let resp = match ca_dir(state) {
-                None => reject("this host does not hold the CA"),
-                Some(_) => {
-                    let enrollment = admin_proto::EnrollmentRequest {
-                        listen: req.listen,
-                        roles: req.roles.clone(),
-                        resolver_member: req.resolver_member.clone(),
-                        resolver_members: req.resolver_members.clone(),
-                        cluster: req.cluster.clone(),
                     };
-                    let resp = run_signing(&signs, {
-                        let state = state.clone();
-                        move || {
-                            handle_enroll_request(
-                                state.ca.as_ref().expect("CA role held"),
-                                &req,
-                                local,
-                                Some(&state.map.lock()),
-                            )
-                        }
-                    })
-                    .await?;
-                    if let SignResponse::Ok { signed_cert_pem, .. } = &resp {
-                        if !local {
-                            match crate::tls::admin_cert_identity_from_pem(
-                                signed_cert_pem.as_bytes(),
-                            )
-                            .and_then(|id| {
-                                grant_enrollment(state, id.server_id, &enrollment)
-                            }) {
-                                Ok(_) => record_peer(state, enrollment.listen),
-                                Err(e) => {
-                                    return admin_proto::write_msg(
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing SignResponse")
+                }
+                Request::Enroll(req) => {
+                    let resp = match ca_dir(state) {
+                        None => reject("this host does not hold the CA"),
+                        Some(_) => {
+                            let enrollment = admin_proto::EnrollmentRequest {
+                                listen: req.listen,
+                                roles: req.roles.clone(),
+                                resolver_member: req.resolver_member.clone(),
+                                resolver_members: req.resolver_members.clone(),
+                                cluster: req.cluster.clone(),
+                            };
+                            let resp = run_signing(&signs, {
+                                let state = state.clone();
+                                move || {
+                                    handle_enroll_request(
+                                        state.ca.as_ref().expect("CA role held"),
+                                        &req,
+                                        local,
+                                        Some(&state.map.lock()),
+                                    )
+                                }
+                            })
+                            .await?;
+                            if let SignResponse::Ok { signed_cert_pem, .. } = &resp {
+                                if !local {
+                                    match crate::tls::admin_cert_identity_from_pem(
+                                        signed_cert_pem.as_bytes(),
+                                    )
+                                    .and_then(|id| {
+                                        grant_enrollment(state, id.server_id, &enrollment)
+                                    }) {
+                                        Ok(_) => record_peer(state, enrollment.listen),
+                                        Err(e) => {
+                                            return admin_proto::write_msg(
                                         &mut tls,
                                         &SignResponse::Err {
                                             reason: format!(
@@ -842,79 +1179,83 @@ where
                                     )
                                     .await
                                     .context("writing SignResponse");
+                                        }
+                                    }
                                 }
                             }
+                            resp
                         }
-                    }
-                    resp
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
-        }
-        Request::AddIdentity(req) => {
-            let resp = if !peer_is_admin_server {
-                AddIdentityResponse::Err {
-                    reason: "identity registration requires a admin-server peer \
-                             certificate"
-                        .to_string(),
-                }
-            } else {
-                let map_path =
-                    { state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone()) };
-                match map_path {
-                    None => AddIdentityResponse::Err {
-                        reason: "this host has no id-map role".to_string(),
-                    },
-                    Some(path) => {
-                        let state = state.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let _guard = state.id_map_lock.lock();
-                            handle_add_identity(&path, &req)
-                        })
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
                         .await
-                        .context("id-map registration task panicked")?
-                    }
+                        .context("writing SignResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AddIdentityResponse")
-        }
-        Request::Enqueue(req) => {
-            let resp = match ca_dir(state) {
-                None => EnqueueResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        handle_enqueue(
-                            state.ca.as_ref().expect("CA role held"),
-                            &req,
-                            peer,
-                            peer_ident.as_ref(),
-                        )
-                    })
-                    .await
-                    .context("enqueue task panicked")?
+                Request::AddIdentity(req) => {
+                    let resp = if !peer_is_admin_server {
+                        AddIdentityResponse::Err {
+                            reason: "identity registration requires a admin-server peer \
+                             certificate"
+                                .to_string(),
+                        }
+                    } else {
+                        let map_path = {
+                            state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone())
+                        };
+                        match map_path {
+                            None => AddIdentityResponse::Err {
+                                reason: "this host has no id-map role".to_string(),
+                            },
+                            Some(path) => {
+                                let state = state.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let _guard = state.id_map_lock.lock();
+                                    handle_add_identity(&path, &req)
+                                })
+                                .await
+                                .context("id-map registration task panicked")?
+                            }
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing AddIdentityResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing EnqueueResponse")
-        }
-        Request::Poll(req) => {
-            let resp = match ca_dir(state) {
-                None => PollResponse::Unknown,
-                Some(_) => {
-                    // The blocking part reads the status (a Pending request
-                    // genuinely has no cert — the commit is atomic); on a
-                    // Signed record whose id-map push never landed it also
-                    // hands back a re-push plan, which the async part runs.
-                    let (mut resp, repush) = {
-                        let state = state.clone();
-                        let id = req.request_id.clone();
-                        tokio::task::spawn_blocking(move || {
+                Request::Enqueue(req) => {
+                    let resp = match ca_dir(state) {
+                        None => EnqueueResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            tokio::task::spawn_blocking(move || {
+                                handle_enqueue(
+                                    state.ca.as_ref().expect("CA role held"),
+                                    &req,
+                                    peer,
+                                    peer_ident.as_ref(),
+                                )
+                            })
+                            .await
+                            .context("enqueue task panicked")?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing EnqueueResponse")
+                }
+                Request::Poll(req) => {
+                    let resp = match ca_dir(state) {
+                        None => PollResponse::Unknown,
+                        Some(_) => {
+                            // The blocking part reads the status (a Pending request
+                            // genuinely has no cert — the commit is atomic); on a
+                            // Signed record whose id-map push never landed it also
+                            // hands back a re-push plan, which the async part runs.
+                            let (mut resp, repush) =
+                                {
+                                    let state = state.clone();
+                                    let id = req.request_id.clone();
+                                    tokio::task::spawn_blocking(move || {
                             let store =
                                 state.ca.as_ref().expect("CA role held").store.lock();
                             match store.status(&id) {
@@ -956,249 +1297,269 @@ where
                         })
                         .await
                         .context("poll task panicked")?
-                    };
-                    if let Some(plan) = repush {
-                        // Best-effort id-map recovery (sets push_done on
-                        // success); the enrollee gets its cert regardless.
-                        let (operation_id, push_warnings) =
-                            push_registrations(state, &plan).await;
-                        if let PollResponse::Signed {
-                            warnings,
-                            operation_id: response_operation_id,
-                            ..
-                        } = &mut resp
-                        {
-                            warnings.extend(push_warnings);
-                            *response_operation_id = Some(operation_id);
-                        }
-                    }
-                    resp
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp).await.context("writing PollResponse")
-        }
-        Request::ListQueue(req) => {
-            let resp = match ca_dir(state) {
-                None => ListQueueResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    run_signing(&signs, move || handle_list_queue(&state, &req)).await?
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ListQueueResponse")
-        }
-        Request::Approve(req) => {
-            let resp = match ca_dir(state) {
-                None => ApproveResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    // Authenticate + sign on the blocking pool (Argon2 +
-                    // openssl); the issuance commits atomically under the
-                    // CA lock inside the task, then we run the best-effort
-                    // side effects.
-                    let signed = run_signing(&signs, {
-                        let state = state.clone();
-                        move || {
-                            handle_approve(
-                                state.ca.as_ref().expect("CA role held"),
-                                &req,
-                                Some(&state.map.lock()),
-                            )
-                        }
-                    })
-                    .await?;
-                    match signed {
-                        Err(reason) => ApproveResponse::Err { reason },
-                        Ok(Approved { resp: SignResponse::Err { reason }, .. }) => {
-                            // The sign itself failed (policy etc.) —
-                            // the request stays pending; the admin can
-                            // retry with different groups or deny it.
-                            ApproveResponse::Err { reason }
-                        }
-                        Ok(Approved {
-                            resp: SignResponse::Ok { mut warnings, .. },
-                            push,
-                            enrollment,
-                            ..
-                        }) => {
-                            // The cert is issued and committed atomically in
-                            // the signing task; these are best-effort side
-                            // effects (the enrollee polls the cert back
-                            // regardless). Push-registration warnings go to
-                            // the approving admin's reply only.
-                            let operation_id = if let Some(plan) = push {
+                                };
+                            if let Some(plan) = repush {
+                                // Best-effort id-map recovery (sets push_done on
+                                // success); the enrollee gets its cert regardless.
                                 let (operation_id, push_warnings) =
                                     push_registrations(state, &plan).await;
-                                warnings.extend(push_warnings);
-                                Some(operation_id)
-                            } else {
-                                None
-                            };
-                            // An approved enrollment makes the new admin
-                            // server a peer — same side effect as the
-                            // synchronous Enroll, deferred to approval.
-                            if let Some((server_id, enrollment)) = enrollment {
-                                match grant_enrollment(state, server_id, &enrollment) {
-                                    Ok(_) => record_peer(state, enrollment.listen),
-                                    Err(e) => warnings.push(format!(
-                                        "recording enrollment grant: {e:#}"
-                                    )),
+                                if let PollResponse::Signed {
+                                    warnings,
+                                    operation_id: response_operation_id,
+                                    ..
+                                } = &mut resp
+                                {
+                                    warnings.extend(push_warnings);
+                                    *response_operation_id = Some(operation_id);
                                 }
                             }
-                            ApproveResponse::Ok { operation_id, warnings }
+                            resp
                         }
-                    }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing PollResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ApproveResponse")
-        }
-        Request::Deny(req) => {
-            let resp = match ca_dir(state) {
-                None => DenyResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    run_signing(&signs, {
+                Request::ListQueue(req) => {
+                    let resp = match ca_dir(state) {
+                        None => ListQueueResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            run_signing(&signs, move || handle_list_queue(&state, &req))
+                                .await?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ListQueueResponse")
+                }
+                Request::Approve(req) => {
+                    let resp = match ca_dir(state) {
+                        None => ApproveResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            // Authenticate + sign on the blocking pool (Argon2 +
+                            // openssl); the issuance commits atomically under the
+                            // CA lock inside the task, then we run the best-effort
+                            // side effects.
+                            let signed = run_signing(&signs, {
+                                let state = state.clone();
+                                move || {
+                                    handle_approve(
+                                        state.ca.as_ref().expect("CA role held"),
+                                        &req,
+                                        Some(&state.map.lock()),
+                                    )
+                                }
+                            })
+                            .await?;
+                            match signed {
+                                Err(reason) => ApproveResponse::Err { reason },
+                                Ok(Approved {
+                                    resp: SignResponse::Err { reason },
+                                    ..
+                                }) => {
+                                    // The sign itself failed (policy etc.) —
+                                    // the request stays pending; the admin can
+                                    // retry with different groups or deny it.
+                                    ApproveResponse::Err { reason }
+                                }
+                                Ok(Approved {
+                                    resp: SignResponse::Ok { mut warnings, .. },
+                                    push,
+                                    enrollment,
+                                    ..
+                                }) => {
+                                    // The cert is issued and committed atomically in
+                                    // the signing task; these are best-effort side
+                                    // effects (the enrollee polls the cert back
+                                    // regardless). Push-registration warnings go to
+                                    // the approving admin's reply only.
+                                    let operation_id = if let Some(plan) = push {
+                                        let (operation_id, push_warnings) =
+                                            push_registrations(state, &plan).await;
+                                        warnings.extend(push_warnings);
+                                        Some(operation_id)
+                                    } else {
+                                        None
+                                    };
+                                    // An approved enrollment makes the new admin
+                                    // server a peer — same side effect as the
+                                    // synchronous Enroll, deferred to approval.
+                                    if let Some((server_id, enrollment)) = enrollment {
+                                        match grant_enrollment(
+                                            state,
+                                            server_id,
+                                            &enrollment,
+                                        ) {
+                                            Ok(_) => {
+                                                record_peer(state, enrollment.listen)
+                                            }
+                                            Err(e) => warnings.push(format!(
+                                                "recording enrollment grant: {e:#}"
+                                            )),
+                                        }
+                                    }
+                                    ApproveResponse::Ok { operation_id, warnings }
+                                }
+                            }
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApproveResponse")
+                }
+                Request::Deny(req) => {
+                    let resp = match ca_dir(state) {
+                        None => DenyResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            run_signing(&signs, {
+                                let state = state.clone();
+                                move || {
+                                    handle_deny(
+                                        state.ca.as_ref().expect("CA role held"),
+                                        &req,
+                                        Some(&state.map.lock()),
+                                    )
+                                }
+                            })
+                            .await?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing DenyResponse")
+                }
+                Request::Revoke(req) => {
+                    let resp = match ca_dir(state) {
+                        None => RevokeResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            run_signing(&signs, move || handle_revoke(&state, &req))
+                                .await?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RevokeResponse")
+                }
+                Request::ListIssued(req) => {
+                    let resp = match ca_dir(state) {
+                        None => ListIssuedResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            run_signing(&signs, move || {
+                                handle_list_issued(
+                                    state.ca.as_ref().expect("CA role held"),
+                                    &req,
+                                )
+                            })
+                            .await?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ListIssuedResponse")
+                }
+                Request::RequestDelegation(req) => {
+                    let resp = match ca_dir(state) {
+                        None => DelegationResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            tokio::task::spawn_blocking(move || {
+                                handle_request_delegation(&state, &req, peer)
+                            })
+                            .await
+                            .context("delegation request task panicked")?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing DelegationResponse")
+                }
+                Request::PollDelegation(req) => {
+                    let resp = match ca_dir(state) {
+                        None => DelegationPollResponse::Unknown,
+                        Some(dir) => tokio::task::spawn_blocking(move || {
+                            handle_poll_delegation(&dir, &req)
+                        })
+                        .await
+                        .context("delegation poll task panicked")?,
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing DelegationPollResponse")
+                }
+                Request::ListDelegations(req) => {
+                    let resp = match ca_dir(state) {
+                        None => ListDelegationsResponse::Err {
+                            reason: "this host does not hold the CA".to_string(),
+                        },
+                        Some(_) => {
+                            let state = state.clone();
+                            run_signing(&signs, move || {
+                                handle_list_delegations(&state, &req)
+                            })
+                            .await?
+                        }
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ListDelegationsResponse")
+                }
+                Request::ApproveDelegation(req) => {
+                    let resp = handle_approve_delegation(state, &signs, req).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApproveDelegationResponse")
+                }
+                Request::DenyDelegation(req) => {
+                    // Argon2-bound (vault auth) — keep it under the sign semaphore.
+                    let state = state.clone();
+                    let resp =
+                        run_signing(&signs, move || handle_deny_delegation(&state, &req))
+                            .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing DenyDelegationResponse")
+                }
+                Request::ApplyReferralEdit(req) => {
+                    let resp = if !peer_is_admin_server {
+                        ApplyReferralEditResponse::Err {
+                            reason:
+                                "a referral edit requires a admin-server peer certificate"
+                                    .to_string(),
+                        }
+                    } else {
                         let state = state.clone();
-                        move || {
-                            handle_deny(
-                                state.ca.as_ref().expect("CA role held"),
-                                &req,
-                                Some(&state.map.lock()),
-                            )
-                        }
-                    })
-                    .await?
+                        tokio::task::spawn_blocking(move || {
+                            handle_apply_referral_edit(&state, &req)
+                        })
+                        .await
+                        .context("apply referral edit task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApplyReferralEditResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp).await.context("writing DenyResponse")
-        }
-        Request::Revoke(req) => {
-            let resp = match ca_dir(state) {
-                None => RevokeResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    run_signing(&signs, move || handle_revoke(&state, &req)).await?
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RevokeResponse")
-        }
-        Request::ListIssued(req) => {
-            let resp = match ca_dir(state) {
-                None => ListIssuedResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    run_signing(&signs, move || {
-                        handle_list_issued(state.ca.as_ref().expect("CA role held"), &req)
-                    })
-                    .await?
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ListIssuedResponse")
-        }
-        Request::RequestDelegation(req) => {
-            let resp = match ca_dir(state) {
-                None => DelegationResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        handle_request_delegation(&state, &req, peer)
-                    })
-                    .await
-                    .context("delegation request task panicked")?
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing DelegationResponse")
-        }
-        Request::PollDelegation(req) => {
-            let resp = match ca_dir(state) {
-                None => DelegationPollResponse::Unknown,
-                Some(dir) => tokio::task::spawn_blocking(move || {
-                    handle_poll_delegation(&dir, &req)
-                })
-                .await
-                .context("delegation poll task panicked")?,
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing DelegationPollResponse")
-        }
-        Request::ListDelegations(req) => {
-            let resp = match ca_dir(state) {
-                None => ListDelegationsResponse::Err {
-                    reason: "this host does not hold the CA".to_string(),
-                },
-                Some(_) => {
-                    let state = state.clone();
-                    tokio::task::spawn_blocking(move || {
-                        handle_list_delegations(&state, &req)
-                    })
-                    .await
-                    .context("list delegations task panicked")?
-                }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ListDelegationsResponse")
-        }
-        Request::ApproveDelegation(req) => {
-            let resp = handle_approve_delegation(state, req).await;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ApproveDelegationResponse")
-        }
-        Request::DenyDelegation(req) => {
-            // Argon2-bound (vault auth) — keep it under the sign semaphore.
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_deny_delegation(&state, &req)).await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing DenyDelegationResponse")
-        }
-        Request::ApplyReferralEdit(req) => {
-            let resp = if !peer_is_admin_server {
-                ApplyReferralEditResponse::Err {
-                    reason: "a referral edit requires a admin-server peer certificate"
-                        .to_string(),
-                }
-            } else {
-                let state = state.clone();
-                tokio::task::spawn_blocking(move || {
-                    handle_apply_referral_edit(&state, &req)
-                })
-                .await
-                .context("apply referral edit task panicked")?
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ApplyReferralEditResponse")
-        }
-        Request::GetCrl => {
-            let resp = match ca_dir(state) {
-                None => GetCrlResponse { crl_pem: None },
-                Some(_) => {
-                    let state = state.clone();
-                    tokio::task::spawn_blocking(move || {
+                Request::GetCrl => {
+                    let resp =
+                        match ca_dir(state) {
+                            None => GetCrlResponse { crl_pem: None },
+                            Some(_) => {
+                                let state = state.clone();
+                                tokio::task::spawn_blocking(move || {
                         let path = state
                             .ca
                             .as_ref()
@@ -1219,178 +1580,198 @@ where
                     })
                     .await
                     .context("CRL read task panicked")?
+                            }
+                        };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing GetCrlResponse")
                 }
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing GetCrlResponse")
-        }
-        Request::Register(req) => {
-            let resp = if !peer_is_admin_server {
-                RegisterResponse::Err {
-                    reason: "register requires a admin-server peer certificate"
-                        .to_string(),
+                Request::Register(req) => {
+                    let resp = if !peer_is_admin_server {
+                        RegisterResponse::Err {
+                            reason: "register requires a admin-server peer certificate"
+                                .to_string(),
+                        }
+                    } else {
+                        let state = state.clone();
+                        let server_id =
+                            peer_admin.expect("NodeSelf authorized").server_id;
+                        tokio::task::spawn_blocking(move || {
+                            handle_register(&state, server_id, &req)
+                        })
+                        .await
+                        .context("register task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RegisterResponse")
                 }
-            } else {
-                let state = state.clone();
-                let server_id = peer_admin.expect("NodeSelf authorized").server_id;
-                tokio::task::spawn_blocking(move || {
-                    handle_register(&state, server_id, &req)
-                })
-                .await
-                .context("register task panicked")?
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RegisterResponse")
-        }
-        Request::Deregister(_req) => {
-            let resp = if !peer_is_admin_server {
-                RegisterResponse::Err {
-                    reason: "deregister requires a admin-server peer certificate"
-                        .to_string(),
+                Request::Deregister(_req) => {
+                    let resp = if !peer_is_admin_server {
+                        RegisterResponse::Err {
+                            reason: "deregister requires a admin-server peer certificate"
+                                .to_string(),
+                        }
+                    } else {
+                        let state = state.clone();
+                        let server_id =
+                            peer_admin.expect("NodeSelf authorized").server_id;
+                        tokio::task::spawn_blocking(move || {
+                            handle_deregister(&state, server_id)
+                        })
+                        .await
+                        .context("deregister task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RegisterResponse")
                 }
-            } else {
-                let state = state.clone();
-                let server_id = peer_admin.expect("NodeSelf authorized").server_id;
-                tokio::task::spawn_blocking(move || handle_deregister(&state, server_id))
-                    .await
-                    .context("deregister task panicked")?
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RegisterResponse")
-        }
-        Request::GetMapVersion => {
-            let resp = GetMapVersionResponse::Ok { version: state.map.lock().version };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing GetMapVersionResponse")
-        }
-        Request::GetMap => {
-            let resp = GetMapResponse::Ok { map: state.map.lock().clone() };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing GetMapResponse")
-        }
-        Request::RemoveServer(req) => {
-            // Argon2-bound (vault auth) — keep it under the sign semaphore.
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_remove_server(&state, &req)).await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RemoveServerResponse")
-        }
-        Request::GetPerms => {
-            let state = state.clone();
-            let resp = tokio::task::spawn_blocking(move || handle_get_perms(&state))
-                .await
-                .context("get-perms task panicked")?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing GetPermsResponse")
-        }
-        Request::EditPerms(req) => {
-            let resp = handle_edit_perms(state, &signs, &req, local).await;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing EditPermsResponse")
-        }
-        Request::ApplyPermsEdit(req) => {
-            let resp = if !peer_is_admin_server {
-                ApplyPermsEditResponse::Err {
-                    reason: "a perms edit requires a admin-server peer certificate"
-                        .to_string(),
+                Request::GetMapVersion => {
+                    let resp =
+                        GetMapVersionResponse::Ok { version: state.map.lock().version };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing GetMapVersionResponse")
                 }
-            } else {
-                let state = state.clone();
-                tokio::task::spawn_blocking(move || handle_apply_perms_edit(&state, &req))
-                    .await
-                    .context("apply perms edit task panicked")?
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ApplyPermsEditResponse")
-        }
-        Request::AddRoleAdmin(req) => {
-            // Bound the Argon2 in `authenticate` by the sign semaphore, like
-            // every other vault-auth handler — a bare `spawn_blocking` would
-            // let an anonymous flood pin unbounded 64 MiB derivations.
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_add_role_admin(&state, &req, local))
-                    .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AdminMgmtResponse")
-        }
-        Request::SetAdminPolicy(req) => {
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_set_admin_policy(&state, &req, local))
-                    .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AdminMgmtResponse")
-        }
-        Request::RemoveAdmin(req) => {
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_remove_admin(&state, &req, local))
-                    .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AdminMgmtResponse")
-        }
-        Request::ListAdmins(req) => {
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_list_admins(&state, &req, local))
-                    .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AdminListResponse")
-        }
-        Request::ControlService(req) => {
-            let resp = handle_control_service(state, &signs, &req).await;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ControlServiceResponse")
-        }
-        Request::ApplyServiceControl(req) => {
-            let resp = if !peer_is_admin_server {
-                ApplyServiceControlResponse::Err {
-                    reason: "service control requires a admin-server peer certificate"
-                        .to_string(),
+                Request::GetMap => {
+                    let resp = GetMapResponse::Ok { map: state.map.lock().clone() };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing GetMapResponse")
                 }
-            } else {
-                handle_apply_service_control(state, &req).await
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing ApplyServiceControlResponse")
-        }
-        Request::RotateRecovery => {
-            // Argon2-bound (recover_mk + a fresh slot KDF), so run it under
-            // the sign semaphore like the other vault-write handlers.
-            let state = state.clone();
-            let resp = run_signing(&signs, move || handle_rotate_recovery(&state, local))
-                .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RotateRecoveryResponse")
-        }
-        Request::RotateAutorenew => {
-            let state = state.clone();
-            let resp =
-                run_signing(&signs, move || handle_rotate_autorenew(&state, local))
+                Request::RemoveServer(req) => {
+                    // Argon2-bound (vault auth) — keep it under the sign semaphore.
+                    let state = state.clone();
+                    let resp =
+                        run_signing(&signs, move || handle_remove_server(&state, &req))
+                            .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RemoveServerResponse")
+                }
+                Request::GetPerms => {
+                    let state = state.clone();
+                    let resp =
+                        tokio::task::spawn_blocking(move || handle_get_perms(&state))
+                            .await
+                            .context("get-perms task panicked")?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing GetPermsResponse")
+                }
+                Request::EditPerms(req) => {
+                    let resp = handle_edit_perms(state, &signs, &req, local).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing EditPermsResponse")
+                }
+                Request::ApplyPermsEdit(req) => {
+                    let resp = if !peer_is_admin_server {
+                        ApplyPermsEditResponse::Err {
+                            reason:
+                                "a perms edit requires a admin-server peer certificate"
+                                    .to_string(),
+                        }
+                    } else {
+                        let state = state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            handle_apply_perms_edit(&state, &req)
+                        })
+                        .await
+                        .context("apply perms edit task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApplyPermsEditResponse")
+                }
+                Request::AddRoleAdmin(req) => {
+                    // Bound the Argon2 in `authenticate` by the sign semaphore, like
+                    // every other vault-auth handler — a bare `spawn_blocking` would
+                    // let an anonymous flood pin unbounded 64 MiB derivations.
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_add_role_admin(&state, &req, local)
+                    })
                     .await?;
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing RotateAutorenewResponse")
-        }
-    }
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing AdminMgmtResponse")
+                }
+                Request::SetAdminPolicy(req) => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_set_admin_policy(&state, &req, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing AdminMgmtResponse")
+                }
+                Request::RemoveAdmin(req) => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_remove_admin(&state, &req, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing AdminMgmtResponse")
+                }
+                Request::ListAdmins(req) => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_list_admins(&state, &req, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing AdminListResponse")
+                }
+                Request::ControlService(req) => {
+                    let resp = handle_control_service(state, &signs, &req).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ControlServiceResponse")
+                }
+                Request::ApplyServiceControl(req) => {
+                    let resp = if !peer_is_admin_server {
+                        ApplyServiceControlResponse::Err {
+                            reason:
+                                "service control requires a admin-server peer certificate"
+                                    .to_string(),
+                        }
+                    } else {
+                        handle_apply_service_control(state, &req).await
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApplyServiceControlResponse")
+                }
+                Request::RotateRecovery => {
+                    // Argon2-bound (recover_mk + a fresh slot KDF), so run it under
+                    // the sign semaphore like the other vault-write handlers.
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_rotate_recovery(&state, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RotateRecoveryResponse")
+                }
+                Request::RotateAutorenew => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_rotate_autorenew(&state, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing RotateAutorenewResponse")
+                }
+            }
+        })
+        .await
 }
 
 /// Run an Argon2-bound vault operation on `spawn_blocking`, bounded by
@@ -1408,11 +1789,13 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    let password_attempt =
+        REQUEST_PASSWORD_ATTEMPT.try_with(Clone::clone).unwrap_or(None);
     let permit =
         signs.clone().acquire_owned().await.expect("sign semaphore is never closed");
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        f()
+        with_password_attempt(password_attempt, f)
     })
     .await
     .context("CA signing task panicked")
@@ -1808,7 +2191,11 @@ fn authenticate(
     ca: &ca_store::CaDir,
     credential: &admin_proto::AdminCredential,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
-    ca.sessions.authenticate(&ca.vault.read(), credential)
+    let result = ca.sessions.authenticate(&ca.vault.read(), credential);
+    if matches!(credential, admin_proto::AdminCredential::Password { .. }) {
+        record_password_auth_result(result.is_ok());
+    }
+    result
 }
 
 fn safe_auth_failure(
@@ -4935,15 +5322,14 @@ pub fn load_roots(trusted_pem: &[u8]) -> Result<RootCertStore> {
 /// Requires both the ca role (admin auth) and the resolver role.
 async fn handle_approve_delegation(
     state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
     req: ApproveDelegationRequest,
 ) -> ApproveDelegationResponse {
     let operation_id = admin_proto::OperationId::new();
     let prepared = {
         let state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            approve_delegation_prepare(&state, &req, operation_id)
-        })
-        .await
+        run_signing(signs, move || approve_delegation_prepare(&state, &req, operation_id))
+            .await
     };
     let fanout = match prepared {
         Ok(Ok(p)) => p,
