@@ -102,6 +102,30 @@ teardown.
    server), or launch the generated activation directory directly. The helper
    writes `nohup` logs under `/root`.
 
+## Permanently removing a dead admin server
+
+Use this only when a machine cannot run the normal `netidx admin uninstall`
+path and will not return with its old identity. Inventory is keyed by immutable
+server UUID, not by its mutable socket address:
+
+```sh
+netidx admin ca servers
+netidx admin ca remove-server <exact-server-uuid> \
+  --admin <name> --password-file <path>
+```
+
+The TUI exposes the same operation under **Cluster → Admin Servers**: select a
+non-controller row and press `x`. It shows the UUID, last address, cluster, and
+an irreversible confirmation. The active controller is visible but protected.
+
+Removal revokes every live serving certificate for the UUID, deletes its
+enrollment grant, updates the CA-owned map, and pushes the resulting referral
+topology to surviving resolvers. It never restarts a service. If a resolver
+restart is needed, do the normal manual roll: restart one member, wait the
+resolver `delay-reads` period for publishers to republish, then restart the next
+member. Fanout failures identify both server UUID and address; repeating the
+same removal UUID is the idempotent manual reconciliation path.
+
 ## Daemon start commands
 
 ```sh

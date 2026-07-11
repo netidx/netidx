@@ -48,9 +48,9 @@ use crate::{
         ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
         ListQueueResponse, NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult,
         PollRequest, PollResponse, QueueEntry, ReferralEdit, RegisterRequest,
-        RegisterResponse, RemoveAdminRequest, Request, ResolverAddr, RevokeRequest,
-        RevokeResponse, Role, SERVING_SAN, Secret, ServerHello, SetAdminPolicyRequest,
-        SignRequest, SignResponse,
+        RegisterResponse, RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse,
+        Request, ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
+        ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -1754,6 +1754,54 @@ pub async fn get_map_from_controller(
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
+    }
+}
+
+#[derive(Debug)]
+pub struct RemoveServerOutcome {
+    pub version: u64,
+    pub operation_id: Option<admin_proto::OperationId>,
+    pub revoked: u64,
+    pub removed: bool,
+    pub affected_clusters: Vec<String>,
+    pub peers: Vec<admin_proto::PeerResult>,
+}
+
+/// Permanently evict one immutable admin-server identity through the verified
+/// controller. Unlike node-self deregistration, this revokes every live serving
+/// certificate for the identity and drops its enrollment grant.
+pub async fn remove_server(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    server: admin_proto::AdminServerId,
+) -> Result<RemoveServerOutcome> {
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::RemoveServer(RemoveServerRequest { credential, server }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, RemoveServerResponse>(&mut tls).await? {
+        RemoveServerResponse::Ok {
+            version,
+            operation_id,
+            revoked,
+            removed,
+            affected_clusters,
+            peers,
+        } => Ok(RemoveServerOutcome {
+            version,
+            operation_id,
+            revoked,
+            removed,
+            affected_clusters,
+            peers,
+        }),
+        RemoveServerResponse::Err { reason } => {
+            bail!("the CA refused server removal: {reason}")
+        }
     }
 }
 

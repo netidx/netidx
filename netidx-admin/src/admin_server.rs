@@ -52,7 +52,7 @@ use rustls::{
 use rustls_pki_types::CertificateDer;
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     fs::OpenOptions,
     io::Write,
     net::{IpAddr, Ipv6Addr, SocketAddr},
@@ -1640,11 +1640,7 @@ where
                         .context("writing GetMapResponse")
                 }
                 Request::RemoveServer(req) => {
-                    // Argon2-bound (vault auth) — keep it under the sign semaphore.
-                    let state = state.clone();
-                    let resp =
-                        run_signing(&signs, move || handle_remove_server(&state, &req))
-                            .await?;
+                    let resp = handle_remove_server(&state, &signs, req).await;
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
                         .context("writing RemoveServerResponse")
@@ -3963,25 +3959,32 @@ fn handle_deregister(
     RegisterResponse::Ok { version: map.version }
 }
 
-/// CA-side: admin-authenticated removal of a (dead) admin server from the
-/// map — for a machine that never ran `uninstall`. Cascades via the
-/// dropped entry, which carries that host's resolver-cluster facts.
-fn handle_remove_server(
+struct RemoveServerPrepare {
+    version: u64,
+    revoked: u64,
+    removed: bool,
+    affected_clusters: Vec<String>,
+    fanout: TopologyFanout,
+}
+
+/// The blocking half of permanent server removal: authenticate, validate the
+/// transition, revoke every certificate for the immutable identity, and commit
+/// the new authoritative map. The returned topology fanout is deliberately
+/// separate: network I/O must not hold the map lock or signing semaphore.
+fn remove_server_prepare(
     state: &Server,
     req: &RemoveServerRequest,
-) -> RemoveServerResponse {
+    operation_id: admin_proto::OperationId,
+) -> std::result::Result<RemoveServerPrepare, RemoveServerResponse> {
+    let err = |reason: String| RemoveServerResponse::Err { reason };
     let ca_dir = match state.ca_dir() {
         Some(d) => d.to_path_buf(),
-        None => {
-            return RemoveServerResponse::Err {
-                reason: "this host does not hold the CA".to_string(),
-            };
-        }
+        None => return Err(err("this host does not hold the CA".to_string())),
     };
     let authd =
         match authenticate(state.ca.as_ref().expect("CA role held"), &req.credential) {
             Ok(a) => a,
-            Err(reason) => return RemoveServerResponse::Err { reason },
+            Err(reason) => return Err(err(reason)),
         };
     // Evicting a admin server from the authoritative map cascades that host's
     // resolver-cluster facts out of the map — a privileged, network-affecting
@@ -4000,47 +4003,164 @@ fn handle_remove_server(
         .and_then(|server| server.cluster)
         .and_then(|cluster| map.clusters.iter().find(|entry| entry.id == cluster))
         .map(|cluster| cluster.base.as_str());
-    if !broad
-        && target_base.is_none_or(|base| {
-            !perms_scope_covers(&authd.policy.server_enroll_scopes, base)
-        })
-    {
-        return RemoveServerResponse::Err {
-            reason: format!(
-                "admin {} is not authorized to remove server {} at {}",
-                authd.admin,
-                req.server,
-                target_base.unwrap_or("<unknown>")
-            ),
-        };
+    let scoped = match target_base {
+        Some(base) => perms_scope_covers(&authd.policy.server_enroll_scopes, base),
+        // On an idempotent repeat the removed entry no longer tells us its
+        // cluster. A scoped admin may safely reconcile topology only inside its
+        // own enrollment scopes.
+        None => !authd.policy.server_enroll_scopes.is_empty(),
+    };
+    if !broad && !scoped {
+        return Err(err(format!(
+            "admin {} is not authorized to remove server {} at {}",
+            authd.admin,
+            req.server,
+            target_base.unwrap_or("<unknown>")
+        )));
     }
+    // Keep the removed cluster and each directly connected cluster in the
+    // reconciliation set. If the last member disappears, `netmap::remove`
+    // deletes that cluster and detaches its children; the surviving parent and
+    // children still need fresh topology.
+    let mut affected_ids = BTreeSet::new();
+    if let Some(cluster_id) = map
+        .servers
+        .iter()
+        .find(|server| server.id == req.server)
+        .and_then(|server| server.cluster)
+    {
+        affected_ids.insert(cluster_id);
+        if let Some(cluster) = map.clusters.iter().find(|entry| entry.id == cluster_id) {
+            affected_ids.extend(cluster.parent);
+            affected_ids.extend(cluster.children.iter().copied());
+        }
+    }
+    let mut affected_clusters: Vec<_> = map
+        .clusters
+        .iter()
+        .filter(|cluster| affected_ids.contains(&cluster.id))
+        .map(|cluster| cluster.base.clone())
+        .collect();
+    affected_clusters.sort();
+    affected_clusters.dedup();
     let mut next = map.clone();
     let removed = match netmap::remove(&mut next, req.server) {
         Ok(removed) => removed,
-        Err(e) => return RemoveServerResponse::Err { reason: format!("{e:#}") },
+        Err(e) => return Err(err(format!("{e:#}"))),
     };
+    // A repeat after partial fanout cannot recover the removed identity's
+    // cluster from the current map (there is deliberately no durable job
+    // record). Broad administrators therefore reconcile every surviving
+    // cluster on an idempotent repeat; scoped administrators reconcile only
+    // clusters their enrollment policy covers.
+    if !removed {
+        affected_ids.extend(
+            map.clusters
+                .iter()
+                .filter(|cluster| {
+                    broad
+                        || perms_scope_covers(
+                            &authd.policy.server_enroll_scopes,
+                            &cluster.base,
+                        )
+                })
+                .map(|cluster| cluster.id),
+        );
+        affected_clusters = map
+            .clusters
+            .iter()
+            .filter(|cluster| affected_ids.contains(&cluster.id))
+            .map(|cluster| cluster.base.clone())
+            .collect();
+        affected_clusters.sort();
+        affected_clusters.dedup();
+    }
+    let mut revoked = 0;
     if removed {
         let ca = state.ca.as_ref().expect("CA role held");
-        if let Err(e) = revoke_server_certificates(ca, req.server, &authd.admin) {
-            return RemoveServerResponse::Err {
-                reason: format!("revoking the server's serving certificates: {e:#}"),
-            };
-        }
+        revoked =
+            revoke_server_certificates(ca, req.server, &authd.admin).map_err(|e| {
+                err(format!("revoking the server's serving certificates: {e:#}"))
+            })?;
         if let Err(e) = netmap::save(&ca_dir, &next) {
-            return RemoveServerResponse::Err {
-                reason: format!("persisting the network map: {e:#}"),
-            };
+            return Err(err(format!("persisting the network map: {e:#}")));
         }
         *map = next;
         audit(
             &ca_dir,
             &authd.admin,
             "remove-server",
-            &req.server.to_string(),
+            &format!("operation {operation_id}: {}", req.server),
+            Duration::ZERO,
+        );
+    } else {
+        audit(
+            &ca_dir,
+            &authd.admin,
+            "reconcile-server-removal",
+            &format!("operation {operation_id}: {}", req.server),
             Duration::ZERO,
         );
     }
-    RemoveServerResponse::Ok { version: map.version }
+    let mut targets = Vec::new();
+    for cluster in
+        map.clusters.iter().filter(|cluster| affected_ids.contains(&cluster.id))
+    {
+        for server in map.servers.iter().filter(|server| {
+            server.cluster == Some(cluster.id)
+                && server.state == admin_proto::ServerState::Registered
+        }) {
+            let Some(local_member) = server.resolver.clone() else {
+                continue;
+            };
+            targets.push((
+                server.id,
+                server.addr,
+                topology_edit(&map, cluster, local_member),
+            ));
+        }
+    }
+    Ok(RemoveServerPrepare {
+        version: map.version,
+        revoked: revoked as u64,
+        removed,
+        affected_clusters,
+        fanout: TopologyFanout { targets },
+    })
+}
+
+/// Permanently remove a dead identity, then reconcile only the surviving
+/// clusters whose referral topology changed. This never restarts a resolver;
+/// administrators retain control of the rolling restart sequence.
+async fn handle_remove_server(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: RemoveServerRequest,
+) -> RemoveServerResponse {
+    let operation_id = admin_proto::OperationId::new();
+    let prepared = {
+        let state = state.clone();
+        run_signing(signs, move || remove_server_prepare(&state, &req, operation_id))
+            .await
+    };
+    let prepared = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(response)) => return response,
+        Err(e) => {
+            return RemoveServerResponse::Err {
+                reason: format!("remove server task panicked: {e}"),
+            };
+        }
+    };
+    let peers = push_topology(&state, prepared.fanout, operation_id).await;
+    RemoveServerResponse::Ok {
+        version: prepared.version,
+        operation_id: Some(operation_id),
+        revoked: prepared.revoked,
+        removed: prepared.removed,
+        affected_clusters: prepared.affected_clusters,
+        peers,
+    }
 }
 
 /// Revoke every still-live serving certificate carrying `server_id`, including
@@ -5131,7 +5251,7 @@ fn approve_delegation_prepare(
     state: &Server,
     req: &ApproveDelegationRequest,
     operation_id: admin_proto::OperationId,
-) -> std::result::Result<DelegationFanout, ApproveDelegationResponse> {
+) -> std::result::Result<TopologyFanout, ApproveDelegationResponse> {
     let err = |reason: String| ApproveDelegationResponse::Err { reason };
     let ca_dir = state
         .ca_dir()
@@ -5213,10 +5333,10 @@ fn approve_delegation_prepare(
             ));
         }
     }
-    Ok(DelegationFanout { targets })
+    Ok(TopologyFanout { targets })
 }
 
-struct DelegationFanout {
+struct TopologyFanout {
     targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
 }
 
@@ -5257,9 +5377,9 @@ fn topology_edit(
 /// Propagate the two delegation edits to every registered server in the parent
 /// and child clusters using CA-owned routing addresses. A down or rejecting
 /// target is reported, and re-approval idempotently re-runs reconciliation.
-async fn push_to_cluster_peers(
+async fn push_topology(
     state: &Arc<Server>,
-    fanout: DelegationFanout,
+    fanout: TopologyFanout,
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
     let (cert, key) = state.outbound_identity();
@@ -5340,7 +5460,7 @@ async fn handle_approve_delegation(
             };
         }
     };
-    let peers = push_to_cluster_peers(state, fanout, operation_id).await;
+    let peers = push_topology(state, fanout, operation_id).await;
     ApproveDelegationResponse::Ok { operation_id, peers }
 }
 

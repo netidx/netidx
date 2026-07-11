@@ -637,6 +637,18 @@ mod tests {
     }
 
     #[test]
+    fn permanent_removal_never_accepts_the_active_controller() {
+        let controller = AdminServerId::new();
+        let mut map = NetworkMap::empty(controller);
+        let before = map.clone();
+        let error = remove(&mut map, controller).unwrap_err().to_string();
+        assert!(error.contains("active controller"));
+        assert_eq!(map.controller, before.controller);
+        assert_eq!(map.version, before.version);
+        assert_eq!(map.servers.len(), before.servers.len());
+    }
+
+    #[test]
     fn enrollment_registration_and_self_only_address_update() {
         let controller = AdminServerId::new();
         let server = AdminServerId::new();

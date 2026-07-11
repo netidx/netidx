@@ -42,6 +42,7 @@ pub mod perms;
 pub mod queue;
 pub mod revoke;
 pub mod roster;
+pub mod servers;
 pub mod service;
 pub mod slots;
 

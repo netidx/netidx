@@ -87,6 +87,14 @@ impl std::fmt::Display for AdminServerId {
     }
 }
 
+impl std::str::FromStr for AdminServerId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Pack,
 )]
@@ -330,8 +338,9 @@ pub enum Request {
     /// [`RegisterResponse`].
     #[pack(tag(20))]
     Register(RegisterRequest),
-    /// Server→CA push: drop this admin server from the CA's map (on
-    /// uninstall). Peer-cert-gated. Answered with [`RegisterResponse`].
+    /// Server→CA push: mark this admin server's grant `Enrolled` (on
+    /// uninstall), taking it out of routing without destroying its identity.
+    /// Peer-cert-gated. Answered with [`RegisterResponse`].
     #[pack(tag(21))]
     Deregister,
     /// Cheap probe: return the served map's current version so a caching
@@ -344,9 +353,10 @@ pub enum Request {
     /// network. Answered with [`GetMapResponse`].
     #[pack(tag(23))]
     GetMap,
-    /// Admin-authenticated: drop a (dead) admin server from the CA's map,
-    /// cascading to its resolver servers — for a machine that never ran
-    /// `uninstall`. Answered with [`RemoveServerResponse`].
+    /// Admin-authenticated: permanently revoke and remove a dead admin-server
+    /// identity, then reconcile referral topology on surviving resolvers. An
+    /// idempotent repeat is the manual recovery path after partial fanout.
+    /// Answered with [`RemoveServerResponse`].
     #[pack(tag(24))]
     RemoveServer(RemoveServerRequest),
     /// Read this resolver host's permissions file (no credentials — perms
@@ -1095,9 +1105,7 @@ pub enum GetMapResponse {
     Err { reason: String },
 }
 
-/// Admin-authenticated: drop a (dead) admin server from the CA's map,
-/// cascading to its resolver servers. For the machine that never ran
-/// `uninstall`.
+/// Admin-authenticated permanent removal of one immutable dead-server identity.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct RemoveServerRequest {
     pub credential: AdminCredential,
@@ -1107,7 +1115,24 @@ pub struct RemoveServerRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum RemoveServerResponse {
     #[pack(tag(0))]
-    Ok { version: u64 },
+    Ok {
+        version: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[pack(default)]
+        operation_id: Option<OperationId>,
+        #[serde(default)]
+        #[pack(default)]
+        revoked: u64,
+        #[serde(default)]
+        #[pack(default)]
+        removed: bool,
+        #[serde(default)]
+        #[pack(default)]
+        affected_clusters: Vec<String>,
+        #[serde(default)]
+        #[pack(default)]
+        peers: Vec<PeerResult>,
+    },
     #[pack(tag(1))]
     Err { reason: String },
 }
@@ -1692,6 +1717,41 @@ mod tests {
                 assert_eq!(map.servers[0].roles, vec![Role::Ca, Role::Resolver]);
             }
             GetMapResponse::Err { reason } => panic!("err: {reason}"),
+        }
+
+        let operation_id = OperationId::new();
+        let server = AdminServerId::new();
+        let removal = RemoveServerResponse::Ok {
+            version: 8,
+            operation_id: Some(operation_id),
+            revoked: 2,
+            removed: true,
+            affected_clusters: vec!["/".to_string(), "/eu".to_string()],
+            peers: vec![PeerResult {
+                server,
+                addr: "10.0.0.2:4565".parse().unwrap(),
+                error: Some("offline".to_string()),
+            }],
+        };
+        write_msg(&mut a, &removal).await.unwrap();
+        match read_msg::<_, RemoveServerResponse>(&mut b).await.unwrap() {
+            RemoveServerResponse::Ok {
+                version,
+                operation_id: got_operation,
+                revoked,
+                removed,
+                affected_clusters,
+                peers,
+            } => {
+                assert_eq!(version, 8);
+                assert_eq!(got_operation, Some(operation_id));
+                assert_eq!(revoked, 2);
+                assert!(removed);
+                assert_eq!(affected_clusters, vec!["/", "/eu"]);
+                assert_eq!(peers[0].server, server);
+                assert_eq!(peers[0].error.as_deref(), Some("offline"));
+            }
+            RemoveServerResponse::Err { reason } => panic!("err: {reason}"),
         }
     }
 

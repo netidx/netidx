@@ -4,7 +4,7 @@ use netidx_admin::{
     admin_client, admin_local,
     admin_ops::{
         self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops,
-        roster as roster_ops, slots as slots_ops,
+        roster as roster_ops, servers as server_ops, slots as slots_ops,
     },
     admin_proto::{self, NodeKind},
     answer::{Answerer, Field},
@@ -74,6 +74,10 @@ pub(crate) enum Cmd {
     Issued(IssuedArgs),
     /// revoke certificate(s) by serial or name and re-sign the CRL
     Revoke(RevokeArgs),
+    /// list every CA-authoritative admin-server identity, grouped by cluster
+    Servers(ServersArgs),
+    /// permanently revoke and remove one dead admin-server identity
+    RemoveServer(RemoveServerArgs),
     /// set up or rotate the auto-approve slot, so the running admin server
     /// approves verified renewals in-process (no human per renewal)
     AutoApprove(AutoApproveArgs),
@@ -261,6 +265,22 @@ pub(crate) struct RevokeArgs {
     /// refuse on any mismatch. Needed to revoke a name that spans >1 key.
     #[arg(long = "assert-glyph")]
     assert_glyph: Option<String>,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ServersArgs {
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RemoveServerArgs {
+    /// Exact immutable server UUID, copied from `ca servers`. This is the
+    /// destructive target assertion; names and addresses are not accepted.
+    #[arg(value_name = "SERVER-ID")]
+    server_id: admin_proto::AdminServerId,
     #[command(flatten)]
     auth: RemoteAuthFlags,
 }
@@ -699,6 +719,8 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Fingerprint(p) => fingerprint(p),
         Cmd::Issued(f) => issued(f),
         Cmd::Revoke(p) => revoke(p),
+        Cmd::Servers(p) => servers(p),
+        Cmd::RemoveServer(p) => remove_server(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
         Cmd::External { cmd } => external(cmd),
@@ -883,6 +905,131 @@ fn revoke(f: RevokeArgs) -> Result<()> {
     }
     for w in out.warnings {
         println!("  warning: {w}");
+    }
+    Ok(())
+}
+
+fn role_name(role: admin_proto::Role) -> &'static str {
+    match role {
+        admin_proto::Role::Ca => "ca",
+        admin_proto::Role::Resolver => "resolver",
+        admin_proto::Role::IdMap => "id-map",
+    }
+}
+
+/// `ca servers` — display the immutable identities from the controller's
+/// authoritative map. Cluster headings are intentionally separate from the
+/// mutable admin and resolver addresses so an operator copies the UUID, not an
+/// address, into the destructive command.
+fn servers(f: ServersArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let rows = runtime()?.block_on(server_ops::list_servers(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+    ))?;
+    if rows.is_empty() {
+        println!("the authoritative server map is empty");
+        return Ok(());
+    }
+    let mut group: Option<(Option<admin_proto::ResolverClusterId>, Option<String>)> =
+        None;
+    for row in rows {
+        let row_group = (row.cluster, row.cluster_base.clone());
+        if group.as_ref() != Some(&row_group) {
+            group = Some(row_group);
+            match (row.cluster_base.as_deref(), row.cluster, row.cluster_state) {
+                (Some(base), Some(id), Some(state)) => {
+                    println!("cluster {base}  {id}  [{state:?}]")
+                }
+                _ => println!("no resolver cluster"),
+            }
+        }
+        let roles =
+            row.roles.iter().copied().map(role_name).collect::<Vec<_>>().join(",");
+        println!(
+            "  {}  {}  [{:?}]{}",
+            row.id,
+            row.addr,
+            row.state,
+            if row.controller { "  CONTROLLER" } else { "" }
+        );
+        println!(
+            "    roles {}  resolver {}",
+            if roles.is_empty() { "-" } else { &roles },
+            row.resolver
+                .as_ref()
+                .map(|member| member.addr.to_string())
+                .as_deref()
+                .unwrap_or("-")
+        );
+    }
+    println!(
+        "\nPermanent removal requires the exact UUID: `netidx admin ca remove-server \
+         <server-id>`."
+    );
+    Ok(())
+}
+
+/// `ca remove-server <uuid>` — irreversible dead-node recovery. The exact UUID
+/// is the strict CLI's target assertion; controller-side policy is still the
+/// authority, and the active controller is unconditionally protected.
+fn remove_server(f: RemoveServerArgs) -> Result<()> {
+    let mut ans = f.auth.answerer()?;
+    let server = f.auth.server_addr()?;
+    let out = runtime()?.block_on(server_ops::remove_server(
+        &mut ans,
+        server,
+        f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
+        f.server_id,
+    ))?;
+    if out.removed {
+        println!("permanently removed server {}", f.server_id);
+    } else {
+        println!(
+            "server {} was already absent; reconciled surviving topology",
+            f.server_id
+        );
+    }
+    println!("  authoritative map version: {}", out.version);
+    println!("  serving certificates revoked: {}", out.revoked);
+    if let Some(operation_id) = out.operation_id {
+        println!("  topology operation: {operation_id}");
+    }
+    if !out.affected_clusters.is_empty() {
+        println!("  affected clusters: {}", out.affected_clusters.join(", "));
+    }
+    let failed: Vec<_> = out.peers.iter().filter(|peer| peer.error.is_some()).collect();
+    println!(
+        "  topology targets updated: {}/{}",
+        out.peers.len() - failed.len(),
+        out.peers.len()
+    );
+    for peer in failed {
+        println!(
+            "  ! server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    if !out.peers.is_empty() {
+        println!(
+            "No service was restarted. If the written topology requires a restart, \
+             roll each affected resolver cluster manually: restart one member, wait \
+             the resolver delay-reads period for publishers to republish, then restart \
+             the next member."
+        );
+    }
+    if !out.peers.is_empty() && !out.peers.iter().all(|peer| peer.error.is_none()) {
+        println!(
+            "The authoritative removal succeeded, but topology is not fully \
+             reconciled. Restore the failed target and repeat an idempotent topology \
+             reconciliation before restarting it."
+        );
     }
     Ok(())
 }
@@ -2033,6 +2180,39 @@ fn list() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TestCaCli {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    #[test]
+    fn remove_server_cli_requires_and_parses_exact_uuid() {
+        let id = admin_proto::AdminServerId::new();
+        let parsed = TestCaCli::try_parse_from([
+            "ca",
+            "remove-server",
+            &id.to_string(),
+            "--server",
+            "10.0.0.1:4565",
+            "--admin",
+            "root",
+            "--password-stdin",
+            "--accept-glyph",
+            "AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AA",
+        ])
+        .unwrap();
+        let Cmd::RemoveServer(args) = parsed.cmd else {
+            panic!("expected remove-server")
+        };
+        assert_eq!(args.server_id, id);
+
+        let err = TestCaCli::try_parse_from(["ca", "remove-server"])
+            .expect_err("a destructive target must be explicit");
+        assert!(err.to_string().contains("SERVER-ID"));
+    }
 
     #[test]
     fn request_then_sign_round_trip() {

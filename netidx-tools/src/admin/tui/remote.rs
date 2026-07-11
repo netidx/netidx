@@ -23,6 +23,7 @@ use anyhow::Result;
 #[cfg(unix)]
 use anyhow::{Context, bail};
 use crossterm::event::KeyCode;
+use netidx_admin::admin_proto::AdminServerId;
 use netidx_admin::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
@@ -107,6 +108,7 @@ pub(super) enum Panel {
     Queue,
     Delegations,
     Roster,
+    Servers,
     Revocation,
     Perms,
     Service,
@@ -118,6 +120,7 @@ impl Panel {
             Panel::Queue => "Enrollment Queue",
             Panel::Delegations => "Delegation Requests",
             Panel::Roster => "Admin Roster",
+            Panel::Servers => "Admin Servers",
             Panel::Revocation => "Issued Certificates",
             Panel::Perms => "Permissions",
             Panel::Service => "Services",
@@ -135,6 +138,9 @@ impl Panel {
             }
             Panel::Roster => {
                 "The cluster's admins and their scopes — mint, scope, or remove admins."
+            }
+            Panel::Servers => {
+                "Every CA-authoritative server identity, grouped by resolver cluster — permanently remove a dead node."
             }
             Panel::Revocation => {
                 "Certificates this CA has issued — revoke one to bar the holder from the cluster."
@@ -159,6 +165,7 @@ impl Panel {
             Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
             Panel::Delegations => "a approve · d deny · r refresh · Esc back",
             Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
+            Panel::Servers => "x force-remove · r refresh · Esc back",
             Panel::Revocation => "x revoke · r refresh · Esc back",
             Panel::Perms => "e edit · r reload · Esc back",
             Panel::Service => "s start · t stop · R restart · r refresh · Esc back",
@@ -205,6 +212,14 @@ pub(super) enum RowKey {
     Cert {
         serial: u64,
         glyph: Option<Fingerprint>,
+    },
+    /// An immutable admin-server identity. The mutable address and cluster are
+    /// carried only to make the destructive confirmation unambiguous.
+    Server {
+        id: AdminServerId,
+        addr: SocketAddr,
+        cluster: String,
+        controller: bool,
     },
 }
 
@@ -254,6 +269,14 @@ pub(super) enum RemoteAction {
     SetPolicy { target: PanelTarget, name: String },
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
     RemoveAdmin { target: PanelTarget, name: String },
+    /// Permanently revoke and remove a dead admin-server identity. The active
+    /// controller is shown in the inventory but never yields this action.
+    RemoveServer {
+        target: PanelTarget,
+        server: AdminServerId,
+        addr: SocketAddr,
+        cluster: String,
+    },
     /// List the cluster's permission levels (resolver bases) from the map, to
     /// pick one to view/edit — replaces free-text path entry for cluster perms.
     ListLevels { target: PanelTarget },
@@ -289,6 +312,7 @@ impl RemoteAction {
             RemoteAction::AddAdmin { .. } => "Adding an admin".to_string(),
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
+            RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
             RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
             RemoteAction::ListServiceServers { .. } => "Loading servers".to_string(),
@@ -325,6 +349,9 @@ impl RemoteAction {
             RemoteAction::RemoveAdmin { name, .. } => Some(format!(
                 "Remove admin {name:?}? Their password will no longer authenticate \
                  to this CA."
+            )),
+            RemoteAction::RemoveServer { server, addr, cluster, .. } => Some(format!(
+                "Force-remove dead server {server}?\n\nLast address: {addr}\nResolver cluster: {cluster}\n\nThis permanently revokes every serving certificate for that immutable identity and removes its enrollment grant. The active controller cannot be removed. No service will be restarted."
             )),
             RemoteAction::ServiceControl {
                 op: ServiceOp::Stop, units, server, ..
@@ -368,6 +395,7 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { target }
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
+            | RemoteAction::RemoveServer { target, .. }
             | RemoteAction::ListLevels { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ListServiceServers { target }
@@ -453,6 +481,9 @@ pub(super) async fn run(
         RemoteAction::SetPolicy { target, name } => set_policy(ans, target, name).await,
         RemoteAction::RemoveAdmin { target, name } => {
             remove_admin(ans, target, name).await
+        }
+        RemoteAction::RemoveServer { target, server, .. } => {
+            remove_server(ans, target.into_remote()?, server).await
         }
         RemoteAction::EditPerms { target, at } => edit_perms(ans, target, at).await,
         RemoteAction::ServiceControl { target, server, units, op } => {
@@ -656,6 +687,7 @@ async fn refresh(
         Panel::Queue => queue_rows(ans, target.remote()?).await?,
         Panel::Delegations => delegation_rows(ans, target.remote()?).await?,
         Panel::Roster => roster_rows(ans, &target).await?,
+        Panel::Servers => server_rows(ans, target.remote()?).await?,
         Panel::Revocation => revocation_rows(ans, target.remote()?).await?,
         Panel::Perms => {
             let at = path.context("a target path is required for the perms panel")?;
@@ -1044,6 +1076,143 @@ async fn roster_rows(
     use netidx_admin::admin_ops::roster::list_admins;
     let at = admin_target(ans, target).await?;
     Ok(list_admins(&at).await?.iter().map(roster_row).collect())
+}
+
+#[cfg(unix)]
+async fn server_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
+    use netidx_admin::admin_ops::servers::list_servers;
+    let servers = list_servers(ans, Some(conn.server), None).await?;
+    Ok(servers.iter().map(server_row).collect())
+}
+
+#[cfg(unix)]
+fn server_row(server: &netidx_admin::admin_ops::servers::ServerInfo) -> PanelRow {
+    let cluster = server.cluster_base.clone().unwrap_or_else(|| "(none)".to_string());
+    let roles = server
+        .roles
+        .iter()
+        .map(|role| match role {
+            netidx_admin::admin_proto::Role::Ca => "ca",
+            netidx_admin::admin_proto::Role::Resolver => "resolver",
+            netidx_admin::admin_proto::Role::IdMap => "id-map",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut tags = format!("{:?}", server.state);
+    if server.controller {
+        tags.push_str(", CONTROLLER");
+    }
+    PanelRow {
+        text: format!("{:<12}  {}  {}  [{tags}]", cluster, server.id, server.addr),
+        key: RowKey::Server {
+            id: server.id,
+            addr: server.addr,
+            cluster: cluster.clone(),
+            controller: server.controller,
+        },
+        detail: vec![
+            ("Server ID".to_string(), server.id.to_string()),
+            ("Admin address".to_string(), server.addr.to_string()),
+            ("Resolver cluster".to_string(), cluster),
+            (
+                "Cluster ID".to_string(),
+                server
+                    .cluster
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            (
+                "Cluster state".to_string(),
+                server
+                    .cluster_state
+                    .map(|state| format!("{state:?}"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            ("Enrollment state".to_string(), format!("{:?}", server.state)),
+            ("Roles".to_string(), if roles.is_empty() { "-".to_string() } else { roles }),
+            (
+                "Resolver address".to_string(),
+                server
+                    .resolver
+                    .as_ref()
+                    .map(|resolver| resolver.addr.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            (
+                "Removal".to_string(),
+                if server.controller {
+                    "protected — replace the controller first".to_string()
+                } else {
+                    "press x only after the machine is permanently dead".to_string()
+                },
+            ),
+        ],
+    }
+}
+
+#[cfg(unix)]
+async fn remove_server(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    server: AdminServerId,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::servers;
+    let out = servers::remove_server(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        None,
+        server,
+    )
+    .await?;
+    let failed: Vec<_> = out.peers.iter().filter(|peer| peer.error.is_some()).collect();
+    let mut lines = vec![
+        if out.removed {
+            format!("Permanently removed server {server}.")
+        } else {
+            format!("Server {server} was already absent; reconciled topology.")
+        },
+        format!("Revoked {} serving certificate(s).", out.revoked),
+        format!(
+            "Updated topology on {} of {} target(s); no service was restarted.",
+            out.peers.len() - failed.len(),
+            out.peers.len()
+        ),
+    ];
+    if let Some(operation_id) = out.operation_id {
+        lines.push(format!("Operation {operation_id}; map version {}.", out.version));
+    }
+    if !out.affected_clusters.is_empty() {
+        lines.push(format!("Affected clusters: {}.", out.affected_clusters.join(", ")));
+    }
+    for peer in failed {
+        lines.push(format!(
+            "  ! server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    if !out.peers.is_empty() {
+        lines.push(
+            "If the written topology requires a restart, roll each affected cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+                .to_string(),
+        );
+    }
+    if !out.peers.iter().all(|peer| peer.error.is_none()) {
+        lines.push(
+            "Topology is not fully reconciled. When the failed target is reachable, repeat force-remove with the same UUID to converge."
+                .to_string(),
+        );
+    }
+    let rows = server_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Server removed",
+        lines,
+        Panel::Servers,
+        rows,
+    ))
 }
 
 /// Format one roster entry. Reserved signing slots (recovery / autorenew) are
@@ -1474,10 +1643,11 @@ pub(super) struct RemoteState {
 }
 
 /// The panels offered in the menu (label + which panel).
-const PANELS: [Panel; 6] = [
+const PANELS: [Panel; 7] = [
     Panel::Queue,
     Panel::Delegations,
     Panel::Roster,
+    Panel::Servers,
     Panel::Revocation,
     Panel::Perms,
     Panel::Service,
@@ -1977,6 +2147,7 @@ impl RemoteState {
                 Panel::Queue => return self.on_key_queue(code, target),
                 Panel::Delegations => return self.on_key_delegations(code, target),
                 Panel::Roster => return self.on_key_roster(code, target),
+                Panel::Servers => return self.on_key_servers(code, target),
                 Panel::Revocation => return self.on_key_revocation(code, target),
                 Panel::Perms => return self.on_key_perms(code, target),
                 Panel::Service => return self.on_key_service(code, target),
@@ -2069,12 +2240,31 @@ impl RemoteState {
         }
     }
 
+    fn on_key_servers(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
+        match code {
+            KeyCode::Char('x') => {
+                self.selected_server().map(|(server, addr, cluster)| {
+                    Action::Remote(RemoteAction::RemoveServer {
+                        target,
+                        server,
+                        addr,
+                        cluster,
+                    })
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The full code of the selected row, if it carries one (not a renewal /
     /// unparseable / non-code row).
     fn selected_code(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Code(c) => Some(c.clone()),
-            RowKey::None | RowKey::Name(_) | RowKey::Cert { .. } => None,
+            RowKey::None
+            | RowKey::Name(_)
+            | RowKey::Cert { .. }
+            | RowKey::Server { .. } => None,
         }
     }
 
@@ -2082,7 +2272,9 @@ impl RemoteState {
     fn selected_cert(&self) -> Option<(u64, Option<Fingerprint>)> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Cert { serial, glyph } => Some((*serial, *glyph)),
-            RowKey::None | RowKey::Code(_) | RowKey::Name(_) => None,
+            RowKey::None | RowKey::Code(_) | RowKey::Name(_) | RowKey::Server { .. } => {
+                None
+            }
         }
     }
 
@@ -2090,7 +2282,25 @@ impl RemoteState {
     fn selected_name(&self) -> Option<String> {
         match &self.rows.get(self.list.selected()?)?.key {
             RowKey::Name(n) => Some(n.clone()),
-            RowKey::None | RowKey::Code(_) | RowKey::Cert { .. } => None,
+            RowKey::None
+            | RowKey::Code(_)
+            | RowKey::Cert { .. }
+            | RowKey::Server { .. } => None,
+        }
+    }
+
+    /// The selected non-controller server. The controller remains visible in
+    /// the inventory but cannot produce a destructive action.
+    fn selected_server(&self) -> Option<(AdminServerId, SocketAddr, String)> {
+        match &self.rows.get(self.list.selected()?)?.key {
+            RowKey::Server { id, addr, cluster, controller: false } => {
+                Some((*id, *addr, cluster.clone()))
+            }
+            RowKey::None
+            | RowKey::Code(_)
+            | RowKey::Name(_)
+            | RowKey::Cert { .. }
+            | RowKey::Server { controller: true, .. } => None,
         }
     }
 
@@ -2375,17 +2585,16 @@ impl RemoteState {
             .split(area);
             self.render_panel_list(f, split[0], panel);
             self.render_panel_detail(f, split[1], panel);
-        } else if matches!(panel, Panel::Roster) {
-            // List of admins on top, the selected admin's granted authorities
-            // spelled out below — the same list-over-detail shape as the glyph
-            // panels, giving the policy room to be readable rather than cryptic.
+        } else if matches!(panel, Panel::Roster | Panel::Servers) {
+            // Admins and servers both have a compact identity list plus a
+            // readable key/value detail pane for authority or topology facts.
             let split = Layout::vertical([
                 Constraint::Percentage(45),
                 Constraint::Percentage(55),
             ])
             .split(area);
             self.render_panel_list(f, split[0], panel);
-            self.render_roster_detail(f, split[1]);
+            self.render_key_value_detail(f, split[1], panel);
         } else {
             self.render_panel_list(f, area, panel);
         }
@@ -2394,9 +2603,13 @@ impl RemoteState {
     /// The detail pane under the admin roster: the selected admin's name and its
     /// granted authorities as readable label/value lines (from the row's
     /// pre-formatted `detail`).
-    fn render_roster_detail(&self, f: &mut Frame, area: Rect) {
-        let block =
-            theme::panel_block().title(Span::styled(" Authority ", theme::title_style()));
+    fn render_key_value_detail(&self, f: &mut Frame, area: Rect, panel: Panel) {
+        let title = if matches!(panel, Panel::Servers) {
+            " Server identity "
+        } else {
+            " Authority "
+        };
+        let block = theme::panel_block().title(Span::styled(title, theme::title_style()));
         let inner = block.inner(area);
         f.render_widget(block, area);
         let row = self.list.selected().and_then(|i| self.rows.get(i));
@@ -2651,6 +2864,7 @@ mod tests {
         assert_eq!(Panel::Queue.title(), "Enrollment Queue");
         assert_eq!(Panel::Delegations.title(), "Delegation Requests");
         assert_eq!(Panel::Roster.title(), "Admin Roster");
+        assert_eq!(Panel::Servers.title(), "Admin Servers");
         assert_eq!(Panel::Revocation.title(), "Issued Certificates");
     }
 
@@ -2779,6 +2993,59 @@ mod tests {
             out.contains("Control services under"),
             "service-scope label missing: {out:?}"
         );
+    }
+
+    #[test]
+    fn server_panel_lists_identity_and_protects_controller() {
+        let controller = AdminServerId::new();
+        let satellite = AdminServerId::new();
+        let mut s = RemoteState::new();
+        s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
+        s.screen = Screen::Panel(Panel::Servers);
+        s.rows = vec![
+            PanelRow {
+                text: format!("/  {controller}  10.0.0.1:4565  [CONTROLLER]"),
+                key: RowKey::Server {
+                    id: controller,
+                    addr: "10.0.0.1:4565".parse().unwrap(),
+                    cluster: "/".to_string(),
+                    controller: true,
+                },
+                detail: vec![(
+                    "Removal".to_string(),
+                    "protected — replace the controller first".to_string(),
+                )],
+            },
+            PanelRow {
+                text: format!("/eu  {satellite}  10.0.60.11:4565  [Registered]"),
+                key: RowKey::Server {
+                    id: satellite,
+                    addr: "10.0.60.11:4565".parse().unwrap(),
+                    cluster: "/eu".to_string(),
+                    controller: false,
+                },
+                detail: vec![("Roles".to_string(), "resolver".to_string())],
+            },
+        ];
+        s.list.select(Some(0));
+        assert!(
+            s.on_key(KeyCode::Char('x')).is_none(),
+            "the controller row must never produce a remove action"
+        );
+        s.list.select(Some(1));
+        let Some(Action::Remote(action @ RemoteAction::RemoveServer { server, .. })) =
+            s.on_key(KeyCode::Char('x'))
+        else {
+            panic!("satellite row did not produce a remove action")
+        };
+        assert_eq!(server, satellite);
+        let confirm = action.confirm_message().unwrap();
+        assert!(confirm.contains(&satellite.to_string()));
+        assert!(confirm.contains("No service will be restarted"));
+        let out = render(&mut s, 120, 30);
+        assert!(out.contains("Admin Servers"), "server title missing: {out:?}");
+        assert!(out.contains("Server identity"), "detail title missing: {out:?}");
+        assert!(out.contains("/eu"), "cluster grouping missing: {out:?}");
     }
 
     fn a_conn(server: &str) -> RemoteConn {
