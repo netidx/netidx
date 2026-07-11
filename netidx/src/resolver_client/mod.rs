@@ -27,7 +27,6 @@ use common::{
 };
 use futures::future;
 use netidx_netproto::resolver::PublisherPriority;
-use nohash::IntMap;
 use parking_lot::{Mutex, RwLock};
 use poolshark::{
     global::{GPooled, Pool},
@@ -52,6 +51,37 @@ use tokio::time::Instant;
 use write_client::WriteClient;
 
 const MAX_REFERRALS: usize = 128;
+
+/// The identity of a publisher record returned by a resolver.
+///
+/// [`PublisherId`] values are allocated independently by each resolver process,
+/// so the resolver address is part of the identifier whenever publisher tables
+/// from multiple referrals are combined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PublisherKey {
+    pub resolver: SocketAddr,
+    pub id: PublisherId,
+}
+
+impl PublisherKey {
+    pub fn new(resolver: SocketAddr, id: PublisherId) -> Self {
+        Self { resolver, id }
+    }
+}
+
+impl From<&Publisher> for PublisherKey {
+    fn from(publisher: &Publisher) -> Self {
+        Self::new(publisher.resolver, publisher.id)
+    }
+}
+
+/// Publisher records returned by resolver read operations, keyed by the
+/// resolver process that allocated the publisher ID.
+pub type PublisherTable = AHashMap<PublisherKey, Publisher>;
+
+fn insert_publisher(table: &mut PublisherTable, publisher: Publisher) {
+    table.insert(PublisherKey::from(&publisher), publisher);
+}
 
 trait ToPath {
     fn path(&self) -> Option<&Path>;
@@ -333,7 +363,7 @@ where
     async fn send(
         &self,
         batch: &GPooled<Vec<T>>,
-    ) -> Result<(GPooled<IntMap<PublisherId, Publisher>>, GPooled<Vec<F>>)> {
+    ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<F>>)> {
         let mut referrals = 0;
         loop {
             let mut waiters = Vec::new();
@@ -429,17 +459,20 @@ impl ResolverRead {
     pub async fn send(
         &self,
         batch: &GPooled<Vec<ToRead>>,
-    ) -> Result<(GPooled<IntMap<PublisherId, Publisher>>, GPooled<Vec<FromRead>>)> {
+    ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<FromRead>>)> {
         self.0.send(batch).await
     }
 
     /// Resolve the specified paths to publisher addresses.
     ///
-    /// Results are in send order.
+    /// Results are in send order. Each [`PublisherRef`](crate::protocol::resolver::PublisherRef)
+    /// in a result addresses the returned [`PublisherTable`] with a
+    /// [`PublisherKey`] constructed from `Resolved::resolver` and
+    /// `PublisherRef::id`.
     pub async fn resolve<I>(
         &self,
         batch: I,
-    ) -> Result<(GPooled<IntMap<PublisherId, Publisher>>, GPooled<Vec<Resolved>>)>
+    ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<Resolved>>)>
     where
         I: IntoIterator<Item = Path>,
     {
@@ -658,6 +691,45 @@ impl ResolverRead {
                 m => bail!("unexpected result from table {:?}", m),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::resolver::{HashMethod, TargetAuth};
+
+    #[test]
+    fn publisher_ids_are_namespaced_by_resolver() {
+        let id = PublisherId::new();
+        let resolver_a = "127.0.0.1:1000".parse().unwrap();
+        let resolver_b = "127.0.0.1:2000".parse().unwrap();
+        let publisher_a = Publisher {
+            resolver: resolver_a,
+            id,
+            addr: "127.0.0.1:1001".parse().unwrap(),
+            hash_method: HashMethod::Sha3_512,
+            target_auth: TargetAuth::Anonymous,
+            user_info: None,
+            priority: PublisherPriority::Normal,
+        };
+        let publisher_b = Publisher {
+            resolver: resolver_b,
+            id,
+            addr: "127.0.0.1:2001".parse().unwrap(),
+            hash_method: HashMethod::Sha3_512,
+            target_auth: TargetAuth::Anonymous,
+            user_info: None,
+            priority: PublisherPriority::Normal,
+        };
+        let mut table = PublisherTable::default();
+
+        insert_publisher(&mut table, publisher_a.clone());
+        insert_publisher(&mut table, publisher_b.clone());
+
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[&PublisherKey::new(resolver_a, id)], publisher_a);
+        assert_eq!(table[&PublisherKey::new(resolver_b, id)], publisher_b);
     }
 }
 

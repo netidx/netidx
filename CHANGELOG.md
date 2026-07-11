@@ -1,3 +1,11 @@
+# Unreleased
+
+- **Breaking `netidx` API:** publisher tables returned by
+  `ResolverRead::send` and `ResolverRead::resolve` are now keyed by both the
+  resolver address and resolver-local publisher ID. This prevents publisher
+  records from different referral domains from overwriting one another. This
+  change must ship in a semver-breaking release, not a patch release.
+
 # 0.31.10
 
 - replace fxhash and siphash with a mix of nohash and ahash, yielding a 12%

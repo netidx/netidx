@@ -9,10 +9,10 @@ use crate::{
     path::Path,
     protocol::{
         publisher::{From, Id, WriteId},
-        resolver::{Publisher, PublisherId, Resolved, TargetAuth},
+        resolver::{Publisher, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
-    resolver_client::ResolverRead,
+    resolver_client::{PublisherKey, PublisherTable, ResolverRead},
     tls,
     utils::{BatchItem, Batched, ChanWrap},
 };
@@ -532,6 +532,14 @@ struct Chosen {
     flags: PublishFlags,
 }
 
+fn publisher_for<'a>(
+    publishers: &'a PublisherTable,
+    resolved: &Resolved,
+    publisher: &PublisherRef,
+) -> Option<&'a Publisher> {
+    publishers.get(&PublisherKey::new(resolved.resolver, publisher.id))
+}
+
 #[derive(Debug)]
 struct SubscriberInner {
     id: SubscriberId,
@@ -560,7 +568,7 @@ impl SubscriberInner {
 
     fn choose_random_addr(
         &mut self,
-        publishers: &GPooled<IntMap<PublisherId, Publisher>>,
+        publishers: &GPooled<PublisherTable>,
         resolved: &Resolved,
         flags: PublishFlags,
     ) -> Option<Chosen> {
@@ -580,7 +588,9 @@ impl SubscriberInner {
                     .publishers
                     .iter()
                     .filter_map(|pref| {
-                        publishers.get(&pref.id).filter($f).map(|pb| (pref, pb))
+                        publisher_for(publishers, resolved, pref)
+                            .filter($f)
+                            .map(|pb| (pref, pb))
                     })
                     .choose(&mut rand::rng())
                     .map(mk)
@@ -610,7 +620,9 @@ impl SubscriberInner {
         let chosen = resolved
             .publishers
             .iter()
-            .filter_map(|pref| publishers.get(&pref.id).map(|pb| (pref, pb)))
+            .filter_map(|pref| {
+                publisher_for(publishers, resolved, pref).map(|pb| (pref, pb))
+            })
             .choose(&mut rand::rng())
             .map(mk);
         trace!("chosen {chosen:?}");
@@ -619,13 +631,13 @@ impl SubscriberInner {
 
     fn choose_existing_addr(
         &mut self,
-        publishers: &GPooled<IntMap<PublisherId, Publisher>>,
+        publishers: &GPooled<PublisherTable>,
         resolved: &Resolved,
         mut flags: PublishFlags,
     ) -> Option<Chosen> {
         flags = flags & !PublishFlags::ISOLATED;
         for pref in &*resolved.publishers {
-            if let Some(pb) = publishers.get(&pref.id) {
+            if let Some(pb) = publisher_for(publishers, resolved, pref) {
                 if self.connections.contains_key(&pb.addr) {
                     return Some(Chosen {
                         addr: pb.addr,
@@ -647,7 +659,7 @@ impl SubscriberInner {
     fn choose_local_addr(
         &mut self,
         tried_existing: bool,
-        publishers: &GPooled<IntMap<PublisherId, Publisher>>,
+        publishers: &GPooled<PublisherTable>,
         resolved: &Resolved,
         flags: PublishFlags,
     ) -> Option<Chosen> {
@@ -675,7 +687,7 @@ impl SubscriberInner {
             resolved
                 .publishers
                 .iter()
-                .filter_map(|r| publishers.get(&r.id).map(|pb| (r, pb)))
+                .filter_map(|r| publisher_for(publishers, resolved, r).map(|pb| (r, pb)))
                 .filter(|(_, p)| !self.recently_failed.contains_key(&p.addr)),
         );
         let mut all_far = true;
@@ -731,7 +743,7 @@ impl SubscriberInner {
 
     fn choose_addr(
         &mut self,
-        publishers: &GPooled<IntMap<PublisherId, Publisher>>,
+        publishers: &GPooled<PublisherTable>,
         resolved: &Resolved,
     ) -> Option<Chosen> {
         let mut flags = PublishFlags::from_bits(resolved.flags)?;

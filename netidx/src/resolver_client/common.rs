@@ -1,23 +1,21 @@
+use super::PublisherTable;
 use crate::{
     channel,
     path::Path,
-    protocol::resolver::{
-        FromRead, FromWrite, Publisher, PublisherId, Resolved, ToRead, ToWrite,
-    },
+    protocol::resolver::{FromRead, FromWrite, Resolved, ToRead, ToWrite},
     utils,
 };
 use anyhow::Result;
 use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use netidx_core::pack::BoundedBytes;
-use nohash::IntMap;
 use poolshark::global::{GPooled, Pool};
 use std::{fmt::Debug, str::FromStr, sync::LazyLock, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
 
-pub(super) static PUBLISHERPOOL: LazyLock<Pool<IntMap<PublisherId, Publisher>>> =
+pub(super) static PUBLISHERPOOL: LazyLock<Pool<PublisherTable>> =
     LazyLock::new(|| Pool::new(1000, 100));
 pub(super) static RAWTOREADPOOL: LazyLock<Pool<Vec<ToRead>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
@@ -85,8 +83,7 @@ impl FromStr for DesiredAuth {
     }
 }
 
-pub(super) type Response<F> =
-    (GPooled<IntMap<PublisherId, Publisher>>, GPooled<Vec<(usize, F)>>);
+pub(super) type Response<F> = (GPooled<PublisherTable>, GPooled<Vec<(usize, F)>>);
 
 pub(super) type ResponseChan<F> = oneshot::Receiver<Response<F>>;
 

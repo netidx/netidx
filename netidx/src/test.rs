@@ -7,7 +7,9 @@ mod resolver {
         path::Path,
         protocol::glob::{Glob, GlobSet},
         publisher::PublishFlags,
-        resolver_client::{ChangeTracker, DesiredAuth, ResolverRead, ResolverWrite},
+        resolver_client::{
+            ChangeTracker, DesiredAuth, PublisherKey, ResolverRead, ResolverWrite,
+        },
         resolver_server::{Server, config::Config as ServerConfig},
     };
     use arcstr::literal;
@@ -44,7 +46,8 @@ mod resolver {
         let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
             assert_eq!(r.publishers.len(), 1);
-            let pb = publishers.get(&r.publishers[0].id).unwrap();
+            let key = PublisherKey::new(r.resolver, r.publishers[0].id);
+            let pb = publishers.get(&key).unwrap();
             assert_eq!(pb.addr, paddr);
         }
         let mut l = r.list(p("/")).await.unwrap();
@@ -94,7 +97,8 @@ mod resolver {
         let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
             assert_eq!(r.publishers.len(), 1);
-            let pb = publishers.get(&r.publishers[0].id).unwrap();
+            let key = PublisherKey::new(r.resolver, r.publishers[0].id);
+            let pb = publishers.get(&key).unwrap();
             assert_eq!(pb.addr, paddr);
         }
         let l = r.list(p("/")).await.unwrap();
@@ -262,8 +266,11 @@ mod resolver {
         let (publishers, mut answer) = r.resolve(paths.iter().cloned()).await.unwrap();
         let mut i = 0;
         for (p, r) in paths.iter().zip(answer.drain(..)) {
-            let mut r_addrs =
-                r.publishers.iter().map(|pr| publishers[&pr.id].addr).collect::<Vec<_>>();
+            let mut r_addrs = r
+                .publishers
+                .iter()
+                .map(|pr| publishers[&PublisherKey::new(r.resolver, pr.id)].addr)
+                .collect::<Vec<_>>();
             r_addrs.sort();
             assert_eq!(r_addrs.len(), addrs.len());
             assert_eq!(r_addrs, addrs);

@@ -2,6 +2,7 @@ use super::common::{
     DesiredAuth, FROMREADPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMREADPOOL, Response,
     ResponseChan, krb5_authentication,
 };
+use super::insert_publisher;
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     os::local_auth::AuthClient,
@@ -260,7 +261,7 @@ async fn connection(
                                         match partition_publishers(m) {
                                             Either::Left(m) => rx_batch.push(m),
                                             Either::Right(p) => {
-                                                publishers.insert(p.id, p);
+                                                insert_publisher(&mut publishers, p);
                                             }
                                         }
                                     });
