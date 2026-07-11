@@ -350,7 +350,12 @@ async fn renew_identity(
             let kc = admin_client::generate_key_and_csr(admin_proto::SERVING_SAN)?;
             let our_spki = admin_client::csr_spki(&kc.csr_pem)?;
             return match admin_local::enroll(&cfg_path, &kc.csr_pem, cfg.listen).await? {
-                admin_proto::SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
+                admin_proto::SignResponse::Ok {
+                    signed_cert_pem,
+                    trusted_pem,
+                    warnings,
+                    ..
+                } => {
                     admin_client::verify_issued_any(
                         &installed_pem,
                         name.as_str(),

@@ -7,7 +7,11 @@
 //! finds lying around. `peers` is the complex-network fallback for
 //! hosts mDNS can't see; on a flat LAN discovery makes it redundant.
 
-use crate::atomic;
+use crate::{
+    admin_proto::AdminServerId,
+    atomic,
+    fingerprint::Fingerprint,
+};
 use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{
@@ -29,6 +33,10 @@ pub struct CaRole {
     /// rotating the credential never has to rewrite this config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autorenew: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+    pub session_absolute_lifetime: Option<std::time::Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+    pub session_idle_timeout: Option<std::time::Duration>,
 }
 
 /// A resolver server runs on this host; GetInfo reports its address
@@ -68,6 +76,9 @@ pub struct Roles {
 pub struct AdminServerConfig {
     /// The TLS domain this network is rooted at (e.g. `ryu-oh.org`).
     pub domain: String,
+    pub server_id: AdminServerId,
+    /// SPKI fingerprint of the one home CA that owns this admin plane.
+    pub home_ca_fingerprint: String,
     pub listen: SocketAddr,
     /// The serving certificate **chain** PEM, `[leaf, ca]` — clients
     /// read the CA cert from the end of the chain.
@@ -129,6 +140,41 @@ impl AdminServerConfig {
                  a `ca` role) may omit it."
             );
         }
+        let configured_fp = Fingerprint::parse_text(&self.home_ca_fingerprint)
+            .context("invalid home_ca_fingerprint")?;
+        let pem = std::fs::read(&self.serving_cert).with_context(|| {
+            format!("reading serving certificate {}", self.serving_cert.display())
+        })?;
+        let mut cursor = std::io::Cursor::new(&pem);
+        let mut certs = rustls_pemfile::certs(&mut cursor);
+        let leaf = certs
+            .next()
+            .context("serving certificate chain is empty")?
+            .context("parsing serving certificate")?;
+        let rest: Vec<_> = certs.collect::<std::result::Result<_, _>>()
+            .context("parsing serving certificate chain")?;
+        let home = rest.last().context(
+            "serving certificate must include its home CA after the leaf",
+        )?;
+        let actual_fp = Fingerprint::of_cert_der(home.as_ref())?;
+        if actual_fp != configured_fp {
+            bail!("home_ca_fingerprint does not match the CA in the serving chain");
+        }
+        let cert_id = crate::tls::admin_cert_identity_from_der(leaf.as_ref())?;
+        if cert_id.server_id != self.server_id {
+            bail!(
+                "configured server_id {} does not match serving certificate identity {}",
+                self.server_id,
+                cert_id.server_id
+            );
+        }
+        if cert_id.controller != self.roles.ca.is_some() {
+            bail!(
+                "serving certificate controller marker ({}) does not match CA role ({})",
+                cert_id.controller,
+                self.roles.ca.is_some()
+            );
+        }
         Ok(())
     }
 
@@ -146,6 +192,8 @@ mod tests {
     fn sample() -> AdminServerConfig {
         AdminServerConfig {
             domain: "ryu-oh.org".to_string(),
+            server_id: AdminServerId::new(),
+            home_ca_fingerprint: Fingerprint::of_der(b"sample-ca").text(),
             listen: "192.168.0.5:4565".parse().unwrap(),
             serving_cert: PathBuf::from("/etc/netidx/ca/server/cert.pem"),
             serving_key: PathBuf::from("/etc/netidx/ca/server/key.pem"),
@@ -154,6 +202,8 @@ mod tests {
                 ca: Some(CaRole {
                     dir: PathBuf::from("/etc/netidx/ca"),
                     autorenew: Some(PathBuf::from("/etc/netidx/autorenew.keytab")),
+                    session_absolute_lifetime: None,
+                    session_idle_timeout: None,
                 }),
                 resolver: Some(ResolverRole {
                     config: PathBuf::from("/etc/netidx/resolver.json"),
@@ -173,7 +223,8 @@ mod tests {
         let p = dir.path().join("admin-server.json");
         let cfg = sample();
         cfg.save(&p).unwrap();
-        assert_eq!(AdminServerConfig::load(&p).unwrap(), cfg);
+        let bytes = std::fs::read(&p).unwrap();
+        assert_eq!(serde_json::from_slice::<AdminServerConfig>(&bytes).unwrap(), cfg);
     }
 
     #[test]
@@ -182,6 +233,8 @@ mod tests {
         // defaults on, omitted optionals default cleanly.
         let json = r#"{
             "domain": "ryu-oh.org",
+            "server_id": "00000000-0000-0000-0000-000000000001",
+            "home_ca_fingerprint": "A4VYW 7QKRO XW3QY B4AZD M5VZT XFBWI MNA3F GHCZV RB3KG 26JSA",
             "listen": "192.168.0.7:4565",
             "serving_cert": "/a/cert.pem",
             "serving_key": "/a/key.pem",
@@ -197,18 +250,14 @@ mod tests {
 
     #[test]
     fn non_ca_requires_ca_addr() {
-        // The CA host (sample has a `ca` role) may omit ca_addr — it owns
-        // the map.
         let mut cfg = sample();
-        assert!(cfg.ca_addr.is_none());
-        assert!(cfg.validate().is_ok());
-        // Drop the CA role: now ca_addr is mandatory (it must know where to
-        // register / fetch the map).
         cfg.roles.ca = None;
-        assert!(cfg.validate().is_err(), "non-CA + no ca_addr must be rejected");
-        // Supplying it makes the config valid again.
+        let error = cfg.validate().unwrap_err().to_string();
+        assert!(error.contains("ca_addr"), "non-CA + no ca_addr must be rejected");
+        // Supplying it passes the structural gate (validation then reaches the
+        // deliberately nonexistent certificate path in this fixture).
         cfg.ca_addr = Some("10.0.0.1:4565".parse().unwrap());
-        assert!(cfg.validate().is_ok());
+        assert!(!cfg.validate().unwrap_err().to_string().contains("must set `ca_addr`"));
         // load() enforces it: an on-disk non-CA config without ca_addr is
         // rejected at load, not silently accepted (it would never register).
         let dir = tempfile::tempdir().unwrap();
@@ -224,6 +273,8 @@ mod tests {
     fn unknown_fields_are_rejected() {
         let json = r#"{
             "domain": "ryu-oh.org",
+            "server_id": "00000000-0000-0000-0000-000000000001",
+            "home_ca_fingerprint": "A4VYW 7QKRO XW3QY B4AZD M5VZT XFBWI MNA3F GHCZV RB3KG 26JSA",
             "listen": "192.168.0.7:4565",
             "serving_cert": "/a/cert.pem",
             "serving_key": "/a/key.pem",

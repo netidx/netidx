@@ -78,15 +78,22 @@ pub async fn enroll(
     csr_pem: &str,
     listen: SocketAddr,
 ) -> Result<SignResponse> {
+    let cfg = crate::admin_server_config::AdminServerConfig::load(cfg_path)?;
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     admin_proto::write_msg(
         &mut s,
         &Request::Enroll(EnrollRequest {
-            admin,
-            password,
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
             csr_pem: csr_pem.to_string(),
             listen,
+            roles: vec![crate::admin_proto::Role::Resolver],
+            resolver_member: None,
+            resolver_members: Vec::new(),
+            cluster: crate::admin_proto::ClusterPlacement::Create {
+                base: "/".to_string(),
+            },
+            renew_identity: Some(cfg.server_id),
         }),
     )
     .await
@@ -106,8 +113,7 @@ pub async fn add_role_admin(
     admin_proto::write_msg(
         &mut s,
         &Request::AddRoleAdmin(AddRoleAdminRequest {
-            admin,
-            password,
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
             name: name.to_string(),
             new_password: Secret(new_password.to_string()),
             policy,
@@ -131,8 +137,7 @@ pub async fn set_admin_policy(
     admin_proto::write_msg(
         &mut s,
         &Request::SetAdminPolicy(SetAdminPolicyRequest {
-            admin,
-            password,
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
             target: target.to_string(),
             policy,
         }),
@@ -151,8 +156,7 @@ pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
     admin_proto::write_msg(
         &mut s,
         &Request::RemoveAdmin(RemoveAdminRequest {
-            admin,
-            password,
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
             target: target.to_string(),
         }),
     )
@@ -169,7 +173,9 @@ pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminI
     let (admin, password) = no_creds();
     admin_proto::write_msg(
         &mut s,
-        &Request::ListAdmins(ListAdminsRequest { admin, password }),
+        &Request::ListAdmins(ListAdminsRequest {
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
+        }),
     )
     .await?;
     match admin_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
@@ -194,15 +200,14 @@ pub async fn edit_perms(
     admin_proto::write_msg(
         &mut s,
         &Request::EditPerms(EditPermsRequest {
-            admin,
-            password,
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
             target_path: target_path.to_string(),
             perms_json: perms_json.to_string(),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut s).await? {
-        EditPermsResponse::Ok { peers } => Ok(peers),
+        EditPermsResponse::Ok { peers, .. } => Ok(peers),
         EditPermsResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }

@@ -457,6 +457,46 @@ pub fn set_parent_referral(
     })
 }
 
+/// Whether the resolver already carries exactly this parent referral. Address
+/// order is not significant: controller topology fanout canonicalizes it, but
+/// hand-written netidx configuration does not have to.
+pub fn parent_referral_matches(
+    resolver_config_path: &Path,
+    expected: &ParentRef,
+) -> Result<bool> {
+    let rcfg = resolver_engine::ResolverConfig::load(resolver_config_path).with_context(
+        || format!("loading resolver config {}", resolver_config_path.display()),
+    )?;
+    let Some(actual) = rcfg.as_file().parent.as_ref() else {
+        return Ok(false);
+    };
+    if actual.path != expected.path
+        || actual.ttl != expected.ttl
+        || actual.addrs.len() != expected.addrs.len()
+    {
+        return Ok(false);
+    }
+    Ok(expected.addrs.iter().all(|(addr, auth)| {
+        actual.addrs.iter().any(|(got_addr, got_auth)| {
+            got_addr == addr
+                && matches!(
+                    (got_auth, auth),
+                    (rfile::RefAuth::Anonymous, ReferralAuth::Anonymous)
+                        | (rfile::RefAuth::Local(_), ReferralAuth::Local(_))
+                        | (rfile::RefAuth::Krb5(_), ReferralAuth::Krb5(_))
+                        | (rfile::RefAuth::Tls(_), ReferralAuth::Tls(_))
+                )
+                && match (got_auth, auth) {
+                    (rfile::RefAuth::Local(got), ReferralAuth::Local(want))
+                    | (rfile::RefAuth::Krb5(got), ReferralAuth::Krb5(want))
+                    | (rfile::RefAuth::Tls(got), ReferralAuth::Tls(want)) => got == want,
+                    (rfile::RefAuth::Anonymous, ReferralAuth::Anonymous) => true,
+                    _ => false,
+                }
+        })
+    }))
+}
+
 /// One-line description of a client-side resolver auth, for the
 /// `--dry-run` plan and `status`.
 pub fn describe_client_auth(auth: &cfile::Auth) -> String {
@@ -719,5 +759,28 @@ mod tests {
         );
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
         assert!(attach_to_network(&rpath, &cpath, anon_parent(), vec![]).is_err());
+    }
+
+    #[test]
+    fn approved_parent_match_is_idempotent_and_order_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rpath = write(
+            dir.path(),
+            "resolver.json",
+            &format!(
+                r#"{{"children":[],"parent":{{"path":"/ap","ttl":null,"addrs":[["10.0.0.2:4564","Anonymous"],["10.0.0.1:4564","Anonymous"]]}},"member_servers":[{LOCAL_MEMBER}],"perms":{{}},"include_permissions":[]}}"#
+            ),
+        );
+        let expected = ParentRef {
+            path: "/ap".into(),
+            ttl: None,
+            addrs: vec![
+                ("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous),
+                ("10.0.0.2:4564".parse().unwrap(), ReferralAuth::Anonymous),
+            ],
+        };
+        assert!(parent_referral_matches(&rpath, &expected).unwrap());
+        let wrong = ParentRef { path: "/other".into(), ..expected };
+        assert!(!parent_referral_matches(&rpath, &wrong).unwrap());
     }
 }

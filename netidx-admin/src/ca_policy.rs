@@ -6,6 +6,7 @@
 
 use serde_derive::{Deserialize, Serialize};
 use std::time::Duration;
+use crate::admin_proto::Role;
 
 /// The `max_validity` for the system-managed signing slots (autorenew,
 /// recovery) and the local superuser. Deliberately huge: the real bound on
@@ -39,12 +40,10 @@ pub struct Policy {
     /// identities.
     #[serde(default)]
     pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new admin servers — i.e. authorize
-    /// issuance of the reserved serving SAN. Granted explicitly; a
-    /// rogue enrollee can impersonate the admin plane, so this is more
-    /// privileged than any `allowed_san` glob.
     #[serde(default)]
-    pub may_enroll_servers: bool,
+    pub server_enroll_scopes: Vec<String>,
+    #[serde(default)]
+    pub server_enroll_roles: Vec<Role>,
     /// Netidx hierarchy paths under which this admin may edit permissions
     /// (the remote perms edit). A target path is in scope when it equals
     /// or descends from one of these (`/` ⇒ the whole tree). Empty ⇒ no
@@ -89,6 +88,7 @@ pub enum SlotKind {
 /// locally and over the wire (`ListAdmins`), hence `Serialize`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminInfo {
+    pub slot_id: uuid::Uuid,
     pub admin: String,
     pub kind: SlotKind,
     pub policy: Policy,
@@ -110,7 +110,8 @@ pub fn autorenew_policy() -> Policy {
         allowed_san: vec![],
         max_validity: SIGNING_SLOT_MAX_VALIDITY,
         id_map_groups: vec![],
-        may_enroll_servers: false,
+        server_enroll_scopes: vec![],
+        server_enroll_roles: vec![],
         perms_edit_scopes: vec![],
         may_manage_admins: false,
         service_control_scopes: vec![],
@@ -134,7 +135,8 @@ pub fn superuser_policy() -> Policy {
         allowed_san: vec!["*".to_string()],
         max_validity: SIGNING_SLOT_MAX_VALIDITY,
         id_map_groups: vec![],
-        may_enroll_servers: true,
+        server_enroll_scopes: vec!["/".to_string()],
+        server_enroll_roles: vec![Role::Resolver, Role::IdMap],
         perms_edit_scopes: vec!["/".to_string()],
         may_manage_admins: true,
         service_control_scopes: vec!["/".to_string()],

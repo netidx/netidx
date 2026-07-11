@@ -13,13 +13,12 @@
 //! refused, so a poisoned map can't redirect a perms read or edit to a
 //! look-alike server.
 
-use super::resolve_identity;
+use super::{open_admin_session, resolve_identity};
 use crate::{
     admin_client::{self, CaIdentity},
     admin_local,
     admin_proto::{NetworkMap, NodeKind, PeerResult, Secret},
-    answer::{Answerer, Field},
-    plan::enroll::current_username,
+    answer::Answerer,
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -57,13 +56,18 @@ async fn bootstrap(
 /// match the CA uses to route the edit).
 fn route(map: &NetworkMap, at: &str) -> Result<SocketAddr> {
     let mut bases = BTreeSet::new();
-    for s in &map.servers {
-        if let Some(c) = &s.cluster {
-            if c.base == at {
-                return Ok(s.addr);
+    for c in map.clusters.iter().filter(|c| {
+        c.state == crate::admin_proto::ClusterState::Active
+    }) {
+        if c.base == at {
+            if let Some(server) = map.servers.iter().find(|s| {
+                s.cluster == Some(c.id)
+                    && s.state == crate::admin_proto::ServerState::Registered
+            }) {
+                return Ok(server.addr);
             }
-            bases.insert(c.base.as_str());
         }
+        bases.insert(c.base.as_str());
     }
     bail!(
         "no resolver cluster is mounted at {at:?} in the network map. Known cluster \
@@ -116,8 +120,13 @@ pub async fn list_levels(
     ca_dir: Option<PathBuf>,
 ) -> Result<Vec<String>> {
     let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
-    let bases: BTreeSet<String> =
-        bs.map.servers.iter().filter_map(|s| s.cluster.as_ref()).map(|c| c.base.clone()).collect();
+    let bases: BTreeSet<String> = bs
+        .map
+        .clusters
+        .iter()
+        .filter(|c| c.state == crate::admin_proto::ClusterState::Active)
+        .map(|c| c.base.clone())
+        .collect();
     Ok(bases.into_iter().collect())
 }
 
@@ -136,23 +145,14 @@ pub async fn edit_perms(
     edited: &str,
 ) -> Result<Vec<PeerResult>> {
     let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
-    let ca_addr = bs.map.ca_addr.context(
-        "the network map records no CA address — cannot route an authenticated edit",
-    )?;
-    // Authenticate to the CA, re-pinned to the confirmed CA; it performs and
-    // propagates the edit.
-    let id = same_ca_identity(&bs, ca_addr).await?;
-    let admin = ans
-        .text(Field::AdminName, admin, current_username().as_deref(), true)
-        .await?
-        .context("an admin name is required")?;
-    let password = ans.secret(Field::AdminPassword, password).await?;
+    // `open_admin_session` resolves and exactly verifies the authoritative
+    // controller before it collects or sends credentials.
+    let session = open_admin_session(ans, Some(bs.addr), ca_dir, admin, password).await?;
     admin_client::edit_perms(
-        ca_addr,
+        session.server,
         NodeKind::Client,
-        &id,
-        &admin,
-        password.as_str(),
+        &session.identity,
+        session.credential,
         at,
         edited,
     )

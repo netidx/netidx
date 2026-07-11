@@ -124,6 +124,9 @@ pub mod resolver;
 /// no openssl).
 pub mod resolver_probe;
 pub mod service;
+pub mod session_cache;
+#[cfg(unix)]
+pub mod session;
 pub mod template;
 pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`admin_client`] and

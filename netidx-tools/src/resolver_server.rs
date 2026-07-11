@@ -218,6 +218,7 @@ async fn handle_reload(
 ) -> Result<file::Config> {
     info!("re-reading {:?}", config_path);
     let new_file = load_file_config(config_path)?;
+    warn_structural_changes(baseline, &new_file);
     // Merge include_permissions + inline perms WITHOUT going through
     // `Config::from_file`: the full validator opens TLS cert files,
     // re-validates addrs / parent / children / member_servers — none
@@ -227,7 +228,6 @@ async fn handle_reload(
     // structural-diff warning separately.
     let new_perms = config::merge_perms_only(&new_file)
         .context("merging perms (include_permissions + inline)")?;
-    warn_structural_changes(baseline, &new_file);
     server.reload_perms(&new_perms).await.context("swapping live PMap")?;
     Ok(new_file)
 }
@@ -302,29 +302,64 @@ fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
     Config::load_raw(path).with_context(|| format!("reading {:?}", path))
 }
 
-/// Emit one WARN per non-perms field that changed between the
-/// startup snapshot and the reloaded config. These fields are not
-/// applied live — restart is required.
+/// Emit one WARN per non-perms field that changed between the startup snapshot
+/// and the reloaded config. The running resolver is deliberately left alone:
+/// topology is activated only by an administrator's one-member-at-a-time
+/// rolling restart, with each member allowed to finish its delay-reads warm-up
+/// before the next member is restarted.
 ///
 /// Comparison is by serialized JSON so we get a stable, structural
 /// equality without depending on `PartialEq` impls. None of the
 /// compared fields contain hash maps with nondeterministic ordering.
-fn warn_structural_changes(orig: &file::Config, new: &file::Config) {
+fn structural_changes(orig: &file::Config, new: &file::Config) -> Vec<&'static str> {
+    let mut changed = Vec::new();
     macro_rules! cmp {
         ($field:ident) => {
             let a = serde_json::to_string(&orig.$field).ok();
             let b = serde_json::to_string(&new.$field).ok();
             if a != b {
-                warn!(
-                    "config field '{}' changed; restart required for this to take effect",
-                    stringify!($field),
-                );
+                changed.push(stringify!($field));
             }
         };
     }
     cmp!(parent);
     cmp!(children);
     cmp!(member_servers);
+    changed
+}
+
+fn warn_structural_changes(orig: &file::Config, new: &file::Config) {
+    for field in structural_changes(orig, new) {
+        warn!(
+            "config field '{field}' changed; the running resolver was not \
+             restarted — use a manual one-member-at-a-time rolling restart to \
+             apply the change"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcstr::ArcStr;
+
+    fn empty_config() -> file::Config {
+        file::ConfigBuilder::default().member_servers(vec![]).build().unwrap()
+    }
+
+    #[test]
+    fn topology_changes_are_reported_for_manual_restart() {
+        let original = empty_config();
+        let mut changed = original.clone();
+        changed.children.push(file::Referral {
+            path: ArcStr::from("/eu"),
+            ttl: None,
+            addrs: vec![],
+        });
+
+        assert!(structural_changes(&original, &original).is_empty());
+        assert_eq!(structural_changes(&original, &changed), vec!["children"]);
+    }
 }
 
 pub(crate) fn run(params: Params) -> Result<()> {

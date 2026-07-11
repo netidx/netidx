@@ -219,8 +219,11 @@ impl App {
                 }
                 // A quiet result (a silent panel re-query) shows no overlay.
                 if !out.quiet {
-                    self.result =
-                        Some(ResultView { title: out.title, lines: out.lines, error: false });
+                    self.result = Some(ResultView {
+                        title: out.title,
+                        lines: out.lines,
+                        error: false,
+                    });
                 }
             }
             Err(e) => {
@@ -290,8 +293,12 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.log_scroll = self.log_scroll.saturating_add(1).min(last)
                 }
-                KeyCode::PageUp => self.log_scroll = self.log_scroll.min(last).saturating_sub(10),
-                KeyCode::PageDown => self.log_scroll = self.log_scroll.saturating_add(10).min(last),
+                KeyCode::PageUp => {
+                    self.log_scroll = self.log_scroll.min(last).saturating_sub(10)
+                }
+                KeyCode::PageDown => {
+                    self.log_scroll = self.log_scroll.saturating_add(10).min(last)
+                }
                 _ => self.show_log = false,
             }
             return None;
@@ -330,8 +337,12 @@ impl App {
         // hostnames and paths routinely contain 'q'/'l'.
         match self.tab {
             Tab::Local if self.local.status_open() => return self.local.on_key(code),
-            Tab::Local if self.local.services_capturing_text() => return self.local.on_key(code),
-            Tab::Remote if self.remote.capturing_text() => return self.remote.on_key(code),
+            Tab::Local if self.local.services_capturing_text() => {
+                return self.local.on_key(code);
+            }
+            Tab::Remote if self.remote.capturing_text() => {
+                return self.remote.on_key(code);
+            }
             _ => {}
         }
         let action = match code {
@@ -384,16 +395,24 @@ impl App {
     /// / cancel); everything else is a plain yes/no (or runs immediately).
     fn arm_action(&mut self, action: Action) -> Option<Action> {
         match action {
-            Action::Uninstall { config_scope, config_dir, needs_root, remove_ca: false }
-                if config_dir.join("ca").is_dir() =>
-            {
+            Action::Uninstall {
+                config_scope,
+                config_dir,
+                needs_root,
+                remove_ca: false,
+            } if config_dir.join("ca").is_dir() => {
                 let destroy = Action::Uninstall {
                     config_scope,
                     config_dir: config_dir.clone(),
                     needs_root,
                     remove_ca: true,
                 };
-                let keep = Action::Uninstall { config_scope, config_dir, needs_root, remove_ca: false };
+                let keep = Action::Uninstall {
+                    config_scope,
+                    config_dir,
+                    needs_root,
+                    remove_ca: false,
+                };
                 self.confirm = Some((
                     "This install holds the cluster's certificate authority. Also \
                      destroy it? Destroying the CA is irreversible — every enrolled \
@@ -432,15 +451,21 @@ impl App {
             || self.result.is_some()
             || self.progress.is_some()
         {
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+            let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
+                .split(screen);
             self.render_footer(f, chunks[1]);
             if self.show_log {
                 self.render_log(f, screen);
             } else if let Some(m) = &self.modal {
                 m.render(f, screen);
             } else if let Some((msg, action, on_no)) = &self.confirm {
-                render_confirm(f, screen, msg, on_no.is_some(), action.confirm_glyph().as_ref());
+                render_confirm(
+                    f,
+                    screen,
+                    msg,
+                    on_no.is_some(),
+                    action.confirm_glyph().as_ref(),
+                );
             } else if let Some(r) = &self.result {
                 render_result(f, screen, r);
             } else {
@@ -456,8 +481,8 @@ impl App {
             // box would flash between two real dialogs. The one thing worth
             // surfacing here is an out-of-band verification code with no progress
             // modal to carry it.
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+            let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
+                .split(screen);
             if self.verification.is_some() {
                 self.render_activity(f, chunks[0]);
             }
@@ -472,7 +497,8 @@ impl App {
             };
             if let Some(keys) = gutter {
                 let chunks =
-                    Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
+                        .split(screen);
                 match self.tab {
                     Tab::Local => self.local.render(f, chunks[0]),
                     Tab::Remote => self.remote.render(f, chunks[0]),
@@ -499,8 +525,8 @@ impl App {
         } else {
             // Fresh machine: the install flow only — no tabs, no remote admin
             // (there's no local cluster to administer yet).
-            let chunks =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(screen);
+            let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
+                .split(screen);
             self.local.render(f, chunks[0]);
             self.render_footer(f, chunks[1]);
         }
@@ -511,7 +537,10 @@ impl App {
         let tabs = Tabs::new(titles)
             .select(self.tab.index())
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" netidx admin ", theme::title_style())))
+            .block(
+                theme::panel_block()
+                    .title(Span::styled(" netidx admin ", theme::title_style())),
+            )
             .highlight_style(theme::selected_style());
         f.render_widget(tabs, area);
     }
@@ -531,10 +560,14 @@ impl App {
         if self.progress.is_none()
             && let Some((purpose, code)) = &self.verification
         {
-            let accent =
-                Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+            let accent = Style::default()
+                .bg(theme::PANEL_BG)
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD);
             lines.push(Line::from(Span::styled(
-                format!("{purpose} — send a screenshot of this window to the approving admin:"),
+                format!(
+                    "{purpose} — send a screenshot of this window to the approving admin:"
+                ),
                 accent,
             )));
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
@@ -564,7 +597,10 @@ impl App {
         let max_scroll = (self.log.len() as u16).saturating_sub(inner_h);
         let scroll = self.log_scroll.min(max_scroll);
         let body = if self.log.is_empty() {
-            Paragraph::new(Line::from(Span::styled("(nothing logged yet)", theme::hint_style())))
+            Paragraph::new(Line::from(Span::styled(
+                "(nothing logged yet)",
+                theme::hint_style(),
+            )))
         } else {
             Paragraph::new(self.log.clone()).scroll((scroll, 0))
         };
@@ -579,13 +615,20 @@ impl App {
     /// (determinate over a known duration, else an indeterminate marquee).
     fn render_progress(&self, f: &mut Frame, screen: Rect) {
         let Some((progress, started)) = &self.progress else { return };
-        let mut lines: Vec<Line> =
-            vec![Line::from(Span::styled(progress.message.to_string(), theme::panel_style()))];
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            progress.message.to_string(),
+            theme::panel_style(),
+        ))];
         if let Some((purpose, code)) = &self.verification {
-            let accent = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+            let accent = Style::default()
+                .bg(theme::PANEL_BG)
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD);
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{purpose} — send a screenshot of this window to the approving admin:"),
+                format!(
+                    "{purpose} — send a screenshot of this window to the approving admin:"
+                ),
                 accent,
             )));
             lines.push(Line::from(Span::styled(code.text(), theme::title_style())));
@@ -620,14 +663,19 @@ impl App {
         );
         match progress.duration {
             Some(dur) => {
-                let ratio = (started.elapsed().as_secs_f64() / dur.as_secs_f64().max(0.001)).clamp(0.0, 1.0);
+                let ratio = (started.elapsed().as_secs_f64()
+                    / dur.as_secs_f64().max(0.001))
+                .clamp(0.0, 1.0);
                 let gauge = Gauge::default()
                     .gauge_style(Style::default().bg(theme::TROUGH).fg(theme::ACCENT))
                     .ratio(ratio)
                     .label(format!("{}%", (ratio * 100.0) as u16));
                 f.render_widget(gauge, rows[2]);
             }
-            None => f.render_widget(Paragraph::new(widgets::marquee(self.tick, rows[2].width)), rows[2]),
+            None => f.render_widget(
+                Paragraph::new(widgets::marquee(self.tick, rows[2].width)),
+                rows[2],
+            ),
         }
     }
 
@@ -694,7 +742,10 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
     widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
     let title_style = if r.error {
-        Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(theme::PANEL_BG)
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
     } else {
         theme::title_style()
     };
@@ -703,9 +754,15 @@ fn render_result(f: &mut Frame, screen: Rect, r: &ResultView) {
         .border_style(theme::panel_style())
         .style(theme::panel_style())
         .title(Span::styled(format!(" {} ", r.title), title_style))
-        .title_bottom(Line::from(Span::styled(" any key to dismiss ", theme::hint_style())));
+        .title_bottom(Line::from(Span::styled(
+            " any key to dismiss ",
+            theme::hint_style(),
+        )));
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()).block(block),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::panel_style())
+            .block(block),
         area,
     );
 }
@@ -720,8 +777,10 @@ fn render_confirm(
     three_way: bool,
     glyph: Option<&Fingerprint>,
 ) {
-    let mut lines: Vec<Line> =
-        msg.split('\n').map(|l| Line::from(Span::styled(l.to_string(), theme::panel_style()))).collect();
+    let mut lines: Vec<Line> = msg
+        .split('\n')
+        .map(|l| Line::from(Span::styled(l.to_string(), theme::panel_style())))
+        .collect();
     // The approve dialogs carry the request's glyph: show the identicon so the
     // admin matches it against the screenshot, not just the code text.
     if let Some(fp) = glyph {
@@ -732,13 +791,19 @@ fn render_confirm(
     // A three-way prompt (n runs an alternate action) spells its keys out in the
     // body, so only the plain y/n case needs the generic footer.
     if !three_way {
-        lines.push(Line::from(Span::styled(" y confirm · n cancel ", theme::hint_style())));
+        lines.push(Line::from(Span::styled(
+            " y confirm · n cancel ",
+            theme::hint_style(),
+        )));
     }
     let h = (lines.len() as u16 + 2).clamp(8, screen.height);
     let area = widgets::centered(70, h, screen);
     widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
-    let title = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+    let title = Style::default()
+        .bg(theme::PANEL_BG)
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::panel_style())
@@ -747,7 +812,10 @@ fn render_confirm(
     // trim:false — the identicon rows carry leading "off" cells as spaces that
     // must survive; the message lines have no significant leading whitespace.
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()).block(block),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::panel_style())
+            .block(block),
         area,
     );
 }
@@ -755,6 +823,33 @@ fn render_confirm(
 /// The type of a running action's future: self-contained (owns its answerer),
 /// so it needs no borrow of the UI state and is driven directly in the loop.
 type OpFuture = Pin<Box<dyn Future<Output = Result<Outcome>>>>;
+
+/// Probe the terminal independently of crossterm's event-reader thread.
+///
+/// Crossterm 0.29's `EventStream` wake thread retries `poll_internal` without
+/// breaking or backing off when the terminal returns an error. If an SSH/tmux
+/// PTY disappears, that hidden thread can therefore spin on `EIO` forever
+/// while the main UI task remains asleep. A termios query observes the same
+/// hangup but returns the error to our event loop, allowing the process to exit
+/// and drop the event stream.
+#[cfg(unix)]
+fn terminal_fd_connected(fd: impl std::os::fd::AsFd) -> Result<()> {
+    nix::sys::termios::tcgetattr(fd)
+        .map(|_| ())
+        .context("interactive terminal disconnected")
+}
+
+#[cfg(unix)]
+fn terminal_connected() -> Result<()> {
+    terminal_fd_connected(std::io::stdin())
+}
+
+/// Windows has no Unix termios probe; querying the console size still fails
+/// when the console backing the TUI has disappeared.
+#[cfg(not(unix))]
+fn terminal_connected() -> Result<()> {
+    crossterm::terminal::size().map(|_| ()).context("interactive terminal disconnected")
+}
 
 /// Run the async event loop over `terminal` until the user quits.
 ///
@@ -783,6 +878,11 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     // Animation clock — only consulted while a progress modal is up, so it costs
     // nothing when idle.
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    // EventStream can fail to wake us when its PTY disappears. Keep an
+    // independent, low-frequency liveness timer so the orphan exits promptly
+    // instead of leaving crossterm's reader thread spinning on one core.
+    let mut terminal_liveness = tokio::time::interval(Duration::from_secs(1));
+    terminal_liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     while !app.should_quit {
         terminal.draw(|f| app.render(f))?;
         let animating = app.progress.is_some();
@@ -871,6 +971,10 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             } => {
                 app.tick = app.tick.wrapping_add(1);
             }
+            // Always active, including while the UI is otherwise idle. This is
+            // deliberately independent of EventStream: that is the component
+            // whose error loop we are guarding against.
+            _ = terminal_liveness.tick() => terminal_connected()?,
         }
     }
     Ok(())
@@ -905,17 +1009,23 @@ fn launch(
     match action {
         Action::Uninstall { config_scope, config_dir, needs_root, remove_ca } => {
             let out = run_suspended(events, || {
-                privileged::uninstall(terminal, config_scope, config_dir, needs_root, remove_ca)
+                privileged::uninstall(
+                    terminal,
+                    config_scope,
+                    config_dir,
+                    needs_root,
+                    remove_ca,
+                )
             })
-                .map(|msg| Outcome {
-                    title: "Uninstalled".to_string(),
-                    lines: vec![msg],
-                    refresh_local: true,
-                    install_service: None,
-                    remote: None,
-                    services: None,
-                    quiet: false,
-                });
+            .map(|msg| Outcome {
+                title: "Uninstalled".to_string(),
+                lines: vec![msg],
+                refresh_local: true,
+                install_service: None,
+                remote: None,
+                services: None,
+                quiet: false,
+            });
             app.finish_op(out);
         }
         op_action => {
@@ -944,7 +1054,9 @@ fn complete_op(
         app.log_line(Line::from("registering the OS service…"));
         match run_suspended(events, || privileged::install_service(terminal, scope)) {
             Ok(msg) => outcome.lines.push(msg),
-            Err(e) => outcome.lines.push(format!("OS service registration failed: {e:#}")),
+            Err(e) => {
+                outcome.lines.push(format!("OS service registration failed: {e:#}"))
+            }
         }
     }
     Ok(outcome)
@@ -976,6 +1088,18 @@ mod render_tests {
     use netidx_admin::answer::{Field, Progress, Stage};
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::sync::oneshot;
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_probe_detects_a_hung_up_pty() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        terminal_fd_connected(&pty.slave).expect("a live PTY must pass the probe");
+        drop(pty.master);
+        assert!(
+            terminal_fd_connected(&pty.slave).is_err(),
+            "closing the PTY master must be observed as a terminal disconnect"
+        );
+    }
 
     /// Render `app` into a `w`×`h` test terminal and flatten the buffer to text.
     fn render_sized(app: &mut App, w: u16, h: u16) -> String {
@@ -1010,7 +1134,10 @@ mod render_tests {
         app.local.on_key(KeyCode::Enter);
         let s = render(&mut app);
         assert!(s.contains("Install a Role"), "role menu missing: {s:?}");
-        assert!(!s.contains("Cluster"), "tab bar should be hidden on a fresh machine: {s:?}");
+        assert!(
+            !s.contains("Cluster"),
+            "tab bar should be hidden on a fresh machine: {s:?}"
+        );
     }
 
     #[test]
@@ -1022,15 +1149,20 @@ mod render_tests {
             return;
         }
         let s = render_sized(&mut app, 46, 24);
-        assert!(s.contains("Publisher."), "welcome body truncated at narrow width: {s:?}");
+        assert!(
+            s.contains("Publisher."),
+            "welcome body truncated at narrow width: {s:?}"
+        );
     }
 
     #[test]
     fn progress_determinate_shows_percent() {
         let mut app = App::new();
         app.busy = true;
-        app.progress =
-            Some((Progress::timed(Stage::Discovering, "searching…", Duration::from_secs(3)), Instant::now()));
+        app.progress = Some((
+            Progress::timed(Stage::Discovering, "searching…", Duration::from_secs(3)),
+            Instant::now(),
+        ));
         let s = render(&mut app);
         assert!(s.contains("Searching the network"), "stage title missing: {s:?}");
         assert!(s.contains('%'), "no gauge percent label: {s:?}");
@@ -1040,7 +1172,8 @@ mod render_tests {
     fn progress_marquee_does_not_panic() {
         let mut app = App::new();
         app.busy = true;
-        app.progress = Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
+        app.progress =
+            Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
         let s = render(&mut app);
         assert!(s.contains("Waiting for approval"), "stage title missing: {s:?}");
     }
@@ -1054,7 +1187,8 @@ mod render_tests {
         // identicon row that has an "on" cell must survive to the buffer.
         let mut app = App::new();
         app.busy = true;
-        app.progress = Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
+        app.progress =
+            Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
         let fp = Fingerprint::of_der(b"a fake spki for the glyph clip test");
         app.verification = Some(("enrollment request".to_string(), fp));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -1063,8 +1197,12 @@ mod render_tests {
         let rendered = (0..buf.area().height)
             .filter(|&y| (0..buf.area().width).any(|x| buf[(x, y)].symbol() == "█"))
             .count();
-        let expected = fp.identicon_cells().iter().filter(|row| row.iter().any(|&c| c)).count();
-        assert_eq!(rendered, expected, "identicon clipped: {rendered} of {expected} rows rendered");
+        let expected =
+            fp.identicon_cells().iter().filter(|row| row.iter().any(|&c| c)).count();
+        assert_eq!(
+            rendered, expected,
+            "identicon clipped: {rendered} of {expected} rows rendered"
+        );
     }
 
     #[test]
@@ -1078,7 +1216,10 @@ mod render_tests {
             reply: tx,
         });
         let s = render(&mut app);
-        assert!(s.contains("192.168.1.20"), "default not pre-filled into the field: {s:?}");
+        assert!(
+            s.contains("192.168.1.20"),
+            "default not pre-filled into the field: {s:?}"
+        );
     }
 
     #[test]
@@ -1131,7 +1272,8 @@ mod render_tests {
         // install state, but the field's contents don't.
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| app.remote.render(f, f.area())).unwrap();
-        let s: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        let s: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(s.contains("qlab"), "typed hostname not captured by the field: {s:?}");
     }
 
@@ -1166,7 +1308,10 @@ mod render_tests {
         let mut app = App::new();
         app.begin("Installing resolver".to_string());
         let s = render(&mut app);
-        assert!(!s.contains("Installing resolver"), "empty activity dialog flashed: {s:?}");
+        assert!(
+            !s.contains("Installing resolver"),
+            "empty activity dialog flashed: {s:?}"
+        );
         assert!(s.contains("working…"), "busy footer hint missing: {s:?}");
     }
 
@@ -1179,7 +1324,10 @@ mod render_tests {
         let fp = Fingerprint::of_der(b"a fake spki for the test");
         app.verification = Some(("Approve this node".to_string(), fp));
         let s = render(&mut app);
-        assert!(s.contains("send a screenshot of this window"), "verification prompt missing: {s:?}");
+        assert!(
+            s.contains("send a screenshot of this window"),
+            "verification prompt missing: {s:?}"
+        );
     }
 
     #[test]
@@ -1189,8 +1337,14 @@ mod render_tests {
         app.handle_request(UiRequest::Warn("key stored in plaintext".to_string()));
         app.open_log();
         let s = render(&mut app);
-        assert!(s.contains("issuing from the local CA"), "note missing from log pane: {s:?}");
-        assert!(s.contains("warning: key stored"), "warning missing from log pane: {s:?}");
+        assert!(
+            s.contains("issuing from the local CA"),
+            "note missing from log pane: {s:?}"
+        );
+        assert!(
+            s.contains("warning: key stored"),
+            "warning missing from log pane: {s:?}"
+        );
     }
 
     #[test]
@@ -1200,11 +1354,15 @@ mod render_tests {
         // manual-entry rows.
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
-        app.modal = Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx });
+        app.modal =
+            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx });
         let s = render(&mut app);
         assert!(s.contains("No clusters found"), "empty-state header missing: {s:?}");
         assert!(s.contains("Search again for more"), "poll-more row missing: {s:?}");
-        assert!(s.contains("Enter an address manually"), "manual-entry row missing: {s:?}");
+        assert!(
+            s.contains("Enter an address manually"),
+            "manual-entry row missing: {s:?}"
+        );
     }
 
     #[test]
@@ -1213,7 +1371,10 @@ mod render_tests {
         let (tx, _rx) = oneshot::channel();
         app.modal = Modal::from_request(UiRequest::Choice {
             field: Field::ClusterMode,
-            choices: vec!["Create a new cluster".into(), "Connect to an existing cluster".into()],
+            choices: vec![
+                "Create a new cluster".into(),
+                "Connect to an existing cluster".into(),
+            ],
             default: Some("Create a new cluster".into()),
             reply: tx,
         });

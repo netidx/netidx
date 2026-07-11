@@ -165,6 +165,8 @@ pub struct Unlocked {
 /// to, what they may do, and which keyslot tier they hold — but NO CA
 /// key. Every non-signing admin op authorizes against this.
 pub struct Authenticated {
+    pub slot_id: uuid::Uuid,
+    pub credential_revision: u64,
     pub admin: String,
     pub policy: Policy,
     pub kind: SlotKind,
@@ -188,6 +190,10 @@ struct Kdf {
 
 #[derive(Serialize, Deserialize)]
 struct Slot {
+    #[serde(default = "uuid::Uuid::new_v4")]
+    id: uuid::Uuid,
+    #[serde(default)]
+    credential_revision: u64,
     admin: String,
     kdf: Kdf,
     // AES-256-GCM(KEK, secret). For a `Signing` slot the secret is the
@@ -306,6 +312,8 @@ impl CAVault {
             )?;
             if aead_try_open(&kek, &slot.wrap)?.is_some() {
                 return Ok(Authenticated {
+                    slot_id: slot.id,
+                    credential_revision: slot.credential_revision,
                     admin: slot.admin.clone(),
                     policy: slot.policy.clone(),
                     kind: slot.kind,
@@ -450,7 +458,12 @@ impl CAVault {
         Ok(vault
             .slots
             .into_iter()
-            .map(|s| AdminInfo { admin: s.admin, kind: s.kind, policy: s.policy })
+            .map(|s| AdminInfo {
+                slot_id: s.id,
+                admin: s.admin,
+                kind: s.kind,
+                policy: s.policy,
+            })
             .collect())
     }
 
@@ -477,6 +490,29 @@ impl CAVault {
             .find(|s| s.admin == admin)
             .map(|s| (s.kind, s.policy.clone()))
             .ok_or_else(|| anyhow!("no admin named {admin:?}"))
+    }
+
+    pub fn resolve_session_slot(
+        &self,
+        slot_id: uuid::Uuid,
+        credential_revision: u64,
+    ) -> Result<Authenticated> {
+        let vault = read_vault(&self.vault_path())?;
+        let slot = vault
+            .slots
+            .iter()
+            .find(|s| s.id == slot_id)
+            .ok_or_else(|| anyhow!("the administrator slot no longer exists"))?;
+        if slot.credential_revision != credential_revision {
+            bail!("the administrator password was rotated");
+        }
+        Ok(Authenticated {
+            slot_id: slot.id,
+            credential_revision: slot.credential_revision,
+            admin: slot.admin.clone(),
+            policy: slot.policy.clone(),
+            kind: slot.kind,
+        })
     }
 
     /// Re-wrap a **signing** slot's master key under a fresh password, in
@@ -508,8 +544,13 @@ impl CAVault {
             );
         }
         let policy = vault.slots[idx].policy.clone();
-        vault.slots[idx] =
+        let old_id = vault.slots[idx].id;
+        let revision = vault.slots[idx].credential_revision.saturating_add(1);
+        let mut replacement =
             make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
+        replacement.id = old_id;
+        replacement.credential_revision = revision;
+        vault.slots[idx] = replacement;
         write_vault(&path, &vault)
     }
 }
@@ -564,6 +605,8 @@ fn make_slot(
     let kek = derive_kek(password.as_bytes(), &salt, m, t, p)?;
     let wrap = aead_seal(&kek, secret)?;
     Ok(Slot {
+        id: uuid::Uuid::new_v4(),
+        credential_revision: 0,
         admin: admin.to_string(),
         kdf: Kdf {
             kind: "argon2id".to_string(),
@@ -657,7 +700,8 @@ mod tests {
             allowed_san: vec![san.to_string()],
             max_validity: std::time::Duration::from_secs(365 * 86400),
             id_map_groups: vec!["users".to_string()],
-            may_enroll_servers: false,
+            server_enroll_scopes: vec![],
+            server_enroll_roles: vec![],
             perms_edit_scopes: vec![],
             may_manage_admins: false,
             service_control_scopes: vec![],
@@ -670,7 +714,8 @@ mod tests {
             allowed_san: vec![],
             max_validity: std::time::Duration::from_secs(0 * 86400),
             id_map_groups: vec![],
-            may_enroll_servers: false,
+            server_enroll_scopes: vec![],
+            server_enroll_roles: vec![],
             perms_edit_scopes: vec![scope.to_string()],
             may_manage_admins: false,
             service_control_scopes: vec![],

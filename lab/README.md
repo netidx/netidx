@@ -58,9 +58,9 @@ default gw from DHCP (router .60.2/.70.2).
 VMs are throwaway (snapshot/discard). Per-host reset over SSH (root key-auth):
 
 ```sh
-ssh -n root@<ip> 'bash -s' < scripts/teardown2.sh   # thorough: units, procs,
+ssh root@<ip> 'bash -s' < scripts/teardown2.sh      # thorough: units, procs,
                                                      # ~/.config + ~/.local/share + /etc units
-ssh -n root@<ip> 'bash -s' < scripts/teardown.sh     # lighter: only ~/.config/netidx
+ssh root@<ip> 'bash -s' < scripts/teardown.sh        # lighter: only ~/.config/netidx
 ```
 
 Use `teardown2.sh` for a truly pristine box. The KDC on .11 (realm

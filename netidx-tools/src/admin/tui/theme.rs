@@ -84,7 +84,10 @@ pub(super) fn dialog_block(title: &str) -> Block<'static> {
 
 /// A bordered panel with no title accent — for status cards and tab bodies.
 pub(super) fn panel_block() -> Block<'static> {
-    Block::default().borders(Borders::ALL).border_style(panel_style()).style(panel_style())
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(panel_style())
+        .style(panel_style())
 }
 
 /// A Debian-style `<Label>` button span; the focused one is drawn in the accent.

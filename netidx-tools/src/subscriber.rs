@@ -201,6 +201,10 @@ struct Ctx {
     subscribe_timeout: Option<Duration>,
 }
 
+fn completes_oneshot(event: &Event) -> bool {
+    matches!(event, Event::Update(_))
+}
+
 impl Ctx {
     fn new(subscriber: Subscriber, p: Params) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
@@ -380,9 +384,16 @@ impl Ctx {
                         if self.subscribe_timeout.is_some() {
                             self.subscribe_ts.remove(path);
                         }
+                        // Resolver referral changes can transiently deliver an
+                        // Unsubscribed event before the subscription reconnects
+                        // at another hierarchy level. `--oneshot` promises one
+                        // value, so only an actual update completes it; treating
+                        // Unsubscribed as success exits silently before the
+                        // redirected value arrives.
+                        let received_value = completes_oneshot(&value);
                         Out { raw: self.raw, path: &**path, value }
                             .write(&mut self.to_stdout)?;
-                        if self.oneshot {
+                        if self.oneshot && received_value {
                             if let Some(path) = self.paths.get(&id).cloned() {
                                 self.remove_subscription(&path);
                             }
@@ -395,6 +406,17 @@ impl Ctx {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oneshot_waits_through_referral_unsubscribe_for_a_value() {
+        assert!(!completes_oneshot(&Event::Unsubscribed));
+        assert!(completes_oneshot(&Event::Update(Value::Bool(true))));
     }
 }
 

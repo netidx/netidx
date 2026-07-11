@@ -10,7 +10,9 @@
 //! masquerade as a cluster you trusted elsewhere.
 
 use futures::future::join_all;
-use netidx_admin::{admin_client::fetch_identity, admin_proto::NodeKind, fingerprint::Fingerprint, paths};
+use netidx_admin::{
+    admin_client::fetch_identity, admin_proto::NodeKind, fingerprint::Fingerprint, paths,
+};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -69,8 +71,10 @@ impl KnownClusters {
                 .with_context(|| format!("creating {}", dir.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        let body = serde_json::to_vec_pretty(self).context("serializing known clusters")?;
-        std::fs::write(&tmp, &body).with_context(|| format!("writing {}", tmp.display()))?;
+        let body =
+            serde_json::to_vec_pretty(self).context("serializing known clusters")?;
+        std::fs::write(&tmp, &body)
+            .with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming into {}", path.display()))?;
         Ok(())
@@ -79,7 +83,12 @@ impl KnownClusters {
     /// Record a confirmed cluster: merge `addr` into the entry with a matching
     /// fingerprint (one cluster = one CA identity, possibly several members), or
     /// append a new entry. Returns whether anything changed (worth saving).
-    pub(super) fn upsert(&mut self, domain: &str, addr: SocketAddr, fp: Fingerprint) -> bool {
+    pub(super) fn upsert(
+        &mut self,
+        domain: &str,
+        addr: SocketAddr,
+        fp: Fingerprint,
+    ) -> bool {
         let fp_text = fp.text();
         match self.clusters.iter_mut().find(|c| c.fingerprint == fp_text) {
             Some(c) => {
@@ -121,7 +130,8 @@ pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
     // host enrolled against, recorded at join (a workstation / publisher runs no
     // admin server of its own). Either reaches the same CA; the on-entry poll
     // verifies the fingerprint live.
-    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen().or(recorded) else {
+    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen().or(recorded)
+    else {
         return false;
     };
     clusters.upsert(&domain, addr, fp)
@@ -186,8 +196,11 @@ pub(super) async fn poll_clusters(
         let want = cluster.fp();
         let mut state = PollState::Absent;
         for addr in &cluster.addrs {
-            let fetched =
-                tokio::time::timeout(POLL_TIMEOUT, fetch_identity(*addr, NodeKind::Client)).await;
+            let fetched = tokio::time::timeout(
+                POLL_TIMEOUT,
+                fetch_identity(*addr, NodeKind::Client),
+            )
+            .await;
             if let Ok(Ok(id)) = fetched
                 && want == Some(id.fingerprint)
             {

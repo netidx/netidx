@@ -14,16 +14,15 @@
 //! the in-sync / idempotent result.
 
 use crate::{
-    client::ClientConfig,
     admin_client::NetworkInfo,
     admin_proto::{InfoAuth, NetworkMap, ResolverAddr},
+    client::ClientConfig,
     resolver::ResolverConfig,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::resolver_server::config::file as rfile;
 use std::{
-    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -215,18 +214,11 @@ pub struct ClusterView {
 /// The distinct resolver clusters in `map`, grouped by base path. A
 /// cluster's members each report the same roster; union them by address.
 pub fn clusters(map: &NetworkMap) -> Vec<ClusterView> {
-    let mut by_base: BTreeMap<String, Vec<ResolverAddr>> = BTreeMap::new();
-    for s in &map.servers {
-        if let Some(c) = &s.cluster {
-            let members = by_base.entry(c.base.clone()).or_default();
-            for m in &c.members {
-                if !members.iter().any(|x| x.addr == m.addr) {
-                    members.push(m.clone());
-                }
-            }
-        }
-    }
-    by_base.into_iter().map(|(base, members)| ClusterView { base, members }).collect()
+    map.clusters
+        .iter()
+        .filter(|c| c.state == crate::admin_proto::ClusterState::Active)
+        .map(|c| ClusterView { base: c.base.clone(), members: c.members.clone() })
+        .collect()
 }
 
 /// The cluster whose members overlap `addrs` — the config's "one level".
@@ -391,7 +383,9 @@ pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admin_proto::{ClusterFacts, ResolverAddr, Role, ServerEntry};
+    use crate::admin_proto::{
+        AdminServerId, ClusterEntry, ClusterState, ResolverAddr, ResolverClusterId,
+    };
     use std::net::SocketAddr;
 
     fn addr(s: &str) -> SocketAddr {
@@ -432,7 +426,15 @@ mod tests {
     }
 
     fn net(resolvers: Vec<ResolverAddr>) -> NetworkInfo {
-        NetworkInfo { domain: "local".into(), ca_addr: None, resolvers, reached: vec![] }
+        NetworkInfo {
+            domain: "local".into(),
+            ca_addr: None,
+            resolvers,
+            resolver_base: Some("/".into()),
+            resolver_parent: None,
+            resolver_children: vec![],
+            reached: vec![],
+        }
     }
 
     #[test]
@@ -514,27 +516,30 @@ mod tests {
 
     // ---- map-driven reconcile (Phase B) ----
 
-    fn srv(addr: &str, base: &str, members: &[&str]) -> ServerEntry {
-        ServerEntry {
-            addr: addr.parse().unwrap(),
-            roles: vec![Role::Resolver],
-            cluster: Some(ClusterFacts {
-                members: members
-                    .iter()
-                    .map(|m| ResolverAddr {
-                        addr: m.parse().unwrap(),
-                        auth: InfoAuth::Anonymous,
-                    })
-                    .collect(),
-                base: base.to_string(),
-                parent: None,
-                children: vec![],
-            }),
+    fn srv(_addr: &str, base: &str, members: &[&str]) -> ClusterEntry {
+        ClusterEntry {
+            id: ResolverClusterId::new(),
+            base: base.to_string(),
+            state: ClusterState::Active,
+            members: members
+                .iter()
+                .map(|m| ResolverAddr {
+                    addr: m.parse().unwrap(),
+                    auth: InfoAuth::Anonymous,
+                })
+                .collect(),
+            parent: None,
+            children: vec![],
         }
     }
 
-    fn map_of(servers: Vec<ServerEntry>) -> NetworkMap {
-        NetworkMap { version: 1, ca_addr: None, servers }
+    fn map_of(clusters: Vec<ClusterEntry>) -> NetworkMap {
+        NetworkMap {
+            version: 1,
+            controller: AdminServerId::new(),
+            servers: vec![],
+            clusters,
+        }
     }
 
     fn write_client(dir: &Path, addrs: &[&str]) -> PathBuf {
@@ -556,7 +561,6 @@ mod tests {
     fn match_cluster_picks_the_one_level() {
         let m = map_of(vec![
             srv("10.0.0.11:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"]),
-            srv("10.0.0.12:4565", "/", &["10.0.0.11:4564", "10.0.0.12:4564"]),
             srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"]),
         ]);
         let cls = clusters(&m);

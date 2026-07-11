@@ -33,6 +33,15 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
 }
 
+fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, String> {
+    match value.to_ascii_lowercase().replace('_', "-").as_str() {
+        "resolver" => Ok(admin_proto::Role::Resolver),
+        "id-map" | "idmap" => Ok(admin_proto::Role::IdMap),
+        "ca" => Err("the Ca role cannot be granted to an enrollee".to_string()),
+        _ => Err("expected resolver or id-map".to_string()),
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// create a new local CA (keyslot vault; can serve via `admin server`)
@@ -280,10 +289,10 @@ pub(crate) struct AdminScopeArgs {
     auth: RemoteAuthFlags,
 }
 
-/// The policy knobs shared by `ca admin add-role` and `set-policy`. Booleans are
-/// `Option`: supplied → used; omitted → the answerer decides (required in
-/// non-interactive mode). Empty `--allow-san` / `--id-map-group` take the
-/// per-domain defaults.
+/// The policy knobs shared by `ca admin add-role` and `set-policy`.
+/// `may_manage_admins` is an `Option`: supplied → used; omitted → the answerer
+/// decides. Empty SAN/id-map inputs take per-domain defaults; enrollment scope
+/// and role grants remain empty unless explicitly supplied.
 #[derive(Args, Debug)]
 pub(crate) struct PolicyFlags {
     /// SAN glob this admin may issue (repeatable). Defaults to `*.<domain>`.
@@ -296,10 +305,12 @@ pub(crate) struct PolicyFlags {
     /// primary; an explicit empty string disables registration).
     #[arg(long = "id-map-group", num_args = 1)]
     id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new admin servers (required
-    /// non-interactively).
-    #[arg(long)]
-    may_enroll_servers: Option<bool>,
+    /// Cluster base under which this admin may enroll servers (repeatable).
+    #[arg(long = "server-enroll-scope", num_args = 1)]
+    server_enroll_scopes: Vec<String>,
+    /// Server role this admin may grant (repeatable: resolver or id-map).
+    #[arg(long = "server-enroll-role", num_args = 1, value_parser = parse_server_role)]
+    server_enroll_roles: Vec<admin_proto::Role>,
     /// Whether this admin may manage the roster — add / rescope / remove admins
     /// (required non-interactively). The CA still enforces no-escalation.
     #[arg(long)]
@@ -318,7 +329,8 @@ impl PolicyFlags {
             allow_san: &self.allow_san,
             max_validity: self.max_validity,
             id_map_groups: &self.id_map_groups,
-            may_enroll_servers: self.may_enroll_servers,
+            server_enroll_scopes: &self.server_enroll_scopes,
+            server_enroll_roles: &self.server_enroll_roles,
             may_manage_admins: self.may_manage_admins,
             perms_scope: &self.perms_scope,
             service_scope: &self.service_scope,
@@ -342,10 +354,6 @@ pub(crate) struct AdminAddArgs {
     /// string disables registration.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether this admin may enroll new admin servers. Prompted when
-    /// omitted (default no for added admins).
-    #[arg(long)]
-    pub may_enroll_servers: Option<bool>,
     /// Netidx path this (signing) admin may also edit perms under
     /// (repeatable, e.g. /eu). Empty unless granted. For a perms-only
     /// admin use `admin add-role` instead.
@@ -488,10 +496,14 @@ pub(crate) struct InitParams {
     /// (repeatable; first is primary). Prompted when omitted.
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
-    /// Whether the superuser may enroll new admin servers. Prompted
-    /// when omitted (default yes for the founding admin).
-    #[arg(long)]
-    pub may_enroll_servers: Option<bool>,
+    /// Cluster base under which the superuser may enroll servers (repeatable).
+    /// Defaults to `/` for the founding admin.
+    #[arg(long = "server-enroll-scope", num_args = 1)]
+    pub server_enroll_scopes: Vec<String>,
+    /// Server role the superuser may grant (repeatable: resolver or id-map).
+    /// Defaults to both roles for the founding admin.
+    #[arg(long = "server-enroll-role", num_args = 1, value_parser = parse_server_role)]
+    pub server_enroll_roles: Vec<admin_proto::Role>,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// DANGER: the autorenew credential is then written in PLAINTEXT, so
     /// every backup or disk image of this machine is a CA compromise. Test
@@ -1177,7 +1189,8 @@ fn init(p: InitParams) -> Result<()> {
         allowed_san: p.allow_san,
         max_validity: p.max_validity,
         id_map_groups: p.id_map_groups,
-        may_enroll_servers: p.may_enroll_servers,
+        server_enroll_scopes: p.server_enroll_scopes,
+        server_enroll_roles: p.server_enroll_roles,
         insecure_no_tpm: p.insecure_no_tpm,
         setup_server,
         listen: p.listen,
@@ -1236,13 +1249,15 @@ fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
         let pol = &info.policy;
         println!(
             "{} [{tier}]: allowed_san={:?} max_validity={} id_map_groups={:?} \
-             may_enroll_servers={} may_manage_admins={} perms_edit_scopes={:?} \
+             server_enroll_scopes={:?} server_enroll_roles={:?} \
+             may_manage_admins={} perms_edit_scopes={:?} \
              service_control_scopes={:?}",
             info.admin,
             pol.allowed_san,
             humantime::format_duration(pol.max_validity),
             pol.id_map_groups,
-            pol.may_enroll_servers,
+            pol.server_enroll_scopes,
+            pol.server_enroll_roles,
             pol.may_manage_admins,
             pol.perms_edit_scopes,
             pol.service_control_scopes
@@ -1783,6 +1798,25 @@ fn queue(f: QueueArgs) -> Result<()> {
                 fmt_age(e.age_secs),
                 e.peer,
             );
+            if let Some(listen) = e.enroll_listen {
+                println!("    listen {listen}");
+                println!("    roles {:?}", e.requested_roles);
+                match &e.cluster {
+                    Some(admin_proto::ClusterPlacement::Create { .. }) => println!(
+                        "    cluster create at {}",
+                        e.cluster_base.as_deref().unwrap_or("(unknown base)")
+                    ),
+                    Some(admin_proto::ClusterPlacement::Join { cluster }) => println!(
+                        "    cluster {cluster} at {}",
+                        e.cluster_base.as_deref().unwrap_or("(unknown base)")
+                    ),
+                    None => println!("    cluster (missing)"),
+                }
+                println!("    resolver members:");
+                for member in &e.resolver_members {
+                    println!("      {}  {:?}", member.addr, member.auth);
+                }
+            }
             match e.code {
                 Some(code) => println!("    code {}", code.text()),
                 None => println!("    (unparseable CSR — can only be denied)"),
@@ -1838,8 +1872,8 @@ fn approve(f: ApproveArgs) -> Result<()> {
     ))?;
     match out.enroll_listen {
         Some(listen) => println!(
-            "approved CONF-SERVER ENROLLMENT — {listen} is now a registered \
-             admin-server peer."
+            "approved CONF-SERVER ENROLLMENT — issued the grant for {listen}; \
+             it becomes a registered routing target when that daemon starts."
         ),
         None if out.id_map_groups.is_empty() => println!(
             "approved and signed {:?} (no id-map registration).",
@@ -2261,7 +2295,11 @@ mod tests {
                     allowed_san: vec!["*.example.com".into()],
                     max_validity: Duration::from_secs(730 * 86400),
                     id_map_groups: vec!["users".into()],
-                    may_enroll_servers: Some(true),
+                    server_enroll_scopes: vec!["/".into()],
+                    server_enroll_roles: vec![
+                        admin_proto::Role::Resolver,
+                        admin_proto::Role::IdMap,
+                    ],
                     insecure_no_tpm: true,
                     setup_server: Some(false),
                     listen: None,
@@ -2301,7 +2339,6 @@ mod tests {
             allow_san: vec![],
             max_validity: Duration::from_secs(730 * 86400),
             id_map_groups: vec![],
-            may_enroll_servers: None,
             perms_scope: vec![],
             ca_dir: Some("/nonexistent".into()),
         }));

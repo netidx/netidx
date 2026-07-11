@@ -9,12 +9,12 @@
 //! strict CLI, the TUI, and Atlas drive the identical flow.
 
 use super::{
-    DEFAULT_RESOLVER_NAME, DEFAULT_TLS_DOMAIN, InstallCommon, detect_resolver_shape,
-    finish_with, install_renew_unit, network_provenance, prompt_ip_or_addr,
+    DEFAULT_RESOLVER_NAME, InstallCommon, detect_resolver_shape, finish_with,
+    install_renew_unit, network_provenance, prompt_ip_or_addr,
     prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
 };
 use crate::{
-    admin_proto::{InfoAuth, NodeKind, Role},
+    admin_proto::{ClusterEdge, InfoAuth, NodeKind},
     answer::{Answerer, Field},
     paths,
     plan::{
@@ -24,7 +24,7 @@ use crate::{
     },
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     service::ServiceScope,
-    template::{self, AuthChoice, ParentRef, resolver::IdMapMode},
+    template::{self, AuthChoice, ParentRef, ReferralAuth, resolver::IdMapMode},
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
@@ -37,9 +37,11 @@ use std::{
 // The unix-only tail: minting / opening a CA, standing up an admin server, and
 // delegating under a WAN parent all depend on unix-only modules.
 #[cfg(unix)]
+use super::DEFAULT_TLS_DOMAIN;
+#[cfg(unix)]
 use crate::{
     admin_client,
-    admin_proto::ResolverAddr,
+    admin_proto::{ResolverAddr, Role},
     admin_server_config::{AdminServerConfig, IdMapRole, ResolverRole, Roles},
     answer::{Progress, Stage},
     atomic,
@@ -132,8 +134,9 @@ pub async fn run_resolver(
 ) -> Result<Option<ServiceScope>> {
     // Ask the network before asking the human: a second (or third…)
     // resolver discovers the existing network and imports its settings
-    // — auth scheme, domain, where the CA is. Peer resolvers stay
-    // mutually unaware; only installers aggregate the full picture.
+    // — auth scheme, domain, where the CA is, and which one cluster it belongs
+    // to. Resolver member blocks are local launch choices, not peer links, so
+    // a joining replica can keep a one-member local config.
     // The probe outcome rides through the whole install: once the
     // operator has said "no admin server", nothing downstream offers a
     // network join again.
@@ -155,6 +158,12 @@ pub async fn run_resolver(
     } else {
         AdminServers::NotProbed
     };
+    if input.parent_admin_server.is_none()
+        && input.base == "/"
+        && let Some(base) = probe.have().and_then(|net| net.info.resolver_base.as_ref())
+    {
+        input.base = base.clone();
+    }
     // Interactive delegation offer: if we joined an EXISTING network that runs a
     // resolver, offer to become a delegated SUBTREE of it (its own /path,
     // referred up to the parent) instead of a plain peer member of the root
@@ -404,13 +413,15 @@ pub async fn run_resolver(
     // binding to a private NIC (cloud-elastic), the local client's publisher
     // must advertise the public IP but bind the private subnet. Only kicks in
     // when shape was actually detected.
-    let local_client_bind = shape.as_ref().and_then(|s| s.elastic_local_client_bind.clone());
+    let local_client_bind =
+        shape.as_ref().and_then(|s| s.elastic_local_client_bind.clone());
     let perms_seed = match &input.perms_seed {
         Some(p) => Some(crate::perms::load_perms(p)?),
         None => None,
     };
     let id_map =
-        resolve_id_map_choice(ans, &auth, input.no_id_map, input.id_map_mode.clone()).await?;
+        resolve_id_map_choice(ans, &auth, input.no_id_map, input.id_map_mode.clone())
+            .await?;
     let no_admin_server = input.no_admin_server;
     let with_admin_server = input.with_admin_server;
     // The admin-server step after apply() needs the *actual* config paths this
@@ -444,11 +455,15 @@ pub async fn run_resolver(
         network,
         admin_server,
     );
-    // Install-time child: delegate this resolver under a WAN parent (the same
-    // ceremony as `add-parent`, run inline) and bake the resulting parent
-    // referral into the config the install writes — no restart needed.
-    // Distinct from the peer-join discovery path above.
-    let parent = match input.parent_admin_server {
+    // Install-time child: collect the delegation request now, but do not send it
+    // until after apply() has written the resolver config and the post-apply
+    // step has enrolled this host's admin server. The CA owns cluster identity,
+    // so delegation must reference that already-enrolled pending cluster; the
+    // previous order sent the request first and was correctly rejected by the
+    // controller because no child cluster existed yet.
+    #[cfg(unix)]
+    let mut install_delegation = None;
+    let mut parent = match input.parent_admin_server {
         None => input.explicit_parent.take(),
         Some(parent_conf) => {
             #[cfg(unix)]
@@ -484,22 +499,13 @@ pub async fn run_resolver(
                 // The probe already glyph-confirmed this parent (it had to,
                 // to enroll our cert from its CA), so pass that identity in —
                 // the operator confirms the parent's glyph exactly once.
-                let parent_addrs = delegation::delegate_under_parent(
-                    ans,
+                install_delegation = Some((
                     parent_conf,
-                    &subtree,
+                    subtree,
                     child,
-                    probe.have().map(|n| &n.identity),
-                )
-                .await?;
-                Some(ParentRef {
-                    path: ArcStr::from(subtree.as_str()),
-                    ttl: None,
-                    addrs: parent_addrs
-                        .into_iter()
-                        .map(|r| (r.addr, delegation::info_to_referral_auth(&r.auth)))
-                        .collect(),
-                })
+                    probe.have().map(|n| n.identity.clone()),
+                ));
+                None
             }
             #[cfg(not(unix))]
             {
@@ -507,6 +513,17 @@ pub async fn run_resolver(
                 bail!("delegation (--parent-admin-server) is unix-only")
             }
         }
+    };
+    if parent.is_none()
+        && input.parent_admin_server.is_none()
+        && let Some(edge) = probe.have().and_then(|net| net.info.resolver_parent.as_ref())
+    {
+        parent = Some(edge_to_parent_ref(edge));
+    }
+    let joining_children = if input.parent_admin_server.is_none() {
+        probe.have().map(|net| net.info.resolver_children.clone()).unwrap_or_default()
+    } else {
+        Vec::new()
     };
     let params = template::resolver::ResolverParams {
         auth,
@@ -527,7 +544,22 @@ pub async fn run_resolver(
         client_config_path: input.client_config_path,
         local_client_bind,
     };
-    let rt = template::resolver(&params)?;
+    // A delegated resolver's runtime base is encoded by its parent referral,
+    // which is deliberately written only after the CA approves delegation.
+    // Preserve the requested base separately so the preceding server-enrollment
+    // grant creates the pending cluster at that intended path rather than
+    // misreading the temporarily parentless config as the root cluster.
+    #[cfg(unix)]
+    let resolver_base = params.base.to_string();
+    let mut rt = template::resolver(&params)?;
+    if !joining_children.is_empty() {
+        let (_, resolver) = rt
+            .resolver_config
+            .as_mut()
+            .context("the resolver install did not render a resolver config")?;
+        resolver.as_file_mut().children =
+            joining_children.into_iter().map(edge_into_file).collect();
+    }
     // A standalone resolver is a network-facing daemon — system-scope is what
     // makes it boot-triggered and visible to the OS.
     finish_with(
@@ -544,18 +576,49 @@ pub async fn run_resolver(
         // serving cert).
         async move |ans| {
             #[cfg(unix)]
-            post_apply_admin_server(
+            let admin_server_ready = post_apply_admin_server(
                 ans,
                 probe.have(),
                 kind,
                 no_admin_server,
                 with_admin_server,
                 listen,
+                resolver_base,
                 post_apply_units_dir.as_deref(),
-                resolver_config_actual,
+                resolver_config_actual.clone(),
                 id_map_actual,
             )
             .await?;
+            #[cfg(unix)]
+            if let Some((parent_conf, subtree, child, confirmed)) = install_delegation {
+                if !admin_server_ready {
+                    bail!(
+                        "the child admin server was not enrolled, so its pending \
+                         CA-owned cluster cannot be delegated"
+                    );
+                }
+                let parent_addrs = delegation::delegate_under_parent(
+                    ans,
+                    parent_conf,
+                    &subtree,
+                    child,
+                    None,
+                    confirmed.as_ref(),
+                )
+                .await?;
+                let parent_ref = ParentRef {
+                    path: ArcStr::from(subtree.as_str()),
+                    ttl: None,
+                    addrs: parent_addrs
+                        .into_iter()
+                        .map(|r| (r.addr, delegation::info_to_referral_auth(&r.auth)))
+                        .collect(),
+                };
+                let update =
+                    template::set_parent_referral(&resolver_config_actual, parent_ref)?;
+                ans.note(&update.describe());
+                update.apply().context("writing the approved parent referral")?;
+            }
             #[cfg(not(unix))]
             {
                 let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
@@ -958,6 +1021,46 @@ fn network_auth_kind(net: &DiscoveredNetwork) -> Option<AuthKind> {
     })
 }
 
+fn info_to_template_referral(auth: &InfoAuth) -> ReferralAuth {
+    match auth {
+        InfoAuth::Anonymous => ReferralAuth::Anonymous,
+        InfoAuth::Krb5 { spn } => ReferralAuth::Krb5(ArcStr::from(spn.as_str())),
+        InfoAuth::Tls { name } => ReferralAuth::Tls(ArcStr::from(name.as_str())),
+    }
+}
+
+fn edge_to_parent_ref(edge: &ClusterEdge) -> ParentRef {
+    ParentRef {
+        path: ArcStr::from(edge.path.as_str()),
+        ttl: None,
+        addrs: edge
+            .addrs
+            .iter()
+            .map(|resolver| (resolver.addr, info_to_template_referral(&resolver.auth)))
+            .collect(),
+    }
+}
+
+fn edge_into_file(edge: ClusterEdge) -> netidx::resolver_server::config::file::Referral {
+    use netidx::resolver_server::config::file::{RefAuth, Referral};
+    Referral {
+        path: ArcStr::from(edge.path),
+        ttl: None,
+        addrs: edge
+            .addrs
+            .into_iter()
+            .map(|resolver| {
+                let auth = match resolver.auth {
+                    InfoAuth::Anonymous => RefAuth::Anonymous,
+                    InfoAuth::Krb5 { spn } => RefAuth::Krb5(ArcStr::from(spn)),
+                    InfoAuth::Tls { name } => RefAuth::Tls(ArcStr::from(name)),
+                };
+                (resolver.addr, auth)
+            })
+            .collect(),
+    }
+}
+
 /// Resolve this resolver's own auth by importing from a confirmed network: TLS
 /// ⇒ request our resolver cert from the network's CA (suggested
 /// `resolver.<domain>`, identity already glyph-confirmed); krb5 ⇒ prompt for
@@ -1053,10 +1156,11 @@ async fn post_apply_admin_server(
     no_admin_server: bool,
     with_admin_server: bool,
     resolver_listen: SocketAddr,
+    resolver_base: String,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     match discovered {
         // A "discovered" network whose CA this host already holds is our OWN
         // network: it already serves the admin plane with the `ca` role, so it
@@ -1068,8 +1172,11 @@ async fn post_apply_admin_server(
                 // Honor an explicit `--no-admin-server` (and Local auth) — don't
                 // advertise this resolver — even though the admin server itself
                 // keeps running here (it's the CA).
-                AdminPlane::Skip => Ok(()),
-                _ => merge_resolver_roles(ans, resolver_config, id_map),
+                AdminPlane::Skip => Ok(false),
+                _ => {
+                    merge_resolver_roles(ans, resolver_config, id_map)?;
+                    Ok(paths::discover_admin_server_config().is_ok())
+                }
             }
         }
         Some(net) => {
@@ -1080,13 +1187,17 @@ async fn post_apply_admin_server(
                 no_admin_server,
                 with_admin_server,
                 resolver_listen,
+                resolver_base,
                 units_dir,
                 resolver_config,
                 id_map,
             )
             .await
         }
-        None => merge_resolver_roles(ans, resolver_config, id_map),
+        None => {
+            merge_resolver_roles(ans, resolver_config, id_map)?;
+            Ok(paths::discover_admin_server_config().is_ok())
+        }
     }
 }
 
@@ -1148,20 +1259,21 @@ async fn enroll_admin_server(
     no_admin_server: bool,
     with_admin_server: bool,
     resolver_listen: SocketAddr,
+    resolver_base: String,
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
             "note: cluster {:?} reported no CA; skipping admin-server setup on this \
              host",
             net.identity.domain,
         ));
-        return Ok(());
+        return Ok(false);
     };
     match admin_plane_decision(kind, no_admin_server) {
-        AdminPlane::Skip => return Ok(()),
+        AdminPlane::Skip => return Ok(false),
         AdminPlane::Mandatory => ans.note(
             "enrolling a admin server on this host — it advertises this resolver to \
              future installs and renews its certificates. (expert opt-out: \
@@ -1177,7 +1289,7 @@ async fn enroll_admin_server(
                      server, so future installs won't learn about this resolver \
                      from this host",
                 );
-                return Ok(());
+                return Ok(false);
             }
         }
     }
@@ -1204,6 +1316,48 @@ async fn enroll_admin_server(
         .context("invalid admin server listen port")?
         .unwrap_or(crate::admin_proto::DEFAULT_PORT);
     let listen = SocketAddr::new(ip, port);
+    let resolver = crate::resolver::ResolverConfig::load(&resolver_config)?;
+    let resolver_members = resolver.resolver_addrs();
+    let resolver_member = resolver_members
+        .iter()
+        .find(|member| member.addr == resolver_listen)
+        .cloned()
+        .context("the local resolver listen address is absent from resolver members")?;
+    let roles = if id_map.is_some() {
+        vec![Role::Resolver, Role::IdMap]
+    } else {
+        vec![Role::Resolver]
+    };
+    let map = admin_client::get_map_pinned(ca_addr, NodeKind::AdminServer, &net.identity)
+        .await
+        .context("fetching the authoritative map for enrollment")?;
+    let base = resolver_base;
+    let cluster = map
+        .clusters
+        .iter()
+        .find(|c| c.base == base)
+        .map(|c| crate::admin_proto::ClusterPlacement::Join { cluster: c.id })
+        .unwrap_or(crate::admin_proto::ClusterPlacement::Create { base: base.clone() });
+    let enrollment = crate::admin_proto::EnrollmentRequest {
+        listen,
+        roles: roles.clone(),
+        resolver_member: Some(resolver_member.clone()),
+        resolver_members: resolver_members.clone(),
+        cluster: cluster.clone(),
+    };
+    let cluster_description = match &cluster {
+        crate::admin_proto::ClusterPlacement::Create { base } => {
+            format!("create pending cluster at {base}")
+        }
+        crate::admin_proto::ClusterPlacement::Join { cluster } => {
+            format!("join cluster {cluster} at {base}")
+        }
+    };
+    ans.note(&format!(
+        "admin-server enrollment request:\n  listen: {listen}\n  roles: {:?}\n  \
+         cluster: {cluster_description}\n  resolver members: {:?}",
+        roles, resolver_members
+    ));
     // A non-interactive install has no admin standing by to type a password, so
     // it always takes the queued (remote-approval) path — mirroring the cert
     // enrollment in `enroll.rs`. Without this gate a strict install that stands
@@ -1218,10 +1372,21 @@ async fn enroll_admin_server(
             .context("a CA admin name is required")?;
         let mut secret = ans.secret(Field::AdminPassword, None).await?;
         let password = Zeroizing::new(std::mem::take(&mut secret.0));
-        admin_client::enroll(ca_addr, &admin, password, listen, &net.identity).await?
+        admin_client::enroll(
+            ca_addr,
+            &admin,
+            password,
+            listen,
+            roles,
+            resolver_member,
+            resolver_members,
+            cluster,
+            &net.identity,
+        )
+        .await?
     } else {
         let pending =
-            admin_client::enqueue_enroll(ca_addr, listen, &net.identity).await?;
+            admin_client::enqueue_enroll(ca_addr, enrollment, &net.identity).await?;
         ans.show_verification_code(
             "admin-server enrollment request",
             &pending.fingerprint,
@@ -1245,7 +1410,7 @@ async fn enroll_admin_server(
                     "the CA admin denied the enrollment ({reason}); this resolver \
                      works, but won't be advertised to future installs from this host"
                 ));
-                return Ok(());
+                return Ok(false);
             }
             admin_client::PollOutcome::Expired => {
                 ans.warn(
@@ -1253,7 +1418,7 @@ async fn enroll_admin_server(
                      this resolver works, but won't be advertised to future installs \
                      from this host. Re-run the install to queue a new enrollment.",
                 );
-                return Ok(());
+                return Ok(false);
             }
             admin_client::PollOutcome::Pending => {
                 unreachable!("await_issuance never returns Pending")
@@ -1288,6 +1453,9 @@ async fn enroll_admin_server(
     atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
     let cfg = AdminServerConfig {
         domain: net.identity.domain.clone(),
+        server_id: tls::admin_cert_identity_from_pem(issued.cert_pem.as_bytes())?
+            .server_id,
+        home_ca_fingerprint: net.identity.fingerprint.text(),
         listen,
         serving_cert,
         serving_key,
@@ -1321,5 +1489,5 @@ async fn enroll_admin_server(
             cfg_path.display()
         ));
     }
-    Ok(())
+    Ok(true)
 }

@@ -11,6 +11,7 @@ use netidx_admin::{
     admin_ops::delegation::{self as ops, ClusterPropagation},
     admin_proto::{PeerResult, ResolverAddr},
     paths,
+    plan::delegation::DelegationSelection,
 };
 
 use super::{answer_cli::RemoteAuthFlags, ca::fmt_age, init};
@@ -21,6 +22,10 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 fn describe_child(child: &[ResolverAddr]) -> String {
     child.iter().map(|r| r.addr.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+fn describe_ids(ids: &[netidx_admin::admin_proto::AdminServerId]) -> String {
+    ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
 /// Report a cluster-propagation push (idempotent — re-run to converge if a peer
@@ -37,7 +42,12 @@ fn report_peers(subject: &str, peers: &[PeerResult]) {
         peers.len()
     );
     for p in &failed {
-        println!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?"));
+        println!(
+            "  ! server {} at {} : {}",
+            p.server,
+            p.addr,
+            p.error.as_deref().unwrap_or("?")
+        );
     }
     println!(
         "  the cluster is INCONSISTENT until every peer is updated. The push is \
@@ -58,6 +68,11 @@ pub(crate) struct AddParentFlags {
     /// `netidx admin ca fingerprint <ip:port>`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
+    /// A resolver address that should remain in the parent cluster. Repeat for
+    /// every parent member when splitting an existing peer cluster. Omit only
+    /// for install-time attachment of an already-enrolled pending child.
+    #[arg(long = "parent-resolver", value_name = "ADDR")]
+    parent_resolver: Vec<std::net::SocketAddr>,
 }
 
 /// `resolver add-parent` — attach this standalone resolver under a parent by
@@ -69,20 +84,19 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
     let server = init::resolve_admin_server_addr(&f.server)?;
     let mut ans =
         super::answer_cli::make_flag_answerer(None, false, f.accept_glyph.as_deref())?;
-    let out = runtime()?.block_on(ops::add_parent(&mut ans, &rpath, server, &f.path, None))?;
+    let selection = (!f.parent_resolver.is_empty())
+        .then_some(DelegationSelection { parent_resolvers: f.parent_resolver });
+    let out = runtime()?
+        .block_on(ops::add_parent(&mut ans, &rpath, server, &f.path, selection))?;
     match out.propagation {
-        ClusterPropagation::SingleMember => {}
-        ClusterPropagation::NoAdminServer { members } => eprintln!(
-            "WARNING: this is a {members}-member cluster but this host has no admin \
-             server, so the parent referral could not be propagated automatically. \
-             Copy the `parent` block from this host's resolver.json into every other \
-             member's resolver.json, or they won't refer up to the parent."
-        ),
-        ClusterPropagation::Pushed(peers) => report_peers("parent referral", &peers),
+        ClusterPropagation::ControllerManaged => {}
     }
     println!(
-        "ok — restart your resolver server(s) to attach under {:?}",
+        "ok — configuration for {:?} is written; no service was restarted",
         out.proposed_path
+    );
+    println!(
+        "roll the affected cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
     );
     Ok(())
 }
@@ -93,7 +107,8 @@ pub(crate) struct ListDelegationFlags {
     auth: RemoteAuthFlags,
 }
 
-/// `resolver list-delegations` — the pending delegation queue, keyed by code.
+/// `resolver list-delegations` — pending and approved delegation requests,
+/// keyed by code. Approved entries can be re-approved to reconcile fanout.
 pub(crate) fn list_delegations(f: ListDelegationFlags) -> Result<()> {
     let mut ans = f.auth.answerer()?;
     let server = f.auth.server_addr()?;
@@ -105,18 +120,32 @@ pub(crate) fn list_delegations(f: ListDelegationFlags) -> Result<()> {
         None,
     ))?;
     if items.is_empty() {
-        println!("the delegation queue is empty");
+        println!("there are no reviewable delegation requests");
         return Ok(());
     }
-    println!("pending delegation requests:");
+    println!("delegation requests:");
     for e in &items {
         println!(
-            "  delegate {:?} to {}  (age {}, from {})",
+            "  [{}] delegate {:?}  (age {}, from {})",
+            if e.approved { "approved; reconcile with approve" } else { "pending" },
             e.proposed_path,
-            describe_child(&e.child),
             fmt_age(e.age_secs),
             e.peer,
         );
+        println!(
+            "    parent {} [{}]: {}",
+            e.parent_base,
+            e.parent_cluster,
+            describe_child(&e.parent)
+        );
+        println!("      server IDs: {}", describe_ids(&e.parent_servers));
+        println!(
+            "    child  {} [{}]: {}",
+            e.child_base,
+            e.child_cluster,
+            describe_child(&e.child)
+        );
+        println!("      server IDs: {}", describe_ids(&e.child_servers));
         println!("    code {}", e.code.text());
     }
     println!(
@@ -153,7 +182,10 @@ pub(crate) fn approve_delegation(f: ApproveDelegationFlags) -> Result<()> {
     ))?;
     println!("approved delegation of {:?}.", d.proposed_path);
     report_peers("approval", &d.peers);
-    println!("restart your resolver server(s) to serve the new child.");
+    println!("no resolver service was restarted.");
+    println!(
+        "roll each affected cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
+    );
     Ok(())
 }
 

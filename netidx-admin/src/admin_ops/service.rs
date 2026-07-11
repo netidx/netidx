@@ -23,6 +23,7 @@ use std::{net::SocketAddr, path::PathBuf};
 /// The `addr` is what the UI shows and what a service-control op targets.
 #[derive(Debug, Clone)]
 pub struct ServiceServer {
+    pub id: crate::admin_proto::AdminServerId,
     pub addr: SocketAddr,
     pub base: String,
     pub roles: Vec<Role>,
@@ -40,13 +41,21 @@ pub async fn list_service_servers(
     let map = admin_client::get_map_pinned(addr, NodeKind::Client, &id)
         .await
         .context("fetching the network map")?;
-    let mut out: Vec<ServiceServer> = map
-        .servers
-        .into_iter()
-        .filter_map(|s| {
-            s.cluster.map(|c| ServiceServer { addr: s.addr, base: c.base, roles: s.roles })
-        })
-        .collect();
+    let mut out = Vec::new();
+    for s in map.servers.iter().filter(|s| {
+        s.state == crate::admin_proto::ServerState::Registered
+    }) {
+        if let Some(cluster) = s.cluster
+            && let Some(cluster) = map.clusters.iter().find(|c| c.id == cluster)
+        {
+            out.push(ServiceServer {
+                id: s.id,
+                addr: s.addr,
+                base: cluster.base.clone(),
+                roles: s.roles.clone(),
+            });
+        }
+    }
     out.sort_by(|a, b| (&a.base, a.addr).cmp(&(&b.base, b.addr)));
     Ok(out)
 }
@@ -67,12 +76,26 @@ pub async fn control_remote(
     op: ControlOp,
 ) -> Result<Vec<crate::admin_proto::ServiceUnit>> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
+    let map = admin_client::get_map_pinned(
+        sess.server,
+        NodeKind::Client,
+        &sess.identity,
+    )
+    .await?;
+    let target_server = map
+        .servers
+        .iter()
+        .find(|s| {
+            s.addr == target_server
+                && s.state == crate::admin_proto::ServerState::Registered
+        })
+        .map(|s| s.id)
+        .context("the selected service target is not registered")?;
     admin_client::control_service(
         sess.server,
         NodeKind::Client,
         &sess.identity,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         target_server,
         units,
         op,

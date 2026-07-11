@@ -11,7 +11,9 @@
 
 use crate::{
     activation, admin_client,
-    admin_proto::{self, NodeKind, SERVING_SAN},
+    admin_proto::{
+        self, AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN,
+    },
     admin_server_config::{AdminServerConfig, CaRole, Roles},
     answer::{Answerer, Field},
     atomic,
@@ -67,12 +69,17 @@ pub async fn setup_server(
     // issuance (allocating the serial from the store) the way the daemon
     // would, keeping the serving cert's serial unique and the daemon's
     // startup counter seeded past it.
+    let server_id = AdminServerId::new();
     let kc = admin_client::generate_key_and_csr(SERVING_SAN)?;
     let leaf = offline_ca::sign_and_record(
         a.ca,
         NodeKind::AdminServer,
         kc.csr_pem.as_bytes(),
-        &[SanEntry::Dns(SERVING_SAN.to_string())],
+        &[
+            SanEntry::Dns(SERVING_SAN.to_string()),
+            SanEntry::Uri(server_id.uri()),
+            SanEntry::Uri(CONTROLLER_ROLE_URI.to_string()),
+        ],
         SERVING_SAN,
         ca::CaLifetimes::load(a.ca_dir)
             .map(|l| l.leaf_validity)
@@ -80,6 +87,7 @@ pub async fn setup_server(
     )
     .context("signing the admin server's serving certificate")?;
     let ca_cert = std::fs::read(a.ca_dir.join("certificate.pem"))?;
+    let home_ca_fingerprint = crate::fingerprint::Fingerprint::of_cert_pem(&ca_cert)?.text();
     // Chain = [serving leaf, ca cert] so the client receives the CA.
     let mut chain = leaf;
     chain.extend_from_slice(&ca_cert);
@@ -139,12 +147,19 @@ pub async fn setup_server(
     };
     let cfg = AdminServerConfig {
         domain: a.domain.to_string(),
+        server_id,
+        home_ca_fingerprint,
         listen,
         serving_cert,
         serving_key,
         trusted,
         roles: Roles {
-            ca: Some(CaRole { dir: a.ca_dir.to_path_buf(), autorenew: None }),
+            ca: Some(CaRole {
+                dir: a.ca_dir.to_path_buf(),
+                autorenew: None,
+                session_absolute_lifetime: None,
+                session_idle_timeout: None,
+            }),
             resolver: None,
             id_map: None,
         },

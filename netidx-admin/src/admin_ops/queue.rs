@@ -52,10 +52,15 @@ pub struct QueueItem {
     /// `Some` ⇒ a admin-server enrollment (approval signs the reserved serving
     /// name and registers a peer); id-map groups are forced empty.
     pub enroll_listen: Option<SocketAddr>,
+    pub requested_roles: Vec<crate::admin_proto::Role>,
+    pub resolver_members: Vec<crate::admin_proto::ResolverAddr>,
+    pub cluster: Option<crate::admin_proto::ClusterPlacement>,
+    pub cluster_base: Option<String>,
     id: String,
 }
 
 fn to_item(e: QueueEntry) -> QueueItem {
+    let enrollment = e.enrollment;
     QueueItem {
         code: csr_fingerprint(&e.csr_pem).ok(),
         kind: e.kind,
@@ -64,7 +69,17 @@ fn to_item(e: QueueEntry) -> QueueItem {
         age_secs: e.age_secs,
         peer: e.peer,
         verified_renewal: e.verified_renewal,
-        enroll_listen: e.enroll_listen,
+        enroll_listen: enrollment.as_ref().map(|e| e.listen),
+        requested_roles: enrollment
+            .as_ref()
+            .map(|e| e.roles.clone())
+            .unwrap_or_default(),
+        resolver_members: enrollment
+            .as_ref()
+            .map(|e| e.resolver_members.clone())
+            .unwrap_or_default(),
+        cluster: enrollment.map(|e| e.cluster),
+        cluster_base: e.cluster_base,
         id: e.id,
     }
 }
@@ -72,8 +87,7 @@ fn to_item(e: QueueEntry) -> QueueItem {
 async fn fetch_queue(sess: &super::AdminSession) -> Result<Vec<QueueItem>> {
     Ok(admin_client::list_queue(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?
@@ -145,8 +159,7 @@ pub async fn approve(
     };
     let warnings = admin_client::approve(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &id,
         groups.clone(),
         &sess.identity,
@@ -182,8 +195,7 @@ pub async fn approve_renewals(
     for item in items.iter().filter(|i| i.verified_renewal) {
         let r = admin_client::approve(
             sess.server,
-            &sess.admin,
-            sess.password.as_str(),
+            sess.credential.clone(),
             &item.id,
             Vec::new(),
             &sess.identity,
@@ -214,8 +226,7 @@ pub async fn deny(
     let (id, requested_name) = (item.id.clone(), item.requested_name.clone());
     admin_client::deny(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &id,
         reason,
         &sess.identity,

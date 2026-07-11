@@ -68,10 +68,10 @@ pub struct NewCaOpts {
     pub max_validity: Duration,
     /// Superuser's id-map groups; empty ⇒ prompt (default `users`).
     pub id_map_groups: Vec<String>,
-    /// Whether the superuser may enroll admin servers; `None` ⇒
-    /// prompt, defaulting to yes (someone has to be able to grow the
-    /// network).
-    pub may_enroll_servers: Option<bool>,
+    /// Cluster-base scopes under which the superuser may enroll servers.
+    pub server_enroll_scopes: Vec<String>,
+    /// Non-CA roles the superuser may grant to enrolled servers.
+    pub server_enroll_roles: Vec<crate::admin_proto::Role>,
     /// Proceed without a TPM / Secure Enclave (autorenew keytab written
     /// in plaintext). A loud warning is printed; test CAs only.
     pub insecure_no_tpm: bool,
@@ -387,7 +387,11 @@ pub fn founding_ca_opts(
         allowed_san,
         max_validity: ca::DEFAULT_LEAF_VALIDITY,
         id_map_groups: vec!["users".to_string()],
-        may_enroll_servers: Some(true),
+        server_enroll_scopes: vec!["/".to_string()],
+        server_enroll_roles: vec![
+            crate::admin_proto::Role::Resolver,
+            crate::admin_proto::Role::IdMap,
+        ],
         insecure_no_tpm,
         setup_server,
         listen: None,
@@ -530,7 +534,8 @@ pub async fn setup_superuser(
             allow_san: &opts.allowed_san,
             max_validity: opts.max_validity,
             id_map_groups: &opts.id_map_groups,
-            may_enroll_servers: opts.may_enroll_servers,
+            server_enroll_scopes: &opts.server_enroll_scopes,
+            server_enroll_roles: &opts.server_enroll_roles,
             // The superuser always manages admins — pass it so gather_policy
             // doesn't ask (rather than forcing it after the fact).
             may_manage_admins: Some(true),
@@ -606,10 +611,8 @@ fn san_suggestion(cn: &str, domain: Option<&str>) -> String {
 }
 
 /// The raw policy knobs an admin collects before building a [`Policy`]. The
-/// booleans route through the answerer (so strict mode requires them
-/// explicitly, while an interactive frontend gets the supplied default); the
-/// scope lists are typed inputs taken straight from flags — a signing admin
-/// gets perms/service scopes only when explicitly granted.
+/// roster-management boolean routes through the answerer; scope and role lists
+/// are typed inputs taken straight from flags.
 pub struct PolicyInputs<'a> {
     /// SAN globs this admin may issue (empty ⇒ answerer suggests `*.<domain>`).
     pub allow_san: &'a [String],
@@ -617,8 +620,10 @@ pub struct PolicyInputs<'a> {
     pub max_validity: Duration,
     /// id-map groups this admin may assign (empty ⇒ answerer default `users`).
     pub id_map_groups: &'a [String],
-    /// Whether this admin may enroll new admin servers.
-    pub may_enroll_servers: Option<bool>,
+    /// Cluster-base scopes under which this admin may enroll servers.
+    pub server_enroll_scopes: &'a [String],
+    /// Non-CA roles this admin may grant to enrolled servers.
+    pub server_enroll_roles: &'a [crate::admin_proto::Role],
     /// Whether this admin may manage the roster (add / rescope / remove admins).
     pub may_manage_admins: Option<bool>,
     /// Netidx paths this admin may edit perms under.
@@ -675,9 +680,6 @@ pub async fn gather_policy(
             .unwrap_or_else(|| "users".to_string());
         enroll::parse_id_map_answer(&answer)
     };
-    let may_enroll_servers = ans
-        .confirm(Field::MayEnrollServers, inputs.may_enroll_servers, enroll_default)
-        .await?;
     let may_manage_admins =
         ans.confirm(Field::MayManageAdmins, inputs.may_manage_admins, false).await?;
     let trim = |scopes: &[String]| -> Vec<String> {
@@ -687,7 +689,20 @@ pub async fn gather_policy(
         allowed_san,
         max_validity: inputs.max_validity,
         id_map_groups,
-        may_enroll_servers,
+        server_enroll_scopes: if inputs.server_enroll_scopes.is_empty()
+            && enroll_default
+        {
+            vec!["/".to_string()]
+        } else {
+            trim(inputs.server_enroll_scopes)
+        },
+        server_enroll_roles: if inputs.server_enroll_roles.is_empty()
+            && enroll_default
+        {
+            vec![crate::admin_proto::Role::Resolver, crate::admin_proto::Role::IdMap]
+        } else {
+            inputs.server_enroll_roles.to_vec()
+        },
         perms_edit_scopes: trim(inputs.perms_scope),
         may_manage_admins,
         service_control_scopes: trim(inputs.service_scope),

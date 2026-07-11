@@ -84,6 +84,7 @@ mod roles;
 #[cfg(unix)]
 mod server;
 mod service;
+mod session;
 mod tls;
 /// The interactive ratatui admin TUI, launched by bare `netidx admin`.
 mod tui;
@@ -91,6 +92,10 @@ mod uninstall;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Params {
+    /// authenticate once and persist a platform-sealed administrator session
+    Login(answer_cli::RemoteAuthFlags),
+    /// revoke and remove a cached administrator session
+    Logout(session::LogoutArgs),
     /// workstation role: a local resolver + matching client
     Workstation {
         #[command(subcommand)]
@@ -142,6 +147,8 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         None => return tui::run(),
     };
     match p {
+        Params::Login(flags) => session::login(flags),
+        Params::Logout(args) => session::logout(args),
         Params::Workstation { cmd } => roles::workstation::run(cmd),
         Params::Resolver { cmd } => roles::resolver::run(cmd),
         Params::Publisher { cmd } => roles::publisher::run(cmd),

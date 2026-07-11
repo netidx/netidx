@@ -142,7 +142,10 @@ impl TuiAnswerer {
 
     /// A TUI answerer that auto-accepts the given CA fingerprint (see
     /// [`Self::accept_glyph`]).
-    pub(super) fn with_glyph(tx: UnboundedSender<UiRequest>, fp: Fingerprint) -> TuiAnswerer {
+    pub(super) fn with_glyph(
+        tx: UnboundedSender<UiRequest>,
+        fp: Fingerprint,
+    ) -> TuiAnswerer {
         TuiAnswerer { tx, accept_glyph: Some(fp) }
     }
 
@@ -151,14 +154,21 @@ impl TuiAnswerer {
     /// normalized text, or an error if the operator aborted. Inherent (not part
     /// of [`Answerer`]) — the editor loop is a TUI-only concern, so only the
     /// concrete op bodies that hold a `TuiAnswerer` reach it.
-    pub(super) async fn edit(&self, seed: String, validate: EditValidator) -> Result<String> {
+    pub(super) async fn edit(
+        &self,
+        seed: String,
+        validate: EditValidator,
+    ) -> Result<String> {
         self.ask(|reply| UiRequest::Editor { seed, validate, reply }).await
     }
 
     /// Multi-select the parent's resolver servers from the network map, or fall
     /// back to a typed address. Inherent (TUI-only), like [`Self::edit`] — the
     /// strict CLI takes an explicit `--parent-*` instead.
-    pub(super) async fn select_parent(&self, rows: Vec<ParentRow>) -> Result<ParentSelection> {
+    pub(super) async fn select_parent(
+        &self,
+        rows: Vec<ParentRow>,
+    ) -> Result<ParentSelection> {
         self.ask(|reply| UiRequest::SelectParent { rows, reply }).await
     }
 
@@ -209,7 +219,10 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Choice { field, choices, default, reply }).await
     }
 
-    async fn select_network(&mut self, networks: &[NetworkOption]) -> Result<NetworkChoice> {
+    async fn select_network(
+        &mut self,
+        networks: &[NetworkOption],
+    ) -> Result<NetworkChoice> {
         let networks = networks.to_vec();
         self.ask(|reply| UiRequest::SelectNetwork { networks, reply }).await
     }
@@ -252,7 +265,10 @@ impl Answerer for TuiAnswerer {
     }
 
     fn show_verification_code(&mut self, purpose: &str, code: &Fingerprint) {
-        let _ = self.tx.send(UiRequest::VerificationCode { purpose: purpose.to_string(), code: *code });
+        let _ = self.tx.send(UiRequest::VerificationCode {
+            purpose: purpose.to_string(),
+            code: *code,
+        });
     }
 
     fn progress(&mut self, progress: Progress) {
@@ -473,7 +489,10 @@ impl Modal {
                     false
                 }
                 KeyCode::Enter => {
-                    let sel = state.selected().unwrap_or(0).min(choices.len().saturating_sub(1));
+                    let sel = state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(choices.len().saturating_sub(1));
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(choices[sel].clone()));
                     }
@@ -497,7 +516,8 @@ impl Modal {
                     false
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let i = state.selected().map_or(0, |i| (i + 1).min(networks.len() + 1));
+                    let i =
+                        state.selected().map_or(0, |i| (i + 1).min(networks.len() + 1));
                     state.select(Some(i));
                     false
                 }
@@ -548,8 +568,11 @@ impl Modal {
                     let choice = if sel == rows.len() {
                         ParentSelection::Manual
                     } else {
-                        let picks: Vec<usize> =
-                            checked.iter().enumerate().filter_map(|(i, &c)| c.then_some(i)).collect();
+                        let picks: Vec<usize> = checked
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &c)| c.then_some(i))
+                            .collect();
                         // Enter with nothing ticked picks the row under the cursor,
                         // so a single-parent choice needs no Space.
                         let picks = if picks.is_empty() { vec![sel] } else { picks };
@@ -569,7 +592,11 @@ impl Modal {
                     }
                     true
                 }
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => {
                     *yes = !*yes;
                     false
                 }
@@ -601,7 +628,10 @@ impl Modal {
                     }
                     true
                 }
-                KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('n') => {
+                KeyCode::Esc
+                | KeyCode::Char('r')
+                | KeyCode::Char('R')
+                | KeyCode::Char('n') => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(false));
                     }
@@ -609,22 +639,23 @@ impl Modal {
                 }
                 _ => false,
             },
-            Modal::Announce { reply, .. } | Modal::AnnounceIdentity { reply, .. } => match code
-            {
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    if let Some(tx) = reply.take() {
-                        let _ = tx.send(Ok(()));
+            Modal::Announce { reply, .. } | Modal::AnnounceIdentity { reply, .. } => {
+                match code {
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        if let Some(tx) = reply.take() {
+                            let _ = tx.send(Ok(()));
+                        }
+                        true
                     }
-                    true
-                }
-                KeyCode::Esc => {
-                    if let Some(tx) = reply.take() {
-                        let _ = tx.send(Err(anyhow!("cancelled")));
+                    KeyCode::Esc => {
+                        if let Some(tx) = reply.take() {
+                            let _ = tx.send(Err(anyhow!("cancelled")));
+                        }
+                        true
                     }
-                    true
+                    _ => false,
                 }
-                _ => false,
-            },
+            }
             Modal::Recovery { .. } => matches!(code, KeyCode::Enter | KeyCode::Char(' ')),
         }
     }
@@ -655,22 +686,34 @@ impl Modal {
                 ])
                 .split(inner);
                 f.render_widget(
-                    Paragraph::new(field.help()).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    Paragraph::new(field.help())
+                        .style(theme::hint_style())
+                        .wrap(Wrap { trim: true }),
                     rows[0],
                 );
-                let shown = if *secret { "•".repeat(input.chars().count()) } else { input.clone() };
+                let shown = if *secret {
+                    "•".repeat(input.chars().count())
+                } else {
+                    input.clone()
+                };
                 let field_row = rows[2];
-                f.render_widget(Paragraph::new(shown).style(theme::field_style()), field_row);
+                f.render_widget(
+                    Paragraph::new(shown).style(theme::field_style()),
+                    field_row,
+                );
                 if let Some(e) = error {
                     let err = Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT);
                     f.render_widget(Paragraph::new(e.clone()).style(err), rows[3]);
                 }
                 // Focus: put the terminal cursor at the end of the field.
-                let cx = field_row.x + (input.chars().count() as u16).min(field_row.width.saturating_sub(1));
+                let cx = field_row.x
+                    + (input.chars().count() as u16)
+                        .min(field_row.width.saturating_sub(1));
                 f.set_cursor_position((cx, field_row.y));
             }
             Modal::Choice { field, choices, state, .. } => {
-                let sel = state.selected().unwrap_or(0).min(choices.len().saturating_sub(1));
+                let sel =
+                    state.selected().unwrap_or(0).min(choices.len().saturating_sub(1));
                 let w = 64u16.min(screen.width.saturating_sub(4)).max(30);
                 let help_h = widgets::wrapped_rows(field.help(), w - 2);
                 let list_h = choices.len() as u16;
@@ -678,10 +721,12 @@ impl Modal {
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let block = theme::dialog_block(field.label()).title_bottom(Line::from(Span::styled(
-                    " ↑/↓ move · Enter select · Esc cancel ",
-                    theme::hint_style(),
-                )));
+                let block = theme::dialog_block(field.label()).title_bottom(Line::from(
+                    Span::styled(
+                        " ↑/↓ move · Enter select · Esc cancel ",
+                        theme::hint_style(),
+                    ),
+                ));
                 let inner = block.inner(area);
                 f.render_widget(block, area);
                 let rows = Layout::vertical([
@@ -691,7 +736,9 @@ impl Modal {
                 ])
                 .split(inner);
                 f.render_widget(
-                    Paragraph::new(field.help()).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    Paragraph::new(field.help())
+                        .style(theme::hint_style())
+                        .wrap(Wrap { trim: true }),
                     rows[0],
                 );
                 let items: Vec<ListItem> = choices
@@ -717,16 +764,16 @@ impl Modal {
                 // identicon rows + a blank + up to 3 fingerprint lines). The list
                 // is the networks plus the poll-more and manual-entry rows.
                 let body_h = (networks.len() as u16 + 2).max(12);
-                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2 /*borders*/).min(screen.height);
+                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
+                    .min(screen.height);
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let block = theme::dialog_block(Field::SelectNetwork.label()).title_bottom(
-                    Line::from(Span::styled(
+                let block = theme::dialog_block(Field::SelectNetwork.label())
+                    .title_bottom(Line::from(Span::styled(
                         " ↑/↓ move · Enter select · Esc cancel ",
                         theme::hint_style(),
-                    )),
-                );
+                    )));
                 let inner = block.inner(area);
                 f.render_widget(block, area);
                 let rows = Layout::vertical([
@@ -741,11 +788,14 @@ impl Modal {
                     "netidx clusters discovered on the local network:"
                 };
                 f.render_widget(
-                    Paragraph::new(header).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    Paragraph::new(header)
+                        .style(theme::hint_style())
+                        .wrap(Wrap { trim: true }),
                     rows[0],
                 );
-                let cols = Layout::horizontal([Constraint::Min(20), Constraint::Length(26)])
-                    .split(rows[2]);
+                let cols =
+                    Layout::horizontal([Constraint::Min(20), Constraint::Length(26)])
+                        .split(rows[2]);
                 let items: Vec<ListItem> = networks
                     .iter()
                     .map(|n| ListItem::new(n.domain.clone()))
@@ -783,7 +833,9 @@ impl Modal {
                 // trim:false — the identicon rows carry leading "off" cells as
                 // spaces; trimming them would shift the glyph and corrupt it.
                 f.render_widget(
-                    Paragraph::new(glyph).style(theme::panel_style()).wrap(Wrap { trim: false }),
+                    Paragraph::new(glyph)
+                        .style(theme::panel_style())
+                        .wrap(Wrap { trim: false }),
                     cols[1],
                 );
             }
@@ -791,16 +843,16 @@ impl Modal {
                 const MANUAL: &str = "Enter an address manually…";
                 let w = 76u16.min(screen.width.saturating_sub(4)).max(48);
                 let body_h = (rows.len() as u16 + 1).max(6);
-                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2 /*borders*/).min(screen.height);
+                let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
+                    .min(screen.height);
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let block = theme::dialog_block("Select the parent resolver(s)").title_bottom(
-                    Line::from(Span::styled(
+                let block = theme::dialog_block("Select the parent resolver(s)")
+                    .title_bottom(Line::from(Span::styled(
                         " ↑/↓ move · Space tick · Enter confirm · Esc cancel ",
                         theme::hint_style(),
-                    )),
-                );
+                    )));
                 let inner = block.inner(area);
                 f.render_widget(block, area);
                 let vrows = Layout::vertical([
@@ -815,16 +867,25 @@ impl Modal {
                     "Tick the resolvers that make up the parent, then Enter:"
                 };
                 f.render_widget(
-                    Paragraph::new(header).style(theme::hint_style()).wrap(Wrap { trim: true }),
+                    Paragraph::new(header)
+                        .style(theme::hint_style())
+                        .wrap(Wrap { trim: true }),
                     vrows[0],
                 );
                 let items: Vec<ListItem> = rows
                     .iter()
                     .enumerate()
                     .map(|(i, r)| {
-                        let marker = if checked.get(i).copied().unwrap_or(false) { "[x]" } else { "[ ]" };
+                        let marker = if checked.get(i).copied().unwrap_or(false) {
+                            "[x]"
+                        } else {
+                            "[ ]"
+                        };
                         ListItem::new(Line::from(vec![
-                            Span::styled(format!("{marker} {:<40}", r.label), theme::panel_style()),
+                            Span::styled(
+                                format!("{marker} {:<40}", r.label),
+                                theme::panel_style(),
+                            ),
                             Span::styled(r.level.clone(), theme::hint_style()),
                         ]))
                     })
@@ -840,20 +901,30 @@ impl Modal {
                 f.render_stateful_widget(list, vrows[2], &mut st);
             }
             Modal::Confirm { field, yes, .. } => {
-                let opts =
-                    Line::from(vec![theme::button("Yes", *yes), Span::raw("   "), theme::button("No", !*yes)]);
+                let opts = Line::from(vec![
+                    theme::button("Yes", *yes),
+                    Span::raw("   "),
+                    theme::button("No", !*yes),
+                ]);
                 let lines = vec![
                     Line::from(Span::styled(field.help(), theme::hint_style())),
                     Line::from(""),
                     opts,
                     Line::from(""),
-                    Line::from(Span::styled(" ←/→ · y/n · Enter · Esc cancel ", theme::hint_style())),
+                    Line::from(Span::styled(
+                        " ←/→ · y/n · Enter · Esc cancel ",
+                        theme::hint_style(),
+                    )),
                 ];
                 popup(f, screen, field.label(), lines, 60);
             }
             Modal::Identity { identity, .. } => {
-                let roles =
-                    identity.roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", ");
+                let roles = identity
+                    .roles
+                    .iter()
+                    .map(|r| format!("{r:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let label = |s: &str| Span::styled(s.to_string(), theme::hint_style());
                 let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
@@ -872,19 +943,28 @@ impl Modal {
                 ];
                 lines.extend(widgets::identicon_lines(&identity.fingerprint));
                 lines.push(Line::from(""));
-                let fp = Style::default().bg(theme::PANEL_BG).fg(Color::Rgb(0, 0, 150)).add_modifier(Modifier::BOLD);
+                let fp = Style::default()
+                    .bg(theme::PANEL_BG)
+                    .fg(Color::Rgb(0, 0, 150))
+                    .add_modifier(Modifier::BOLD);
                 for chunk in widgets::group_fingerprint(&identity.fingerprint) {
                     lines.push(Line::from(Span::styled(chunk, fp)));
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(" a/Enter accept · Esc/r reject ", theme::hint_style())));
+                lines.push(Line::from(Span::styled(
+                    " a/Enter accept · Esc/r reject ",
+                    theme::hint_style(),
+                )));
                 popup(f, screen, "Confirm cluster identity", lines, 60);
             }
             Modal::Announce { title, body, .. } => {
                 let lines = vec![
                     Line::from(Span::styled(body.clone(), theme::panel_style())),
                     Line::from(""),
-                    Line::from(Span::styled(" Press Enter to continue ", theme::selected_style())),
+                    Line::from(Span::styled(
+                        " Press Enter to continue ",
+                        theme::selected_style(),
+                    )),
                 ];
                 popup(f, screen, title, lines, 64);
             }
@@ -930,7 +1010,10 @@ impl Modal {
                         theme::panel_style(),
                     )),
                     Line::from(""),
-                    Line::from(Span::styled(" Enter — I have saved it ", theme::selected_style())),
+                    Line::from(Span::styled(
+                        " Enter — I have saved it ",
+                        theme::selected_style(),
+                    )),
                 ];
                 popup(f, screen, "CA recovery password", lines, 66);
             }
@@ -992,7 +1075,8 @@ mod tests {
     fn select_parent_modal() -> (Modal, oneshot::Receiver<Result<ParentSelection>>) {
         let (tx, rx) = oneshot::channel();
         let modal =
-            Modal::from_request(UiRequest::SelectParent { rows: rows(), reply: tx }).unwrap();
+            Modal::from_request(UiRequest::SelectParent { rows: rows(), reply: tx })
+                .unwrap();
         (modal, rx)
     }
 
@@ -1007,7 +1091,10 @@ mod tests {
         let (modal, _rx) = select_parent_modal();
         let out = render(&modal, 90, 16);
         assert!(out.contains("[ ]"), "unticked marker missing: {out:?}");
-        assert!(out.contains("10.0.0.1:4564") && out.contains("10.0.60.1:4564"), "labels: {out:?}");
+        assert!(
+            out.contains("10.0.0.1:4564") && out.contains("10.0.60.1:4564"),
+            "labels: {out:?}"
+        );
         assert!(out.contains("/ap"), "level column missing: {out:?}");
         assert!(out.contains("Enter an address manually"), "manual row missing: {out:?}");
     }
@@ -1068,7 +1155,8 @@ mod tests {
         // Empty network list: index 0 is the poll-more row, index 1 the manual row.
         let (tx, rx) = oneshot::channel();
         let modal =
-            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx }).unwrap();
+            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx })
+                .unwrap();
         (modal, rx)
     }
 

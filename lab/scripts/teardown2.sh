@@ -1,5 +1,9 @@
 set +e
 echo "== $(hostname) reset =="
+# Match the executable name exactly. The deployed process may appear in argv as
+# either `/usr/local/bin/netidx` or just `netidx`; path-only `pkill -f` misses
+# the latter and can leave an orphan controller holding the CA lock.
+pkill -9 -x netidx 2>/dev/null
 units=$(systemctl list-units --no-legend 'netidx*' 2>/dev/null | awk '{print $1}')
 [ -n "$units" ] && systemctl stop $units 2>/dev/null
 ufiles=$(systemctl list-unit-files --no-legend 'netidx*' 2>/dev/null | awk '{print $1}')

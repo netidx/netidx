@@ -47,7 +47,11 @@ pub(super) struct Outcome {
 }
 
 impl Outcome {
-    fn plain(title: impl Into<String>, lines: Vec<String>, refresh_local: bool) -> Outcome {
+    fn plain(
+        title: impl Into<String>,
+        lines: Vec<String>,
+        refresh_local: bool,
+    ) -> Outcome {
         Outcome {
             title: title.into(),
             lines,
@@ -79,7 +83,9 @@ impl Outcome {
     /// A silent Cluster-tab discovery result: refresh the known-cluster list and
     /// return to the landing screen with no overlay — the list is the result, and
     /// the landing screen re-polls it to show the verified clusters.
-    pub(super) fn remote_clusters(clusters: Vec<super::clusters::KnownCluster>) -> Outcome {
+    pub(super) fn remote_clusters(
+        clusters: Vec<super::clusters::KnownCluster>,
+    ) -> Outcome {
         Outcome {
             title: String::new(),
             lines: Vec::new(),
@@ -275,15 +281,21 @@ impl Action {
             Action::Renew { .. } => "Renewing certificates".to_string(),
             Action::Update { .. } => "Updating".to_string(),
             Action::Join { dry_run } => {
-                if *dry_run { "Previewing join".to_string() } else { "Joining a cluster".to_string() }
+                if *dry_run {
+                    "Previewing join".to_string()
+                } else {
+                    "Joining a cluster".to_string()
+                }
             }
             Action::AddParent => "Adding a parent".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
-            Action::AutoApprove { rotate, .. } => {
-                if *rotate { "Rotating auto-approve credential" } else { "Enabling auto-approve" }
-                    .to_string()
+            Action::AutoApprove { rotate, .. } => if *rotate {
+                "Rotating auto-approve credential"
+            } else {
+                "Enabling auto-approve"
             }
+            .to_string(),
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
             Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
@@ -365,7 +377,9 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent => add_parent(&mut ans).await,
         Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
-        Action::Uninstall { .. } => bail!("internal error: uninstall is not an op future"),
+        Action::Uninstall { .. } => {
+            bail!("internal error: uninstall is not an op future")
+        }
         Action::ManageLocalAdmins { .. } => {
             bail!("internal error: manage-local-admins is navigation, not an op future")
         }
@@ -385,7 +399,9 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
 #[cfg(unix)]
 async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
     match action {
-        Action::AutoApprove { rotate, ca_dir, cfg } => auto_approve(ans, rotate, ca_dir, cfg).await,
+        Action::AutoApprove { rotate, ca_dir, cfg } => {
+            auto_approve(ans, rotate, ca_dir, cfg).await
+        }
         Action::RecoveryRotate { ca_dir, cfg } => recovery_rotate(ans, ca_dir, cfg).await,
         Action::ExternalEmitCsr { ca_dir } => external_emit_csr(ans, ca_dir).await,
         Action::ExternalInstall { ca_dir } => external_install(ans, ca_dir).await,
@@ -420,10 +436,13 @@ async fn auto_approve(
         }
         AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error } => {
             let verb = if rotate { "rotated" } else { "enabled" };
-            let mut l = vec![format!("Auto-approve {verb}. Keytab: {}", keytab.display())];
+            let mut l =
+                vec![format!("Auto-approve {verb}. Keytab: {}", keytab.display())];
             match (cfg_path, cfg_error) {
                 (Some(p), _) => l.push(format!("Config updated: {}", p.display())),
-                (None, Some(e)) => l.push(format!("Config update failed (non-fatal): {e}")),
+                (None, Some(e)) => {
+                    l.push(format!("Config update failed (non-fatal): {e}"))
+                }
                 (None, None) => {}
             }
             l
@@ -478,8 +497,10 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
         .text(Field::SignedCert, None, None, true)
         .await?
         .context("a signed certificate path is required")?;
-    let root =
-        ans.text(Field::ExternalRoot, None, None, false).await?.filter(|s| !s.trim().is_empty());
+    let root = ans
+        .text(Field::ExternalRoot, None, None, false)
+        .await?
+        .filter(|s| !s.trim().is_empty());
     let out = external_install_cert(
         ans,
         ca_dir,
@@ -531,7 +552,7 @@ async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
     let mut lines: Vec<String> = plan.describe().lines().map(str::to_string).collect();
     plan.apply()?;
     lines.push(String::new());
-    lines.push(super::lifecycle::restart_hint(role).to_string());
+    lines.push(super::lifecycle::restart_hint_for_plan(role, &plan).to_string());
     Ok(Outcome {
         title: "Updated".to_string(),
         lines,
@@ -545,13 +566,19 @@ async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
 
 /// Graduate a local-only workstation onto a network.
 async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
-    use netidx_admin::plan::install::workstation::{WorkstationJoinInput, run_workstation_join};
-    let input = WorkstationJoinInput { dry_run, key_protection: None, admin_server: None };
+    use netidx_admin::plan::install::workstation::{
+        WorkstationJoinInput, run_workstation_join,
+    };
+    let input =
+        WorkstationJoinInput { dry_run, key_protection: None, admin_server: None };
     run_workstation_join(ans, input).await?;
     let (title, lines) = if dry_run {
         ("Join preview", vec!["Preview only — nothing was written.".to_string()])
     } else {
-        ("Joined", vec!["Joined the cluster. Restart the local resolver to use it.".to_string()])
+        (
+            "Joined",
+            vec!["Joined the cluster. Restart the local resolver to use it.".to_string()],
+        )
     };
     Ok(Outcome {
         title: title.to_string(),
@@ -562,25 +589,6 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
         services: None,
         quiet: false,
     })
-}
-
-/// The admin server that can approve a delegation to the ticked resolvers: the
-/// one whose cluster contains ALL of them. `None` when the ticks span clusters
-/// (no single cluster holds them all) — the operator must pick resolvers served
-/// by one parent cluster.
-#[cfg(unix)]
-fn parent_admin_for(
-    map: &netidx_admin::admin_proto::NetworkMap,
-    picked: &[SocketAddr],
-) -> Option<SocketAddr> {
-    map.servers
-        .iter()
-        .find(|s| {
-            s.cluster.as_ref().is_some_and(|c| {
-                picked.iter().all(|a| c.members.iter().any(|m| m.addr == *a))
-            })
-        })
-        .map(|s| s.addr)
 }
 
 /// Prompt for the parent's admin-server address (the manual fallback when the
@@ -606,34 +614,51 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
     use super::answer::{ParentRow, ParentSelection};
     use netidx_admin::{
         admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
-        admin_proto::ResolverAddr,
+        admin_proto::{ResolverAddr, ResolverClusterId, ServerState},
         paths,
+        plan::delegation::DelegationSelection,
         resolver::ResolverConfig,
     };
-    use std::collections::HashSet;
     let rpath = paths::discover_resolver_config()?;
 
     // Candidate parents come from the network map (each resolver + its level),
     // minus this host's own resolvers. If the map is unreachable or offers no
     // other resolver, fall back to typing an admin-server address.
     let map = super::lifecycle::fetch_local_map().await.ok();
-    let own: HashSet<SocketAddr> = ResolverConfig::load(&rpath)
-        .map(|c| c.resolver_addrs().into_iter().map(|r| r.addr).collect())
-        .unwrap_or_default();
-    // (resolver addr+auth, its cluster base) — the source of truth for the picker.
-    let cand: Vec<(ResolverAddr, String)> = match &map {
+    // netidx-admin owns the first advertisable member in this host's resolver
+    // config (the same member GetInfo has always reported). Unlike excluding
+    // the whole config roster, excluding only this identity still shows AP2
+    // when AP1 is splitting a four-peer root into US and /ap sets.
+    let local_member = ResolverConfig::load(&rpath)
+        .ok()
+        .and_then(|c| c.resolver_addrs().into_iter().next());
+    let local_server = map.as_ref().and_then(|map| {
+        let local = local_member.as_ref()?;
+        map.servers.iter().find(|s| s.resolver.as_ref() == Some(local))
+    });
+    if map.is_some() && local_server.is_none() {
+        bail!("this resolver's locally owned member is absent from the CA network map");
+    }
+    // (admin addr, resolver addr+auth, current cluster, base)
+    // — the global source of truth for the picker.
+    let cand: Vec<(SocketAddr, ResolverAddr, ResolverClusterId, String)> = match &map {
         Some(map) => {
-            let mut seen = HashSet::new();
             let mut cand = Vec::new();
-            for s in &map.servers {
-                if let Some(c) = &s.cluster {
-                    for m in &c.members {
-                        if own.contains(&m.addr) || !seen.insert(m.addr) {
-                            continue;
-                        }
-                        cand.push((m.clone(), c.base.clone()));
-                    }
-                }
+            for server in map.servers.iter().filter(|s| {
+                s.state == ServerState::Registered
+                    && s.roles.contains(&netidx_admin::admin_proto::Role::Resolver)
+                    && Some(s.id) != local_server.map(|local| local.id)
+            }) {
+                let (Some(cluster_id), Some(resolver)) =
+                    (server.cluster, server.resolver.clone())
+                else {
+                    continue;
+                };
+                let Some(cluster) = map.clusters.iter().find(|c| c.id == cluster_id)
+                else {
+                    continue;
+                };
+                cand.push((server.addr, resolver, cluster_id, cluster.base.clone()));
             }
             cand
         }
@@ -642,62 +667,60 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
 
     // (parent admin-server addr, optional referral override) — the two things the
     // delegation op needs.
-    let (parent, referral): (SocketAddr, Option<Vec<ResolverAddr>>) = if cand.is_empty() {
+    let (parent, selection): (SocketAddr, Option<DelegationSelection>) = if cand
+        .is_empty()
+    {
         (prompt_parent_admin(ans).await?, None)
     } else {
-        let map = map.as_ref().expect("cand non-empty implies a map");
         loop {
             let rows: Vec<ParentRow> = cand
                 .iter()
-                .map(|(r, level)| ParentRow { label: r.addr.to_string(), level: level.clone() })
+                .map(|(_, resolver, _, level)| ParentRow {
+                    label: resolver.addr.to_string(),
+                    level: level.clone(),
+                })
                 .collect();
             match ans.select_parent(rows).await? {
                 ParentSelection::Manual => break (prompt_parent_admin(ans).await?, None),
                 ParentSelection::Resolvers(idxs) => {
-                    let picked: Vec<ResolverAddr> =
-                        idxs.iter().filter_map(|&i| cand.get(i).map(|(r, _)| r.clone())).collect();
+                    let picked: Vec<_> =
+                        idxs.iter().filter_map(|&i| cand.get(i).cloned()).collect();
                     if picked.is_empty() {
                         continue;
                     }
-                    // The approving admin server is the one whose cluster contains
-                    // ALL the ticked resolvers (any of a multi-admin cluster works).
-                    let want: Vec<SocketAddr> = picked.iter().map(|r| r.addr).collect();
-                    match parent_admin_for(map, &want) {
-                        Some(admin) => break (admin, Some(picked)),
-                        None => ans.warn(
+                    let parent_cluster = picked[0].2;
+                    if picked.iter().any(|candidate| candidate.2 != parent_cluster) {
+                        ans.warn(
                             "those resolvers aren't all in one parent cluster — pick \
                              resolvers served by a single cluster",
-                        ),
+                        );
+                        continue;
                     }
+                    break (
+                        picked[0].0,
+                        Some(DelegationSelection {
+                            parent_resolvers: picked
+                                .iter()
+                                .map(|candidate| candidate.1.addr)
+                                .collect(),
+                        }),
+                    );
                 }
             }
         }
     };
-    let path = ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
-    let out = do_add_parent(ans, &rpath, parent, &path, referral).await?;
-    let mut lines = vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
+    let path =
+        ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
+    let out = do_add_parent(ans, &rpath, parent, &path, selection).await?;
+    let mut lines =
+        vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
     match out.propagation {
-        ClusterPropagation::SingleMember => {}
-        ClusterPropagation::NoAdminServer { members } => lines.push(format!(
-            "{members}-member cluster with no admin server — hand-copy the new parent \
-             block to the other members."
-        )),
-        ClusterPropagation::Pushed(peers) => {
-            let failed = peers.iter().filter(|p| p.error.is_some()).count();
-            if failed == 0 {
-                lines.push(format!("Propagated to {} cluster peer(s).", peers.len()));
-            } else {
-                lines.push(format!(
-                    "{failed} of {} cluster peer(s) could NOT be updated — re-run to converge:",
-                    peers.len()
-                ));
-                for p in peers.iter().filter(|p| p.error.is_some()) {
-                    lines.push(format!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("")));
-                }
-            }
-        }
+        ClusterPropagation::ControllerManaged => {}
     }
-    lines.push("Restart your resolver server(s) to attach under the parent.".to_string());
+    lines.push(
+        "Configuration is written; do not restart the whole cluster at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+            .to_string(),
+    );
     Ok(Outcome {
         title: "Parent added".to_string(),
         lines,
@@ -723,7 +746,11 @@ async fn renew(_ans: &mut TuiAnswerer, server: Option<SocketAddr>) -> Result<Out
     ))
 }
 
-async fn install(ans: &mut TuiAnswerer, role: InstallRole, dry_run: bool) -> Result<Outcome> {
+async fn install(
+    ans: &mut TuiAnswerer,
+    role: InstallRole,
+    dry_run: bool,
+) -> Result<Outcome> {
     let common = InstallCommon {
         dry_run,
         force: false,
@@ -831,66 +858,11 @@ fn publisher_input(common: InstallCommon) -> PublisherInput {
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use netidx_admin::admin_proto::{
-        ClusterFacts, InfoAuth, NetworkMap, ResolverAddr, ServerEntry,
-    };
-
-    fn addr(s: &str) -> SocketAddr {
-        s.parse().unwrap()
-    }
-
-    fn resolver(a: &str) -> ResolverAddr {
-        ResolverAddr { addr: addr(a), auth: InfoAuth::Anonymous }
-    }
-
-    fn server(admin: &str, base: &str, members: &[&str]) -> ServerEntry {
-        ServerEntry {
-            addr: addr(admin),
-            roles: vec![],
-            cluster: Some(ClusterFacts {
-                members: members.iter().map(|m| resolver(m)).collect(),
-                base: base.to_string(),
-                parent: None,
-                children: vec![],
-            }),
-        }
-    }
-
-    fn map(servers: Vec<ServerEntry>) -> NetworkMap {
-        NetworkMap { version: 0, ca_addr: None, servers }
-    }
-
-    #[test]
-    fn parent_admin_is_the_cluster_holding_all_ticks() {
-        // Two independent clusters, both rooted at `/` (the base-collision case).
-        let m = map(vec![
-            server("10.0.0.1:4565", "/", &["10.0.0.1:4564", "10.0.0.2:4564"]),
-            server("10.0.60.1:4565", "/", &["10.0.60.1:4564"]),
-        ]);
-        // Ticking both US root resolvers resolves to the US admin server.
-        let admin = parent_admin_for(&m, &[addr("10.0.0.1:4564"), addr("10.0.0.2:4564")]);
-        assert_eq!(admin, Some(addr("10.0.0.1:4565")));
-        // Ticking the lone Asia resolver resolves to the Asia admin server.
-        let admin = parent_admin_for(&m, &[addr("10.0.60.1:4564")]);
-        assert_eq!(admin, Some(addr("10.0.60.1:4565")));
-    }
-
-    #[test]
-    fn ticks_spanning_clusters_have_no_single_admin() {
-        let m = map(vec![
-            server("10.0.0.1:4565", "/", &["10.0.0.1:4564"]),
-            server("10.0.60.1:4565", "/", &["10.0.60.1:4564"]),
-        ]);
-        // One resolver from each cluster: no single cluster holds both.
-        let admin = parent_admin_for(&m, &[addr("10.0.0.1:4564"), addr("10.0.60.1:4564")]);
-        assert_eq!(admin, None);
-    }
-}
-
-fn install_outcome(role: InstallRole, dry_run: bool, scope: Option<ServiceScope>) -> Outcome {
+fn install_outcome(
+    role: InstallRole,
+    dry_run: bool,
+    scope: Option<ServiceScope>,
+) -> Outcome {
     if dry_run {
         let mut lines = vec!["Preview only — nothing was written.".to_string()];
         if scope.is_some() {
@@ -899,8 +871,12 @@ fn install_outcome(role: InstallRole, dry_run: bool, scope: Option<ServiceScope>
         Outcome::plain(format!("{} preview", role.as_str()), lines, false)
     } else {
         let lines = match scope {
-            Some(_) => vec!["Configuration written. Registering the OS service…".to_string()],
-            None => vec!["Configuration written. No OS service was registered.".to_string()],
+            Some(_) => {
+                vec!["Configuration written. Registering the OS service…".to_string()]
+            }
+            None => {
+                vec!["Configuration written. No OS service was registered.".to_string()]
+            }
         };
         Outcome {
             title: format!("{} installed", role.as_str()),

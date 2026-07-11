@@ -58,9 +58,13 @@ impl ServiceRow {
     /// tab's remote services panel). The member pre-formats the definition
     /// fields, so this is a pure mapping — no `ActivationDir` access, which
     /// stays local-only.
-    pub(super) fn from_service_unit(su: &netidx_admin::admin_proto::ServiceUnit) -> ServiceRow {
+    pub(super) fn from_service_unit(
+        su: &netidx_admin::admin_proto::ServiceUnit,
+    ) -> ServiceRow {
         let (exe, args, trigger, restart) = match &su.definition {
-            Some(d) => (d.exe.clone(), d.args.clone(), d.trigger.clone(), d.restart.clone()),
+            Some(d) => {
+                (d.exe.clone(), d.args.clone(), d.trigger.clone(), d.restart.clone())
+            }
             None => (String::new(), Vec::new(), String::new(), String::new()),
         };
         ServiceRow {
@@ -120,9 +124,9 @@ impl ServicesAction {
             ServicesAction::Control { op: ControlOp::Stop, unit: Some(u), .. } => {
                 Some(format!("Stop unit {u:?}? It stays down until started."))
             }
-            ServicesAction::Control { op: ControlOp::Stop, unit: None, .. } => {
-                Some("Stop this machine's netidx services? Running units stop.".to_string())
-            }
+            ServicesAction::Control { op: ControlOp::Stop, unit: None, .. } => Some(
+                "Stop this machine's netidx services? Running units stop.".to_string(),
+            ),
             ServicesAction::Delete { name, .. } => Some(format!(
                 "Delete unit {name:?}? This removes its definition file and reloads \
                  the supervisor."
@@ -134,7 +138,10 @@ impl ServicesAction {
 
 /// Run a services op. Takes the answerer so create/edit can drive the
 /// terminal-suspending `$EDITOR` flow; the rest ignore it.
-pub(super) async fn run(ans: &mut TuiAnswerer, action: ServicesAction) -> Result<Outcome> {
+pub(super) async fn run(
+    ans: &mut TuiAnswerer,
+    action: ServicesAction,
+) -> Result<Outcome> {
     match action {
         ServicesAction::Refresh { units_dir } => {
             Ok(Outcome::services_rows(svc_rows(&units_dir).await?))
@@ -158,7 +165,8 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: ServicesAction) -> Result
             // The rest of the set, for the cross-unit trigger-conflict check.
             let validate = unit_validator(ad.list()?, name.clone());
             let edited = ans.edit(template_unit_json(), validate).await?;
-            let unit: Unit = serde_json::from_str(&edited).context("parsing the edited unit")?;
+            let unit: Unit =
+                serde_json::from_str(&edited).context("parsing the edited unit")?;
             ad.save(&name, &unit)?;
             reload(&units_dir).await?;
             Ok(Outcome::services_after(
@@ -176,7 +184,8 @@ pub(super) async fn run(ans: &mut TuiAnswerer, action: ServicesAction) -> Result
             others.remove(&name);
             let validate = unit_validator(others, name.clone());
             let edited = ans.edit(seed, validate).await?;
-            let unit: Unit = serde_json::from_str(&edited).context("parsing the edited unit")?;
+            let unit: Unit =
+                serde_json::from_str(&edited).context("parsing the edited unit")?;
             ad.save(&name, &unit)?;
             reload(&units_dir).await?;
             Ok(Outcome::services_after(
@@ -243,7 +252,9 @@ async fn svc_rows(units_dir: &Path) -> Result<Vec<ServiceRow>> {
 
 /// Reload the supervisor so it picks up an on-disk unit change.
 async fn reload(units_dir: &Path) -> Result<()> {
-    match control(units_dir, &ControlRequest { op: ControlOp::Reload, units: Vec::new() }).await? {
+    match control(units_dir, &ControlRequest { op: ControlOp::Reload, units: Vec::new() })
+        .await?
+    {
         ControlResponse::Ok { .. } => Ok(()),
         ControlResponse::Err { reason } => bail!("{reason}"),
     }
@@ -296,7 +307,9 @@ fn state_word(row: &ServiceRow) -> (&'static str, Color) {
 enum SvcScreen {
     List,
     /// Inline unit-name entry before the editor opens on a fresh template.
-    NamePrompt { input: String },
+    NamePrompt {
+        input: String,
+    },
 }
 
 pub(super) struct ServicesState {
@@ -378,7 +391,13 @@ impl ServicesState {
             return None;
         }
         let ud = self.units_dir.clone();
-        let control = |op, unit| Some(Action::Services(ServicesAction::Control { units_dir: ud.clone(), op, unit }));
+        let control = |op, unit| {
+            Some(Action::Services(ServicesAction::Control {
+                units_dir: ud.clone(),
+                op,
+                unit,
+            }))
+        };
         match code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if !self.rows.is_empty() {
@@ -389,26 +408,37 @@ impl ServicesState {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.rows.is_empty() {
-                    let i = self.list.selected().map_or(0, |i| (i + 1).min(self.rows.len() - 1));
+                    let i = self
+                        .list
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(self.rows.len() - 1));
                     self.list.select(Some(i));
                 }
                 None
             }
-            KeyCode::Char('s') => self.selected_name().and_then(|u| control(ControlOp::Start, Some(u))),
-            KeyCode::Char('t') => self.selected_name().and_then(|u| control(ControlOp::Stop, Some(u))),
-            KeyCode::Char('R') => self.selected_name().and_then(|u| control(ControlOp::Restart, Some(u))),
+            KeyCode::Char('s') => {
+                self.selected_name().and_then(|u| control(ControlOp::Start, Some(u)))
+            }
+            KeyCode::Char('t') => {
+                self.selected_name().and_then(|u| control(ControlOp::Stop, Some(u)))
+            }
+            KeyCode::Char('R') => {
+                self.selected_name().and_then(|u| control(ControlOp::Restart, Some(u)))
+            }
             KeyCode::Char('c') => {
                 self.screen = SvcScreen::NamePrompt { input: String::new() };
                 self.error = None;
                 None
             }
-            KeyCode::Char('e') => self
-                .selected_name()
-                .map(|name| Action::Services(ServicesAction::Edit { units_dir: ud, name })),
-            KeyCode::Char('d') => self
-                .selected_name()
-                .map(|name| Action::Services(ServicesAction::Delete { units_dir: ud, name })),
-            KeyCode::Char('r') => Some(Action::Services(ServicesAction::Refresh { units_dir: ud })),
+            KeyCode::Char('e') => self.selected_name().map(|name| {
+                Action::Services(ServicesAction::Edit { units_dir: ud, name })
+            }),
+            KeyCode::Char('d') => self.selected_name().map(|name| {
+                Action::Services(ServicesAction::Delete { units_dir: ud, name })
+            }),
+            KeyCode::Char('r') => {
+                Some(Action::Services(ServicesAction::Refresh { units_dir: ud }))
+            }
             _ => None,
         }
     }
@@ -461,8 +491,10 @@ pub(super) fn render_units(
     let sel = list.selected().unwrap_or(0).min(rows.len().saturating_sub(1));
     // Narrow name list on the left; the freed width goes to the stacked
     // Status (top) and Definition (bottom) panes on the right.
-    let cols = Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).split(area);
-    let right = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(cols[1]);
+    let cols =
+        Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).split(area);
+    let right =
+        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(cols[1]);
     let items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(Line::from(Span::styled("(no units)", theme::hint_style())))]
     } else {
@@ -471,7 +503,10 @@ pub(super) fn render_units(
     let mut st = list.clone();
     let widget = List::new(items)
         .style(theme::panel_style())
-        .block(theme::panel_block().title(Span::styled(title.to_string(), theme::title_style())))
+        .block(
+            theme::panel_block()
+                .title(Span::styled(title.to_string(), theme::title_style())),
+        )
         .highlight_style(theme::selected_style())
         .highlight_symbol("▸ ");
     f.render_stateful_widget(widget, cols[0], &mut st);
@@ -494,9 +529,9 @@ pub(super) fn render_units(
         None => vec![Line::from(label("No unit selected."))],
     };
     f.render_widget(
-        Paragraph::new(status)
-            .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Status ", theme::title_style()))),
+        Paragraph::new(status).style(theme::panel_style()).block(
+            theme::panel_block().title(Span::styled(" Status ", theme::title_style())),
+        ),
         right[0],
     );
     // Bottom-right: the selected unit's definition.
@@ -516,7 +551,10 @@ pub(super) fn render_units(
         Paragraph::new(detail)
             .wrap(Wrap { trim: true })
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Definition ", theme::title_style()))),
+            .block(
+                theme::panel_block()
+                    .title(Span::styled(" Definition ", theme::title_style())),
+            ),
         right[1],
     );
 }
@@ -551,13 +589,19 @@ mod tests {
         let out = render(&mut s, 110, 20);
         assert!(out.contains("resolver"), "unit name missing: {out:?}");
         // Status pane: status word + pid on their own lines.
-        assert!(out.contains("status:") && out.contains("running"), "status pane missing: {out:?}");
+        assert!(
+            out.contains("status:") && out.contains("running"),
+            "status pane missing: {out:?}"
+        );
         assert!(out.contains("pid:") && out.contains("42"), "pid line missing: {out:?}");
         // Definition pane: the selected unit's exe.
         assert!(out.contains("/usr/bin/netidx"), "definition exe missing: {out:?}");
         // Keybinds live in the App gutter, not the surface.
         let g = s.gutter();
-        assert!(g.contains("c create") && g.contains("d delete"), "gutter keys missing: {g:?}");
+        assert!(
+            g.contains("c create") && g.contains("d delete"),
+            "gutter keys missing: {g:?}"
+        );
     }
 
     #[test]

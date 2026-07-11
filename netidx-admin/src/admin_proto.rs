@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uuid::Uuid;
 
 // CR codex for estokes: Both ends require exact equality, so the next
 // incompatible bump makes rolling upgrades impossible: enrollment, renewal,
@@ -24,7 +25,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 // binary. Please define a supported version range/capability negotiation and
 // exercise at least N/N-1 interoperability before this becomes an IT-managed
 // fleet protocol.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -37,6 +38,77 @@ pub const DEFAULT_PORT: u16 = 4565;
 /// a normal join; it is only issued locally on the CA host or via the
 /// policy-gated [`Request::Enroll`].
 pub const SERVING_SAN: &str = "netidx-admin-server";
+
+pub const SERVER_ID_URI_PREFIX: &str = "urn:netidx:admin:server:";
+pub const CONTROLLER_ROLE_URI: &str = "urn:netidx:admin:role:controller";
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct AdminServerId(pub Uuid);
+
+impl AdminServerId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn uri(self) -> String {
+        format!("{SERVER_ID_URI_PREFIX}{}", self.0)
+    }
+}
+
+impl Default for AdminServerId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for AdminServerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ResolverClusterId(pub Uuid);
+
+impl ResolverClusterId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for ResolverClusterId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ResolverClusterId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OperationId(pub Uuid);
+
+impl OperationId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for OperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Bodies larger than this are refused before allocation — CSRs and
 /// certs are a few KB; this is a generous backstop against a hostile or
@@ -84,6 +156,8 @@ pub struct ServerHello {
     pub domain: String,
     /// What this host does — see [`Role`].
     pub roles: Vec<Role>,
+    pub server_id: AdminServerId,
+    pub controller: bool,
 }
 
 /// A secret string that never appears in `Debug` output and is zeroized
@@ -113,6 +187,18 @@ impl Drop for Secret {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AdminCredential {
+    Password { admin: String, password: Secret },
+    Session { token: Secret },
+}
+
+impl AdminCredential {
+    pub fn password(admin: impl Into<String>, password: impl Into<String>) -> Self {
+        Self::Password { admin: admin.into(), password: Secret(password.into()) }
+    }
+}
+
 /// The one request a connection carries after the hello exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -120,13 +206,17 @@ pub enum Request {
     /// ([`GetInfoResponse`]). The *client* walks `peers` and
     /// aggregates — servers never fan out to answer this.
     GetInfo,
+    /// Authenticate a password once and mint an in-memory CA session.
+    Login(LoginRequest),
+    /// Revoke one in-memory CA session.
+    Logout(LogoutRequest),
     /// Data-plane cert join (TLS networks), signed immediately — the
     /// admin's password rides in the request, so an admin must be
     /// present at the enrolling node. Answered with [`SignResponse`].
     Sign(SignRequest),
     /// Admin-server enrollment: issue the reserved [`SERVING_SAN`]
     /// serving cert to a new admin server. Requires an admin whose
-    /// policy grants `may_enroll_servers`. Answered with
+    /// policy covers the requested cluster base and roles. Answered with
     /// [`SignResponse`].
     Enroll(EnrollRequest),
     /// CA → id-map push: register an identity on this host's id-map.
@@ -270,9 +360,38 @@ pub enum Request {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub credential: AdminCredential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LoginResponse {
+    Ok {
+        admin: String,
+        token: Secret,
+        issued_unix: u64,
+        absolute_deadline_unix: u64,
+        idle_timeout_secs: u64,
+    },
+    Err {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutRequest {
+    pub credential: AdminCredential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogoutResponse {
+    Ok,
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     /// Serial numbers to revoke (chosen from a [`ListIssuedResponse`]).
     pub serials: Vec<u64>,
     /// Recorded with each revocation and shown in the audit log.
@@ -294,8 +413,7 @@ pub enum RevokeResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListIssuedRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
 }
 
 /// One issued certificate, for the admin revoke UI / inspection.
@@ -324,10 +442,13 @@ pub struct GetCrlResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignRequest {
+    /// The identity class being issued. Resolver service identities may have
+    /// multiple live keys for their shared cluster TLS name; user-like kinds
+    /// retain the one-live-name rule.
+    pub kind: NodeKind,
     /// Which admin's password follows — selects the keyslot and its
     /// issuance policy.
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub csr_pem: String,
     /// The DNS name the leaf should carry as its single SAN (netidx
     /// pins identities to exactly one DNS SAN). The CA overrides
@@ -349,13 +470,38 @@ pub struct SignRequest {
 /// privileged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub csr_pem: String,
     /// Where the new admin server will listen. The CA appends it to its
     /// own peer list (admin-authorized, so trusted), which makes the CA
     /// host the well-known starting point for peer walks.
     pub listen: SocketAddr,
+    pub roles: Vec<Role>,
+    /// The resolver endpoint owned by this admin-server identity. It must be
+    /// one of this host's locally configured `resolver_members`; stable
+    /// ownership lets the CA form and split clusters without treating those
+    /// optional launch blocks as the authoritative roster.
+    pub resolver_member: Option<ResolverAddr>,
+    pub resolver_members: Vec<ResolverAddr>,
+    pub cluster: ClusterPlacement,
+    /// Accepted only on the protected local control socket, for renewing the
+    /// already-installed controller identity across a key rotation.
+    pub renew_identity: Option<AdminServerId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ClusterPlacement {
+    Create { base: String },
+    Join { cluster: ResolverClusterId },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnrollmentRequest {
+    pub listen: SocketAddr,
+    pub roles: Vec<Role>,
+    pub resolver_member: Option<ResolverAddr>,
+    pub resolver_members: Vec<ResolverAddr>,
+    pub cluster: ClusterPlacement,
 }
 
 /// Response to both [`Request::Sign`] and [`Request::Enroll`].
@@ -375,6 +521,9 @@ pub enum SignResponse {
         /// the operator.
         #[serde(default)]
         warnings: Vec<String>,
+        /// Present when issuance triggered an id-map fanout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
     },
     Err {
         reason: String,
@@ -386,6 +535,7 @@ pub enum SignResponse {
 /// are a per-host detail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddIdentityRequest {
+    pub operation_id: OperationId,
     /// The identity name — the DNS SAN the CA just issued.
     pub san: String,
     /// Primary group (created with an allocated gid if missing).
@@ -419,10 +569,10 @@ pub struct EnqueueRequest {
     /// the reserved [`SERVING_SAN`] (whatever `requested_name` says)
     /// and the value is where the new admin server will listen — the CA
     /// records it as a peer at approval. Approval requires an admin
-    /// whose policy grants `may_enroll_servers`; the request code
+    /// whose policy covers the requested cluster base and roles; the request code
     /// ceremony is the same as any queued request.
     #[serde(default)]
-    pub enroll_listen: Option<SocketAddr>,
+    pub enrollment: Option<EnrollmentRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +596,8 @@ pub enum PollResponse {
         trusted_pem: String,
         #[serde(default)]
         warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
     },
     Denied {
         reason: String,
@@ -456,8 +608,7 @@ pub enum PollResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListQueueRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
 }
 
 /// One pending queue entry. The CSR rides along so the admin's CLI
@@ -487,10 +638,15 @@ pub struct QueueEntry {
     pub verified_renewal: bool,
     /// `Some` ⇒ a admin-server enrollment (see
     /// [`EnqueueRequest::enroll_listen`]): approval signs the reserved
-    /// [`SERVING_SAN`] and requires `may_enroll_servers`; id-map groups
+    /// [`SERVING_SAN`] and requires scoped server-enrollment authority; id-map groups
     /// don't apply.
     #[serde(default)]
-    pub enroll_listen: Option<SocketAddr>,
+    pub enrollment: Option<EnrollmentRequest>,
+    /// Authoritative base of the requested resolver cluster. For `Create` this
+    /// repeats the requested base; for `Join` the CA resolves the stable cluster
+    /// ID through its map so approval UIs can show both identity and scope.
+    #[serde(default)]
+    pub cluster_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,8 +657,7 @@ pub enum ListQueueResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApproveRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub request_id: String,
     /// id-map groups for the new identity (first is primary), chosen
     /// by the admin here and validated against their policy's allowed
@@ -513,6 +668,8 @@ pub struct ApproveRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApproveResponse {
     Ok {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<OperationId>,
         #[serde(default)]
         warnings: Vec<String>,
     },
@@ -523,8 +680,7 @@ pub enum ApproveResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub request_id: String,
     /// Shown to the waiting enrollee.
     pub reason: String,
@@ -538,16 +694,16 @@ pub enum DenyResponse {
 
 // -- resolver hierarchy delegation -------------------------------------------
 
-/// A delegation request: the child proposes to own `proposed_path` as a
-/// subtree and submits its own resolver cluster's address(es). No
-/// credentials — the parent admin authorizes by matching the out-of-band
-/// request code (a fingerprint over exactly `(proposed_path, child)`)
-/// before approving. The `child` list is the full child cluster so the
-/// parent can refer down to any member.
+/// A delegation request names the intended parent and child by immutable
+/// admin-server identities. The two sets may currently belong to distinct
+/// clusters (attach/rebase) or to one active peer cluster (split). No
+/// credentials are carried: approval is authorized by matching the
+/// out-of-band request code over this complete proposal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegationRequest {
     pub proposed_path: String,
-    pub child: Vec<ResolverAddr>,
+    pub parent_servers: Vec<AdminServerId>,
+    pub child_servers: Vec<AdminServerId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,19 +730,29 @@ pub enum DelegationPollResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListDelegationsRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
 }
 
-/// One pending delegation request for the admin reviewer. The
-/// `proposed_path` and `child` are exactly what the request code
-/// fingerprints, so the admin's CLI recomputes the code locally — never
-/// trusting a wire value.
+/// One pending or previously-approved delegation request for the admin
+/// reviewer. Approved entries remain reviewable so an administrator can run
+/// the idempotent reconciliation path after a partial propagation failure. The
+/// `proposed_path`, `parent_servers`, and `child_servers` are exactly what the
+/// request code fingerprints, so the admin's CLI recomputes the code locally
+/// rather than trusting a wire value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegationEntry {
     pub id: String,
     pub proposed_path: String,
-    pub child: Vec<ResolverAddr>,
+    pub parent_servers: Vec<AdminServerId>,
+    pub child_servers: Vec<AdminServerId>,
+    /// Current/final cluster IDs resolved by the controller for display.
+    pub parent: ResolverClusterId,
+    pub child: ResolverClusterId,
+    pub parent_base: String,
+    pub child_base: String,
+    pub parent_members: Vec<ResolverAddr>,
+    pub child_members: Vec<ResolverAddr>,
+    pub approved: bool,
     pub age_secs: u64,
     pub peer: String,
 }
@@ -599,8 +765,7 @@ pub enum ListDelegationsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApproveDelegationRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub request_id: String,
 }
 
@@ -609,6 +774,7 @@ pub struct ApproveDelegationRequest {
 /// until re-synced — the reviewer surfaces it loudly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerResult {
+    pub server: AdminServerId,
     pub addr: SocketAddr,
     /// `None` ⇒ updated; `Some(err)` ⇒ failed (unreachable / rejected).
     pub error: Option<String>,
@@ -616,14 +782,13 @@ pub struct PeerResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApproveDelegationResponse {
-    Ok { peers: Vec<PeerResult> },
+    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
     Err { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DenyDelegationRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub request_id: String,
     pub reason: String,
 }
@@ -637,15 +802,22 @@ pub enum DenyDelegationResponse {
 /// A referral edit pushed server-to-server for cluster-wide consistency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReferralEdit {
-    /// Add `child` as the resolver's child owning `path`.
-    AddChild { path: String, child: Vec<ResolverAddr> },
-    /// Set the resolver's `parent` referral: it attaches at `path` under
-    /// the parent cluster `parent`.
-    SetParent { path: String, parent: Vec<ResolverAddr> },
+    /// Replace the complete CA-managed topology portion of a resolver config.
+    /// Existing member blocks are retained by address (preserving TLS paths,
+    /// bind addresses, and tuning); only the selected blocks and referrals are
+    /// rewritten. `local_member` is placed first so netidx-admin-managed units
+    /// continue to run member index zero.
+    SetTopology {
+        local_member: ResolverAddr,
+        members: Vec<ResolverAddr>,
+        parent: Option<ClusterEdge>,
+        children: Vec<ClusterEdge>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyReferralEditRequest {
+    pub operation_id: OperationId,
     pub edit: ReferralEdit,
 }
 
@@ -696,13 +868,13 @@ pub struct ClusterEdge {
     pub addrs: Vec<ResolverAddr>,
 }
 
-/// A resolver cluster's facts, self-reported by one of its admin servers:
-/// its advertisable members, where it attaches in the namespace, and its
-/// hierarchy edges. This is the single-owner fact the CA folds into the
-/// map — each cluster owns its own.
+/// Resolver facts self-reported by one admin server: its locally configured
+/// launch members, where its assigned cluster attaches, and hierarchy edges.
+/// The CA derives the authoritative cluster roster from enrolled server
+/// ownership; `members` may be only this node or a convenient larger subset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterFacts {
-    /// The cluster's advertisable member resolver servers (`Local` dropped).
+    /// This host's configured advertisable member blocks (`Local` dropped).
     pub members: Vec<ResolverAddr>,
     /// Where this cluster attaches — its parent-referral path, or `/` for
     /// the root cluster.
@@ -713,15 +885,41 @@ pub struct ClusterFacts {
     pub children: Vec<ClusterEdge>,
 }
 
-/// One admin server in the trust domain, as recorded in the CA's map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerState {
+    Enrolled,
+    Registered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClusterState {
+    Pending,
+    Active,
+}
+
+/// One admin server grant in the CA-owned map. The immutable identity is the
+/// key; `addr` is mutable routing data and never serves as identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerEntry {
-    /// The admin server's listen address.
+    pub id: AdminServerId,
     pub addr: SocketAddr,
-    /// What this host does (see [`Role`]).
     pub roles: Vec<Role>,
-    /// Its resolver cluster's facts, if it runs a resolver.
-    pub cluster: Option<ClusterFacts>,
+    /// Resolver endpoint owned by this identity. `None` only for a server
+    /// without the Resolver role.
+    #[serde(default)]
+    pub resolver: Option<ResolverAddr>,
+    pub cluster: Option<ResolverClusterId>,
+    pub state: ServerState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterEntry {
+    pub id: ResolverClusterId,
+    pub base: String,
+    pub state: ClusterState,
+    pub members: Vec<ResolverAddr>,
+    pub parent: Option<ResolverClusterId>,
+    pub children: Vec<ResolverClusterId>,
 }
 
 /// The CA-authoritative, versioned picture of the whole trust domain. The
@@ -729,31 +927,44 @@ pub struct ServerEntry {
 /// walking — bumps `version` on every change, persists it, and serves it.
 /// Every admin server caches a copy (version-checked) and serves it to
 /// clients, so one round trip to any admin server is the whole network.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
     /// this (via [`Request::GetMapVersion`]) before pulling the full map.
     pub version: u64,
-    /// Where the CA lives (the Sign/Enroll destination).
-    pub ca_addr: Option<SocketAddr>,
-    /// Every admin server in the trust domain.
+    pub controller: AdminServerId,
     pub servers: Vec<ServerEntry>,
+    pub clusters: Vec<ClusterEntry>,
+}
+
+impl NetworkMap {
+    pub fn empty(controller: AdminServerId) -> Self {
+        Self { version: 0, controller, servers: Vec::new(), clusters: Vec::new() }
+    }
+
+    pub fn controller_entry(&self) -> Option<&ServerEntry> {
+        self.servers.iter().find(|s| s.id == self.controller)
+    }
+}
+
+impl Default for NetworkMap {
+    fn default() -> Self {
+        Self::empty(AdminServerId(Uuid::nil()))
+    }
 }
 
 /// Server→CA: register/update this admin server's facts in the map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
-    /// This admin server's own listen address.
     pub addr: SocketAddr,
-    pub roles: Vec<Role>,
-    pub cluster: Option<ClusterFacts>,
+    /// The resolver configuration is evidence checked against the CA grant;
+    /// it is never copied wholesale into the authoritative map.
+    pub resolver: Option<ClusterFacts>,
 }
 
 /// Server→CA: drop this admin server from the map (on uninstall).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeregisterRequest {
-    pub addr: SocketAddr,
-}
+pub struct DeregisterRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RegisterResponse {
@@ -778,10 +989,8 @@ pub enum GetMapResponse {
 /// `uninstall`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveServerRequest {
-    pub admin: String,
-    pub password: Secret,
-    /// The listen address of the admin server to remove.
-    pub addr: SocketAddr,
+    pub credential: AdminCredential,
+    pub server: AdminServerId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -801,8 +1010,7 @@ pub enum GetPermsResponse {
 /// `perms_json` (a serialized resolver `PMap`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditPermsRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     /// The base path of the cluster whose perms to edit (e.g. `/eu`).
     pub target_path: String,
     pub perms_json: String,
@@ -810,13 +1018,14 @@ pub struct EditPermsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditPermsResponse {
-    Ok { peers: Vec<PeerResult> },
+    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
     Err { reason: String },
 }
 
 /// Server → server: apply a permissions edit to the local resolver perms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyPermsEditRequest {
+    pub operation_id: OperationId,
     pub perms_json: String,
 }
 
@@ -836,8 +1045,7 @@ pub enum ApplyPermsEditResponse {
 /// caller's own password.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddRoleAdminRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub name: String,
     pub new_password: Secret,
     pub policy: crate::ca_policy::Policy,
@@ -847,8 +1055,7 @@ pub struct AddRoleAdminRequest {
 /// + subset rule as [`AddRoleAdminRequest`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetAdminPolicyRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub target: String,
     pub policy: crate::ca_policy::Policy,
 }
@@ -856,16 +1063,14 @@ pub struct SetAdminPolicyRequest {
 /// Admin → CA: remove role admin `target`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveAdminRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
     pub target: String,
 }
 
 /// Admin → CA: list the admin roster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAdminsRequest {
-    pub admin: String,
-    pub password: Secret,
+    pub credential: AdminCredential,
 }
 
 /// Response to add/set/remove admin ops. These are CA-local (no cluster
@@ -896,16 +1101,15 @@ pub enum AdminListResponse {
 /// from the activation control protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlServiceRequest {
-    pub admin: String,
-    pub password: Secret,
-    pub target_server: SocketAddr,
+    pub credential: AdminCredential,
+    pub target_server: AdminServerId,
     pub units: Vec<String>,
     pub op: netidx_activation::control::ControlOp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlServiceResponse {
-    Ok { units: Vec<ServiceUnit> },
+    Ok { operation_id: OperationId, units: Vec<ServiceUnit> },
     Err { reason: String },
 }
 
@@ -913,6 +1117,7 @@ pub enum ControlServiceResponse {
 /// activation supervisor. `units` are the resolved unit names for THIS host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyServiceControlRequest {
+    pub operation_id: OperationId,
     pub units: Vec<String>,
     pub op: netidx_activation::control::ControlOp,
 }
@@ -1026,8 +1231,8 @@ mod tests {
     async fn round_trips_over_a_pipe() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let req = Request::Sign(SignRequest {
-            admin: "alice".to_string(),
-            password: Secret("pw".to_string()),
+            kind: NodeKind::Resolver,
+            credential: AdminCredential::password("alice", "pw"),
             csr_pem: "CSR".to_string(),
             requested_name: "resolver.example.com".to_string(),
             requested_validity: std::time::Duration::from_secs(365 * 86400),
@@ -1036,29 +1241,34 @@ mod tests {
         write_msg(&mut a, &req).await.unwrap();
         let got: Request = read_msg(&mut b).await.unwrap();
         let Request::Sign(got) = got else { panic!("expected Sign") };
-        assert_eq!(got.admin, "alice");
-        assert_eq!(got.password.0, "pw");
+        assert!(matches!(
+            got.credential,
+            AdminCredential::Password { admin, password }
+                if admin == "alice" && password.0 == "pw"
+        ));
         assert_eq!(got.requested_name, "resolver.example.com");
+        assert_eq!(got.kind, NodeKind::Resolver);
         assert_eq!(got.id_map_groups, vec!["users".to_string()]);
     }
 
     #[tokio::test]
     async fn delegation_messages_round_trip() {
         let (mut a, mut b) = tokio::io::duplex(4096);
+        let parent_id = AdminServerId::new();
+        let child_id = AdminServerId::new();
         let req = Request::RequestDelegation(DelegationRequest {
-            proposed_path: "/eu".to_string(),
-            child: vec![ResolverAddr {
-                addr: "10.0.0.2:4564".parse().unwrap(),
-                auth: InfoAuth::Anonymous,
-            }],
+            proposed_path: "/ap".into(),
+            parent_servers: vec![parent_id],
+            child_servers: vec![child_id],
         });
         write_msg(&mut a, &req).await.unwrap();
         let got: Request = read_msg(&mut b).await.unwrap();
         let Request::RequestDelegation(got) = got else {
             panic!("expected RequestDelegation")
         };
-        assert_eq!(got.proposed_path, "/eu");
-        assert_eq!(got.child.len(), 1);
+        assert_eq!(got.proposed_path, "/ap");
+        assert_eq!(got.parent_servers, vec![parent_id]);
+        assert_eq!(got.child_servers, vec![child_id]);
 
         let resp = DelegationPollResponse::Approved {
             parent: vec![ResolverAddr {
@@ -1074,13 +1284,24 @@ mod tests {
             _ => panic!("expected Approved"),
         }
 
+        // A topology fanout carries the complete CA-owned roster and edges.
+        let local_member = ResolverAddr {
+            addr: "10.0.0.2:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        };
         let edit = Request::ApplyReferralEdit(ApplyReferralEditRequest {
-            edit: ReferralEdit::AddChild {
-                path: "/eu".to_string(),
-                child: vec![ResolverAddr {
-                    addr: "10.0.0.2:4564".parse().unwrap(),
-                    auth: InfoAuth::Anonymous,
-                }],
+            operation_id: OperationId::new(),
+            edit: ReferralEdit::SetTopology {
+                local_member: local_member.clone(),
+                members: vec![local_member.clone()],
+                parent: Some(ClusterEdge {
+                    path: "/eu".to_string(),
+                    addrs: vec![ResolverAddr {
+                        addr: "10.0.0.1:4564".parse().unwrap(),
+                        auth: InfoAuth::Krb5 { spn: "svc/r@EU".to_string() },
+                    }],
+                }),
+                children: vec![],
             },
         });
         write_msg(&mut a, &edit).await.unwrap();
@@ -1088,38 +1309,16 @@ mod tests {
             panic!("expected ApplyReferralEdit")
         };
         match got.edit {
-            ReferralEdit::AddChild { path, child } => {
-                assert_eq!(path, "/eu");
-                assert_eq!(child.len(), 1);
-            }
-            _ => panic!("expected AddChild"),
-        }
-
-        // The child-cluster direction: SetParent carries the parent's
-        // address(es) + auth and must round-trip identically.
-        let edit = Request::ApplyReferralEdit(ApplyReferralEditRequest {
-            edit: ReferralEdit::SetParent {
-                path: "/eu".to_string(),
-                parent: vec![ResolverAddr {
-                    addr: "10.0.0.1:4564".parse().unwrap(),
-                    auth: InfoAuth::Krb5 { spn: "svc/r@EU".to_string() },
-                }],
-            },
-        });
-        write_msg(&mut a, &edit).await.unwrap();
-        let Request::ApplyReferralEdit(got) = read_msg(&mut b).await.unwrap() else {
-            panic!("expected ApplyReferralEdit")
-        };
-        match got.edit {
-            ReferralEdit::SetParent { path, parent } => {
-                assert_eq!(path, "/eu");
-                assert_eq!(parent.len(), 1);
+            ReferralEdit::SetTopology { local_member: got, parent, .. } => {
+                assert_eq!(got, local_member);
+                let parent = parent.unwrap();
+                assert_eq!(parent.path, "/eu");
+                assert_eq!(parent.addrs.len(), 1);
                 assert_eq!(
-                    parent[0].auth,
+                    parent.addrs[0].auth,
                     InfoAuth::Krb5 { spn: "svc/r@EU".to_string() }
                 );
             }
-            _ => panic!("expected SetParent"),
         }
     }
 
@@ -1128,8 +1327,8 @@ mod tests {
         // A request written before `id_map_groups` existed must decode
         // — the field is `#[serde(default)]`.
         let json = r#"{
-            "admin": "alice",
-            "password": "pw",
+            "kind": "Client",
+            "credential": {"Password":{"admin":"alice","password":"pw"}},
             "csr_pem": "CSR",
             "requested_name": "a.example.com",
             "requested_validity": "30days"
@@ -1145,6 +1344,8 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             domain: "ryu-oh.org".to_string(),
             roles: vec![Role::Ca, Role::Resolver, Role::IdMap],
+            server_id: AdminServerId::new(),
+            controller: true,
         };
         write_msg(&mut a, &hello).await.unwrap();
         let got: ServerHello = read_msg(&mut b).await.unwrap();
@@ -1185,8 +1386,7 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let req = Request::Register(RegisterRequest {
             addr: "10.0.0.2:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
-            cluster: Some(ClusterFacts {
+            resolver: Some(ClusterFacts {
                 members: vec![ResolverAddr {
                     addr: "10.0.0.2:4564".parse().unwrap(),
                     auth: InfoAuth::Anonymous,
@@ -1206,17 +1406,22 @@ mod tests {
         let got: Request = read_msg(&mut b).await.unwrap();
         let Request::Register(got) = got else { panic!("expected Register") };
         assert_eq!(got.addr, "10.0.0.2:4565".parse().unwrap());
-        assert_eq!(got.cluster.unwrap().base, "/eu");
+        assert_eq!(got.resolver.unwrap().base, "/eu");
 
+        let controller = AdminServerId::new();
         let resp = GetMapResponse::Ok {
             map: NetworkMap {
                 version: 7,
-                ca_addr: Some("10.0.0.1:4565".parse().unwrap()),
+                controller,
                 servers: vec![ServerEntry {
+                    id: controller,
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     roles: vec![Role::Ca, Role::Resolver],
+                    resolver: None,
                     cluster: None,
+                    state: ServerState::Registered,
                 }],
+                clusters: vec![],
             },
         };
         write_msg(&mut a, &resp).await.unwrap();

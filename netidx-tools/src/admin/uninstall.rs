@@ -362,7 +362,7 @@ fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
         let roots = admin_server::load_roots(&trusted)?;
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-        rt.block_on(admin_client::deregister(ca_addr, &cert, &key, roots, cfg.listen))?;
+        rt.block_on(admin_client::deregister(ca_addr, &cert, &key, roots))?;
         Ok(())
     })();
     match result {

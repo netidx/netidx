@@ -22,12 +22,11 @@
 //! wire-supplied string that becomes a file name): anything but
 //! `[0-9a-f]{32}` is rejected (no path traversal).
 
-use crate::{atomic, admin_proto::NodeKind};
+use crate::{atomic, admin_proto::{EnrollmentRequest, NodeKind}};
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
 use std::{
-    net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -67,7 +66,7 @@ pub struct QueuedReq {
     pub renewal_of: Option<u64>,
     /// `Some` ⇒ a admin-server enrollment.
     #[serde(default)]
-    pub enroll_listen: Option<SocketAddr>,
+    pub enrollment: Option<EnrollmentRequest>,
 }
 
 impl QueuedReq {
@@ -79,7 +78,7 @@ impl QueuedReq {
         requested_validity: Duration,
         peer: String,
         renewal_of: Option<u64>,
-        enroll_listen: Option<SocketAddr>,
+        enrollment: Option<EnrollmentRequest>,
     ) -> Self {
         QueuedReq {
             id: new_id(),
@@ -90,7 +89,7 @@ impl QueuedReq {
             received_unix: now_unix(),
             peer,
             renewal_of,
-            enroll_listen,
+            enrollment,
         }
     }
 
@@ -240,6 +239,7 @@ pub struct CaDir {
     /// so a CA predating the file keeps today's behaviour. A daemon picks up
     /// edits on restart.
     pub lifetimes: crate::ca::CaLifetimes,
+    pub sessions: crate::session::SessionStore,
     /// The CA directory path — a lockless accessor for the netmap, the CA
     /// cert, and other files that are neither the store nor the vault.
     dir: PathBuf,
@@ -262,6 +262,7 @@ impl CaDir {
             vault: RwLock::new(crate::ca_vault::CAVault::new(dir.clone())),
             autorenew_pw: RwLock::new(None),
             lifetimes,
+            sessions: crate::session::SessionStore::default(),
             dir,
             _lock,
         })

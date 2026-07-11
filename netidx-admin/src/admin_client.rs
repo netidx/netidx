@@ -59,7 +59,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
 use rustls::ClientConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
@@ -114,6 +114,8 @@ pub struct CaIdentity {
     pub domain: String,
     /// The roles the contacted host claimed in the server hello.
     pub roles: Vec<Role>,
+    pub server_id: admin_proto::AdminServerId,
+    pub controller: bool,
     /// The CA cert the fingerprint is of, kept so later connections can
     /// verify against the *confirmed* CA rather than a re-presented one.
     ca_der: CertificateDer<'static>,
@@ -124,6 +126,10 @@ impl CaIdentity {
     /// chains (`[leaf, ca]`) after an [`enroll`].
     pub fn ca_pem(&self) -> String {
         der_to_pem(self.ca_der.as_ref())
+    }
+
+    pub fn ca_certificate(&self) -> CertificateDer<'static> {
+        self.ca_der.clone()
     }
 }
 
@@ -217,8 +223,11 @@ async fn exchange_hello(
     tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
     kind: NodeKind,
 ) -> Result<ServerHello> {
-    admin_proto::write_msg(tls, &ClientHello { protocol_version: PROTOCOL_VERSION, kind })
-        .await?;
+    admin_proto::write_msg(
+        tls,
+        &ClientHello { protocol_version: PROTOCOL_VERSION, kind },
+    )
+    .await?;
     let hello: ServerHello = admin_proto::read_msg(tls).await?;
     if hello.protocol_version != PROTOCOL_VERSION {
         bail!(
@@ -244,10 +253,15 @@ async fn exchange_hello(
 pub async fn fetch_identity(addr: SocketAddr, kind: NodeKind) -> Result<CaIdentity> {
     let (mut tls, chain) = connect_tofu(addr).await?;
     let (serving_der, ca_der) = split_chain(&chain)?;
-    verify_serving_cert(serving_der, ca_der).context(
+    let cert_identity = verify_serving_cert(serving_der, ca_der).context(
         "the admin server's serving certificate is not bound to the CA it presented",
     )?;
     let hello = exchange_hello(&mut tls, kind).await?;
+    if hello.server_id != cert_identity.server_id
+        || hello.controller != cert_identity.controller
+    {
+        bail!("admin server hello identity does not match its certificate");
+    }
     drop(tls);
     Ok(CaIdentity {
         // The glyph is of the CA's *key* (SPKI), not the cert — stable
@@ -256,6 +270,8 @@ pub async fn fetch_identity(addr: SocketAddr, kind: NodeKind) -> Result<CaIdenti
             .context("fingerprinting the presented CA certificate")?,
         domain: hello.domain,
         roles: hello.roles,
+        server_id: cert_identity.server_id,
+        controller: cert_identity.controller,
         ca_der: ca_der.clone(),
     })
 }
@@ -283,12 +299,122 @@ async fn connect_pinned(
     // Everything downstream binds to the *confirmed* CA, not the
     // re-presented one (identical given the pin passed, but this makes
     // the trust anchor explicit).
-    verify_serving_cert(serving_der, &expected.ca_der).context(
+    let cert_identity = verify_serving_cert(serving_der, &expected.ca_der).context(
         "the admin server's serving certificate failed verification against the \
          confirmed CA — this is not the network you confirmed",
     )?;
-    exchange_hello(&mut tls, kind).await?;
+    let hello = exchange_hello(&mut tls, kind).await?;
+    if hello.server_id != cert_identity.server_id
+        || hello.controller != cert_identity.controller
+    {
+        bail!("admin server hello identity does not match its certificate");
+    }
     Ok(tls)
+}
+
+/// Resolve and verify the one active controller without sending a credential.
+/// Bootstrap maps and peer lists are hints only; the returned connection is
+/// pinned to the same home CA and requires the controller URI in the serving
+/// certificate.
+async fn connect_controller_pinned(
+    bootstrap: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let map = get_map_pinned(bootstrap, kind, expected).await?;
+    let controller = map
+        .controller_entry()
+        .filter(|s| s.state == admin_proto::ServerState::Registered)
+        .context("the authoritative map contains no registered controller")?;
+    let identity = fetch_identity(controller.addr, kind)
+        .await
+        .context("verifying the active controller")?;
+    if identity.fingerprint != expected.fingerprint
+        || !identity.controller
+        || identity.server_id != map.controller
+    {
+        bail!(
+            "the controller candidate is not the exact controller of the confirmed home CA"
+        );
+    }
+    connect_pinned(controller.addr, kind, &identity).await
+}
+
+pub struct LoginSession {
+    pub admin: String,
+    pub token: Secret,
+    pub issued_unix: u64,
+    pub absolute_deadline_unix: u64,
+    pub idle_timeout_secs: u64,
+}
+
+fn admin_refusal(
+    expected: &CaIdentity,
+    credential: &admin_proto::AdminCredential,
+    context: &str,
+    reason: String,
+) -> anyhow::Error {
+    if matches!(credential, admin_proto::AdminCredential::Session { .. })
+        && reason.contains("login required")
+    {
+        let _ = crate::session_cache::delete(&expected.fingerprint.text());
+    }
+    anyhow!("{context}: {reason}")
+}
+
+pub async fn login(
+    bootstrap: SocketAddr,
+    expected: &CaIdentity,
+    admin: &str,
+    password: &str,
+) -> Result<LoginSession> {
+    let mut tls =
+        connect_controller_pinned(bootstrap, NodeKind::Client, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::Login(admin_proto::LoginRequest {
+            credential: admin_proto::AdminCredential::password(admin, password),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::LoginResponse>(&mut tls).await? {
+        admin_proto::LoginResponse::Ok {
+            admin,
+            token,
+            issued_unix,
+            absolute_deadline_unix,
+            idle_timeout_secs,
+        } => Ok(LoginSession {
+            admin,
+            token,
+            issued_unix,
+            absolute_deadline_unix,
+            idle_timeout_secs,
+        }),
+        admin_proto::LoginResponse::Err { reason } => bail!("login refused: {reason}"),
+    }
+}
+
+pub async fn logout(
+    bootstrap: SocketAddr,
+    expected: &CaIdentity,
+    token: &str,
+) -> Result<()> {
+    let mut tls =
+        connect_controller_pinned(bootstrap, NodeKind::Client, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::Logout(admin_proto::LogoutRequest {
+            credential: admin_proto::AdminCredential::Session {
+                token: Secret(token.to_string()),
+            },
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::LogoutResponse>(&mut tls).await? {
+        admin_proto::LogoutResponse::Ok => Ok(()),
+        admin_proto::LogoutResponse::Err { reason } => bail!("logout refused: {reason}"),
+    }
 }
 
 /// Fetch one admin server's local facts + known peers, pinned to the
@@ -314,9 +440,36 @@ pub async fn get_map_pinned(
 ) -> Result<NetworkMap> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
-        GetMapResponse::Ok { map } => Ok(map),
+    let hint = match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+        GetMapResponse::Ok { map } => map,
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
+    };
+    if expected.controller && expected.server_id == hint.controller {
+        return Ok(hint);
+    }
+    let controller = hint
+        .controller_entry()
+        .filter(|s| s.state == admin_proto::ServerState::Registered)
+        .context("map hint contains no registered controller")?;
+    let controller_id = controller.id;
+    let controller_addr = controller.addr;
+    let identity = fetch_identity(controller_addr, kind)
+        .await
+        .context("verifying the controller named by the map hint")?;
+    if identity.fingerprint != expected.fingerprint
+        || !identity.controller
+        || identity.server_id != controller_id
+    {
+        bail!("map candidate is not the exact controller of the confirmed home CA");
+    }
+    let mut tls = connect_pinned(controller_addr, kind, &identity).await?;
+    admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+        GetMapResponse::Ok { map } if map.controller == controller_id => Ok(map),
+        GetMapResponse::Ok { .. } => {
+            bail!("controller returned a map for another controller")
+        }
+        GetMapResponse::Err { reason } => bail!("controller map query refused: {reason}"),
     }
 }
 
@@ -324,20 +477,34 @@ pub async fn get_map_pinned(
 /// authed). Mirrors [`push_referral_edit`].
 pub async fn push_perms_edit(
     addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
     serving_cert_pem: &[u8],
     serving_key_pem: &[u8],
     roots: rustls::RootCertStore,
+    operation_id: admin_proto::OperationId,
     perms_json: &str,
 ) -> Result<()> {
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
-    let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ApplyPermsEdit(ApplyPermsEditRequest {
+            operation_id,
             perms_json: perms_json.to_string(),
         }),
     )
@@ -372,27 +539,28 @@ pub async fn edit_perms(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     target_path: &str,
     perms_json: &str,
 ) -> Result<Vec<admin_proto::PeerResult>> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::EditPerms(EditPermsRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
+            credential: credential.clone(),
             target_path: target_path.to_string(),
             perms_json: perms_json.to_string(),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
-        EditPermsResponse::Ok { peers } => Ok(peers),
-        EditPermsResponse::Err { reason } => {
-            bail!("the CA refused the perms edit: {reason}")
-        }
+        EditPermsResponse::Ok { peers, .. } => Ok(peers),
+        EditPermsResponse::Err { reason } => Err(admin_refusal(
+            expected,
+            &credential,
+            "the CA refused the perms edit",
+            reason,
+        )),
     }
 }
 
@@ -404,18 +572,16 @@ pub async fn add_role_admin(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     name: &str,
     new_password: &str,
     policy: crate::ca_policy::Policy,
 ) -> Result<()> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::AddRoleAdmin(AddRoleAdminRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
+            credential: credential.clone(),
             name: name.to_string(),
             new_password: admin_proto::Secret(new_password.to_string()),
             policy,
@@ -424,7 +590,9 @@ pub async fn add_role_admin(
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
-        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+        AdminMgmtResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
     }
 }
 
@@ -433,17 +601,15 @@ pub async fn set_admin_policy(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     target: &str,
     policy: crate::ca_policy::Policy,
 ) -> Result<()> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::SetAdminPolicy(SetAdminPolicyRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
+            credential: credential.clone(),
             target: target.to_string(),
             policy,
         }),
@@ -451,7 +617,9 @@ pub async fn set_admin_policy(
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
-        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+        AdminMgmtResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
     }
 }
 
@@ -460,23 +628,23 @@ pub async fn remove_admin(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     target: &str,
 ) -> Result<()> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::RemoveAdmin(RemoveAdminRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
+            credential: credential.clone(),
             target: target.to_string(),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok => Ok(()),
-        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+        AdminMgmtResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
     }
 }
 
@@ -485,21 +653,19 @@ pub async fn list_admins(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
 ) -> Result<Vec<crate::ca_policy::AdminInfo>> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
-        &Request::ListAdmins(ListAdminsRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
-        }),
+        &Request::ListAdmins(ListAdminsRequest { credential: credential.clone() }),
     )
     .await?;
     match admin_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
-        AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
+        AdminListResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
     }
 }
 
@@ -510,18 +676,16 @@ pub async fn control_service(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    admin: &str,
-    password: &str,
-    target_server: SocketAddr,
+    credential: admin_proto::AdminCredential,
+    target_server: admin_proto::AdminServerId,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
 ) -> Result<Vec<admin_proto::ServiceUnit>> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ControlService(ControlServiceRequest {
-            admin: admin.to_string(),
-            password: admin_proto::Secret(password.to_string()),
+            credential: credential.clone(),
             target_server,
             units,
             op,
@@ -529,8 +693,10 @@ pub async fn control_service(
     )
     .await?;
     match admin_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
-        ControlServiceResponse::Ok { units } => Ok(units),
-        ControlServiceResponse::Err { reason } => bail!("the CA refused: {reason}"),
+        ControlServiceResponse::Ok { units, .. } => Ok(units),
+        ControlServiceResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
     }
 }
 
@@ -538,21 +704,38 @@ pub async fn control_service(
 /// activation supervisor (serving-cert authed). Mirrors [`push_perms_edit`].
 pub async fn push_service_control(
     addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
     serving_cert_pem: &[u8],
     serving_key_pem: &[u8],
     roots: rustls::RootCertStore,
+    operation_id: admin_proto::OperationId,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
 ) -> Result<Vec<admin_proto::ServiceUnit>> {
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
-    let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
     admin_proto::write_msg(
         &mut tls,
-        &Request::ApplyServiceControl(ApplyServiceControlRequest { units, op }),
+        &Request::ApplyServiceControl(ApplyServiceControlRequest {
+            operation_id,
+            units,
+            op,
+        }),
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
@@ -563,17 +746,27 @@ pub async fn push_service_control(
     }
 }
 
-/// The aggregated picture of a network, built by walking admin servers'
-/// `peers` from one or more seeds. Everything in it was served over
-/// connections pinned to the operator-confirmed CA.
+/// The controller-authoritative picture of the bootstrap server's resolver
+/// cluster, plus the admin servers reached while walking discovery hints.
+/// Everything in it was served over connections pinned to the
+/// operator-confirmed CA.
 pub struct NetworkInfo {
     pub domain: String,
     /// Where Sign/Enroll requests go. The first CA location seen wins;
     /// a well-formed network only has one.
     pub ca_addr: Option<SocketAddr>,
-    /// Every resolver any reached admin server reported, deduped by
-    /// address.
+    /// The active members of the bootstrap server's CA-owned cluster. These
+    /// are replicas of one resolver cluster, never a flattening of the
+    /// hierarchy's parent and child clusters.
     pub resolvers: Vec<ResolverAddr>,
+    /// Base of that one bootstrap cluster. Installers use it when adding a
+    /// replica to a non-root level; it is ordinary admin metadata and never
+    /// changes netidx's data-plane protocol.
+    pub resolver_base: Option<String>,
+    /// Referral topology for that one cluster, derived from the authoritative
+    /// map and restricted to active, registered routing targets.
+    pub resolver_parent: Option<admin_proto::ClusterEdge>,
+    pub resolver_children: Vec<admin_proto::ClusterEdge>,
     /// The admin servers actually reached.
     pub reached: Vec<SocketAddr>,
 }
@@ -582,24 +775,114 @@ pub struct NetworkInfo {
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
-/// Walk the network from `seeds`: [`get_info`] each admin server, follow
-/// `peers` (deduped, cycle-safe), and merge the results. Unreachable or
-/// mismatching (different-CA) servers are skipped with a logged warning
-/// — one live seed is enough to map the network.
+fn bootstrap_cluster(
+    map: &NetworkMap,
+    server_id: admin_proto::AdminServerId,
+) -> Result<(
+    SocketAddr,
+    Vec<ResolverAddr>,
+    Option<String>,
+    Option<admin_proto::ClusterEdge>,
+    Vec<admin_proto::ClusterEdge>,
+)> {
+    fn registered_members(
+        map: &NetworkMap,
+        cluster_id: admin_proto::ResolverClusterId,
+    ) -> Vec<ResolverAddr> {
+        let Some(cluster) = map.clusters.iter().find(|cluster| {
+            cluster.id == cluster_id && cluster.state == admin_proto::ClusterState::Active
+        }) else {
+            return Vec::new();
+        };
+        let mut members: Vec<_> = map
+            .servers
+            .iter()
+            .filter(|server| {
+                server.cluster == Some(cluster_id)
+                    && server.state == admin_proto::ServerState::Registered
+            })
+            .filter_map(|server| server.resolver.clone())
+            .filter(|resolver| cluster.members.contains(resolver))
+            .collect();
+        members.sort_by(|a, b| a.addr.cmp(&b.addr));
+        members
+    }
+    let controller = map
+        .controller_entry()
+        .filter(|s| s.state == admin_proto::ServerState::Registered)
+        .context("network map contains no registered controller")?;
+    let bootstrap = map
+        .servers
+        .iter()
+        .find(|s| s.id == server_id)
+        .filter(|s| s.state == admin_proto::ServerState::Registered)
+        .context("the verified bootstrap server is not registered in the network map")?;
+    let (resolvers, base, parent, mut children) = match bootstrap.cluster {
+        None => (Vec::new(), None, None, Vec::new()),
+        Some(cluster_id) => {
+            let cluster = map
+                .clusters
+                .iter()
+                .find(|c| c.id == cluster_id)
+                .filter(|c| c.state == admin_proto::ClusterState::Active)
+                .context("the bootstrap server's resolver cluster is not active")?;
+            let resolvers = registered_members(map, cluster_id);
+            let parent = cluster.parent.and_then(|parent_id| {
+                let addrs = registered_members(map, parent_id);
+                (!addrs.is_empty()).then(|| admin_proto::ClusterEdge {
+                    path: cluster.base.clone(),
+                    addrs,
+                })
+            });
+            let children = cluster
+                .children
+                .iter()
+                .filter_map(|child_id| {
+                    let child = map.clusters.iter().find(|child| {
+                        child.id == *child_id
+                            && child.state == admin_proto::ClusterState::Active
+                    })?;
+                    let addrs = registered_members(map, *child_id);
+                    (!addrs.is_empty()).then(|| admin_proto::ClusterEdge {
+                        path: child.base.clone(),
+                        addrs,
+                    })
+                })
+                .collect();
+            (resolvers, Some(cluster.base.clone()), parent, children)
+        }
+    };
+    children.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((controller.addr, resolvers, base, parent, children))
+}
+
+/// Walk the network from `seeds`: [`get_info`] each admin server and follow
+/// `peers` (deduped, cycle-safe) as discovery hints. Then fetch the security-
+/// sensitive map from the exact controller and select only the active members
+/// of the bootstrap server's cluster. Parent/child clusters are resolver
+/// referrals, not replicas, and must never be flattened into one client
+/// address set.
 pub async fn aggregate(
     seeds: &[SocketAddr],
     kind: NodeKind,
     expected: &CaIdentity,
 ) -> Result<NetworkInfo> {
-    let mut queue: Vec<SocketAddr> = seeds.to_vec();
+    // Preserve candidate order: `confirm_seeds` records the identity of the
+    // first reachable seed, and `NetworkInfo::reached[0]` becomes the durable
+    // bootstrap hint in the install record. A LIFO walk could silently record
+    // a different same-CA satellite from the tail of an mDNS result.
+    let mut queue: VecDeque<SocketAddr> = seeds.iter().copied().collect();
     let mut visited: Vec<SocketAddr> = Vec::new();
     let mut info = NetworkInfo {
         domain: expected.domain.clone(),
         ca_addr: None,
         resolvers: Vec::new(),
+        resolver_base: None,
+        resolver_parent: None,
+        resolver_children: Vec::new(),
         reached: Vec::new(),
     };
-    while let Some(addr) = queue.pop() {
+    while let Some(addr) = queue.pop_front() {
         if visited.contains(&addr) || visited.len() >= MAX_WALK {
             continue;
         }
@@ -612,24 +895,23 @@ pub async fn aggregate(
             }
         };
         info.reached.push(addr);
-        // A server bound to 0.0.0.0 reports itself with an unspecified
-        // IP — substitute the address we actually reached it at.
-        let fixup = |a: SocketAddr| {
-            if a.ip().is_unspecified() { SocketAddr::new(addr.ip(), a.port()) } else { a }
-        };
-        if info.ca_addr.is_none() {
-            info.ca_addr = resp.ca_addr.map(fixup);
-        }
-        if let Some(r) = resp.resolver
-            && !info.resolvers.iter().any(|x| x.addr == r.addr)
-        {
-            info.resolvers.push(r);
-        }
+        // Local facts and peers are discovery hints. Resolver membership and
+        // the controller address come from the CA-owned map below.
         queue.extend(resp.peers);
     }
     if info.reached.is_empty() {
         bail!("no admin server could be reached");
     }
+    let map = get_map_pinned(info.reached[0], kind, expected)
+        .await
+        .context("fetching the controller-authoritative network map")?;
+    let (controller, resolvers, resolver_base, resolver_parent, resolver_children) =
+        bootstrap_cluster(&map, expected.server_id)?;
+    info.ca_addr = Some(controller);
+    info.resolvers = resolvers;
+    info.resolver_base = resolver_base;
+    info.resolver_parent = resolver_parent;
+    info.resolver_children = resolver_children;
     Ok(info)
 }
 
@@ -658,8 +940,8 @@ pub async fn request_cert(
     // Local work first: our key + CSR.
     let kc = generate_key_and_csr(name)?;
     let req = Request::Sign(SignRequest {
-        admin: admin.to_string(),
-        password: Secret(password.as_str().to_string()),
+        kind,
+        credential: admin_proto::AdminCredential::password(admin, password.as_str()),
         csr_pem: kc.csr_pem.clone(),
         requested_name: name.to_string(),
         requested_validity: validity,
@@ -670,7 +952,7 @@ pub async fn request_cert(
 
 /// Enroll a new admin server: request the reserved [`SERVING_SAN`]
 /// serving cert from the network's CA, authenticated as
-/// `admin`/`password` (whose policy must grant `may_enroll_servers`),
+/// `admin`/`password` (whose policy must cover the requested cluster and roles),
 /// pinned to the confirmed identity. `listen` is where the new daemon
 /// will serve — the CA records it as a peer. The returned leaf + the
 /// confirmed CA ([`CaIdentity::ca_pem`]) form the new daemon's serving
@@ -680,14 +962,22 @@ pub async fn enroll(
     admin: &str,
     password: Zeroizing<String>,
     listen: SocketAddr,
+    roles: Vec<Role>,
+    resolver_member: ResolverAddr,
+    resolver_members: Vec<ResolverAddr>,
+    cluster: admin_proto::ClusterPlacement,
     expected: &CaIdentity,
 ) -> Result<Issued> {
     let kc = generate_key_and_csr(SERVING_SAN)?;
     let req = Request::Enroll(EnrollRequest {
-        admin: admin.to_string(),
-        password: Secret(password.as_str().to_string()),
+        credential: admin_proto::AdminCredential::password(admin, password.as_str()),
         csr_pem: kc.csr_pem.clone(),
         listen,
+        roles,
+        resolver_member: Some(resolver_member),
+        resolver_members,
+        cluster,
+        renew_identity: None,
     });
     submit_csr(addr, NodeKind::AdminServer, SERVING_SAN, kc, req, expected).await
 }
@@ -706,10 +996,10 @@ async fn submit_csr(
     // Capture our public key now — we need it after the response to
     // confirm the CA signed *our* key, not a substituted one.
     let our_spki = csr_spki(&kc.csr_pem)?;
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &req).await?;
     match admin_proto::read_msg::<_, SignResponse>(&mut tls).await? {
-        SignResponse::Ok { signed_cert_pem, trusted_pem, warnings } => {
+        SignResponse::Ok { signed_cert_pem, trusted_pem, warnings, .. } => {
             verify_issued(expected, name, &our_spki, &signed_cert_pem, &trusted_pem)?;
             Ok(Issued {
                 cert_pem: signed_cert_pem,
@@ -789,8 +1079,8 @@ pub fn csr_fingerprint(csr_pem: &str) -> Result<Fingerprint> {
 pub(crate) fn cert_spki(cert_pem: &str) -> Result<Vec<u8>> {
     use x509_parser::prelude::{FromDer, X509Certificate};
     let der = pem_to_der(cert_pem, "CERTIFICATE")?;
-    let (_, cert) =
-        X509Certificate::from_der(&der).map_err(|e| anyhow!("parsing certificate: {e}"))?;
+    let (_, cert) = X509Certificate::from_der(&der)
+        .map_err(|e| anyhow!("parsing certificate: {e}"))?;
     Ok(cert.public_key().raw.to_vec())
 }
 
@@ -817,12 +1107,12 @@ pub async fn enqueue(
 
 /// Queue a **admin-server enrollment** for asynchronous admin approval:
 /// the reserved [`SERVING_SAN`] serving cert, approvable only by an
-/// admin whose policy grants `may_enroll_servers`. Same request-code
+/// admin whose policy covers the requested cluster and roles. Same request-code
 /// ceremony and [`poll`] loop as a queued sign; `listen` is where the
 /// new admin server will serve (recorded as a peer at approval).
 pub async fn enqueue_enroll(
     addr: SocketAddr,
-    listen: SocketAddr,
+    enrollment: admin_proto::EnrollmentRequest,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
     // The validity is decided server-side at approval (the standard
@@ -833,7 +1123,7 @@ pub async fn enqueue_enroll(
         NodeKind::AdminServer,
         SERVING_SAN,
         Duration::from_secs(1),
-        Some(listen),
+        Some(enrollment),
         expected,
     )
     .await
@@ -844,7 +1134,7 @@ async fn enqueue_inner(
     kind: NodeKind,
     name: &str,
     validity: Duration,
-    enroll_listen: Option<SocketAddr>,
+    enrollment: Option<admin_proto::EnrollmentRequest>,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
     let kc = generate_key_and_csr(name)?;
@@ -858,7 +1148,7 @@ async fn enqueue_inner(
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
             requested_validity: validity,
-            enroll_listen,
+            enrollment,
         }),
     )
     .await?;
@@ -897,7 +1187,7 @@ pub async fn poll(
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
-        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings } => {
+        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings, .. } => {
             verify_issued(
                 expected,
                 &pending.name,
@@ -919,22 +1209,20 @@ pub async fn poll(
 /// the admin's password only ever goes to the confirmed network).
 pub async fn list_queue(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     expected: &CaIdentity,
 ) -> Result<Vec<QueueEntry>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
-        &Request::ListQueue(ListQueueRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
-        }),
+        &Request::ListQueue(ListQueueRequest { credential: credential.clone() }),
     )
     .await?;
     match admin_proto::read_msg::<_, ListQueueResponse>(&mut tls).await? {
         ListQueueResponse::Ok { requests } => Ok(requests),
-        ListQueueResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        ListQueueResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -944,26 +1232,26 @@ pub async fn list_queue(
 /// receives the cert via its own [`poll`].
 pub async fn approve(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     request_id: &str,
     id_map_groups: Vec<String>,
     expected: &CaIdentity,
 ) -> Result<Vec<String>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::Approve(ApproveRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
             request_id: request_id.to_string(),
             id_map_groups,
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, ApproveResponse>(&mut tls).await? {
-        ApproveResponse::Ok { warnings } => Ok(warnings),
-        ApproveResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        ApproveResponse::Ok { warnings, .. } => Ok(warnings),
+        ApproveResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -983,18 +1271,16 @@ pub async fn get_crl(
 /// Deny a queued request with a reason shown to the waiting enrollee.
 pub async fn deny(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     request_id: &str,
     reason: &str,
     expected: &CaIdentity,
 ) -> Result<()> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::Deny(DenyRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
             request_id: request_id.to_string(),
             reason: reason.to_string(),
         }),
@@ -1002,23 +1288,30 @@ pub async fn deny(
     .await?;
     match admin_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
         DenyResponse::Ok => Ok(()),
-        DenyResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        DenyResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
 // -- resolver hierarchy delegation -------------------------------------------
 
-/// The request code for a delegation: a fingerprint over exactly
-/// `(proposed_path, child)` — the value the child admin shows and the
-/// parent admin recomputes from the queued request, matched out of band.
-/// Child addresses are sorted so the code is order-independent (a cluster
-/// child may list its members in any order).
-pub fn delegation_code(proposed_path: &str, child: &[ResolverAddr]) -> Fingerprint {
-    let mut sorted = child.to_vec();
-    sorted.sort_by_key(|r| r.addr);
-    // Canonical, byte-identical on both sides: a tuple's field order and a
-    // struct's field order are fixed, and we sorted the vec.
-    let canonical = serde_json::to_vec(&(proposed_path, &sorted)).unwrap_or_default();
+/// The request code for a delegation: a fingerprint over the proposed path
+/// and immutable parent/child server-ID sets. Both sets are canonicalized so
+/// selection order cannot change the out-of-band code.
+pub fn delegation_code(
+    proposed_path: &str,
+    parent_servers: &[admin_proto::AdminServerId],
+    child_servers: &[admin_proto::AdminServerId],
+) -> Fingerprint {
+    let mut parent_servers = parent_servers.to_vec();
+    let mut child_servers = child_servers.to_vec();
+    parent_servers.sort();
+    parent_servers.dedup();
+    child_servers.sort();
+    child_servers.dedup();
+    let canonical = serde_json::to_vec(&(proposed_path, parent_servers, child_servers))
+        .unwrap_or_default();
     Fingerprint::of_der(&canonical)
 }
 
@@ -1028,15 +1321,17 @@ pub fn delegation_code(proposed_path: &str, child: &[ResolverAddr]) -> Fingerpri
 pub async fn request_delegation(
     addr: SocketAddr,
     proposed_path: &str,
-    child: Vec<ResolverAddr>,
+    parent_servers: Vec<admin_proto::AdminServerId>,
+    child_servers: Vec<admin_proto::AdminServerId>,
     expected: &CaIdentity,
 ) -> Result<String> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::RequestDelegation(DelegationRequest {
             proposed_path: proposed_path.to_string(),
-            child,
+            parent_servers,
+            child_servers,
         }),
     )
     .await?;
@@ -1054,7 +1349,10 @@ pub async fn poll_delegation(
     request_id: &str,
     expected: &CaIdentity,
 ) -> Result<DelegationPollResponse> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    // The durable request queue exists only at the controller. `addr` may be
+    // an ordinary resolver used as a bootstrap hint, so resolve and verify the
+    // controller on every poll just as request submission does.
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::PollDelegation(PollRequest { request_id: request_id.to_string() }),
@@ -1066,22 +1364,22 @@ pub async fn poll_delegation(
 /// List the pending delegation queue, authenticated as `admin` (pinned).
 pub async fn list_delegations(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     expected: &CaIdentity,
 ) -> Result<Vec<DelegationEntry>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ListDelegations(ListDelegationsRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
         ListDelegationsResponse::Ok { requests } => Ok(requests),
-        ListDelegationsResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        ListDelegationsResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -1089,25 +1387,23 @@ pub async fn list_delegations(
 /// (a non-empty `error` means that peer is out of sync — surface it).
 pub async fn approve_delegation(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     request_id: &str,
     expected: &CaIdentity,
 ) -> Result<Vec<PeerResult>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ApproveDelegation(ApproveDelegationRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
             request_id: request_id.to_string(),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
-        ApproveDelegationResponse::Ok { peers } => Ok(peers),
+        ApproveDelegationResponse::Ok { peers, .. } => Ok(peers),
         ApproveDelegationResponse::Err { reason } => {
-            bail!("admin server refused: {reason}")
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
     }
 }
@@ -1115,18 +1411,16 @@ pub async fn approve_delegation(
 /// Deny a queued delegation with a reason shown to the waiting child.
 pub async fn deny_delegation(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     request_id: &str,
     reason: &str,
     expected: &CaIdentity,
 ) -> Result<()> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::DenyDelegation(DenyDelegationRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
             request_id: request_id.to_string(),
             reason: reason.to_string(),
         }),
@@ -1134,7 +1428,9 @@ pub async fn deny_delegation(
     .await?;
     match admin_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
         DenyDelegationResponse::Ok => Ok(()),
-        DenyDelegationResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        DenyDelegationResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -1143,20 +1439,36 @@ pub async fn deny_delegation(
 /// our reserved-SAN serving cert. Mirrors [`push_identity`].
 pub async fn push_referral_edit(
     addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
     client_cert_pem: &[u8],
     client_key_pem: &[u8],
     roots: rustls::RootCertStore,
+    operation_id: admin_proto::OperationId,
     edit: &ReferralEdit,
 ) -> Result<()> {
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
         .context("parsing client key")?
         .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
-    let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((client_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
     admin_proto::write_msg(
         &mut tls,
-        &Request::ApplyReferralEdit(ApplyReferralEditRequest { edit: edit.clone() }),
+        &Request::ApplyReferralEdit(ApplyReferralEditRequest {
+            operation_id,
+            edit: edit.clone(),
+        }),
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
@@ -1172,22 +1484,20 @@ pub async fn push_referral_edit(
 /// owns the index; this is the only way to read it.
 pub async fn list_issued(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     expected: &CaIdentity,
 ) -> Result<Vec<IssuedEntry>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
-        &Request::ListIssued(ListIssuedRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
-        }),
+        &Request::ListIssued(ListIssuedRequest { credential: credential.clone() }),
     )
     .await?;
     match admin_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
         ListIssuedResponse::Ok { entries } => Ok(entries),
-        ListIssuedResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        ListIssuedResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -1196,18 +1506,16 @@ pub async fn list_issued(
 /// follow-up warnings.
 pub async fn revoke(
     addr: SocketAddr,
-    admin: &str,
-    password: &str,
+    credential: admin_proto::AdminCredential,
     serials: Vec<u64>,
     reason: &str,
     expected: &CaIdentity,
 ) -> Result<Vec<String>> {
-    let mut tls = connect_pinned(addr, NodeKind::Client, expected).await?;
+    let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::Revoke(RevokeRequest {
-            admin: admin.to_string(),
-            password: Secret(password.to_string()),
+            credential: credential.clone(),
             serials,
             reason: reason.to_string(),
         }),
@@ -1215,7 +1523,9 @@ pub async fn revoke(
     .await?;
     match admin_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
         RevokeResponse::Ok { warnings } => Ok(warnings),
-        RevokeResponse::Err { reason } => bail!("admin server refused: {reason}"),
+        RevokeResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+        }
     }
 }
 
@@ -1230,6 +1540,9 @@ pub async fn revoke(
 /// the ones that can't register identities.
 pub async fn push_identity(
     addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
     client_cert_pem: &[u8],
     client_key_pem: &[u8],
     roots: rustls::RootCertStore,
@@ -1238,9 +1551,18 @@ pub async fn push_identity(
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(client_key_pem))
         .context("parsing client key")?
         .ok_or_else(|| anyhow!("no private key found in client key PEM"))?;
-    let (mut tls, hello) =
-        connect_pki(addr, roots, Some((client_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
+    let (mut tls, hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((client_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
     if !hello.roles.contains(&Role::IdMap) {
         return Ok(None);
     }
@@ -1256,6 +1578,16 @@ pub async fn push_identity(
 /// Server→CA: register/update this admin server's facts in the CA's network
 /// map, authenticated with the serving cert (peer-cert-gated). Returns the
 /// CA's new map version.
+fn home_ca_from_chain(pem: &[u8]) -> Result<CertificateDer<'static>> {
+    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+        .collect::<std::result::Result<_, _>>()
+        .context("parsing admin certificate chain")?;
+    if certs.len() < 2 {
+        bail!("admin certificate chain does not include its home CA");
+    }
+    Ok(certs.last().expect("length checked").clone())
+}
+
 pub async fn register(
     addr: SocketAddr,
     serving_cert_pem: &[u8],
@@ -1263,12 +1595,18 @@ pub async fn register(
     roots: rustls::RootCertStore,
     req: &RegisterRequest,
 ) -> Result<u64> {
+    let home_ca = home_ca_from_chain(serving_cert_pem)?;
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
-    let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget { id: None, home_ca: &home_ca, controller: true }),
+    )
+    .await?;
     admin_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
@@ -1284,19 +1622,20 @@ pub async fn deregister(
     serving_cert_pem: &[u8],
     serving_key_pem: &[u8],
     roots: rustls::RootCertStore,
-    own_addr: SocketAddr,
 ) -> Result<u64> {
+    let home_ca = home_ca_from_chain(serving_cert_pem)?;
     let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
         .context("parsing serving key")?
         .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
-    let (mut tls, _hello) =
-        connect_pki(addr, roots, Some((serving_cert_pem, key)), NodeKind::AdminServer)
-            .await?;
-    admin_proto::write_msg(
-        &mut tls,
-        &Request::Deregister(DeregisterRequest { addr: own_addr }),
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget { id: None, home_ca: &home_ca, controller: true }),
     )
     .await?;
+    admin_proto::write_msg(&mut tls, &Request::Deregister(DeregisterRequest)).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
@@ -1322,6 +1661,29 @@ pub async fn get_map_version(
     }
 }
 
+pub async fn get_map_version_from_controller(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    home_ca: CertificateDer<'static>,
+    kind: NodeKind,
+) -> Result<u64> {
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        None,
+        kind,
+        Some(ExactTarget { id: None, home_ca: &home_ca, controller: true }),
+    )
+    .await?;
+    admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
+    match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
+        GetMapVersionResponse::Ok { version } => Ok(version),
+        GetMapVersionResponse::Err { reason } => {
+            bail!("map version query refused: {reason}")
+        }
+    }
+}
+
 /// Fetch the whole network map in one round trip — every cluster, every
 /// admin server's role, the CA location.
 pub async fn get_map(
@@ -1330,6 +1692,27 @@ pub async fn get_map(
     kind: NodeKind,
 ) -> Result<NetworkMap> {
     let (mut tls, _hello) = connect_pki(addr, roots, None, kind).await?;
+    admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
+    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+        GetMapResponse::Ok { map } => Ok(map),
+        GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
+    }
+}
+
+pub async fn get_map_from_controller(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    home_ca: CertificateDer<'static>,
+    kind: NodeKind,
+) -> Result<NetworkMap> {
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        None,
+        kind,
+        Some(ExactTarget { id: None, home_ca: &home_ca, controller: true }),
+    )
+    .await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
         GetMapResponse::Ok { map } => Ok(map),
@@ -1347,6 +1730,22 @@ async fn connect_pki(
     roots: rustls::RootCertStore,
     client_identity: Option<(&[u8], PrivateKeyDer<'static>)>,
     kind: NodeKind,
+) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
+    connect_pki_target(addr, roots, client_identity, kind, None).await
+}
+
+struct ExactTarget<'a> {
+    id: Option<admin_proto::AdminServerId>,
+    home_ca: &'a CertificateDer<'a>,
+    controller: bool,
+}
+
+async fn connect_pki_target(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    client_identity: Option<(&[u8], PrivateKeyDer<'static>)>,
+    kind: NodeKind,
+    target: Option<ExactTarget<'_>>,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(provider)
@@ -1375,6 +1774,39 @@ async fn connect_pki(
         .await
         .context("TLS handshake with admin server")?;
     let hello = exchange_hello(&mut tls, kind).await?;
+    let leaf = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|c| c.first())
+        .context("admin server presented no serving certificate")?;
+    let identity = crate::tls::admin_cert_identity_from_der(leaf.as_ref())?;
+    if identity.server_id != hello.server_id || identity.controller != hello.controller {
+        bail!("admin server hello identity does not match its serving certificate");
+    }
+    if let Some(target) = target {
+        if target.id.is_some_and(|id| identity.server_id != id)
+            || identity.controller != target.controller
+        {
+            bail!(
+                "admin target identity mismatch: expected {} (controller={}), got {} (controller={})",
+                target
+                    .id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "<controller>".into()),
+                target.controller,
+                identity.server_id,
+                identity.controller
+            );
+        }
+        use x509_parser::prelude::{FromDer, X509Certificate};
+        let (_, leaf) = X509Certificate::from_der(leaf.as_ref())
+            .map_err(|e| anyhow!("parsing target certificate: {e}"))?;
+        let (_, ca) = X509Certificate::from_der(target.home_ca.as_ref())
+            .map_err(|e| anyhow!("parsing home CA certificate: {e}"))?;
+        leaf.verify_signature(Some(ca.public_key()))
+            .map_err(|e| anyhow!("target is not issued by the exact home CA: {e}"))?;
+    }
     Ok((tls, hello))
 }
 
@@ -1454,7 +1886,7 @@ pub async fn enqueue_renewal(
             csr_pem: kc.csr_pem.clone(),
             requested_name: name.to_string(),
             requested_validity: validity,
-            enroll_listen: None,
+            enrollment: None,
         }),
     )
     .await?;
@@ -1491,7 +1923,7 @@ pub async fn poll_renewal(
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
-        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings } => {
+        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings, .. } => {
             verify_issued_any(
                 installed_pem,
                 &pending.name,
@@ -1770,7 +2202,7 @@ fn pem_to_der(pem: &str, label: &str) -> Result<Vec<u8>> {
 fn verify_serving_cert(
     serving_der: &CertificateDer<'_>,
     ca_der: &CertificateDer<'_>,
-) -> Result<()> {
+) -> Result<crate::tls::AdminCertIdentity> {
     use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
     let (_, ca) =
         X509Certificate::from_der(ca_der.as_ref()).context("parsing CA cert")?;
@@ -1794,7 +2226,7 @@ fn verify_serving_cert(
     if !leaf.validity().is_valid() {
         bail!("serving cert is expired or not yet valid");
     }
-    Ok(())
+    crate::tls::admin_cert_identity_from_der(serving_der.as_ref())
 }
 
 #[cfg(test)]
@@ -1806,6 +2238,92 @@ mod tests {
         let kc = generate_key_and_csr("resolver.example.com").unwrap();
         assert!(kc.csr_pem.contains("BEGIN CERTIFICATE REQUEST"));
         assert!(kc.private_key_pem.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn bootstrap_cluster_does_not_flatten_the_resolver_hierarchy() {
+        use admin_proto::{
+            ClusterEntry, ClusterState, ResolverClusterId, Role, ServerEntry, ServerState,
+        };
+        let controller = admin_proto::AdminServerId::new();
+        let satellite = admin_proto::AdminServerId::new();
+        let waiting = admin_proto::AdminServerId::new();
+        let root_cluster = ResolverClusterId::new();
+        let child_cluster = ResolverClusterId::new();
+        let root = ResolverAddr {
+            addr: "192.168.50.11:4564".parse().unwrap(),
+            auth: admin_proto::InfoAuth::Tls { name: "root.example".into() },
+        };
+        let child = ResolverAddr {
+            addr: "192.168.60.15:4564".parse().unwrap(),
+            auth: admin_proto::InfoAuth::Tls { name: "child.example".into() },
+        };
+        let waiting_root = ResolverAddr {
+            addr: "192.168.50.12:4564".parse().unwrap(),
+            auth: admin_proto::InfoAuth::Tls { name: "root.example".into() },
+        };
+        let map = NetworkMap {
+            version: 1,
+            controller,
+            servers: vec![
+                ServerEntry {
+                    id: controller,
+                    addr: "192.168.50.11:4565".parse().unwrap(),
+                    roles: vec![Role::Ca, Role::Resolver],
+                    resolver: Some(root.clone()),
+                    cluster: Some(root_cluster),
+                    state: ServerState::Registered,
+                },
+                ServerEntry {
+                    id: waiting,
+                    addr: "192.168.50.12:4565".parse().unwrap(),
+                    roles: vec![Role::Resolver],
+                    resolver: Some(waiting_root.clone()),
+                    cluster: Some(root_cluster),
+                    state: ServerState::Enrolled,
+                },
+                ServerEntry {
+                    id: satellite,
+                    addr: "192.168.60.15:4565".parse().unwrap(),
+                    roles: vec![Role::Resolver],
+                    resolver: Some(child.clone()),
+                    cluster: Some(child_cluster),
+                    state: ServerState::Registered,
+                },
+            ],
+            clusters: vec![
+                ClusterEntry {
+                    id: root_cluster,
+                    base: "/".into(),
+                    state: ClusterState::Active,
+                    members: vec![root.clone(), waiting_root],
+                    parent: None,
+                    children: vec![child_cluster],
+                },
+                ClusterEntry {
+                    id: child_cluster,
+                    base: "/eu".into(),
+                    state: ClusterState::Active,
+                    members: vec![child.clone()],
+                    parent: Some(root_cluster),
+                    children: vec![],
+                },
+            ],
+        };
+
+        let (_, root_members, root_base, root_parent, root_children) =
+            bootstrap_cluster(&map, controller).unwrap();
+        let (_, child_members, child_base, child_parent, child_children) =
+            bootstrap_cluster(&map, satellite).unwrap();
+        assert_eq!(root_members, vec![root.clone()]);
+        assert_eq!(child_members, vec![child]);
+        assert_eq!(root_base.as_deref(), Some("/"));
+        assert_eq!(child_base.as_deref(), Some("/eu"));
+        assert!(root_parent.is_none());
+        assert_eq!(root_children.len(), 1);
+        assert_eq!(root_children[0].path, "/eu");
+        assert_eq!(child_parent.unwrap().addrs, vec![root]);
+        assert!(child_children.is_empty());
     }
 
     fn self_signed(name: &str, key: &rcgen::KeyPair) -> String {
@@ -1894,8 +2412,10 @@ mod tests {
         };
         let mut b = X509Builder::new().unwrap();
         b.set_version(2).unwrap();
-        b.set_serial_number(&BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap())
-            .unwrap();
+        b.set_serial_number(
+            &BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap(),
+        )
+        .unwrap();
         b.set_subject_name(&mkname(subject_cn)).unwrap();
         b.set_issuer_name(&mkname(issuer_cn)).unwrap();
         b.set_pubkey(pubkey).unwrap();
@@ -1944,7 +2464,8 @@ mod tests {
         assert_eq!(slot_der(&out), der_of(&inter_refresh), "intermediate refreshed");
 
         // A forged same-SPKI cert is ignored; the installed intermediate stays.
-        let out2 = reconcile_trusted_bundle(&installed, &format!("{root}{forged}")).unwrap();
+        let out2 =
+            reconcile_trusted_bundle(&installed, &format!("{root}{forged}")).unwrap();
         assert_eq!(slot_der(&out2), der_of(&inter), "forged refresh ignored");
     }
 }

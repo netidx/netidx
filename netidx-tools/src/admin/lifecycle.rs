@@ -330,11 +330,15 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
     if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
         plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
     }
-    run_update(
-        plan,
-        flags.dry_run,
-        "restart the resolver / re-run clients to use the new peers",
-    )
+    let hint = if plan.resolver_edit.is_some() {
+        "no service was restarted. Restart this resolver manually at its place in the \
+         cluster's rolling sequence; re-run client processes if their resolver addresses \
+         changed"
+    } else {
+        "re-run client processes to use the new resolver addresses; no resolver service \
+         restart is needed"
+    };
+    run_update(plan, flags.dry_run, hint)
 }
 
 // -- publisher ----------------------------------------------------------------

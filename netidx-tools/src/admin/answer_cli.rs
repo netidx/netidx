@@ -109,6 +109,18 @@ impl RemoteAuthFlags {
     pub(crate) fn server_addr(&self) -> Result<Option<SocketAddr>> {
         self.server.as_deref().map(super::init::resolve_admin_server_addr).transpose()
     }
+
+    /// Read the explicitly supplied password after the caller has verified its
+    /// controller target. Keeping this separate from [`Self::answerer`] lets
+    /// `admin login` honor the no-credentials-before-controller rule even for
+    /// password files and stdin.
+    pub(crate) fn password(&self) -> Result<Option<Zeroizing<String>>> {
+        read_secret(
+            self.password_file.as_deref(),
+            self.password_stdin,
+            ("--password-file", "--password-stdin"),
+        )
+    }
 }
 
 /// One purpose's secret: its value (read once from a `--*-file` / `--*-stdin`
@@ -246,6 +258,17 @@ fn missing(field: Field) -> anyhow::Error {
 impl Answerer for FlagAnswerer {
     fn interactive(&self) -> bool {
         false
+    }
+
+    fn has_explicit_secret(&self, field: Field) -> bool {
+        match field {
+            Field::KeyPassword => self.key.value.is_some(),
+            Field::AdminPassword | Field::AdminPasswordConfirm => {
+                self.admin.value.is_some()
+            }
+            Field::RecoveryPassword => self.recovery.value.is_some(),
+            _ => false,
+        }
     }
 
     async fn text(

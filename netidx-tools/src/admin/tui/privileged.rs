@@ -14,8 +14,11 @@
 use anyhow::{Context, Result, bail};
 use crossterm::{
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    },
 };
+use netidx_activation::runtime::default_units_dir;
 use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{
     io::{Write, stdout},
@@ -41,15 +44,17 @@ pub(super) fn install_service(
         ServiceScope::System => {
             let for_user = super::super::service::resolve_for_user(None)?;
             let exe = current_exe()?;
-            let args = install_argv(&for_user, &exe);
+            let activation_dir = activation_dir()?;
+            let args = install_argv(&for_user, &exe, &activation_dir);
             let params = ServiceParams {
                 scope: ServiceScope::System,
                 for_user: Some(for_user),
                 binary: exe.clone(),
                 service_name: ServiceParams::DEFAULT_NAME.to_string(),
-                activation_dir: None,
+                activation_dir: Some(activation_dir),
             };
-            let ran = run_privileged(terminal, &exe, &args, true, "install the system service");
+            let ran =
+                run_privileged(terminal, &exe, &args, true, "install the system service");
             // The privileged handoff (suspend → sudo/su → resume) is inherently
             // flaky: a lost tty or a bumpy terminal resume can report failure even
             // when the child already installed the unit. The unit's real state is
@@ -67,7 +72,9 @@ pub(super) fn install_service(
                 }
                 Ok(ServiceStatus::NotInstalled) => {
                     ran?;
-                    bail!("the system service install reported success but no unit is installed");
+                    bail!(
+                        "the system service install reported success but no unit is installed"
+                    );
                 }
                 Err(status_err) => ran
                     .map(|()| "registered the system service (netidx)".to_string())
@@ -145,11 +152,15 @@ fn user_params() -> Result<ServiceParams> {
         for_user: Some(super::super::service::resolve_for_user(None)?),
         binary: current_exe()?,
         service_name: ServiceParams::DEFAULT_NAME.to_string(),
-        activation_dir: None,
+        activation_dir: Some(activation_dir()?),
     })
 }
 
-fn install_argv(for_user: &str, exe: &Path) -> Vec<String> {
+fn activation_dir() -> Result<std::path::PathBuf> {
+    default_units_dir().context("no default activation unit directory was found")
+}
+
+fn install_argv(for_user: &str, exe: &Path, activation_dir: &Path) -> Vec<String> {
     vec![
         "admin".to_string(),
         "component".to_string(),
@@ -163,6 +174,8 @@ fn install_argv(for_user: &str, exe: &Path) -> Vec<String> {
         ServiceParams::DEFAULT_NAME.to_string(),
         "--netidx-binary".to_string(),
         exe.display().to_string(),
+        "--activation-dir".to_string(),
+        activation_dir.display().to_string(),
     ]
 }
 
@@ -189,7 +202,9 @@ fn run_privileged(
             Escalation::Direct => Command::new(exe).args(args).status(),
             Escalation::Sudo => Command::new("sudo").arg(exe).args(args).status(),
             Escalation::Su => {
-                println!("You are not a sudoer here — switching to root (enter root's password):");
+                println!(
+                    "You are not a sudoer here — switching to root (enter root's password):"
+                );
                 let _ = stdout().flush();
                 let mut line = sh_quote(&exe.display().to_string());
                 for a in args {
@@ -296,7 +311,8 @@ fn with_suspended<T>(
     let result = f();
     let resumed = (|| {
         enable_raw_mode().context("re-entering raw mode")?;
-        execute!(stdout(), EnterAlternateScreen).context("re-entering the alternate screen")?;
+        execute!(stdout(), EnterAlternateScreen)
+            .context("re-entering the alternate screen")?;
         // Force a full repaint. `Terminal::clear` can't be trusted here: in
         // ratatui 0.30 it opens with a cursor-position DSR round-trip on stdin,
         // which is unreliable immediately after a child process and an
@@ -320,7 +336,8 @@ fn with_suspended<T>(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::sh_quote;
+    use super::{install_argv, sh_quote};
+    use std::path::Path;
 
     #[test]
     fn sh_quote_wraps_and_escapes() {
@@ -329,5 +346,19 @@ mod tests {
         assert_eq!(sh_quote("a b"), "'a b'");
         // An embedded single quote closes, escapes, and reopens.
         assert_eq!(sh_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn privileged_service_install_pins_the_activation_directory() {
+        let args = install_argv(
+            "root",
+            Path::new("/usr/local/bin/netidx"),
+            Path::new("/root/.config/netidx/activation"),
+        );
+        assert!(
+            args.windows(2).any(|a| {
+                a == ["--activation-dir", "/root/.config/netidx/activation"]
+            })
+        );
     }
 }

@@ -45,8 +45,7 @@ pub async fn list_admins(target: &AdminTarget) -> Result<Vec<AdminInfo>> {
                 session.server,
                 NodeKind::Client,
                 &session.identity,
-                &session.admin,
-                session.password.as_str(),
+                session.credential.clone(),
             )
             .await
         }
@@ -71,8 +70,7 @@ pub async fn add_role_admin(
                 session.server,
                 NodeKind::Client,
                 &session.identity,
-                &session.admin,
-                session.password.as_str(),
+                session.credential.clone(),
                 name,
                 new_password.as_str(),
                 policy,
@@ -98,8 +96,7 @@ pub async fn set_admin_policy(
                 session.server,
                 NodeKind::Client,
                 &session.identity,
-                &session.admin,
-                session.password.as_str(),
+                session.credential.clone(),
                 name,
                 policy,
             )
@@ -120,8 +117,7 @@ pub async fn remove_admin(target: &AdminTarget, name: &str) -> Result<()> {
                 session.server,
                 NodeKind::Client,
                 &session.identity,
-                &session.admin,
-                session.password.as_str(),
+                session.credential.clone(),
                 name,
             )
             .await

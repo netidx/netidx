@@ -46,6 +46,8 @@ pub enum Field {
     Listen,
     /// An optional bind-address override (behind NAT / on cloud hosts).
     Bind,
+    /// The publisher's required `BindCfg` routing/bind selection.
+    PublisherBind,
     /// The namespace base path this role owns.
     Base,
     /// How the private key is protected (`seal` / `password` / `none`).
@@ -199,6 +201,14 @@ impl Field {
                 help: "Override the address advertised to clients when it \
                        differs from the listen address (NAT / cloud). Usually \
                        left unset.",
+            },
+            PublisherBind => FieldInfo {
+                flag: "--bind",
+                label: "publisher network bind",
+                help: "The network this publisher should bind and advertise on, \
+                       for example 10.0.0.0/24, an exact host as 10.0.0.5/32, \
+                       or local. The detected interface subnet is usually the \
+                       right choice.",
             },
             Base => FieldInfo {
                 flag: "--base",
@@ -647,6 +657,15 @@ pub trait Answerer: Send {
 
     /// Ask for a secret (password). Never echoed, never defaulted.
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret>;
+
+    /// Whether this frontend already holds an explicitly supplied secret for
+    /// `field` (for example `--password-file`). This lets reusable-session
+    /// callers honor the rule that an explicit password takes precedence over
+    /// a cache without consuming or exposing the secret before endpoint
+    /// verification. Interactive prompts return false.
+    fn has_explicit_secret(&self, _field: Field) -> bool {
+        false
+    }
 
     /// Announce a new section or component of the flow — a short informational
     /// dialog the operator acknowledges before the next questions (e.g. "Now

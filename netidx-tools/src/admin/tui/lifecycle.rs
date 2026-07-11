@@ -29,18 +29,18 @@ pub(super) async fn update_plan(role: InstallRole) -> Result<EditPlan> {
     if rec.role != role {
         bail!("this host is a {} install, not a {}", rec.role.as_str(), role.as_str());
     }
-    let net_id = rec
-        .network
-        .as_ref()
-        .context("this host is local-only — nothing to update")?;
+    let net_id =
+        rec.network.as_ref().context("this host is local-only — nothing to update")?;
     match role {
         InstallRole::Workstation => {
             let rpath = paths::discover_resolver_config()?;
-            let info = fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client).await?;
+            let info =
+                fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client).await?;
             reconcile::reconcile_resolver_peers(&rpath, &info)
         }
         InstallRole::Resolver => {
-            let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await?;
+            let map =
+                fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await?;
             let mut plan = match paths::discover_client_config() {
                 Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
                 Err(_) => EditPlan::default(),
@@ -52,7 +52,8 @@ pub(super) async fn update_plan(role: InstallRole) -> Result<EditPlan> {
             Ok(plan)
         }
         InstallRole::Publisher => {
-            let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher).await?;
+            let map =
+                fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher).await?;
             let cpath = paths::discover_client_config()?;
             reconcile::reconcile_client_peers(&cpath, &map)
         }
@@ -72,11 +73,23 @@ pub(super) async fn fetch_local_map() -> Result<NetworkMap> {
     fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
 }
 
-/// A one-line "now restart X" hint for a role after an update applies.
-pub(super) fn restart_hint(role: InstallRole) -> &'static str {
+/// An activation hint after an update applies. Resolver updates can touch only
+/// client configuration, only the resolver's parent referral, or both, so the
+/// hint must follow the actual edit plan rather than only the host role.
+pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'static str {
     match role {
-        InstallRole::Workstation => "Restart the local resolver to serve the new peers.",
-        InstallRole::Resolver => "Restart the resolver / re-run clients to use the new peers.",
+        InstallRole::Workstation => {
+            "No service was restarted. Restart the local resolver to serve the new peers."
+        }
+        InstallRole::Resolver if plan.resolver_edit.is_some() => {
+            "No service was restarted. Restart this resolver manually at its place in the \
+             cluster's rolling sequence; re-run client processes if their resolver addresses \
+             changed."
+        }
+        InstallRole::Resolver => {
+            "Re-run client processes to use the new resolver addresses; no resolver service \
+             restart is needed."
+        }
         InstallRole::Publisher => "Re-run publishers to use the new resolvers.",
     }
 }
@@ -150,4 +163,16 @@ fn fail<T>(saw_mismatch: bool) -> Result<T> {
         )
     }
     bail!("could not reach any admin server (recorded address and mDNS both failed)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_only_resolver_update_does_not_request_a_resolver_restart() {
+        let hint = restart_hint_for_plan(InstallRole::Resolver, &EditPlan::default());
+        assert!(hint.contains("no resolver service restart is needed"));
+        assert!(!hint.contains("Restart this resolver"));
+    }
 }

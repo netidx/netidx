@@ -35,7 +35,7 @@ path = "src/bin/netidx-activation.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["term"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

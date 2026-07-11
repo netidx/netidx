@@ -5,11 +5,11 @@
 //! through `Config::from_file`.
 
 use crate::{
-    atomic,
     admin_proto::{ClusterEdge, ClusterFacts, InfoAuth, ResolverAddr},
-    paths,
+    atomic, paths,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use netidx::path::Path as NetidxPath;
 use netidx::resolver_server::config::{self, Config, file};
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,7 @@ impl ResolverConfig {
         // form keeps its relative paths.
         let mut resolved = self.0.clone();
         config::resolve_relative_includes(&mut resolved, path)?;
+        validate_permission_topology(&resolved)?;
         Config::from_file(resolved).map(|_| ())
     }
 
@@ -72,6 +73,7 @@ impl ResolverConfig {
     /// Prefer [`Self::validate_for_path`] when the on-disk location is
     /// known.
     pub fn validate(&self) -> Result<()> {
+        validate_permission_topology(&self.0)?;
         Config::from_file(self.0.clone()).map(|_| ())
     }
 
@@ -143,6 +145,31 @@ impl ResolverConfig {
             children: self.children_edges(),
         }
     }
+}
+
+/// Check the part of resolver permission validation that depends on the
+/// resolver's place in the hierarchy. `Config::from_file` validates the
+/// resolver topology and loads the permission files, but the resolver does
+/// not normally apply these containment checks until it constructs its auth
+/// map during startup. Admin topology fanout must perform them before writing
+/// a config, otherwise a successful delegation can leave a resolver unable to
+/// restart.
+fn validate_permission_topology(cfg: &file::Config) -> Result<()> {
+    let root = cfg.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
+    let permissions = config::merge_perms_only(cfg)?;
+    for entry in permissions.0.keys() {
+        let entry = NetidxPath::from(entry);
+        if !NetidxPath::is_parent(root, &entry) {
+            bail!("permission entry for parent: {root}, entry: {entry}")
+        }
+        for child in &cfg.children {
+            let child = NetidxPath::from(&child.path);
+            if NetidxPath::is_parent(&child, &entry) {
+                bail!("permission entry for child: {child}, entry: {entry}")
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Map a referral (parent / child) to a network-map [`ClusterEdge`],
@@ -295,5 +322,57 @@ mod tests {
         let result = cfg.save(dir.path().join("resolver.json"));
         std::env::set_current_dir(saved_cwd).unwrap();
         result.expect("save must succeed even when cwd differs from config dir");
+    }
+
+    #[test]
+    fn validation_rejects_permissions_outside_delegated_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("resolver.json");
+        let permissions_path = dir.path().join("perms.json");
+        std::fs::write(
+            &permissions_path,
+            r#"{"/":{"users":"swl"},"/users/$[user]":{"$[user]":"swlpd"}}"#,
+        )
+        .unwrap();
+
+        let mut cfg = minimal();
+        cfg.0.parent = Some(file::Referral {
+            path: ArcStr::from("/eu"),
+            ttl: None,
+            addrs: vec![("10.0.0.1:4564".parse().unwrap(), file::RefAuth::Anonymous)],
+        });
+        cfg.0.include_permissions = vec![ArcStr::from("perms.json")];
+
+        let err = cfg.validate_for_path(&config_path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("permission entry for parent: /eu, entry: /"),
+            "unexpected error: {err:#}"
+        );
+
+        std::fs::write(
+            &permissions_path,
+            r#"{"/eu":{"users":"swl"},"/eu/users/$[user]":{"$[user]":"swlpd"}}"#,
+        )
+        .unwrap();
+        cfg.validate_for_path(&config_path)
+            .expect("permissions rooted at the delegated base must validate");
+    }
+
+    #[test]
+    fn validation_rejects_permissions_below_a_child_referral() {
+        let mut cfg = minimal();
+        cfg.0.children = vec![file::Referral {
+            path: ArcStr::from("/eu"),
+            ttl: None,
+            addrs: vec![("10.0.0.1:4564".parse().unwrap(), file::RefAuth::Anonymous)],
+        }];
+        crate::perms::add_entry(&mut cfg.0.perms, "/eu/private", "users", "swl").unwrap();
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            format!("{err:#}")
+                .contains("permission entry for child: /eu, entry: /eu/private"),
+            "unexpected error: {err:#}"
+        );
     }
 }

@@ -22,7 +22,7 @@
 
 use crate::{
     admin_client::{self, CaIdentity},
-    admin_proto::{NodeKind, Secret},
+    admin_proto::{AdminCredential, NodeKind, Secret},
     admin_server_config::AdminServerConfig,
     answer::{Answerer, Field},
     fingerprint::Fingerprint,
@@ -55,8 +55,7 @@ pub struct AdminSession {
     pub identity: CaIdentity,
     /// The role-admin name authorizing the operation.
     pub admin: String,
-    /// The admin's password.
-    pub password: Secret,
+    pub credential: AdminCredential,
 }
 
 /// This host's own admin-server listen address, read from its
@@ -91,13 +90,6 @@ async fn resolve_identity(
     let identity = admin_client::fetch_identity(server, NodeKind::Client)
         .await
         .with_context(|| format!("contacting admin server {server}"))?;
-    // CR codex for estokes: Confirming the CA glyph authenticates the trust
-    // domain, not this endpoint as the CA host. Every enrolled admin server has
-    // the same SERVING_SAN and can claim Role::Ca in ServerHello, so a compromised
-    // member selected here can receive the reusable role-admin password on the
-    // next request. Resolve and authenticate a uniquely identified CA service
-    // (and refuse a non-CA endpoint) before collecting/sending credentials; the
-    // shared serving certificate is not sufficient endpoint authorization.
     // On the CA host (or any box holding the CA dir) the local CA cert is the
     // trust anchor — verify against it rather than asking the operator to
     // confirm their own glyph.
@@ -174,13 +166,79 @@ pub async fn open_admin_session(
     admin: Option<String>,
     password: Option<Secret>,
 ) -> Result<AdminSession> {
-    let (server, identity) = resolve_identity(ans, server, ca_dir.as_deref()).await?;
+    let (server, controller_identity) =
+        resolve_controller(ans, server, ca_dir.as_deref()).await?;
+    if password.is_none()
+        && !ans.has_explicit_secret(Field::AdminPassword)
+        && let Some(cached) =
+            crate::session_cache::load(&controller_identity.fingerprint.text())?
+    {
+        return Ok(AdminSession {
+            server,
+            identity: controller_identity,
+            admin: cached.admin,
+            credential: AdminCredential::Session { token: cached.token },
+        });
+    }
+    password_session(ans, server, controller_identity, admin, password).await
+}
+
+/// Open a controller-verified password session even if a reusable login cache
+/// exists. This is the `admin login` path: an explicit login replaces the
+/// selected cached session instead of accidentally reusing it.
+pub async fn open_admin_password_session(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<Secret>,
+) -> Result<AdminSession> {
+    let (server, controller_identity) =
+        resolve_controller(ans, server, ca_dir.as_deref()).await?;
+    password_session(ans, server, controller_identity, admin, password).await
+}
+
+async fn resolve_controller(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<&Path>,
+) -> Result<(SocketAddr, CaIdentity)> {
+    let (server, identity) = resolve_identity(ans, server, ca_dir).await?;
+    // Resolve the authoritative controller while we still hold no secret.
+    let map = admin_client::get_map_pinned(server, NodeKind::Client, &identity).await?;
+    let controller = map
+        .controller_entry()
+        .filter(|s| s.state == crate::admin_proto::ServerState::Registered)
+        .context("the authoritative map has no registered controller")?;
+    let server = controller.addr;
+    let controller_identity = admin_client::fetch_identity(server, NodeKind::Client).await?;
+    if controller_identity.fingerprint != identity.fingerprint
+        || !controller_identity.controller
+        || controller_identity.server_id != map.controller
+    {
+        bail!("the map's controller candidate failed exact home-CA verification");
+    }
+    Ok((server, controller_identity))
+}
+
+async fn password_session(
+    ans: &mut dyn Answerer,
+    server: SocketAddr,
+    controller_identity: CaIdentity,
+    admin: Option<String>,
+    password: Option<Secret>,
+) -> Result<AdminSession> {
     let admin = ans
         .text(Field::AdminName, admin, current_username().as_deref(), true)
         .await?
         .context("an admin name is required")?;
     let password = ans.secret(Field::AdminPassword, password).await?;
-    Ok(AdminSession { server, identity, admin, password })
+    Ok(AdminSession {
+        server,
+        identity: controller_identity,
+        admin: admin.clone(),
+        credential: AdminCredential::Password { admin, password },
+    })
 }
 
 /// Select exactly one item from `items` by its **full** security code.

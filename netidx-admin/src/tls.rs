@@ -12,7 +12,7 @@
 //! design/netidx-admin-future.md.
 
 use crate::{atomic, paths};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -284,6 +284,77 @@ pub fn first_dns_san_from_der(der: &[u8]) -> Option<String> {
         GeneralName::DNSName(dns) => Some(dns.to_string()),
         _ => None,
     })
+}
+
+/// The application identity carried by every protocol-v6 admin serving
+/// certificate. The DNS SAN remains the TLS endpoint name; URI SANs bind the
+/// immutable node identity and the singleton controller role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminCertIdentity {
+    pub server_id: crate::admin_proto::AdminServerId,
+    pub controller: bool,
+}
+
+pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
+    use crate::admin_proto::{
+        AdminServerId, CONTROLLER_ROLE_URI, SERVER_ID_URI_PREFIX, SERVING_SAN,
+    };
+    use uuid::Uuid;
+    use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
+
+    let (_, cert) = X509Certificate::from_der(der)
+        .map_err(|e| anyhow!("parsing admin certificate: {e}"))?;
+    let san = cert
+        .subject_alternative_name()
+        .context("reading admin certificate SAN")?
+        .context("admin certificate has no SubjectAlternativeName")?;
+    let dns: Vec<&str> = san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|n| match n { GeneralName::DNSName(s) => Some(*s), _ => None })
+        .collect();
+    if dns.len() != 1 || !dns[0].eq_ignore_ascii_case(SERVING_SAN) {
+        bail!(
+            "admin certificate must contain exactly one DNS SAN {:?}, found {:?}",
+            SERVING_SAN,
+            dns
+        );
+    }
+    let mut server_id = None;
+    let mut controller = false;
+    for uri in san.value.general_names.iter().filter_map(|n| match n {
+        GeneralName::URI(s) => Some(*s),
+        _ => None,
+    }) {
+        if let Some(raw) = uri.strip_prefix(SERVER_ID_URI_PREFIX) {
+            if server_id.is_some() {
+                bail!("admin certificate contains duplicate server identity URIs");
+            }
+            let id = Uuid::parse_str(raw)
+                .with_context(|| format!("invalid admin server identity URI {uri:?}"))?;
+            server_id = Some(AdminServerId(id));
+        } else if uri == CONTROLLER_ROLE_URI {
+            if controller {
+                bail!("admin certificate contains duplicate controller role URIs");
+            }
+            controller = true;
+        }
+    }
+    Ok(AdminCertIdentity {
+        server_id: server_id.context(
+            "admin certificate has no protocol-v6 server identity URI (legacy certificates are refused)",
+        )?,
+        controller,
+    })
+}
+
+pub fn admin_cert_identity_from_pem(pem: &[u8]) -> Result<AdminCertIdentity> {
+    let der = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+        .next()
+        .context("admin certificate PEM contains no certificate")?
+        .context("parsing admin certificate PEM")?;
+    admin_cert_identity_from_der(der.as_ref())
 }
 
 /// Strip the leftmost DNS label off a SAN to get the *domain* that
@@ -603,5 +674,46 @@ mod tests {
         std::fs::remove_file(sealed_sidecar(&key_src)).unwrap();
         install_identity(&p).unwrap();
         assert!(!dst_sidecar.exists());
+    }
+
+    fn admin_cert(uris: &[String]) -> Vec<u8> {
+        use rcgen::{CertificateParams, KeyPair, SanType, string::Ia5String};
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![
+            crate::admin_proto::SERVING_SAN.to_string(),
+        ])
+        .unwrap();
+        params.subject_alt_names.extend(uris.iter().map(|uri| {
+            SanType::URI(Ia5String::try_from(uri.as_str()).unwrap())
+        }));
+        params.self_signed(&key).unwrap().der().as_ref().to_vec()
+    }
+
+    #[test]
+    fn protocol_v6_admin_certificate_identity_is_strict() {
+        let id = crate::admin_proto::AdminServerId::new();
+        let der = admin_cert(&[
+            id.uri(),
+            crate::admin_proto::CONTROLLER_ROLE_URI.to_string(),
+        ]);
+        let parsed = admin_cert_identity_from_der(&der).unwrap();
+        assert_eq!(parsed.server_id, id);
+        assert!(parsed.controller);
+
+        let legacy = admin_cert(&[]);
+        assert!(admin_cert_identity_from_der(&legacy).is_err());
+        let duplicate = admin_cert(&[id.uri(), id.uri()]);
+        assert!(admin_cert_identity_from_der(&duplicate).is_err());
+        let malformed = admin_cert(&[format!(
+            "{}not-a-uuid",
+            crate::admin_proto::SERVER_ID_URI_PREFIX
+        )]);
+        assert!(admin_cert_identity_from_der(&malformed).is_err());
+        let duplicate_role = admin_cert(&[
+            id.uri(),
+            crate::admin_proto::CONTROLLER_ROLE_URI.to_string(),
+            crate::admin_proto::CONTROLLER_ROLE_URI.to_string(),
+        ]);
+        assert!(admin_cert_identity_from_der(&duplicate_role).is_err());
     }
 }

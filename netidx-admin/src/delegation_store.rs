@@ -19,9 +19,9 @@
 //! become file names; no path traversal).
 
 use crate::{
+    admin_proto::{AdminServerId, ResolverAddr, ResolverClusterId},
     atomic,
     ca_store::{TTL, new_id, now_unix, valid_id},
-    admin_proto::ResolverAddr,
 };
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -34,21 +34,33 @@ pub const MAX_PENDING: usize = 32;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingDelegation {
     pub id: String,
-    /// The subtree the child proposes to own (e.g. `/eu`).
     pub proposed_path: String,
-    /// The child resolver cluster's advertised address(es).
-    pub child: Vec<ResolverAddr>,
+    pub parent_servers: Vec<AdminServerId>,
+    pub child_servers: Vec<AdminServerId>,
+    /// Stable CA allocation used if approval splits one active cluster.
+    pub proposed_child: ResolverClusterId,
     pub received_unix: u64,
     /// Socket address the request arrived from (display context).
     pub peer: String,
 }
 
 impl PendingDelegation {
-    pub fn new(proposed_path: String, child: Vec<ResolverAddr>, peer: String) -> Self {
+    pub fn new(
+        proposed_path: String,
+        mut parent_servers: Vec<AdminServerId>,
+        mut child_servers: Vec<AdminServerId>,
+        peer: String,
+    ) -> Self {
+        parent_servers.sort();
+        parent_servers.dedup();
+        child_servers.sort();
+        child_servers.dedup();
         PendingDelegation {
             id: new_id(),
             proposed_path,
-            child,
+            parent_servers,
+            child_servers,
+            proposed_child: ResolverClusterId::new(),
             received_unix: now_unix(),
             peer,
         }
@@ -216,6 +228,40 @@ pub fn read_approved(ca_dir: &Path, id: &str) -> Result<Option<ApprovedRecord>> 
     }
 }
 
+/// Every unexpired approved delegation, oldest first. These stay visible to
+/// administrator tooling for the lifetime of the record so approval can be
+/// re-run as the explicit, idempotent reconciliation path.
+pub fn approved(ca_dir: &Path) -> Result<Vec<ApprovedRecord>> {
+    let dir = approved_dir(ca_dir);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+    };
+    let now = now_unix();
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_id(id) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(rec) = serde_json::from_slice::<ApprovedRecord>(&bytes) else {
+            continue;
+        };
+        if now.saturating_sub(rec.req.received_unix) <= TTL.as_secs() {
+            out.push(rec);
+        }
+    }
+    out.sort_by_key(|r| r.req.received_unix);
+    Ok(out)
+}
+
 /// Commit an approval: write the `approved/` record (the atomic commit),
 /// then remove the `queue/` entry. The single write is the transaction.
 pub fn approve(
@@ -322,8 +368,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path();
         let req = PendingDelegation::new(
-            "/eu".into(),
-            vec![ra("10.0.0.2:4564")],
+            "/ap".into(),
+            vec![AdminServerId::new()],
+            vec![AdminServerId::new()],
             "10.0.0.2:5000".into(),
         );
         enqueue(ca, &req).unwrap();
@@ -339,14 +386,21 @@ mod tests {
             s => panic!("expected Approved, got {s:?}"),
         }
         assert!(read_pending(ca, &req.id).unwrap().is_none());
+        let reviewable = approved(ca).unwrap();
+        assert_eq!(reviewable.len(), 1);
+        assert_eq!(reviewable[0].req.id, req.id);
     }
 
     #[test]
     fn deny_is_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path();
-        let req =
-            PendingDelegation::new("/asia".into(), vec![ra("10.0.0.3:4564")], "p".into());
+        let req = PendingDelegation::new(
+            "/ap".into(),
+            vec![AdminServerId::new()],
+            vec![AdminServerId::new()],
+            "p".into(),
+        );
         enqueue(ca, &req).unwrap();
         deny(ca, &req, "not authorized").unwrap();
         assert!(pending(ca).unwrap().is_empty());

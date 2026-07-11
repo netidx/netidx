@@ -104,7 +104,7 @@ pub enum AdminPlane {
 ///
 /// The same rule covers joining an existing network: enrolling an admin server
 /// queues for remote approval like any other request (the admin's
-/// `may_enroll_servers` gate runs at approval), so no admin needs to be at
+/// scoped enrollment authorization runs at approval), so no admin needs to be at
 /// this keyboard and there is no reason for the join side of the matrix to
 /// differ.
 pub fn admin_plane_decision(kind: AuthKind, no_admin_server: bool) -> AdminPlane {

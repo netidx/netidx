@@ -326,6 +326,11 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
                 netidx_activation::file::ProcessCfgBuilder::default()
                     .exe(netidx_binary.to_string_lossy().into_owned())
                     .args(resolver_args)
+                    // Resolver-server clusters are rolled manually, one member
+                    // at a time. A failed start must stay failed: an automatic
+                    // retry could come up later, outside the operator's rollout
+                    // sequence, and overlap another member's planned restart.
+                    .restart(netidx_activation::file::Restart::No)
                     .build()?,
             )
             .build()?,
@@ -555,6 +560,11 @@ mod tests {
             unit.process.args.iter().any(|a| a == "--delay-reads"),
             "resolver unit args must include --delay-reads: {:?}",
             unit.process.args,
+        );
+        assert!(
+            matches!(unit.process.restart, netidx_activation::file::Restart::No),
+            "resolver unit must not restart automatically: {}",
+            unit.process.restart,
         );
     }
 

@@ -2,19 +2,18 @@
 //!
 //! A child resolver requests delegation of a subtree from a parent's admin
 //! server (glyph-confirming it first) and polls; the parent admin lists the
-//! pending requests, matches the out-of-band code, and approves (which edits
-//! the parent's `children` cluster-wide) or denies. The review ceremony becomes
+//! pending requests, matches the out-of-band code, and approves the CA-owned
+//! topology transaction or denies it. The review ceremony becomes
 //! `list_pending_delegations` (query) + `approve_delegation`/`deny_delegation`
-//! (actions keyed by the request code — recomputed locally from
-//! `(proposed_path, child)`, never trusted from the wire).
+//! (actions keyed by the request code — recomputed locally from the path and
+//! stable parent/child server sets, never trusted from the wire).
 
 use super::{find_by_code, open_admin_session};
 use crate::{
-    admin_client, admin_server, admin_server_config,
-    admin_proto::{InfoAuth, PeerResult, ReferralEdit, ResolverAddr},
+    admin_client,
+    admin_proto::{InfoAuth, PeerResult, ResolverAddr},
     answer::Answerer,
     fingerprint::Fingerprint,
-    paths,
     plan::delegation::delegate_under_parent,
     resolver::ResolverConfig,
     template::{self, ParentRef, ReferralAuth},
@@ -35,8 +34,8 @@ pub fn info_to_referral_auth(a: &InfoAuth) -> ReferralAuth {
     }
 }
 
-/// A pending delegation request, keyed by its **code** (the delegation
-/// fingerprint recomputed locally from `proposed_path` + `child`). `id` is the
+/// A pending or approved delegation request, keyed by its **code** (the delegation
+/// fingerprint recomputed locally from its path and server sets). `id` is the
 /// opaque server request id an action reuses — private, so callers address a
 /// request only by its code.
 pub struct PendingDelegation {
@@ -44,8 +43,19 @@ pub struct PendingDelegation {
     pub code: Fingerprint,
     /// The subtree the child asks to own.
     pub proposed_path: String,
-    /// The child cluster's resolver address(es).
+    /// The proposed/final parent cluster's resolver address(es).
+    pub parent: Vec<ResolverAddr>,
+    /// The proposed/final child cluster's resolver address(es).
     pub child: Vec<ResolverAddr>,
+    /// Immutable identities covered by the out-of-band request code.
+    pub parent_servers: Vec<crate::admin_proto::AdminServerId>,
+    pub child_servers: Vec<crate::admin_proto::AdminServerId>,
+    pub parent_cluster: crate::admin_proto::ResolverClusterId,
+    pub child_cluster: crate::admin_proto::ResolverClusterId,
+    pub parent_base: String,
+    pub child_base: String,
+    /// Already approved; approving again runs idempotent reconciliation.
+    pub approved: bool,
     /// Seconds since the request was queued.
     pub age_secs: u64,
     /// The address the request arrived from.
@@ -55,9 +65,21 @@ pub struct PendingDelegation {
 
 fn to_pending(e: crate::admin_proto::DelegationEntry) -> PendingDelegation {
     PendingDelegation {
-        code: admin_client::delegation_code(&e.proposed_path, &e.child),
+        code: admin_client::delegation_code(
+            &e.proposed_path,
+            &e.parent_servers,
+            &e.child_servers,
+        ),
         proposed_path: e.proposed_path,
-        child: e.child,
+        parent: e.parent_members,
+        child: e.child_members,
+        parent_servers: e.parent_servers,
+        child_servers: e.child_servers,
+        parent_cluster: e.parent,
+        child_cluster: e.child,
+        parent_base: e.parent_base,
+        child_base: e.child_base,
+        approved: e.approved,
         age_secs: e.age_secs,
         peer: e.peer,
         id: e.id,
@@ -76,8 +98,7 @@ pub async fn list_pending_delegations(
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let entries = admin_client::list_delegations(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?;
@@ -109,8 +130,7 @@ pub async fn approve_delegation(
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let items: Vec<PendingDelegation> = admin_client::list_delegations(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?
@@ -121,8 +141,7 @@ pub async fn approve_delegation(
     let (id, proposed_path) = (item.id.clone(), item.proposed_path.clone());
     let peers = admin_client::approve_delegation(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &id,
         &sess.identity,
     )
@@ -143,8 +162,7 @@ pub async fn deny_delegation(
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let items: Vec<PendingDelegation> = admin_client::list_delegations(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?
@@ -154,19 +172,41 @@ pub async fn deny_delegation(
     let item = find_by_code(&items, code, |i| Some(i.code))?;
     admin_client::deny_delegation(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &item.id,
         reason,
         &sess.identity,
     )
     .await?;
     // Return the matched item (owned) for the caller to report.
-    let PendingDelegation { code, proposed_path, child, age_secs, peer, id } = item;
+    let PendingDelegation {
+        code,
+        proposed_path,
+        parent,
+        child,
+        parent_servers,
+        child_servers,
+        parent_cluster,
+        child_cluster,
+        parent_base,
+        child_base,
+        approved,
+        age_secs,
+        peer,
+        id,
+    } = item;
     Ok(PendingDelegation {
         code: *code,
         proposed_path: proposed_path.clone(),
+        parent: parent.clone(),
         child: child.clone(),
+        parent_servers: parent_servers.clone(),
+        child_servers: child_servers.clone(),
+        parent_cluster: *parent_cluster,
+        child_cluster: *child_cluster,
+        parent_base: parent_base.clone(),
+        child_base: child_base.clone(),
+        approved: *approved,
         age_secs: *age_secs,
         peer: peer.clone(),
         id: id.clone(),
@@ -176,14 +216,8 @@ pub async fn deny_delegation(
 /// Whether the child's freshly-written parent referral reached the rest of its
 /// cluster.
 pub enum ClusterPropagation {
-    /// Single-member child — nothing to propagate.
-    SingleMember,
-    /// Multi-member, but this host runs no admin server, so it couldn't
-    /// authenticate as a cluster peer — the operator must copy the `parent`
-    /// block into every other member by hand.
-    NoAdminServer { members: usize },
-    /// Pushed to the other members; per-peer results.
-    Pushed(Vec<PeerResult>),
+    /// The CA controller updated every registered parent and child member.
+    ControllerManaged,
 }
 
 /// The outcome of `resolver add-parent`.
@@ -195,16 +229,17 @@ pub struct AddParentOutcome {
 }
 
 /// The `resolver add-parent` action: attach a standalone resolver under a
-/// parent by delegation, then write its `parent` referral (and propagate it to
-/// the child's other cluster members). The parent glyph confirm + queue + poll
-/// runs through [`delegate_under_parent`] (already Answerer-driven).
+/// parent by delegation, then write this installer's local `parent` referral.
+/// All remote parent/child propagation is owned by the CA controller. The
+/// parent glyph confirm + queue + poll runs through [`delegate_under_parent`].
 pub async fn add_parent(
     ans: &mut dyn Answerer,
     resolver_config: &Path,
     parent_server: SocketAddr,
     proposed_path: &str,
-    referral: Option<Vec<ResolverAddr>>,
+    selection: Option<crate::plan::delegation::DelegationSelection>,
 ) -> Result<AddParentOutcome> {
+    let existing_cluster_change = selection.is_some();
     let rcfg = ResolverConfig::load(resolver_config)?;
     if rcfg.as_file().parent.is_some() {
         bail!(
@@ -219,70 +254,33 @@ pub async fn add_parent(
              be delegated a subtree."
         );
     }
-    let n_members = child.len();
     // Queue the request, glyph-confirm the parent, and poll until approved. The
-    // approval is authoritative regardless of which parent resolvers we then
-    // reference; `referral` (when the operator picked a subset from the map) sets
-    // exactly which of the parent's resolvers this child contacts, else we take
-    // the full set the parent returned at approval.
+    // approval is authoritative; the returned members are the exact parent
+    // cluster produced by the CA-owned split/attach transaction.
     let approved =
-        delegate_under_parent(ans, parent_server, proposed_path, child, None).await?;
-    let parent = referral.unwrap_or(approved);
+        delegate_under_parent(ans, parent_server, proposed_path, child, selection, None)
+            .await?;
+    let parent = approved;
     let parent_ref = ParentRef {
         path: ArcStr::from(proposed_path),
         ttl: None,
         addrs: parent.iter().map(|r| (r.addr, info_to_referral_auth(&r.auth))).collect(),
     };
-    let rt = template::set_parent_referral(resolver_config, parent_ref)?;
-    ans.note(&rt.describe());
-    rt.apply().context("writing the parent referral")?;
-    let propagation = if n_members > 1 {
-        propagate_parent_to_child_cluster(&rcfg, proposed_path, &parent).await?
+    // The controller fanout normally reaches this registered child while the
+    // requestor is polling, so its full topology may already be on disk. Treat
+    // that exact state as successful completion; a different pre-existing
+    // parent still fails in `set_parent_referral` as a real reparent attempt.
+    if template::parent_referral_matches(resolver_config, &parent_ref)? {
+        ans.note("the controller already wrote this resolver's approved topology");
+    } else if existing_cluster_change {
+        bail!(
+            "the delegation was approved, but the controller did not write this resolver's complete topology; do not apply a parent-only edit. Re-approve the delegation to reconcile the failed target"
+        );
     } else {
-        ClusterPropagation::SingleMember
-    };
+        let rt = template::set_parent_referral(resolver_config, parent_ref)?;
+        ans.note(&rt.describe());
+        rt.apply().context("writing the parent referral")?;
+    }
+    let propagation = ClusterPropagation::ControllerManaged;
     Ok(AddParentOutcome { proposed_path: proposed_path.to_string(), propagation })
-}
-
-/// Push the child's freshly-written `parent` referral to every other member of
-/// the child cluster (symmetric to the parent-side `AddChild` push). Needs this
-/// host's admin-server serving cert to authenticate as a cluster peer; without
-/// one, reports [`ClusterPropagation::NoAdminServer`] for the caller to warn on.
-async fn propagate_parent_to_child_cluster(
-    rcfg: &ResolverConfig,
-    proposed_path: &str,
-    parent: &[ResolverAddr],
-) -> Result<ClusterPropagation> {
-    let admin_path = match paths::discover_admin_server_config() {
-        Ok(p) => p,
-        Err(_) => {
-            return Ok(ClusterPropagation::NoAdminServer {
-                members: rcfg.as_file().member_servers.len(),
-            });
-        }
-    };
-    let cfg = admin_server_config::AdminServerConfig::load(&admin_path).context(
-        "loading this host's admin-server config to propagate the parent referral",
-    )?;
-    let cert = std::fs::read(&cfg.serving_cert)
-        .with_context(|| format!("reading serving cert {}", cfg.serving_cert.display()))?;
-    let key = std::fs::read(&cfg.serving_key)
-        .with_context(|| format!("reading serving key {}", cfg.serving_key.display()))?;
-    let trusted = std::fs::read(&cfg.trusted)
-        .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
-    let roots = admin_server::load_roots(&trusted)?;
-    let member_addrs: Vec<SocketAddr> =
-        rcfg.as_file().member_servers.iter().map(|m| m.addr).collect();
-    let edit =
-        ReferralEdit::SetParent { path: proposed_path.to_string(), parent: parent.to_vec() };
-    let peers = admin_server::push_referral_edit_to_peers(
-        &edit,
-        &member_addrs,
-        cfg.listen,
-        &cert,
-        &key,
-        roots,
-    )
-    .await;
-    Ok(ClusterPropagation::Pushed(peers))
 }

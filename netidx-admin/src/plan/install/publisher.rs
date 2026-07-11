@@ -229,7 +229,7 @@ pub async fn run_publisher(
             );
         }
         let answer = ans
-            .text(Field::Bind, None, suggestion.as_deref(), false)
+            .text(Field::PublisherBind, None, suggestion.as_deref(), false)
             .await?
             .unwrap_or_default();
         if answer.trim().is_empty() {

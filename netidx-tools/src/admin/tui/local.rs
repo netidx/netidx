@@ -88,7 +88,11 @@ struct LocalCa {
 }
 
 impl Detected {
-    fn probe(record: InstallRecord, scope: ServiceScope, config_dir: PathBuf) -> Detected {
+    fn probe(
+        record: InstallRecord,
+        scope: ServiceScope,
+        config_dir: PathBuf,
+    ) -> Detected {
         // The CA glyph comes from the cluster identity recorded at install — set
         // for both a founding host (its own cluster) and a joining one.
         let ca = record
@@ -183,7 +187,11 @@ fn detect() -> Vec<Detected> {
     // user record (unusual, but possible if the two roots coincide).
     if sys_path.exists() && user_path.as_deref() != Some(sys_path.as_path()) {
         if let Ok(record) = InstallRecord::load(&sys_path) {
-            out.push(Detected::probe(record, ServiceScope::System, paths::system_config_root()));
+            out.push(Detected::probe(
+                record,
+                ServiceScope::System,
+                paths::system_config_root(),
+            ));
         }
     }
     out
@@ -432,7 +440,9 @@ impl LocalState {
                 return Some(items.remove(sel - 1).1);
             }
             // Quick shortcuts (also in the list).
-            Char('u') => return Some(uninstall_action(&self.installs[self.selected], false)),
+            Char('u') => {
+                return Some(uninstall_action(&self.installs[self.selected], false));
+            }
             // Uppercase U applies the network sync (the Update action) — mnemonic
             // and distinct from lowercase `u` (uninstall). Only meaningful for a
             // networked install; the status overlay surfaces it when out of sync.
@@ -486,9 +496,14 @@ impl LocalState {
         let items: Vec<ListItem> = ROLES.iter().map(|r| ListItem::new(r.title)).collect();
         let list = List::new(items)
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Install a Role ", theme::title_style())).title_bottom(
-                Line::from(Span::styled(" ↑/↓ select · Enter install · p preview ", theme::hint_style())),
-            ))
+            .block(
+                theme::panel_block()
+                    .title(Span::styled(" Install a Role ", theme::title_style()))
+                    .title_bottom(Line::from(Span::styled(
+                        " ↑/↓ select · Enter install · p preview ",
+                        theme::hint_style(),
+                    ))),
+            )
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, cols[0], &mut self.role_menu);
@@ -497,7 +512,10 @@ impl LocalState {
         let blurb = Paragraph::new(ROLES[sel].blurb)
             .wrap(Wrap { trim: true })
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(format!(" {} ", ROLES[sel].title), theme::title_style())));
+            .block(theme::panel_block().title(Span::styled(
+                format!(" {} ", ROLES[sel].title),
+                theme::title_style(),
+            )));
         f.render_widget(blurb, cols[1]);
     }
 
@@ -513,7 +531,8 @@ impl LocalState {
         let mut labels = vec!["Status".to_string()];
         labels.extend(acts.iter().map(|(l, _)| l.clone()));
         let items: Vec<ListItem> = labels.into_iter().map(ListItem::new).collect();
-        let title = format!(" {} ({}) ", role_title(d.record.role), service_word(d.service));
+        let title =
+            format!(" {} ({}) ", role_title(d.record.role), service_word(d.service));
         let hint = if self.installs.len() > 1 {
             " ↑/↓ select · Enter run · ‹/› switch install "
         } else {
@@ -539,14 +558,16 @@ impl LocalState {
         let blurb = Paragraph::new(desc)
             .wrap(Wrap { trim: true })
             .style(theme::panel_style())
-            .block(theme::panel_block().title(Span::styled(" Description ", theme::title_style())));
+            .block(
+                theme::panel_block()
+                    .title(Span::styled(" Description ", theme::title_style())),
+            );
         f.render_widget(blurb, cols[1]);
     }
 }
 
 /// The Status item's description in the tool detail pane.
-const STATUS_DESC: &str =
-    "Full status detail for this install: its config, whether it is in sync with \
+const STATUS_DESC: &str = "Full status detail for this install: its config, whether it is in sync with \
      the cluster, and its CA glyph.";
 
 /// A one-line description of a Local-tab action, shown in the menu detail pane.
@@ -571,7 +592,9 @@ fn action_desc(action: &Action) -> &'static str {
         Join { dry_run: true } => "Preview joining a cluster, without changing anything.",
         AddParent => "Attach this resolver under a parent resolver by delegation.",
         Remote(_) => "Connect to a remote admin server.",
-        Uninstall { remove_ca: false, .. } => "Remove this install — its config and OS service.",
+        Uninstall { remove_ca: false, .. } => {
+            "Remove this install — its config and OS service."
+        }
         Uninstall { remove_ca: true, .. } => {
             "Remove this install and destroy its certificate authority. Irreversible."
         }
@@ -588,7 +611,9 @@ fn action_desc(action: &Action) -> &'static str {
              one — it retires the old password. Works only locally, on the CA machine."
         }
         ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
-        ExternalInstall { .. } => "Install the externally-signed CA certificate returned by your PKI.",
+        ExternalInstall { .. } => {
+            "Install the externally-signed CA certificate returned by your PKI."
+        }
         OpenServices { .. } => {
             "Manage netidx services on this machine — list them, start/stop/restart, \
              and create, edit, or delete units."
@@ -599,9 +624,7 @@ fn action_desc(action: &Action) -> &'static str {
         ManageLocalAdmins { panel: super::remote::Panel::Perms, .. } => {
             "View and edit this host's permissions."
         }
-        ManageLocalAdmins { .. } => {
-            "Manage this admin server's admins and their scopes."
-        }
+        ManageLocalAdmins { .. } => "Manage this admin server's admins and their scopes.",
     }
 }
 
@@ -631,7 +654,10 @@ fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncS
     widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
     let block = theme::dialog_block(&format!("{} status", role_title(d.record.role)))
-        .title_bottom(Line::from(Span::styled(" any key to close ", theme::hint_style())));
+        .title_bottom(Line::from(Span::styled(
+            " any key to close ",
+            theme::hint_style(),
+        )));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let cols = if d.ca.is_some() {
@@ -670,7 +696,8 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     }
     if role == InstallRole::Workstation && !networked {
         items.push(("Join a Cluster".to_string(), Action::Join { dry_run: false }));
-        items.push(("Preview Join (Dry Run)".to_string(), Action::Join { dry_run: true }));
+        items
+            .push(("Preview Join (Dry Run)".to_string(), Action::Join { dry_run: true }));
     }
     if role == InstallRole::Resolver {
         items.push(("Add a Parent".to_string(), Action::AddParent));
@@ -681,7 +708,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // Cluster tab (connect to this host's own admin server).
     }
     if networked {
-        items.push(("Renew Certificates".to_string(), Action::Renew { server: d.record.admin_server }));
+        items.push((
+            "Renew Certificates".to_string(),
+            Action::Renew { server: d.record.admin_server },
+        ));
     }
     // One Services surface over the local activation supervisor (no auth): list +
     // status, start/stop/restart, and local-only unit create/edit/delete. Present
@@ -715,18 +745,29 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         if lca.auto_approve_present {
             items.push((
                 "Rotate Auto-Renew Credential".to_string(),
-                Action::AutoApprove { rotate: true, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+                Action::AutoApprove {
+                    rotate: true,
+                    ca_dir: lca.ca_dir.clone(),
+                    cfg: lca.cfg.clone(),
+                },
             ));
         } else {
             items.push((
                 "Enable Auto-Renew".to_string(),
-                Action::AutoApprove { rotate: false, ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+                Action::AutoApprove {
+                    rotate: false,
+                    ca_dir: lca.ca_dir.clone(),
+                    cfg: lca.cfg.clone(),
+                },
             ));
         }
         if lca.recovery_present {
             items.push((
                 "Rotate Recovery Password".to_string(),
-                Action::RecoveryRotate { ca_dir: lca.ca_dir.clone(), cfg: lca.cfg.clone() },
+                Action::RecoveryRotate {
+                    ca_dir: lca.ca_dir.clone(),
+                    cfg: lca.cfg.clone(),
+                },
             ));
         }
         if lca.external_signed {
@@ -739,7 +780,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
             } else {
                 "Install Signed Certificate (External CA)"
             };
-            items.push((label.to_string(), Action::ExternalInstall { ca_dir: lca.ca_dir.clone() }));
+            items.push((
+                label.to_string(),
+                Action::ExternalInstall { ca_dir: lca.ca_dir.clone() },
+            ));
         }
     }
     // One Uninstall item; when this host owns a CA, the confirm flow asks whether
@@ -764,7 +808,6 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
     }
 }
 
-
 /// The one-time "netidx isn't installed" welcome dialog on a fresh machine.
 /// The prose is one continuous string per paragraph so ratatui's `Paragraph`
 /// wraps it to the dialog width at any terminal size; the box is sized to the
@@ -776,7 +819,10 @@ fn render_welcome(f: &mut Frame, screen: Rect) {
     let prompt = " Press Enter to continue ";
     let w = 64.min(screen.width.saturating_sub(4)).max(24);
     let lines = vec![
-        Line::from(Span::styled(heading, theme::panel_style().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            heading,
+            theme::panel_style().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(Span::styled(body, theme::panel_style())),
         Line::from(""),
@@ -787,7 +833,10 @@ fn render_welcome(f: &mut Frame, screen: Rect) {
     widgets::shadow(f, area, screen);
     f.render_widget(Clear, area);
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: true }).style(theme::panel_style()).block(theme::dialog_block("Welcome to netidx")),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(theme::panel_style())
+            .block(theme::dialog_block("Welcome to netidx")),
         area,
     );
 }
@@ -820,8 +869,11 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
             ("not set up", theme::HINT_FG)
         };
         lines.push(kv_status("Auto-approve", aa.to_string(), aa_c));
-        let (rec, rec_c) =
-            if lca.recovery_present { ("set", theme::OK) } else { ("MISSING", theme::WARN) };
+        let (rec, rec_c) = if lca.recovery_present {
+            ("set", theme::OK)
+        } else {
+            ("MISSING", theme::WARN)
+        };
         lines.push(kv_status("Recovery slot", rec.to_string(), rec_c));
         if lca.external_signed {
             let (ext, ext_c) = if lca.external_installed {
@@ -874,16 +926,16 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
         SyncState::OutOfSync(changes) => {
             let mut lines = vec![kv_status(
                 "Cluster sync",
-                format!(
-                    "⚠ {} new member server(s) — press U to apply",
-                    changes.len()
-                ),
+                format!("⚠ {} new member server(s) — press U to apply", changes.len()),
                 theme::WARN,
             )];
             for c in changes {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{:>18}", "")),
-                    Span::styled(format!("+ {c}"), Style::default().bg(theme::PANEL_BG).fg(theme::WARN)),
+                    Span::styled(
+                        format!("+ {c}"),
+                        Style::default().bg(theme::PANEL_BG).fg(theme::WARN),
+                    ),
                 ]));
             }
             lines

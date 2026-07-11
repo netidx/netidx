@@ -57,8 +57,7 @@ pub async fn issued(
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let entries = admin_client::list_issued(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?;
@@ -97,8 +96,7 @@ pub async fn revoke(
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let entries = admin_client::list_issued(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         &sess.identity,
     )
     .await?;
@@ -130,8 +128,7 @@ pub async fn revoke(
     let revoked: Vec<IssuedEntry> = targets.iter().map(|t| (*t).clone()).collect();
     let warnings = admin_client::revoke(
         sess.server,
-        &sess.admin,
-        sess.password.as_str(),
+        sess.credential.clone(),
         serials,
         reason,
         &sess.identity,
