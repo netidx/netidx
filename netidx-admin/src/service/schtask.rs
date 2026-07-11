@@ -173,8 +173,11 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
 
     // schtasks /XML reads a UTF-16 file; write UTF-16LE with a BOM to match
     // the declared encoding.
-    let xml_path = std::env::temp_dir()
-        .join(format!("netidx-task-{}-{}.xml", p.service_name, std::process::id()));
+    let xml_path = std::env::temp_dir().join(format!(
+        "netidx-task-{}-{}.xml",
+        p.service_name,
+        std::process::id()
+    ));
     let mut bytes = Vec::with_capacity(xml.len() * 2 + 2);
     bytes.extend_from_slice(&[0xFF, 0xFE]); // UTF-16LE BOM
     for u in xml.encode_utf16() {
@@ -184,8 +187,7 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
         .with_context(|| format!("writing task XML to {}", xml_path.display()))?;
 
     let xml_str = xml_path.to_string_lossy().into_owned();
-    let create =
-        schtasks(&["/Create", "/TN", &p.service_name, "/XML", &xml_str, "/F"]);
+    let create = schtasks(&["/Create", "/TN", &p.service_name, "/XML", &xml_str, "/F"]);
     // Best-effort cleanup of the temp file regardless of the result.
     let _ = std::fs::remove_file(&xml_path);
     create?;
@@ -195,10 +197,7 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
     // not undo the (successful) registration.
     let _ = schtasks(&["/Run", "/TN", &p.service_name]);
 
-    Ok(InstalledService {
-        unit_path: xml_path,
-        service_id: p.service_name.clone(),
-    })
+    Ok(InstalledService { unit_path: xml_path, service_id: p.service_name.clone() })
 }
 
 pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
@@ -219,11 +218,7 @@ pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
         .stderr(Stdio::null())
         .status()
         .context("running schtasks.exe")?;
-    Ok(if out.success() {
-        ServiceStatus::Active
-    } else {
-        ServiceStatus::NotInstalled
-    })
+    Ok(if out.success() { ServiceStatus::Active } else { ServiceStatus::NotInstalled })
 }
 
 #[cfg(test)]

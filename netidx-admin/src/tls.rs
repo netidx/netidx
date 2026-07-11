@@ -312,7 +312,10 @@ pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
         .value
         .general_names
         .iter()
-        .filter_map(|n| match n { GeneralName::DNSName(s) => Some(*s), _ => None })
+        .filter_map(|n| match n {
+            GeneralName::DNSName(s) => Some(*s),
+            _ => None,
+        })
         .collect();
     if dns.len() != 1 || !dns[0].eq_ignore_ascii_case(SERVING_SAN) {
         bail!(
@@ -679,23 +682,21 @@ mod tests {
     fn admin_cert(uris: &[String]) -> Vec<u8> {
         use rcgen::{CertificateParams, KeyPair, SanType, string::Ia5String};
         let key = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::new(vec![
-            crate::admin_proto::SERVING_SAN.to_string(),
-        ])
-        .unwrap();
-        params.subject_alt_names.extend(uris.iter().map(|uri| {
-            SanType::URI(Ia5String::try_from(uri.as_str()).unwrap())
-        }));
+        let mut params =
+            CertificateParams::new(vec![crate::admin_proto::SERVING_SAN.to_string()])
+                .unwrap();
+        params.subject_alt_names.extend(
+            uris.iter()
+                .map(|uri| SanType::URI(Ia5String::try_from(uri.as_str()).unwrap())),
+        );
         params.self_signed(&key).unwrap().der().as_ref().to_vec()
     }
 
     #[test]
     fn protocol_v6_admin_certificate_identity_is_strict() {
         let id = crate::admin_proto::AdminServerId::new();
-        let der = admin_cert(&[
-            id.uri(),
-            crate::admin_proto::CONTROLLER_ROLE_URI.to_string(),
-        ]);
+        let der =
+            admin_cert(&[id.uri(), crate::admin_proto::CONTROLLER_ROLE_URI.to_string()]);
         let parsed = admin_cert_identity_from_der(&der).unwrap();
         assert_eq!(parsed.server_id, id);
         assert!(parsed.controller);

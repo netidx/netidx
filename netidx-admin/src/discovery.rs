@@ -159,7 +159,8 @@ fn parse_resolved(info: &ResolvedService) -> Option<(String, Discovered)> {
     let domain = info.get_property_val_str("domain").unwrap_or_default().to_string();
     let roles = roles_from_txt(info.get_property_val_str("roles").unwrap_or_default());
     let fp_short = info.get_property_val_str("fp").unwrap_or_default().to_string();
-    let addrs: Vec<IpAddr> = info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
+    let addrs: Vec<IpAddr> =
+        info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
     if domain.is_empty() || addrs.is_empty() {
         debug!("ignoring malformed admin-server record {}", info.get_fullname());
         return None;

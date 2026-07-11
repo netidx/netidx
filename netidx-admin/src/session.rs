@@ -6,7 +6,10 @@ use base64::Engine;
 use parking_lot::{Mutex, RwLock};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 pub const DEFAULT_ABSOLUTE_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -68,7 +71,9 @@ impl SessionStore {
         };
         let authenticated = match vault.authenticate(admin, password.as_str()) {
             Ok(a) => a,
-            Err(_) => return LoginResponse::Err { reason: "authentication failed".into() },
+            Err(_) => {
+                return LoginResponse::Err { reason: "authentication failed".into() };
+            }
         };
         let mut raw = [0u8; 32];
         rand::rng().fill(&mut raw);
@@ -87,7 +92,8 @@ impl SessionStore {
         };
         let mut sessions = self.sessions.lock();
         if sessions.len() >= MAX_SESSIONS
-            && let Some(oldest) = sessions.iter().min_by_key(|(_, s)| s.last_use).map(|(h, _)| *h)
+            && let Some(oldest) =
+                sessions.iter().min_by_key(|(_, s)| s.last_use).map(|(h, _)| *h)
         {
             sessions.remove(&oldest);
         }
@@ -144,7 +150,9 @@ impl SessionStore {
 
     pub fn logout(&self, credential: &AdminCredential) -> LogoutResponse {
         let AdminCredential::Session { token } = credential else {
-            return LogoutResponse::Err { reason: "logout requires a session token".into() };
+            return LogoutResponse::Err {
+                reason: "logout requires a session token".into(),
+            };
         };
         self.sessions.lock().remove(&token_hash(token.as_str()));
         LogoutResponse::Ok
@@ -159,7 +167,10 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{admin_proto::Role, ca_policy::{Policy, SlotKind}};
+    use crate::{
+        admin_proto::Role,
+        ca_policy::{Policy, SlotKind},
+    };
 
     fn policy(scope: &str) -> Policy {
         Policy {
@@ -177,18 +188,13 @@ mod tests {
     fn setup() -> (tempfile::TempDir, CAVault) {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = CAVault::new(dir.path().to_path_buf());
-        vault
-            .create(b"mock-ca-key", "recovery", "rpw", policy("/"))
-            .unwrap();
+        vault.create(b"mock-ca-key", "recovery", "rpw", policy("/")).unwrap();
         vault.add_role_slot("alice", "pw", policy("/eu")).unwrap();
         (dir, vault)
     }
 
     fn login(store: &SessionStore, vault: &CAVault) -> Secret {
-        match store.login(
-            vault,
-            &AdminCredential::password("alice", "pw"),
-        ) {
+        match store.login(vault, &AdminCredential::password("alice", "pw")) {
             LoginResponse::Ok { token, .. } => token,
             LoginResponse::Err { reason } => panic!("{reason}"),
         }
@@ -208,9 +214,9 @@ mod tests {
 
         let token = login(&store, &vault);
         let restarted = SessionStore::default();
-        assert!(restarted
-            .authenticate(&vault, &AdminCredential::Session { token })
-            .is_err());
+        assert!(
+            restarted.authenticate(&vault, &AdminCredential::Session { token }).is_err()
+        );
     }
 
     #[test]
@@ -231,9 +237,11 @@ mod tests {
         let expiring = SessionStore::default();
         expiring.configure(Some(Duration::ZERO), Some(Duration::ZERO));
         let expired = login(&expiring, &vault);
-        assert!(expiring
-            .authenticate(&vault, &AdminCredential::Session { token: expired })
-            .is_err());
+        assert!(
+            expiring
+                .authenticate(&vault, &AdminCredential::Session { token: expired })
+                .is_err()
+        );
     }
 
     #[test]

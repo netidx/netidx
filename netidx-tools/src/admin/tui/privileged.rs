@@ -60,25 +60,47 @@ pub(super) fn install_service(
             // when the child already installed the unit. The unit's real state is
             // authoritative, and querying it needs no privilege — so consult it
             // before believing a reported failure.
-            match service::status(&params) {
-                // CR codex for estokes: Inactive is not evidence that installation
-                // succeeded: the backend writes the unit file before `enable
-                // --now`, so a failed child leaves exactly an Inactive unit and
-                // `ran` contains the failure that this arm masks. Only override a
-                // dubious child status after verifying the unit is enabled/running;
-                // otherwise propagate `ran` and present the install as incomplete.
-                Ok(ServiceStatus::Active) | Ok(ServiceStatus::Inactive) => {
-                    Ok("registered the system service (netidx)".to_string())
-                }
-                Ok(ServiceStatus::NotInstalled) => {
-                    ran?;
-                    bail!(
-                        "the system service install reported success but no unit is installed"
-                    );
-                }
-                Err(status_err) => ran
-                    .map(|()| "registered the system service (netidx)".to_string())
-                    .map_err(|e| e.context(status_err)),
+            system_install_outcome(ran, service::status(&params))
+        }
+    }
+}
+
+/// Reconcile the terminal-owning child's result with the service manager's
+/// authoritative state. Only a running service is success. In particular, an
+/// installed-but-inactive unit is the normal residue of `enable --now`
+/// failing, not evidence that installation completed.
+fn system_install_outcome(
+    ran: Result<()>,
+    status: Result<ServiceStatus>,
+) -> Result<String> {
+    const SUCCESS: &str = "registered the system service (netidx)";
+    match status {
+        Ok(ServiceStatus::Active) => Ok(SUCCESS.to_string()),
+        Ok(ServiceStatus::Inactive) => {
+            let state = anyhow::anyhow!(
+                "the system service unit is installed but inactive; installation is incomplete"
+            );
+            match ran {
+                Ok(()) => Err(state),
+                Err(child) => Err(state.context(child)),
+            }
+        }
+        Ok(ServiceStatus::NotInstalled) => {
+            let state = anyhow::anyhow!(
+                "the system service unit is not installed; installation is incomplete"
+            );
+            match ran {
+                Ok(()) => Err(state),
+                Err(child) => Err(state.context(child)),
+            }
+        }
+        Err(status_err) => {
+            let state = status_err.context(
+                "could not verify that the system service is active; installation is incomplete",
+            );
+            match ran {
+                Ok(()) => Err(state),
+                Err(child) => Err(state.context(child)),
             }
         }
     }
@@ -336,7 +358,9 @@ fn with_suspended<T>(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{install_argv, sh_quote};
+    use super::{install_argv, sh_quote, system_install_outcome};
+    use anyhow::anyhow;
+    use netidx_admin::service::ServiceStatus;
     use std::path::Path;
 
     #[test]
@@ -360,5 +384,39 @@ mod tests {
                 a == ["--activation-dir", "/root/.config/netidx/activation"]
             })
         );
+    }
+
+    #[test]
+    fn active_state_is_the_only_success_and_overrides_child_failure() {
+        assert!(system_install_outcome(Ok(()), Ok(ServiceStatus::Active)).is_ok());
+        assert!(
+            system_install_outcome(
+                Err(anyhow!("lost terminal")),
+                Ok(ServiceStatus::Active)
+            )
+            .is_ok()
+        );
+
+        for state in [ServiceStatus::Inactive, ServiceStatus::NotInstalled] {
+            assert!(system_install_outcome(Ok(()), Ok(state)).is_err());
+            let err = system_install_outcome(Err(anyhow!("child failed")), Ok(state))
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("child failed"));
+        }
+    }
+
+    #[test]
+    fn unverifiable_status_is_failure_regardless_of_child_result() {
+        let err =
+            system_install_outcome(Ok(()), Err(anyhow!("status failed"))).unwrap_err();
+        assert!(format!("{err:#}").contains("status failed"));
+
+        let err = system_install_outcome(
+            Err(anyhow!("child failed")),
+            Err(anyhow!("status failed")),
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("child failed") && err.contains("status failed"));
     }
 }

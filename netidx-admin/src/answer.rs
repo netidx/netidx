@@ -579,7 +579,11 @@ impl Progress {
 
     /// Build a progress note for a step of known length, so a frontend can
     /// drive a determinate bar over `duration`.
-    pub fn timed(stage: Stage, message: impl Into<CompactString>, duration: Duration) -> Self {
+    pub fn timed(
+        stage: Stage,
+        message: impl Into<CompactString>,
+        duration: Duration,
+    ) -> Self {
         Progress { stage, message: message.into(), duration: Some(duration) }
     }
 }
@@ -645,7 +649,10 @@ pub trait Answerer: Send {
     /// with its CA glyph and fingerprint — plus a trailing "enter an address
     /// manually" option, and return which the operator picked. Interactive
     /// only: the strict answerer never discovers, so it errors.
-    async fn select_network(&mut self, networks: &[NetworkOption]) -> Result<NetworkChoice>;
+    async fn select_network(
+        &mut self,
+        networks: &[NetworkOption],
+    ) -> Result<NetworkChoice>;
 
     /// Ask a yes/no question with the given default.
     async fn confirm(
@@ -710,5 +717,5 @@ pub trait Answerer: Send {
     /// read it. Distinct from [`note`] because it must be impossible to miss:
     /// a CLI prints a boxed banner, a TUI renders a modal that forces
     /// acknowledgment before continuing.
-    fn show_recovery_password(&mut self, password: &str);
+    async fn show_recovery_password(&mut self, password: &str) -> Result<()>;
 }

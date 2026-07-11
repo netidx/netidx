@@ -91,7 +91,11 @@ pub fn sanitize_filename(s: &str) -> String {
     let out: String = s
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
         })
         .collect();
     if out.is_empty() { "_".to_string() } else { out }
@@ -374,13 +378,19 @@ mod tests {
 
     #[test]
     fn reserved_serving_san_is_refused() {
-        assert!(ensure_san_not_reserved(&[SanEntry::Dns(SERVING_SAN.to_string())]).is_err());
+        assert!(
+            ensure_san_not_reserved(&[SanEntry::Dns(SERVING_SAN.to_string())]).is_err()
+        );
         // DNS is case-insensitive — an upper/mixed-case variant is the same
         // reserved name and must also be refused.
-        assert!(ensure_san_not_reserved(&[SanEntry::Dns(SERVING_SAN.to_uppercase())]).is_err());
+        assert!(
+            ensure_san_not_reserved(&[SanEntry::Dns(SERVING_SAN.to_uppercase())])
+                .is_err()
+        );
         // A normal name is fine.
         assert!(
-            ensure_san_not_reserved(&[SanEntry::Dns("resolver.example.com".to_string())]).is_ok()
+            ensure_san_not_reserved(&[SanEntry::Dns("resolver.example.com".to_string())])
+                .is_ok()
         );
     }
 
@@ -390,10 +400,7 @@ mod tests {
             parse_san_one("dns:example.com").unwrap(),
             SanEntry::Dns(s) if s == "example.com"
         ));
-        assert!(matches!(
-            parse_san_one("ip:127.0.0.1").unwrap(),
-            SanEntry::Ip(_)
-        ));
+        assert!(matches!(parse_san_one("ip:127.0.0.1").unwrap(), SanEntry::Ip(_)));
         assert!(parse_san_one("uri:https://x").is_ok());
         assert!(parse_san_one("email:a@b").is_ok());
         assert!(parse_san_one("bogus").is_err());
@@ -426,7 +433,10 @@ mod tests {
 
     #[test]
     fn default_filenames() {
-        assert_eq!(default_csr_filename("alice.example.com"), PathBuf::from("alice.example.com.csr"));
+        assert_eq!(
+            default_csr_filename("alice.example.com"),
+            PathBuf::from("alice.example.com.csr")
+        );
         assert_eq!(default_csr_filename("../sneaky"), PathBuf::from(".._sneaky.csr"));
         assert_eq!(
             default_cert_filename(Some("alice.example.com")),
@@ -462,7 +472,12 @@ mod tests {
         let mut vault = ca_vault::CAVault::new(dir.to_path_buf());
         let recovery_pw = ca_vault::gen_recovery_password();
         vault
-            .create(&key, ca_vault::RECOVERY_ADMIN, &recovery_pw, crate::ca_policy::recovery_policy())
+            .create(
+                &key,
+                ca_vault::RECOVERY_ADMIN,
+                &recovery_pw,
+                crate::ca_policy::recovery_policy(),
+            )
             .unwrap();
         std::fs::remove_file(dir.join("private.key")).unwrap();
         let autorenew_pw = "renew-secret-01234".to_string();
@@ -540,6 +555,9 @@ mod tests {
         let cadir = CaDir::open(dir.path()).unwrap();
         // A present-but-wrong keytab is Failed (→ caller notes it and falls back
         // to the recovery password), NOT Absent (→ silent fall back).
-        assert!(matches!(try_unlock_with_keytab(&cadir, &keytab), KeytabOutcome::Failed(_)));
+        assert!(matches!(
+            try_unlock_with_keytab(&cadir, &keytab),
+            KeytabOutcome::Failed(_)
+        ));
     }
 }

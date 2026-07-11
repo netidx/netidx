@@ -39,12 +39,8 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { file, path } => list(resolve(file)?, path),
-        Cmd::Set { file, path, entity, bits } => {
-            set(resolve(file)?, path, entity, bits)
-        }
-        Cmd::Remove { file, path, entity } => {
-            remove(resolve(file)?, path, entity)
-        }
+        Cmd::Set { file, path, entity, bits } => set(resolve(file)?, path, entity, bits),
+        Cmd::Remove { file, path, entity } => remove(resolve(file)?, path, entity),
     }
 }
 

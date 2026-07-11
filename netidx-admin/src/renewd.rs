@@ -25,7 +25,7 @@
 //! No TOFU, no glyphs — those are for humans establishing trust;
 //! renewal is continuation under trust already established.
 
-use crate::{atomic, admin_client, admin_proto::NodeKind, paths};
+use crate::{admin_client, admin_proto::NodeKind, atomic, paths};
 // The `admin_proto` module alias is only needed by the unix-only renewal
 // path below (SERVING_SAN / SignResponse); `NodeKind` is cross-platform.
 #[cfg(unix)]
@@ -343,7 +343,8 @@ async fn renew_identity(
     {
         if name == admin_proto::SERVING_SAN
             && let Ok(cfg_path) = paths::discover_admin_server_config()
-            && let Ok(cfg) = crate::admin_server_config::AdminServerConfig::load(&cfg_path)
+            && let Ok(cfg) =
+                crate::admin_server_config::AdminServerConfig::load(&cfg_path)
             && cfg.roles.ca.is_some()
             && admin_local::daemon_running(&cfg_path).await
         {
@@ -373,7 +374,9 @@ async fn renew_identity(
                         },
                     )?;
                     clear_pending(&id.certificate);
-                    info!("renewd: re-minted serving cert {name} locally over admin.sock");
+                    info!(
+                        "renewd: re-minted serving cert {name} locally over admin.sock"
+                    );
                     Ok("renewed (local)")
                 }
                 admin_proto::SignResponse::Err { reason } => {
@@ -536,11 +539,11 @@ async fn distribute_crl(ids: &[Identity], server: Option<SocketAddr>) -> Result<
         done.push(id.trusted.as_path());
         let roots = load_roots(&id.trusted)?;
         let ca_addr = find_ca_addr(server, &roots).await?;
-        let crl = match admin_client::get_crl_pki(ca_addr, NodeKind::Client, roots).await?
-        {
-            Some(pem) => pem,
-            None => continue, // nothing ever revoked
-        };
+        let crl =
+            match admin_client::get_crl_pki(ca_addr, NodeKind::Client, roots).await? {
+                Some(pem) => pem,
+                None => continue, // nothing ever revoked
+            };
         let dest = id.trusted.with_file_name("crl.pem");
         let current = std::fs::read(&dest).unwrap_or_default();
         if current != crl.as_bytes() {

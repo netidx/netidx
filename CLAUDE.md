@@ -1,8 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Overview
+# Netidx Project Overview
 
 Netidx is a high-performance, distributed publish-subscribe middleware for Rust. It enables publishing values in one program and consuming them in another, either locally or across a network, using a hierarchical namespace with globally unique paths.
 

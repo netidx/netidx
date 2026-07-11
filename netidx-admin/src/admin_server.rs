@@ -848,7 +848,7 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
         | ApplyPermsEdit(_)
         | ApplyReferralEdit(_)
         | ApplyServiceControl(_) => RequestAuthorization::ControllerOnly,
-        Register(_) | Deregister(_) => RequestAuthorization::NodeSelf,
+        Register(_) | Deregister => RequestAuthorization::NodeSelf,
         RotateRecovery | RotateAutorenew => RequestAuthorization::LocalOnly,
         Login(_) | Logout(_) | Sign(_) | Enroll(_) | ListQueue(_) | Approve(_)
         | Deny(_) | Revoke(_) | ListIssued(_) | ListDelegations(_)
@@ -892,7 +892,7 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         | PollDelegation(_)
         | ApplyReferralEdit(_)
         | Register(_)
-        | Deregister(_)
+        | Deregister
         | GetMapVersion
         | GetMap
         | GetPerms
@@ -1606,7 +1606,7 @@ where
                         .await
                         .context("writing RegisterResponse")
                 }
-                Request::Deregister(_req) => {
+                Request::Deregister => {
                     let resp = if !peer_is_admin_server {
                         RegisterResponse::Err {
                             reason: "deregister requires a admin-server peer certificate"

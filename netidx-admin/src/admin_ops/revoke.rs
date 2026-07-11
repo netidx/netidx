@@ -55,12 +55,9 @@ pub async fn issued(
     name_filter: Option<&str>,
 ) -> Result<Vec<IssuedEntry>> {
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
-    let entries = admin_client::list_issued(
-        sess.server,
-        sess.credential.clone(),
-        &sess.identity,
-    )
-    .await?;
+    let entries =
+        admin_client::list_issued(sess.server, sess.credential.clone(), &sess.identity)
+            .await?;
     let filt = name_filter.map(str::to_lowercase);
     Ok(entries
         .into_iter()
@@ -94,12 +91,9 @@ pub async fn revoke(
     reason: &str,
 ) -> Result<RevokeOutcome> {
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
-    let entries = admin_client::list_issued(
-        sess.server,
-        sess.credential.clone(),
-        &sess.identity,
-    )
-    .await?;
+    let entries =
+        admin_client::list_issued(sess.server, sess.credential.clone(), &sess.identity)
+            .await?;
     let live = entries.iter().filter(|e| !e.revoked);
     let targets: Vec<&IssuedEntry> = match &selector {
         RevokeSelector::Serial(serial) => {
@@ -214,7 +208,11 @@ mod tests {
 
     /// `span` mirrors the call site's `needs_span_guard`: a bare-name selector
     /// passes `true` (could span several keys), a by-serial selector `false`.
-    fn gate(targets: &[IssuedEntry], assert: Option<&Fingerprint>, span: bool) -> Result<()> {
+    fn gate(
+        targets: &[IssuedEntry],
+        assert: Option<&Fingerprint>,
+        span: bool,
+    ) -> Result<()> {
         let refs: Vec<&IssuedEntry> = targets.iter().collect();
         enforce_glyph_gate(&refs, assert, span)
     }

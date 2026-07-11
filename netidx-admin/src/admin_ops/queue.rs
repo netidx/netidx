@@ -70,10 +70,7 @@ fn to_item(e: QueueEntry) -> QueueItem {
         peer: e.peer,
         verified_renewal: e.verified_renewal,
         enroll_listen: enrollment.as_ref().map(|e| e.listen),
-        requested_roles: enrollment
-            .as_ref()
-            .map(|e| e.roles.clone())
-            .unwrap_or_default(),
+        requested_roles: enrollment.as_ref().map(|e| e.roles.clone()).unwrap_or_default(),
         resolver_members: enrollment
             .as_ref()
             .map(|e| e.resolver_members.clone())
@@ -85,15 +82,11 @@ fn to_item(e: QueueEntry) -> QueueItem {
 }
 
 async fn fetch_queue(sess: &super::AdminSession) -> Result<Vec<QueueItem>> {
-    Ok(admin_client::list_queue(
-        sess.server,
-        sess.credential.clone(),
-        &sess.identity,
-    )
-    .await?
-    .into_iter()
-    .map(to_item)
-    .collect())
+    Ok(admin_client::list_queue(sess.server, sess.credential.clone(), &sess.identity)
+        .await?
+        .into_iter()
+        .map(to_item)
+        .collect())
 }
 
 /// The `ca queue` query: the admin server's pending enrollment queue, each row
@@ -224,13 +217,7 @@ pub async fn deny(
     let items = fetch_queue(&sess).await?;
     let item = find_by_code(&items, code, |i| i.code)?;
     let (id, requested_name) = (item.id.clone(), item.requested_name.clone());
-    admin_client::deny(
-        sess.server,
-        sess.credential.clone(),
-        &id,
-        reason,
-        &sess.identity,
-    )
-    .await?;
+    admin_client::deny(sess.server, sess.credential.clone(), &id, reason, &sess.identity)
+        .await?;
     Ok(requested_name)
 }

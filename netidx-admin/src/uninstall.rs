@@ -74,10 +74,6 @@ pub struct UninstallReport {
     /// teardown (or would have, under dry-run). False ⇒ nothing
     /// service-side to do.
     pub service_was_installed: bool,
-    /// Whether the service uninstall reported an error (suppressed —
-    /// we always continue to the config-dir cleanup). Always `None`
-    /// under dry-run.
-    pub service_error: Option<String>,
     /// Paths removed (or "would be removed" under dry-run), in the
     /// order they were processed.
     pub removed: Vec<PathBuf>,
@@ -95,6 +91,14 @@ impl UninstallReport {
 
 /// Tear down a netidx install. See module docs for scope.
 pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
+    uninstall_with_service(p, service::status, service::uninstall)
+}
+
+fn uninstall_with_service(
+    p: &UninstallParams,
+    status: impl FnOnce(&ServiceParams) -> Result<ServiceStatus>,
+    remove_service: impl FnOnce(&ServiceParams) -> Result<()>,
+) -> Result<UninstallReport> {
     let mut report = UninstallReport::default();
 
     // 1. Service teardown. service::status checks file existence to
@@ -108,21 +112,13 @@ pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
         service_name: p.service_name.clone(),
         activation_dir: None,
     };
-    let pre = service::status(&sparams).unwrap_or(ServiceStatus::NotInstalled);
+    let pre = status(&sparams)
+        .context("could not determine service state; refusing to remove configuration")?;
     report.service_was_installed = pre != ServiceStatus::NotInstalled;
-    if !p.dry_run
-        && report.service_was_installed
-        && let Err(e) = service::uninstall(&sparams)
-    {
-        // CR codex for estokes: Continuing into the config/CA wipe after the
-        // service failed to stop can leave live resolver/admin processes holding
-        // listeners and loaded credentials while deleting the files needed to
-        // manage or restart them. The command also returns Ok, so automation sees
-        // a successful uninstall. A confirmed stop should be a prerequisite for
-        // destructive cleanup; make bypassing that an explicit force operation.
-        // Best-effort: don't block the config wipe. The CLI
-        // surfaces this in the printed outcome.
-        report.service_error = Some(format!("{e:#}"));
+    if !p.dry_run && report.service_was_installed {
+        remove_service(&sparams).context(
+            "service teardown was not verified; configuration has been preserved",
+        )?;
     }
 
     // 2. Config-root cleanup.
@@ -311,7 +307,6 @@ mod tests {
         // But the report reflects the intent.
         assert!(!r.removed.is_empty());
         assert_eq!(r.kept.len(), 1);
-        assert!(r.service_error.is_none());
     }
 
     #[test]
@@ -369,5 +364,41 @@ mod tests {
         assert!(!r1.is_empty());
         let r2 = uninstall(&p).unwrap();
         assert!(r2.is_empty());
+    }
+
+    #[test]
+    fn service_status_error_preserves_all_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+        let mut p = params(root.clone());
+        p.remove_ca = true;
+
+        let result = uninstall_with_service(
+            &p,
+            |_| anyhow::bail!("service manager unavailable"),
+            |_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(root.join("resolver.json").exists());
+        assert!(root.join("ca/private.key").exists());
+    }
+
+    #[test]
+    fn service_teardown_error_preserves_all_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+        let mut p = params(root.clone());
+        p.remove_ca = true;
+
+        let result = uninstall_with_service(
+            &p,
+            |_| Ok(ServiceStatus::Active),
+            |_| anyhow::bail!("unit is still active"),
+        );
+        assert!(result.is_err());
+        assert!(root.join("resolver.json").exists());
+        assert!(root.join("ca/private.key").exists());
     }
 }

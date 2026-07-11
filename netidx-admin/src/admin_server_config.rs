@@ -7,11 +7,7 @@
 //! finds lying around. `peers` is the complex-network fallback for
 //! hosts mDNS can't see; on a flat LAN discovery makes it redundant.
 
-use crate::{
-    admin_proto::AdminServerId,
-    atomic,
-    fingerprint::Fingerprint,
-};
+use crate::{admin_proto::AdminServerId, atomic, fingerprint::Fingerprint};
 use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{
@@ -33,9 +29,17 @@ pub struct CaRole {
     /// rotating the credential never has to rewrite this config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autorenew: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "humantime_serde::option"
+    )]
     pub session_absolute_lifetime: Option<std::time::Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "humantime_serde::option"
+    )]
     pub session_idle_timeout: Option<std::time::Duration>,
 }
 
@@ -151,11 +155,12 @@ impl AdminServerConfig {
             .next()
             .context("serving certificate chain is empty")?
             .context("parsing serving certificate")?;
-        let rest: Vec<_> = certs.collect::<std::result::Result<_, _>>()
+        let rest: Vec<_> = certs
+            .collect::<std::result::Result<_, _>>()
             .context("parsing serving certificate chain")?;
-        let home = rest.last().context(
-            "serving certificate must include its home CA after the leaf",
-        )?;
+        let home = rest
+            .last()
+            .context("serving certificate must include its home CA after the leaf")?;
         let actual_fp = Fingerprint::of_cert_der(home.as_ref())?;
         if actual_fp != configured_fp {
             bail!("home_ca_fingerprint does not match the CA in the serving chain");

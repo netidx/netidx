@@ -30,6 +30,55 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// A new CA directory that remains invisible at its configured path until
+/// [`StagedCaDir::commit`] publishes it. Dropping it before commit removes all
+/// staged secrets.
+pub struct StagedCaDir {
+    owner: tempfile::TempDir,
+    staged: PathBuf,
+    final_path: PathBuf,
+}
+
+impl StagedCaDir {
+    /// Create staging beside `final_path`, so commit is one same-filesystem
+    /// rename. Existing paths are never replaced, including empty directories.
+    pub fn new(final_path: PathBuf) -> Result<Self> {
+        if final_path.exists() {
+            bail!(
+                "CA path {} already exists; move it aside or choose a new directory",
+                final_path.display()
+            );
+        }
+        let raw_parent = final_path.parent().ok_or_else(|| {
+            anyhow::anyhow!("CA path {} has no parent directory", final_path.display())
+        })?;
+        let parent =
+            if raw_parent.as_os_str().is_empty() { Path::new(".") } else { raw_parent };
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("creating CA parent directory {}", parent.display())
+        })?;
+        let owner = tempfile::Builder::new()
+            .prefix(".netidx-ca-stage-")
+            .tempdir_in(parent)
+            .with_context(|| {
+                format!("creating CA staging directory in {}", parent.display())
+            })?;
+        let staged = owner.path().join("ca");
+        Ok(Self { owner, staged, final_path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.staged
+    }
+
+    /// Publish the completed CA and remove the now-empty staging parent.
+    pub fn commit(self) -> Result<PathBuf> {
+        atomic::publish_dir(&self.staged, &self.final_path)?;
+        drop(self.owner);
+        Ok(self.final_path)
+    }
+}
+
 /// Inputs to [`create_vaulted_ca`], the single new-CA entry point.
 /// Fields are primitive so callers (the `ca init` command *and* the
 /// resolver install) don't need the engine's `Subject` / `SanEntry`
@@ -243,12 +292,20 @@ pub async fn create_vaulted_ca(
     let insecure_no_tpm = tpm_gate(ans, opts.insecure_no_tpm).await?;
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
 
+    // Build the entire recoverable CA in a same-filesystem staging directory.
+    // Nothing becomes the configured CA until the operator has acknowledged
+    // receipt of its sole off-box recovery credential. Requiring the final
+    // path to be absent also prevents a rename from replacing any existing
+    // state.
+    let stage = StagedCaDir::new(opts.dir.clone())?;
+    let stage_dir = stage.path().to_path_buf();
+
     // Generate the CA (its key is returned, never written to disk in
     // plaintext) and seal it into the vault under the `recovery` slot —
     // the off-box break-glass credential whose generated password is shown
     // once and never stored.
     let (ca, key_pem) = Ca::init_vaulted(&CaParams {
-        directory: opts.dir.clone(),
+        directory: stage_dir.clone(),
         subject: Subject {
             common_name: common_name.clone(),
             country: opts.country.clone(),
@@ -264,7 +321,7 @@ pub async fn create_vaulted_ca(
     // (self-signed CA — externally_signed is false). One flock is held for
     // the rest of init.
     let (recovery_pw, cadir) = seal_ca_recovery(
-        &opts.dir,
+        &stage_dir,
         &key_pem,
         CaLifetimes {
             leaf_validity: opts.leaf_validity,
@@ -273,21 +330,15 @@ pub async fn create_vaulted_ca(
         },
     )?;
 
-    ans.note(&format_compact!("created a new CA at {}", opts.dir.display()));
     // Present the new CA's identity (the glyph joiners verify) in a dialog, then
     // the one-time recovery secret.
     let ca_fp = {
-        let cert = std::fs::read(opts.dir.join("certificate.pem"))
-            .with_context(|| format!("reading CA cert in {}", opts.dir.display()))?;
+        let cert =
+            std::fs::read(stage_dir.join("certificate.pem")).with_context(|| {
+                format!("reading staged CA cert in {}", stage_dir.display())
+            })?;
         Fingerprint::of_cert_pem(&cert)?
     };
-    // CR codex for estokes: The CA and its only recovery slot are already
-    // durable, but recovery_pw exists only in memory and is not shown until after
-    // this cancellable await. Esc, Ctrl-C, or a UI/channel error here drops the
-    // sole credential, leaves an unlockable default CA, and makes a retry refuse
-    // the existing directory. There must be no cancellation point between the
-    // vault commit and acknowledged delivery of the recovery secret; stage and
-    // roll back the CA, or make secret delivery an acknowledged part of commit.
     ans.announce_identity(
         "Your new certificate authority has been created. This glyph is its \
          identity — it is shown to anyone joining the cluster so they can verify \
@@ -295,7 +346,17 @@ pub async fn create_vaulted_ca(
         &ca_fp,
     )
     .await?;
-    show_recovery_password(ans, &recovery_pw);
+    show_recovery_password(ans, &recovery_pw).await?;
+
+    // The acknowledgement is the commit authorization. Close the staged vault
+    // before renaming (required on Windows), publish the complete directory in
+    // one same-filesystem operation, then rebind/reopen the live handles.
+    drop(cadir);
+    let live_dir = stage.commit()?;
+    let ca = ca.relocated(live_dir);
+    let cadir = ca_store::CaDir::open(&opts.dir)
+        .context("opening the newly committed CA directory")?;
+    ans.note(&format_compact!("created a new CA at {}", opts.dir.display()));
 
     // No "now setting up the admin server" announce: standing up this host's
     // admin server is part of founding the cluster the caller already framed.
@@ -436,8 +497,7 @@ pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<b
     // still found a TEST CA through the TUI, while the strict CLI (which can't
     // prompt) still hard-requires --insecure-no-tpm.
     let proceed = insecure_no_tpm
-        || (ans.interactive()
-            && ans.confirm(Field::InsecureNoTpm, None, false).await?);
+        || (ans.interactive() && ans.confirm(Field::InsecureNoTpm, None, false).await?);
     if !proceed {
         bail!(
             "this host has no usable {mech}. A CA's autorenew credential is sealed \
@@ -461,9 +521,9 @@ pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<b
 /// [`Answerer::show_recovery_password`] seam (a CLI boxes it with a
 /// store-it-in-a-safe warning, a TUI forces acknowledgment). It is never
 /// persisted, so this is the only time it is shown.
-pub fn show_recovery_password(ans: &mut dyn Answerer, pw: &str) {
+pub async fn show_recovery_password(ans: &mut dyn Answerer, pw: &str) -> Result<()> {
     let grouped = ca_vault::group_recovery_password(pw);
-    ans.show_recovery_password(&grouped);
+    ans.show_recovery_password(&grouped).await
 }
 
 /// Show the CA's own identity (fingerprint + identicon) as an out-of-band
@@ -689,16 +749,13 @@ pub async fn gather_policy(
         allowed_san,
         max_validity: inputs.max_validity,
         id_map_groups,
-        server_enroll_scopes: if inputs.server_enroll_scopes.is_empty()
-            && enroll_default
+        server_enroll_scopes: if inputs.server_enroll_scopes.is_empty() && enroll_default
         {
             vec!["/".to_string()]
         } else {
             trim(inputs.server_enroll_scopes)
         },
-        server_enroll_roles: if inputs.server_enroll_roles.is_empty()
-            && enroll_default
-        {
+        server_enroll_roles: if inputs.server_enroll_roles.is_empty() && enroll_default {
             vec![crate::admin_proto::Role::Resolver, crate::admin_proto::Role::IdMap]
         } else {
             inputs.server_enroll_roles.to_vec()

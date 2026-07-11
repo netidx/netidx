@@ -495,6 +495,14 @@ impl Ca {
         &self.directory
     }
 
+    /// Rebind an in-memory CA to a directory containing the same persisted
+    /// certificate and vault. CA creation uses this after atomically moving a
+    /// fully initialized staging directory into its final location.
+    pub(crate) fn relocated(mut self, directory: PathBuf) -> Self {
+        self.directory = directory;
+        self
+    }
+
     /// Sign a CSR. Returns the signed leaf certificate as PEM bytes.
     /// The `san` argument overrides whatever the CSR claims — the CA
     /// is the sole authority on SAN content.
@@ -880,7 +888,11 @@ pub fn generate_csr(
 /// external PKI to sign netidx's CA cert so the CA runs as an
 /// intermediate. Shared by [`Ca::init_vaulted_external`] (fresh key) and
 /// [`ca_csr_from_key`] (renewal over the same key).
-fn build_ca_csr(pkey: &PKey<Private>, subject: &Subject, san: &[SanEntry]) -> Result<Vec<u8>> {
+fn build_ca_csr(
+    pkey: &PKey<Private>,
+    subject: &Subject,
+    san: &[SanEntry],
+) -> Result<Vec<u8>> {
     let name = build_name(subject)?;
     let mut req = X509ReqBuilder::new()?;
     req.set_version(0)?;
@@ -906,7 +918,11 @@ fn build_ca_csr(pkey: &PKey<Private>, subject: &Subject, san: &[SanEntry]) -> Re
 
 /// Re-emit a CA CSR over the CA's existing (vault-unlocked) key, so an
 /// externally-signed CA cert can be renewed without changing the key.
-pub fn ca_csr_from_key(key_pem: &[u8], subject: &Subject, san: &[SanEntry]) -> Result<Vec<u8>> {
+pub fn ca_csr_from_key(
+    key_pem: &[u8],
+    subject: &Subject,
+    san: &[SanEntry],
+) -> Result<Vec<u8>> {
     let pkey = PKey::private_key_from_pem(key_pem).context("parsing CA key")?;
     build_ca_csr(&pkey, subject, san)
 }
@@ -936,10 +952,7 @@ pub fn validate_external_ca_cert(
     let inter_idx = certs
         .iter()
         .position(|c| {
-            c.public_key()
-                .ok()
-                .and_then(|k| k.public_key_to_der().ok())
-                .as_deref()
+            c.public_key().ok().and_then(|k| k.public_key_to_der().ok()).as_deref()
                 == Some(our_spki.as_slice())
         })
         .context(
@@ -951,12 +964,8 @@ pub fn validate_external_ca_cert(
     let inter_der = intermediate.to_der().context("re-encoding the CA cert")?;
     let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&inter_der)
         .map_err(|e| anyhow::anyhow!("parsing the signed CA cert: {e}"))?;
-    let is_ca = parsed
-        .basic_constraints()
-        .ok()
-        .flatten()
-        .map(|bc| bc.value.ca)
-        .unwrap_or(false);
+    let is_ca =
+        parsed.basic_constraints().ok().flatten().map(|bc| bc.value.ca).unwrap_or(false);
     if !is_ca {
         bail!(
             "the signed certificate is not a CA certificate (basicConstraints \
@@ -1501,7 +1510,7 @@ mod tests {
     /// cert "live", wedging its replacement and pinning it in the CRL.
     #[test]
     fn commit_issuance_records_the_signed_validity_not_the_requested() {
-        use crate::{ca_store, admin_proto::NodeKind};
+        use crate::{admin_proto::NodeKind, ca_store};
         let dir = tempfile::tempdir().unwrap();
         let ca = small_ca(dir.path()); // 30-day CA
         let name = "host.example.com";

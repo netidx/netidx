@@ -4,6 +4,10 @@ echo "== $(hostname) reset =="
 # either `/usr/local/bin/netidx` or just `netidx`; path-only `pkill -f` misses
 # the latter and can leave an orphan controller holding the CA lock.
 pkill -9 -x netidx 2>/dev/null
+# Lab publisher probes keep stdin open with a `sh -c (...; sleep N) | netidx
+# publisher ...` wrapper. Killing the netidx child leaves that harmless but
+# noisy wrapper behind, so remove the narrowly matched harness process too.
+pkill -f 'sh -c .*netidx publisher -c /.*netidx/client.json' 2>/dev/null
 units=$(systemctl list-units --no-legend 'netidx*' 2>/dev/null | awk '{print $1}')
 [ -n "$units" ] && systemctl stop $units 2>/dev/null
 ufiles=$(systemctl list-unit-files --no-legend 'netidx*' 2>/dev/null | awk '{print $1}')

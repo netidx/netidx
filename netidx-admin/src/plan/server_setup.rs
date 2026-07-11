@@ -11,9 +11,7 @@
 
 use crate::{
     activation, admin_client,
-    admin_proto::{
-        self, AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN,
-    },
+    admin_proto::{self, AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN},
     admin_server_config::{AdminServerConfig, CaRole, Roles},
     answer::{Answerer, Field},
     atomic,
@@ -87,7 +85,8 @@ pub async fn setup_server(
     )
     .context("signing the admin server's serving certificate")?;
     let ca_cert = std::fs::read(a.ca_dir.join("certificate.pem"))?;
-    let home_ca_fingerprint = crate::fingerprint::Fingerprint::of_cert_pem(&ca_cert)?.text();
+    let home_ca_fingerprint =
+        crate::fingerprint::Fingerprint::of_cert_pem(&ca_cert)?.text();
     // Chain = [serving leaf, ca cert] so the client receives the CA.
     let mut chain = leaf;
     chain.extend_from_slice(&ca_cert);

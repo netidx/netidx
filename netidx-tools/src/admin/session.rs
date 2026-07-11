@@ -48,7 +48,8 @@ async fn resolve_controller(
         }
         _ => {}
     }
-    let map = admin_client::get_map_pinned(bootstrap, NodeKind::Client, &identity).await?;
+    let map =
+        admin_client::get_map_pinned(bootstrap, NodeKind::Client, &identity).await?;
     let controller = map
         .controller_entry()
         .filter(|s| s.state == ServerState::Registered)
@@ -66,10 +67,8 @@ async fn resolve_controller(
 }
 
 pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
-    let mut answerer = FlagAnswerer::single(
-        None,
-        parse_glyph(flags.accept_glyph.as_deref())?,
-    );
+    let mut answerer =
+        FlagAnswerer::single(None, parse_glyph(flags.accept_glyph.as_deref())?);
     let bootstrap = flags.server_addr()?.or_else(local_admin_server).context(
         "no admin server specified and none found on this host — pass --server <ip:port>",
     )?;
@@ -89,12 +88,8 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
         Some(password) => password,
         None => Zeroizing::new(rpassword::prompt_password("Administrator password: ")?),
     };
-    let logged = runtime.block_on(admin_client::login(
-        server,
-        &identity,
-        &admin,
-        &password,
-    ))?;
+    let logged =
+        runtime.block_on(admin_client::login(server, &identity, &admin, &password))?;
     let fingerprint = identity.fingerprint.text();
     session_cache::store(CachedSession {
         ca_fingerprint: fingerprint.clone(),
@@ -127,14 +122,14 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
     let selected: Vec<_> = if all {
         sessions
     } else if let Some(glyph) = args.accept_glyph {
-        let normalized = netidx_admin::fingerprint::Fingerprint::parse_text(&glyph)?.text();
-        sessions
-            .into_iter()
-            .filter(|s| s.ca_fingerprint == normalized)
-            .collect()
+        let normalized =
+            netidx_admin::fingerprint::Fingerprint::parse_text(&glyph)?.text();
+        sessions.into_iter().filter(|s| s.ca_fingerprint == normalized).collect()
     } else {
         if sessions.len() > 1 {
-            bail!("more than one network session is cached; pass --accept-glyph or --all");
+            bail!(
+                "more than one network session is cached; pass --accept-glyph or --all"
+            );
         }
         sessions
     };
@@ -149,15 +144,13 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
             if identity.fingerprint.text() != cached.ca_fingerprint {
                 bail!("cached bootstrap now presents a different CA");
             }
-            admin_client::logout(
-                cached.bootstrap,
-                &identity,
-                cached.token.as_str(),
-            )
-            .await
+            admin_client::logout(cached.bootstrap, &identity, cached.token.as_str()).await
         });
         if let Err(e) = revoke {
-            eprintln!("warning: could not revoke {} remotely: {e:#}", cached.ca_fingerprint);
+            eprintln!(
+                "warning: could not revoke {} remotely: {e:#}",
+                cached.ca_fingerprint
+            );
         }
         session_cache::delete(&cached.ca_fingerprint)?;
         println!("logged out {}", cached.ca_fingerprint);

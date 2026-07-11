@@ -6,5 +6,5 @@ sleep 1
 pkill -9 -f 'resolver-server -c'; pkill -9 -f 'component server run'
 sleep 1
 nohup /usr/local/bin/netidx resolver-server -c "$D/resolver.json" --id "$ID" -f >/root/resolver.log 2>&1 &
-nohup /usr/local/bin/netidx conf component server run -c "$D/conf-server.json" -f >/root/confserver.log 2>&1 &
-echo "started member id=$ID on $(hostname): resolver+confserver (nohup)"
+nohup /usr/local/bin/netidx admin component server run -c "$D/admin-server.json" -f >/root/admin-server.log 2>&1 &
+echo "started member id=$ID on $(hostname): resolver+admin-server (nohup)"

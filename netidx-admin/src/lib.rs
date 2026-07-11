@@ -15,13 +15,41 @@
 extern crate anyhow;
 
 pub mod activation;
+/// Admin-server client: fetch a network's identity and info, join it
+/// (key + CSR + signature over TLS), and enroll new admin servers —
+/// verifying the CA identity by fingerprint first. Cross-platform
+/// (rcgen + rustls, no openssl).
+pub mod admin_client;
+/// Local control-socket client: the on-box `ca` CLI drives the running admin
+/// daemon over its `0600` unix socket (no TLS / no password — the daemon
+/// trusts the local peer by `SO_PEERCRED`). Unix-only — the socket is a
+/// daemon feature and the daemon is unix.
+#[cfg(unix)]
+pub mod admin_local;
+/// Remote-admin operations behind the [`answer::Answerer`] seam: the
+/// query/action (code-as-id) orchestrators — enrollment queue, delegation,
+/// revocation, admin roster, service control, perms, offline sign/issue, CA
+/// slots — that the strict CLI, the TUI, and Atlas all drive.
+#[cfg(unix)]
+pub mod admin_ops;
+/// Wire protocol (message types + framing) shared by the admin server
+/// and its clients. Cross-platform — a Windows node speaks it to a unix
+/// admin server. See [`design/ca-server.md`].
+pub mod admin_proto;
+/// Admin server: answers network-info queries, validates sign/enroll
+/// requests against per-admin policy, and pushes id-map registrations
+/// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].
+#[cfg(unix)]
+pub mod admin_server;
+/// On-disk config (`admin-server.json`) for the admin-server daemon:
+/// domain, listen address, serving identity, roles, peers. Unix-only —
+/// only the daemon and its installer read or write it.
+#[cfg(unix)]
+pub mod admin_server_config;
 /// The `Answerer` seam: how the admin engine asks the operator questions and
 /// reports progress, abstracted over the frontend (strict CLI / TUI / Atlas).
 pub mod answer;
 pub mod atomic;
-/// The install planner: the decision logic behind `admin <role> install`,
-/// driven through the [`answer::Answerer`] seam so every frontend shares it.
-pub mod plan;
 /// CA / CSR / cert generation. Unix-only because it depends on
 /// `openssl`, which on Windows requires a mingw build of OpenSSL
 /// that is impractical to install. netidx itself uses rustls
@@ -49,44 +77,6 @@ pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]
 mod cloud;
-/// Admin-server client: fetch a network's identity and info, join it
-/// (key + CSR + signature over TLS), and enroll new admin servers —
-/// verifying the CA identity by fingerprint first. Cross-platform
-/// (rcgen + rustls, no openssl).
-pub mod admin_client;
-/// Local control-socket client: the on-box `ca` CLI drives the running admin
-/// daemon over its `0600` unix socket (no TLS / no password — the daemon
-/// trusts the local peer by `SO_PEERCRED`). Unix-only — the socket is a
-/// daemon feature and the daemon is unix.
-#[cfg(unix)]
-pub mod admin_local;
-/// Remote-admin operations behind the [`answer::Answerer`] seam: the
-/// query/action (code-as-id) orchestrators — enrollment queue, delegation,
-/// revocation, admin roster, service control, perms, offline sign/issue, CA
-/// slots — that the strict CLI, the TUI, and Atlas all drive.
-#[cfg(unix)]
-pub mod admin_ops;
-/// Offline (pre-daemon) CA issuance glue — the non-interactive half of
-/// `ca sign` / `ca issue`, shared with the install flow and the daemon's own
-/// sign path (serial allocation under the CA flock, issuance recording, SAN
-/// parsing). Unix-only — it operates directly on the CA dir. The
-/// Answerer-driven orchestration lives in [`admin_ops::offline`].
-#[cfg(unix)]
-pub mod offline_ca;
-/// Wire protocol (message types + framing) shared by the admin server
-/// and its clients. Cross-platform — a Windows node speaks it to a unix
-/// admin server. See [`design/ca-server.md`].
-pub mod admin_proto;
-/// Admin server: answers network-info queries, validates sign/enroll
-/// requests against per-admin policy, and pushes id-map registrations
-/// to peers. Unix-only (openssl signer). See [`design/ca-server.md`].
-#[cfg(unix)]
-pub mod admin_server;
-/// On-disk config (`admin-server.json`) for the admin-server daemon:
-/// domain, listen address, serving identity, roles, peers. Unix-only —
-/// only the daemon and its installer read or write it.
-#[cfg(unix)]
-pub mod admin_server_config;
 /// The admin server's resolver-hierarchy delegation request store (the
 /// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
 /// Unix-only — it lives in the CA dir.
@@ -103,6 +93,8 @@ pub mod discovery;
 /// everywhere — see [`design/ca-server.md`].
 pub mod fingerprint;
 pub mod id_map;
+/// Canonical operating-system identity names used by netidx Local auth.
+pub mod local_identity;
 pub mod netmap;
 /// Deployment-environment network-shape detection (`--listen` /
 /// `--bind` suggestions) for the `admin install` flow. Behind the
@@ -110,8 +102,18 @@ pub mod netmap;
 /// enumeration that config-only consumers don't need.
 #[cfg(feature = "cloud-detect")]
 pub mod netshape;
+/// Offline (pre-daemon) CA issuance glue — the non-interactive half of
+/// `ca sign` / `ca issue`, shared with the install flow and the daemon's own
+/// sign path (serial allocation under the CA flock, issuance recording, SAN
+/// parsing). Unix-only — it operates directly on the CA dir. The
+/// Answerer-driven orchestration lives in [`admin_ops::offline`].
+#[cfg(unix)]
+pub mod offline_ca;
 pub mod paths;
 pub mod perms;
+/// The install planner: the decision logic behind `admin <role> install`,
+/// driven through the [`answer::Answerer`] seam so every frontend shares it.
+pub mod plan;
 pub mod provenance;
 pub mod reconcile;
 /// The certificate renewal daemon: queues verified renewals for this
@@ -124,9 +126,9 @@ pub mod resolver;
 /// no openssl).
 pub mod resolver_probe;
 pub mod service;
-pub mod session_cache;
 #[cfg(unix)]
 pub mod session;
+pub mod session_cache;
 pub mod template;
 pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`admin_client`] and

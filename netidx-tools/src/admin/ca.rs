@@ -3,8 +3,8 @@ use clap::{Args, Subcommand};
 use netidx_admin::{
     admin_client, admin_local,
     admin_ops::{
-        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
-        slots as slots_ops,
+        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops,
+        roster as roster_ops, slots as slots_ops,
     },
     admin_proto::{self, NodeKind},
     answer::{Answerer, Field},
@@ -730,7 +730,10 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     if p.status {
         let s = slots_ops::auto_approve_status(&dir, cfg.as_deref())?;
         println!("auto-approve status:");
-        println!("  autorenew slot: {}", if s.slot_present { "present" } else { "absent" });
+        println!(
+            "  autorenew slot: {}",
+            if s.slot_present { "present" } else { "absent" }
+        );
         let keytab = if !s.keytab_present {
             "absent".to_string()
         } else if s.keytab_sealed {
@@ -743,8 +746,13 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
         return Ok(());
     }
     let mut ans = p.recovery.answerer()?;
-    let out = runtime()?
-        .block_on(slots_ops::auto_approve(&mut ans, dir, cfg, p.rotate, p.insecure_no_tpm))?;
+    let out = runtime()?.block_on(slots_ops::auto_approve(
+        &mut ans,
+        dir,
+        cfg,
+        p.rotate,
+        p.insecure_no_tpm,
+    ))?;
     match out {
         slots_ops::AutoApproveOutcome::HotSwapped { warning } => {
             println!(
@@ -755,7 +763,12 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
                 eprintln!("WARNING: {w}");
             }
         }
-        slots_ops::AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error } => {
+        slots_ops::AutoApproveOutcome::Offline {
+            rotate,
+            keytab,
+            cfg_path,
+            cfg_error,
+        } => {
             println!("auto-approve {}:", if rotate { "rotated" } else { "enabled" });
             println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
             println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
@@ -766,7 +779,9 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
                 }
                 (None, err) => {
                     if let Some(e) = err {
-                        println!("  note: could not update the admin-server config ({e}).");
+                        println!(
+                            "  note: could not update the admin-server config ({e})."
+                        );
                     }
                     println!("        set roles.ca.autorenew to the keytab path and");
                     println!("        restart the admin server.");
@@ -890,7 +905,10 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let s = slots_ops::recovery_status(&dir)?;
             println!("recovery status:");
-            println!("  recovery slot:  {}", if s.slot_present { "present" } else { "absent" });
+            println!(
+                "  recovery slot:  {}",
+                if s.slot_present { "present" } else { "absent" }
+            );
             println!(
                 "  autorenew keytab (offline re-mint authority): {}",
                 if s.keytab_present { "present" } else { "absent" }
@@ -1036,7 +1054,9 @@ fn external_status(a: ExternalDirArgs) -> Result<()> {
 /// (re-)emits a CSR; a signed certificate installs it.
 fn external_renew(a: ExternalRenewArgs) -> Result<()> {
     match a.signed_cert {
-        None => external_emit_csr(ExternalDirArgs { ca_dir: a.ca_dir, recovery: a.recovery }),
+        None => {
+            external_emit_csr(ExternalDirArgs { ca_dir: a.ca_dir, recovery: a.recovery })
+        }
         Some(signed_cert) => external_install(ExternalInstallArgs {
             signed_cert,
             root: a.root,
@@ -1072,12 +1092,16 @@ async fn external_bootstrap(
         ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     // The TPM gate matters only for a served CA — the autorenew keytab is
     // the sole TPM-sealed artifact; an offline external CA has none.
-    if set_up_server {
-        ca_setup::tpm_gate(ans, opts.insecure_no_tpm).await?;
-    }
+    let insecure_no_tpm = if set_up_server {
+        ca_setup::tpm_gate(ans, opts.insecure_no_tpm).await?
+    } else {
+        opts.insecure_no_tpm
+    };
     let san = parse_sans(&opts.san, &common_name)?;
+    let stage = ca_setup::StagedCaDir::new(opts.dir.clone())?;
+    let stage_dir = stage.path().to_path_buf();
     let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
-        directory: opts.dir.clone(),
+        directory: stage_dir.clone(),
         subject: Subject {
             common_name: common_name.clone(),
             country: opts.country.clone(),
@@ -1090,7 +1114,7 @@ async fn external_bootstrap(
         validity: opts.ca_validity,
     })?;
     let (recovery_pw, cadir) = ca_setup::seal_ca_recovery(
-        &opts.dir,
+        &stage_dir,
         &key_pem,
         ca::CaLifetimes {
             leaf_validity: opts.leaf_validity,
@@ -1098,17 +1122,9 @@ async fn external_bootstrap(
             externally_signed: true,
         },
     )?;
-    ans.note(&format!(
-        "created the CA key at {} (awaiting an externally-signed certificate)",
-        opts.dir.display()
-    ));
-    ca_setup::show_recovery_password(ans, &recovery_pw);
-    // Write the CSR and the marker BEFORE the fallible/interactive slot
-    // setup, so an interrupted bootstrap leaves a CA that `ca external
-    // renew` can continue rather than a dead-ended half-CA.
-    let csr_path = default_csr_filename(&common_name);
-    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
-        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
+    // Include the continuation marker in the atomic commit. If phase 1 is
+    // interrupted after publication, `ca external renew` can always recreate
+    // the CSR from this metadata.
     slots_ops::ExternalPending {
         cn: common_name.clone(),
         domain,
@@ -1121,18 +1137,28 @@ async fn external_bootstrap(
         listen: opts.listen,
         units_dir: opts.units_dir.clone(),
     }
-    .store(&opts.dir)?;
+    .store(&stage_dir)?;
+    ca_setup::show_recovery_password(ans, &recovery_pw).await?;
+    drop(cadir);
+    stage.commit()?;
+    let cadir = netidx_admin::ca_store::CaDir::open(&opts.dir)
+        .context("opening the newly committed external CA directory")?;
+    ans.note(&format!(
+        "created the CA key at {} (awaiting an externally-signed certificate)",
+        opts.dir.display()
+    ));
+    // Write the CSR before the fallible/interactive slot setup. The committed
+    // marker can reproduce it if this write is interrupted.
+    let csr_path = default_csr_filename(&common_name);
+    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
+        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
     if set_up_server {
         // Mint the box autorenew slot now (it needs the recovery password,
         // which we hold here) so phase 2 can unlock passwordlessly; it is
         // wired to the server config in phase 2. The superuser role slot
         // needs no CA cert, so it is minted here too.
-        let keytab = ca_setup::setup_autorenew_slot(
-            ans,
-            &cadir,
-            &recovery_pw,
-            opts.insecure_no_tpm,
-        )?;
+        let keytab =
+            ca_setup::setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
         ans.note(&format!(
             "provisioned the automatic-renewal (leaf) approval slot:\n  \
              slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)\n  \
@@ -1170,8 +1196,7 @@ fn init(p: InitParams) -> Result<()> {
     };
     // Preserve the `ca.<domain>` convenience: with a domain but no explicit
     // --cn, derive the CN so strict mode need not demand --cn as well.
-    let common_name =
-        p.cn.or_else(|| p.domain.as_deref().map(ca_setup::default_ca_cn));
+    let common_name = p.cn.or_else(|| p.domain.as_deref().map(ca_setup::default_ca_cn));
     let opts = ca_setup::NewCaOpts {
         dir: directory,
         common_name,
@@ -1286,8 +1311,7 @@ fn policy_context(
             (ca_setup::default_ca_cn(&domain), Some(domain))
         }
         admin_ops::AdminTarget::Local { .. } => {
-            let dir =
-                ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
+            let dir = ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
             let cn = dir.map(|d| existing_ca_cn(&d)).unwrap_or_default();
             (cn, None)
         }
@@ -1463,7 +1487,9 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
         .with_context(|| format!("contacting admin server {server}"))?;
     init::show_network_identity(server, &identity);
     if !ans.confirm_identity(&identity).await? {
-        bail!("CA identity was not confirmed (--accept-glyph mismatch); nothing was sent");
+        bail!(
+            "CA identity was not confirmed (--accept-glyph mismatch); nothing was sent"
+        );
     }
     let name = ans
         .text(Field::TlsName, p.name, None, true)
@@ -1541,7 +1567,8 @@ fn existing_ca_cn(dir: &Path) -> String {
 
 fn issue(p: IssueArgs) -> Result<()> {
     let directory = ca_dir_for(p.ca_dir)?;
-    let cn = p.cn.ok_or_else(|| anyhow!("--cn is required (the certificate common name)"))?;
+    let cn =
+        p.cn.ok_or_else(|| anyhow!("--cn is required (the certificate common name)"))?;
     let out_dir = p
         .out_dir
         .ok_or_else(|| anyhow!("--out is required (the output dir for key + cert)"))?;
@@ -1560,14 +1587,7 @@ fn issue(p: IssueArgs) -> Result<()> {
     // unencrypted: callers here are doing manual cert issuance and don't
     // necessarily have a netidx config to receive the askpass.
     let out = runtime()?.block_on(offline_ops::ca_issue(
-        &mut ans,
-        directory,
-        subject,
-        san,
-        p.key_bits,
-        p.validity,
-        out_dir,
-        None,
+        &mut ans, directory, subject, san, p.key_bits, p.validity, out_dir, None,
     ))?;
     println!("issued cert:");
     println!("  cn:          {}", out.cn);
@@ -1658,7 +1678,8 @@ fn sign(mut p: SignArgs) -> Result<()> {
 fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
     Ok(match (p.san.is_empty(), p.accept_csr_san) {
         (false, false) => {
-            let san = p.san.iter().map(|s| parse_san_one(s)).collect::<Result<Vec<_>>>()?;
+            let san =
+                p.san.iter().map(|s| parse_san_one(s)).collect::<Result<Vec<_>>>()?;
             offline_ops::SignSan::Explicit(san)
         }
         (false, true) => bail!(
@@ -1709,7 +1730,10 @@ fn print_id_map_result(r: &offline_ops::IdMapResult) {
                 reg.name, old.uid, old.primary_group,
             ),
             None => {
-                println!("added to id-map: {} uid={} primary={}", reg.name, reg.uid, reg.primary)
+                println!(
+                    "added to id-map: {} uid={} primary={}",
+                    reg.name, reg.uid, reg.primary
+                )
             }
         },
     }
@@ -2068,7 +2092,10 @@ mod tests {
             no_id_map: true,
             id_map_group: vec![],
             uid: None,
-            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
+            recovery: RecoveryAuth {
+                recovery_password_file: None,
+                recovery_password_stdin: false,
+            },
         })
         .unwrap();
         assert!(cert_path.exists());
@@ -2123,7 +2150,10 @@ mod tests {
             no_id_map: true,
             id_map_group: vec![],
             uid: None,
-            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
+            recovery: RecoveryAuth {
+                recovery_password_file: None,
+                recovery_password_stdin: false,
+            },
         })
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -2166,7 +2196,10 @@ mod tests {
             no_id_map: true,
             id_map_group: vec![],
             uid: None,
-            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
+            recovery: RecoveryAuth {
+                recovery_password_file: None,
+                recovery_password_stdin: false,
+            },
         })
         .unwrap_err();
         let msg = format!("{err:#}");
@@ -2212,7 +2245,10 @@ mod tests {
             no_id_map: true,
             id_map_group: vec![],
             uid: None,
-            recovery: RecoveryAuth { recovery_password_file: None, recovery_password_stdin: false },
+            recovery: RecoveryAuth {
+                recovery_password_file: None,
+                recovery_password_stdin: false,
+            },
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("not both"));
@@ -2258,7 +2294,6 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600, "issued key must be 0600");
         }
     }
-
 
     /// An offline CA (no admin server) is minted with exactly one signing
     /// slot — `recovery`, holding a generated password never typed — and no

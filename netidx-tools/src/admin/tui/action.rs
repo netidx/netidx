@@ -771,34 +771,15 @@ async fn run_workstation(
     ans: &mut TuiAnswerer,
     common: InstallCommon,
 ) -> Result<Option<ServiceScope>> {
-    use netidx_admin::plan::install::workstation::{WorkstationInput, run_workstation};
-    let input = WorkstationInput {
-        explicit_parent: None,
-        admin_server: None,
-        default_auth: None,
-        base: "/local".to_string(),
-        listen_port: None,
-        local_socket: None,
-        client_config_path: None,
-        resolver_config_path: None,
-        units_dir: None,
-        netidx_binary: None,
-        key_protection: None,
-        // CR codex for estokes: The guided TUI silently chooses the CLI's two
-        // expert opt-outs: it omits the default container and, more seriously,
-        // writes a workstation resolver with no auto-seeded owner permissions.
-        // That local resolver denies normal operations, while `workstation
-        // install` in the strict CLI enables both defaults. Resolve the current
-        // Local-auth identity and seed its grant here (and keep the container
-        // default), or ask the operator explicitly rather than making the two
-        // frontends produce materially different/broken installs.
-        with_container: false,
-        owner: None,
-        with_perms_file: false,
-        perms_path: None,
-        common,
-    };
-    run_workstation(ans, input).await
+    use netidx_admin::plan::install::workstation::run_workstation;
+    run_workstation(ans, guided_workstation_input(common)).await
+}
+
+#[cfg(any(unix, windows))]
+fn guided_workstation_input(
+    common: InstallCommon,
+) -> netidx_admin::plan::install::workstation::WorkstationInput {
+    netidx_admin::plan::install::workstation::WorkstationInput::defaults(common)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -887,5 +868,24 @@ fn install_outcome(
             services: None,
             quiet: false,
         }
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guided_workstation_uses_shared_safe_defaults() {
+        let input = guided_workstation_input(InstallCommon {
+            dry_run: true,
+            force: false,
+            no_units: false,
+            with_service: false,
+            no_service: false,
+        });
+        assert_eq!(input.base, "/local");
+        assert!(input.with_perms_file);
+        assert!(input.with_container);
     }
 }

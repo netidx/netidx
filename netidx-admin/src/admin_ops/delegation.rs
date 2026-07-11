@@ -228,6 +228,30 @@ pub struct AddParentOutcome {
     pub propagation: ClusterPropagation,
 }
 
+fn validate_existing_parent(
+    existing_path: Option<&str>,
+    proposed_path: &str,
+    has_complete_parent_selection: bool,
+) -> Result<()> {
+    let Some(existing_path) = existing_path else { return Ok(()) };
+    if existing_path != proposed_path {
+        bail!(
+            "this resolver is already attached at {existing_path:?}; re-parenting \
+             to {proposed_path:?} isn't supported (uninstall + reinstall to switch \
+             networks)"
+        );
+    }
+    if !has_complete_parent_selection {
+        bail!(
+            "refreshing an existing delegation requires selecting every resolver \
+             in the parent cluster (`--parent-resolver` once per member), so the \
+             new approval code covers the complete current parent and child server \
+             sets"
+        );
+    }
+    Ok(())
+}
+
 /// The `resolver add-parent` action: attach a standalone resolver under a
 /// parent by delegation, then write this installer's local `parent` referral.
 /// All remote parent/child propagation is owned by the CA controller. The
@@ -241,12 +265,11 @@ pub async fn add_parent(
 ) -> Result<AddParentOutcome> {
     let existing_cluster_change = selection.is_some();
     let rcfg = ResolverConfig::load(resolver_config)?;
-    if rcfg.as_file().parent.is_some() {
-        bail!(
-            "this resolver already has a parent referral — re-parenting isn't \
-             supported (uninstall + reinstall to switch networks)."
-        );
-    }
+    validate_existing_parent(
+        rcfg.as_file().parent.as_ref().map(|parent| parent.path.as_str()),
+        proposed_path,
+        existing_cluster_change,
+    )?;
     let child = rcfg.resolver_addrs();
     if child.is_empty() {
         bail!(
@@ -283,4 +306,17 @@ pub async fn add_parent(
     }
     let propagation = ClusterPropagation::ControllerManaged;
     Ok(AddParentOutcome { proposed_path: proposed_path.to_string(), propagation })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_existing_parent;
+
+    #[test]
+    fn existing_parent_allows_only_membership_bound_same_path_refresh() {
+        validate_existing_parent(None, "/eu", false).unwrap();
+        validate_existing_parent(Some("/eu"), "/eu", true).unwrap();
+        assert!(validate_existing_parent(Some("/eu"), "/ap", true).is_err());
+        assert!(validate_existing_parent(Some("/eu"), "/eu", false).is_err());
+    }
 }

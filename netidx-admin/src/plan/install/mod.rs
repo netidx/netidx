@@ -8,6 +8,7 @@
 use crate::{
     activation,
     answer::{Answerer, Field},
+    paths,
     plan::{
         enroll::{self, AdminServers},
         service::{ServiceGate, ServiceNeed, offer},
@@ -47,9 +48,11 @@ pub mod workstation;
 /// runtime would panic ("cannot start a runtime from within a runtime").
 #[cfg(feature = "cloud-detect")]
 pub async fn detected_advertised_ip() -> Option<IpAddr> {
-    tokio::task::spawn_blocking(|| crate::netshape::NetShape::detect().advertised_ip().into())
-        .await
-        .ok()
+    tokio::task::spawn_blocking(|| {
+        crate::netshape::NetShape::detect().advertised_ip().into()
+    })
+    .await
+    .ok()
 }
 
 /// See the `cloud-detect` variant.
@@ -280,10 +283,10 @@ pub fn install_renew_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()
     Ok(())
 }
 
-/// Describe + apply the rendered template, then run a post-apply step (after
-/// the install, never on `--dry-run`), then make the single end-of-install
-/// OS-service decision. Returns the scope the frontend should install a
-/// service at, or `None`.
+/// Describe + apply the rendered template, record the usable core install,
+/// then run a post-apply step (never on `--dry-run`) and make the single
+/// end-of-install OS-service decision. Returns the scope the frontend should
+/// install a service at, or `None`.
 ///
 /// `post_apply` receives the `Answerer` because its steps (standing up this
 /// host's admin server, dropping the renew unit) themselves report to the
@@ -297,22 +300,44 @@ pub async fn finish_with(
     record: InstallRecord,
     post_apply: impl AsyncFnOnce(&mut dyn Answerer) -> Result<()>,
 ) -> Result<Option<ServiceScope>> {
+    finish_with_record_path(ans, rt, common, need, record, None, post_apply).await
+}
+
+async fn finish_with_record_path(
+    ans: &mut dyn Answerer,
+    rt: RenderedTemplate,
+    common: &InstallCommon,
+    need: ServiceNeed,
+    record: InstallRecord,
+    record_path_override: Option<&Path>,
+    post_apply: impl AsyncFnOnce(&mut dyn Answerer) -> Result<()>,
+) -> Result<Option<ServiceScope>> {
     ans.note(&rt.describe());
     if !common.dry_run {
         check_no_overwrite(&rt, common.force)?;
-        // CR codex for estokes: This is a user-facing install transaction, but
-        // apply writes several files without rollback, post_apply performs more
-        // durable setup, and install.json is written only after both. Any failure
-        // leaves an unrecorded partial install whose retry is then rejected as an
-        // overwrite unless the operator diagnoses it and uses --force. Preflight
-        // and stage the whole bundle, then commit/roll back it as one operation (or
-        // persist an explicit incomplete record with a supported repair path).
+        // Resolve the provenance destination before touching the template. A
+        // missing platform config directory is a preflight error, not something
+        // to discover after a usable install has been written.
+        let record_path = match record_path_override {
+            Some(path) => path.to_path_buf(),
+            None => paths::user_install_record()
+                .context("resolving the install-record destination")?,
+        };
         rt.apply().context("applying template")?;
+        // The local role is now a real, usable install. Record it before the
+        // network/admin completion tail: connectivity loss while enrolling a
+        // local admin server or requesting delegation must not turn this into
+        // an unrecorded install that a retry mistakes for foreign files.
+        record.save(&record_path).context("writing the install record")?;
         ans.note("ok");
-        post_apply(ans).await?;
-        // Record what we installed and the network it joined (identity-pinned),
-        // so lifecycle ops know what this host is and can re-pin to the same CA.
-        record.save_default().context("writing the install record")?;
+        post_apply(ans).await.with_context(|| {
+            format!(
+                "the {} core install completed and is recorded at {}, but its \
+                 post-install setup did not finish",
+                record.role.as_str(),
+                record_path.display()
+            )
+        })?;
     }
     offer(
         ans,
@@ -504,8 +529,100 @@ pub fn suggest_client_san(resolver_san: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template::{RenderedTemplate, TlsCopyJob};
+    use crate::{
+        admin_client::CaIdentity,
+        admin_proto::Secret,
+        answer::{NetworkChoice, NetworkOption, Progress},
+        fingerprint::Fingerprint,
+        provenance::InstallRole,
+        template::{RenderedTemplate, TlsCopyJob},
+    };
     use std::collections::BTreeMap;
+
+    struct TestAnswerer;
+
+    #[async_trait::async_trait]
+    impl Answerer for TestAnswerer {
+        fn interactive(&self) -> bool {
+            false
+        }
+
+        async fn text(
+            &mut self,
+            _field: Field,
+            _provided: Option<String>,
+            _default: Option<&str>,
+            _required: bool,
+        ) -> Result<Option<String>> {
+            unreachable!()
+        }
+
+        async fn choice(
+            &mut self,
+            _field: Field,
+            _provided: Option<String>,
+            _choices: &[&str],
+            _default: Option<&str>,
+        ) -> Result<String> {
+            unreachable!()
+        }
+
+        async fn select_network(
+            &mut self,
+            _networks: &[NetworkOption],
+        ) -> Result<NetworkChoice> {
+            unreachable!()
+        }
+
+        async fn confirm(
+            &mut self,
+            _field: Field,
+            _provided: Option<bool>,
+            _default: bool,
+        ) -> Result<bool> {
+            unreachable!()
+        }
+
+        async fn secret(
+            &mut self,
+            _field: Field,
+            _provided: Option<Secret>,
+        ) -> Result<Secret> {
+            unreachable!()
+        }
+
+        async fn announce(&mut self, _title: &str, _body: &str) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn announce_identity(
+            &mut self,
+            _body: &str,
+            _code: &Fingerprint,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn confirm_identity(&mut self, _identity: &CaIdentity) -> Result<bool> {
+            unreachable!()
+        }
+
+        fn show_verification_code(&mut self, _purpose: &str, _code: &Fingerprint) {
+            unreachable!()
+        }
+
+        fn progress(&mut self, _progress: Progress) {
+            unreachable!()
+        }
+
+        fn note(&mut self, _message: &str) {}
+
+        fn warn(&mut self, _message: &str) {}
+
+        async fn show_recovery_password(&mut self, _password: &str) -> Result<()> {
+            unreachable!()
+        }
+    }
 
     fn empty_rt() -> RenderedTemplate {
         RenderedTemplate {
@@ -572,5 +689,96 @@ mod tests {
         });
         assert!(check_no_overwrite(&rt, false).is_err());
         check_no_overwrite(&rt, true).unwrap();
+    }
+
+    #[test]
+    fn preflight_reads_the_whole_tls_bundle_before_installing_any_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        let cert_src = src.join("certificate.pem");
+        let missing_key = src.join("private.key");
+        let trusted_src = src.join("trusted.pem");
+        std::fs::write(&cert_src, b"cert").unwrap();
+        std::fs::write(&trusted_src, b"trusted").unwrap();
+
+        let mut rt = empty_rt();
+        rt.tls_install.push(TlsCopyJob {
+            cn: "resolver.example.com".to_string(),
+            dest_dir: dest.clone(),
+            certificate_src: cert_src,
+            private_key_src: missing_key,
+            trusted_src,
+        });
+        assert!(rt.apply().is_err());
+        assert!(!dest.exists(), "preflight failure must precede destination writes");
+    }
+
+    #[test]
+    fn preflight_rejects_invalid_resolver_topology_before_writing_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver_path = dir.path().join("resolver.json");
+        let perms_path = dir.path().join("perms.json");
+        let raw = format!(
+            r#"{{
+                "children":[{{"path":"/eu","ttl":null,"addrs":[["10.0.0.1:4564","Anonymous"]]}}],
+                "parent":null,
+                "member_servers":[{{"addr":"10.0.0.2:4564","bind_addr":"10.0.0.2","auth":"Anonymous","hello_timeout":10,"max_connections":768,"pid_file":"","reader_ttl":60,"writer_ttl":120,"id_map_command":null,"id_map_type":"DoNotMap","id_map_timeout":3600}}],
+                "perms":{{}},
+                "include_permissions":[{:?}]
+            }}"#,
+            perms_path
+        );
+        let resolver: netidx::resolver_server::config::file::Config =
+            serde_json::from_str(&raw).unwrap();
+        let mut rt = empty_rt();
+        rt.resolver_config = Some((resolver_path.clone(), resolver.into()));
+        rt.perms_file = Some((perms_path.clone(), crate::perms::default_seed("/eu")));
+
+        let err = rt.apply().unwrap_err();
+        assert!(format!("{err:#}").contains("permission entry for child: /eu"));
+        assert!(!perms_path.exists(), "preflight failure must precede perms write");
+        assert!(!resolver_path.exists(), "preflight failure must precede config write");
+    }
+
+    #[tokio::test]
+    async fn post_apply_failure_leaves_the_core_install_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let perms_path = dir.path().join("perms.json");
+        let record_path = dir.path().join("install.json");
+        let mut rt = empty_rt();
+        rt.perms_file = Some((perms_path.clone(), crate::perms::empty()));
+        let record =
+            InstallRecord::new(InstallRole::Resolver, "/", "anonymous", None, None);
+        let check_record = record_path.clone();
+        let check_perms = perms_path.clone();
+        let mut ans = TestAnswerer;
+        let err = finish_with_record_path(
+            &mut ans,
+            rt,
+            &InstallCommon {
+                dry_run: false,
+                force: false,
+                no_units: true,
+                with_service: false,
+                no_service: true,
+            },
+            ServiceNeed::NONE,
+            record.clone(),
+            Some(&record_path),
+            async move |_ans| {
+                assert!(check_record.exists());
+                assert!(check_perms.exists());
+                bail!("simulated network failure")
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("core install completed"));
+        assert!(message.contains("simulated network failure"));
+        assert_eq!(InstallRecord::load(&record_path).unwrap(), record);
     }
 }

@@ -102,16 +102,23 @@ pub async fn ca_sign(
     id_map: IdMapAction,
 ) -> Result<SignOutcome> {
     let summary = ca::inspect_csr(&csr_pem).context("inspecting CSR")?;
-    let out = out
-        .unwrap_or_else(|| offline_ca::default_cert_filename(summary.common_name.as_deref()));
+    let out = out.unwrap_or_else(|| {
+        offline_ca::default_cert_filename(summary.common_name.as_deref())
+    });
     let san = resolve_san(ans, san, &summary).await?;
     offline_ca::ensure_san_not_reserved(&san)?;
     let name = offline_ca::first_dns_san(&san)
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
     let ca = offline_ca::open_ca(ans, &ca_dir).await?;
-    let cert_pem =
-        offline_ca::sign_and_record(&ca, NodeKind::Client, &csr_pem, &san, &name, validity)?;
+    let cert_pem = offline_ca::sign_and_record(
+        &ca,
+        NodeKind::Client,
+        &csr_pem,
+        &san,
+        &name,
+        validity,
+    )?;
     atomic::write_atomic(&out, &cert_pem, 0o644)
         .with_context(|| format!("writing certificate to {}", out.display()))?;
     let id_map = register_id_map(ans, &summary, &san, id_map).await?;
@@ -227,13 +234,20 @@ async fn register_id_map(
                 .text(Field::Uid, None, Some(&default), true)
                 .await?
                 .ok_or_else(|| anyhow!("a uid is required to register in the id-map"))?;
-            typed.trim().parse::<u32>().with_context(|| format!("parsing uid {typed:?}"))?
+            typed
+                .trim()
+                .parse::<u32>()
+                .with_context(|| format!("parsing uid {typed:?}"))?
         }
     };
     let primary = groups[0].clone();
     let secondary: Vec<&str> = groups[1..].iter().map(|s| s.as_str()).collect();
-    let previous = id_map::upsert_identity(&mut map, &identity_name, uid, &primary, &secondary)?
-        .map(|old| PrevIdentity { uid: old.uid, primary_group: old.primary_group.to_string() });
+    let previous =
+        id_map::upsert_identity(&mut map, &identity_name, uid, &primary, &secondary)?
+            .map(|old| PrevIdentity {
+                uid: old.uid,
+                primary_group: old.primary_group.to_string(),
+            });
     id_map::save(&map_path, &map)?;
     Ok(IdMapResult::Registered(IdMapRegistration {
         name: identity_name,
@@ -283,5 +297,9 @@ pub async fn ca_issue(
             serial: 0, // assigned by issue_and_record
         },
     )?;
-    Ok(IssueOutcome { cn, private_key: issued.private_key, certificate: issued.certificate })
+    Ok(IssueOutcome {
+        cn,
+        private_key: issued.private_key,
+        certificate: issued.certificate,
+    })
 }

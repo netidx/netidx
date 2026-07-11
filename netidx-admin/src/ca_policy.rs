@@ -4,9 +4,10 @@
 //! carries it. A Windows admin client speaks these types to a unix CA, so
 //! the types must be cross-platform even though the vault is `#[cfg(unix)]`.
 
+use crate::admin_proto::Role;
+use netidx_derive::Pack;
 use serde_derive::{Deserialize, Serialize};
 use std::time::Duration;
-use crate::admin_proto::Role;
 
 /// The `max_validity` for the system-managed signing slots (autorenew,
 /// recovery) and the local superuser. Deliberately huge: the real bound on
@@ -21,7 +22,7 @@ const SIGNING_SLOT_MAX_VALIDITY: Duration = Duration::from_secs(100 * 365 * 8640
 /// SERVER holds the only signing key (the autorenew credential); this
 /// policy decides what it will sign / edit / manage *on a role admin's
 /// behalf* — a role admin's password never unlocks the key itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub struct Policy {
     /// The admin's **server-signing scope**: glob patterns every requested
     /// SAN must match for the server to sign it on this admin's behalf.
@@ -39,10 +40,13 @@ pub struct Policy {
     /// the `SignRequest`. Empty ⇒ this admin's signs never register
     /// identities.
     #[serde(default)]
+    #[pack(default)]
     pub id_map_groups: Vec<String>,
     #[serde(default)]
+    #[pack(default)]
     pub server_enroll_scopes: Vec<String>,
     #[serde(default)]
+    #[pack(default)]
     pub server_enroll_roles: Vec<Role>,
     /// Netidx hierarchy paths under which this admin may edit permissions
     /// (the remote perms edit). A target path is in scope when it equals
@@ -50,6 +54,7 @@ pub struct Policy {
     /// perms-edit authority. Unlike issuance, this needs no CA key, so a
     /// `Role` keyslot can carry it.
     #[serde(default)]
+    #[pack(default)]
     pub perms_edit_scopes: Vec<String>,
     /// Whether this admin may mint / rescope / revoke **role** admins (the
     /// `ca admin` ops, local or over the admin plane). It never confers MK
@@ -58,6 +63,7 @@ pub struct Policy {
     /// capabilities ⊆ its own (no escalation; enforced server-side).
     /// Granted explicitly.
     #[serde(default)]
+    #[pack(default)]
     pub may_manage_admins: bool,
     /// Netidx hierarchy paths under which this admin may control services
     /// (restart / start / stop / status the activation units on the admin
@@ -66,27 +72,30 @@ pub struct Policy {
     /// editing perms and restarting services are distinct authorities.
     /// Needs no CA key, so a `Role` keyslot can carry it.
     #[serde(default)]
+    #[pack(default)]
     pub service_control_scopes: Vec<String>,
 }
 
 /// What a keyslot's `wrap` field protects, and so what authority the slot
 /// confers. The cryptographic boundary of the RBAC model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
 #[serde(rename_all = "lowercase")]
 pub enum SlotKind {
     /// The slot wraps the master key, so its password can recover the CA
     /// private key and sign certificates. The original (and default for
     /// pre-RBAC vaults, whose slots all wrap MK).
+    #[pack(tag(0))]
     Signing,
     /// The slot wraps a random verifier — never the master key — so its
     /// password authenticates and yields the slot's scoped [`Policy`] but
     /// can NEVER recover the CA private key. A satellite admin's keyslot.
+    #[pack(tag(1))]
     Role,
 }
 
 /// One admin keyslot's public facts (no secrets), for `ca admin list` —
 /// locally and over the wire (`ListAdmins`), hence `Serialize`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct AdminInfo {
     pub slot_id: uuid::Uuid,
     pub admin: String,

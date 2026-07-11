@@ -47,11 +47,20 @@ loss/latency/partitions). HQ serves `/`, EU serves `/eu`, AP serves `/ap`.
 | `debian13 ap-publisher`    | 192.168.70.13  | AP publisher |
 | `debian13 ap-workstation`  | 192.168.70.14  | AP workstation |
 | `debian13 router`          | .50.2/.60.2/.70.2 | tri-homed netem WAN router; hosts `wan` at `/usr/local/bin/wan` |
+| `win11`                    | DHCP on libvirt `default` (currently 192.168.122.10) | Windows 11 workstation test VM; passwordless SSH as `eric` |
 
 Networks: `netidx-test` 192.168.50.0/24 (HQ, NAT), `netidx-eu` 192.168.60.0/24
 (isolated — router is the only path off-subnet), `netidx-ap` 192.168.70.0/24
 (isolated). HQ guests get a route to 60/70 via .50.2; EU/AP guests get their
 default gw from DHCP (router .60.2/.70.2).
+
+The Windows VM uses libvirt's separate `default` NAT network, which may need
+`virsh net-start default` after a host reboot. Discover its current address
+with `virsh net-dhcp-leases default`, then connect without a password:
+
+```sh
+ssh eric@<windows-ip>
+```
 
 ## Clean
 
@@ -66,6 +75,14 @@ ssh root@<ip> 'bash -s' < scripts/teardown.sh        # lighter: only ~/.config/n
 Use `teardown2.sh` for a truly pristine box. The KDC on .11 (realm
 `NETIDX.TEST`) survives a reset. Networks are left alone — don't touch them.
 
+Kerberos fixture credentials: the ordinary test principal is
+`eric@NETIDX.TEST` with password `testpw12345`. Resolver and publisher service
+principals live in each role VM's `/etc/krb5.keytab`; all six resolver VMs have
+host-specific `netidx/resolver-<site>-<member>.netidx.test@NETIDX.TEST` entries,
+and the three publisher VMs have matching `netidx/publisher-<site>.netidx.test`
+entries. These keytabs and the KDC database intentionally survive config
+teardown.
+
 ## Bring up
 
 1. `virsh start` the domains you need (router first for a WAN run). Start
@@ -74,23 +91,22 @@ Use `teardown2.sh` for a truly pristine box. The KDC on .11 (realm
    repo to devbox .14, `cargo build -p netidx-tools --bin netidx`, strips, scps
    to each `/usr/local/bin/netidx`. (`scripts/build2.sh` / `build-fixed.sh` are
    convenience wrappers for specific host sets.)
-3. Bootstrap CA + conf-server on .11: `netidx conf ca init --insecure-no-tpm`
-   (harness `harness/ca-init-i.exp`). Recovery quad is **printed once** — capture
-   it. Two-slot vault = recovery + autorenew.
-4. Enroll the rest interactively, each approved on .11 with `netidx conf ca
-   approve` (`harness/ca-approve.exp`): resolver-B (`harness/res.exp` /
-   `res-b-install.exp`), publisher (`harness/pub.exp`), workstation
-   (`harness/ws.exp`). Satellites: `resolver install --parent-conf-server
-   192.168.50.11:4565` then `review-delegation` at HQ
-   (`harness/sat1-install.exp`, `sat2-install.exp`, `review-deleg.exp`).
-5. Run daemons by hand: `scripts/start-member.sh <id>` (resolver + conf server),
-   or `scripts/start-conf.sh` (conf server only). Both `nohup` into `/root/*.log`.
+3. Bootstrap the CA/controller and first resolver on .11 with `netidx admin
+   resolver install --with-admin-server --insecure-no-tpm ...`. The recovery
+   password is **printed once** — capture it.
+4. Enroll the rest with the strict `netidx admin ... install` commands or the
+   bare `netidx admin` TUI. Approve queued identities on .11 with `netidx admin
+   ca approve`; approve hierarchy changes with `netidx admin resolver
+   approve-delegation`.
+5. Run daemons by hand with `scripts/start-member.sh <id>` (resolver + admin
+   server), or launch the generated activation directory directly. The helper
+   writes `nohup` logs under `/root`.
 
 ## Daemon start commands
 
 ```sh
-# conf server (CA + conf plane, :4565), foreground:
-netidx conf component server run -c /root/.config/netidx/conf-server.json -f
+# admin server (CA controller on .11, :4565), foreground:
+netidx admin component server run -c /root/.config/netidx/admin-server.json -f
 # resolver member (:4564), --id selects the cluster member index:
 netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f
 # cert auto-renewal puller (NOT run by default — lab installs decline it):

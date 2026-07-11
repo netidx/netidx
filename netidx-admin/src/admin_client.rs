@@ -42,15 +42,15 @@ use crate::{
         ApproveResponse, ClientHello, ControlServiceRequest, ControlServiceResponse,
         DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        DeregisterRequest, EditPermsRequest, EditPermsResponse, EnqueueRequest,
-        EnqueueResponse, EnrollRequest, GetInfoResponse, GetMapResponse,
-        GetMapVersionResponse, GetPermsResponse, IssuedEntry, ListAdminsRequest,
-        ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NetworkMap, NodeKind,
-        PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse, QueueEntry,
-        ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest, Request,
-        ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
-        ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
+        EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
+        EnrollRequest, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
+        GetPermsResponse, IssuedEntry, ListAdminsRequest, ListDelegationsRequest,
+        ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
+        ListQueueResponse, NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult,
+        PollRequest, PollResponse, QueueEntry, ReferralEdit, RegisterRequest,
+        RegisterResponse, RemoveAdminRequest, Request, ResolverAddr, RevokeRequest,
+        RevokeResponse, Role, SERVING_SAN, Secret, ServerHello, SetAdminPolicyRequest,
+        SignRequest, SignResponse,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -775,6 +775,83 @@ pub struct NetworkInfo {
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
+fn registered_members(
+    map: &NetworkMap,
+    cluster_id: admin_proto::ResolverClusterId,
+) -> Vec<ResolverAddr> {
+    let Some(cluster) = map.clusters.iter().find(|cluster| {
+        cluster.id == cluster_id && cluster.state == admin_proto::ClusterState::Active
+    }) else {
+        return Vec::new();
+    };
+    let mut members: Vec<_> = map
+        .servers
+        .iter()
+        .filter(|server| {
+            server.cluster == Some(cluster_id)
+                && server.state == admin_proto::ServerState::Registered
+        })
+        .filter_map(|server| server.resolver.clone())
+        .filter(|resolver| cluster.members.contains(resolver))
+        .collect();
+    members.sort_by(|a, b| a.addr.cmp(&b.addr));
+    members
+}
+
+/// One active cluster's CA-authoritative resolver topology. This is also used
+/// by strict installers whose explicit bootstrap server belongs to a different
+/// level of the hierarchy than the cluster they are joining.
+pub struct ClusterTopology {
+    pub members: Vec<ResolverAddr>,
+    pub parent: Option<admin_proto::ClusterEdge>,
+    pub children: Vec<admin_proto::ClusterEdge>,
+}
+
+fn cluster_topology(
+    map: &NetworkMap,
+    cluster_id: admin_proto::ResolverClusterId,
+) -> Result<ClusterTopology> {
+    let cluster = map
+        .clusters
+        .iter()
+        .find(|c| c.id == cluster_id)
+        .filter(|c| c.state == admin_proto::ClusterState::Active)
+        .context("resolver cluster is not active")?;
+    let members = registered_members(map, cluster_id);
+    let parent = cluster.parent.and_then(|parent_id| {
+        let addrs = registered_members(map, parent_id);
+        (!addrs.is_empty())
+            .then(|| admin_proto::ClusterEdge { path: cluster.base.clone(), addrs })
+    });
+    let mut children: Vec<_> = cluster
+        .children
+        .iter()
+        .filter_map(|child_id| {
+            let child = map.clusters.iter().find(|child| {
+                child.id == *child_id && child.state == admin_proto::ClusterState::Active
+            })?;
+            let addrs = registered_members(map, *child_id);
+            (!addrs.is_empty())
+                .then(|| admin_proto::ClusterEdge { path: child.base.clone(), addrs })
+        })
+        .collect();
+    children.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(ClusterTopology { members, parent, children })
+}
+
+pub fn cluster_topology_by_base(map: &NetworkMap, base: &str) -> Result<ClusterTopology> {
+    let cluster = map
+        .clusters
+        .iter()
+        .find(|cluster| {
+            cluster.base == base && cluster.state == admin_proto::ClusterState::Active
+        })
+        .with_context(|| {
+            format!("the authoritative map has no active cluster at {base}")
+        })?;
+    cluster_topology(map, cluster.id)
+}
+
 fn bootstrap_cluster(
     map: &NetworkMap,
     server_id: admin_proto::AdminServerId,
@@ -785,28 +862,6 @@ fn bootstrap_cluster(
     Option<admin_proto::ClusterEdge>,
     Vec<admin_proto::ClusterEdge>,
 )> {
-    fn registered_members(
-        map: &NetworkMap,
-        cluster_id: admin_proto::ResolverClusterId,
-    ) -> Vec<ResolverAddr> {
-        let Some(cluster) = map.clusters.iter().find(|cluster| {
-            cluster.id == cluster_id && cluster.state == admin_proto::ClusterState::Active
-        }) else {
-            return Vec::new();
-        };
-        let mut members: Vec<_> = map
-            .servers
-            .iter()
-            .filter(|server| {
-                server.cluster == Some(cluster_id)
-                    && server.state == admin_proto::ServerState::Registered
-            })
-            .filter_map(|server| server.resolver.clone())
-            .filter(|resolver| cluster.members.contains(resolver))
-            .collect();
-        members.sort_by(|a, b| a.addr.cmp(&b.addr));
-        members
-    }
     let controller = map
         .controller_entry()
         .filter(|s| s.state == admin_proto::ServerState::Registered)
@@ -817,42 +872,24 @@ fn bootstrap_cluster(
         .find(|s| s.id == server_id)
         .filter(|s| s.state == admin_proto::ServerState::Registered)
         .context("the verified bootstrap server is not registered in the network map")?;
-    let (resolvers, base, parent, mut children) = match bootstrap.cluster {
+    let (resolvers, base, parent, children) = match bootstrap.cluster {
         None => (Vec::new(), None, None, Vec::new()),
         Some(cluster_id) => {
             let cluster = map
                 .clusters
                 .iter()
                 .find(|c| c.id == cluster_id)
-                .filter(|c| c.state == admin_proto::ClusterState::Active)
+                .context("the bootstrap server's resolver cluster is absent")?;
+            let topology = cluster_topology(map, cluster_id)
                 .context("the bootstrap server's resolver cluster is not active")?;
-            let resolvers = registered_members(map, cluster_id);
-            let parent = cluster.parent.and_then(|parent_id| {
-                let addrs = registered_members(map, parent_id);
-                (!addrs.is_empty()).then(|| admin_proto::ClusterEdge {
-                    path: cluster.base.clone(),
-                    addrs,
-                })
-            });
-            let children = cluster
-                .children
-                .iter()
-                .filter_map(|child_id| {
-                    let child = map.clusters.iter().find(|child| {
-                        child.id == *child_id
-                            && child.state == admin_proto::ClusterState::Active
-                    })?;
-                    let addrs = registered_members(map, *child_id);
-                    (!addrs.is_empty()).then(|| admin_proto::ClusterEdge {
-                        path: child.base.clone(),
-                        addrs,
-                    })
-                })
-                .collect();
-            (resolvers, Some(cluster.base.clone()), parent, children)
+            (
+                topology.members,
+                Some(cluster.base.clone()),
+                topology.parent,
+                topology.children,
+            )
         }
     };
-    children.sort_by(|a, b| a.path.cmp(&b.path));
     Ok((controller.addr, resolvers, base, parent, children))
 }
 
@@ -1635,7 +1672,7 @@ pub async fn deregister(
         Some(ExactTarget { id: None, home_ca: &home_ca, controller: true }),
     )
     .await?;
-    admin_proto::write_msg(&mut tls, &Request::Deregister(DeregisterRequest)).await?;
+    admin_proto::write_msg(&mut tls, &Request::Deregister).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
@@ -2315,8 +2352,10 @@ mod tests {
             bootstrap_cluster(&map, controller).unwrap();
         let (_, child_members, child_base, child_parent, child_children) =
             bootstrap_cluster(&map, satellite).unwrap();
+        let child_by_base = cluster_topology_by_base(&map, "/eu").unwrap();
         assert_eq!(root_members, vec![root.clone()]);
-        assert_eq!(child_members, vec![child]);
+        assert_eq!(child_members, vec![child.clone()]);
+        assert_eq!(child_by_base.members, vec![child]);
         assert_eq!(root_base.as_deref(), Some("/"));
         assert_eq!(child_base.as_deref(), Some("/eu"));
         assert!(root_parent.is_none());
@@ -2324,6 +2363,8 @@ mod tests {
         assert_eq!(root_children[0].path, "/eu");
         assert_eq!(child_parent.unwrap().addrs, vec![root]);
         assert!(child_children.is_empty());
+        assert_eq!(child_by_base.parent.unwrap().path, "/eu");
+        assert!(child_by_base.children.is_empty());
     }
 
     fn self_signed(name: &str, key: &rcgen::KeyPair) -> String {

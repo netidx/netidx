@@ -7,9 +7,8 @@
 //! parks on a `oneshot` for the reply. The UI loop pops the request into a
 //! [`Modal`], collects the answer through key events, and sends it back. Sync
 //! notifications (`note`/`warn`/`progress`/`show_verification_code`) are
-//! fire-and-forget; `show_recovery_password` is the one sync call that must
-//! block until acknowledged, which is safe because it runs on the spawned op
-//! task, never the UI task.
+//! fire-and-forget. Recovery-password delivery is an awaited question: the op
+//! does not commit a new CA until the operator explicitly acknowledges it.
 
 use super::{theme, widgets};
 use anyhow::{Result, anyhow};
@@ -113,6 +112,7 @@ pub(super) enum UiRequest {
     },
     Recovery {
         password: String,
+        reply: oneshot::Sender<Result<()>>,
     },
     VerificationCode {
         purpose: String,
@@ -283,11 +283,9 @@ impl Answerer for TuiAnswerer {
         let _ = self.tx.send(UiRequest::Warn(message.to_string()));
     }
 
-    fn show_recovery_password(&mut self, password: &str) {
-        // Fire-and-forget: the op runs on the UI task, so we cannot block here.
-        // The modal queue keeps this un-missable — it stays up (and any later
-        // question queues behind it) until the operator acknowledges it.
-        let _ = self.tx.send(UiRequest::Recovery { password: password.to_string() });
+    async fn show_recovery_password(&mut self, password: &str) -> Result<()> {
+        let password = password.to_string();
+        self.ask(|reply| UiRequest::Recovery { password, reply }).await
     }
 }
 
@@ -349,6 +347,7 @@ pub(super) enum Modal {
     },
     Recovery {
         password: String,
+        reply: Option<oneshot::Sender<Result<()>>>,
     },
 }
 
@@ -413,7 +412,9 @@ impl Modal {
             UiRequest::AnnounceIdentity { body, code, reply } => {
                 Some(Modal::AnnounceIdentity { body, code, reply: Some(reply) })
             }
-            UiRequest::Recovery { password } => Some(Modal::Recovery { password }),
+            UiRequest::Recovery { password, reply } => {
+                Some(Modal::Recovery { password, reply: Some(reply) })
+            }
             _ => None,
         }
     }
@@ -656,7 +657,21 @@ impl Modal {
                     _ => false,
                 }
             }
-            Modal::Recovery { .. } => matches!(code, KeyCode::Enter | KeyCode::Char(' ')),
+            Modal::Recovery { reply, .. } => match code {
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Ok(()));
+                    }
+                    true
+                }
+                KeyCode::Esc => {
+                    if let Some(tx) = reply.take() {
+                        let _ = tx.send(Err(anyhow!("cancelled")));
+                    }
+                    true
+                }
+                _ => false,
+            },
         }
     }
 
@@ -1063,7 +1078,9 @@ fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netidx_admin::{admin_proto::Role, ca, plan::ca_setup};
     use ratatui::{Terminal, backend::TestBackend};
+    use std::time::Duration;
 
     fn rows() -> Vec<ParentRow> {
         vec![
@@ -1078,6 +1095,34 @@ mod tests {
             Modal::from_request(UiRequest::SelectParent { rows: rows(), reply: tx })
                 .unwrap();
         (modal, rx)
+    }
+
+    fn offline_ca_opts(dir: std::path::PathBuf) -> ca_setup::NewCaOpts {
+        ca_setup::NewCaOpts {
+            dir,
+            common_name: Some("ca.example.com".into()),
+            domain: Some("example.com".into()),
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec![],
+            key_bits: 2048,
+            ca_validity: Duration::from_secs(30 * 86400),
+            leaf_validity: ca::DEFAULT_LEAF_VALIDITY,
+            ca_renew_threshold: ca::DEFAULT_CA_RENEW_THRESHOLD,
+            admin: Some("root".into()),
+            allowed_san: vec!["*.example.com".into()],
+            max_validity: ca::DEFAULT_LEAF_VALIDITY,
+            id_map_groups: vec!["users".into()],
+            server_enroll_scopes: vec!["/".into()],
+            server_enroll_roles: vec![Role::Resolver, Role::IdMap],
+            insecure_no_tpm: true,
+            setup_server: Some(false),
+            listen: None,
+            listen_hint: None,
+            units_dir: None,
+        }
     }
 
     fn render(modal: &Modal, w: u16, h: u16) -> String {
@@ -1142,6 +1187,66 @@ mod tests {
             ParentSelection::Manual => {}
             ParentSelection::Resolvers(_) => panic!("expected Manual, got Resolvers"),
         }
+    }
+
+    #[test]
+    fn recovery_modal_requires_and_reports_explicit_acknowledgement() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut modal = Modal::from_request(UiRequest::Recovery {
+            password: "AAAA BBBB".into(),
+            reply: tx,
+        })
+        .unwrap();
+        assert!(!modal.on_key(KeyCode::Char('x')));
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(modal.on_key(KeyCode::Enter));
+        assert!(rx.try_recv().unwrap().is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_recovery_ack_rolls_back_new_ca() {
+        let scratch = tempfile::tempdir().unwrap();
+        let ca_dir = scratch.path().join("ca");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ans = TuiAnswerer::new(tx);
+        let opts = offline_ca_opts(ca_dir.clone());
+        let create =
+            tokio::spawn(
+                async move { ca_setup::create_vaulted_ca(&mut ans, opts).await },
+            );
+
+        let mut cancelled = false;
+        while let Some(req) = rx.recv().await {
+            match req {
+                UiRequest::AnnounceIdentity { body, code, reply } => {
+                    let mut modal = Modal::from_request(UiRequest::AnnounceIdentity {
+                        body,
+                        code,
+                        reply,
+                    })
+                    .unwrap();
+                    assert!(modal.on_key(KeyCode::Enter));
+                }
+                UiRequest::Recovery { password, reply } => {
+                    let mut modal =
+                        Modal::from_request(UiRequest::Recovery { password, reply })
+                            .unwrap();
+                    assert!(modal.on_key(KeyCode::Esc));
+                    cancelled = true;
+                    break;
+                }
+                UiRequest::Warn(_) | UiRequest::Note(_) | UiRequest::Progress(_) => {}
+                _ => panic!("unexpected question during offline CA creation"),
+            }
+        }
+        assert!(cancelled, "recovery acknowledgement was never requested");
+        assert!(create.await.unwrap().is_err());
+        assert!(!ca_dir.exists(), "cancelled CA must never become live");
+        assert_eq!(
+            std::fs::read_dir(scratch.path()).unwrap().count(),
+            0,
+            "staged CA state must be removed when the operation is cancelled"
+        );
     }
 
     #[test]

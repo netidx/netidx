@@ -211,7 +211,8 @@ async fn resolve_controller(
         .filter(|s| s.state == crate::admin_proto::ServerState::Registered)
         .context("the authoritative map has no registered controller")?;
     let server = controller.addr;
-    let controller_identity = admin_client::fetch_identity(server, NodeKind::Client).await?;
+    let controller_identity =
+        admin_client::fetch_identity(server, NodeKind::Client).await?;
     if controller_identity.fingerprint != identity.fingerprint
         || !controller_identity.controller
         || controller_identity.server_id != map.controller
@@ -264,8 +265,11 @@ pub fn find_by_code<'a, T>(
     code: &str,
     of: impl Fn(&T) -> Option<Fingerprint>,
 ) -> Result<&'a T> {
-    let norm: String =
-        code.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_uppercase).collect();
+    let norm: String = code
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_uppercase)
+        .collect();
     if norm.is_empty() {
         bail!("a code is required to select a request");
     }

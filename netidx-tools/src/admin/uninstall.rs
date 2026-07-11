@@ -6,7 +6,7 @@
 //! and prompts the operator before deleting anything (unless
 //! `--yes`).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin::{
     paths,
@@ -21,8 +21,6 @@ use super::service::{self as svc_cli, ScopeArg};
 // context.
 #[cfg(unix)]
 use super::service::ELEVATED_ENV;
-#[cfg(unix)]
-use anyhow::Context;
 #[cfg(unix)]
 use std::process::Command;
 
@@ -76,7 +74,6 @@ pub(crate) fn run(p: Params) -> Result<()> {
     if scope == ServiceScope::System && !svc_cli::is_elevated()? {
         return escalate(&p);
     }
-    do_primary_scope(&p, scope)?;
     // Templated installs (resolver, publisher) register a *system*-scope
     // service (`netidx@<user>.service`) even when the config they write is
     // user-scope (`~/.config/netidx`), so it never shows up in our
@@ -90,6 +87,10 @@ pub(crate) fn run(p: Params) -> Result<()> {
             offer_system_scope(&p)?;
         }
     }
+    // Only touch the primary configuration after every supervisor that may be
+    // consuming it has been stopped. In the common resolver layout the system
+    // service above reads this user-scoped configuration.
+    do_primary_scope(&p, scope)?;
     Ok(())
 }
 
@@ -160,9 +161,9 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
 
 /// Probe `/etc/systemd/system/<name>@.service` + `/etc/netidx`
 /// without escalating. If anything's there, show it and offer to
-/// escalate. Best-effort: a probe failure (e.g. perms denied on
-/// `/etc/netidx`) is logged at debug and the offer is silently
-/// skipped — the operator can always re-run `--scope system`.
+/// escalate. Probe uncertainty is fatal: this system service may be consuming
+/// the user-scoped configuration, so the primary uninstall cannot safely
+/// continue until its state is known.
 fn offer_system_scope(p: &Params) -> Result<()> {
     let probe = UninstallParams {
         scope: ServiceScope::System,
@@ -177,13 +178,9 @@ fn offer_system_scope(p: &Params) -> Result<()> {
         remove_ca: p.with_ca,
         dry_run: true,
     };
-    let plan = match uninstall::uninstall(&probe) {
-        Ok(plan) => plan,
-        Err(e) => {
-            log::debug!("system-scope probe failed (skipping offer): {e:#}");
-            return Ok(());
-        }
-    };
+    let plan = uninstall::uninstall(&probe).context(
+        "could not verify the system-scope service; refusing to remove user configuration",
+    )?;
     if plan.is_empty() {
         return Ok(());
     }
@@ -215,7 +212,9 @@ fn offer_system_scope(p: &Params) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        println!("removing the system-scope install (sudo may prompt for your password)…");
+        println!(
+            "removing the system-scope install (sudo may prompt for your password)…"
+        );
         escalate(p)
     }
     #[cfg(not(unix))]
@@ -245,13 +244,9 @@ fn remove_system_scope_if_present(p: &Params) -> Result<()> {
         remove_ca: p.with_ca,
         dry_run: true,
     };
-    let plan = match uninstall::uninstall(&base) {
-        Ok(plan) => plan,
-        Err(e) => {
-            log::debug!("system-scope probe failed (skipping): {e:#}");
-            return Ok(());
-        }
-    };
+    let plan = uninstall::uninstall(&base).context(
+        "could not verify the system-scope service; refusing to remove user configuration",
+    )?;
     if plan.is_empty() {
         return Ok(());
     }
@@ -338,7 +333,9 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
 /// admin-server daemon is, so only a unix host ever has one to deregister.
 #[cfg(unix)]
 fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
-    use netidx_admin::{admin_client, admin_server, admin_server_config::AdminServerConfig};
+    use netidx_admin::{
+        admin_client, admin_server, admin_server_config::AdminServerConfig,
+    };
     let cfg = match AdminServerConfig::load(&root.join("admin-server.json")) {
         Ok(c) => c,
         Err(_) => return, // no admin server here (workstation/publisher/hand-rolled)
@@ -348,7 +345,10 @@ fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
     }
     let Some(ca_addr) = cfg.ca_addr else { return };
     if dry_run {
-        println!("admin server: would deregister {} from the CA at {ca_addr}", cfg.listen);
+        println!(
+            "admin server: would deregister {} from the CA at {ca_addr}",
+            cfg.listen
+        );
         return;
     }
     let result = (|| -> Result<()> {
@@ -393,9 +393,6 @@ fn print_report(r: &UninstallReport, applied: bool) {
         }
     } else {
         println!("service: not installed");
-    }
-    if let Some(e) = &r.service_error {
-        println!("service uninstall reported error: {e}");
     }
     if r.removed.is_empty() && r.kept.is_empty() {
         return;

@@ -108,7 +108,10 @@ pub fn auto_approve_status(ca_dir: &Path, cfg: Option<&Path>) -> Result<Autorene
     let keytab = offline_ca::autorenew_keytab_path()?;
     let keytab_present = keytab.exists();
     let keytab_sealed = keytab_present
-        && std::fs::read(&keytab).ok().map(|b| netidx_tpm::is_sealed(&b)).unwrap_or(false);
+        && std::fs::read(&keytab)
+            .ok()
+            .map(|b| netidx_tpm::is_sealed(&b))
+            .unwrap_or(false);
     let slot_present = CAVault::exists(ca_dir)
         && CAVault::new(ca_dir.to_path_buf())
             .signing_slot_names()
@@ -118,7 +121,13 @@ pub fn auto_approve_status(ca_dir: &Path, cfg: Option<&Path>) -> Result<Autorene
         .and_then(|p| crate::admin_server_config::AdminServerConfig::load(p).ok())
         .and_then(|c| c.roles.ca.map(|ca| ca.autorenew.is_some()))
         .unwrap_or(false);
-    Ok(AutorenewStatus { slot_present, keytab, keytab_present, keytab_sealed, wired_in_config })
+    Ok(AutorenewStatus {
+        slot_present,
+        keytab,
+        keytab_present,
+        keytab_sealed,
+        wired_in_config,
+    })
 }
 
 // -- ca recovery -------------------------------------------------------------
@@ -143,7 +152,7 @@ pub async fn recovery_rotate(
         && admin_local::daemon_running(cfg).await
     {
         let new_pw = admin_local::rotate_recovery(cfg).await?;
-        ca_setup::show_recovery_password(ans, &new_pw);
+        ca_setup::show_recovery_password(ans, &new_pw).await?;
         return Ok(RecoveryRotateOutcome::HotSwapped);
     }
     if !CAVault::exists(&ca_dir) {
@@ -183,7 +192,7 @@ pub async fn recovery_rotate(
         &new_pw,
         recovery_policy(),
     )?;
-    ca_setup::show_recovery_password(ans, &new_pw);
+    ca_setup::show_recovery_password(ans, &new_pw).await?;
     Ok(RecoveryRotateOutcome::Offline { ca_dir })
 }
 
@@ -202,7 +211,8 @@ pub fn recovery_status(ca_dir: &Path) -> Result<RecoveryStatus> {
             .signing_slot_names()
             .map(|names| names.iter().any(|n| n == ca_vault::RECOVERY_ADMIN))
             .unwrap_or(false);
-    let keytab_present = offline_ca::autorenew_keytab_path().map(|k| k.exists()).unwrap_or(false);
+    let keytab_present =
+        offline_ca::autorenew_keytab_path().map(|k| k.exists()).unwrap_or(false);
     Ok(RecoveryStatus { slot_present, keytab_present })
 }
 
@@ -237,8 +247,8 @@ impl ExternalPending {
     const FILE: &'static str = "external_pending.json";
 
     pub fn store(&self, dir: &Path) -> Result<()> {
-        let bytes =
-            serde_json::to_vec_pretty(self).context("encoding the external-sign marker")?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .context("encoding the external-sign marker")?;
         atomic::write_atomic(&dir.join(Self::FILE), &bytes, 0o644)
     }
 
@@ -266,7 +276,10 @@ async fn external_ca_key(
 
 /// (Re-)emit a CSR for the CA cert over the existing key — for renewing an
 /// externally-signed CA cert (same key ⇒ glyph unchanged). Returns the CSR path.
-pub async fn external_emit_csr(ans: &mut dyn Answerer, ca_dir: PathBuf) -> Result<PathBuf> {
+pub async fn external_emit_csr(
+    ans: &mut dyn Answerer,
+    ca_dir: PathBuf,
+) -> Result<PathBuf> {
     let m = ExternalPending::load(&ca_dir)?;
     let san = if m.san.is_empty() {
         vec![SanEntry::Dns(m.cn.clone())]
@@ -356,7 +369,8 @@ pub async fn external_install_cert(
             },
         )
         .await?;
-        let cfg_path = server_setup::set_ca_autorenew(&offline_ca::autorenew_keytab_path()?)?;
+        let cfg_path =
+            server_setup::set_ca_autorenew(&offline_ca::autorenew_keytab_path()?)?;
         return Ok(ExternalInstallOutcome::FirstInstall { need, cfg_path });
     }
     // Already configured: this is a renewal. Keep autorenew wired (idempotent).

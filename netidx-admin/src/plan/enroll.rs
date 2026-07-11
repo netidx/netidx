@@ -464,15 +464,19 @@ pub async fn discover_networks(
         admin_servers.dedup();
         let mut identity = Err("no advertised admin server was reachable".to_string());
         for addr in &admin_servers {
-            let fetched =
-                tokio::time::timeout(IDENTITY_FETCH_TIMEOUT, admin_client::fetch_identity(*addr, kind))
-                    .await;
+            let fetched = tokio::time::timeout(
+                IDENTITY_FETCH_TIMEOUT,
+                admin_client::fetch_identity(*addr, kind),
+            )
+            .await;
             match fetched {
                 Ok(Ok(id)) => {
                     identity = Ok(id);
                     break;
                 }
-                Ok(Err(e)) => identity = Err(format_compact!("{addr}: {e:#}").into_string()),
+                Ok(Err(e)) => {
+                    identity = Err(format_compact!("{addr}: {e:#}").into_string())
+                }
                 Err(_) => {
                     identity = Err(format_compact!(
                         "{addr}: no response within {IDENTITY_FETCH_TIMEOUT:?}"
@@ -512,7 +516,9 @@ pub async fn discover_network(
             "Connect to an existing cluster",
             "Create a new cluster",
         ),
-        _ => (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster"),
+        _ => {
+            (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster")
+        }
     };
     // Decide first, discover second — so the flow is identical however many
     // clusters happen to be on the network.
@@ -570,7 +576,8 @@ async fn discover_into(
         "searching for a netidx cluster on the local network…",
         DISCOVERY_TIMEOUT,
     ));
-    let reports = discover_networks(DISCOVERY_TIMEOUT, kind, Some(DISCOVERY_SETTLE)).await;
+    let reports =
+        discover_networks(DISCOVERY_TIMEOUT, kind, Some(DISCOVERY_SETTLE)).await;
     let mut added = 0;
     for r in reports {
         if options.iter().any(|o| o.domain == r.domain) {

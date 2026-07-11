@@ -56,9 +56,11 @@ async fn bootstrap(
 /// match the CA uses to route the edit).
 fn route(map: &NetworkMap, at: &str) -> Result<SocketAddr> {
     let mut bases = BTreeSet::new();
-    for c in map.clusters.iter().filter(|c| {
-        c.state == crate::admin_proto::ClusterState::Active
-    }) {
+    for c in map
+        .clusters
+        .iter()
+        .filter(|c| c.state == crate::admin_proto::ClusterState::Active)
+    {
         if c.base == at {
             if let Some(server) = map.servers.iter().find(|s| {
                 s.cluster == Some(c.id)

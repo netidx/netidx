@@ -42,9 +42,11 @@ pub async fn list_service_servers(
         .await
         .context("fetching the network map")?;
     let mut out = Vec::new();
-    for s in map.servers.iter().filter(|s| {
-        s.state == crate::admin_proto::ServerState::Registered
-    }) {
+    for s in map
+        .servers
+        .iter()
+        .filter(|s| s.state == crate::admin_proto::ServerState::Registered)
+    {
         if let Some(cluster) = s.cluster
             && let Some(cluster) = map.clusters.iter().find(|c| c.id == cluster)
         {
@@ -76,12 +78,8 @@ pub async fn control_remote(
     op: ControlOp,
 ) -> Result<Vec<crate::admin_proto::ServiceUnit>> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
-    let map = admin_client::get_map_pinned(
-        sess.server,
-        NodeKind::Client,
-        &sess.identity,
-    )
-    .await?;
+    let map = admin_client::get_map_pinned(sess.server, NodeKind::Client, &sess.identity)
+        .await?;
     let target_server = map
         .servers
         .iter()

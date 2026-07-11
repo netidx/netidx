@@ -168,19 +168,24 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
     let for_user = resolve_for_user(p)?;
     let id = service_id(p, &for_user);
     let path = unit_path(p)?;
-    // CR codex for estokes: Ignoring this error and then deleting the unit makes
-    // `component service uninstall` report success even when `--now` failed and
-    // the daemon is still running. "Already stopped/not loaded" needs a narrow
-    // idempotent case; other disable/stop errors must propagate, and the unit file
-    // should only be removed after the service is confirmed inactive.
-    // Best-effort disable + stop; the unit may already be stopped.
-    let _ = run_systemctl(p.scope, &["disable", "--now", &id]);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    // The command result alone is not authoritative: systemctl may report an
+    // error after completing part (or all) of the requested transition. What
+    // makes it safe to remove the definition is the independently verified end
+    // state: no running supervisor and no boot-time enablement.
+    let transition = run_systemctl(p.scope, &["disable", "--now", &id]);
+    let active = systemctl_property(p.scope, &id, "ActiveState")?;
+    let enabled = systemctl_enabled_state(p.scope, &id)?;
+    verify_teardown(transition, &active, &enabled)?;
     if path.exists() {
         std::fs::remove_file(&path)
             .with_context(|| format!("removing unit file {path:?}"))?;
     }
     // daemon-reload after the file is gone so systemd forgets it.
-    let _ = run_systemctl(p.scope, &["daemon-reload"]);
+    run_systemctl(p.scope, &["daemon-reload"]).context("systemctl daemon-reload")?;
     Ok(())
 }
 
@@ -243,6 +248,87 @@ fn run_systemctl(scope: ServiceScope, args: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Query one stable systemd property. Unlike `is-active`, `show` distinguishes
+/// a real inactive/failed state from an inability to ask systemd at all.
+fn systemctl_property(scope: ServiceScope, id: &str, property: &str) -> Result<String> {
+    let mut cmd = systemctl_command(scope);
+    let property_arg = format!("--property={property}");
+    let out = cmd
+        .args(["show", property_arg.as_str(), "--value", id])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("querying systemd {property} for {id}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "systemctl show {property} {id} failed: {}{}",
+            out.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        );
+    }
+    let value = String::from_utf8(out.stdout)
+        .with_context(|| format!("systemd returned non-UTF-8 {property} for {id}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("systemd returned an empty {property} for {id}");
+    }
+    Ok(value.to_string())
+}
+
+/// `systemctl is-enabled` intentionally exits nonzero for the safe `disabled`
+/// state, so classify its stdout and reserve command errors for missing/unknown
+/// output.
+fn systemctl_enabled_state(scope: ServiceScope, id: &str) -> Result<String> {
+    let mut cmd = systemctl_command(scope);
+    let out = cmd
+        .args(["is-enabled", id])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("querying whether systemd unit {id} is enabled"))?;
+    let value = String::from_utf8(out.stdout)
+        .with_context(|| format!("systemd returned non-UTF-8 enablement for {id}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "systemctl is-enabled {id} returned no state: {}{}",
+            out.status,
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        );
+    }
+    Ok(value.to_string())
+}
+
+fn verify_uninstalled_state(active: &str, enabled: &str) -> Result<()> {
+    if !matches!(active, "inactive" | "failed") {
+        bail!("refusing to remove the unit while systemd ActiveState is {active:?}");
+    }
+    if !matches!(enabled, "disabled" | "masked" | "masked-runtime") {
+        bail!("refusing to remove the unit while systemd enablement is {enabled:?}");
+    }
+    Ok(())
+}
+
+fn verify_teardown(transition: Result<()>, active: &str, enabled: &str) -> Result<()> {
+    match verify_uninstalled_state(active, enabled) {
+        Ok(()) => Ok(()),
+        Err(state_err) => match transition {
+            Ok(()) => Err(state_err),
+            Err(command_err) => Err(state_err.context(command_err)),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -319,6 +405,36 @@ mod tests {
     fn system_service_id_includes_user() {
         let p = params(ServiceScope::System);
         assert_eq!(service_id(&p, "alice"), "netidx@alice.service");
+    }
+
+    #[test]
+    fn teardown_requires_inactive_and_disabled_end_state() {
+        for active in ["inactive", "failed"] {
+            for enabled in ["disabled", "masked", "masked-runtime"] {
+                verify_uninstalled_state(active, enabled).unwrap();
+            }
+        }
+        for active in ["active", "activating", "deactivating", "reloading"] {
+            assert!(verify_uninstalled_state(active, "disabled").is_err());
+        }
+        for enabled in ["enabled", "enabled-runtime", "linked", "static", "unknown"] {
+            assert!(verify_uninstalled_state("inactive", enabled).is_err());
+        }
+
+        // A command may return failure after reaching the requested state; the
+        // independently observed final state wins. Conversely, command success
+        // never excuses an unsafe final state.
+        verify_teardown(
+            Err(anyhow!("transient systemctl error")),
+            "inactive",
+            "disabled",
+        )
+        .unwrap();
+        assert!(verify_teardown(Ok(()), "active", "disabled").is_err());
+        let err = verify_teardown(Err(anyhow!("disable failed")), "active", "enabled")
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("disable failed") && err.contains("ActiveState"));
     }
 
     #[test]

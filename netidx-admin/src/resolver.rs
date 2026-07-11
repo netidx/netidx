@@ -63,8 +63,44 @@ impl ResolverConfig {
         // form keeps its relative paths.
         let mut resolved = self.0.clone();
         config::resolve_relative_includes(&mut resolved, path)?;
-        validate_permission_topology(&resolved)?;
+        let permissions = config::merge_perms_only(&resolved)?;
+        validate_permission_topology(&resolved, &permissions)?;
         Config::from_file(resolved).map(|_| ())
+    }
+
+    /// Preflight the hierarchy-dependent permission checks against a rendered
+    /// permissions file that has not been written yet. Other include files are
+    /// read normally; the matching prospective path is supplied from memory.
+    pub(crate) fn preflight_permission_topology(
+        &self,
+        path: &Path,
+        prospective: Option<(&Path, &config::PMap)>,
+    ) -> Result<()> {
+        let mut resolved = self.0.clone();
+        config::resolve_relative_includes(&mut resolved, path)?;
+        let config_parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let prospective = prospective.map(|(perms_path, perms)| {
+            let path = if perms_path.is_absolute() {
+                perms_path.to_path_buf()
+            } else {
+                config_parent.join(perms_path)
+            };
+            (path, perms)
+        });
+        let mut permissions = config::PMap::default();
+        for include in &resolved.include_permissions {
+            let include = Path::new(include.as_str());
+            let pmap = match prospective.as_ref() {
+                Some((path, perms)) if include == path => (*perms).clone(),
+                _ => config::load_perms(include)?,
+            };
+            config::merge_pmap(&mut permissions, pmap);
+        }
+        config::merge_pmap(&mut permissions, resolved.perms.clone());
+        validate_permission_topology(&resolved, &permissions)
     }
 
     /// Re-runs the existing `Config::from_file` validator on a clone.
@@ -73,7 +109,8 @@ impl ResolverConfig {
     /// Prefer [`Self::validate_for_path`] when the on-disk location is
     /// known.
     pub fn validate(&self) -> Result<()> {
-        validate_permission_topology(&self.0)?;
+        let permissions = config::merge_perms_only(&self.0)?;
+        validate_permission_topology(&self.0, &permissions)?;
         Config::from_file(self.0.clone()).map(|_| ())
     }
 
@@ -154,9 +191,11 @@ impl ResolverConfig {
 /// map during startup. Admin topology fanout must perform them before writing
 /// a config, otherwise a successful delegation can leave a resolver unable to
 /// restart.
-fn validate_permission_topology(cfg: &file::Config) -> Result<()> {
+fn validate_permission_topology(
+    cfg: &file::Config,
+    permissions: &config::PMap,
+) -> Result<()> {
     let root = cfg.parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
-    let permissions = config::merge_perms_only(cfg)?;
     for entry in permissions.0.keys() {
         let entry = NetidxPath::from(entry);
         if !NetidxPath::is_parent(root, &entry) {

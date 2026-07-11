@@ -463,9 +463,42 @@ pub async fn run_resolver(
     // controller because no child cluster existed yet.
     #[cfg(unix)]
     let mut install_delegation = None;
+    // `--parent-admin-server` is also the strict/non-mDNS way to name the
+    // existing network we are joining.  It only means "delegated child" when
+    // a subtree was supplied; without one this resolver is a peer in the
+    // cluster at `input.base`, exactly like the interactive blank-subtree
+    // choice above.
+    #[cfg(unix)]
+    let delegated_child = input.delegate_subtree.is_some();
+    // An explicit bootstrap can be a controller in some other cluster (the
+    // common strict-CLI case is adding EU-B through HQ-A). Discovery facts are
+    // intentionally scoped to that bootstrap server's own cluster, so select
+    // the requested peer cluster from the verified controller map before
+    // rendering referrals. Otherwise HQ-A's `/eu` child would become a
+    // nonsensical self-child on a resolver whose own base is `/eu`.
+    #[cfg(unix)]
+    let authoritative_peer_topology = if !delegated_child
+        && input.parent_admin_server.is_some()
+        && probe.have().and_then(|net| net.info.resolver_base.as_deref())
+            != Some(input.base.as_str())
+    {
+        let net =
+            probe.have().context("the explicit bootstrap network was not verified")?;
+        let controller = net
+            .info
+            .ca_addr
+            .context("the verified network reported no controller address")?;
+        let map =
+            admin_client::get_map_pinned(controller, NodeKind::Resolver, &net.identity)
+                .await
+                .context("fetching the authoritative map for peer-cluster topology")?;
+        Some(admin_client::cluster_topology_by_base(&map, &input.base)?)
+    } else {
+        None
+    };
     let mut parent = match input.parent_admin_server {
         None => input.explicit_parent.take(),
-        Some(parent_conf) => {
+        Some(parent_conf) if delegated_child => {
             #[cfg(unix)]
             {
                 if input.common.dry_run {
@@ -513,15 +546,24 @@ pub async fn run_resolver(
                 bail!("delegation (--parent-admin-server) is unix-only")
             }
         }
+        #[cfg(unix)]
+        Some(_) => input.explicit_parent.take(),
     };
     if parent.is_none()
-        && input.parent_admin_server.is_none()
-        && let Some(edge) = probe.have().and_then(|net| net.info.resolver_parent.as_ref())
+        && !delegated_child
+        && let Some(edge) = authoritative_peer_topology
+            .as_ref()
+            .and_then(|topology| topology.parent.as_ref())
+            .or_else(|| probe.have().and_then(|net| net.info.resolver_parent.as_ref()))
     {
         parent = Some(edge_to_parent_ref(edge));
     }
-    let joining_children = if input.parent_admin_server.is_none() {
-        probe.have().map(|net| net.info.resolver_children.clone()).unwrap_or_default()
+    let joining_children = if !delegated_child {
+        authoritative_peer_topology
+            .as_ref()
+            .map(|topology| topology.children.clone())
+            .or_else(|| probe.have().map(|net| net.info.resolver_children.clone()))
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -1416,7 +1458,9 @@ async fn enroll_admin_server(
                 ans.warn(
                     "the enrollment request expired before an admin approved it; \
                      this resolver works, but won't be advertised to future installs \
-                     from this host. Re-run the install to queue a new enrollment.",
+                     from this host. This does not invalidate the resolver install; \
+                     the optional admin-server component can be enrolled and \
+                     configured separately later.",
                 );
                 return Ok(false);
             }

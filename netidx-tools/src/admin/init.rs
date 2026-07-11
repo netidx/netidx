@@ -295,12 +295,11 @@ pub(crate) struct WorkstationFlags {
     /// units; pass this when you don't want a container service.
     #[arg(long = "no-container")]
     no_container: bool,
-    /// Override the perms-file owner. By default the workstation
-    /// install grants `<base>` → `<current-unix-user>` → `swlpd` so
-    /// the operator has full rights to the local-resolver namespace
-    /// without further setup. Pass `--owner alice` to grant `alice`
-    /// instead — useful when installing as root on behalf of another
-    /// user. Implies `--with-perms` (and conflicts with `--no-perms`).
+    /// Override the perms-file owner. By default the workstation install grants
+    /// `<base>` → `<current Local-auth user>` → `swlpd` so the operator has full
+    /// rights immediately (a passwd username on Unix, `DOMAIN\user` on Windows).
+    /// Pass an explicit identity when installing on behalf of another user.
+    /// Conflicts with `--no-perms`.
     #[arg(long = "owner", conflicts_with = "no_perms")]
     owner: Option<String>,
     /// Skip the auto-seeded perms file entirely. The workstation
@@ -315,58 +314,6 @@ pub(crate) struct WorkstationFlags {
     perms_path: Option<PathBuf>,
     #[command(flatten)]
     common: CommonFlags,
-}
-
-/// Resolve the workstation owner: explicit `--owner` first, else the
-/// current Unix user via `nix::unistd`. On unix, bails when the current
-/// uid has no passwd entry (distroless / scratch containers, uid-mapped
-/// namespaces, some CI runners) — silently producing `None` here would
-/// flow through to an empty `PMap`, which the local-auth resolver
-/// treats as deny-everything and the install would report success while
-/// being fundamentally broken. Operators in that situation must pass
-/// `--owner <name>` (or `--no-perms` to skip perms generation
-/// entirely). Unix-only: the workstation role (its sole caller) is
-/// unix-only.
-#[cfg(unix)]
-fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
-    if let Some(s) = provided {
-        return Ok(Some(ArcStr::from(s.as_str())));
-    }
-    let uid = nix::unistd::Uid::current();
-    match nix::unistd::User::from_uid(uid) {
-        Ok(Some(u)) => Ok(Some(ArcStr::from(u.name.as_str()))),
-        Ok(None) => bail!(
-            "could not resolve current uid ({uid}) to a passwd entry. \
-             This usually means you're running in a container or namespace \
-             without an /etc/passwd entry for your uid. Pass --owner <name> \
-             to name the workstation owner explicitly, or --no-perms to skip \
-             perms generation entirely."
-        ),
-        Err(e) => bail!(
-            "getpwuid_r failed for current uid ({uid}): {e}. \
-             Pass --owner <name> or --no-perms to proceed."
-        ),
-    }
-}
-
-/// The owner is the identity the local resolver will attribute to this
-/// user under Local auth. On Windows that is the down-level
-/// (SAM-compatible) name `DOMAIN\username` produced by
-/// `LookupAccountSidW` on the pipe server side; `GetUserNameEx` with the
-/// same format yields exactly that string, so the perms owner matches the
-/// authenticated identity by construction (no env-var guessing).
-#[cfg(windows)]
-fn resolve_workstation_owner(provided: Option<String>) -> Result<Option<ArcStr>> {
-    match provided {
-        Some(s) => Ok(Some(ArcStr::from(s.as_str()))),
-        None => {
-            let name = super::windows_sam_name().context(
-                "resolving the workstation owner. Pass --owner <DOMAIN\\user> \
-                 explicitly, or --no-perms to skip perms generation.",
-            )?;
-            Ok(Some(ArcStr::from(name.as_str())))
-        }
-    }
 }
 
 /// `workstation install` needs the activation supervisor + Local auth,
@@ -394,26 +341,23 @@ fn workstation_input(
     use netidx_admin::plan::install::workstation::WorkstationInput;
     let explicit_parent =
         if f.parent.any_set() { f.parent.to_parent_ref(&f.base)? } else { None };
-    let owner =
-        if f.no_perms { None } else { resolve_workstation_owner(f.owner.clone())? };
-    Ok(WorkstationInput {
-        common: f.common.install_common(),
-        explicit_parent,
-        admin_server: f.admin_server,
-        default_auth: f.default_auth,
-        base: f.base,
-        listen_port: f.listen_port,
-        local_socket: f.local_socket,
-        client_config_path: f.client_config_path,
-        resolver_config_path: f.resolver_config_path,
-        units_dir: f.units_dir,
-        netidx_binary: f.netidx_binary,
-        key_protection: lib_kp(f.key_protection),
-        with_container: !f.no_container,
-        owner,
-        with_perms_file: !f.no_perms,
-        perms_path: f.perms_path,
-    })
+    let mut input = WorkstationInput::defaults(f.common.install_common());
+    input.explicit_parent = explicit_parent;
+    input.admin_server = f.admin_server;
+    input.default_auth = f.default_auth;
+    input.base = f.base;
+    input.listen_port = f.listen_port;
+    input.local_socket = f.local_socket;
+    input.client_config_path = f.client_config_path;
+    input.resolver_config_path = f.resolver_config_path;
+    input.units_dir = f.units_dir;
+    input.netidx_binary = f.netidx_binary;
+    input.key_protection = lib_kp(f.key_protection);
+    input.with_container = !f.no_container;
+    input.owner = f.owner.map(ArcStr::from);
+    input.with_perms_file = !f.no_perms;
+    input.perms_path = f.perms_path;
+    Ok(input)
 }
 
 #[derive(Args, Debug)]
@@ -527,7 +471,6 @@ pub(super) fn parse_id_map_answer(answer: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-
 
 /// The `--key-protection` flag: like [`choose_key_protection`]'s
 /// interactive choice, but scriptable. `password` is inherently

@@ -26,7 +26,11 @@ pub(crate) fn make_flag_answerer(
     password_stdin: bool,
     accept_glyph: Option<&str>,
 ) -> Result<FlagAnswerer> {
-    let password = read_secret(password_file, password_stdin, ("--password-file", "--password-stdin"))?;
+    let password = read_secret(
+        password_file,
+        password_stdin,
+        ("--password-file", "--password-stdin"),
+    )?;
     Ok(FlagAnswerer::single(password, parse_glyph(accept_glyph)?))
 }
 
@@ -173,7 +177,8 @@ impl SecretSlot {
 // founding superuser, and a CA recovery unlock each get their own file.
 const KEY_FLAGS: (&str, &str) = ("--key-password-file", "--key-password-stdin");
 const ADMIN_FLAGS: (&str, &str) = ("--admin-password-file", "--admin-password-stdin");
-const RECOVERY_FLAGS: (&str, &str) = ("--recovery-password-file", "--recovery-password-stdin");
+const RECOVERY_FLAGS: (&str, &str) =
+    ("--recovery-password-file", "--recovery-password-stdin");
 // The single-secret flag for commands that take exactly one password (remote
 // admin, `ca init`, `component tls join`) — no collapse is possible with one.
 const PASSWORD_FLAGS: (&str, &str) = ("--password-file", "--password-stdin");
@@ -240,7 +245,9 @@ impl FlagAnswerer {
 /// Parse an out-of-band `--accept-glyph` fingerprint (if present).
 pub(crate) fn parse_glyph(accept_glyph: Option<&str>) -> Result<Option<Fingerprint>> {
     match accept_glyph {
-        Some(s) => Ok(Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?)),
+        Some(s) => {
+            Ok(Some(Fingerprint::parse_text(s).context("parsing --accept-glyph")?))
+        }
         None => Ok(None),
     }
 }
@@ -313,7 +320,10 @@ impl Answerer for FlagAnswerer {
         provided.ok_or_else(|| missing(field))
     }
 
-    async fn select_network(&mut self, _networks: &[NetworkOption]) -> Result<NetworkChoice> {
+    async fn select_network(
+        &mut self,
+        _networks: &[NetworkOption],
+    ) -> Result<NetworkChoice> {
         // Discovery is interactive-only; the strict CLI takes an explicit
         // --admin-server instead and never reaches this.
         Err(missing(Field::SelectNetwork))
@@ -324,7 +334,9 @@ impl Answerer for FlagAnswerer {
             Field::KeyPassword => &self.key,
             Field::AdminPassword | Field::AdminPasswordConfirm => &self.admin,
             Field::RecoveryPassword => &self.recovery,
-            other => bail!("internal error: secret() requested for non-secret field {other:?}"),
+            other => {
+                bail!("internal error: secret() requested for non-secret field {other:?}")
+            }
         };
         slot.resolve(field, provided)
     }
@@ -370,16 +382,16 @@ impl Answerer for FlagAnswerer {
         let _ = writeln!(std::io::stderr(), "warning: {m}");
     }
 
-    fn show_recovery_password(&mut self, password: &str) {
+    async fn show_recovery_password(&mut self, password: &str) -> Result<()> {
         // The one-time, never-stored CA break-glass secret. Boxed on stdout
         // (the operator must copy it) with the store-it-in-a-safe warning.
         let bar = "─".repeat(password.chars().count() + 2);
         let mut out = std::io::stdout();
-        let _ = writeln!(out);
-        let _ = writeln!(out, "┌{bar}┐");
-        let _ = writeln!(out, "│ {password} │");
-        let _ = writeln!(out, "└{bar}┘");
-        let _ = writeln!(
+        writeln!(out)?;
+        writeln!(out, "┌{bar}┐")?;
+        writeln!(out, "│ {password} │")?;
+        writeln!(out, "└{bar}┘")?;
+        writeln!(
             out,
             "This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.\n\
              It is shown ONCE and never stored. It is the only OFF-box credential\n\
@@ -387,6 +399,8 @@ impl Answerer for FlagAnswerer {
              own credential. If you lose it AND this machine, the CA is unrecoverable;\n\
              while the machine lives you can mint a fresh one with\n\
              `netidx admin ca recovery rotate`.\n"
-        );
+        )?;
+        out.flush().context("flushing the CA recovery password")?;
+        Ok(())
     }
 }

@@ -226,6 +226,72 @@ pub struct RenderedTemplate {
 }
 
 impl RenderedTemplate {
+    /// Validate and read every fallible input that can be checked without
+    /// touching an install destination. This is deliberately modest: each
+    /// final file write is already atomic, and config validation that opens
+    /// the final TLS/perms paths still has to run after those dependencies are
+    /// installed. The useful guarantee here is that a missing later TLS source,
+    /// invalid unit set, invalid id-map, or serialization error is found before
+    /// the first destination write.
+    pub fn preflight(&self) -> Result<()> {
+        activation::validate(&self.units).context("activation units validation")?;
+
+        if let Some((path, map)) = &self.id_map_file
+            && !path.exists()
+        {
+            map.validate().context("id-map structural validation")?;
+        }
+
+        if let Some((_, config)) = &self.client_config {
+            serde_json::to_vec_pretty(&config.0)
+                .context("serializing client config during preflight")?;
+        }
+        if let Some((path, config)) = &self.resolver_config {
+            serde_json::to_vec_pretty(config.as_file())
+                .context("serializing resolver config during preflight")?;
+            let prospective_perms =
+                self.perms_file.as_ref().map(|(path, perms)| (path.as_path(), perms));
+            config
+                .preflight_permission_topology(path, prospective_perms)
+                .context("validating resolver permission topology during preflight")?;
+        }
+        if let Some((_, permissions)) = &self.perms_file {
+            serde_json::to_vec_pretty(permissions)
+                .context("serializing permissions during preflight")?;
+        }
+
+        // Read the complete source bundle before install_identity writes the
+        // first destination. In particular, don't install certificate.pem and
+        // only then discover that private.key or trusted.pem is unreadable.
+        for job in &self.tls_install {
+            for source in [&job.certificate_src, &job.private_key_src, &job.trusted_src] {
+                let bytes = zeroize::Zeroizing::new(std::fs::read(source).with_context(
+                    || {
+                        format!(
+                            "reading TLS source {} during preflight",
+                            source.display()
+                        )
+                    },
+                )?);
+                if bytes.is_empty() {
+                    anyhow::bail!("TLS source {} is empty", source.display());
+                }
+            }
+            let sidecar = tlsmod::sealed_sidecar(&job.private_key_src);
+            if sidecar.exists() {
+                let _ = zeroize::Zeroizing::new(std::fs::read(&sidecar).with_context(
+                    || {
+                        format!(
+                            "reading sealed TLS key sidecar {} during preflight",
+                            sidecar.display()
+                        )
+                    },
+                )?);
+            }
+        }
+        Ok(())
+    }
+
     /// Apply: install TLS identities, validate every artifact, then
     /// write atomically.
     ///
@@ -247,11 +313,13 @@ impl RenderedTemplate {
     /// - Per-config `save()` re-validates internally, so the final
     ///   write is gated on a post-install validation pass.
     ///
-    /// **No rollback** on partial failure: a crash between, say, the
-    /// client save and the resolver save leaves the client save on
-    /// disk. The atomic primitives keep each individual file
-    /// consistent, but the bundle is not transactional.
+    /// A preflight pass catches fallible inputs before the first destination
+    /// write. There is intentionally no multi-file journal: the atomic
+    /// primitives keep each file consistent, while interruption between files
+    /// may leave a partial but parseable bundle.
     pub fn apply(&self) -> Result<()> {
+        self.preflight()?;
+
         // 1) Install TLS identities first so validators can find them.
         for job in &self.tls_install {
             tlsmod::install_identity(&tlsmod::InstallIdentity {
@@ -264,17 +332,14 @@ impl RenderedTemplate {
             .with_context(|| format!("installing TLS identity {}", job.cn))?;
         }
 
-        // 2) Structural validate units as a set.
-        activation::validate(&self.units).context("activation units validation")?;
-
-        // 3) Save perms file before any config validation: resolver
+        // 2) Save perms file before any config validation: resolver
         // configs that reference it via `include_permissions` would
         // otherwise fail to validate on first apply.
         if let Some((p, m)) = &self.perms_file {
             perms::save_perms(p, m).with_context(|| format!("saving perms to {p:?}"))?;
         }
 
-        // 3.5) Drop the starter id-map JSON in place, but only when
+        // 2.5) Drop the starter id-map JSON in place, but only when
         // the target file doesn't already exist — operators who have
         // hand-edited it would not want a re-run of `init` to flatten
         // their map back to empty.
@@ -285,7 +350,7 @@ impl RenderedTemplate {
                 .with_context(|| format!("saving id-map to {p:?}"))?;
         }
 
-        // 4) Save configs (each re-validates internally).
+        // 3) Save configs (each re-validates internally).
         if let Some((p, c)) = &self.client_config {
             c.save(p).with_context(|| format!("saving client config to {p:?}"))?;
         }
@@ -293,7 +358,7 @@ impl RenderedTemplate {
             r.save(p).with_context(|| format!("saving resolver config to {p:?}"))?;
         }
 
-        // 5) Save activation units.
+        // 4) Save activation units.
         if let Some(dir) = &self.units_dir
             && !self.units.is_empty()
         {

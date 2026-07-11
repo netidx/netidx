@@ -11,7 +11,7 @@
 //! step is a no-op (NTFS rename atomicity does not require it; there
 //! is no portable way to fsync a directory handle on Windows).
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{io::Write, path::Path};
 
@@ -50,6 +50,28 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     // directory fsync to make the dirent change durable.
     #[cfg(unix)]
     fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
+    Ok(())
+}
+
+/// Atomically publish a newly-created directory by renaming it to a sibling
+/// destination that must not already exist. The caller builds all sensitive
+/// state under `src`; until this succeeds, dropping its temporary-directory
+/// owner rolls the state back.
+pub fn publish_dir(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        bail!("refusing to replace existing directory {dst:?}");
+    }
+    let raw_parent = dst
+        .parent()
+        .ok_or_else(|| anyhow!("directory publish target {dst:?} has no parent"))?;
+    let parent =
+        if raw_parent.as_os_str().is_empty() { Path::new(".") } else { raw_parent };
+    #[cfg(not(unix))]
+    let _ = parent;
+    std::fs::rename(src, dst)
+        .with_context(|| format!("publishing staged directory {src:?} as {dst:?}"))?;
+    #[cfg(unix)]
+    fsync_dir(parent).with_context(|| format!("fsync parent dir {parent:?}"))?;
     Ok(())
 }
 
@@ -110,5 +132,23 @@ mod tests {
         let p = dir.path().join("nested/sub/dir/data");
         write_atomic(&p, b"x", 0o644).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"x");
+    }
+
+    #[test]
+    fn publishes_new_directory_without_replacing_existing_state() {
+        let parent = tempfile::tempdir().unwrap();
+        let src = parent.path().join("staged");
+        let dst = parent.path().join("live");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("value"), b"ready").unwrap();
+        publish_dir(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(dst.join("value")).unwrap(), b"ready");
+
+        let other = parent.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(publish_dir(&other, &dst).is_err());
+        assert!(other.exists());
+        assert_eq!(std::fs::read(dst.join("value")).unwrap(), b"ready");
     }
 }

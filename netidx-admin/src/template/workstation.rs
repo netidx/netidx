@@ -103,9 +103,9 @@ pub struct WorkstationParams {
     /// `perms_seed = None && with_perms_file = true` that produces
     /// an empty perms map.
     ///
-    /// The CLI fills this from `nix::unistd::User::from_uid(getuid())`
-    /// so a `admin workstation install` run as `alice` grants `alice`
-    /// the local-resolver namespace. Tests pass an explicit name.
+    /// The shared install planner resolves this through
+    /// [`crate::local_identity::current_user`] so every frontend grants the
+    /// same identity that Local auth will report. Tests pass an explicit name.
     pub owner: Option<ArcStr>,
     /// Initial perms map. `None` + `with_perms_file = true` +
     /// `owner = Some(...)` auto-seeds `<base>` → `<owner>` → `swlpd`.

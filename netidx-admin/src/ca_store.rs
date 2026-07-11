@@ -22,7 +22,10 @@
 //! wire-supplied string that becomes a file name): anything but
 //! `[0-9a-f]{32}` is rejected (no path traversal).
 
-use crate::{atomic, admin_proto::{EnrollmentRequest, NodeKind}};
+use crate::{
+    admin_proto::{EnrollmentRequest, NodeKind},
+    atomic,
+};
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};

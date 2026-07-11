@@ -57,12 +57,8 @@ fn print_human(networks: &[DiscoveredNetworkReport], identicon: bool) {
     }
     for n in networks {
         println!("network {:?}", n.domain);
-        let addrs = n
-            .admin_servers
-            .iter()
-            .map(|a| a.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let addrs =
+            n.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
         println!("  admin server(s): {addrs}");
         match &n.identity {
             Ok(id) => {

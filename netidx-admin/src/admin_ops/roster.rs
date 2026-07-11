@@ -63,7 +63,8 @@ pub async fn add_role_admin(
     guard_not_reserved(name)?;
     match target {
         AdminTarget::Local { cfg_path } => {
-            admin_local::add_role_admin(cfg_path, name, new_password.as_str(), policy).await
+            admin_local::add_role_admin(cfg_path, name, new_password.as_str(), policy)
+                .await
         }
         AdminTarget::Remote { session } => {
             admin_client::add_role_admin(
@@ -111,7 +112,9 @@ pub async fn set_admin_policy(
 pub async fn remove_admin(target: &AdminTarget, name: &str) -> Result<()> {
     guard_not_reserved(name)?;
     match target {
-        AdminTarget::Local { cfg_path } => admin_local::remove_admin(cfg_path, name).await,
+        AdminTarget::Local { cfg_path } => {
+            admin_local::remove_admin(cfg_path, name).await
+        }
         AdminTarget::Remote { session } => {
             admin_client::remove_admin(
                 session.server,

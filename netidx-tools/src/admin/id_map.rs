@@ -140,9 +140,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
             add_user(file, name, uid, primary_group, groups)
         }
         Cmd::RemoveUser { file, name } => remove_user(resolve(file)?, name),
-        Cmd::AddMember { file, name, group } => {
-            add_member(resolve(file)?, name, group)
-        }
+        Cmd::AddMember { file, name, group } => add_member(resolve(file)?, name, group),
         Cmd::RemoveMember { file, name, group } => {
             remove_member(resolve(file)?, name, group)
         }

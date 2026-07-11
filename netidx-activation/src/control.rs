@@ -14,6 +14,7 @@
 //! unix-socket connect) is `#[cfg(unix)]`.
 
 use anyhow::{Context, Result, bail};
+use netidx_derive::Pack;
 use serde_derive::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,30 +31,39 @@ const MAX_MSG: usize = 1 << 20;
 /// regardless of the unit's crash-restart policy (that policy governs
 /// *crash* behavior, not an operator action); `Stop` latches the unit
 /// stopped so it is not auto-restarted until an explicit `Start`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub enum ControlOp {
+    #[pack(tag(0))]
     Start,
+    #[pack(tag(1))]
     Stop,
+    #[pack(tag(2))]
     Restart,
+    #[pack(tag(3))]
     Status,
     /// Reload the supervisor's unit directory from disk (the control-plane
     /// equivalent of unix SIGHUP, and the only reload trigger on Windows).
     /// Supervisor-global — the `units` list is ignored — and replies with
     /// the post-reload unit set and their states. Added after the original
     /// four ops; an older peer that doesn't know it simply never sends it.
+    #[pack(tag(4))]
     Reload,
 }
 
 /// A unit's runtime state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub enum UnitState {
     /// Defined but never started (e.g. an OnAccess unit awaiting access).
+    #[pack(tag(0))]
     NotStarted,
     /// Running, with its pid if we can read it.
+    #[pack(tag(1))]
     Running { pid: Option<u32> },
     /// Explicitly stopped — will not auto-restart until started.
+    #[pack(tag(2))]
     Stopped,
     /// The process exited on its own and was not (yet) restarted.
+    #[pack(tag(3))]
     Died,
 }
 

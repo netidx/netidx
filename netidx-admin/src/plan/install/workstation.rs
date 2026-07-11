@@ -6,8 +6,9 @@
 //! local-only workstation onto a network without a reinstall.
 
 use super::{
-    InstallCommon, finish_with, install_renew_unit, network_provenance, prompt_ip_or_addr,
-    prompt_resolver_tls_name, resolve_netidx_binary, resolve_units_dir, suggest_client_san,
+    InstallCommon, finish_with, install_renew_unit, network_provenance,
+    prompt_ip_or_addr, prompt_resolver_tls_name, resolve_netidx_binary,
+    resolve_units_dir, suggest_client_san,
 };
 use crate::{
     admin_proto::NodeKind,
@@ -27,8 +28,9 @@ use arcstr::ArcStr;
 use compact_str::format_compact;
 use std::{net::SocketAddr, path::PathBuf};
 
-/// Typed inputs for [`run_workstation`] — the resolved form of the clap
-/// `WorkstationFlags`.
+/// Typed inputs for [`run_workstation`]. Frontends begin with
+/// [`WorkstationInput::defaults`] and apply only their explicit overrides; the
+/// planner resolves environment-derived values such as the Local-auth owner.
 #[cfg(any(unix, windows))]
 pub struct WorkstationInput {
     /// A parent referral fully built from `--parent-*` flags. `Some` means the
@@ -60,7 +62,8 @@ pub struct WorkstationInput {
     pub key_protection: Option<KeyProtArg>,
     /// Emit the default `container` activation unit.
     pub with_container: bool,
-    /// The perms-file owner, already resolved (`None` ⇒ no perms file).
+    /// Explicit perms-file owner. When permissions are enabled, `None` resolves
+    /// to the current Local-auth identity in the shared planner.
     pub owner: Option<ArcStr>,
     /// Whether to write the auto-seeded perms file.
     pub with_perms_file: bool,
@@ -68,6 +71,41 @@ pub struct WorkstationInput {
     pub perms_path: Option<PathBuf>,
     /// Install-wide flags.
     pub common: InstallCommon,
+}
+
+impl WorkstationInput {
+    /// Safe frontend-independent defaults for a guided workstation install.
+    /// Expert frontends apply explicit overrides after constructing this value.
+    pub fn defaults(common: InstallCommon) -> Self {
+        Self {
+            explicit_parent: None,
+            admin_server: None,
+            default_auth: None,
+            base: "/local".to_string(),
+            listen_port: None,
+            local_socket: None,
+            client_config_path: None,
+            resolver_config_path: None,
+            units_dir: None,
+            netidx_binary: None,
+            key_protection: None,
+            with_container: true,
+            owner: None,
+            with_perms_file: true,
+            perms_path: None,
+            common,
+        }
+    }
+
+    fn resolve_owner(mut self) -> Result<Self> {
+        if self.with_perms_file && self.owner.is_none() {
+            self.owner = Some(crate::local_identity::current_user().context(
+                "resolving the workstation permissions owner. Supply an explicit \
+                 owner, or explicitly disable permissions generation",
+            )?);
+        }
+        Ok(self)
+    }
 }
 
 /// Typed inputs for [`run_workstation_join`].
@@ -90,6 +128,9 @@ pub async fn run_workstation(
     ans: &mut dyn Answerer,
     input: WorkstationInput,
 ) -> Result<Option<ServiceScope>> {
+    // Resolve before discovery or enrollment, so an unnameable Local-auth user
+    // fails before any network or disk changes.
+    let input = input.resolve_owner()?;
     let WorkstationInput {
         explicit_parent,
         admin_server,
@@ -248,7 +289,9 @@ pub async fn run_workstation_join(
     // it via `--accept-glyph`); otherwise discover it (interactive only — the
     // strict answerer disables discovery, so strict `join` needs `--admin-server`).
     let probe = match input.admin_server {
-        Some(addr) => enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?,
+        Some(addr) => {
+            enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?
+        }
         None => enroll::discover_network(ans, NodeKind::Workstation).await?,
     };
     let net = probe.have().context(
@@ -353,4 +396,48 @@ async fn prompt_parent_referral(
         },
         identity,
     )))
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn common() -> InstallCommon {
+        InstallCommon {
+            dry_run: true,
+            force: false,
+            no_units: false,
+            with_service: false,
+            no_service: false,
+        }
+    }
+
+    #[test]
+    fn defaults_enable_a_usable_workstation() {
+        let input = WorkstationInput::defaults(common());
+        assert_eq!(input.base, "/local");
+        assert!(input.with_container);
+        assert!(input.with_perms_file);
+        assert!(input.owner.is_none(), "owner is resolved after overrides");
+    }
+
+    #[test]
+    fn enabled_permissions_resolve_the_exact_local_identity() {
+        let input = WorkstationInput::defaults(common()).resolve_owner().unwrap();
+        assert_eq!(input.owner.unwrap(), crate::local_identity::current_user().unwrap());
+    }
+
+    #[test]
+    fn explicit_permission_opt_out_does_not_resolve_an_owner() {
+        let mut input = WorkstationInput::defaults(common());
+        input.with_perms_file = false;
+        assert!(input.resolve_owner().unwrap().owner.is_none());
+    }
+
+    #[test]
+    fn explicit_owner_is_preserved() {
+        let mut input = WorkstationInput::defaults(common());
+        input.owner = Some(ArcStr::from("chosen-user"));
+        assert_eq!(input.resolve_owner().unwrap().owner.unwrap(), "chosen-user");
+    }
 }
