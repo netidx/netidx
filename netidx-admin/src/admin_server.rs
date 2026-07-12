@@ -609,6 +609,14 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     } else {
         None
     };
+    // Reconcile the current CRL on every controller start. This is especially
+    // important after offline disaster recovery: the superseded controller
+    // certificate was revoked before the replacement daemon existed to do the
+    // ordinary immediate fanout. Startup is the first safe moment to push it.
+    if state.ca.is_some() {
+        let state = state.clone();
+        tokio::spawn(async move { reconcile_crl_on_start(state).await });
+    }
     serve_on(listener, acceptor, state).await
 }
 
@@ -3355,6 +3363,34 @@ async fn push_crl_to_peers(
     results.append(&mut remote);
     results.sort_by_key(|result| result.server);
     results
+}
+
+async fn reconcile_crl_on_start(state: Arc<Server>) {
+    let Some(ca) = state.ca.as_ref() else { return };
+    let path = ca.store.lock().crl_path();
+    let crl_pem = match std::fs::read_to_string(&path) {
+        Ok(crl) => crl,
+        Err(e) => {
+            warn!("admin-server: startup CRL reconciliation skipped: {e}");
+            return;
+        }
+    };
+    let operation_id = admin_proto::OperationId::new();
+    audit(
+        ca.dir(),
+        "(startup)",
+        "fanout-crl",
+        &format!("operation {operation_id}: startup reconciliation"),
+        Duration::ZERO,
+    );
+    for result in push_crl_to_peers(&state, &crl_pem, operation_id).await {
+        if let Some(error) = result.error {
+            warn!(
+                "admin-server: startup CRL reconciliation {} at {} failed: {}",
+                result.server, result.addr, error
+            );
+        }
+    }
 }
 
 async fn handle_revoke(

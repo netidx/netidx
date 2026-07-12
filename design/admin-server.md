@@ -335,6 +335,45 @@ failed re-seal aborts the install loudly rather than degrading to
 plaintext. Recovery from a cleared TPM is re-issue — one command,
 which is the point of the whole renewal chapter: keys are disposable.
 
+### Restoring a controller on replacement hardware
+
+The CA directory is portable even though daemon credentials are not. Its
+`vault.json` contains a `recovery` signing slot whose password is kept off-box;
+that slot unwraps the CA master key without the old TPM. A usable backup must
+contain the complete CA directory (certificate, vault, issuance index, CRL,
+network map, delegation state, and trust bundle) plus `admin-server.json` and
+the resolver/configuration files. The sealed `autorenew.keytab` and TLS keys
+are deliberately not recovery assets.
+
+With the old daemon stopped or gone, restore those files and run:
+
+```text
+netidx admin ca recover-controller \
+    --ca-dir /restored/ca \
+    --config /restored/admin-server.json \
+    --listen 10.0.0.20:4565 \
+    --recovery-password-stdin
+```
+
+The command accepts only the off-box `recovery` slot, verifies the config's CA
+fingerprint and controller UUID against `netmap.json`, and then:
+
+- generates and seals a fresh serving key on the replacement machine;
+- issues a serving certificate with the **same** controller UUID and controller
+  URI (clients retain the same administrative identity);
+- atomically replaces the `autorenew` vault slot and seals its new keytab on
+  the replacement machine;
+- revokes every superseded live serving certificate for that controller and
+  republishes the CRL;
+- updates the controller's authoritative map address and rewrites
+  `admin-server.json` to the restored CA's canonical paths.
+
+On first start the recovered controller reconciles the new CRL to every
+registered admin server. Other co-located TLS identities whose keys were sealed
+to the failed machine are re-enrolled normally after the controller is back.
+`--insecure-no-tpm` is an explicit test-only fallback and leaves both new
+machine credentials in plaintext.
+
 ## Per-admin policy (vault slots)
 
 `Policy` gained two fields:

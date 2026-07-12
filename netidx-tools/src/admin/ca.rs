@@ -86,6 +86,9 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: RecoveryCmd,
     },
+    /// rebind a restored CA controller to replacement hardware, preserving its
+    /// immutable identity while replacing every machine-sealed credential
+    RecoverController(RecoverControllerArgs),
     /// manage an externally-signed (intermediate) CA: (re-)emit its CSR or
     /// install a signed certificate
     External {
@@ -172,6 +175,27 @@ pub(crate) enum RecoveryCmd {
 pub(crate) struct RecoveryRotateArgs {
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RecoverControllerArgs {
+    /// Restored CA directory. Defaults to the normal local CA directory.
+    #[arg(long)]
+    pub ca_dir: Option<PathBuf>,
+    /// Restored admin-server config. Defaults to the discovered local config.
+    /// Its old serving-file paths may be unusable; identity fields are checked
+    /// against the restored CA and network map before replacement.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// New admin-server listen address. Defaults to the restored config value.
+    #[arg(long)]
+    pub listen: Option<SocketAddr>,
+    /// Proceed without TPM/Secure-Enclave sealing. This writes the replacement
+    /// autorenew credential and serving key in plaintext. Test CAs only.
+    #[arg(long = "insecure-no-tpm")]
+    pub insecure_no_tpm: bool,
+    #[command(flatten)]
+    pub recovery: RecoveryAuth,
 }
 
 #[derive(Args, Debug)]
@@ -723,6 +747,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::RemoveServer(p) => remove_server(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
+        Cmd::RecoverController(args) => recover_controller(args),
         Cmd::External { cmd } => external(cmd),
     }
 }
@@ -1100,6 +1125,47 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
             println!("rotated the recovery password for the CA at {}", ca_dir.display())
         }
     }
+    Ok(())
+}
+
+fn recover_controller(a: RecoverControllerArgs) -> Result<()> {
+    let ca_dir = ca_dir_for(a.ca_dir)?;
+    let config = match a.config {
+        Some(path) => path,
+        None => paths::discover_admin_server_config().context(
+            "no restored admin-server config found; pass --config <admin-server.json>",
+        )?,
+    };
+    let mut ans = a.recovery.answerer()?;
+    let out = runtime()?.block_on(slots_ops::recover_controller(
+        &mut ans,
+        ca_dir,
+        config.clone(),
+        a.listen,
+        a.insecure_no_tpm,
+    ))?;
+    println!("recovered CA controller {}", out.server_id);
+    println!("  listen:       {}", out.listen);
+    println!("  config:       {}", config.display());
+    println!("  serving cert: {}", out.serving_certificate.display());
+    println!(
+        "  serving key:  {} ({})",
+        out.serving_key.display(),
+        if out.serving_key_sealed { "sealed to this machine" } else { "PLAINTEXT" }
+    );
+    println!(
+        "  autorenew:    {} ({})",
+        out.autorenew_keytab.display(),
+        if out.autorenew_keytab_sealed { "sealed to this machine" } else { "PLAINTEXT" }
+    );
+    println!(
+        "  revoked {} superseded controller serving certificate(s); CRL republished",
+        out.revoked_serving_certificates
+    );
+    println!(
+        "start the admin server, then re-enroll any other local TLS identities whose \
+         keys were sealed to the failed machine"
+    );
     Ok(())
 }
 
@@ -2230,6 +2296,31 @@ mod tests {
         let err = TestCaCli::try_parse_from(["ca", "remove-server"])
             .expect_err("a destructive target must be explicit");
         assert!(err.to_string().contains("SERVER-ID"));
+    }
+
+    #[test]
+    fn recover_controller_cli_requires_offline_recovery_inputs() {
+        let parsed = TestCaCli::try_parse_from([
+            "ca",
+            "recover-controller",
+            "--ca-dir",
+            "/restore/ca",
+            "--config",
+            "/restore/admin-server.json",
+            "--listen",
+            "10.0.0.20:14565",
+            "--recovery-password-stdin",
+            "--insecure-no-tpm",
+        ])
+        .unwrap();
+        let Cmd::RecoverController(args) = parsed.cmd else {
+            panic!("expected recover-controller")
+        };
+        assert_eq!(args.ca_dir.as_deref(), Some(Path::new("/restore/ca")));
+        assert_eq!(args.config.as_deref(), Some(Path::new("/restore/admin-server.json")));
+        assert_eq!(args.listen, Some("10.0.0.20:14565".parse().unwrap()));
+        assert!(args.recovery.recovery_password_stdin);
+        assert!(args.insecure_no_tpm);
     }
 
     #[test]

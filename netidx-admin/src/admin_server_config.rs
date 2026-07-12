@@ -122,11 +122,20 @@ fn default_true() -> bool {
 }
 
 impl AdminServerConfig {
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Parse a config without validating its serving files. Disaster recovery
+    /// needs this narrow entry point because those files may be absent or
+    /// sealed to the dead machine; the recovery operation validates every
+    /// identity field against the restored CA and authoritative map before it
+    /// replaces them.
+    pub(crate) fn load_for_recovery(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading admin-server config {}", path.display()))?;
-        let cfg: Self = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let cfg = Self::load_for_recovery(path)?;
         cfg.validate()
             .with_context(|| format!("invalid admin-server config {}", path.display()))?;
         Ok(cfg)

@@ -15,16 +15,20 @@
 //! implementation of the security-critical parts.
 
 use crate::{
-    admin_local,
+    admin_client, admin_local,
+    admin_proto::{AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN},
     admin_server::read_autorenew_password,
+    admin_server_config::AdminServerConfig,
     answer::{Answerer, Field},
     atomic,
     ca::{self, Ca, CaLifetimes, SanEntry, Subject},
     ca_policy::recovery_policy,
     ca_store::CaDir,
     ca_vault::{self, CAVault},
-    offline_ca, paths,
+    fingerprint::Fingerprint,
+    netmap, offline_ca, paths,
     plan::{ca_setup, server_setup, service::ServiceNeed},
+    tls,
 };
 use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
@@ -214,6 +218,297 @@ pub fn recovery_status(ca_dir: &Path) -> Result<RecoveryStatus> {
     let keytab_present =
         offline_ca::autorenew_keytab_path().map(|k| k.exists()).unwrap_or(false);
     Ok(RecoveryStatus { slot_present, keytab_present })
+}
+
+// -- controller disaster recovery -------------------------------------------
+
+/// Result of rebinding a restored controller CA to replacement hardware.
+#[derive(Debug)]
+pub struct RecoverControllerOutcome {
+    pub server_id: AdminServerId,
+    pub listen: SocketAddr,
+    pub revoked_serving_certificates: usize,
+    pub serving_certificate: PathBuf,
+    pub serving_key: PathBuf,
+    pub autorenew_keytab: PathBuf,
+    pub serving_key_sealed: bool,
+    pub autorenew_keytab_sealed: bool,
+}
+
+/// Recover a served CA from a backup on replacement hardware. This operation
+/// is deliberately offline and accepts only the off-box `recovery` slot: old
+/// TPM-sealed serving/autorenew material is ignored and replaced.
+pub async fn recover_controller(
+    ans: &mut dyn Answerer,
+    ca_dir: PathBuf,
+    config_path: PathBuf,
+    listen: Option<SocketAddr>,
+    insecure_no_tpm: bool,
+) -> Result<RecoverControllerOutcome> {
+    let typed = ans.secret(Field::RecoveryPassword, None).await?;
+    let recovery = ca_vault::normalize_recovery_password(typed.as_str());
+    let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
+    let autorenew_keytab = offline_ca::autorenew_keytab_path()?;
+    recover_controller_with_password(
+        &ca_dir,
+        &config_path,
+        listen,
+        &recovery,
+        insecure_no_tpm,
+        &autorenew_keytab,
+    )
+}
+
+struct ProtectedBytes {
+    bytes: Zeroizing<Vec<u8>>,
+    sidecar: Option<Vec<u8>>,
+    sealed: bool,
+}
+
+fn protect_serving_key(plain_pem: &str, insecure_no_tpm: bool) -> Result<ProtectedBytes> {
+    match tls::seal_private_key(plain_pem) {
+        Ok((encrypted, blob)) => Ok(ProtectedBytes {
+            bytes: Zeroizing::new(encrypted.into_bytes()),
+            sidecar: Some(blob),
+            sealed: true,
+        }),
+        Err(_e) if insecure_no_tpm => Ok(ProtectedBytes {
+            bytes: Zeroizing::new(plain_pem.as_bytes().to_vec()),
+            sidecar: None,
+            sealed: false,
+        }),
+        Err(e) => bail!(
+            "could not seal the recovered controller serving key to this host's {}: \
+             {e:#}",
+            netidx_tpm::MECHANISM
+        ),
+    }
+}
+
+fn protect_autorenew_keytab(
+    password: &str,
+    insecure_no_tpm: bool,
+) -> Result<ProtectedBytes> {
+    match netidx_tpm::seal(password.as_bytes()) {
+        Ok(blob) => Ok(ProtectedBytes {
+            bytes: Zeroizing::new(blob),
+            sidecar: None,
+            sealed: true,
+        }),
+        Err(_e) if insecure_no_tpm => Ok(ProtectedBytes {
+            bytes: Zeroizing::new(password.as_bytes().to_vec()),
+            sidecar: None,
+            sealed: false,
+        }),
+        Err(e) => bail!(
+            "could not seal the recovered controller autorenew credential to this \
+             host's {}: {e:#}",
+            netidx_tpm::MECHANISM
+        ),
+    }
+}
+
+fn write_protected_key(path: &Path, protected: &ProtectedBytes) -> Result<()> {
+    atomic::write_atomic(path, &protected.bytes, 0o600)?;
+    let sidecar = tls::sealed_sidecar(path);
+    match &protected.sidecar {
+        Some(blob) => atomic::write_atomic(&sidecar, blob, 0o600),
+        None => {
+            if sidecar.exists() {
+                std::fs::remove_file(&sidecar)
+                    .with_context(|| format!("removing stale sidecar {sidecar:?}"))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Synchronous recovery core, split from the Answerer seam for deterministic
+/// backup/restore testing. The caller has already normalized the password and
+/// made the explicit TPM fallback decision.
+fn recover_controller_with_password(
+    ca_dir: &Path,
+    config_path: &Path,
+    listen: Option<SocketAddr>,
+    recovery_password: &str,
+    insecure_no_tpm: bool,
+    autorenew_keytab: &Path,
+) -> Result<RecoverControllerOutcome> {
+    if !CAVault::exists(ca_dir) {
+        bail!("no vault-protected CA at {}", ca_dir.display());
+    }
+    let mut cfg = AdminServerConfig::load_for_recovery(config_path)?;
+    if cfg.roles.ca.is_none() {
+        bail!("the restored admin-server config does not carry the CA role");
+    }
+
+    let ca_cert = std::fs::read(ca_dir.join("certificate.pem")).with_context(|| {
+        format!("reading restored CA certificate in {}", ca_dir.display())
+    })?;
+    let restored_fingerprint = Fingerprint::of_cert_pem(&ca_cert)?;
+    let configured_fingerprint = Fingerprint::parse_text(&cfg.home_ca_fingerprint)
+        .context("the restored config has an invalid home CA fingerprint")?;
+    if configured_fingerprint != restored_fingerprint {
+        bail!(
+            "the restored config belongs to a different CA (configured {}, backup {})",
+            configured_fingerprint.text(),
+            restored_fingerprint.text()
+        );
+    }
+
+    // One exclusive lock covers recovery-password verification, serial/CRL
+    // mutation, vault re-key, and authoritative map update. A running daemon
+    // therefore cannot race a disaster-recovery attempt.
+    let cadir = CaDir::open(ca_dir).context(
+        "controller recovery requires exclusive CA access; stop the admin server",
+    )?;
+    let unlocked = cadir
+        .vault
+        .read()
+        .unlock(recovery_password)
+        .context("the recovery password did not unlock the restored CA")?;
+    if unlocked.admin != ca_vault::RECOVERY_ADMIN {
+        bail!(
+            "controller recovery requires the off-box {:?} credential, not slot {:?}",
+            ca_vault::RECOVERY_ADMIN,
+            unlocked.admin
+        );
+    }
+
+    let mut map = netmap::load(ca_dir, cfg.server_id)?;
+    if map.controller != cfg.server_id {
+        bail!(
+            "restored controller mismatch: config {}, map {}",
+            cfg.server_id,
+            map.controller
+        );
+    }
+    let mut controller = map
+        .controller_entry()
+        .cloned()
+        .context("the restored authoritative map has no controller entry")?;
+    if !controller.roles.contains(&crate::admin_proto::Role::Ca) {
+        bail!("the restored map's controller entry does not carry the CA role");
+    }
+    let listen = listen.unwrap_or(cfg.listen);
+
+    // Prepare both replacement secrets before touching the vault or issuance
+    // index. A sealing failure therefore leaves the backup byte-for-byte usable
+    // for another attempt.
+    let serving = admin_client::generate_key_and_csr(SERVING_SAN)?;
+    let protected_serving =
+        protect_serving_key(&serving.private_key_pem, insecure_no_tpm)?;
+    let new_autorenew = ca_vault::random_signing_password();
+    let protected_autorenew = protect_autorenew_keytab(&new_autorenew, insecure_no_tpm)?;
+
+    let signer = offline_ca::load_ca_from_unlocked(ca_dir, &unlocked)?;
+    let validity = cadir.lifetimes.leaf_validity;
+    let serial = cadir.store.lock().next_serial()?;
+    let sans = [
+        SanEntry::Dns(SERVING_SAN.to_string()),
+        SanEntry::Uri(cfg.server_id.uri()),
+        SanEntry::Uri(CONTROLLER_ROLE_URI.to_string()),
+    ];
+    let leaf = signer
+        .sign_request(serving.csr_pem.as_bytes(), &sans, validity, serial)
+        .context("signing the recovered controller serving certificate")?;
+    let leaf_text =
+        std::str::from_utf8(&leaf).context("serving certificate is not utf8")?;
+    let identity = tls::admin_cert_identity_from_pem(leaf_text.as_bytes())?;
+    if identity.server_id != cfg.server_id || !identity.controller {
+        bail!("the recovered serving certificate did not preserve controller identity");
+    }
+
+    // Atomically replace the machine credential in the vault using the
+    // recovery slot as authority. The recovery slot itself is unchanged.
+    cadir.vault.write().replace_signing_slot(
+        recovery_password,
+        crate::admin_server::AUTORENEW_ADMIN,
+        &new_autorenew,
+        crate::ca_policy::autorenew_policy(),
+    )?;
+
+    let now = crate::ca_store::now_unix();
+    let mut store = cadir.store.lock();
+    let old_serials: Vec<_> = store
+        .list_signed()?
+        .into_iter()
+        .filter(|record| {
+            record.live(now)
+                && record.name.eq_ignore_ascii_case(SERVING_SAN)
+                && tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
+                    .is_ok_and(|old| old.server_id == cfg.server_id)
+        })
+        .map(|record| record.serial)
+        .collect();
+    offline_ca::record_offline_issuance(
+        &mut store,
+        serial,
+        NodeKind::AdminServer,
+        SERVING_SAN,
+        &serving.csr_pem,
+        leaf_text,
+        validity,
+    )?;
+    let mut revoked = 0;
+    for old_serial in old_serials {
+        let revocation = crate::ca_store::Revocation {
+            serial: old_serial,
+            revoked_unix: now,
+            reason: format!(
+                "controller {} rebound to replacement hardware during disaster recovery",
+                cfg.server_id
+            ),
+        };
+        if store.revoke(old_serial, revocation)? {
+            revoked += 1;
+        }
+    }
+    store.write_crl(&unlocked.ca_key_pem)?;
+    drop(store);
+
+    let server_dir = ca_dir.join("server");
+    std::fs::create_dir_all(&server_dir)
+        .with_context(|| format!("creating {}", server_dir.display()))?;
+    let serving_certificate = server_dir.join("cert.pem");
+    let serving_key = server_dir.join("key.pem");
+    let mut chain = leaf;
+    chain.extend_from_slice(&ca_cert);
+    atomic::write_atomic(&serving_certificate, &chain, 0o644)?;
+    write_protected_key(&serving_key, &protected_serving)?;
+
+    atomic::write_atomic(&autorenew_keytab, &protected_autorenew.bytes, 0o600)?;
+
+    controller.addr = listen;
+    netmap::upsert_controller(&mut map, controller, None)?;
+    netmap::save(ca_dir, &map)?;
+
+    cfg.listen = listen;
+    cfg.home_ca_fingerprint = restored_fingerprint.text();
+    cfg.serving_cert = serving_certificate.clone();
+    cfg.serving_key = serving_key.clone();
+    cfg.trusted = {
+        let trusted = ca_dir.join("trusted.pem");
+        if trusted.exists() { trusted } else { ca_dir.join("certificate.pem") }
+    };
+    cfg.ca_addr = None;
+    let role = cfg.roles.ca.as_mut().expect("CA role checked above");
+    role.dir = ca_dir.to_path_buf();
+    role.autorenew = Some(autorenew_keytab.to_path_buf());
+    cfg.save(config_path)?;
+    AdminServerConfig::load(config_path)
+        .context("the recovered admin-server configuration failed validation")?;
+
+    Ok(RecoverControllerOutcome {
+        server_id: cfg.server_id,
+        listen,
+        revoked_serving_certificates: revoked,
+        serving_certificate,
+        serving_key,
+        autorenew_keytab: autorenew_keytab.to_path_buf(),
+        serving_key_sealed: protected_serving.sealed,
+        autorenew_keytab_sealed: protected_autorenew.sealed,
+    })
 }
 
 // -- ca external (intermediate CA signed by an external PKI) ------------------
@@ -412,6 +707,159 @@ mod tests {
     use super::*;
     use crate::ca::{CaParams, Subject};
 
+    struct ControllerFixture {
+        ca_dir: tempfile::TempDir,
+        config: PathBuf,
+        keytab: PathBuf,
+        recovery: Zeroizing<String>,
+        server_id: AdminServerId,
+        old_serial: u64,
+        old_autorenew: String,
+    }
+
+    fn recoverable_controller() -> ControllerFixture {
+        use crate::admin_proto::{
+            ClusterEntry, ClusterState, NetworkMap, ResolverClusterId, Role, ServerEntry,
+            ServerState,
+        };
+        use crate::admin_server_config::{CaRole, Roles};
+
+        let ca_dir = tempfile::tempdir().unwrap();
+        let params = CaParams {
+            directory: ca_dir.path().to_path_buf(),
+            subject: Subject::cn("backup-ca"),
+            san: vec![SanEntry::Dns("backup-ca".to_string())],
+            key_bits: 2048,
+            validity: std::time::Duration::from_secs(30 * 86400),
+        };
+        let ca = Ca::init(&params, None).unwrap();
+        let key = std::fs::read(ca_dir.path().join("private.key")).unwrap();
+        let recovery = ca_vault::gen_recovery_password();
+        let old_autorenew = "old-machine-sealed-autorenew".to_string();
+        let mut vault = CAVault::new(ca_dir.path().to_path_buf());
+        vault
+            .create(&key, ca_vault::RECOVERY_ADMIN, &recovery, recovery_policy())
+            .unwrap();
+        std::fs::remove_file(ca_dir.path().join("private.key")).unwrap();
+        vault
+            .add_signing_slot(
+                &recovery,
+                crate::admin_server::AUTORENEW_ADMIN,
+                &old_autorenew,
+                crate::ca_policy::autorenew_policy(),
+            )
+            .unwrap();
+
+        let server_id = AdminServerId::new();
+        let old = admin_client::generate_key_and_csr(SERVING_SAN).unwrap();
+        let old_leaf = offline_ca::sign_and_record(
+            &ca,
+            NodeKind::AdminServer,
+            old.csr_pem.as_bytes(),
+            &[
+                SanEntry::Dns(SERVING_SAN.to_string()),
+                SanEntry::Uri(server_id.uri()),
+                SanEntry::Uri(CONTROLLER_ROLE_URI.to_string()),
+            ],
+            SERVING_SAN,
+            std::time::Duration::from_secs(7 * 86400),
+        )
+        .unwrap();
+        let server_dir = ca_dir.path().join("server");
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let serving_cert = server_dir.join("cert.pem");
+        let serving_key = server_dir.join("key.pem");
+        let mut chain = old_leaf;
+        chain.extend_from_slice(
+            &std::fs::read(ca_dir.path().join("certificate.pem")).unwrap(),
+        );
+        std::fs::write(&serving_cert, chain).unwrap();
+        // The backup contains the old machine's encrypted/sidecar-shaped files;
+        // recovery must never try to reuse them.
+        std::fs::write(&serving_key, b"old machine key").unwrap();
+        std::fs::write(tls::sealed_sidecar(&serving_key), b"old machine seal").unwrap();
+
+        let cluster = ResolverClusterId::new();
+        let listen = "10.0.0.10:4565".parse().unwrap();
+        let mut map = NetworkMap::empty(server_id);
+        map.servers.push(ServerEntry {
+            id: server_id,
+            addr: listen,
+            roles: vec![Role::Ca, Role::Resolver],
+            resolver: None,
+            cluster: Some(cluster),
+            state: ServerState::Registered,
+        });
+        map.clusters.push(ClusterEntry {
+            id: cluster,
+            base: "/".to_string(),
+            state: ClusterState::Active,
+            members: vec![],
+            parent: None,
+            children: vec![],
+        });
+        netmap::save(ca_dir.path(), &map).unwrap();
+
+        let config = ca_dir.path().join("admin-server.json");
+        let keytab = ca_dir.path().join("replacement-autorenew.keytab");
+        let ca_cert = std::fs::read(ca_dir.path().join("certificate.pem")).unwrap();
+        let restored_config = AdminServerConfig {
+            domain: "example.com".to_string(),
+            server_id,
+            home_ca_fingerprint: Fingerprint::of_cert_pem(&ca_cert).unwrap().text(),
+            listen,
+            // A backup restored at a different mount point retains dead-machine
+            // paths. `load_for_recovery` must not need these files in order to
+            // authenticate the backup and rewrite them canonically.
+            serving_cert: PathBuf::from("/dead-machine/ca/server/cert.pem"),
+            serving_key: PathBuf::from("/dead-machine/ca/server/key.pem"),
+            trusted: PathBuf::from("/dead-machine/ca/trusted.pem"),
+            roles: Roles {
+                ca: Some(CaRole {
+                    dir: PathBuf::from("/dead-machine/ca"),
+                    autorenew: Some(PathBuf::from(
+                        "/dead-machine/config/autorenew.keytab",
+                    )),
+                    session_absolute_lifetime: None,
+                    session_idle_timeout: None,
+                }),
+                resolver: None,
+                id_map: None,
+            },
+            ca_addr: None,
+            peers: vec![],
+            mdns: true,
+            activation_units_dir: None,
+        };
+        atomic::write_atomic(
+            &config,
+            &serde_json::to_vec_pretty(&restored_config).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let old_serial = {
+            let cadir = CaDir::open(ca_dir.path()).unwrap();
+            cadir
+                .store
+                .lock()
+                .list_signed()
+                .unwrap()
+                .into_iter()
+                .find(|record| record.name == SERVING_SAN)
+                .unwrap()
+                .serial
+        };
+        ControllerFixture {
+            ca_dir,
+            config,
+            keytab,
+            recovery,
+            server_id,
+            old_serial,
+            old_autorenew,
+        }
+    }
+
     /// A vaulted CA in `dir` with recovery + autorenew slots (as the install
     /// path leaves it), for the read-only status queries.
     fn vaulted_ca(dir: &Path) {
@@ -449,6 +897,131 @@ mod tests {
         let a = auto_approve_status(dir.path(), None).unwrap();
         assert!(a.slot_present);
         assert!(!a.wired_in_config);
+    }
+
+    #[test]
+    fn restored_controller_rebinds_to_new_machine_without_changing_identity() {
+        let fixture = recoverable_controller();
+        let new_listen: SocketAddr = "10.0.0.20:14565".parse().unwrap();
+        let out = recover_controller_with_password(
+            fixture.ca_dir.path(),
+            &fixture.config,
+            Some(new_listen),
+            &fixture.recovery,
+            true,
+            &fixture.keytab,
+        )
+        .unwrap();
+        assert_eq!(out.server_id, fixture.server_id);
+        assert_eq!(out.listen, new_listen);
+        assert_eq!(out.revoked_serving_certificates, 1);
+
+        let cfg = AdminServerConfig::load(&fixture.config).unwrap();
+        assert_eq!(cfg.server_id, fixture.server_id);
+        assert_eq!(cfg.listen, new_listen);
+        assert_eq!(cfg.roles.ca.as_ref().unwrap().dir, fixture.ca_dir.path());
+        assert_eq!(
+            cfg.roles.ca.as_ref().unwrap().autorenew.as_deref(),
+            Some(fixture.keytab.as_path())
+        );
+        let leaf = std::fs::read(&cfg.serving_cert).unwrap();
+        let identity = tls::admin_cert_identity_from_pem(&leaf).unwrap();
+        assert_eq!(identity.server_id, fixture.server_id);
+        assert!(identity.controller);
+        netidx::tls::load_private_key(None, &cfg.serving_key.to_string_lossy()).unwrap();
+
+        let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
+        assert_eq!(map.controller_entry().unwrap().addr, new_listen);
+
+        let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
+        let records = cadir.store.lock().list_signed().unwrap();
+        let old = records.iter().find(|r| r.serial == fixture.old_serial).unwrap();
+        assert!(old.revoked.is_some());
+        let live: Vec<_> = records
+            .iter()
+            .filter(|r| {
+                r.live(crate::ca_store::now_unix())
+                    && r.name == SERVING_SAN
+                    && tls::admin_cert_identity_from_pem(r.cert_pem.as_bytes())
+                        .is_ok_and(|id| id.server_id == fixture.server_id)
+            })
+            .collect();
+        assert_eq!(live.len(), 1);
+        assert!(cadir.store.lock().crl_path().is_file());
+        assert!(cadir.vault.read().unlock(&fixture.recovery).is_ok());
+        assert!(cadir.vault.read().unlock(&fixture.old_autorenew).is_err());
+        let replacement = read_autorenew_password(&fixture.keytab).unwrap();
+        let unlocked = cadir.vault.read().unlock(&replacement).unwrap();
+        assert_eq!(unlocked.admin, crate::admin_server::AUTORENEW_ADMIN);
+    }
+
+    #[test]
+    fn controller_recovery_rejects_wrong_password_and_identity_mismatch_before_writes() {
+        let fixture = recoverable_controller();
+        let vault_path = fixture.ca_dir.path().join(ca_vault::VAULT_FILE);
+        let before_vault = std::fs::read(&vault_path).unwrap();
+        let before_config = std::fs::read(&fixture.config).unwrap();
+        let before_map = std::fs::read(netmap::path(fixture.ca_dir.path())).unwrap();
+        assert!(
+            recover_controller_with_password(
+                fixture.ca_dir.path(),
+                &fixture.config,
+                None,
+                "definitely-wrong",
+                true,
+                &fixture.keytab,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&vault_path).unwrap(), before_vault);
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), before_config);
+        assert_eq!(
+            std::fs::read(netmap::path(fixture.ca_dir.path())).unwrap(),
+            before_map
+        );
+        assert!(!fixture.keytab.exists());
+
+        let error = recover_controller_with_password(
+            fixture.ca_dir.path(),
+            &fixture.config,
+            None,
+            &fixture.old_autorenew,
+            true,
+            &fixture.keytab,
+        )
+        .expect_err("the on-box slot must not authorize disaster recovery");
+        assert!(error.to_string().contains("off-box"));
+        assert_eq!(std::fs::read(&vault_path).unwrap(), before_vault);
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), before_config);
+        assert!(!fixture.keytab.exists());
+
+        let mut wrong = AdminServerConfig::load_for_recovery(&fixture.config).unwrap();
+        wrong.server_id = AdminServerId::new();
+        atomic::write_atomic(
+            &fixture.config,
+            &serde_json::to_vec_pretty(&wrong).unwrap(),
+            0o600,
+        )
+        .unwrap();
+        let after_tamper = std::fs::read(&fixture.config).unwrap();
+        assert!(
+            recover_controller_with_password(
+                fixture.ca_dir.path(),
+                &fixture.config,
+                None,
+                &fixture.recovery,
+                true,
+                &fixture.keytab,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&vault_path).unwrap(), before_vault);
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), after_tamper);
+        assert_eq!(
+            std::fs::read(netmap::path(fixture.ca_dir.path())).unwrap(),
+            before_map
+        );
+        assert!(!fixture.keytab.exists());
     }
 
     #[test]
