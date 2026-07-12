@@ -18,26 +18,27 @@ use crate::{
     admin_client,
     admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyCrlRequest, ApplyCrlResponse,
+        AdminListResponse, AdminMgmtResponse, ApplyControllerStateRequest,
+        ApplyControllerStateResponse, ApplyCrlRequest, ApplyCrlResponse,
         ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
         ApplyReferralEditResponse, ApplyServiceControlRequest,
         ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
-        ApproveRequest, ApproveResponse, ClientHello, ControlServiceRequest,
-        ControlServiceResponse, DelegationEntry, DelegationPollResponse,
-        DelegationRequest, DelegationResponse, DenyDelegationRequest,
-        DenyDelegationResponse, DenyRequest, DenyResponse, EditPermsRequest,
-        EditPermsResponse, EnqueueRequest, EnqueueResponse, EnrollRequest,
-        GetCrlResponse, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
-        GetPermsResponse, InfoAuth, IssuedEntry, ListAdminsRequest,
-        ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NetworkMap, NodeKind,
-        PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse, QueueEntry,
-        ReadPermsRequest, ReadPermsResponse, ReferralEdit, RegisterRequest,
-        RegisterResponse, RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse,
-        Request, ResolverAddr, RevokeRequest, RevokeResponse, Role,
-        RotateAutorenewResponse, RotateRecoveryResponse, SERVING_SAN, Secret,
-        ServerEntry, ServerHello, ServiceUnit, ServiceUnitDef, SetAdminPolicyRequest,
-        SignRequest, SignResponse,
+        ApproveRequest, ApproveResponse, BackupResponse, ClientHello,
+        ControlServiceRequest, ControlServiceResponse, DelegationEntry,
+        DelegationPollResponse, DelegationRequest, DelegationResponse,
+        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
+        EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
+        EnrollRequest, GetCrlResponse, GetInfoResponse, GetMapResponse,
+        GetMapVersionResponse, GetPermsResponse, InfoAuth, IssuedEntry,
+        ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
+        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
+        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
+        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReconcileControllerResponse,
+        ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
+        RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
+        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
+        SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceUnit, ServiceUnitDef,
+        SetAdminPolicyRequest, SignRequest, SignResponse,
     },
     admin_server_config::AdminServerConfig,
     ca::{Ca, SanEntry},
@@ -412,6 +413,11 @@ pub struct Server {
     /// Failed-password sliding windows and one-in-flight gates, keyed by the
     /// network source. Used only for network requests handled by a CA.
     password_limiter: Arc<PasswordLimiter>,
+    /// A live-backup barrier. Every durable mutation takes a shared guard;
+    /// backup takes the exclusive guard only while capturing bytes into
+    /// memory, so the published bundle is one controller-state instant without
+    /// stopping read-only service or holding the pause across target I/O.
+    mutation_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl Server {
@@ -541,6 +547,7 @@ impl Server {
             resolver_edit_lock: Mutex::new(()),
             map: Mutex::new(map),
             password_limiter: Arc::new(PasswordLimiter::default()),
+            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
         }))
     }
 
@@ -615,7 +622,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     // ordinary immediate fanout. Startup is the first safe moment to push it.
     if state.ca.is_some() {
         let state = state.clone();
-        tokio::spawn(async move { reconcile_crl_on_start(state).await });
+        tokio::spawn(async move { reconcile_controller_state_on_start(state).await });
     }
     serve_on(listener, acceptor, state).await
 }
@@ -854,18 +861,68 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
         | PollDelegation(_) | GetMapVersion | GetMap => RequestAuthorization::Public,
         AddIdentity(_)
         | ApplyCrl(_)
+        | ApplyControllerState(_)
         | GetPerms
         | ApplyPermsEdit(_)
         | ApplyReferralEdit(_)
         | ApplyServiceControl(_) => RequestAuthorization::ControllerOnly,
         Register(_) | Deregister => RequestAuthorization::NodeSelf,
-        RotateRecovery | RotateAutorenew => RequestAuthorization::LocalOnly,
-        Login(_) | Logout(_) | Sign(_) | Enroll(_) | ListQueue(_) | Approve(_)
-        | Deny(_) | Revoke(_) | ListIssued(_) | ListDelegations(_)
-        | ApproveDelegation(_) | DenyDelegation(_) | RemoveServer(_) | ReadPerms(_)
-        | EditPerms(_) | AddRoleAdmin(_) | SetAdminPolicy(_) | RemoveAdmin(_)
-        | ListAdmins(_) | ControlService(_) => RequestAuthorization::AdminAuthenticated,
+        RotateRecovery | RotateAutorenew | Backup(_) => RequestAuthorization::LocalOnly,
+        Login(_)
+        | Logout(_)
+        | Sign(_)
+        | Enroll(_)
+        | ListQueue(_)
+        | Approve(_)
+        | Deny(_)
+        | Revoke(_)
+        | ListIssued(_)
+        | ListDelegations(_)
+        | ApproveDelegation(_)
+        | DenyDelegation(_)
+        | RemoveServer(_)
+        | ReadPerms(_)
+        | EditPerms(_)
+        | AddRoleAdmin(_)
+        | SetAdminPolicy(_)
+        | RemoveAdmin(_)
+        | ListAdmins(_)
+        | ControlService(_)
+        | ReconcileController(_) => RequestAuthorization::AdminAuthenticated,
     }
+}
+
+/// Durable controller/node state changes participate in the live-backup
+/// barrier. The backup request itself takes the exclusive side in its handler;
+/// read-only requests and in-memory login sessions do not delay a snapshot.
+fn request_mutates_durable_state(req: &Request) -> bool {
+    use Request::*;
+    matches!(
+        req,
+        Sign(_)
+            | Enroll(_)
+            | AddIdentity(_)
+            | Enqueue(_)
+            | Approve(_)
+            | Deny(_)
+            | Revoke(_)
+            | RequestDelegation(_)
+            | ApproveDelegation(_)
+            | DenyDelegation(_)
+            | ApplyReferralEdit(_)
+            | ApplyCrl(_)
+            | ApplyControllerState(_)
+            | Register(_)
+            | Deregister
+            | RemoveServer(_)
+            | EditPerms(_)
+            | ApplyPermsEdit(_)
+            | AddRoleAdmin(_)
+            | SetAdminPolicy(_)
+            | RemoveAdmin(_)
+            | RotateRecovery
+            | RotateAutorenew
+    )
 }
 
 /// The credential of a request that can actually invoke the password KDF.
@@ -903,6 +960,8 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         | PollDelegation(_)
         | ApplyReferralEdit(_)
         | ApplyCrl(_)
+        | Backup(_)
+        | ApplyControllerState(_)
         | Register(_)
         | Deregister
         | GetMapVersion
@@ -912,6 +971,7 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         | ApplyServiceControl(_)
         | RotateRecovery
         | RotateAutorenew => return None,
+        ReconcileController(req) => &req.credential,
     };
     matches!(credential, admin_proto::AdminCredential::Password { .. })
         .then_some(credential)
@@ -1054,6 +1114,16 @@ where
         } else {
             None
         };
+    // A waiting backup writer prevents new mutations from entering; once all
+    // in-flight shared guards drain it captures one durable instant. Acquire
+    // after the per-source delay so a throttled attacker cannot stall a local
+    // backup without even reaching authentication. Keep the guard across the
+    // complete operation, including post-commit fanout.
+    let _mutation_guard = if request_mutates_durable_state(&req) {
+        Some(state.mutation_gate.read().await)
+    } else {
+        None
+    };
     REQUEST_PASSWORD_ATTEMPT
         .scope(password_attempt, async move {
             match req {
@@ -1713,6 +1783,31 @@ where
                         .await
                         .context("writing ApplyCrlResponse")
                 }
+                Request::ApplyControllerState(req) => {
+                    let resp = if !peer_is_controller {
+                        ApplyControllerStateResponse::Err {
+                            reason: "controller-state reconciliation requires the exact home CA \
+                                     controller certificate"
+                                .to_string(),
+                        }
+                    } else {
+                        let state = state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            handle_apply_controller_state(&state, &req)
+                        })
+                        .await
+                        .context("apply controller state task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApplyControllerStateResponse")
+                }
+                Request::ReconcileController(req) => {
+                    let resp = handle_reconcile_controller(state, &signs, &req, local).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ReconcileControllerResponse")
+                }
                 Request::AddRoleAdmin(req) => {
                     // Bound the Argon2 in `authenticate` by the sign semaphore, like
                     // every other vault-auth handler — a bare `spawn_blocking` would
@@ -1798,6 +1893,12 @@ where
                         .await
                         .context("writing RotateAutorenewResponse")
                 }
+                Request::Backup(req) => {
+                    let resp = handle_backup(state, &signs, &req).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing BackupResponse")
+                }
             }
         })
         .await
@@ -1832,6 +1933,97 @@ where
 
 fn ca_dir(state: &Server) -> Option<PathBuf> {
     state.ca_dir.clone()
+}
+
+async fn handle_backup(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &admin_proto::BackupRequest,
+) -> BackupResponse {
+    let Some(ca) = state.ca.as_ref() else {
+        return BackupResponse::Err {
+            reason: "backup must be run on the CA controller".to_string(),
+        };
+    };
+    let Some(cfg_path) = state.cfg_path.clone() else {
+        return BackupResponse::Err {
+            reason: "the running controller has no persistent config path".to_string(),
+        };
+    };
+    let ca_dir = ca.dir().to_path_buf();
+    let target = PathBuf::from(&req.target);
+    let signing_state = state.clone();
+    let unlocked = match run_signing(signs, move || {
+        server_unlock(signing_state.ca.as_ref().expect("CA role held"))
+    })
+    .await
+    {
+        Ok(Ok(unlocked)) => unlocked,
+        Ok(Err(reason)) => return BackupResponse::Err { reason },
+        Err(e) => {
+            return BackupResponse::Err {
+                reason: format!("backup signing task failed: {e:#}"),
+            };
+        }
+    };
+    let gate = state.mutation_gate.clone().write_owned().await;
+    let cfg = state.cfg.lock().clone();
+    let map_version = state.map.lock().version;
+    let highest_serial = match ca.store.lock().max_serial() {
+        Ok(serial) => serial.unwrap_or(0),
+        Err(e) => {
+            return BackupResponse::Err {
+                reason: format!("reading serial state: {e:#}"),
+            };
+        }
+    };
+    let snapshot = match crate::backup::capture(
+        &cfg,
+        &cfg_path,
+        &ca_dir,
+        map_version,
+        highest_serial,
+        &unlocked.ca_key_pem,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return BackupResponse::Err { reason: format!("capturing backup: {e:#}") };
+        }
+    };
+    // The consistent bytes are fixed; let administration resume before the
+    // potentially slow target filesystem is touched.
+    drop(gate);
+    let ca_dir_for_publish = ca_dir.clone();
+    let outcome = match tokio::task::spawn_blocking(move || {
+        crate::backup::publish(snapshot, &target, &ca_dir_for_publish)
+    })
+    .await
+    {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => {
+            return BackupResponse::Err { reason: format!("publishing backup: {e:#}") };
+        }
+        Err(e) => {
+            return BackupResponse::Err { reason: format!("backup task panicked: {e}") };
+        }
+    };
+    audit(
+        &ca_dir,
+        "local",
+        "backup",
+        &format!("{} manifest {}", outcome.target.display(), outcome.manifest_sha256),
+        Duration::ZERO,
+    );
+    BackupResponse::Ok {
+        target: outcome.target.to_string_lossy().into_owned(),
+        ca_fingerprint: outcome.ca_fingerprint,
+        controller: outcome.controller,
+        map_version: outcome.map_version,
+        highest_serial: outcome.highest_serial,
+        files: outcome.files,
+        bytes: outcome.bytes,
+        manifest_sha256: outcome.manifest_sha256,
+    }
 }
 
 /// Append a freshly enrolled admin server to our peer list (and persist
@@ -3264,6 +3456,64 @@ fn handle_apply_crl(state: &Server, req: &ApplyCrlRequest) -> ApplyCrlResponse {
     }
 }
 
+fn handle_apply_controller_state(
+    state: &Server,
+    req: &ApplyControllerStateRequest,
+) -> ApplyControllerStateResponse {
+    let err = |reason: String| ApplyControllerStateResponse::Err { reason };
+    let installed_controller = state.map.lock().controller;
+    if req.controller != installed_controller
+        || req.map.controller != installed_controller
+    {
+        return err(format!(
+            "controller identity mismatch (installed {}, request {}, map {})",
+            installed_controller, req.controller, req.map.controller
+        ));
+    }
+    let Some(controller) = req.map.controller_entry() else {
+        return err("authoritative map has no controller entry".to_string());
+    };
+    if controller.id != req.controller
+        || controller.addr != req.addr
+        || controller.state != admin_proto::ServerState::Registered
+        || !controller.roles.contains(&Role::Ca)
+    {
+        return err("authoritative map does not bind the claimed registered CA controller address"
+            .to_string());
+    }
+    if req.map.version < state.map.lock().version {
+        return err(format!(
+            "refusing controller-state rollback from map version {} to {}",
+            state.map.lock().version,
+            req.map.version
+        ));
+    }
+    if let Err(e) = validate_home_crl(&req.crl_pem, state.home_ca_der.as_ref()) {
+        return err(format!("validating controller CRL: {e:#}"));
+    }
+
+    // Persist the new route before publishing the map in memory. The
+    // controller itself deliberately keeps `ca_addr = None`.
+    if state.ca.is_none() {
+        let Some(cfg_path) = state.cfg_path.as_ref() else {
+            return err(
+                "this node has no persistent admin-server config path".to_string()
+            );
+        };
+        let mut next = state.cfg.lock().clone();
+        next.ca_addr = Some(req.addr);
+        if let Err(e) = next.save(cfg_path) {
+            return err(format!("persisting the relocated controller address: {e:#}"));
+        }
+        *state.cfg.lock() = next;
+    }
+    if let Err(e) = apply_crl_local(state, &req.crl_pem) {
+        return err(format!("installing reconciled CRL: {e:#}"));
+    }
+    *state.map.lock() = req.map.clone();
+    ApplyControllerStateResponse::Ok
+}
+
 fn registered_crl_targets(
     state: &Server,
 ) -> Vec<(admin_proto::AdminServerId, SocketAddr)> {
@@ -3279,7 +3529,7 @@ fn registered_crl_targets(
     targets
 }
 
-async fn collect_crl_results<I, F, Fut>(targets: I, apply: F) -> Vec<PeerResult>
+async fn collect_peer_results<I, F, Fut>(targets: I, apply: F) -> Vec<PeerResult>
 where
     I: IntoIterator<Item = (admin_proto::AdminServerId, SocketAddr)>,
     F: Fn(admin_proto::AdminServerId, SocketAddr) -> Fut,
@@ -3330,7 +3580,7 @@ async fn push_crl_to_peers(
     let (cert, key) = state.outbound_identity();
     let roots = state.roots.clone();
     let home_ca = state.home_ca_der.clone();
-    let mut remote = collect_crl_results(
+    let mut remote = collect_peer_results(
         targets.into_iter().filter(|(server, _)| *server != my_id),
         |server, addr| {
             let cert = cert.clone();
@@ -3365,31 +3615,152 @@ async fn push_crl_to_peers(
     results
 }
 
-async fn reconcile_crl_on_start(state: Arc<Server>) {
+async fn push_controller_state_to_peers(
+    state: &Arc<Server>,
+    operation_id: admin_proto::OperationId,
+) -> Result<Vec<PeerResult>> {
+    let map = state.map.lock().clone();
+    let controller = map
+        .controller_entry()
+        .filter(|entry| entry.state == admin_proto::ServerState::Registered)
+        .cloned()
+        .context("the authoritative map has no registered controller")?;
+    let ca =
+        state.ca.as_ref().context("controller reconciliation requires the CA role")?;
+    let crl_path = ca.store.lock().crl_path();
+    let crl_pem = std::fs::read_to_string(&crl_path)
+        .with_context(|| format!("reading current CRL {}", crl_path.display()))?;
+    let request = ApplyControllerStateRequest {
+        operation_id,
+        controller: controller.id,
+        addr: controller.addr,
+        map: map.clone(),
+        crl_pem,
+    };
+    let targets = registered_crl_targets(state);
+    let my_id = state.cfg.lock().server_id;
+    let mut results = Vec::new();
+    if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
+        let state = state.clone();
+        let request = request.clone();
+        let error = tokio::task::spawn_blocking(move || {
+            match handle_apply_controller_state(&state, &request) {
+                ApplyControllerStateResponse::Ok => Ok(()),
+                ApplyControllerStateResponse::Err { reason } => bail!(reason),
+            }
+        })
+        .await
+        .map_err(|e| anyhow!("local controller-state task panicked: {e}"))
+        .and_then(|result| result)
+        .err()
+        .map(|e| format!("{e:#}"));
+        results.push(PeerResult { server, addr, error });
+    }
+    let (cert, key) = state.outbound_identity();
+    let roots = state.roots.clone();
+    let home_ca = state.home_ca_der.clone();
+    let mut remote = collect_peer_results(
+        targets.into_iter().filter(|(server, _)| *server != my_id),
+        |server, addr| {
+            let cert = cert.clone();
+            let key = key.clone();
+            let roots = roots.clone();
+            let home_ca = home_ca.clone();
+            let request = request.clone();
+            async move {
+                tokio::time::timeout(
+                    PUSH_TIMEOUT,
+                    admin_client::push_controller_state(
+                        addr,
+                        server,
+                        server == controller.id,
+                        home_ca,
+                        &cert,
+                        &key,
+                        roots,
+                        request,
+                    ),
+                )
+                .await
+                .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))
+                .and_then(|result| result)
+            }
+        },
+    )
+    .await;
+    results.append(&mut remote);
+    results.sort_by_key(|result| result.server);
+    Ok(results)
+}
+
+async fn reconcile_controller_state_on_start(state: Arc<Server>) {
+    let operation_id = admin_proto::OperationId::new();
     let Some(ca) = state.ca.as_ref() else { return };
-    let path = ca.store.lock().crl_path();
-    let crl_pem = match std::fs::read_to_string(&path) {
-        Ok(crl) => crl,
-        Err(e) => {
-            warn!("admin-server: startup CRL reconciliation skipped: {e}");
-            return;
+    audit(
+        ca.dir(),
+        "(startup)",
+        "reconcile-controller",
+        &format!("operation {operation_id}: startup reconciliation"),
+        Duration::ZERO,
+    );
+    match push_controller_state_to_peers(&state, operation_id).await {
+        Ok(results) => {
+            for result in results {
+                if let Some(error) = result.error {
+                    warn!(
+                        "admin-server: startup controller reconciliation {} at {} failed: {}",
+                        result.server, result.addr, error
+                    );
+                }
+            }
+        }
+        Err(e) => warn!("admin-server: startup controller reconciliation failed: {e:#}"),
+    }
+}
+
+async fn handle_reconcile_controller(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &admin_proto::ReconcileControllerRequest,
+    local: bool,
+) -> ReconcileControllerResponse {
+    let Some(ca) = state.ca.as_ref() else {
+        return ReconcileControllerResponse::Err {
+            reason: "controller reconciliation must be sent to the CA controller"
+                .to_string(),
+        };
+    };
+    let admin = if local {
+        "local".to_string()
+    } else {
+        let state = state.clone();
+        let credential = req.credential.clone();
+        match run_signing(signs, move || {
+            authenticate(state.ca.as_ref().expect("CA role held"), &credential)
+                .map(|authd| authd.admin)
+        })
+        .await
+        {
+            Ok(Ok(admin)) => admin,
+            Ok(Err(reason)) => return ReconcileControllerResponse::Err { reason },
+            Err(e) => {
+                return ReconcileControllerResponse::Err {
+                    reason: format!("authentication task failed: {e:#}"),
+                };
+            }
         }
     };
     let operation_id = admin_proto::OperationId::new();
     audit(
         ca.dir(),
-        "(startup)",
-        "fanout-crl",
-        &format!("operation {operation_id}: startup reconciliation"),
+        &admin,
+        "reconcile-controller",
+        &format!("operation {operation_id}"),
         Duration::ZERO,
     );
-    for result in push_crl_to_peers(&state, &crl_pem, operation_id).await {
-        if let Some(error) = result.error {
-            warn!(
-                "admin-server: startup CRL reconciliation {} at {} failed: {}",
-                result.server, result.addr, error
-            );
-        }
+    match push_controller_state_to_peers(state, operation_id).await {
+        Ok(peers) => ReconcileControllerResponse::Ok { operation_id, peers },
+        Err(e) => ReconcileControllerResponse::Err { reason: format!("{e:#}") },
     }
 }
 
@@ -3687,30 +4058,29 @@ const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// read-replica — if the CA is unreachable we keep serving the last copy
 /// we cached, and the re-register self-heals a push lost while it was down.
 fn spawn_map_refresh(state: &Arc<Server>) {
-    let ca_addr = {
-        let cfg = state.cfg.lock();
-        if cfg.roles.ca.is_some() {
-            return; // the CA owns the map — nothing to refresh
-        }
-        match cfg.ca_addr {
-            Some(a) => a,
-            None => return, // no admin-plane CA configured
-        }
-    };
+    if state.cfg.lock().roles.ca.is_some() {
+        return; // the CA owns the map — nothing to refresh
+    }
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { break };
             let (cert, key) = state.outbound_identity();
-            let (req, roots) = {
+            let (ca_addr, req, roots) = {
                 let cfg = state.cfg.lock();
                 (
+                    cfg.ca_addr,
                     RegisterRequest {
                         addr: cfg.listen,
                         resolver: local_cluster_facts(&cfg),
                     },
                     state.roots.clone(),
                 )
+            };
+            let Some(ca_addr) = ca_addr else {
+                drop(state);
+                tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
+                continue;
             };
             // Self-heal: (re)register our own facts. Idempotent at the CA.
             if let Err(e) =
@@ -3786,9 +4156,11 @@ fn spawn_autorenew(state: &Arc<Server>) {
                 tokio::time::sleep(AUTORENEW_POLL).await;
                 continue;
             };
+            let gate = state.mutation_gate.clone().read_owned().await;
             // Hand the Arc to the blocking task and let it drop there, so
             // we never hold the server alive across the sleep below.
             if let Err(e) = tokio::task::spawn_blocking(move || {
+                let _gate = gate;
                 autorenew_sweep(state.ca.as_ref().expect("CA role held"), &pw);
             })
             .await
@@ -9792,6 +10164,7 @@ mod tests {
 #[cfg(test)]
 mod v6_tests {
     use super::*;
+    use crate::fingerprint::Fingerprint;
 
     #[test]
     fn resolver_replicas_may_share_a_tls_name_with_distinct_keys() {
@@ -9933,6 +10306,42 @@ mod v6_tests {
             })),
             RequestAuthorization::ControllerOnly,
         );
+        let controller = admin_proto::AdminServerId::new();
+        let mut map = NetworkMap::empty(controller);
+        map.servers.push(ServerEntry {
+            id: controller,
+            addr: "127.0.0.1:4565".parse().unwrap(),
+            roles: vec![Role::Ca],
+            resolver: None,
+            cluster: None,
+            state: admin_proto::ServerState::Registered,
+        });
+        assert_eq!(
+            request_authorization(&Request::ApplyControllerState(
+                ApplyControllerStateRequest {
+                    operation_id,
+                    controller,
+                    addr: "127.0.0.1:4565".parse().unwrap(),
+                    map,
+                    crl_pem: "crl".into(),
+                }
+            )),
+            RequestAuthorization::ControllerOnly,
+        );
+        assert_eq!(
+            request_authorization(&Request::Backup(admin_proto::BackupRequest {
+                target: "/backup".into(),
+            })),
+            RequestAuthorization::LocalOnly,
+        );
+        assert_eq!(
+            request_authorization(&Request::ReconcileController(
+                admin_proto::ReconcileControllerRequest {
+                    credential: admin_proto::AdminCredential::password("admin", "pw"),
+                }
+            )),
+            RequestAuthorization::AdminAuthenticated,
+        );
         assert_eq!(
             request_authorization(&Request::ApplyReferralEdit(
                 ApplyReferralEditRequest {
@@ -10002,6 +10411,15 @@ mod v6_tests {
         assert!(
             authorize_request_class(RequestAuthorization::NodeSelf, false, false, false,)
                 .is_err()
+        );
+        assert!(
+            authorize_request_class(RequestAuthorization::LocalOnly, false, true, true)
+                .is_err(),
+            "even the controller certificate cannot invoke a local-only backup"
+        );
+        assert!(
+            authorize_request_class(RequestAuthorization::LocalOnly, true, false, false)
+                .is_ok()
         );
     }
 
@@ -10212,13 +10630,106 @@ mod v6_tests {
         }
     }
 
+    #[test]
+    fn controller_state_relocation_persists_route_map_and_crl_without_rollback() {
+        use crate::admin_server_config::Roles;
+        let home = tempfile::tempdir().unwrap();
+        let (crl, home_ca) = signed_empty_crl(home.path(), "home-ca");
+        let root = tempfile::tempdir().unwrap();
+        let cfg_path = root.path().join("admin-server.json");
+        let trusted = root.path().join("trusted.pem");
+        std::fs::write(
+            &trusted,
+            std::fs::read(home.path().join("certificate.pem")).unwrap(),
+        )
+        .unwrap();
+        let controller = admin_proto::AdminServerId::new();
+        let node = admin_proto::AdminServerId::new();
+        let old_addr = "10.0.0.1:4565".parse().unwrap();
+        let new_addr = "10.0.0.2:14565".parse().unwrap();
+        let cfg = AdminServerConfig {
+            domain: "example.com".into(),
+            server_id: node,
+            home_ca_fingerprint: Fingerprint::of_cert_der(&home_ca).unwrap().text(),
+            listen: "10.1.0.2:4565".parse().unwrap(),
+            serving_cert: root.path().join("unused-cert.pem"),
+            serving_key: root.path().join("unused-key.pem"),
+            trusted: trusted.clone(),
+            roles: Roles::default(),
+            ca_addr: Some(old_addr),
+            peers: vec![],
+            mdns: false,
+            activation_units_dir: None,
+        };
+        cfg.save(&cfg_path).unwrap();
+        let entry = |id, addr, roles| ServerEntry {
+            id,
+            addr,
+            roles,
+            resolver: None,
+            cluster: None,
+            state: admin_proto::ServerState::Registered,
+        };
+        let mut old_map = NetworkMap::empty(controller);
+        old_map.version = 4;
+        old_map.servers.push(entry(controller, old_addr, vec![Role::Ca]));
+        old_map.servers.push(entry(node, cfg.listen, vec![Role::Resolver]));
+        let mut new_map = old_map.clone();
+        new_map.version = 5;
+        new_map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = new_addr;
+        let state = Server {
+            cfg: Mutex::new(cfg),
+            cfg_path: Some(cfg_path.clone()),
+            ca_dir: None,
+            ca: None,
+            serving_cert_pem: vec![],
+            serving_key_pem: vec![],
+            roots: RootCertStore::empty(),
+            home_ca_der: CertificateDer::from(home_ca),
+            id_map_lock: Mutex::new(()),
+            resolver_edit_lock: Mutex::new(()),
+            map: Mutex::new(old_map),
+            password_limiter: Arc::new(PasswordLimiter::default()),
+            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
+        };
+        let req = ApplyControllerStateRequest {
+            operation_id: admin_proto::OperationId::new(),
+            controller,
+            addr: new_addr,
+            map: new_map.clone(),
+            crl_pem: crl.clone(),
+        };
+        assert!(matches!(
+            handle_apply_controller_state(&state, &req),
+            ApplyControllerStateResponse::Ok
+        ));
+        let persisted = AdminServerConfig::load_for_recovery(&cfg_path).unwrap();
+        assert_eq!(persisted.ca_addr, Some(new_addr));
+        assert_eq!(*state.map.lock(), new_map);
+        assert_eq!(std::fs::read_to_string(root.path().join("crl.pem")).unwrap(), crl);
+
+        let mut stale = req.clone();
+        stale.map.version = 3;
+        stale.addr = old_addr;
+        stale.map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr =
+            old_addr;
+        assert!(matches!(
+            handle_apply_controller_state(&state, &stale),
+            ApplyControllerStateResponse::Err { .. }
+        ));
+        assert_eq!(
+            AdminServerConfig::load_for_recovery(&cfg_path).unwrap().ca_addr,
+            Some(new_addr)
+        );
+    }
+
     #[tokio::test]
     async fn immediate_crl_partial_results_are_target_identifying_and_sorted() {
         let failed = admin_proto::AdminServerId::new();
         let ok = admin_proto::AdminServerId::new();
         let failed_addr = "127.0.0.1:41001".parse().unwrap();
         let ok_addr = "127.0.0.1:41002".parse().unwrap();
-        let results = collect_crl_results(
+        let results = collect_peer_results(
             vec![(failed, failed_addr), (ok, ok_addr)],
             |server, _addr| async move {
                 if server == failed {

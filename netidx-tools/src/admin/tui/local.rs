@@ -608,6 +608,10 @@ fn action_desc(action: &Action) -> &'static str {
             "Mint a fresh CA recovery password. Use this if you lost or forgot the old \
              one — it retires the old password. Works only locally, on the CA machine."
         }
+        Backup { .. } => {
+            "Create a point-in-time-consistent controller recovery bundle while the CA \
+             remains online. Existing target directories are never overwritten."
+        }
         ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
         ExternalInstall { .. } => {
             "Install the externally-signed CA certificate returned by your PKI."
@@ -723,6 +727,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // The admin roster and this host's own permissions over the local control
         // socket, when an admin server is configured on this box.
         if let Some(cfg_path) = &lca.cfg {
+            items.push((
+                "Back Up Controller".to_string(),
+                Action::Backup { cfg_path: cfg_path.clone() },
+            ));
             items.push((
                 "Admins".to_string(),
                 Action::ManageLocalAdmins {
@@ -997,5 +1005,14 @@ mod tests {
         assert_eq!(service_word(ServiceStatus::Active), "running");
         assert_eq!(service_word(ServiceStatus::Inactive), "stopped");
         assert_eq!(service_word(ServiceStatus::NotInstalled), "no service");
+    }
+
+    #[test]
+    fn backup_action_is_explained_as_live_and_non_overwriting() {
+        let action =
+            Action::Backup { cfg_path: PathBuf::from("/etc/netidx/admin-server.json") };
+        let desc = action_desc(&action);
+        assert!(desc.contains("remains online"));
+        assert!(desc.contains("never overwritten"));
     }
 }

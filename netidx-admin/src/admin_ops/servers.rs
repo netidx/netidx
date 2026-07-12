@@ -94,3 +94,22 @@ pub async fn remove_server(
     )
     .await
 }
+
+/// Re-send the controller's current address, authoritative map, and CRL to all
+/// registered servers. Safe to repeat after any partial result.
+pub async fn reconcile_controller(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<crate::admin_proto::Secret>,
+) -> Result<(crate::admin_proto::OperationId, Vec<crate::admin_proto::PeerResult>)> {
+    let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
+    admin_client::reconcile_controller(
+        sess.server,
+        NodeKind::Client,
+        &sess.identity,
+        sess.credential,
+    )
+    .await
+}

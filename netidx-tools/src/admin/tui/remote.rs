@@ -161,7 +161,9 @@ impl Panel {
             Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
             Panel::Delegations => "a approve · d deny · r refresh · Esc back",
             Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
-            Panel::Servers => "x force-remove · r refresh · Esc back",
+            Panel::Servers => {
+                "c reconcile controller · x force-remove · r refresh · Esc back"
+            }
             Panel::Revocation => "x revoke · r refresh · Esc back",
             Panel::Perms => "e edit · r reload · Esc back",
             Panel::Service => "s start · t stop · R restart · r refresh · Esc back",
@@ -273,6 +275,9 @@ pub(super) enum RemoteAction {
         addr: SocketAddr,
         cluster: String,
     },
+    /// Re-send the controller's current address, map, and CRL to every
+    /// registered node. Idempotent manual retry after recovery/relocation.
+    ReconcileController { target: PanelTarget },
     /// List the cluster's permission levels (resolver bases) from the map, to
     /// pick one to view/edit — replaces free-text path entry for cluster perms.
     ListLevels { target: PanelTarget },
@@ -309,6 +314,9 @@ impl RemoteAction {
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
+            RemoteAction::ReconcileController { .. } => {
+                "Reconciling controller state".to_string()
+            }
             RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
             RemoteAction::ListServiceServers { .. } => "Loading servers".to_string(),
@@ -394,6 +402,7 @@ impl RemoteAction {
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
             | RemoteAction::RemoveServer { target, .. }
+            | RemoteAction::ReconcileController { target }
             | RemoteAction::ListLevels { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ListServiceServers { target }
@@ -489,6 +498,9 @@ pub(super) async fn run(
         }
         RemoteAction::RemoveServer { target, server, .. } => {
             remove_server(ans, target.into_remote()?, server).await
+        }
+        RemoteAction::ReconcileController { target } => {
+            reconcile_controller(ans, target.into_remote()?).await
         }
         RemoteAction::EditPerms { target, at } => edit_perms(ans, target, at).await,
         RemoteAction::ServiceControl { target, server, units, op } => {
@@ -1242,6 +1254,52 @@ async fn remove_server(
     let rows = server_rows(ans, &conn).await?;
     Ok(super::action::Outcome::remote_after(
         "Server removed",
+        lines,
+        Panel::Servers,
+        rows,
+    ))
+}
+
+#[cfg(unix)]
+async fn reconcile_controller(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::admin_ops::servers;
+    let (operation_id, peers) = servers::reconcile_controller(
+        ans,
+        Some(conn.server),
+        None,
+        Some(conn.admin.clone()),
+        None,
+    )
+    .await?;
+    let failed: Vec<_> = peers.iter().filter(|peer| peer.error.is_some()).collect();
+    let mut lines = vec![
+        format!("Operation {operation_id}."),
+        format!(
+            "Updated {} of {} registered server(s).",
+            peers.len() - failed.len(),
+            peers.len()
+        ),
+    ];
+    for peer in failed {
+        lines.push(format!(
+            "  ! server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    if !peers.iter().all(|peer| peer.error.is_none()) {
+        lines.push(
+            "Bring failed servers back online and press c again; controller reconciliation is idempotent."
+                .to_string(),
+        );
+    }
+    let rows = server_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Controller reconciled",
         lines,
         Panel::Servers,
         rows,
@@ -2288,6 +2346,9 @@ impl RemoteState {
 
     fn on_key_servers(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
+            KeyCode::Char('c') => {
+                Some(Action::Remote(RemoteAction::ReconcileController { target }))
+            }
             KeyCode::Char('x') => {
                 self.selected_server().map(|(server, addr, cluster)| {
                     Action::Remote(RemoteAction::RemoveServer {
@@ -3074,6 +3135,10 @@ mod tests {
             },
         ];
         s.list.select(Some(0));
+        assert!(matches!(
+            s.on_key(KeyCode::Char('c')),
+            Some(Action::Remote(RemoteAction::ReconcileController { .. }))
+        ));
         assert!(
             s.on_key(KeyCode::Char('x')).is_none(),
             "the controller row must never produce a remove action"

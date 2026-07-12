@@ -35,7 +35,8 @@
 use crate::{
     admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyCrlRequest, ApplyCrlResponse,
+        AdminListResponse, AdminMgmtResponse, ApplyControllerStateRequest,
+        ApplyControllerStateResponse, ApplyCrlRequest, ApplyCrlResponse,
         ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
         ApplyReferralEditResponse, ApplyServiceControlRequest,
         ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
@@ -48,9 +49,10 @@ use crate::{
         IssuedEntry, ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
         ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
         NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
-        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReferralEdit, RegisterRequest,
-        RegisterResponse, RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse,
-        Request, ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
+        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
+        ReconcileControllerResponse, ReferralEdit, RegisterRequest, RegisterResponse,
+        RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse, Request,
+        ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
         ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
     },
     fingerprint::Fingerprint,
@@ -563,6 +565,42 @@ pub async fn push_crl(
         ApplyCrlResponse::Ok => Ok(()),
         ApplyCrlResponse::Err { reason } => {
             bail!("peer refused the CRL update: {reason}")
+        }
+    }
+}
+
+/// Controller → node: reconcile the exact controller address, authoritative
+/// map, and CRL on one exact home-CA admin-server identity.
+pub async fn push_controller_state(
+    addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    request: ApplyControllerStateRequest,
+) -> Result<()> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
+    admin_proto::write_msg(&mut tls, &Request::ApplyControllerState(request)).await?;
+    match admin_proto::read_msg::<_, ApplyControllerStateResponse>(&mut tls).await? {
+        ApplyControllerStateResponse::Ok => Ok(()),
+        ApplyControllerStateResponse::Err { reason } => {
+            bail!("peer refused controller-state reconciliation: {reason}")
         }
     }
 }
@@ -1919,6 +1957,31 @@ pub async fn remove_server(
         }),
         RemoveServerResponse::Err { reason } => {
             bail!("the CA refused server removal: {reason}")
+        }
+    }
+}
+
+/// Ask the verified controller to re-send its current address, map, and CRL to
+/// every registered node. Idempotent and intended as the explicit retry after
+/// a node was offline during controller recovery/relocation.
+pub async fn reconcile_controller(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+) -> Result<(admin_proto::OperationId, Vec<admin_proto::PeerResult>)> {
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ReconcileController(ReconcileControllerRequest { credential }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut tls).await? {
+        ReconcileControllerResponse::Ok { operation_id, peers } => {
+            Ok((operation_id, peers))
+        }
+        ReconcileControllerResponse::Err { reason } => {
+            bail!("the CA refused controller reconciliation: {reason}")
         }
     }
 }

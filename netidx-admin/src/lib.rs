@@ -50,6 +50,9 @@ pub mod admin_server_config;
 /// reports progress, abstracted over the frontend (strict CLI / TUI / Atlas).
 pub mod answer;
 pub mod atomic;
+/// Point-in-time, daemon-mediated CA/controller recovery bundles.
+#[cfg(unix)]
+pub mod backup;
 /// CA / CSR / cert generation. Unix-only because it depends on
 /// `openssl`, which on Windows requires a mingw build of OpenSSL
 /// that is impractical to install. netidx itself uses rustls

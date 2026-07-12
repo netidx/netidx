@@ -149,6 +149,8 @@ pub enum Field {
     SignedCert,
     /// Path to an external PKI's root certificate (external-CA install).
     ExternalRoot,
+    /// New directory the local controller creates for a consistent backup.
+    BackupTarget,
 }
 
 /// The presentation descriptor for a [`Field`]: what flag a script passes,
@@ -521,6 +523,12 @@ impl Field {
                 help: "Path to your external PKI's root certificate, if the signed \
                        certificate does not already carry the chain. Leave blank to \
                        use the chain in the signed certificate.",
+            },
+            BackupTarget => FieldInfo {
+                flag: "--target",
+                label: "backup target directory",
+                help: "A new directory on this controller for the recovery bundle. \
+                       Existing paths are never overwritten.",
             },
         }
     }

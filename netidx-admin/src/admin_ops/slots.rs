@@ -391,6 +391,12 @@ fn recover_controller_with_password(
         bail!("the restored map's controller entry does not carry the CA role");
     }
     let listen = listen.unwrap_or(cfg.listen);
+    if listen.ip().is_unspecified() {
+        bail!(
+            "controller recovery needs a routable admin address, not {listen}; pass \
+             --listen <address:port>"
+        );
+    }
 
     // Prepare both replacement secrets before touching the vault or issuance
     // index. A sealing failure therefore leaves the backup byte-for-byte usable
@@ -953,6 +959,146 @@ mod tests {
         let replacement = read_autorenew_password(&fixture.keytab).unwrap();
         let unlocked = cadir.vault.read().unlock(&replacement).unwrap();
         assert_eq!(unlocked.admin, crate::admin_server::AUTORENEW_ADMIN);
+    }
+
+    #[test]
+    fn live_backup_bundle_verifies_restores_and_recovers_without_machine_keys() {
+        let fixture = recoverable_controller();
+        let cfg = AdminServerConfig::load_for_recovery(&fixture.config).unwrap();
+        let (map_version, highest_serial, ca_key) = {
+            let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
+            let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
+            let highest = cadir.store.lock().max_serial().unwrap().unwrap();
+            let key = cadir.vault.read().unlock(&fixture.recovery).unwrap().ca_key_pem;
+            (map.version, highest, key)
+        };
+        let snapshot = crate::backup::capture(
+            &cfg,
+            &fixture.config,
+            fixture.ca_dir.path(),
+            map_version,
+            highest_serial,
+            &ca_key,
+        )
+        .unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let bundle = backup_parent.path().join("controller-backup");
+        let outcome =
+            crate::backup::publish(snapshot, &bundle, fixture.ca_dir.path()).unwrap();
+        assert_eq!(outcome.controller, fixture.server_id);
+        let manifest = crate::backup::verify(&bundle).unwrap();
+        assert_eq!(manifest.highest_serial, highest_serial);
+        assert!(
+            manifest.files.iter().all(|file| !file.path.starts_with("ca/server/")),
+            "machine-bound serving material must not be backed up"
+        );
+
+        let restore = tempfile::tempdir().unwrap();
+        let ca = restore.path().join("ca");
+        let config = restore.path().join("admin-server.json");
+        crate::backup::restore(&bundle, &ca, &config).unwrap();
+        crate::backup::restore(&bundle, &ca, &config)
+            .expect("a pristine restore is retryable after a mistyped password");
+        let keytab = restore.path().join("autorenew.keytab");
+        let new_listen: SocketAddr = "10.0.0.30:24565".parse().unwrap();
+        let recovered = recover_controller_with_password(
+            &ca,
+            &config,
+            Some(new_listen),
+            &fixture.recovery,
+            true,
+            &keytab,
+        )
+        .unwrap();
+        assert_eq!(recovered.server_id, fixture.server_id);
+        assert_eq!(recovered.listen, new_listen);
+        assert!(keytab.is_file());
+        assert!(AdminServerConfig::load(&config).is_ok());
+    }
+
+    #[test]
+    fn backup_manifest_detects_tampering_and_restore_never_overwrites() {
+        let fixture = recoverable_controller();
+        let cfg = AdminServerConfig::load_for_recovery(&fixture.config).unwrap();
+        let (map_version, highest_serial, ca_key) = {
+            let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
+            let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
+            let highest = cadir.store.lock().max_serial().unwrap().unwrap();
+            let key = cadir.vault.read().unlock(&fixture.recovery).unwrap().ca_key_pem;
+            (map.version, highest, key)
+        };
+        let snapshot = crate::backup::capture(
+            &cfg,
+            &fixture.config,
+            fixture.ca_dir.path(),
+            map_version,
+            highest_serial,
+            &ca_key,
+        )
+        .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let bundle = parent.path().join("backup");
+        crate::backup::publish(snapshot, &bundle, fixture.ca_dir.path()).unwrap();
+        let original_map = std::fs::read(bundle.join("ca/netmap.json")).unwrap();
+        std::fs::write(bundle.join("ca/netmap.json"), b"tampered").unwrap();
+        assert!(crate::backup::verify(&bundle).is_err());
+        std::fs::write(bundle.join("ca/netmap.json"), original_map).unwrap();
+        let manifest_path = bundle.join(crate::backup::MANIFEST_FILE);
+        let mut manifest: crate::backup::Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.map_version += 1;
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap())
+            .unwrap();
+        let error = crate::backup::verify(&bundle).unwrap_err();
+        assert!(format!("{error:#}").contains("signature"));
+
+        let destination = parent.path().join("existing-ca");
+        std::fs::create_dir(&destination).unwrap();
+        let config = parent.path().join("new-config.json");
+        assert!(crate::backup::restore(&bundle, &destination, &config).is_err());
+        assert!(!config.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_controller_backs_up_over_the_protected_local_rpc() {
+        let fixture = recoverable_controller();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        recover_controller_with_password(
+            fixture.ca_dir.path(),
+            &fixture.config,
+            Some(listen),
+            &fixture.recovery,
+            true,
+            &fixture.keytab,
+        )
+        .unwrap();
+        let mut cfg = AdminServerConfig::load(&fixture.config).unwrap();
+        cfg.mdns = false;
+        cfg.save(&fixture.config).unwrap();
+        let config = fixture.config.clone();
+        let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
+        for _ in 0..500 {
+            if crate::admin_local::daemon_running(&config).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if !crate::admin_local::daemon_running(&config).await {
+            if daemon.is_finished() {
+                panic!(
+                    "recovered controller exited before local RPC: {:?}",
+                    daemon.await
+                );
+            }
+            panic!("recovered controller never opened its local RPC socket");
+        }
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("live-backup");
+        let outcome = crate::admin_local::backup(&config, &target).await.unwrap();
+        assert_eq!(outcome.controller, fixture.server_id);
+        assert_eq!(outcome.target, target);
+        assert!(crate::backup::verify(&target).is_ok());
+        daemon.abort();
     }
 
     #[test]

@@ -8,7 +8,7 @@ use netidx_admin::{
     },
     admin_proto::{self, NodeKind},
     answer::{Answerer, Field},
-    atomic,
+    atomic, backup as controller_backup,
     ca::{self, Ca, CaParams, SanEntry, Subject},
     ca_vault,
     fingerprint::{ColorMode, Fingerprint},
@@ -78,6 +78,12 @@ pub(crate) enum Cmd {
     Servers(ServersArgs),
     /// permanently revoke and remove one dead admin-server identity
     RemoveServer(RemoveServerArgs),
+    /// capture a point-in-time-consistent recovery bundle from the running
+    /// local controller
+    Backup(BackupArgs),
+    /// re-send the controller's current address, authoritative map, and CRL to
+    /// every registered node (safe to repeat after partial failure)
+    ReconcileController(ReconcileControllerArgs),
     /// set up or rotate the auto-approve slot, so the running admin server
     /// approves verified renewals in-process (no human per renewal)
     AutoApprove(AutoApproveArgs),
@@ -179,6 +185,11 @@ pub(crate) struct RecoveryRotateArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RecoverControllerArgs {
+    /// A bundle produced by `ca backup`. When supplied, the verified bundle is
+    /// restored into `--ca-dir` and `--config` before hardware rebinding; both
+    /// destinations must not already exist.
+    #[arg(long)]
+    pub backup: Option<PathBuf>,
     /// Restored CA directory. Defaults to the normal local CA directory.
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
@@ -196,6 +207,22 @@ pub(crate) struct RecoverControllerArgs {
     pub insecure_no_tpm: bool,
     #[command(flatten)]
     pub recovery: RecoveryAuth,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct BackupArgs {
+    /// New backup directory to create on this controller. Existing targets are
+    /// never overwritten; relative paths are made absolute before the local RPC.
+    pub target: PathBuf,
+    /// Local admin-server config used to locate the protected control socket.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ReconcileControllerArgs {
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
@@ -745,6 +772,8 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Revoke(p) => revoke(p),
         Cmd::Servers(p) => servers(p),
         Cmd::RemoveServer(p) => remove_server(p),
+        Cmd::Backup(p) => backup(p),
+        Cmd::ReconcileController(p) => reconcile_controller(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
         Cmd::RecoverController(args) => recover_controller(args),
@@ -1077,6 +1106,57 @@ fn remove_server(f: RemoveServerArgs) -> Result<()> {
     Ok(())
 }
 
+fn backup(a: BackupArgs) -> Result<()> {
+    let config = match a.config {
+        Some(path) => path,
+        None => paths::discover_admin_server_config()?,
+    };
+    let target = if a.target.is_absolute() {
+        a.target
+    } else {
+        std::env::current_dir()?.join(a.target)
+    };
+    let out = runtime()?.block_on(admin_local::backup(&config, &target))?;
+    println!("created controller recovery backup at {}", out.target.display());
+    println!("  CA fingerprint: {}", out.ca_fingerprint);
+    println!("  controller:     {}", out.controller);
+    println!("  map version:    {}", out.map_version);
+    println!("  highest serial: {}", out.highest_serial);
+    println!("  files:          {}", out.files);
+    println!("  bytes:          {}", out.bytes);
+    println!("  manifest SHA-256: {}", out.manifest_sha256);
+    Ok(())
+}
+
+fn reconcile_controller(a: ReconcileControllerArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let (operation_id, peers) = runtime()?.block_on(server_ops::reconcile_controller(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let failed: Vec<_> = peers.iter().filter(|peer| peer.error.is_some()).collect();
+    println!("controller reconciliation operation: {operation_id}");
+    println!("  targets updated: {}/{}", peers.len() - failed.len(), peers.len());
+    for peer in failed {
+        println!(
+            "  ! server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    if !peers.iter().all(|peer| peer.error.is_none()) {
+        println!(
+            "Restore the failed targets, then repeat this command; reconciliation is idempotent."
+        );
+    }
+    Ok(())
+}
+
 fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
     match override_ {
         Some(p) => Ok(p),
@@ -1130,12 +1210,21 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
 
 fn recover_controller(a: RecoverControllerArgs) -> Result<()> {
     let ca_dir = ca_dir_for(a.ca_dir)?;
-    let config = match a.config {
-        Some(path) => path,
-        None => paths::discover_admin_server_config().context(
+    let config = match (a.backup.as_ref(), a.config) {
+        (_, Some(path)) => path,
+        (Some(_), None) => paths::user_admin_server_config()?,
+        (None, None) => paths::discover_admin_server_config().context(
             "no restored admin-server config found; pass --config <admin-server.json>",
         )?,
     };
+    if let Some(bundle) = &a.backup {
+        let manifest = controller_backup::restore(bundle, &ca_dir, &config)
+            .context("restoring verified controller backup")?;
+        println!(
+            "restored verified backup for controller {} (map version {}, highest serial {})",
+            manifest.controller, manifest.map_version, manifest.highest_serial
+        );
+    }
     let mut ans = a.recovery.answerer()?;
     let out = runtime()?.block_on(slots_ops::recover_controller(
         &mut ans,
@@ -2321,6 +2410,53 @@ mod tests {
         assert_eq!(args.listen, Some("10.0.0.20:14565".parse().unwrap()));
         assert!(args.recovery.recovery_password_stdin);
         assert!(args.insecure_no_tpm);
+        assert!(args.backup.is_none());
+    }
+
+    #[test]
+    fn backup_and_reconcile_controller_cli_are_explicit() {
+        let parsed = TestCaCli::try_parse_from([
+            "ca",
+            "backup",
+            "/srv/backups/netidx-2026-07-12",
+            "--config",
+            "/etc/netidx/admin-server.json",
+        ])
+        .unwrap();
+        let Cmd::Backup(args) = parsed.cmd else { panic!("expected backup") };
+        assert_eq!(args.target, Path::new("/srv/backups/netidx-2026-07-12"));
+
+        let parsed = TestCaCli::try_parse_from([
+            "ca",
+            "reconcile-controller",
+            "--server",
+            "10.0.0.2:4565",
+            "--admin",
+            "root",
+            "--password-stdin",
+            "--accept-glyph",
+            "AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AAAAA AA",
+        ])
+        .unwrap();
+        assert!(matches!(parsed.cmd, Cmd::ReconcileController(_)));
+
+        let parsed = TestCaCli::try_parse_from([
+            "ca",
+            "recover-controller",
+            "--backup",
+            "/mnt/backup/controller",
+            "--ca-dir",
+            "/etc/netidx/ca",
+            "--config",
+            "/etc/netidx/admin-server.json",
+            "--recovery-password-stdin",
+            "--insecure-no-tpm",
+        ])
+        .unwrap();
+        let Cmd::RecoverController(args) = parsed.cmd else {
+            panic!("expected recover-controller")
+        };
+        assert_eq!(args.backup.as_deref(), Some(Path::new("/mnt/backup/controller")));
     }
 
     #[test]

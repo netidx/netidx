@@ -12,16 +12,28 @@
 //! the daemon on this socket.
 
 use crate::admin_proto::{
-    self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
-    EditPermsRequest, EditPermsResponse, EnrollRequest, ListAdminsRequest, NodeKind,
-    PROTOCOL_VERSION, PeerResult, ReadPermsRequest, ReadPermsResponse,
-    RemoveAdminRequest, Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret,
-    ServerHello, SetAdminPolicyRequest, SignResponse,
+    self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupRequest,
+    BackupResponse, ClientHello, EditPermsRequest, EditPermsResponse, EnrollRequest,
+    ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult, ReadPermsRequest,
+    ReadPermsResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
+    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
+
+#[derive(Debug, Clone)]
+pub struct BackupOutcome {
+    pub target: std::path::PathBuf,
+    pub ca_fingerprint: String,
+    pub controller: admin_proto::AdminServerId,
+    pub map_version: u64,
+    pub highest_serial: u64,
+    pub files: u64,
+    pub bytes: u64,
+    pub manifest_sha256: String,
+}
 
 /// Connect to the daemon's local control socket (beside the admin-server
 /// config) and complete the hello exchange, returning the stream positioned
@@ -56,6 +68,40 @@ async fn connect(cfg_path: &Path) -> Result<UnixStream> {
 pub async fn daemon_running(cfg_path: &Path) -> bool {
     let path = crate::admin_server::local_socket_path(cfg_path);
     UnixStream::connect(&path).await.is_ok()
+}
+
+/// Ask the running controller to publish a point-in-time-consistent recovery
+/// bundle. This request exists only on the protected local control socket; the
+/// target is a path on this host and the daemon refuses to overwrite it.
+pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
+    let mut s = connect(cfg_path).await?;
+    admin_proto::write_msg(
+        &mut s,
+        &Request::Backup(BackupRequest { target: target.to_string_lossy().into_owned() }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, BackupResponse>(&mut s).await? {
+        BackupResponse::Ok {
+            target,
+            ca_fingerprint,
+            controller,
+            map_version,
+            highest_serial,
+            files,
+            bytes,
+            manifest_sha256,
+        } => Ok(BackupOutcome {
+            target: target.into(),
+            ca_fingerprint,
+            controller,
+            map_version,
+            highest_serial,
+            files,
+            bytes,
+            manifest_sha256,
+        }),
+        BackupResponse::Err { reason } => bail!("the CA refused backup: {reason}"),
+    }
 }
 
 /// Empty credentials. The daemon ignores the admin/password fields on the

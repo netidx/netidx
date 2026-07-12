@@ -444,6 +444,78 @@ pub enum Request {
     /// [`ReadPermsResponse`].
     #[pack(tag(37))]
     ReadPerms(ReadPermsRequest),
+    /// Local-control-only: capture a point-in-time-consistent recovery bundle
+    /// from the running controller into `target`. The target path is interpreted
+    /// on the controller host and is never accepted over the network plane.
+    /// Answered with [`BackupResponse`].
+    #[pack(tag(38))]
+    Backup(BackupRequest),
+    /// Admin-authenticated controller maintenance: fan the controller's current
+    /// identity/address, authoritative map, and CRL out to every registered
+    /// node. Idempotent; this is the explicit retry after a node missed startup
+    /// reconciliation. Answered with [`ReconcileControllerResponse`].
+    #[pack(tag(39))]
+    ReconcileController(ReconcileControllerRequest),
+    /// Controller → node: install a verified controller relocation and its
+    /// accompanying authoritative state. The TLS peer's exact home-CA-issued
+    /// controller identity is the authorization boundary. Answered with
+    /// [`ApplyControllerStateResponse`].
+    #[pack(tag(40))]
+    ApplyControllerState(ApplyControllerStateRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct BackupRequest {
+    /// Absolute or caller-relative path on the controller host. The server
+    /// refuses an existing target rather than overwriting backup material.
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum BackupResponse {
+    #[pack(tag(0))]
+    Ok {
+        target: String,
+        ca_fingerprint: String,
+        controller: AdminServerId,
+        map_version: u64,
+        highest_serial: u64,
+        files: u64,
+        bytes: u64,
+        manifest_sha256: String,
+    },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ReconcileControllerRequest {
+    pub credential: AdminCredential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ReconcileControllerResponse {
+    #[pack(tag(0))]
+    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ApplyControllerStateRequest {
+    pub operation_id: OperationId,
+    pub controller: AdminServerId,
+    pub addr: SocketAddr,
+    pub map: NetworkMap,
+    pub crl_pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ApplyControllerStateResponse {
+    #[pack(tag(0))]
+    Ok,
+    #[pack(tag(1))]
+    Err { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1546,6 +1618,24 @@ mod tests {
             target_path: "/eu".to_string(),
         }));
         assert_eq!(read_perms[1], 37);
+        let backup = encode(&Request::Backup(BackupRequest {
+            target: "/backup/controller".into(),
+        }));
+        assert_eq!(backup[1], 38);
+        let reconcile =
+            encode(&Request::ReconcileController(ReconcileControllerRequest {
+                credential: AdminCredential::password("alice", "pw"),
+            }));
+        assert_eq!(reconcile[1], 39);
+        let controller = AdminServerId::new();
+        let apply = encode(&Request::ApplyControllerState(ApplyControllerStateRequest {
+            operation_id: OperationId::new(),
+            controller,
+            addr: "127.0.0.1:4565".parse().unwrap(),
+            map: NetworkMap::empty(controller),
+            crl_pem: "crl".into(),
+        }));
+        assert_eq!(apply[1], 40);
     }
 
     #[tokio::test]

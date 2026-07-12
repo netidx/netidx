@@ -339,18 +339,30 @@ which is the point of the whole renewal chapter: keys are disposable.
 
 The CA directory is portable even though daemon credentials are not. Its
 `vault.json` contains a `recovery` signing slot whose password is kept off-box;
-that slot unwraps the CA master key without the old TPM. A usable backup must
-contain the complete CA directory (certificate, vault, issuance index, CRL,
-network map, delegation state, and trust bundle) plus `admin-server.json` and
-the resolver/configuration files. The sealed `autorenew.keytab` and TLS keys
-are deliberately not recovery assets.
+that slot unwraps the CA master key without the old TPM. Create a live,
+point-in-time-consistent bundle over the protected local control socket:
 
-With the old daemon stopped or gone, restore those files and run:
+```text
+netidx admin ca backup /srv/backups/netidx-2026-07-12
+```
+
+The daemon briefly blocks durable mutations while capturing the vault,
+certificate/trust chain, issuance and revocation records, CRL, authoritative
+map, delegation records, lifetime settings, audit log, admin-server config,
+and referenced resolver/id-map configuration into memory. It resumes
+administration before writing the target. A versioned, hashed manifest signed
+by the CA key is published with the files through a new sibling directory and atomic rename;
+an existing target is never overwritten. The local-only RPC cannot be invoked
+with any network certificate. Sealed `autorenew.keytab` and TLS keys, sessions,
+locks, and temporary files are deliberately not recovery assets.
+
+After fencing the old controller, restore and recover the bundle directly:
 
 ```text
 netidx admin ca recover-controller \
-    --ca-dir /restored/ca \
-    --config /restored/admin-server.json \
+    --backup /srv/backups/netidx-2026-07-12 \
+    --ca-dir /etc/netidx/ca \
+    --config /etc/netidx/admin-server.json \
     --listen 10.0.0.20:4565 \
     --recovery-password-stdin
 ```
@@ -368,9 +380,21 @@ fingerprint and controller UUID against `netmap.json`, and then:
 - updates the controller's authoritative map address and rewrites
   `admin-server.json` to the restored CA's canonical paths.
 
-On first start the recovered controller reconciles the new CRL to every
-registered admin server. Other co-located TLS identities whose keys were sealed
-to the failed machine are re-enrolled normally after the controller is back.
+On first start the recovered controller sends its current immutable identity,
+possibly changed address, authoritative map, and CRL to every registered admin
+server. Each satellite accepts this only from the exact home-CA controller,
+persists the new `ca_addr`, and resumes normal map refresh and renewal. A node
+that was unavailable is retried explicitly from the CLI or the Admin Servers
+TUI panel (`c`):
+
+```text
+netidx admin ca reconcile-controller --server <controller> ...
+```
+
+The response identifies every target by immutable server ID and address. The
+operation is idempotent and never restarts a service. Other co-located TLS
+identities whose keys were sealed to the failed machine are re-enrolled
+normally after the controller is back.
 `--insecure-no-tpm` is an explicit test-only fallback and leaves both new
 machine credentials in plaintext.
 

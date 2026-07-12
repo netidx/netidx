@@ -251,6 +251,9 @@ pub(super) enum Action {
     AutoApprove { rotate: bool, ca_dir: PathBuf, cfg: Option<PathBuf> },
     /// Mint a fresh CA recovery password on this box (local, no-auth).
     RecoveryRotate { ca_dir: PathBuf, cfg: Option<PathBuf> },
+    /// Capture a consistent live recovery bundle through the protected local
+    /// control socket. The target directory is prompted by the TUI.
+    Backup { cfg_path: PathBuf },
     /// Re-emit a renewal CSR for this box's externally-signed CA (local).
     ExternalEmitCsr { ca_dir: PathBuf },
     /// Install an externally-signed CA certificate on this box (local).
@@ -296,6 +299,7 @@ impl Action {
             }
             .to_string(),
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
+            Action::Backup { .. } => "Backing up controller".to_string(),
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
             Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
             Action::OpenServices { .. } => "Services".to_string(),
@@ -324,6 +328,7 @@ impl Action {
             | Action::Join { .. }
             | Action::AddParent
             | Action::AutoApprove { rotate: false, .. }
+            | Action::Backup { .. }
             | Action::ExternalEmitCsr { .. }
             | Action::ExternalInstall { .. }
             | Action::ManageLocalAdmins { .. } => None,
@@ -387,6 +392,7 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         }
         a @ (Action::AutoApprove { .. }
         | Action::RecoveryRotate { .. }
+        | Action::Backup { .. }
         | Action::ExternalEmitCsr { .. }
         | Action::ExternalInstall { .. }) => local_ca_op(&mut ans, a).await,
         Action::Services(sa) => super::services::run(&mut ans, sa).await,
@@ -402,6 +408,7 @@ async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
             auto_approve(ans, rotate, ca_dir, cfg).await
         }
         Action::RecoveryRotate { ca_dir, cfg } => recovery_rotate(ans, ca_dir, cfg).await,
+        Action::Backup { cfg_path } => backup(ans, cfg_path).await,
         Action::ExternalEmitCsr { ca_dir } => external_emit_csr(ans, ca_dir).await,
         Action::ExternalInstall { ca_dir } => external_install(ans, ca_dir).await,
         _ => unreachable!("local_ca_op called with a non-CA action"),
@@ -471,6 +478,33 @@ async fn recovery_rotate(
         }
     };
     Ok(Outcome::plain("Recovery password rotated", lines, true))
+}
+
+#[cfg(unix)]
+async fn backup(ans: &mut TuiAnswerer, cfg_path: PathBuf) -> Result<Outcome> {
+    let target = ans
+        .text(Field::BackupTarget, None, None, true)
+        .await?
+        .context("a backup target directory is required")?;
+    let target = PathBuf::from(target);
+    let target =
+        if target.is_absolute() { target } else { std::env::current_dir()?.join(target) };
+    let out = netidx_admin::admin_local::backup(&cfg_path, &target).await?;
+    Ok(Outcome::plain(
+        "Controller backup created",
+        vec![
+            format!("Target: {}", out.target.display()),
+            format!("CA: {}", out.ca_fingerprint),
+            format!("Controller: {}", out.controller),
+            format!(
+                "Map version: {} · highest serial: {}",
+                out.map_version, out.highest_serial
+            ),
+            format!("{} files · {} bytes", out.files, out.bytes),
+            format!("Manifest SHA-256: {}", out.manifest_sha256),
+        ],
+        false,
+    ))
 }
 
 /// Re-emit a renewal CSR for an externally-signed CA.
