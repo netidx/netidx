@@ -265,9 +265,8 @@ pub(super) enum Action {
     Services(super::services::ServicesAction),
     /// Open the Local tab's local admin-server panel surface (roster, perms) over
     /// the control socket, landing directly on `panel`. Pure navigation — handled
-    /// by the UI loop, not an op. `ca_dir` lets the perms read auto-verify against
-    /// the local CA cert.
-    ManageLocalAdmins { cfg_path: PathBuf, ca_dir: PathBuf, panel: super::remote::Panel },
+    /// by the UI loop, not an op.
+    ManageLocalAdmins { cfg_path: PathBuf, panel: super::remote::Panel },
 }
 
 impl Action {

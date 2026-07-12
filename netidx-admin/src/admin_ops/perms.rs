@@ -1,116 +1,78 @@
 //! Map-routed permissions administration as query + action.
 //!
-//! An admin contacts *a* admin server, glyph-confirms its CA (the one human
-//! trust decision), and the network map locates the resolver cluster mounted at
-//! a path. `show_perms` reads that cluster's perms; `edit_perms` authenticates
-//! to the CA, which validates the file and propagates it to every cluster
-//! member. The `$EDITOR` loop between read and write is a frontend concern and
-//! stays in the CLI — the library exposes the read and the authenticated write.
-//!
-//! **The map can route us at an impostor.** Every connection the map sends us
-//! to is re-pinned against the CA the operator already confirmed
-//! ([`same_ca_identity`]): a target presenting a different CA fingerprint is
-//! refused, so a poisoned map can't redirect a perms read or edit to a
-//! look-alike server.
+//! An admin contacts *an* admin server, glyph-confirms its CA (the one human
+//! trust decision), and resolves the authoritative controller before sending
+//! credentials. Both reads and edits authenticate there. The controller
+//! authorizes the requested path and uses its CA-owned map plus exact server-ID
+//! pinning to reach cluster members. The `$EDITOR` loop between read and write
+//! is a frontend concern and stays in the CLI.
 
-use super::{open_admin_session, resolve_identity};
+use super::{AdminSession, open_admin_session, resolve_identity};
 use crate::{
-    admin_client::{self, CaIdentity},
-    admin_local,
+    admin_client, admin_local,
     admin_proto::{NetworkMap, NodeKind, PeerResult, Secret},
     answer::Answerer,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::{
     collections::BTreeSet,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
-/// A glyph-confirmed admin server plus the network map fetched from it.
-struct MapBootstrap {
-    /// The bootstrap admin server (whose CA the operator confirmed).
-    addr: SocketAddr,
-    /// The confirmed CA identity — every later connection re-pins to it.
-    id: CaIdentity,
-    /// The network map fetched (pinned) from the bootstrap server.
-    map: NetworkMap,
-}
-
 /// Reach an admin server (explicit, else this host's own), confirm its CA glyph
 /// (auto-verified against the local cert, or through the answerer), and pull the
-/// map — the shared preamble for both perms ops.
+/// map for the level picker. The map is a discovery hint only; authenticated
+/// reads and edits separately resolve and verify the controller.
 async fn bootstrap(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<&Path>,
-) -> Result<MapBootstrap> {
+) -> Result<NetworkMap> {
     let (addr, id) = resolve_identity(ans, server, ca_dir).await?;
-    let map = admin_client::get_map_pinned(addr, NodeKind::Client, &id)
+    admin_client::get_map_pinned(addr, NodeKind::Client, &id)
         .await
-        .context("fetching the network map")?;
-    Ok(MapBootstrap { addr, id, map })
-}
-
-/// The admin server of the cluster mounted exactly at `at` (the same exact-base
-/// match the CA uses to route the edit).
-fn route(map: &NetworkMap, at: &str) -> Result<SocketAddr> {
-    let mut bases = BTreeSet::new();
-    for c in map
-        .clusters
-        .iter()
-        .filter(|c| c.state == crate::admin_proto::ClusterState::Active)
-    {
-        if c.base == at {
-            if let Some(server) = map.servers.iter().find(|s| {
-                s.cluster == Some(c.id)
-                    && s.state == crate::admin_proto::ServerState::Registered
-            }) {
-                return Ok(server.addr);
-            }
-        }
-        bases.insert(c.base.as_str());
-    }
-    bail!(
-        "no resolver cluster is mounted at {at:?} in the network map. Known cluster \
-         bases: {}",
-        bases.into_iter().collect::<Vec<_>>().join(", ")
-    )
-}
-
-/// The CA identity to use for `target`, pinned to the SAME CA the operator
-/// confirmed at bootstrap. Reuses the bootstrap identity when `target` is the
-/// bootstrap host; otherwise fetches `target`'s identity and refuses it if its
-/// CA fingerprint differs (the map could route us at an impostor).
-async fn same_ca_identity(bs: &MapBootstrap, target: SocketAddr) -> Result<CaIdentity> {
-    if target == bs.addr {
-        return Ok(bs.id.clone());
-    }
-    let tid = admin_client::fetch_identity(target, NodeKind::Client)
-        .await
-        .with_context(|| format!("contacting admin server {target}"))?;
-    if tid.fingerprint != bs.id.fingerprint {
-        bail!(
-            "the admin server at {target} presents a DIFFERENT CA than the one you \
-             confirmed — refusing to trust where the map routed us."
-        );
-    }
-    Ok(tid)
+        .context("fetching the network map")
 }
 
 /// The `perms show --at <path>` query: read the raw perms JSON of the cluster
-/// mounted at `at` (glyph-confirmed, re-pinned; perms are readable within the
-/// trust domain, so no admin password). The CLI pretty-prints the result.
+/// mounted at `at`. The authoritative controller is verified before collecting
+/// credentials, then authenticates and authorizes the read. The CLI
+/// pretty-prints the result.
 pub async fn show_perms(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<Secret>,
     at: &str,
 ) -> Result<String> {
-    let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
-    let target = route(&bs.map, at)?;
-    let id = same_ca_identity(&bs, target).await?;
-    admin_client::get_perms(target, NodeKind::Client, &id).await
+    let (_session, perms_json) =
+        open_perms_session(ans, server, ca_dir, admin, password, at).await?;
+    Ok(perms_json)
+}
+
+/// Open one verified remote-admin session and read `at`. Editor frontends keep
+/// the returned session across human think-time and use it for the write, so a
+/// one-shot password is collected only once.
+pub async fn open_perms_session(
+    ans: &mut dyn Answerer,
+    server: Option<SocketAddr>,
+    ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<Secret>,
+    at: &str,
+) -> Result<(AdminSession, String)> {
+    let session = open_admin_session(ans, server, ca_dir, admin, password).await?;
+    let perms_json = admin_client::read_perms(
+        session.server,
+        NodeKind::Client,
+        &session.identity,
+        session.credential.clone(),
+        at,
+    )
+    .await?;
+    Ok((session, perms_json))
 }
 
 /// List every level (resolver-cluster base) in the network map — the exact
@@ -121,9 +83,8 @@ pub async fn list_levels(
     server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,
 ) -> Result<Vec<String>> {
-    let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
-    let bases: BTreeSet<String> = bs
-        .map
+    let map = bootstrap(ans, server, ca_dir.as_deref()).await?;
+    let bases: BTreeSet<String> = map
         .clusters
         .iter()
         .filter(|c| c.state == crate::admin_proto::ClusterState::Active)
@@ -146,15 +107,23 @@ pub async fn edit_perms(
     at: &str,
     edited: &str,
 ) -> Result<Vec<PeerResult>> {
-    let bs = bootstrap(ans, server, ca_dir.as_deref()).await?;
     // `open_admin_session` resolves and exactly verifies the authoritative
     // controller before it collects or sends credentials.
-    let session = open_admin_session(ans, Some(bs.addr), ca_dir, admin, password).await?;
+    let session = open_admin_session(ans, server, ca_dir, admin, password).await?;
+    edit_perms_with_session(&session, at, edited).await
+}
+
+/// Apply an edit using a session already used for the editor's initial read.
+pub async fn edit_perms_with_session(
+    session: &AdminSession,
+    at: &str,
+    edited: &str,
+) -> Result<Vec<PeerResult>> {
     admin_client::edit_perms(
         session.server,
         NodeKind::Client,
         &session.identity,
-        session.credential,
+        session.credential.clone(),
         at,
         edited,
     )
@@ -168,14 +137,16 @@ pub async fn edit_perms(
 /// map, and propagates the edit to every member of the cluster mounted at
 /// `target_path`, so a local edit is as cluster-consistent as a remote one.
 ///
-/// The *read* side has no Local variant: on the CA host [`show_perms`] with no
-/// `--server` already auto-verifies against the local CA cert (glyph-free) and
-/// reads perms within the trust domain (password-free), so it serves the Local
-/// tab unchanged.
 pub async fn edit_perms_local(
     cfg_path: &Path,
     target_path: &str,
     edited: &str,
 ) -> Result<Vec<PeerResult>> {
     admin_local::edit_perms(cfg_path, target_path, edited).await
+}
+
+/// Read this resolver's own permissions over its protected local socket. The
+/// daemon confines the request to the host's configured cluster base.
+pub async fn show_perms_local(cfg_path: &Path, target_path: &str) -> Result<String> {
+    admin_local::read_perms(cfg_path, target_path).await
 }

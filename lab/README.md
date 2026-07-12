@@ -47,19 +47,39 @@ loss/latency/partitions). HQ serves `/`, EU serves `/eu`, AP serves `/ap`.
 | `debian13 ap-publisher`    | 192.168.70.13  | AP publisher |
 | `debian13 ap-workstation`  | 192.168.70.14  | AP workstation |
 | `debian13 router`          | .50.2/.60.2/.70.2 | tri-homed netem WAN router; hosts `wan` at `/usr/local/bin/wan` |
-| `win11`                    | DHCP on libvirt `default` (currently 192.168.122.10) | Windows 11 workstation test VM; passwordless SSH as `eric` |
+| `win11`                    | management: DHCP on `default` (currently 192.168.122.10); netidx: DHCP on `netidx-test` (currently 192.168.50.163) | Windows 11 workstation test VM; passwordless SSH as `eric` |
 
 Networks: `netidx-test` 192.168.50.0/24 (HQ, NAT), `netidx-eu` 192.168.60.0/24
 (isolated — router is the only path off-subnet), `netidx-ap` 192.168.70.0/24
 (isolated). HQ guests get a route to 60/70 via .50.2; EU/AP guests get their
 default gw from DHCP (router .60.2/.70.2).
 
-The Windows VM uses libvirt's separate `default` NAT network, which may need
-`virsh net-start default` after a host reboot. Discover its current address
-with `virsh net-dhcp-leases default`, then connect without a password:
+The Windows VM has two NICs. The libvirt `default` NAT network is its stable
+management/SSH path and may need `virsh net-start default` after a host reboot.
+The `netidx-test` NIC puts the workstation directly on the HQ network for
+admin-plane and resolver testing; do not rely on the management NAT to route
+the 50/60/70 lab networks. Discover the management address with
+`virsh net-dhcp-leases default`, then connect without a password:
 
 ```sh
 ssh eric@<windows-ip>
+```
+
+If an older `win11` definition has only the management NIC, attach the HQ NIC
+once (both live and persistent):
+
+```sh
+virsh -c qemu:///system attach-interface win11 network netidx-test \
+  --model virtio --live --config
+```
+
+The Windows distribution consists of **two sibling executables**:
+`netidx.exe` and the GUI-subsystem `netidx-activation.exe`. A workstation
+install with its per-user logon task requires both. Cross-build them with:
+
+```sh
+cargo build -p netidx-tools \
+  --bin netidx --bin netidx-activation --target x86_64-pc-windows-gnu
 ```
 
 ## Clean

@@ -13,7 +13,7 @@
 //!   [`SigEvent::Reload`].
 
 use crate::{control, platform::SigEvent};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use futures::{future, prelude::*, select_biased};
 use log::{error, info};
 use std::{
@@ -35,13 +35,18 @@ use tokio::{
 };
 use windows::{
     Win32::{
-        Foundation::HANDLE,
+        Foundation::{HANDLE, HLOCAL, LocalFree},
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        },
         System::{
             JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-                SetInformationJobObject,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JobObjectExtendedLimitInformation, SetInformationJobObject,
             },
             Threading::{CREATE_NO_WINDOW, CreateEventW, SetEvent},
         },
@@ -116,7 +121,9 @@ pub(crate) fn configure_privileges(
     gid: Option<u32>,
 ) -> Result<()> {
     if uid.is_some() || gid.is_some() {
-        bail!("uid/gid privilege drop is not supported on Windows; remove them from the unit")
+        bail!(
+            "uid/gid privilege drop is not supported on Windows; remove them from the unit"
+        )
     }
     Ok(())
 }
@@ -130,10 +137,9 @@ pub(crate) fn spawn(mut cmd: Command, job: &Job) -> Result<Spawned> {
     let wname: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     // Manual-reset so a daemon that hasn't reached its wait yet still
     // observes the signal; initially non-signaled.
-    let handle = unsafe {
-        CreateEventW(None, true.into(), false.into(), PCWSTR(wname.as_ptr()))
-    }
-    .context("CreateEventW(shutdown)")?;
+    let handle =
+        unsafe { CreateEventW(None, true.into(), false.into(), PCWSTR(wname.as_ptr())) }
+            .context("CreateEventW(shutdown)")?;
     // SAFETY: CreateEventW returned a valid, owned event handle.
     let shutdown_event = unsafe { OwnedHandle::from_raw_handle(handle.0 as RawHandle) };
     cmd.env(SHUTDOWN_EVENT_VAR, &name);
@@ -190,21 +196,62 @@ pub(crate) struct ControlListener {
 /// The connected control stream handed to `handle_control_conn`.
 pub(crate) type ControlStream = NamedPipeServer;
 
+struct LocalSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl Drop for LocalSecurityDescriptor {
+    fn drop(&mut self) {
+        if !self.0.0.is_null() {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0.0)));
+            }
+        }
+    }
+}
+
+/// Create one control-pipe instance with a protected DACL. The logged-in user,
+/// SYSTEM, and Administrators receive full control; no inherited/default ACE
+/// grants Everyone enough access to connect and hold a server task open.
+fn create_control_pipe(name: &str, first: bool) -> Result<NamedPipeServer> {
+    let owner = netidx::windows::current_user_sid_string()
+        .context("resolving the activation supervisor owner SID")?;
+    let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner})");
+    let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(wide.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+    }
+    .context("building the activation control-pipe DACL")?;
+    let descriptor = LocalSecurityDescriptor(descriptor);
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0.0,
+        bInheritHandle: false.into(),
+    };
+    let mut options = ServerOptions::new();
+    options.first_pipe_instance(first).reject_remote_clients(true);
+    // SAFETY: `attributes` and its LocalAlloc-backed security descriptor stay
+    // alive until CreateNamedPipeW returns. Tokio does not retain the pointer.
+    unsafe {
+        options.create_with_security_attributes_raw(
+            name,
+            &mut attributes as *mut SECURITY_ATTRIBUTES as *mut c_void,
+        )
+    }
+    .map_err(|error| anyhow!(error))
+    .with_context(|| format!("creating protected activation control pipe {name}"))
+}
+
 /// Create the first instance of the control pipe. Returns `None`
 /// (logged) on failure — the supervisor still runs, just without remote
 /// control.
 pub(crate) fn bind_control(units_dir: &Path) -> Option<ControlListener> {
     let name = control::pipe_name(units_dir);
-    // CR claude for estokes: v1 uses the default named-pipe security
-    // descriptor (creator + SYSTEM + Administrators full control,
-    // Everyone read-only — they cannot write a request). Harden with an
-    // explicit owner-SID DACL via create_with_security_attributes_raw,
-    // sharing the token-SID helper with the Phase 2 local-auth code.
-    match ServerOptions::new()
-        .first_pipe_instance(true)
-        .reject_remote_clients(true)
-        .create(&name)
-    {
+    match create_control_pipe(&name, true) {
         Ok(pending) => {
             info!("activation control pipe listening at {name}");
             Some(ControlListener { name, pending })
@@ -227,17 +274,16 @@ pub(crate) async fn accept_control(
         Some(l) => match l.pending.connect().await {
             // After connect returns there is no further await, so building
             // the next instance + swapping is atomic w.r.t. cancellation.
-            Ok(()) => match ServerOptions::new()
-                .reject_remote_clients(true)
-                .create(&l.name)
-            {
+            Ok(()) => match create_control_pipe(&l.name, false) {
                 Ok(next) => Some(std::mem::replace(&mut l.pending, next)),
                 Err(e) => {
                     // Couldn't pre-create the next instance (resource
                     // pressure). Reset the connected instance back to
                     // listening and drop this one request — degraded, not
                     // a hang.
-                    error!("activation control: could not create next pipe instance: {e}");
+                    error!(
+                        "activation control: could not create next pipe instance: {e}"
+                    );
                     let _ = l.pending.disconnect();
                     None
                 }

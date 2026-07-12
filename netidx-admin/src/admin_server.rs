@@ -18,24 +18,26 @@ use crate::{
     admin_client,
     admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
-        ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
-        ApplyServiceControlRequest, ApplyServiceControlResponse,
-        ApproveDelegationRequest, ApproveDelegationResponse, ApproveRequest,
-        ApproveResponse, ClientHello, ControlServiceRequest, ControlServiceResponse,
-        DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
-        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetCrlResponse, GetInfoResponse, GetMapResponse,
-        GetMapVersionResponse, GetPermsResponse, InfoAuth, IssuedEntry,
-        ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
-        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
-        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
-        QueueEntry, ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
-        RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
-        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
-        SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceUnit, ServiceUnitDef,
-        SetAdminPolicyRequest, SignRequest, SignResponse,
+        AdminListResponse, AdminMgmtResponse, ApplyCrlRequest, ApplyCrlResponse,
+        ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
+        ApplyReferralEditResponse, ApplyServiceControlRequest,
+        ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
+        ApproveRequest, ApproveResponse, ClientHello, ControlServiceRequest,
+        ControlServiceResponse, DelegationEntry, DelegationPollResponse,
+        DelegationRequest, DelegationResponse, DenyDelegationRequest,
+        DenyDelegationResponse, DenyRequest, DenyResponse, EditPermsRequest,
+        EditPermsResponse, EnqueueRequest, EnqueueResponse, EnrollRequest,
+        GetCrlResponse, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
+        GetPermsResponse, InfoAuth, IssuedEntry, ListAdminsRequest,
+        ListDelegationsRequest, ListDelegationsResponse, ListIssuedRequest,
+        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NetworkMap, NodeKind,
+        PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse, QueueEntry,
+        ReadPermsRequest, ReadPermsResponse, ReferralEdit, RegisterRequest,
+        RegisterResponse, RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse,
+        Request, ResolverAddr, RevokeRequest, RevokeResponse, Role,
+        RotateAutorenewResponse, RotateRecoveryResponse, SERVING_SAN, Secret,
+        ServerEntry, ServerHello, ServiceUnit, ServiceUnitDef, SetAdminPolicyRequest,
+        SignRequest, SignResponse,
     },
     admin_server_config::AdminServerConfig,
     ca::{Ca, SanEntry},
@@ -841,10 +843,10 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
     use Request::*;
     match req {
         GetInfo | Enqueue(_) | Poll(_) | GetCrl | RequestDelegation(_)
-        | PollDelegation(_) | GetMapVersion | GetMap | GetPerms => {
-            RequestAuthorization::Public
-        }
+        | PollDelegation(_) | GetMapVersion | GetMap => RequestAuthorization::Public,
         AddIdentity(_)
+        | ApplyCrl(_)
+        | GetPerms
         | ApplyPermsEdit(_)
         | ApplyReferralEdit(_)
         | ApplyServiceControl(_) => RequestAuthorization::ControllerOnly,
@@ -852,9 +854,9 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
         RotateRecovery | RotateAutorenew => RequestAuthorization::LocalOnly,
         Login(_) | Logout(_) | Sign(_) | Enroll(_) | ListQueue(_) | Approve(_)
         | Deny(_) | Revoke(_) | ListIssued(_) | ListDelegations(_)
-        | ApproveDelegation(_) | DenyDelegation(_) | RemoveServer(_) | EditPerms(_)
-        | AddRoleAdmin(_) | SetAdminPolicy(_) | RemoveAdmin(_) | ListAdmins(_)
-        | ControlService(_) => RequestAuthorization::AdminAuthenticated,
+        | ApproveDelegation(_) | DenyDelegation(_) | RemoveServer(_) | ReadPerms(_)
+        | EditPerms(_) | AddRoleAdmin(_) | SetAdminPolicy(_) | RemoveAdmin(_)
+        | ListAdmins(_) | ControlService(_) => RequestAuthorization::AdminAuthenticated,
     }
 }
 
@@ -876,6 +878,7 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         ApproveDelegation(req) => &req.credential,
         DenyDelegation(req) => &req.credential,
         RemoveServer(req) => &req.credential,
+        ReadPerms(req) => &req.credential,
         EditPerms(req) => &req.credential,
         AddRoleAdmin(req) => &req.credential,
         SetAdminPolicy(req) => &req.credential,
@@ -891,6 +894,7 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         | RequestDelegation(_)
         | PollDelegation(_)
         | ApplyReferralEdit(_)
+        | ApplyCrl(_)
         | Register(_)
         | Deregister
         | GetMapVersion
@@ -1440,11 +1444,7 @@ where
                         None => RevokeResponse::Err {
                             reason: "this host does not hold the CA".to_string(),
                         },
-                        Some(_) => {
-                            let state = state.clone();
-                            run_signing(&signs, move || handle_revoke(&state, &req))
-                                .await?
-                        }
+                        Some(_) => handle_revoke(state, &signs, &req).await,
                     };
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
@@ -1645,6 +1645,12 @@ where
                         .await
                         .context("writing RemoveServerResponse")
                 }
+                Request::ReadPerms(req) => {
+                    let resp = handle_read_perms(state, &signs, &req, local).await;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ReadPermsResponse")
+                }
                 Request::GetPerms => {
                     let state = state.clone();
                     let resp =
@@ -1679,6 +1685,25 @@ where
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
                         .context("writing ApplyPermsEditResponse")
+                }
+                Request::ApplyCrl(req) => {
+                    let resp = if !peer_is_controller {
+                        ApplyCrlResponse::Err {
+                            reason:
+                                "a CRL update requires the home CA controller certificate"
+                                    .to_string(),
+                        }
+                    } else {
+                        let state = state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            handle_apply_crl(&state, &req)
+                        })
+                        .await
+                        .context("apply CRL task panicked")?
+                    };
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ApplyCrlResponse")
                 }
                 Request::AddRoleAdmin(req) => {
                     // Bound the Argon2 in `authenticate` by the sign semaphore, like
@@ -2962,18 +2987,25 @@ fn handle_list_queue(state: &Server, req: &ListQueueRequest) -> ListQueueRespons
     }
 }
 
-/// Revoke certificates by serial and re-sign the CRL (admin-authenticated;
-/// the daemon owns the index, so the `ca` CLI sends this rather than
-/// touching the files). The fresh CRL is served via `GetCrl` and pulled by
-/// the renewal daemon to each resolver's trust bundle.
-fn handle_revoke(state: &Server, req: &RevokeRequest) -> RevokeResponse {
+struct PreparedRevoke {
+    admin: String,
+    warnings: Vec<String>,
+    crl_pem: Option<String>,
+}
+
+/// Authenticate, apply the requested serial revocations, and re-sign the CRL.
+/// The async wrapper below performs the network fanout after this
+/// Argon2/signing-bound phase releases the signing semaphore.
+fn prepare_revoke(
+    state: &Server,
+    req: &RevokeRequest,
+    operation_id: admin_proto::OperationId,
+) -> std::result::Result<PreparedRevoke, String> {
     let ca = state.ca.as_ref().expect("CA role held");
     let authd = match authenticate(ca, &req.credential) {
         Ok(a) => a,
         Err(reason) => {
-            return RevokeResponse::Err {
-                reason: safe_auth_failure(&req.credential, reason),
-            };
+            return Err(safe_auth_failure(&req.credential, reason));
         }
     };
     // Revocation is privileged — revoking serving certs or another region's
@@ -2987,15 +3019,13 @@ fn handle_revoke(state: &Server, req: &RevokeRequest) -> RevokeResponse {
         && authd.policy.allowed_san.is_empty()
         && authd.policy.server_enroll_scopes.is_empty()
     {
-        return RevokeResponse::Err {
-            reason: format!(
-                "admin {} is not authorized to revoke certificates",
-                authd.admin
-            ),
-        };
+        return Err(format!(
+            "admin {} is not authorized to revoke certificates",
+            authd.admin
+        ));
     }
     if req.serials.is_empty() {
-        return RevokeResponse::Err { reason: "no serials to revoke".to_string() };
+        return Err("no serials to revoke".to_string());
     }
     // Resolve each serial to the name it was issued for, so we can confine a
     // scoped admin to revoking only certs within its `allowed_san`. Read once
@@ -3005,9 +3035,7 @@ fn handle_revoke(state: &Server, req: &RevokeRequest) -> RevokeResponse {
         match ca.store.lock().list_signed() {
             Ok(records) => records.into_iter().map(|r| (r.serial, r)).collect(),
             Err(e) => {
-                return RevokeResponse::Err {
-                    reason: format!("reading the issuance index: {e:#}"),
-                };
+                return Err(format!("reading the issuance index: {e:#}"));
             }
         };
     let now = ca_store::now_unix();
@@ -3079,7 +3107,7 @@ fn handle_revoke(state: &Server, req: &RevokeRequest) -> RevokeResponse {
                     ca.dir(),
                     &authd.admin,
                     "revoke",
-                    &format!("serial {serial}"),
+                    &format!("operation {operation_id}: serial {serial}"),
                     Duration::ZERO,
                 ),
                 Ok(false) => warnings.push(format!(
@@ -3090,15 +3118,287 @@ fn handle_revoke(state: &Server, req: &RevokeRequest) -> RevokeResponse {
         }
     }
     // Re-sign the CRL with the server's own key (the autorenew credential).
-    match server_unlock(ca) {
+    let crl_pem = match server_unlock(ca) {
         Ok(signing) => {
-            if let Err(e) = ca.store.lock().write_crl(&signing.ca_key_pem) {
-                warnings.push(format!("re-signing the CRL: {e:#}"));
+            let path = {
+                let mut store = ca.store.lock();
+                match store.write_crl(&signing.ca_key_pem) {
+                    Ok(()) => store.crl_path(),
+                    Err(e) => {
+                        warnings.push(format!(
+                            "re-signing the CRL failed; immediate enforcement is unavailable: {e:#}"
+                        ));
+                        return Ok(PreparedRevoke {
+                            admin: authd.admin,
+                            warnings,
+                            crl_pem: None,
+                        });
+                    }
+                }
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(pem) => Some(pem),
+                Err(e) => {
+                    warnings.push(format!(
+                        "reading the signed CRL for immediate distribution: {e:#}"
+                    ));
+                    None
+                }
             }
         }
-        Err(reason) => warnings.push(format!("re-signing the CRL: {reason}")),
+        Err(reason) => {
+            warnings.push(format!(
+                "re-signing the CRL failed; immediate enforcement is unavailable: {reason}"
+            ));
+            None
+        }
+    };
+    Ok(PreparedRevoke { admin: authd.admin, warnings, crl_pem })
+}
+
+/// Validate that `crl_pem` is exactly one CRL signed by this node's immutable
+/// home CA. Controller-only transport is the authorization boundary, while
+/// this signature check prevents a corrupted payload from replacing working
+/// revocation state.
+fn validate_home_crl(crl_pem: &str, home_ca_der: &[u8]) -> Result<()> {
+    use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
+    let crls = rustls_pemfile::crls(&mut std::io::Cursor::new(crl_pem.as_bytes()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("parsing CRL PEM")?;
+    let [der] = crls.as_slice() else {
+        bail!("expected exactly one CRL, got {}", crls.len());
+    };
+    let (remaining, crl) = CertificateRevocationList::from_der(der.as_ref())
+        .map_err(|e| anyhow!("parsing CRL DER: {e}"))?;
+    if !remaining.is_empty() {
+        bail!("CRL DER contains trailing bytes");
     }
-    RevokeResponse::Ok { warnings }
+    let (remaining, ca) = X509Certificate::from_der(home_ca_der)
+        .map_err(|e| anyhow!("parsing home CA certificate: {e}"))?;
+    if !remaining.is_empty() {
+        bail!("home CA certificate contains trailing bytes");
+    }
+    crl.verify_signature(ca.public_key())
+        .context("CRL signature does not verify against the home CA")
+}
+
+/// Every local trust bundle whose inbound TLS authentication is administered
+/// by this daemon. The admin-plane bundle is always present; a resolver role
+/// may name the same bundle more than once, so destinations are deduplicated.
+fn local_crl_destinations(state: &Server) -> Result<BTreeSet<PathBuf>> {
+    use netidx::resolver_server::config::file::Auth;
+    let (admin_trusted, resolver_config) = {
+        let cfg = state.cfg.lock();
+        (cfg.trusted.clone(), cfg.roles.resolver.as_ref().map(|role| role.config.clone()))
+    };
+    let mut destinations = BTreeSet::new();
+    destinations.insert(admin_trusted.with_file_name("crl.pem"));
+    if let Some(path) = resolver_config {
+        let cfg = crate::resolver::ResolverConfig::load(&path)
+            .with_context(|| format!("loading resolver config {}", path.display()))?;
+        for member in &cfg.as_file().member_servers {
+            if let Auth::Tls { trusted, .. } = &member.auth {
+                destinations
+                    .insert(Path::new(trusted.as_str()).with_file_name("crl.pem"));
+            }
+        }
+    }
+    Ok(destinations)
+}
+
+/// Install a verified CRL atomically beside all local trust bundles. Identical
+/// content is left untouched so file watchers do not rebuild TLS state twice.
+fn apply_crl_to_destinations(
+    crl_pem: &str,
+    home_ca_der: &[u8],
+    destinations: BTreeSet<PathBuf>,
+) -> Result<()> {
+    validate_home_crl(crl_pem, home_ca_der)?;
+    let mut failures = Vec::new();
+    for destination in destinations {
+        match std::fs::read(&destination) {
+            Ok(current) if current == crl_pem.as_bytes() => continue,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                failures.push(format!("reading {}: {e}", destination.display()));
+                continue;
+            }
+        }
+        match crate::atomic::write_atomic(&destination, crl_pem.as_bytes(), 0o644) {
+            Ok(()) => info!(
+                "admin-server: installed immediate CRL at {}",
+                destination.display()
+            ),
+            Err(e) => failures.push(format!("writing {}: {e:#}", destination.display())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("one or more CRL destinations failed: {}", failures.join("; "))
+    }
+}
+
+fn apply_crl_local(state: &Server, crl_pem: &str) -> Result<()> {
+    apply_crl_to_destinations(
+        crl_pem,
+        state.home_ca_der.as_ref(),
+        local_crl_destinations(state)?,
+    )
+}
+
+fn handle_apply_crl(state: &Server, req: &ApplyCrlRequest) -> ApplyCrlResponse {
+    info!("admin-server: applying CRL operation {}", req.operation_id);
+    match apply_crl_local(state, &req.crl_pem) {
+        Ok(()) => ApplyCrlResponse::Ok,
+        Err(e) => ApplyCrlResponse::Err { reason: format!("{e:#}") },
+    }
+}
+
+fn registered_crl_targets(
+    state: &Server,
+) -> Vec<(admin_proto::AdminServerId, SocketAddr)> {
+    let mut targets: Vec<_> = state
+        .map
+        .lock()
+        .servers
+        .iter()
+        .filter(|server| server.state == admin_proto::ServerState::Registered)
+        .map(|server| (server.id, server.addr))
+        .collect();
+    targets.sort_by_key(|(server, _)| *server);
+    targets
+}
+
+async fn collect_crl_results<I, F, Fut>(targets: I, apply: F) -> Vec<PeerResult>
+where
+    I: IntoIterator<Item = (admin_proto::AdminServerId, SocketAddr)>,
+    F: Fn(admin_proto::AdminServerId, SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let mut results: Vec<_> = stream::iter(targets.into_iter().map(|(server, addr)| {
+        let future = apply(server, addr);
+        async move {
+            PeerResult {
+                server,
+                addr,
+                error: future.await.err().map(|error| format!("{error:#}")),
+            }
+        }
+    }))
+    .buffer_unordered(32)
+    .collect()
+    .await;
+    results.sort_by_key(|result| result.server);
+    results
+}
+
+/// Immediately distribute a newly signed CRL to every registered node. The
+/// local controller uses the same application core without a loopback TLS
+/// connection; remote targets are exact-ID/home-CA pinned and bounded exactly
+/// like the other controller mutation fanouts.
+async fn push_crl_to_peers(
+    state: &Arc<Server>,
+    crl_pem: &str,
+    operation_id: admin_proto::OperationId,
+) -> Vec<PeerResult> {
+    let targets = registered_crl_targets(state);
+    let my_id = state.cfg.lock().server_id;
+    let controller = state.map.lock().controller;
+    let mut results = Vec::new();
+    if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
+        let state = state.clone();
+        let crl_pem = crl_pem.to_string();
+        let error =
+            tokio::task::spawn_blocking(move || apply_crl_local(&state, &crl_pem))
+                .await
+                .map_err(|e| anyhow!("local CRL task panicked: {e}"))
+                .and_then(|result| result)
+                .err()
+                .map(|e| format!("{e:#}"));
+        results.push(PeerResult { server, addr, error });
+    }
+    let (cert, key) = state.outbound_identity();
+    let roots = state.roots.clone();
+    let home_ca = state.home_ca_der.clone();
+    let mut remote = collect_crl_results(
+        targets.into_iter().filter(|(server, _)| *server != my_id),
+        |server, addr| {
+            let cert = cert.clone();
+            let key = key.clone();
+            let roots = roots.clone();
+            let home_ca = home_ca.clone();
+            let crl_pem = crl_pem.to_string();
+            async move {
+                tokio::time::timeout(
+                    PUSH_TIMEOUT,
+                    admin_client::push_crl(
+                        addr,
+                        server,
+                        server == controller,
+                        home_ca,
+                        &cert,
+                        &key,
+                        roots,
+                        operation_id,
+                        &crl_pem,
+                    ),
+                )
+                .await
+                .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))
+                .and_then(|result| result)
+            }
+        },
+    )
+    .await;
+    results.append(&mut remote);
+    results.sort_by_key(|result| result.server);
+    results
+}
+
+async fn handle_revoke(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &RevokeRequest,
+) -> RevokeResponse {
+    let operation_id = admin_proto::OperationId::new();
+    let prepared = {
+        let state = state.clone();
+        let req = req.clone();
+        run_signing(signs, move || prepare_revoke(&state, &req, operation_id)).await
+    };
+    let PreparedRevoke { admin, mut warnings, crl_pem } = match prepared {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(reason)) => return RevokeResponse::Err { reason },
+        Err(e) => {
+            return RevokeResponse::Err { reason: format!("revoke task panicked: {e}") };
+        }
+    };
+    audit(
+        state.ca.as_ref().expect("CA role held").dir(),
+        &admin,
+        "fanout-crl",
+        &format!("operation {operation_id}"),
+        Duration::ZERO,
+    );
+    let peers = match crl_pem {
+        Some(crl_pem) => push_crl_to_peers(state, &crl_pem, operation_id).await,
+        None => {
+            let reason =
+                "fresh CRL unavailable; immediate distribution was not attempted";
+            warnings.push(reason.to_string());
+            registered_crl_targets(state)
+                .into_iter()
+                .map(|(server, addr)| PeerResult {
+                    server,
+                    addr,
+                    error: Some(reason.to_string()),
+                })
+                .collect()
+        }
+    };
+    RevokeResponse::Ok { warnings, operation_id: Some(operation_id), peers }
 }
 
 /// List every issued certificate (admin-authenticated) — the revoke UI
@@ -3965,6 +4265,7 @@ struct RemoveServerPrepare {
     removed: bool,
     affected_clusters: Vec<String>,
     fanout: TopologyFanout,
+    crl_pem: Option<String>,
 }
 
 /// The blocking half of permanent server removal: authenticate, validate the
@@ -4102,6 +4403,22 @@ fn remove_server_prepare(
             Duration::ZERO,
         );
     }
+    // Always carry the current CRL on an idempotent retry as well: a previous
+    // removal may have committed the revocation but only partially delivered
+    // it. Repeating force-remove is the manual reconciliation path for both
+    // topology and revocation state.
+    let crl_pem = {
+        let path = state.ca.as_ref().expect("CA role held").store.lock().crl_path();
+        match std::fs::read_to_string(&path) {
+            Ok(pem) => Some(pem),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(err(format!(
+                    "reading the current CRL for immediate distribution: {e:#}"
+                )));
+            }
+        }
+    };
     let mut targets = Vec::new();
     for cluster in
         map.clusters.iter().filter(|cluster| affected_ids.contains(&cluster.id))
@@ -4126,6 +4443,7 @@ fn remove_server_prepare(
         removed,
         affected_clusters,
         fanout: TopologyFanout { targets },
+        crl_pem,
     })
 }
 
@@ -4152,6 +4470,10 @@ async fn handle_remove_server(
             };
         }
     };
+    let crl_peers = match prepared.crl_pem {
+        Some(crl_pem) => push_crl_to_peers(&state, &crl_pem, operation_id).await,
+        None => Vec::new(),
+    };
     let peers = push_topology(&state, prepared.fanout, operation_id).await;
     RemoveServerResponse::Ok {
         version: prepared.version,
@@ -4160,6 +4482,7 @@ async fn handle_remove_server(
         removed: prepared.removed,
         affected_clusters: prepared.affected_clusters,
         peers,
+        crl_peers,
     }
 }
 
@@ -4234,6 +4557,163 @@ fn handle_get_perms(state: &Server) -> GetPermsResponse {
         Ok(perms_json) => GetPermsResponse::Ok { perms_json },
         Err(e) => GetPermsResponse::Err { reason: format!("{e:#}") },
     }
+}
+
+/// Authenticate a permissions operation. Remote callers use the CA vault or a
+/// live session; the protected local socket is the on-box signing superuser.
+/// Shared by reads and edits so their scope semantics cannot drift.
+async fn authenticate_perms_caller(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    credential: &admin_proto::AdminCredential,
+    local: bool,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    if local {
+        return Ok(local_superuser());
+    }
+    let state = state.clone();
+    let auth_credential = credential.clone();
+    let failure_credential = credential.clone();
+    match run_signing(signs, move || {
+        authenticate(state.ca.as_ref().expect("CA role held"), &auth_credential)
+    })
+    .await
+    {
+        Ok(Ok(authd)) => Ok(authd),
+        Ok(Err(reason)) => Err(safe_auth_failure(&failure_credential, reason)),
+        Err(e) => Err(format!("auth task panicked: {e}")),
+    }
+}
+
+fn authorize_perms_scope(
+    authd: &ca_vault::Authenticated,
+    target_path: &str,
+    operation: &str,
+) -> std::result::Result<(), String> {
+    if authd.kind == ca_vault::SlotKind::Signing
+        || perms_scope_covers(&authd.policy.perms_edit_scopes, target_path)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "admin {:?} ({}) is not authorized to {operation} perms at {:?}",
+            authd.admin,
+            match authd.kind {
+                ca_vault::SlotKind::Signing => "signing",
+                ca_vault::SlotKind::Role => "role",
+            },
+            target_path
+        ))
+    }
+}
+
+fn confine_local_perms(state: &Server, target_path: &str, operation: &str) -> Result<()> {
+    let base = own_base(state);
+    if base.as_deref() == Some(target_path) {
+        Ok(())
+    } else {
+        bail!(
+            "local perms {operation}s are confined to this host's own level ({}); \
+             refusing to {operation} {:?}",
+            base.as_deref().unwrap_or("<none>"),
+            target_path,
+        )
+    }
+}
+
+/// Admin → controller permissions read. Authentication and policy are checked
+/// once at the controller, then registered cluster members are tried in stable
+/// server-ID order using the controller certificate and exact target pinning.
+async fn handle_read_perms(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    req: &ReadPermsRequest,
+    local: bool,
+) -> ReadPermsResponse {
+    let err = |reason: String| ReadPermsResponse::Err { reason };
+    if !local && state.ca.is_none() {
+        return err("a remote perms read must be sent to the CA controller".to_string());
+    }
+    let authd =
+        match authenticate_perms_caller(state, signs, &req.credential, local).await {
+            Ok(authd) => authd,
+            Err(reason) => return err(reason),
+        };
+    if local && let Err(e) = confine_local_perms(state, &req.target_path, "read") {
+        return err(format!("{e:#}"));
+    }
+    if let Err(reason) = authorize_perms_scope(&authd, &req.target_path, "read") {
+        return err(reason);
+    }
+    // The protected local socket is deliberately useful on every resolver,
+    // including satellites that do not have the CA role. It may read only the
+    // host's own level and never consults or trusts remote map hints.
+    if local {
+        let (server, addr) = {
+            let cfg = state.cfg.lock();
+            (cfg.server_id, cfg.listen)
+        };
+        return match handle_get_perms(state) {
+            GetPermsResponse::Ok { perms_json } => {
+                ReadPermsResponse::Ok { server, addr, perms_json }
+            }
+            GetPermsResponse::Err { reason } => err(reason),
+        };
+    }
+    let targets = {
+        let map = state.map.lock();
+        match cluster_members_for(&map, &req.target_path) {
+            Some(targets) => targets,
+            None => {
+                return err(format!(
+                    "no registered resolver cluster serving {:?} in the network map",
+                    req.target_path
+                ));
+            }
+        }
+    };
+    audit(
+        state.ca.as_ref().expect("CA role held").dir(),
+        &authd.admin,
+        "read-perms",
+        &req.target_path,
+        Duration::ZERO,
+    );
+    let (cert, key) = state.outbound_identity();
+    let roots = state.roots.clone();
+    let controller = state.map.lock().controller;
+    let home_ca = state.home_ca_der.clone();
+    let mut failures = Vec::new();
+    for (server, addr) in targets {
+        let result = tokio::time::timeout(
+            PUSH_TIMEOUT,
+            admin_client::pull_perms(
+                addr,
+                server,
+                server == controller,
+                home_ca.clone(),
+                &cert,
+                &key,
+                roots.clone(),
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(perms_json)) => {
+                return ReadPermsResponse::Ok { server, addr, perms_json };
+            }
+            Ok(Err(e)) => failures.push(format!("{server} at {addr}: {e:#}")),
+            Err(_) => failures.push(format!(
+                "{server} at {addr}: timed out after {}s",
+                PUSH_TIMEOUT.as_secs()
+            )),
+        }
+    }
+    err(format!(
+        "no registered member of cluster {:?} could provide permissions: {}",
+        req.target_path,
+        failures.join("; ")
+    ))
 }
 
 /// Write `perms_json` to the local perms file under the resolver-edit lock,
@@ -4434,63 +4914,16 @@ async fn handle_edit_perms(
     if state.ca.is_none() {
         return err("a perms edit must be sent to the CA host".to_string());
     }
-    // Authenticate WITHOUT unlocking the CA key — a perms edit needs no
-    // key, so a role keyslot is a first-class admin here. Authorize by
-    // tier: a signing admin holds full authority (it can already unlock
-    // the CA and do anything); a role admin needs a `perms_edit_scopes`
-    // entry covering the target path. The Argon2 runs under the sign
-    // semaphore so an anonymous flood can't pin unbounded memory.
-    //
-    // A `local` request arrived over the `0600` + `SO_PEERCRED` control
-    // socket: reaching it already proves on-box authority, so it authorizes
-    // as a signing superuser with no password (exactly like
-    // [`authorize_admin_mgmt`] and the other local-bypass handlers). The
-    // route + peer push below is unchanged, so a local edit still propagates
-    // to every cluster member the same way a remote signing admin's does.
-    let authd = if local {
-        local_superuser()
-    } else {
-        let auth = {
-            let state = state.clone();
-            let credential = req.credential.clone();
-            run_signing(signs, move || {
-                authenticate(state.ca.as_ref().expect("CA role held"), &credential)
-            })
-            .await
+    let authd =
+        match authenticate_perms_caller(state, signs, &req.credential, local).await {
+            Ok(authd) => authd,
+            Err(reason) => return err(reason),
         };
-        match auth {
-            Ok(Ok(a)) => a,
-            Ok(Err(reason)) => return err(safe_auth_failure(&req.credential, reason)),
-            Err(e) => return err(format!("auth task panicked: {e}")),
-        }
-    };
-    // A local (control-socket) caller is the on-box superuser, but confined to
-    // this host's OWN level: it may not reach across the cluster map to edit
-    // another resolver's permissions. (Remote admins are bounded by their
-    // `perms_edit_scopes` below.)
-    if local {
-        let base = own_base(state);
-        if base.as_deref() != Some(req.target_path.as_str()) {
-            return err(format!(
-                "local perms edits are confined to this host's own level ({}); \
-                 refusing to edit {:?}",
-                base.as_deref().unwrap_or("<none>"),
-                req.target_path,
-            ));
-        }
+    if local && let Err(e) = confine_local_perms(state, &req.target_path, "edit") {
+        return err(format!("{e:#}"));
     }
-    let authorized = authd.kind == ca_vault::SlotKind::Signing
-        || perms_scope_covers(&authd.policy.perms_edit_scopes, &req.target_path);
-    if !authorized {
-        return err(format!(
-            "admin {:?} ({}) is not authorized to edit perms at {:?}",
-            authd.admin,
-            match authd.kind {
-                ca_vault::SlotKind::Signing => "signing",
-                ca_vault::SlotKind::Role => "role",
-            },
-            req.target_path
-        ));
+    if let Err(reason) = authorize_perms_scope(&authd, &req.target_path, "edit") {
+        return err(reason);
     }
     let members = {
         let map = state.map.lock();
@@ -4543,6 +4976,20 @@ fn base_for_server(map: &NetworkMap, id: admin_proto::AdminServerId) -> Option<S
         .find(|s| s.id == id && s.state == admin_proto::ServerState::Registered)?
         .cluster?;
     map.clusters.iter().find(|c| c.id == cluster).map(|c| c.base.clone())
+}
+
+/// Resolve only an immutable registered identity to its current routing
+/// address. Addresses are deliberately never accepted as lookup keys here.
+fn registered_server_addr(
+    map: &NetworkMap,
+    id: admin_proto::AdminServerId,
+) -> Option<SocketAddr> {
+    map.servers
+        .iter()
+        .find(|server| {
+            server.id == id && server.state == admin_proto::ServerState::Registered
+        })
+        .map(|server| server.addr)
 }
 
 /// CA-side: authenticate the admin, authorize by service-control scope, and
@@ -4613,14 +5060,7 @@ async fn handle_control_service(
     );
     let (my_id, target_addr) = {
         let map = state.map.lock();
-        let addr = map
-            .servers
-            .iter()
-            .find(|s| {
-                s.id == req.target_server
-                    && s.state == admin_proto::ServerState::Registered
-            })
-            .map(|s| s.addr);
+        let addr = registered_server_addr(&map, req.target_server);
         (state.cfg.lock().server_id, addr)
     };
     let Some(target_addr) = target_addr else {
@@ -6769,7 +7209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregation_walks_peers() {
+    async fn aggregation_stops_after_an_authoritative_map() {
         let dir = tempfile::tempdir().unwrap();
         setup_ca(dir.path());
         // B: a roleless stepping stone; A: the CA, which knows about B.
@@ -6791,7 +7231,10 @@ mod tests {
         assert_eq!(info.ca_addr, Some(a_addr));
         assert_eq!(info.reached.first(), Some(&a_addr), "seed order is preserved");
         assert!(info.reached.contains(&a_addr));
-        assert!(info.reached.contains(&b_addr), "peer walk must reach B via A");
+        assert!(
+            !info.reached.contains(&b_addr),
+            "a discovery-hint peer must not be contacted after the controller map is available"
+        );
     }
 
     #[tokio::test]
@@ -9437,6 +9880,24 @@ mod v6_tests {
             RequestAuthorization::ControllerOnly,
         );
         assert_eq!(
+            request_authorization(&Request::GetPerms),
+            RequestAuthorization::ControllerOnly,
+        );
+        assert_eq!(
+            request_authorization(&Request::ReadPerms(ReadPermsRequest {
+                credential: admin_proto::AdminCredential::password("alice", "pw"),
+                target_path: "/eu".into(),
+            })),
+            RequestAuthorization::AdminAuthenticated,
+        );
+        assert_eq!(
+            request_authorization(&Request::ApplyCrl(ApplyCrlRequest {
+                operation_id,
+                crl_pem: "crl".into(),
+            })),
+            RequestAuthorization::ControllerOnly,
+        );
+        assert_eq!(
             request_authorization(&Request::ApplyReferralEdit(
                 ApplyReferralEditRequest {
                     operation_id,
@@ -9506,6 +9967,65 @@ mod v6_tests {
             authorize_request_class(RequestAuthorization::NodeSelf, false, false, false,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn perms_reads_and_edits_share_the_same_scope_authorization() {
+        let role = ca_vault::Authenticated {
+            slot_id: uuid::Uuid::new_v4(),
+            credential_revision: 0,
+            admin: "eu-ops".into(),
+            policy: ca_vault::Policy {
+                allowed_san: vec![],
+                max_validity: Duration::from_secs(60),
+                id_map_groups: vec![],
+                server_enroll_scopes: vec![],
+                server_enroll_roles: vec![],
+                perms_edit_scopes: vec!["/eu".into()],
+                may_manage_admins: false,
+                service_control_scopes: vec![],
+            },
+            kind: ca_vault::SlotKind::Role,
+        };
+        for operation in ["read", "edit"] {
+            assert!(authorize_perms_scope(&role, "/eu", operation).is_ok());
+            assert!(authorize_perms_scope(&role, "/eu/ap", operation).is_ok());
+            assert!(authorize_perms_scope(&role, "/", operation).is_err());
+            assert!(authorize_perms_scope(&role, "/us", operation).is_err());
+        }
+        let signing =
+            ca_vault::Authenticated { kind: ca_vault::SlotKind::Signing, ..role };
+        assert!(authorize_perms_scope(&signing, "/", "read").is_ok());
+        assert!(authorize_perms_scope(&signing, "/us", "edit").is_ok());
+    }
+
+    #[test]
+    fn service_control_routing_uses_identity_across_address_reuse() {
+        let controller = admin_proto::AdminServerId::new();
+        let selected = admin_proto::AdminServerId::new();
+        let replacement = admin_proto::AdminServerId::new();
+        let old_addr = "10.0.0.10:4565".parse().unwrap();
+        let new_addr = "10.0.0.20:4565".parse().unwrap();
+        let entry = |id, addr| ServerEntry {
+            id,
+            addr,
+            roles: vec![Role::Resolver],
+            resolver: None,
+            cluster: None,
+            state: admin_proto::ServerState::Registered,
+        };
+        let mut map = NetworkMap::empty(controller);
+        // The selected identity moved, and a different identity reused its old
+        // address. Routing by address would now hit `replacement`.
+        map.servers.push(entry(selected, new_addr));
+        map.servers.push(entry(replacement, old_addr));
+
+        assert_eq!(registered_server_addr(&map, selected), Some(new_addr));
+        assert_eq!(registered_server_addr(&map, replacement), Some(old_addr));
+        assert_eq!(registered_server_addr(&map, admin_proto::AdminServerId::new()), None);
+
+        map.servers[0].state = admin_proto::ServerState::Enrolled;
+        assert_eq!(registered_server_addr(&map, selected), None);
     }
 
     #[test]
@@ -9598,5 +10118,89 @@ mod v6_tests {
             .is_err()
         );
         assert!(authorize_enrollment(&signing, &request("/", vec![]), None).is_err());
+    }
+
+    fn signed_empty_crl(dir: &Path, name: &str) -> (String, Vec<u8>) {
+        let ca = Ca::init(
+            &crate::ca::CaParams {
+                directory: dir.to_path_buf(),
+                subject: crate::ca::Subject::cn(name),
+                san: vec![],
+                key_bits: crate::ca::MIN_KEY_BITS,
+                validity: Duration::from_secs(30 * 86400),
+            },
+            None,
+        )
+        .unwrap();
+        drop(ca);
+        let key = std::fs::read(dir.join("private.key")).unwrap();
+        let ca_pem = std::fs::read(dir.join("certificate.pem")).unwrap();
+        let ca_der = rustls_pemfile::certs(&mut std::io::Cursor::new(ca_pem))
+            .next()
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        let cadir = ca_store::CaDir::open(dir).unwrap();
+        cadir.store.lock().write_crl(&key).unwrap();
+        let pem = std::fs::read_to_string(cadir.store.lock().crl_path()).unwrap();
+        (pem, ca_der)
+    }
+
+    #[test]
+    fn immediate_crl_install_is_signed_atomic_and_all_or_nothing_on_validation() {
+        let home = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let (home_crl, home_ca) = signed_empty_crl(home.path(), "home-ca");
+        let (foreign_crl, _) = signed_empty_crl(foreign.path(), "foreign-ca");
+        let root = tempfile::tempdir().unwrap();
+        let destinations = BTreeSet::from([
+            root.path().join("admin/crl.pem"),
+            root.path().join("resolver/crl.pem"),
+        ]);
+
+        apply_crl_to_destinations(&home_crl, &home_ca, destinations.clone()).unwrap();
+        for path in &destinations {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), home_crl);
+        }
+
+        let error =
+            apply_crl_to_destinations(&foreign_crl, &home_ca, destinations.clone())
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("does not verify"));
+        for path in &destinations {
+            assert_eq!(
+                std::fs::read_to_string(path).unwrap(),
+                home_crl,
+                "signature validation happens before any destination is replaced"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_crl_partial_results_are_target_identifying_and_sorted() {
+        let failed = admin_proto::AdminServerId::new();
+        let ok = admin_proto::AdminServerId::new();
+        let failed_addr = "127.0.0.1:41001".parse().unwrap();
+        let ok_addr = "127.0.0.1:41002".parse().unwrap();
+        let results = collect_crl_results(
+            vec![(failed, failed_addr), (ok, ok_addr)],
+            |server, _addr| async move {
+                if server == failed {
+                    bail!("satellite link down")
+                }
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(results.len(), 2);
+        assert!(results.windows(2).all(|pair| pair[0].server < pair[1].server));
+        let failed_result =
+            results.iter().find(|result| result.server == failed).unwrap();
+        assert_eq!(failed_result.addr, failed_addr);
+        assert!(failed_result.error.as_deref().unwrap().contains("satellite link down"));
+        let ok_result = results.iter().find(|result| result.server == ok).unwrap();
+        assert_eq!(ok_result.addr, ok_addr);
+        assert!(ok_result.error.is_none());
     }
 }

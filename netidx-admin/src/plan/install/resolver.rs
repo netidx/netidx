@@ -14,6 +14,7 @@ use super::{
     prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
 };
 use crate::{
+    admin_client,
     admin_proto::{ClusterEdge, InfoAuth, NodeKind},
     answer::{Answerer, Field},
     paths,
@@ -40,7 +41,6 @@ use std::{
 use super::DEFAULT_TLS_DOMAIN;
 #[cfg(unix)]
 use crate::{
-    admin_client,
     admin_proto::{ResolverAddr, Role},
     admin_server_config::{AdminServerConfig, IdMapRole, ResolverRole, Roles},
     answer::{Progress, Stage},
@@ -468,7 +468,6 @@ pub async fn run_resolver(
     // a subtree was supplied; without one this resolver is a peer in the
     // cluster at `input.base`, exactly like the interactive blank-subtree
     // choice above.
-    #[cfg(unix)]
     let delegated_child = input.delegate_subtree.is_some();
     // An explicit bootstrap can be a controller in some other cluster (the
     // common strict-CLI case is adding EU-B through HQ-A). Discovery facts are
@@ -476,7 +475,6 @@ pub async fn run_resolver(
     // the requested peer cluster from the verified controller map before
     // rendering referrals. Otherwise HQ-A's `/eu` child would become a
     // nonsensical self-child on a resolver whose own base is `/eu`.
-    #[cfg(unix)]
     let authoritative_peer_topology = if !delegated_child
         && input.parent_admin_server.is_some()
         && probe.have().and_then(|net| net.info.resolver_base.as_deref())
@@ -546,7 +544,6 @@ pub async fn run_resolver(
                 bail!("delegation (--parent-admin-server) is unix-only")
             }
         }
-        #[cfg(unix)]
         Some(_) => input.explicit_parent.take(),
     };
     if parent.is_none()

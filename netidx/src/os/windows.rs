@@ -16,8 +16,8 @@ use windows::{
         },
         Security::{
             Authorization::ConvertSidToStringSidW, GetLengthSid, GetTokenInformation,
-            LookupAccountSidW, PSID, RevertToSelf, SID_NAME_USE, TOKEN_QUERY,
-            TOKEN_USER, TokenUser,
+            LookupAccountSidW, PSID, RevertToSelf, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
@@ -130,7 +130,7 @@ fn copy_token_user_sid(token: HANDLE) -> Result<Vec<u8>> {
 /// The current process user's SID as a string (`S-1-5-…`), used to make
 /// the local-auth pipe name unique per user so concurrent RDS/Citrix
 /// sessions on one host don't collide.
-fn current_user_sid_string() -> Result<String> {
+pub fn current_user_sid_string() -> Result<String> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
         .context("OpenProcessToken")?;
@@ -138,7 +138,8 @@ fn current_user_sid_string() -> Result<String> {
     let token = unsafe { OwnedHandle::from_raw_handle(token.0 as RawHandle) };
     with_token_user_sid(as_handle(&token), |sid| {
         let mut s = PWSTR::null();
-        unsafe { ConvertSidToStringSidW(sid, &mut s) }.context("ConvertSidToStringSidW")?;
+        unsafe { ConvertSidToStringSidW(sid, &mut s) }
+            .context("ConvertSidToStringSidW")?;
         let out = unsafe { s.to_string() }.unwrap_or_default();
         unsafe {
             let _ = LocalFree(Some(HLOCAL(s.0 as *mut c_void)));
@@ -195,8 +196,12 @@ fn local_groups(user: &str) -> Result<Vec<ArcStr>> {
     let mut groups = Vec::with_capacity(read as usize);
     if !buf.is_null() {
         // SAFETY: on success buf points at `read` LOCALGROUP_USERS_INFO_0.
-        let entries =
-            unsafe { std::slice::from_raw_parts(buf as *const LOCALGROUP_USERS_INFO_0, read as usize) };
+        let entries = unsafe {
+            std::slice::from_raw_parts(
+                buf as *const LOCALGROUP_USERS_INFO_0,
+                read as usize,
+            )
+        };
         for e in entries {
             let name = unsafe { e.lgrui0_name.to_string() }.unwrap_or_default();
             if !name.is_empty() {
@@ -286,7 +291,9 @@ impl Mapper {
 }
 
 pub(crate) mod local_auth {
-    use super::{RevertGuard, as_handle, copy_token_user_sid, lookup_account_sid, pipe_name};
+    use super::{
+        RevertGuard, as_handle, copy_token_user_sid, lookup_account_sid, pipe_name,
+    };
     use crate::{
         os::local_auth::Credential,
         resolver_server::config::{Config, MemberServer},

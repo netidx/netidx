@@ -867,14 +867,6 @@ fn issued(f: IssuedArgs) -> Result<()> {
 /// the CRL over RPC (the daemon owns the CA index and CRL). `<id-or-name>` is a
 /// serial (one cert) or a name (every live cert for it, when they share one
 /// key); `--assert-glyph` pins the intended key. Irreversible.
-///
-/// CR claude for estokes: the old local-file revoke also (a) copied the fresh
-/// CRL beside this host's resolver for instant enforcement and (b) offered to
-/// drop the revoked identity from the local id-map. Both needed direct file
-/// access the CLI no longer has now the daemon owns the CA. The CRL still
-/// re-signs (in the daemon) and distributes via `GetCrl`; the local-resolver
-/// fast-path and the id-map cleanup remain dropped (unchanged from the prior
-/// RPC revoke). If we want them back they belong in the daemon's `handle_revoke`.
 fn revoke(f: RevokeArgs) -> Result<()> {
     let mut ans = f.auth.answerer()?;
     let server = f.auth.server_addr()?;
@@ -902,6 +894,17 @@ fn revoke(f: RevokeArgs) -> Result<()> {
     for e in &out.revoked {
         let name = if e.name.is_empty() { "(no name)" } else { &e.name };
         println!("  serial {}  {}", e.serial, name);
+    }
+    if let Some(operation_id) = out.operation_id {
+        println!("  CRL distribution operation: {operation_id}");
+    }
+    for peer in &out.peers {
+        match &peer.error {
+            None => println!("  updated server {} at {}", peer.server, peer.addr),
+            Some(error) => {
+                println!("  FAILED server {} at {}: {error}", peer.server, peer.addr)
+            }
+        }
     }
     for w in out.warnings {
         println!("  warning: {w}");
@@ -997,10 +1000,25 @@ fn remove_server(f: RemoveServerArgs) -> Result<()> {
     println!("  authoritative map version: {}", out.version);
     println!("  serving certificates revoked: {}", out.revoked);
     if let Some(operation_id) = out.operation_id {
-        println!("  topology operation: {operation_id}");
+        println!("  removal operation: {operation_id}");
     }
     if !out.affected_clusters.is_empty() {
         println!("  affected clusters: {}", out.affected_clusters.join(", "));
+    }
+    let crl_failed: Vec<_> =
+        out.crl_peers.iter().filter(|peer| peer.error.is_some()).collect();
+    println!(
+        "  CRL targets updated: {}/{}",
+        out.crl_peers.len() - crl_failed.len(),
+        out.crl_peers.len()
+    );
+    for peer in crl_failed {
+        println!(
+            "  ! CRL server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        );
     }
     let failed: Vec<_> = out.peers.iter().filter(|peer| peer.error.is_some()).collect();
     println!(

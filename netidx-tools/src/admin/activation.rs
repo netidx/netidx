@@ -9,6 +9,7 @@ use netidx_admin::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
         UnitBuilder,
     },
+    admin_proto::AdminServerId,
     client::ClientConfig,
     id_map as id_map_engine,
     template::services::{
@@ -60,12 +61,11 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct ServiceCtlArgs {
-    /// The admin server to control (its `host:port` listen address). With
-    /// `--server` this is the ONE server whose services to act on — restart is
-    /// per-server, so you restart one resolver at a time. Defaults to `--server`
-    /// (control the server you connect to). Ignored locally.
-    #[arg(long)]
-    pub target: Option<String>,
+    /// Immutable UUID of the ONE admin server to control. Required with
+    /// `--server`; obtain it from `netidx admin ca servers`. Restart remains
+    /// deliberately per-server. Ignored locally.
+    #[arg(long, value_name = "SERVER-ID")]
+    pub target: Option<AdminServerId>,
     /// Units to act on (empty ⇒ every unit). Plain unit names in both modes.
     pub units: Vec<String>,
     /// Activation directory (local mode). Default: the user activation dir.
@@ -212,12 +212,10 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
         // control path below is the one that matters.
         #[cfg(unix)]
         Some(server) => {
-            // The server to control: an explicit --target, else the --server we
-            // connect to. Restart is per-server, so this names exactly one host.
-            let target = match &a.target {
-                Some(t) => super::init::resolve_admin_server_addr(t)?,
-                None => server,
-            };
+            let target = a.target.context(
+                "remote service control requires --target <SERVER-ID>; list immutable \
+                 IDs with `netidx admin ca servers`",
+            )?;
             let mut ans = a.auth.answerer()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let units = rt.block_on(admin_ops::service::control_remote(
@@ -497,6 +495,55 @@ fn parse_restart(s: &str) -> Result<Restart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct TestActivationCli {
+        #[command(subcommand)]
+        cmd: Cmd,
+    }
+
+    #[test]
+    fn remote_service_target_is_an_exact_server_uuid() {
+        let id = AdminServerId::new();
+        let parsed = TestActivationCli::try_parse_from([
+            "activation",
+            "status",
+            "--server",
+            "10.0.0.1:4565",
+            "--target",
+            &id.to_string(),
+        ])
+        .unwrap();
+        let Cmd::Status(args) = parsed.cmd else { panic!("expected status") };
+        assert_eq!(args.target, Some(id));
+
+        TestActivationCli::try_parse_from([
+            "activation",
+            "restart",
+            "--server",
+            "10.0.0.1:4565",
+            "--target",
+            "10.0.60.11:4565",
+            "resolver",
+        ])
+        .expect_err("a mutable address must not parse as a service target");
+
+        #[cfg(unix)]
+        {
+            let parsed = TestActivationCli::try_parse_from([
+                "activation",
+                "status",
+                "--server",
+                "10.0.0.1:4565",
+            ])
+            .unwrap();
+            let Cmd::Status(args) = parsed.cmd else { panic!("expected status") };
+            let error = service_control(ControlOp::Status, args)
+                .expect_err("a remote mutation target must be explicit");
+            assert!(error.to_string().contains("--target <SERVER-ID>"));
+        }
+    }
 
     #[test]
     fn api_path_for_base_branches() {

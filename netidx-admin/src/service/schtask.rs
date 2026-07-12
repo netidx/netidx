@@ -22,6 +22,60 @@
 use super::{InstalledService, ServiceParams, ServiceScope, ServiceStatus};
 use anyhow::{Context, Result, bail};
 use std::process::{Command, Stdio};
+use windows::{
+    Win32::{
+        Foundation::RPC_E_CHANGED_MODE,
+        System::{
+            Com::{
+                CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance,
+                CoInitializeEx, CoUninitialize,
+            },
+            TaskScheduler::{
+                ITaskService, TASK_STATE, TASK_STATE_RUNNING, TaskScheduler,
+            },
+            Variant::VARIANT,
+        },
+    },
+    core::BSTR,
+};
+
+/// Balance a successful `CoInitializeEx` on this thread. If the caller already
+/// initialized COM in another apartment (`RPC_E_CHANGED_MODE`), COM is still
+/// usable but this function owns no initialization to release.
+struct ComGuard(bool);
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+/// Query Task Scheduler through COM rather than parsing localized `schtasks`
+/// output. The registration probe remains in [`status`] so a missing task maps
+/// cleanly to `NotInstalled`; this helper only classifies an existing task.
+fn task_state(name: &str) -> Result<TASK_STATE> {
+    let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let owns_com = if hr == RPC_E_CHANGED_MODE {
+        false
+    } else {
+        hr.ok().context("initializing COM for Task Scheduler")?;
+        true
+    };
+    let _guard = ComGuard(owns_com);
+    let service: ITaskService =
+        unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
+            .context("creating Task Scheduler service")?;
+    let empty = VARIANT::default();
+    unsafe { service.Connect(&empty, &empty, &empty, &empty) }
+        .context("connecting to Task Scheduler")?;
+    let root = unsafe { service.GetFolder(&BSTR::from("\\")) }
+        .context("opening the Task Scheduler root folder")?;
+    let task = unsafe { root.GetTask(&BSTR::from(name)) }
+        .with_context(|| format!("opening scheduled task {name:?}"))?;
+    unsafe { task.State() }.with_context(|| format!("querying scheduled task {name:?}"))
+}
 
 /// Escape a string for inclusion in XML text/attribute content.
 fn xml_escape(s: &str) -> String {
@@ -161,8 +215,8 @@ pub(super) fn install(p: &ServiceParams) -> Result<InstalledService> {
     if !supervisor.exists() {
         bail!(
             "background supervisor {} not found next to {}; install it alongside \
-             netidx.exe (build netidx-tools with \
-             `--features win-activation-supervisor`)",
+             netidx.exe (build it with \
+             `cargo build -p netidx-tools --bin netidx-activation`)",
             supervisor.display(),
             p.binary.display()
         );
@@ -207,10 +261,14 @@ pub(super) fn uninstall(p: &ServiceParams) -> Result<()> {
 }
 
 pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
-    // A query that fails means the task isn't registered. We can't cheaply
-    // distinguish "registered, supervisor not currently running" from
-    // "registered and running" for a logon task, so a registered task
-    // reports Active.
+    // Windows deliberately has no system-scope netidx service. Returning
+    // NotInstalled here also keeps the cross-platform uninstaller from
+    // mistaking the one user task for a second, system-scope install.
+    if p.scope == ServiceScope::System {
+        return Ok(ServiceStatus::NotInstalled);
+    }
+    // A query that fails means the task isn't registered. Once registered,
+    // use COM for the runtime state; `schtasks` text is localized.
     let out = Command::new("schtasks")
         .args(["/Query", "/TN", &p.service_name])
         .stdin(Stdio::null())
@@ -218,7 +276,14 @@ pub(super) fn status(p: &ServiceParams) -> Result<ServiceStatus> {
         .stderr(Stdio::null())
         .status()
         .context("running schtasks.exe")?;
-    Ok(if out.success() { ServiceStatus::Active } else { ServiceStatus::NotInstalled })
+    if !out.success() {
+        return Ok(ServiceStatus::NotInstalled);
+    }
+    Ok(if task_state(&p.service_name)? == TASK_STATE_RUNNING {
+        ServiceStatus::Active
+    } else {
+        ServiceStatus::Inactive
+    })
 }
 
 #[cfg(test)]

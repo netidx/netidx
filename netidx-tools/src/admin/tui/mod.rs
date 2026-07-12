@@ -376,8 +376,8 @@ impl App {
         match action {
             // Open the Local tab's local admin panel surface directly on the
             // requested panel (Admins / Permissions), kicking off its refresh.
-            Action::ManageLocalAdmins { cfg_path, ca_dir, panel } => {
-                self.local.open_admin(cfg_path, ca_dir, panel)
+            Action::ManageLocalAdmins { cfg_path, panel } => {
+                self.local.open_admin(cfg_path, panel)
             }
             // Pure navigation: open the Local tab's Services surface and kick off
             // its first refresh.
@@ -1245,7 +1245,6 @@ mod render_tests {
         let mut app = App::new();
         let _ = app.local.open_admin(
             std::path::PathBuf::from("/nonexistent/admin-server.json"),
-            std::path::PathBuf::from("/nonexistent/ca"),
             remote::Panel::Roster,
         );
         let s = render(&mut app);

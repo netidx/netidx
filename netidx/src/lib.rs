@@ -151,6 +151,12 @@ mod channel;
 pub use channel::{read_raw, write_raw};
 pub mod config;
 mod os;
+
+/// Small Windows integration helpers shared by netidx's own processes.
+#[cfg(windows)]
+pub mod windows {
+    pub use crate::os::windows::current_user_sid_string;
+}
 pub mod publisher;
 pub mod resolver_client;
 pub mod resolver_server;

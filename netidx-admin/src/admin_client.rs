@@ -35,19 +35,20 @@
 use crate::{
     admin_proto::{
         self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyPermsEditRequest,
-        ApplyPermsEditResponse, ApplyReferralEditRequest, ApplyReferralEditResponse,
-        ApplyServiceControlRequest, ApplyServiceControlResponse,
-        ApproveDelegationRequest, ApproveDelegationResponse, ApproveRequest,
-        ApproveResponse, ClientHello, ControlServiceRequest, ControlServiceResponse,
-        DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
-        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
-        EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
-        GetPermsResponse, IssuedEntry, ListAdminsRequest, ListDelegationsRequest,
-        ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
-        ListQueueResponse, NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult,
-        PollRequest, PollResponse, QueueEntry, ReferralEdit, RegisterRequest,
+        AdminListResponse, AdminMgmtResponse, ApplyCrlRequest, ApplyCrlResponse,
+        ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
+        ApplyReferralEditResponse, ApplyServiceControlRequest,
+        ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
+        ApproveRequest, ApproveResponse, ClientHello, ControlServiceRequest,
+        ControlServiceResponse, DelegationEntry, DelegationPollResponse,
+        DelegationRequest, DelegationResponse, DenyDelegationRequest,
+        DenyDelegationResponse, DenyRequest, DenyResponse, EditPermsRequest,
+        EditPermsResponse, EnqueueRequest, EnqueueResponse, EnrollRequest,
+        GetInfoResponse, GetMapResponse, GetMapVersionResponse, GetPermsResponse,
+        IssuedEntry, ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
+        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
+        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
+        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReferralEdit, RegisterRequest,
         RegisterResponse, RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse,
         Request, ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
         ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
@@ -63,6 +64,10 @@ use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
+
+/// A black-holed candidate must not hold discovery, enrollment, renewal, or
+/// administration on the operating system's multi-minute TCP timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A freshly generated leaf identity awaiting signature.
 pub struct KeyAndCsr {
@@ -182,8 +187,9 @@ async fn connect_tofu(
         .with_custom_certificate_verifier(Arc::new(TofuVerifier::new(provider)))
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect(addr)
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
+        .with_context(|| format!("timed out connecting to admin server {addr}"))?
         .with_context(|| format!("connecting to admin server {addr}"))?;
     let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
     let tls = connector
@@ -517,19 +523,111 @@ pub async fn push_perms_edit(
     }
 }
 
-/// Read a admin server's local perms, pinned to the confirmed CA (perms are
-/// readable within the trust domain). The client routes to a member of the
-/// cluster it wants.
-pub async fn get_perms(
+/// Controller → node: immediately install a freshly signed CRL on one exact
+/// home-CA admin-server identity.
+pub async fn push_crl(
     addr: SocketAddr,
-    kind: NodeKind,
-    expected: &CaIdentity,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
+    operation_id: admin_proto::OperationId,
+    crl_pem: &str,
+) -> Result<()> {
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ApplyCrl(ApplyCrlRequest {
+            operation_id,
+            crl_pem: crl_pem.to_string(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ApplyCrlResponse>(&mut tls).await? {
+        ApplyCrlResponse::Ok => Ok(()),
+        ApplyCrlResponse::Err { reason } => {
+            bail!("peer refused the CRL update: {reason}")
+        }
+    }
+}
+
+/// Controller → node: read one exact home-CA server's local permissions using
+/// the controller serving certificate. This is the internal target-side half
+/// of [`read_perms`]; ordinary clients cannot invoke `GetPerms`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn pull_perms(
+    addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_controller: bool,
+    home_ca: CertificateDer<'static>,
+    serving_cert_pem: &[u8],
+    serving_key_pem: &[u8],
+    roots: rustls::RootCertStore,
 ) -> Result<String> {
-    let mut tls = connect_pinned(addr, kind, expected).await?;
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(serving_key_pem))
+        .context("parsing serving key")?
+        .ok_or_else(|| anyhow!("no private key found in serving key PEM"))?;
+    let (mut tls, _hello) = connect_pki_target(
+        addr,
+        roots,
+        Some((serving_cert_pem, key)),
+        NodeKind::AdminServer,
+        Some(ExactTarget {
+            id: Some(target_id),
+            home_ca: &home_ca,
+            controller: target_controller,
+        }),
+    )
+    .await?;
     admin_proto::write_msg(&mut tls, &Request::GetPerms).await?;
     match admin_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
         GetPermsResponse::Ok { perms_json } => Ok(perms_json),
         GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
+    }
+}
+
+/// Admin → controller: authenticate, authorize `target_path`, and have the
+/// controller read one exact registered member of that cluster.
+pub async fn read_perms(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    target_path: &str,
+) -> Result<String> {
+    let mut tls = connect_controller_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ReadPerms(ReadPermsRequest {
+            credential: credential.clone(),
+            target_path: target_path.to_string(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ReadPermsResponse>(&mut tls).await? {
+        ReadPermsResponse::Ok { perms_json, .. } => Ok(perms_json),
+        ReadPermsResponse::Err { reason } => Err(admin_refusal(
+            expected,
+            &credential,
+            "the CA refused the perms read",
+            reason,
+        )),
     }
 }
 
@@ -893,12 +991,16 @@ fn bootstrap_cluster(
     Ok((controller.addr, resolvers, base, parent, children))
 }
 
-/// Walk the network from `seeds`: [`get_info`] each admin server and follow
-/// `peers` (deduped, cycle-safe) as discovery hints. Then fetch the security-
-/// sensitive map from the exact controller and select only the active members
-/// of the bootstrap server's cluster. Parent/child clusters are resolver
-/// referrals, not replicas, and must never be flattened into one client
-/// address set.
+/// Try `seeds` and their advertised peers as candidate paths to the exact
+/// controller. Stop as soon as one candidate yields the controller-authoritative
+/// map: peer addresses are discovery hints, not a checklist that every client
+/// must contact before it can use the network. This matters across routed or
+/// partitioned sites, where a perfectly usable bootstrap cluster may advertise
+/// admin servers that the joining client cannot reach directly.
+///
+/// Resolver membership comes only from the authoritative map. Parent/child
+/// clusters are referrals, not replicas, and must never be flattened into one
+/// client address set.
 pub async fn aggregate(
     seeds: &[SocketAddr],
     kind: NodeKind,
@@ -919,6 +1021,7 @@ pub async fn aggregate(
         resolver_children: Vec::new(),
         reached: Vec::new(),
     };
+    let mut authoritative = None;
     while let Some(addr) = queue.pop_front() {
         if visited.contains(&addr) || visited.len() >= MAX_WALK {
             continue;
@@ -932,16 +1035,26 @@ pub async fn aggregate(
             }
         };
         info.reached.push(addr);
-        // Local facts and peers are discovery hints. Resolver membership and
-        // the controller address come from the CA-owned map below.
+        // Local facts and peers are discovery hints. If this candidate's map
+        // points us to the verified controller, no other peer needs probing.
+        // Otherwise its peers are fallback candidates for the next iteration.
         queue.extend(resp.peers);
+        match get_map_pinned(addr, kind, expected).await {
+            Ok(map) => {
+                authoritative = Some(map);
+                break;
+            }
+            Err(e) => warn!(
+                "admin server {addr} did not yield a controller-authoritative map: {e:#}"
+            ),
+        }
     }
     if info.reached.is_empty() {
         bail!("no admin server could be reached");
     }
-    let map = get_map_pinned(info.reached[0], kind, expected)
-        .await
-        .context("fetching the controller-authoritative network map")?;
+    let map = authoritative.context(
+        "reachable admin servers did not yield a controller-authoritative network map",
+    )?;
     let (controller, resolvers, resolver_base, resolver_parent, resolver_children) =
         bootstrap_cluster(&map, expected.server_id)?;
     info.ca_addr = Some(controller);
@@ -1539,15 +1652,15 @@ pub async fn list_issued(
 }
 
 /// Revoke certificates by serial (admin-authenticated). The daemon
-/// rewrites their records and re-signs the CRL; returns any non-fatal
-/// follow-up warnings.
+/// rewrites their records, re-signs the CRL, and immediately distributes it;
+/// returns warnings, the operation ID, and per-node delivery results.
 pub async fn revoke(
     addr: SocketAddr,
     credential: admin_proto::AdminCredential,
     serials: Vec<u64>,
     reason: &str,
     expected: &CaIdentity,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Option<admin_proto::OperationId>, Vec<PeerResult>)> {
     let mut tls = connect_controller_pinned(addr, NodeKind::Client, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -1559,7 +1672,9 @@ pub async fn revoke(
     )
     .await?;
     match admin_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
-        RevokeResponse::Ok { warnings } => Ok(warnings),
+        RevokeResponse::Ok { warnings, operation_id, peers } => {
+            Ok((warnings, operation_id, peers))
+        }
         RevokeResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1765,6 +1880,7 @@ pub struct RemoveServerOutcome {
     pub removed: bool,
     pub affected_clusters: Vec<String>,
     pub peers: Vec<admin_proto::PeerResult>,
+    pub crl_peers: Vec<admin_proto::PeerResult>,
 }
 
 /// Permanently evict one immutable admin-server identity through the verified
@@ -1791,6 +1907,7 @@ pub async fn remove_server(
             removed,
             affected_clusters,
             peers,
+            crl_peers,
         } => Ok(RemoveServerOutcome {
             version,
             operation_id,
@@ -1798,6 +1915,7 @@ pub async fn remove_server(
             removed,
             affected_clusters,
             peers,
+            crl_peers,
         }),
         RemoveServerResponse::Err { reason } => {
             bail!("the CA refused server removal: {reason}")
@@ -1850,8 +1968,9 @@ async fn connect_pki_target(
         None => builder.with_no_client_auth(),
     };
     let connector = TlsConnector::from(Arc::new(config));
-    let tcp = TcpStream::connect(addr)
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
+        .with_context(|| format!("timed out connecting to admin server {addr}"))?
         .with_context(|| format!("connecting to admin server {addr}"))?;
     let server_name = ServerName::try_from(SERVING_SAN).context("server name")?;
     let mut tls = connector
@@ -2317,6 +2436,159 @@ fn verify_serving_cert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A valid home-CA satellite that serves a hostile map naming itself as
+    /// controller. It records every post-hello request, which lets the test
+    /// prove controller resolution never exposes either credential form.
+    async fn hostile_satellite(
+        server_id: admin_proto::AdminServerId,
+    ) -> (
+        SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use admin_proto::{ServerEntry, ServerState};
+        use rcgen::{
+            BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+            SanType, string::Ia5String,
+        };
+        use rustls::ServerConfig;
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params =
+            CertificateParams::new(vec!["hostile-test-ca".into()]).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages =
+            vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::DigitalSignature];
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let leaf_key = KeyPair::generate().unwrap();
+        let mut leaf_params =
+            CertificateParams::new(vec![admin_proto::SERVING_SAN.to_string()]).unwrap();
+        leaf_params
+            .subject_alt_names
+            .push(SanType::URI(Ia5String::try_from(server_id.uri().as_str()).unwrap()));
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let tls = ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![
+                    CertificateDer::from(leaf_cert.der().to_vec()),
+                    CertificateDer::from(ca_cert.der().to_vec()),
+                ],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hostile_map = NetworkMap {
+            version: 1,
+            controller: server_id,
+            servers: vec![ServerEntry {
+                id: server_id,
+                addr,
+                // These are untrusted map claims. The serving certificate has
+                // no controller role URI, which must win.
+                roles: vec![Role::Ca, Role::Resolver],
+                resolver: None,
+                cluster: None,
+                state: ServerState::Registered,
+            }],
+            clusters: vec![],
+        };
+        let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else { break };
+                let Ok(mut tls) = acceptor.accept(tcp).await else { continue };
+                let Ok(hello) = admin_proto::read_msg::<_, ClientHello>(&mut tls).await
+                else {
+                    continue;
+                };
+                let _ = admin_proto::write_msg(
+                    &mut tls,
+                    &ServerHello {
+                        protocol_version: PROTOCOL_VERSION,
+                        domain: "hostile.test".into(),
+                        roles: vec![Role::Resolver],
+                        server_id,
+                        controller: false,
+                    },
+                )
+                .await;
+                if hello.protocol_version != PROTOCOL_VERSION {
+                    continue;
+                }
+                // fetch_identity closes immediately after the hello. A real
+                // request is present only on the map/credential connections.
+                let Ok(request) = admin_proto::read_msg::<_, Request>(&mut tls).await
+                else {
+                    continue;
+                };
+                match request {
+                    Request::GetMap => {
+                        let _ = seen_tx.send("GetMap");
+                        let _ = admin_proto::write_msg(
+                            &mut tls,
+                            &GetMapResponse::Ok { map: hostile_map.clone() },
+                        )
+                        .await;
+                    }
+                    Request::Login(_) => {
+                        let _ = seen_tx.send("PASSWORD LEAKED");
+                    }
+                    Request::Logout(_) => {
+                        let _ = seen_tx.send("SESSION LEAKED");
+                    }
+                    _ => {
+                        let _ = seen_tx.send("unexpected request");
+                    }
+                }
+            }
+        });
+        (addr, seen_rx, task)
+    }
+
+    #[tokio::test]
+    async fn hostile_home_ca_satellite_never_receives_password_or_session() {
+        let satellite = admin_proto::AdminServerId::new();
+        let (addr, mut seen, server) = hostile_satellite(satellite).await;
+        let identity = fetch_identity(addr, NodeKind::Client).await.unwrap();
+        assert_eq!(identity.server_id, satellite);
+        assert!(!identity.controller);
+
+        let password = "sentinel-password-must-not-reach-satellite";
+        let err = login(addr, &identity, "admin", password)
+            .await
+            .err()
+            .expect("hostile satellite must be refused");
+        assert!(
+            format!("{err:#}").contains("not the exact controller"),
+            "unexpected password-path error: {err:#}"
+        );
+
+        let token = "sentinel-session-must-not-reach-satellite";
+        let err = logout(addr, &identity, token).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not the exact controller"),
+            "unexpected session-path error: {err:#}"
+        );
+
+        let mut requests = Vec::new();
+        while let Ok(request) = seen.try_recv() {
+            requests.push(request);
+        }
+        assert_eq!(requests, vec!["GetMap", "GetMap"]);
+        server.abort();
+    }
 
     #[test]
     fn generates_a_parseable_ecdsa_csr() {

@@ -462,8 +462,7 @@ pub(crate) fn get_match<'a: 'b, 'b, U>(
 /// path are untouched). 8 × 25ms = 200ms comfortably covers a renewal's
 /// cert-then-key install window, which is sub-millisecond in practice.
 const CERT_BUILD_RETRIES: usize = 8;
-const CERT_BUILD_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(25);
+const CERT_BUILD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 struct CachedInnerLocked<T> {
     cached: BTreeMap<String, (CertMtimes, T)>,

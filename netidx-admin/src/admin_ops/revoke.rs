@@ -17,7 +17,7 @@
 use super::open_admin_session;
 use crate::{
     admin_client,
-    admin_proto::{IssuedEntry, Secret},
+    admin_proto::{IssuedEntry, OperationId, PeerResult, Secret},
     answer::Answerer,
     fingerprint::Fingerprint,
 };
@@ -73,8 +73,12 @@ pub async fn issued(
 pub struct RevokeOutcome {
     /// The certificates that were revoked.
     pub revoked: Vec<IssuedEntry>,
-    /// Non-fatal follow-up warnings from the server (CRL push, etc.).
+    /// Non-fatal revocation/signing warnings from the server.
     pub warnings: Vec<String>,
+    /// Immediate CRL-distribution operation ID.
+    pub operation_id: Option<OperationId>,
+    /// One result for every registered admin server that should enforce it.
+    pub peers: Vec<PeerResult>,
 }
 
 /// The `ca revoke <id-or-name> --reason <text>` action. Re-lists the issued
@@ -120,7 +124,7 @@ pub async fn revoke(
     enforce_glyph_gate(&targets, assert_glyph.as_ref(), needs_span_guard)?;
     let serials: Vec<u64> = targets.iter().map(|t| t.serial).collect();
     let revoked: Vec<IssuedEntry> = targets.iter().map(|t| (*t).clone()).collect();
-    let warnings = admin_client::revoke(
+    let (warnings, operation_id, peers) = admin_client::revoke(
         sess.server,
         sess.credential.clone(),
         serials,
@@ -128,7 +132,7 @@ pub async fn revoke(
         &sess.identity,
     )
     .await?;
-    Ok(RevokeOutcome { revoked, warnings })
+    Ok(RevokeOutcome { revoked, warnings, operation_id, peers })
 }
 
 /// Enforce the revocation glyph gate. With `assert_glyph`, it must equal the

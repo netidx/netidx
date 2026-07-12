@@ -51,13 +51,9 @@ pub(super) struct RemoteConn {
 /// connect form).
 #[derive(Clone)]
 pub(super) enum PanelTarget {
-    /// This box's own admin server over its `SO_PEERCRED` control socket. Carries
-    /// the CA directory so a perms *read* can auto-verify the admin server's
-    /// identity against the local CA cert (glyph-free) — the write is authorized
-    /// by the socket itself.
+    /// This box's own admin server over its `SO_PEERCRED` control socket.
     Local {
         cfg_path: PathBuf,
-        ca_dir: PathBuf,
     },
     Remote(RemoteConn),
 }
@@ -290,7 +286,7 @@ pub(super) enum RemoteAction {
     /// Per-server by design — never a cluster-wide fanout. Stop is confirm-gated.
     ServiceControl {
         target: PanelTarget,
-        server: SocketAddr,
+        server: ServiceTarget,
         units: Vec<String>,
         op: ServiceOp,
     },
@@ -356,11 +352,13 @@ impl RemoteAction {
             RemoteAction::ServiceControl {
                 op: ServiceOp::Stop, units, server, ..
             } => Some(format!(
-                "Stop {} on {server}? It will stay down until started.",
+                "Stop {} on {} at {}? It will stay down until started.",
                 units
                     .first()
                     .map(|u| format!("unit {u:?}"))
-                    .unwrap_or_else(|| "services".to_string())
+                    .unwrap_or_else(|| "services".to_string()),
+                server.id,
+                server.addr,
             )),
             _ => None,
         }
@@ -404,11 +402,18 @@ impl RemoteAction {
     }
 }
 
-/// One admin server offered in the service-control server picker: its address
-/// (the target of the op) plus a display label carrying its level.
+/// The immutable identity selected for service control plus the address shown
+/// to the operator at selection time. Only `id` is authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ServiceTarget {
+    pub(super) id: AdminServerId,
+    pub(super) addr: SocketAddr,
+}
+
+/// One admin server offered in the service-control server picker.
 #[derive(Clone)]
 pub(super) struct ServiceServerRow {
-    pub(super) addr: SocketAddr,
+    pub(super) target: ServiceTarget,
     pub(super) label: String,
 }
 
@@ -1038,6 +1043,17 @@ async fn revoke(
         .iter()
         .map(|e| format!("Revoked #{} {}.", e.serial, e.name))
         .collect();
+    if let Some(operation_id) = out.operation_id {
+        lines.push(format!("CRL distribution operation {operation_id}."));
+    }
+    for peer in &out.peers {
+        match &peer.error {
+            None => lines.push(format!("updated {} at {}", peer.server, peer.addr)),
+            Some(error) => {
+                lines.push(format!("FAILED {} at {}: {error}", peer.server, peer.addr))
+            }
+        }
+    }
     for w in &out.warnings {
         lines.push(format!("warning: {w}"));
     }
@@ -1167,6 +1183,8 @@ async fn remove_server(
     )
     .await?;
     let failed: Vec<_> = out.peers.iter().filter(|peer| peer.error.is_some()).collect();
+    let crl_failed: Vec<_> =
+        out.crl_peers.iter().filter(|peer| peer.error.is_some()).collect();
     let mut lines = vec![
         if out.removed {
             format!("Permanently removed server {server}.")
@@ -1174,6 +1192,11 @@ async fn remove_server(
             format!("Server {server} was already absent; reconciled topology.")
         },
         format!("Revoked {} serving certificate(s).", out.revoked),
+        format!(
+            "Updated CRL on {} of {} target(s).",
+            out.crl_peers.len() - crl_failed.len(),
+            out.crl_peers.len()
+        ),
         format!(
             "Updated topology on {} of {} target(s); no service was restarted.",
             out.peers.len() - failed.len(),
@@ -1194,13 +1217,23 @@ async fn remove_server(
             peer.error.as_deref().unwrap_or("unknown error")
         ));
     }
+    for peer in crl_failed {
+        lines.push(format!(
+            "  ! CRL server {} at {}: {}",
+            peer.server,
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
     if !out.peers.is_empty() {
         lines.push(
             "If the written topology requires a restart, roll each affected cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
                 .to_string(),
         );
     }
-    if !out.peers.iter().all(|peer| peer.error.is_none()) {
+    if !out.peers.iter().all(|peer| peer.error.is_none())
+        || !out.crl_peers.iter().all(|peer| peer.error.is_none())
+    {
         lines.push(
             "Topology is not fully reconciled. When the failed target is reachable, repeat force-remove with the same UUID to converge."
                 .to_string(),
@@ -1375,21 +1408,21 @@ async fn remove_admin(
 }
 
 /// Read the perms of the cluster mounted at `at`, for either target. A remote
-/// target reads over its pinned session; a local target reads with no
-/// `--server`, which on the CA host auto-verifies against the local CA cert
-/// (glyph-free) and reads within the trust domain (password-free).
+/// target authenticates to its verified controller; a local target uses the
+/// protected control socket and is confined to this host's own level.
 #[cfg(unix)]
 async fn show_perms_for(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
     at: &str,
 ) -> Result<String> {
-    use netidx_admin::admin_ops::perms::show_perms;
+    use netidx_admin::admin_ops::perms::{show_perms, show_perms_local};
     match target {
-        PanelTarget::Remote(conn) => show_perms(ans, Some(conn.server), None, at).await,
-        PanelTarget::Local { ca_dir, .. } => {
-            show_perms(ans, None, Some(ca_dir.clone()), at).await
+        PanelTarget::Remote(conn) => {
+            show_perms(ans, Some(conn.server), None, Some(conn.admin.clone()), None, at)
+                .await
         }
+        PanelTarget::Local { cfg_path, .. } => show_perms_local(cfg_path, at).await,
     }
 }
 
@@ -1405,10 +1438,7 @@ async fn list_levels(
             netidx_admin::admin_ops::perms::list_levels(ans, Some(conn.server), None)
                 .await?
         }
-        PanelTarget::Local { ca_dir, .. } => {
-            netidx_admin::admin_ops::perms::list_levels(ans, None, Some(ca_dir.clone()))
-                .await?
-        }
+        PanelTarget::Local { .. } => vec![local_own_base()],
     };
     Ok(super::action::Outcome::levels(Panel::Perms, levels))
 }
@@ -1435,22 +1465,36 @@ async fn edit_perms(
     target: PanelTarget,
     at: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::admin_ops::perms::{edit_perms, edit_perms_local};
+    use netidx_admin::admin_ops::perms::{
+        edit_perms_local, edit_perms_with_session, open_perms_session, show_perms_local,
+    };
     // Seed the editor with the cluster's current perms, validate locally, then
     // hand the normalized result to the CA (which re-validates + propagates).
-    let current = show_perms_for(ans, &target, &at).await?;
-    let seed = super::super::perms_admin::pretty(&current)?;
-    let validate: super::answer::EditValidator =
-        Box::new(|s: &str| super::super::perms_admin::validate(s));
-    let edited = ans.edit(seed, validate).await?;
-    let peers = match &target {
+    let (session, current) = match &target {
         PanelTarget::Remote(conn) => {
-            edit_perms(
+            let (session, current) = open_perms_session(
                 ans,
                 Some(conn.server),
                 None,
                 Some(conn.admin.clone()),
                 None,
+                &at,
+            )
+            .await?;
+            (Some(session), current)
+        }
+        PanelTarget::Local { cfg_path, .. } => {
+            (None, show_perms_local(cfg_path, &at).await?)
+        }
+    };
+    let seed = super::super::perms_admin::pretty(&current)?;
+    let validate: super::answer::EditValidator =
+        Box::new(|s: &str| super::super::perms_admin::validate(s));
+    let edited = ans.edit(seed, validate).await?;
+    let peers = match &target {
+        PanelTarget::Remote(_) => {
+            edit_perms_with_session(
+                session.as_ref().expect("remote branch opened a session"),
                 &at,
                 &edited,
             )
@@ -1484,7 +1528,8 @@ async fn edit_perms(
 }
 
 /// The cluster's admin servers, from the map — the service-control server
-/// picker (level 1). Each row's address is the target of a control op.
+/// picker (level 1). Each row preserves the immutable ID that a control op uses;
+/// its address is display-only routing context.
 #[cfg(unix)]
 async fn list_service_servers(
     ans: &mut TuiAnswerer,
@@ -1497,8 +1542,8 @@ async fn list_service_servers(
     let rows: Vec<ServiceServerRow> = servers
         .into_iter()
         .map(|s| ServiceServerRow {
-            addr: s.addr,
-            label: format!("{:<22} {}", s.addr.to_string(), s.base),
+            target: ServiceTarget { id: s.id, addr: s.addr },
+            label: format!("{:<22} {:<12} {}", s.addr.to_string(), s.base, s.id),
         })
         .collect();
     Ok(super::action::Outcome::service_servers(rows))
@@ -1511,7 +1556,7 @@ async fn list_service_servers(
 async fn fetch_service_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
-    server: SocketAddr,
+    server: ServiceTarget,
 ) -> Result<Vec<super::services::ServiceRow>> {
     use netidx_activation::control::ControlOp;
     let units = service_op(ans, conn, server, Vec::new(), ControlOp::Status).await?;
@@ -1525,7 +1570,7 @@ async fn fetch_service_rows(
 async fn service_op(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
-    server: SocketAddr,
+    server: ServiceTarget,
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
 ) -> Result<Vec<netidx_admin::admin_proto::ServiceUnit>> {
@@ -1536,7 +1581,7 @@ async fn service_op(
         None,
         Some(conn.admin.clone()),
         None,
-        server,
+        server.id,
         units,
         op,
     )
@@ -1547,7 +1592,7 @@ async fn service_op(
 async fn service_control(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
-    server: SocketAddr,
+    server: ServiceTarget,
     units: Vec<String>,
     op: ServiceOp,
 ) -> Result<super::action::Outcome> {
@@ -1568,9 +1613,11 @@ async fn service_control(
         return Ok(super::action::Outcome::remote_service_rows(rows));
     }
     let lines = match (&result, units.first()) {
-        (Ok(_), Some(u)) => vec![format!("{verb} {u} on {server}.")],
-        (Ok(_), None) => vec![format!("{verb} on {server}.")],
-        (Err(e), _) => vec![format!("{server}: {e:#}")],
+        (Ok(_), Some(u)) => {
+            vec![format!("{verb} {u} on {} at {}.", server.id, server.addr)]
+        }
+        (Ok(_), None) => vec![format!("{verb} on {} at {}.", server.id, server.addr)],
+        (Err(e), _) => vec![format!("{} at {}: {e:#}", server.id, server.addr)],
     };
     Ok(super::action::Outcome::remote_service_after(verb, lines, rows))
 }
@@ -1635,7 +1682,7 @@ pub(super) struct RemoteState {
     panel_path: Option<String>,
     /// The admin server the open services panel controls (picked from the map).
     /// `None` outside the services panel.
-    service_target: Option<SocketAddr>,
+    service_target: Option<ServiceTarget>,
     /// The services panel's units (state + definition), shared type with the
     /// Local Services surface so both render via `services::render_units`. The
     /// generic `rows` above stays empty while the services panel is open.
@@ -1654,10 +1701,10 @@ const PANELS: [Panel; 7] = [
 ];
 
 /// The panels a local (no-auth) target can serve: the admin roster over the
-/// control socket, and perms — read glyph-free against the local CA cert,
-/// written over the control socket (the daemon authorizes the local superuser
-/// and propagates the edit to the cluster). The queue, delegations, and
-/// revocation have no no-auth local backend and stay Cluster-only.
+/// control socket, and perms — read and written over the control socket (the
+/// daemon authorizes the local superuser and confines both to its own level).
+/// The queue, delegations, and revocation have no no-auth local backend and
+/// stay Cluster-only.
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
 /// This host's own resolver base — the single level a local (control-socket)
@@ -1710,11 +1757,10 @@ impl RemoteState {
     /// to this host's own resolver base. Returns the initial refresh op to run.
     pub(super) fn local_panel(
         cfg_path: PathBuf,
-        ca_dir: PathBuf,
         panel: Panel,
     ) -> (RemoteState, Option<Action>) {
         let mut s = RemoteState::new();
-        let target = PanelTarget::Local { cfg_path, ca_dir };
+        let target = PanelTarget::Local { cfg_path };
         s.target = Some(target.clone());
         // Local perms are always this host's own level — no prompt, no picking
         // another resolver's permissions.
@@ -1941,7 +1987,7 @@ impl RemoteState {
             }
             KeyCode::Enter => {
                 let sel = state.selected()?;
-                let server = servers.get(sel)?.addr;
+                let server = servers.get(sel)?.target;
                 let target = self.target.clone()?;
                 self.service_target = Some(server);
                 self.list.select(None);
@@ -2560,7 +2606,7 @@ impl RemoteState {
             // A full-width header names the target server (the narrow list column
             // can't hold an address); the shared view renders below it.
             let header = match self.service_target {
-                Some(server) => format!("Services @ {server}"),
+                Some(server) => format!("Services @ {} ({})", server.addr, server.id),
                 None => "Services".to_string(),
             };
             let split =
@@ -3062,15 +3108,23 @@ mod tests {
         let mut s = RemoteState::new();
         let mut state = ListState::default();
         state.select(Some(0));
+        let root = AdminServerId::new();
+        let ap = AdminServerId::new();
         s.screen = Screen::ServerPick {
             servers: vec![
                 ServiceServerRow {
-                    addr: "10.0.0.11:4565".parse().unwrap(),
-                    label: "10.0.0.11:4565         /".to_string(),
+                    target: ServiceTarget {
+                        id: root,
+                        addr: "10.0.0.11:4565".parse().unwrap(),
+                    },
+                    label: format!("10.0.0.11:4565         / {root}"),
                 },
                 ServiceServerRow {
-                    addr: "10.0.60.11:4565".parse().unwrap(),
-                    label: "10.0.60.11:4565        /ap".to_string(),
+                    target: ServiceTarget {
+                        id: ap,
+                        addr: "10.0.60.11:4565".parse().unwrap(),
+                    },
+                    label: format!("10.0.60.11:4565        /ap {ap}"),
                 },
             ],
             state,
@@ -3079,6 +3133,7 @@ mod tests {
         assert!(out.contains("pick an admin server"), "picker title missing: {out:?}");
         assert!(out.contains("10.0.0.11:4565"), "first server missing: {out:?}");
         assert!(out.contains("/ap"), "level column missing: {out:?}");
+        assert!(out.contains(&root.to_string()), "immutable ID missing: {out:?}");
     }
 
     #[test]
@@ -3088,10 +3143,12 @@ mod tests {
         let mut state = ListState::default();
         state.select(Some(0));
         let addr: SocketAddr = "10.0.60.11:4565".parse().unwrap();
+        let id = AdminServerId::new();
+        let selected = ServiceTarget { id, addr };
         s.screen = Screen::ServerPick {
             servers: vec![ServiceServerRow {
-                addr,
-                label: "10.0.60.11:4565  /ap".to_string(),
+                target: selected,
+                label: format!("10.0.60.11:4565  /ap {id}"),
             }],
             state,
         };
@@ -3102,10 +3159,7 @@ mod tests {
                 units,
                 ..
             })) => {
-                assert_eq!(
-                    server, addr,
-                    "must target the picked server, not the connected CA"
-                );
+                assert_eq!(server, selected, "must preserve the picked identity");
                 assert!(
                     matches!(op, ServiceOp::Status),
                     "initial open is a status listing"
@@ -3115,7 +3169,39 @@ mod tests {
             _ => panic!("expected a ServiceControl action for the picked server"),
         }
         // The picked server is remembered for the panel's control keys.
-        assert_eq!(s.service_target, Some(addr));
+        assert_eq!(s.service_target, Some(selected));
+    }
+
+    #[test]
+    fn duplicate_or_reused_addresses_cannot_change_the_selected_identity() {
+        let mut s = RemoteState::new();
+        s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
+        let addr = "10.0.60.11:4565".parse().unwrap();
+        let first = ServiceTarget { id: AdminServerId::new(), addr };
+        let selected = ServiceTarget { id: AdminServerId::new(), addr };
+        let mut state = ListState::default();
+        state.select(Some(1));
+        s.screen = Screen::ServerPick {
+            servers: vec![
+                ServiceServerRow {
+                    target: first,
+                    label: format!("{addr} /ap {}", first.id),
+                },
+                ServiceServerRow {
+                    target: selected,
+                    label: format!("{addr} /ap {}", selected.id),
+                },
+            ],
+            state,
+        };
+
+        let Some(Action::Remote(RemoteAction::ServiceControl { server, .. })) =
+            s.on_key(KeyCode::Enter)
+        else {
+            panic!("expected service-control action")
+        };
+        assert_eq!(server, selected);
+        assert_ne!(server.id, first.id);
     }
 
     #[test]
@@ -3128,7 +3214,11 @@ mod tests {
         use netidx_admin::admin_proto::{ServiceUnit, ServiceUnitDef};
         let mut s = RemoteState::new();
         s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
-        s.service_target = Some("10.0.60.11:4565".parse().unwrap());
+        let service_target = ServiceTarget {
+            id: AdminServerId::new(),
+            addr: "10.0.60.11:4565".parse().unwrap(),
+        };
+        s.service_target = Some(service_target);
         let su = ServiceUnit {
             unit: "resolver".to_string(),
             state: UnitState::Running { pid: Some(42) },
@@ -3161,7 +3251,7 @@ mod tests {
                 op,
                 ..
             })) => {
-                assert_eq!(server, "10.0.60.11:4565".parse().unwrap());
+                assert_eq!(server, service_target);
                 assert!(matches!(op, ServiceOp::Start), "expected Start");
                 assert_eq!(
                     units,

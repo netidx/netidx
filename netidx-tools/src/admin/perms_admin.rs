@@ -1,10 +1,9 @@
 //! `netidx admin perms show|edit --at <path>` — remote permissions
 //! administration, a thin CLI over [`netidx_admin::admin_ops::perms`]. The
 //! library reaches an admin server, glyph-confirms its CA, routes by the
-//! network map to the cluster mounted at `<path>` (re-pinning every hop to the
-//! confirmed CA), and reads or writes its perms. `edit` runs the `$EDITOR` loop
-//! and local validation here — a frontend concern — between the library's read
-//! and its authenticated write.
+//! authoritative controller, and performs an authenticated read or write.
+//! `edit` runs the `$EDITOR` loop and local validation here — a frontend
+//! concern — between the library's authenticated read and write.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -18,7 +17,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// show the permissions of the cluster mounted at <path>
+    /// show the permissions of the cluster mounted at <path> (admin)
     Show(Flags),
     /// edit the permissions of the cluster mounted at <path> (admin)
     Edit(Flags),
@@ -48,6 +47,8 @@ fn show(f: Flags) -> Result<()> {
         &mut ans,
         server,
         f.auth.ca_dir.clone(),
+        f.auth.admin.clone(),
+        None,
         &f.at,
     ))?;
     println!("{}", pretty(&perms_json)?);
@@ -60,22 +61,17 @@ fn edit(f: Flags) -> Result<()> {
     let rt = runtime()?;
     // Seed the editor with the cluster's current perms, then hand the edited,
     // locally-validated result to the library's authenticated write.
-    let current = rt.block_on(perms_ops::show_perms(
-        &mut ans,
-        server,
-        f.auth.ca_dir.clone(),
-        &f.at,
-    ))?;
-    let edited = editor::edit_with_validation(&pretty(&current)?, validate)?;
-    let peers = rt.block_on(perms_ops::edit_perms(
+    let (session, current) = rt.block_on(perms_ops::open_perms_session(
         &mut ans,
         server,
         f.auth.ca_dir.clone(),
         f.auth.admin.clone(),
         None,
         &f.at,
-        &edited,
     ))?;
+    let edited = editor::edit_with_validation(&pretty(&current)?, validate)?;
+    let peers =
+        rt.block_on(perms_ops::edit_perms_with_session(&session, &f.at, &edited))?;
     report_peers(&peers, &f.at);
     Ok(())
 }

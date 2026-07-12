@@ -14,8 +14,9 @@
 use crate::admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, ClientHello,
     EditPermsRequest, EditPermsResponse, EnrollRequest, ListAdminsRequest, NodeKind,
-    PROTOCOL_VERSION, PeerResult, RemoveAdminRequest, Request, RotateAutorenewResponse,
-    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
+    PROTOCOL_VERSION, PeerResult, ReadPermsRequest, ReadPermsResponse,
+    RemoveAdminRequest, Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret,
+    ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
@@ -181,6 +182,26 @@ pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminI
     match admin_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Read this resolver host's own permissions over the protected local socket.
+/// The daemon confines `target_path` to its configured resolver level; no
+/// network map or remote discovery hint participates in this operation.
+pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    admin_proto::write_msg(
+        &mut s,
+        &Request::ReadPerms(ReadPermsRequest {
+            credential: crate::admin_proto::AdminCredential::Password { admin, password },
+            target_path: target_path.to_string(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ReadPermsResponse>(&mut s).await? {
+        ReadPermsResponse::Ok { perms_json, .. } => Ok(perms_json),
+        ReadPermsResponse::Err { reason } => bail!("the admin daemon refused: {reason}"),
     }
 }
 

@@ -252,11 +252,9 @@ impl LocalState {
     pub(super) fn open_admin(
         &mut self,
         cfg_path: PathBuf,
-        ca_dir: PathBuf,
         panel: super::remote::Panel,
     ) -> Option<Action> {
-        let (state, initial) =
-            super::remote::RemoteState::local_panel(cfg_path, ca_dir, panel);
+        let (state, initial) = super::remote::RemoteState::local_panel(cfg_path, panel);
         self.admin = Some(state);
         initial
     }
@@ -729,7 +727,6 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 "Admins".to_string(),
                 Action::ManageLocalAdmins {
                     cfg_path: cfg_path.clone(),
-                    ca_dir: lca.ca_dir.clone(),
                     panel: super::remote::Panel::Roster,
                 },
             ));
@@ -737,7 +734,6 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 "Permissions".to_string(),
                 Action::ManageLocalAdmins {
                     cfg_path: cfg_path.clone(),
-                    ca_dir: lca.ca_dir.clone(),
                     panel: super::remote::Panel::Perms,
                 },
             ));

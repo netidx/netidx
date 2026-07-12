@@ -359,9 +359,9 @@ pub enum Request {
     /// Answered with [`RemoveServerResponse`].
     #[pack(tag(24))]
     RemoveServer(RemoveServerRequest),
-    /// Read this resolver host's permissions file (no credentials — perms
-    /// are readable within the trust domain, like the map). The client
-    /// routes to a member of the cluster it wants. Answered with
+    /// Controller → node: read this resolver host's permissions file. This is
+    /// an internal exact-target RPC; network clients use [`Request::ReadPerms`]
+    /// so credentials are verified at the controller first. Answered with
     /// [`GetPermsResponse`].
     #[pack(tag(25))]
     GetPerms,
@@ -430,6 +430,20 @@ pub enum Request {
     /// [`Request::RotateRecovery`]. Answered with [`RotateAutorenewResponse`].
     #[pack(tag(35))]
     RotateAutorenew,
+    /// Controller → node: atomically install the home CA's freshly signed CRL
+    /// beside this node's admin and resolver trust bundles. The receiver
+    /// verifies the CRL signature against its exact home CA before writing it.
+    /// Answered with [`ApplyCrlResponse`].
+    #[pack(tag(36))]
+    ApplyCrl(ApplyCrlRequest),
+    /// Admin-authenticated, sent to the **controller**: read the permissions
+    /// of the active resolver cluster mounted at `target_path`. The controller
+    /// authorizes the scope and reads one exact CA-owned server identity via
+    /// [`Request::GetPerms`]. Local-control callers are authorized by the
+    /// protected socket and confined to this host's own level. Answered with
+    /// [`ReadPermsResponse`].
+    #[pack(tag(37))]
+    ReadPerms(ReadPermsRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -477,12 +491,38 @@ pub struct RevokeRequest {
 pub enum RevokeResponse {
     #[pack(tag(0))]
     Ok {
-        /// Non-fatal follow-ups (e.g. couldn't install the CRL beside a
-        /// local resolver).
+        /// Non-fatal revocation/signing follow-ups.
         #[serde(default)]
         #[pack(default)]
         warnings: Vec<String>,
+        /// The immediate CRL-distribution operation, when this response came
+        /// from a protocol-v6 controller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[pack(default)]
+        operation_id: Option<OperationId>,
+        /// One deterministic result for every registered admin server that
+        /// should enforce the new CRL.
+        #[serde(default)]
+        #[pack(default)]
+        peers: Vec<PeerResult>,
     },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+/// Controller → node immediate CRL distribution. The controller certificate
+/// is the authorization gate; the CRL itself is independently signature
+/// checked by the receiver before it replaces any local file.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ApplyCrlRequest {
+    pub operation_id: OperationId,
+    pub crl_pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ApplyCrlResponse {
+    #[pack(tag(0))]
+    Ok,
     #[pack(tag(1))]
     Err { reason: String },
 }
@@ -1132,6 +1172,11 @@ pub enum RemoveServerResponse {
         #[serde(default)]
         #[pack(default)]
         peers: Vec<PeerResult>,
+        /// Immediate CRL-distribution results. Separate from `peers`, which
+        /// reports referral-topology reconciliation for the same operation.
+        #[serde(default)]
+        #[pack(default)]
+        crl_peers: Vec<PeerResult>,
     },
     #[pack(tag(1))]
     Err { reason: String },
@@ -1142,6 +1187,22 @@ pub enum RemoveServerResponse {
 pub enum GetPermsResponse {
     #[pack(tag(0))]
     Ok { perms_json: String },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+/// Admin → controller: read the permissions of the cluster mounted exactly at
+/// `target_path`.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ReadPermsRequest {
+    pub credential: AdminCredential,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ReadPermsResponse {
+    #[pack(tag(0))]
+    Ok { server: AdminServerId, addr: SocketAddr, perms_json: String },
     #[pack(tag(1))]
     Err { reason: String },
 }
@@ -1241,7 +1302,7 @@ pub enum AdminListResponse {
 // -- remote service control (over the admin plane) -----------------------------
 
 /// Admin → CA: control services on **one** admin server (`target_server`, its
-/// listen address from the network map). Restart is deliberately per-server, not
+/// immutable CA-issued identity). Restart is deliberately per-server, not
 /// cluster-wide — an operator restarts one resolver at a time so readers never
 /// see a gap. Authorized by the caller's `service_control_scopes` covering that
 /// server's cluster base (or a signing slot). `units` empty ⇒ every unit (for
@@ -1475,6 +1536,16 @@ mod tests {
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
+        let apply_crl = encode(&Request::ApplyCrl(ApplyCrlRequest {
+            operation_id: OperationId::new(),
+            crl_pem: "crl".to_string(),
+        }));
+        assert_eq!(apply_crl[1], 36);
+        let read_perms = encode(&Request::ReadPerms(ReadPermsRequest {
+            credential: AdminCredential::password("alice", "pw"),
+            target_path: "/eu".to_string(),
+        }));
+        assert_eq!(read_perms[1], 37);
     }
 
     #[tokio::test]
@@ -1534,6 +1605,22 @@ mod tests {
         assert_eq!(got.requested_name, "resolver.example.com");
         assert_eq!(got.kind, NodeKind::Resolver);
         assert_eq!(got.id_map_groups, vec!["users".to_string()]);
+
+        let server = AdminServerId::new();
+        let response = ReadPermsResponse::Ok {
+            server,
+            addr: "127.0.0.1:4565".parse().unwrap(),
+            perms_json: "{}".to_string(),
+        };
+        write_msg(&mut a, &response).await.unwrap();
+        match read_msg::<_, ReadPermsResponse>(&mut b).await.unwrap() {
+            ReadPermsResponse::Ok { server: got, addr, perms_json } => {
+                assert_eq!(got, server);
+                assert_eq!(addr, "127.0.0.1:4565".parse().unwrap());
+                assert_eq!(perms_json, "{}");
+            }
+            ReadPermsResponse::Err { reason } => panic!("unexpected error: {reason}"),
+        }
     }
 
     #[tokio::test]
@@ -1732,6 +1819,7 @@ mod tests {
                 addr: "10.0.0.2:4565".parse().unwrap(),
                 error: Some("offline".to_string()),
             }],
+            crl_peers: vec![],
         };
         write_msg(&mut a, &removal).await.unwrap();
         match read_msg::<_, RemoveServerResponse>(&mut b).await.unwrap() {
@@ -1742,6 +1830,7 @@ mod tests {
                 removed,
                 affected_clusters,
                 peers,
+                crl_peers,
             } => {
                 assert_eq!(version, 8);
                 assert_eq!(got_operation, Some(operation_id));
@@ -1750,8 +1839,26 @@ mod tests {
                 assert_eq!(affected_clusters, vec!["/", "/eu"]);
                 assert_eq!(peers[0].server, server);
                 assert_eq!(peers[0].error.as_deref(), Some("offline"));
+                assert!(crl_peers.is_empty());
             }
             RemoveServerResponse::Err { reason } => panic!("err: {reason}"),
+        }
+
+        let operation_id = OperationId::new();
+        let peer =
+            PeerResult { server, addr: "10.0.0.2:4565".parse().unwrap(), error: None };
+        let response = RevokeResponse::Ok {
+            warnings: vec![],
+            operation_id: Some(operation_id),
+            peers: vec![peer],
+        };
+        write_msg(&mut a, &response).await.unwrap();
+        match read_msg::<_, RevokeResponse>(&mut b).await.unwrap() {
+            RevokeResponse::Ok { operation_id: got, peers, .. } => {
+                assert_eq!(got, Some(operation_id));
+                assert_eq!(peers[0].server, server);
+            }
+            RevokeResponse::Err { reason } => panic!("err: {reason}"),
         }
     }
 

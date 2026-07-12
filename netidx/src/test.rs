@@ -762,9 +762,22 @@ mod publisher {
                         &subj,
                     ])
                     && run(&[
-                        "x509", "-req", "-in", &req, "-CA", &s(&ca), "-CAkey", &s(&cak),
-                        "-CAcreateserial", "-out", &cert, "-days", "730", "-sha512",
-                        "-extfile", &s(&ext),
+                        "x509",
+                        "-req",
+                        "-in",
+                        &req,
+                        "-CA",
+                        &s(&ca),
+                        "-CAkey",
+                        &s(&cak),
+                        "-CAcreateserial",
+                        "-out",
+                        &cert,
+                        "-days",
+                        "730",
+                        "-sha512",
+                        "-extfile",
+                        &s(&ext),
                     ]);
                 if !ok {
                     return false;
@@ -864,10 +877,7 @@ mod publisher {
                             let _ = std::fs::rename(&tmp, &live);
                         }
                     };
-                    swap(
-                        format!("{dir}/cert{g}.pem"),
-                        format!("{dir}/certificate.pem"),
-                    );
+                    swap(format!("{dir}/cert{g}.pem"), format!("{dir}/certificate.pem"));
                     time::sleep(Duration::from_millis(40)).await;
                     swap(format!("{dir}/key{g}.pem"), format!("{dir}/private.key"));
                     n += 1;
