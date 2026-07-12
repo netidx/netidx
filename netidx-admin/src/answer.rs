@@ -99,6 +99,8 @@ pub enum Field {
     ResolverName,
     /// Whether to set up an admin server (admin-plane CA) for this network.
     SetupAdminServer,
+    /// Whether the controller CA certificate is signed by an external PKI.
+    ExternalSign,
     /// The IP the admin server on this host listens on.
     AdminServerListenIp,
     /// The port the admin server on this host listens on.
@@ -151,6 +153,10 @@ pub enum Field {
     ExternalRoot,
     /// New directory the local controller creates for a consistent backup.
     BackupTarget,
+    /// Existing installation bundle selected for restore.
+    RestoreSource,
+    /// Explicit split-brain fence attestation before controller restore.
+    FenceOldController,
 }
 
 /// The presentation descriptor for a [`Field`]: what flag a script passes,
@@ -378,6 +384,13 @@ impl Field {
                        --with-admin-server (yes) or --no-admin-server (no); \
                        interactive defaults to yes.",
             },
+            ExternalSign => FieldInfo {
+                flag: "--external-sign",
+                label: "use an external root CA?",
+                help: "Generate the controller CA key and a subordinate-CA CSR, then \
+                       wait for your external PKI or hardware root to sign it. The \
+                       controller starts after the signed certificate is installed.",
+            },
             AdminServerListenIp => FieldInfo {
                 flag: "--listen",
                 label: "admin server listen IP",
@@ -529,6 +542,19 @@ impl Field {
                 label: "backup target directory",
                 help: "A new directory on this controller for the recovery bundle. \
                        Existing paths are never overwritten.",
+            },
+            RestoreSource => FieldInfo {
+                flag: "--bundle",
+                label: "backup bundle directory",
+                help: "A bundle created by netidx admin backup. It is completely \
+                       verified before restore writes anything.",
+            },
+            FenceOldController => FieldInfo {
+                flag: "--old-controller-fenced",
+                label: "old controller is fenced",
+                help: "Confirm that the old controller cannot run. Two machines using \
+                       the same controller identity would violate the admin plane's \
+                       single-writer security boundary.",
             },
         }
     }

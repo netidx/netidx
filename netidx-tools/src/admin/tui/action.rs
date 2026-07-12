@@ -11,9 +11,15 @@
 //! the loop runs it directly rather than as an op future.
 
 use super::answer::TuiAnswerer;
-use anyhow::{Context, Result, bail};
+use anyhow::Context;
+use anyhow::{Result, bail};
+#[cfg(unix)]
+use netidx_admin::plan::install::controller::{ControllerInput, run_controller};
+#[cfg(unix)]
+use netidx_admin::{admin_local, atomic, offline_ca};
 use netidx_admin::{
     answer::{Answerer, Field, Progress, Stage},
+    install_bundle, paths,
     plan::install::{
         InstallCommon,
         publisher::{PublisherInput, run_publisher},
@@ -23,10 +29,7 @@ use netidx_admin::{
     renewd,
     service::ServiceScope,
 };
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf};
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
@@ -37,13 +40,34 @@ pub(super) struct Outcome {
     pub(super) refresh_local: bool,
     /// A privileged follow-up the UI loop performs with the terminal: register
     /// the OS service at this scope. `None` ⇒ nothing to do.
-    pub(super) install_service: Option<ServiceScope>,
+    pub(super) install_service: Option<ServiceInstall>,
+    /// Continue a multi-phase operation after the service registration has
+    /// completed (controller+resolver restore uses this to re-enroll local
+    /// identities against the newly started controller).
+    pub(super) after_service: Option<Action>,
     /// A result to apply to the Remote tab's state (connection / panel rows).
     pub(super) remote: Option<super::remote::RemoteUpdate>,
     /// A result to apply to the Local tab's Services surface (refreshed rows).
     pub(super) services: Option<super::services::ServicesUpdate>,
     /// Suppress the result overlay (used by silent panel re-queries).
     pub(super) quiet: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ServiceInstall {
+    pub(super) scope: ServiceScope,
+    pub(super) name: String,
+    pub(super) for_user: Option<String>,
+}
+
+impl ServiceInstall {
+    fn defaults(scope: ServiceScope) -> Self {
+        Self {
+            scope,
+            name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
+            for_user: None,
+        }
+    }
 }
 
 impl Outcome {
@@ -57,6 +81,7 @@ impl Outcome {
             lines,
             refresh_local,
             install_service: None,
+            after_service: None,
             remote: None,
             services: None,
             quiet: false,
@@ -74,6 +99,7 @@ impl Outcome {
             lines,
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(update),
             services: None,
             quiet: false,
@@ -91,6 +117,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::Clusters(clusters)),
             services: None,
             quiet: true,
@@ -107,6 +134,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
             services: None,
             quiet: true,
@@ -125,6 +153,7 @@ impl Outcome {
             lines,
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
             services: None,
             quiet: false,
@@ -138,6 +167,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::Levels { panel, levels }),
             services: None,
             quiet: true,
@@ -154,6 +184,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::ServiceServers { servers }),
             services: None,
             quiet: true,
@@ -169,6 +200,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
             services: None,
             quiet: true,
@@ -186,6 +218,7 @@ impl Outcome {
             lines,
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
             services: None,
             quiet: false,
@@ -199,6 +232,7 @@ impl Outcome {
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: None,
             services: Some(super::services::ServicesUpdate { rows }),
             quiet: true,
@@ -216,6 +250,7 @@ impl Outcome {
             lines,
             refresh_local: false,
             install_service: None,
+            after_service: None,
             remote: None,
             services: Some(super::services::ServicesUpdate { rows }),
             quiet: false,
@@ -251,9 +286,13 @@ pub(super) enum Action {
     AutoApprove { rotate: bool, ca_dir: PathBuf, cfg: Option<PathBuf> },
     /// Mint a fresh CA recovery password on this box (local, no-auth).
     RecoveryRotate { ca_dir: PathBuf, cfg: Option<PathBuf> },
-    /// Capture a consistent live recovery bundle through the protected local
-    /// control socket. The target directory is prompted by the TUI.
-    Backup { cfg_path: PathBuf },
+    /// Back up the complete managed installation. A controller component is
+    /// captured through its protected local control socket.
+    Backup { config_root: PathBuf, scope: ServiceScope },
+    /// Select and restore an installation bundle on a fresh machine.
+    Restore,
+    /// Resume controller+resolver restore after the privileged service step.
+    FinishRestore { bundle: PathBuf, config_root: PathBuf },
     /// Re-emit a renewal CSR for this box's externally-signed CA (local).
     ExternalEmitCsr { ca_dir: PathBuf },
     /// Install an externally-signed CA certificate on this box (local).
@@ -299,7 +338,9 @@ impl Action {
             }
             .to_string(),
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
-            Action::Backup { .. } => "Backing up controller".to_string(),
+            Action::Backup { .. } => "Backing up this install".to_string(),
+            Action::Restore => "Restoring an install".to_string(),
+            Action::FinishRestore { .. } => "Finishing restore".to_string(),
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
             Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
             Action::OpenServices { .. } => "Services".to_string(),
@@ -329,6 +370,8 @@ impl Action {
             | Action::AddParent
             | Action::AutoApprove { rotate: false, .. }
             | Action::Backup { .. }
+            | Action::Restore
+            | Action::FinishRestore { .. }
             | Action::ExternalEmitCsr { .. }
             | Action::ExternalInstall { .. }
             | Action::ManageLocalAdmins { .. } => None,
@@ -392,9 +435,15 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         }
         a @ (Action::AutoApprove { .. }
         | Action::RecoveryRotate { .. }
-        | Action::Backup { .. }
         | Action::ExternalEmitCsr { .. }
         | Action::ExternalInstall { .. }) => local_ca_op(&mut ans, a).await,
+        Action::Backup { config_root, scope } => {
+            backup(&mut ans, config_root, scope).await
+        }
+        Action::Restore => restore(&mut ans).await,
+        Action::FinishRestore { bundle, config_root } => {
+            finish_restore(&mut ans, bundle, config_root).await
+        }
         Action::Services(sa) => super::services::run(&mut ans, sa).await,
     }
 }
@@ -408,7 +457,6 @@ async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
             auto_approve(ans, rotate, ca_dir, cfg).await
         }
         Action::RecoveryRotate { ca_dir, cfg } => recovery_rotate(ans, ca_dir, cfg).await,
-        Action::Backup { cfg_path } => backup(ans, cfg_path).await,
         Action::ExternalEmitCsr { ca_dir } => external_emit_csr(ans, ca_dir).await,
         Action::ExternalInstall { ca_dir } => external_install(ans, ca_dir).await,
         _ => unreachable!("local_ca_op called with a non-CA action"),
@@ -480,8 +528,11 @@ async fn recovery_rotate(
     Ok(Outcome::plain("Recovery password rotated", lines, true))
 }
 
-#[cfg(unix)]
-async fn backup(ans: &mut TuiAnswerer, cfg_path: PathBuf) -> Result<Outcome> {
+async fn backup(
+    ans: &mut TuiAnswerer,
+    config_root: PathBuf,
+    scope: ServiceScope,
+) -> Result<Outcome> {
     let target = ans
         .text(Field::BackupTarget, None, None, true)
         .await?
@@ -489,28 +540,274 @@ async fn backup(ans: &mut TuiAnswerer, cfg_path: PathBuf) -> Result<Outcome> {
     let target = PathBuf::from(target);
     let target =
         if target.is_absolute() { target } else { std::env::current_dir()?.join(target) };
-    let out = netidx_admin::admin_local::backup(&cfg_path, &target).await?;
+    let record =
+        netidx_admin::provenance::InstallRecord::load(&config_root.join("install.json"))?;
+    let service_scope = match record.role {
+        InstallRole::Workstation => ServiceScope::User,
+        _ => ServiceScope::System,
+    };
+    let for_user = match service_scope {
+        ServiceScope::User => None,
+        ServiceScope::System => Some(super::super::service::resolve_for_user(None)?),
+    };
+    let service = netidx_admin::service::status(&netidx_admin::service::ServiceParams {
+        scope: service_scope,
+        for_user: for_user.clone(),
+        binary: PathBuf::new(),
+        service_name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
+        activation_dir: None,
+    })?;
+    let intent = install_bundle::ServiceIntent {
+        scope: match service_scope {
+            ServiceScope::User => install_bundle::BundleScope::User,
+            ServiceScope::System => install_bundle::BundleScope::System,
+        },
+        name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
+        for_user,
+        installed: service != netidx_admin::service::ServiceStatus::NotInstalled,
+    };
+    #[cfg(unix)]
+    let controller_tmp = tempfile::tempdir()?;
+    let inner: Option<PathBuf> = if config_root.join("ca").is_dir() {
+        #[cfg(unix)]
+        {
+            let inner = controller_tmp.path().join("controller");
+            admin_local::backup(&config_root.join("admin-server.json"), &inner).await?;
+            Some(inner)
+        }
+        #[cfg(not(unix))]
+        {
+            bail!("controller backup is supported only on unix")
+        }
+    } else {
+        None
+    };
+    let out = install_bundle::create(
+        &config_root,
+        record,
+        match scope {
+            ServiceScope::User => install_bundle::BundleScope::User,
+            ServiceScope::System => install_bundle::BundleScope::System,
+        },
+        Some(intent),
+        inner.as_deref(),
+        &target,
+    )?;
     Ok(Outcome::plain(
-        "Controller backup created",
+        "Installation backup created",
         vec![
             format!("Target: {}", out.target.display()),
-            format!("CA: {}", out.ca_fingerprint),
-            format!("Controller: {}", out.controller),
-            format!(
-                "Map version: {} · highest serial: {}",
-                out.map_version, out.highest_serial
-            ),
+            format!("Components: {:?}", out.components),
             format!("{} files · {} bytes", out.files, out.bytes),
+            format!(
+                "Fresh enrollment on restore: {} credential(s)",
+                out.identities_to_reenroll
+            ),
             format!("Manifest SHA-256: {}", out.manifest_sha256),
         ],
         false,
     ))
 }
 
+fn restore_root(manifest: &install_bundle::Manifest) -> Result<PathBuf> {
+    match manifest.config_scope {
+        install_bundle::BundleScope::User => paths::user_config_root(),
+        install_bundle::BundleScope::System => Ok(paths::system_config_root()),
+    }
+}
+
+async fn finish_identities(
+    ans: &mut TuiAnswerer,
+    bundle: &PathBuf,
+    root: &PathBuf,
+) -> Result<()> {
+    let manifest = install_bundle::verify(bundle)?;
+    if manifest.identities.is_empty()
+        || super::super::backup_restore::identities_complete(root, &manifest)
+    {
+        return Ok(());
+    }
+    let (controller, net) =
+        super::super::backup_restore::network_for_restore(&manifest, None)
+            .await?
+            .context(
+                "the backup contains TLS identities but no administrative network",
+            )?;
+    super::super::backup_restore::reenroll_data_identities(
+        ans, root, &manifest, controller, &net, None,
+    )
+    .await?;
+    #[cfg(unix)]
+    super::super::backup_restore::reenroll_satellite_admin(
+        ans, root, &manifest, &net, None,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
+    let source = ans
+        .text(Field::RestoreSource, None, None, true)
+        .await?
+        .context("a backup bundle directory is required")?;
+    let bundle = PathBuf::from(source).canonicalize()?;
+    let preflight = install_bundle::verify(&bundle)?;
+    let controller =
+        preflight.components.contains(&install_bundle::Component::Controller);
+    ans.announce(
+        "Restore plan",
+        &format!(
+            "Components: {:?}\nRole: {}\nFresh enrollment required for {} machine credential(s).\nThe destination must be a clean install or an identical interrupted restore.",
+            preflight.components,
+            preflight.install.role.as_str(),
+            preflight.identities.len(),
+        ),
+    )
+    .await?;
+    if controller && !ans.confirm(Field::FenceOldController, None, false).await? {
+        bail!("controller restore cancelled until the old controller is fenced");
+    }
+    let root = restore_root(&preflight)?;
+    let manifest = install_bundle::restore_files(&bundle, &root)?;
+    #[cfg(unix)]
+    if controller {
+        let ca_dir = root.join("ca");
+        let cfg_path = root.join("admin-server.json");
+        if !install_bundle::controller_recovered(&bundle, &cfg_path)? {
+            if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg_path)?
+            {
+                netidx_admin::backup::restore(
+                    &bundle.join(install_bundle::CONTROLLER_DIR),
+                    &ca_dir,
+                    &cfg_path,
+                )?;
+            }
+            let lifetimes = netidx_admin::ca::CaLifetimes::load(&ca_dir)?;
+            if lifetimes.externally_signed
+                && netidx_admin::ca::ca_cert_needs_renewal(
+                    &ca_dir,
+                    std::time::Duration::ZERO,
+                )
+            {
+                let signed = ans
+                    .text(Field::SignedCert, None, None, true)
+                    .await?
+                    .context("the renewed external-CA certificate is required")?;
+                let root = ans.text(Field::ExternalRoot, None, None, false).await?;
+                netidx_admin::admin_ops::slots::external_install_cert(
+                    ans,
+                    ca_dir.clone(),
+                    PathBuf::from(signed).as_path(),
+                    root.as_deref().filter(|s| !s.is_empty()).map(std::path::Path::new),
+                )
+                .await?;
+            }
+            netidx_admin::admin_ops::slots::recover_controller(
+                ans,
+                ca_dir,
+                cfg_path.clone(),
+                manifest.admin_listen,
+                false,
+            )
+            .await?;
+        }
+        let mut cfg =
+            netidx_admin::admin_server_config::AdminServerConfig::load_for_recovery(
+                &cfg_path,
+            )?;
+        if let Some(role) = cfg.roles.resolver.as_mut() {
+            role.config = root.join("resolver.json");
+        }
+        if let Some(role) = cfg.roles.id_map.as_mut() {
+            role.map = root.join("id-map.json");
+        }
+        cfg.save(&cfg_path)?;
+        manifest.install.save(&root.join("install.json"))?;
+    }
+    #[cfg(not(unix))]
+    if controller {
+        bail!("controller restore is supported only on unix")
+    }
+    let recorded = manifest.service.as_ref().is_some_and(|s| s.installed);
+    let install_service =
+        ans.confirm(Field::Service, recorded.then_some(true), true).await?;
+    let service_scope = install_service.then_some(
+        match manifest.service.as_ref().map(|s| s.scope).unwrap_or(manifest.config_scope)
+        {
+            install_bundle::BundleScope::User => ServiceScope::User,
+            install_bundle::BundleScope::System => ServiceScope::System,
+        },
+    );
+    let service_install = service_scope.map(|scope| match &manifest.service {
+        Some(intent) => ServiceInstall {
+            scope,
+            name: intent.name.clone(),
+            for_user: intent.for_user.clone(),
+        },
+        None => ServiceInstall::defaults(scope),
+    });
+    if controller && !manifest.identities.is_empty() {
+        let service_install = service_install.context(
+            "a controller with co-located TLS roles must run its service before those roles can re-enroll",
+        )?;
+        return Ok(Outcome {
+            title: "Controller restored".to_string(),
+            lines: vec![
+                "Starting the controller before re-enrolling its co-located TLS roles…"
+                    .to_string(),
+            ],
+            refresh_local: false,
+            install_service: Some(service_install),
+            after_service: Some(Action::FinishRestore { bundle, config_root: root }),
+            remote: None,
+            services: None,
+            quiet: true,
+        });
+    }
+    finish_identities(ans, &bundle, &root).await?;
+    Ok(Outcome {
+        title: "Restore complete".to_string(),
+        lines: vec![format!(
+            "{} is installed and ready.",
+            manifest.install.role.as_str()
+        )],
+        refresh_local: true,
+        install_service: service_install,
+        after_service: None,
+        remote: None,
+        services: None,
+        quiet: false,
+    })
+}
+
+async fn finish_restore(
+    ans: &mut TuiAnswerer,
+    bundle: PathBuf,
+    config_root: PathBuf,
+) -> Result<Outcome> {
+    let manifest = install_bundle::verify(&bundle)?;
+    finish_identities(ans, &bundle, &config_root).await?;
+    super::super::backup_restore::start_restored_units(&config_root).await?;
+    Ok(Outcome::plain(
+        "Restore complete",
+        vec![format!("{} is installed and ready.", manifest.install.role.as_str())],
+        true,
+    ))
+}
+
 /// Re-emit a renewal CSR for an externally-signed CA.
 #[cfg(unix)]
 async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
-    let csr = netidx_admin::admin_ops::slots::external_emit_csr(ans, ca_dir).await?;
+    let csr = match paths::discover_admin_server_config() {
+        Ok(cfg) => {
+            let (common_name, csr_pem) = admin_local::external_ca_csr(&cfg).await?;
+            let csr = offline_ca::default_csr_filename(&common_name);
+            atomic::write_atomic(&csr, csr_pem.as_bytes(), 0o644)
+                .with_context(|| format!("writing CSR to {}", csr.display()))?;
+            csr
+        }
+        Err(_) => netidx_admin::admin_ops::slots::external_emit_csr(ans, ca_dir).await?,
+    };
     Ok(Outcome::plain(
         "CSR emitted",
         vec![format!(
@@ -525,7 +822,6 @@ async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Out
 /// Install an externally-signed CA certificate.
 #[cfg(unix)]
 async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
-    use netidx_admin::admin_ops::slots::{ExternalInstallOutcome, external_install_cert};
     let signed = ans
         .text(Field::SignedCert, None, None, true)
         .await?
@@ -534,40 +830,64 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
         .text(Field::ExternalRoot, None, None, false)
         .await?
         .filter(|s| !s.trim().is_empty());
-    let out = external_install_cert(
-        ans,
-        ca_dir,
-        Path::new(&signed),
-        root.as_deref().map(Path::new),
-    )
-    .await?;
-    match out {
-        ExternalInstallOutcome::OfflineCa => Ok(Outcome::plain(
-            "Certificate installed",
-            vec!["Installed the externally-signed CA certificate (offline CA).".to_string()],
-            true,
-        )),
-        ExternalInstallOutcome::Renewal => Ok(Outcome::plain(
-            "Certificate renewed",
-            vec![
-                "Renewed the CA certificate — enrolled nodes adopt it on their next \
-                 renewal (glyph unchanged; existing certificates stay valid)."
-                    .to_string(),
-            ],
-            true,
-        )),
-        ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
-            title: "Certificate installed".to_string(),
-            lines: vec![
-                format!("Installed the externally-signed CA certificate; admin server configured ({}).", cfg_path.display()),
-                "CA-cert auto-renewal is DISABLED (external issuer); re-run install when your PKI re-signs it.".to_string(),
-            ],
-            refresh_local: true,
-            install_service: need.scope(),
-            remote: None,
-            services: None,
-            quiet: false,
-        }),
+    match paths::discover_admin_server_config() {
+        Ok(cfg) => {
+            let signed_pem = std::fs::read_to_string(&signed)
+                .with_context(|| format!("reading {signed}"))?;
+            let root_pem = root
+                .as_deref()
+                .map(std::fs::read_to_string)
+                .transpose()
+                .context("reading the external root certificate")?;
+            let fingerprint =
+                admin_local::external_ca_install(&cfg, signed_pem, root_pem).await?;
+            Ok(Outcome::plain(
+                "Certificate renewed",
+                vec![
+                    "Renewed the externally-signed controller CA without stopping it."
+                        .to_string(),
+                    format!("CA identity: {fingerprint}"),
+                ],
+                true,
+            ))
+        }
+        Err(_) => {
+            use netidx_admin::admin_ops::slots::{
+                ExternalInstallOutcome, external_install_cert,
+            };
+            match external_install_cert(
+                ans,
+                ca_dir,
+                PathBuf::from(&signed).as_path(),
+                root.as_deref().map(std::path::Path::new),
+            )
+            .await?
+            {
+                ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
+                    title: "Controller certificate installed".to_string(),
+                    lines: vec![format!(
+                        "Installed the externally-signed CA certificate; controller configured at {}.",
+                        cfg_path.display()
+                    )],
+                    refresh_local: true,
+                    install_service: need.scope().map(ServiceInstall::defaults),
+                    after_service: None,
+                    remote: None,
+                    services: None,
+                    quiet: false,
+                }),
+                ExternalInstallOutcome::OfflineCa => Ok(Outcome::plain(
+                    "Certificate installed",
+                    vec![
+                        "Installed the externally-signed offline CA certificate.".into(),
+                    ],
+                    true,
+                )),
+                ExternalInstallOutcome::Renewal => bail!(
+                    "a served controller CA must be renewed over its local control socket"
+                ),
+            }
+        }
     }
 }
 
@@ -591,6 +911,7 @@ async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
         lines,
         refresh_local: true,
         install_service: None,
+        after_service: None,
         remote: None,
         services: None,
         quiet: false,
@@ -618,6 +939,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
         lines,
         refresh_local: !dry_run,
         install_service: None,
+        after_service: None,
         remote: None,
         services: None,
         quiet: false,
@@ -759,6 +1081,7 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
         lines,
         refresh_local: true,
         install_service: None,
+        after_service: None,
         remote: None,
         services: None,
         quiet: false,
@@ -792,6 +1115,12 @@ async fn install(
         no_service: false,
     };
     let scope = match role {
+        #[cfg(unix)]
+        InstallRole::Controller => {
+            run_controller(ans, ControllerInput::defaults(common)).await?
+        }
+        #[cfg(not(unix))]
+        InstallRole::Controller => bail!("the controller role is supported only on unix"),
         InstallRole::Resolver => run_resolver(ans, resolver_input(common)).await?,
         InstallRole::Publisher => run_publisher(ans, publisher_input(common)).await?,
         InstallRole::Workstation => run_workstation(ans, common).await?,
@@ -896,7 +1225,8 @@ fn install_outcome(
             title: format!("{} installed", role.as_str()),
             lines,
             refresh_local: true,
-            install_service: scope,
+            install_service: scope.map(ServiceInstall::defaults),
+            after_service: None,
             remote: None,
             services: None,
             quiet: false,

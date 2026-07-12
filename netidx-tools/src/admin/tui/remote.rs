@@ -760,6 +760,12 @@ fn queue_row(item: &netidx_admin::admin_ops::queue::QueueItem) -> PanelRow {
         None => (format!("{:?}  (unparseable CSR — deny only)", item.kind), RowKey::None),
     };
     let mut row = PanelRow::plain(format!("{name}  {tail}"), key);
+    if let Some(serial) = item.replaces_serial {
+        row.detail.push((
+            "Restores".to_string(),
+            format!("certificate serial {serial} (will be revoked)"),
+        ));
+    }
     if let Some(listen) = item.enroll_listen {
         let cluster = match &item.cluster {
             Some(netidx_admin::admin_proto::ClusterPlacement::Create { .. }) => format!(
@@ -780,12 +786,18 @@ fn queue_row(item: &netidx_admin::admin_ops::queue::QueueItem) -> PanelRow {
             .map(|m| format!("{} {:?}", m.addr, m.auth))
             .collect::<Vec<_>>()
             .join(", ");
-        row.detail = vec![
+        row.detail.extend([
             ("Listen".to_string(), listen.to_string()),
             ("Roles".to_string(), format!("{:?}", item.requested_roles)),
             ("Cluster".to_string(), cluster),
             ("Resolver members".to_string(), members),
-        ];
+        ]);
+        if let Some(old) = item.replaces {
+            row.detail.push((
+                "Replaces".to_string(),
+                format!("{old} (old certificates will be revoked)"),
+            ));
+        }
     }
     row
 }

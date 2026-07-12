@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +24,7 @@ use std::{
 /// services a *admin server* offers (ca / resolver / id-map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallRole {
+    Controller,
     Workstation,
     Resolver,
     Publisher,
@@ -32,6 +33,7 @@ pub enum InstallRole {
 impl InstallRole {
     pub fn as_str(self) -> &'static str {
         match self {
+            InstallRole::Controller => "controller",
             InstallRole::Workstation => "workstation",
             InstallRole::Resolver => "resolver",
             InstallRole::Publisher => "publisher",
@@ -87,6 +89,11 @@ pub struct InstallRecord {
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
     pub admin_server: Option<SocketAddr>,
+    /// Files and directories produced by the role template. Backup uses this
+    /// inventory to refuse a falsely "complete" portable bundle when an
+    /// operator deliberately installed managed state outside the config root.
+    #[serde(default)]
+    pub managed_paths: Vec<PathBuf>,
     /// Unix seconds the record was written.
     pub created_unix: u64,
 }
@@ -110,8 +117,15 @@ impl InstallRecord {
             auth: auth.into(),
             network,
             admin_server,
+            managed_paths: Vec::new(),
             created_unix,
         }
+    }
+
+    pub fn set_managed_paths(&mut self, paths: Vec<PathBuf>) {
+        self.managed_paths = paths;
+        self.managed_paths.sort();
+        self.managed_paths.dedup();
     }
 
     /// Read a record from `path`.
@@ -181,5 +195,16 @@ mod tests {
         let back = InstallRecord::load(&path).unwrap();
         assert!(back.network.is_none());
         assert!(back.admin_server.is_none());
+    }
+
+    #[test]
+    fn controller_role_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("install.json");
+        let rec =
+            InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
+        rec.save(&path).unwrap();
+        assert_eq!(InstallRecord::load(&path).unwrap().role, InstallRole::Controller);
+        assert_eq!(InstallRole::Controller.as_str(), "controller");
     }
 }

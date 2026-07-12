@@ -127,7 +127,7 @@ impl AdminServerConfig {
     /// sealed to the dead machine; the recovery operation validates every
     /// identity field against the restored CA and authoritative map before it
     /// replaces them.
-    pub(crate) fn load_for_recovery(path: &Path) -> Result<Self> {
+    pub fn load_for_recovery(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading admin-server config {}", path.display()))?;
         serde_json::from_slice(&bytes)

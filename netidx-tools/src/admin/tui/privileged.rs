@@ -33,24 +33,27 @@ use std::{
 /// root.
 pub(super) fn install_service(
     terminal: &mut ratatui::DefaultTerminal,
-    scope: ServiceScope,
+    request: &super::action::ServiceInstall,
 ) -> Result<String> {
-    match scope {
+    match request.scope {
         ServiceScope::User => {
-            let params = user_params()?;
+            let params = user_params(&request.name)?;
             let installed = service::install(&params)?;
             Ok(format!("registered the user service ({})", installed.service_id))
         }
         ServiceScope::System => {
-            let for_user = super::super::service::resolve_for_user(None)?;
+            let for_user = match &request.for_user {
+                Some(for_user) => for_user.clone(),
+                None => super::super::service::resolve_for_user(None)?,
+            };
             let exe = current_exe()?;
             let activation_dir = activation_dir()?;
-            let args = install_argv(&for_user, &exe, &activation_dir);
+            let args = install_argv(&for_user, &request.name, &exe, &activation_dir);
             let params = ServiceParams {
                 scope: ServiceScope::System,
                 for_user: Some(for_user),
                 binary: exe.clone(),
-                service_name: ServiceParams::DEFAULT_NAME.to_string(),
+                service_name: request.name.clone(),
                 activation_dir: Some(activation_dir),
             };
             let ran =
@@ -60,7 +63,7 @@ pub(super) fn install_service(
             // when the child already installed the unit. The unit's real state is
             // authoritative, and querying it needs no privilege — so consult it
             // before believing a reported failure.
-            system_install_outcome(ran, service::status(&params))
+            system_install_outcome(&request.name, ran, service::status(&params))
         }
     }
 }
@@ -70,12 +73,14 @@ pub(super) fn install_service(
 /// installed-but-inactive unit is the normal residue of `enable --now`
 /// failing, not evidence that installation completed.
 fn system_install_outcome(
+    service_name: &str,
     ran: Result<()>,
     status: Result<ServiceStatus>,
 ) -> Result<String> {
-    const SUCCESS: &str = "registered the system service (netidx)";
     match status {
-        Ok(ServiceStatus::Active) => Ok(SUCCESS.to_string()),
+        Ok(ServiceStatus::Active) => {
+            Ok(format!("registered the system service ({service_name})"))
+        }
         Ok(ServiceStatus::Inactive) => {
             let state = anyhow::anyhow!(
                 "the system service unit is installed but inactive; installation is incomplete"
@@ -168,12 +173,12 @@ fn scope_flag(scope: ServiceScope) -> &'static str {
     }
 }
 
-fn user_params() -> Result<ServiceParams> {
+fn user_params(service_name: &str) -> Result<ServiceParams> {
     Ok(ServiceParams {
         scope: ServiceScope::User,
         for_user: Some(super::super::service::resolve_for_user(None)?),
         binary: current_exe()?,
-        service_name: ServiceParams::DEFAULT_NAME.to_string(),
+        service_name: service_name.to_string(),
         activation_dir: Some(activation_dir()?),
     })
 }
@@ -182,7 +187,12 @@ fn activation_dir() -> Result<std::path::PathBuf> {
     default_units_dir().context("no default activation unit directory was found")
 }
 
-fn install_argv(for_user: &str, exe: &Path, activation_dir: &Path) -> Vec<String> {
+fn install_argv(
+    for_user: &str,
+    service_name: &str,
+    exe: &Path,
+    activation_dir: &Path,
+) -> Vec<String> {
     vec![
         "admin".to_string(),
         "component".to_string(),
@@ -193,7 +203,7 @@ fn install_argv(for_user: &str, exe: &Path, activation_dir: &Path) -> Vec<String
         "--for-user".to_string(),
         for_user.to_string(),
         "--service-name".to_string(),
-        ServiceParams::DEFAULT_NAME.to_string(),
+        service_name.to_string(),
         "--netidx-binary".to_string(),
         exe.display().to_string(),
         "--activation-dir".to_string(),
@@ -376,6 +386,7 @@ mod tests {
     fn privileged_service_install_pins_the_activation_directory() {
         let args = install_argv(
             "root",
+            "netidx",
             Path::new("/usr/local/bin/netidx"),
             Path::new("/root/.config/netidx/activation"),
         );
@@ -384,13 +395,17 @@ mod tests {
                 a == ["--activation-dir", "/root/.config/netidx/activation"]
             })
         );
+        assert!(args.windows(2).any(|a| a == ["--service-name", "netidx"]));
     }
 
     #[test]
     fn active_state_is_the_only_success_and_overrides_child_failure() {
-        assert!(system_install_outcome(Ok(()), Ok(ServiceStatus::Active)).is_ok());
+        assert!(
+            system_install_outcome("netidx", Ok(()), Ok(ServiceStatus::Active)).is_ok()
+        );
         assert!(
             system_install_outcome(
+                "netidx",
                 Err(anyhow!("lost terminal")),
                 Ok(ServiceStatus::Active)
             )
@@ -398,20 +413,22 @@ mod tests {
         );
 
         for state in [ServiceStatus::Inactive, ServiceStatus::NotInstalled] {
-            assert!(system_install_outcome(Ok(()), Ok(state)).is_err());
-            let err = system_install_outcome(Err(anyhow!("child failed")), Ok(state))
-                .unwrap_err();
+            assert!(system_install_outcome("netidx", Ok(()), Ok(state)).is_err());
+            let err =
+                system_install_outcome("netidx", Err(anyhow!("child failed")), Ok(state))
+                    .unwrap_err();
             assert!(format!("{err:#}").contains("child failed"));
         }
     }
 
     #[test]
     fn unverifiable_status_is_failure_regardless_of_child_result() {
-        let err =
-            system_install_outcome(Ok(()), Err(anyhow!("status failed"))).unwrap_err();
+        let err = system_install_outcome("netidx", Ok(()), Err(anyhow!("status failed")))
+            .unwrap_err();
         assert!(format!("{err:#}").contains("status failed"));
 
         let err = system_install_outcome(
+            "netidx",
             Err(anyhow!("child failed")),
             Err(anyhow!("status failed")),
         )

@@ -29,7 +29,15 @@ struct RoleChoice {
     blurb: &'static str,
 }
 
-const ROLES: [RoleChoice; 3] = [
+#[cfg(unix)]
+const ROLES: [RoleChoice; 4] = [
+    RoleChoice {
+        role: InstallRole::Controller,
+        title: "Controller / CA",
+        blurb: "Install the administrative network's one active controller and \
+                certificate authority on this machine. It may be dedicated to this role; \
+                resolver servers are installed separately and enroll with it.",
+    },
     RoleChoice {
         role: InstallRole::Workstation,
         title: "Workstation",
@@ -45,6 +53,32 @@ const ROLES: [RoleChoice; 3] = [
                 publishers for a whole network or a delegated subtree. Can mint a new \
                 network's certificate authority and admin server, or enroll under an \
                 existing one.",
+    },
+    RoleChoice {
+        role: InstallRole::Publisher,
+        title: "Publisher",
+        blurb: "A client configuration for a host that publishes data: point it at a \
+                network's resolvers with the right auth. Installs a certificate-renewal \
+                service when the network uses TLS.",
+    },
+];
+
+#[cfg(not(unix))]
+const ROLES: [RoleChoice; 3] = [
+    RoleChoice {
+        role: InstallRole::Workstation,
+        title: "Workstation",
+        blurb: "Turn this machine into a full netidx node: a local resolver serving a \
+                /local namespace plus a matching client. Join an existing network to \
+                enroll a TLS identity, or run standalone. The usual choice for a laptop \
+                or desktop.",
+    },
+    RoleChoice {
+        role: InstallRole::Resolver,
+        title: "Resolver",
+        blurb: "A network-facing resolver server — the directory that maps paths to \
+                publishers for a whole network or a delegated subtree. Enrolls under an \
+                existing controller.",
     },
     RoleChoice {
         role: InstallRole::Publisher,
@@ -160,7 +194,7 @@ pub(super) enum SyncState {
 fn probe_service(record: &InstallRecord) -> ServiceStatus {
     let (scope, for_user) = match record.role {
         InstallRole::Workstation => (ServiceScope::User, None),
-        InstallRole::Resolver | InstallRole::Publisher => {
+        InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher => {
             (ServiceScope::System, super::super::service::resolve_for_user(None).ok())
         }
     };
@@ -334,6 +368,7 @@ impl LocalState {
         let mut out = Vec::new();
         for i in 0..self.installs.len() {
             if self.installs[i].record.network.is_some()
+                && self.installs[i].record.role != InstallRole::Controller
                 && matches!(self.sync[i], SyncState::Unchecked)
             {
                 self.sync[i] = SyncState::Checking;
@@ -403,6 +438,7 @@ impl LocalState {
                     let role = ROLES[self.role_menu.selected().unwrap_or(0)].role;
                     return Some(Action::Install { role, dry_run: true });
                 }
+                Char('r') => return Some(Action::Restore),
                 _ => {}
             }
             return None;
@@ -446,7 +482,8 @@ impl LocalState {
             // networked install; the status overlay surfaces it when out of sync.
             Char('U') => {
                 let d = &self.installs[self.selected];
-                if d.record.network.is_some() {
+                if d.record.network.is_some() && d.record.role != InstallRole::Controller
+                {
                     return Some(Action::Update { role: d.record.role });
                 }
             }
@@ -498,7 +535,7 @@ impl LocalState {
                 theme::panel_block()
                     .title(Span::styled(" Install a Role ", theme::title_style()))
                     .title_bottom(Line::from(Span::styled(
-                        " ↑/↓ select · Enter install · p preview ",
+                        " ↑/↓ select · Enter install · p preview · r restore ",
                         theme::hint_style(),
                     ))),
             )
@@ -609,9 +646,11 @@ fn action_desc(action: &Action) -> &'static str {
              one — it retires the old password. Works only locally, on the CA machine."
         }
         Backup { .. } => {
-            "Create a point-in-time-consistent controller recovery bundle while the CA \
-             remains online. Existing target directories are never overwritten."
+            "Back up this complete managed installation. Controller state is captured \
+             consistently while the CA remains online; machine credentials are re-enrolled on restore."
         }
+        Restore => "Restore a complete installation from a verified backup bundle.",
+        FinishRestore { .. } => "Finish re-enrolling roles after controller startup.",
         ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
         ExternalInstall { .. } => {
             "Install the externally-signed CA certificate returned by your PKI."
@@ -693,7 +732,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let role = d.record.role;
     let networked = d.record.network.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
-    if networked {
+    if networked && role != InstallRole::Controller {
         items.push(("Update Resolvers".to_string(), Action::Update { role }));
     }
     if role == InstallRole::Workstation && !networked {
@@ -727,10 +766,6 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // The admin roster and this host's own permissions over the local control
         // socket, when an admin server is configured on this box.
         if let Some(cfg_path) = &lca.cfg {
-            items.push((
-                "Back Up Controller".to_string(),
-                Action::Backup { cfg_path: cfg_path.clone() },
-            ));
             items.push((
                 "Admins".to_string(),
                 Action::ManageLocalAdmins {
@@ -790,6 +825,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
             ));
         }
     }
+    items.push((
+        "Back Up This Install".to_string(),
+        Action::Backup { config_root: d.config_dir.clone(), scope: d.scope },
+    ));
     // One Uninstall item; when this host owns a CA, the confirm flow asks whether
     // to also destroy it (see the chained confirm in the App loop).
     items.push(("Uninstall".to_string(), uninstall_action(d, false)));
@@ -803,7 +842,10 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
     // A resolver/publisher registers a system-scope service even with user-scope
     // config, so removing it needs root.
     let needs_root = d.scope == ServiceScope::System
-        || matches!(d.record.role, InstallRole::Resolver | InstallRole::Publisher);
+        || matches!(
+            d.record.role,
+            InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher
+        );
     Action::Uninstall {
         config_scope: d.scope,
         config_dir: d.config_dir.clone(),
@@ -819,7 +861,8 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
 fn render_welcome(f: &mut Frame, screen: Rect) {
     let heading = "netidx isn't installed on this machine.";
     let body = "Choose an install option — a Workstation for a laptop or desktop, a \
-                Resolver to run a network's directory, or a Publisher.";
+                Resolver to run a network's directory, or a Publisher. Press r to \
+                restore any role from a backup bundle.";
     let prompt = " Press Enter to continue ";
     let w = 64.min(screen.width.saturating_sub(4)).max(24);
     let lines = vec![
@@ -980,6 +1023,7 @@ fn service_line(status: ServiceStatus) -> Line<'static> {
 
 fn role_title(role: InstallRole) -> &'static str {
     match role {
+        InstallRole::Controller => "Controller / CA",
         InstallRole::Workstation => "Workstation",
         InstallRole::Resolver => "Resolver",
         InstallRole::Publisher => "Publisher",
@@ -1009,10 +1053,20 @@ mod tests {
 
     #[test]
     fn backup_action_is_explained_as_live_and_non_overwriting() {
-        let action =
-            Action::Backup { cfg_path: PathBuf::from("/etc/netidx/admin-server.json") };
+        let action = Action::Backup {
+            config_root: PathBuf::from("/etc/netidx"),
+            scope: ServiceScope::System,
+        };
         let desc = action_desc(&action);
         assert!(desc.contains("remains online"));
-        assert!(desc.contains("never overwritten"));
+        assert!(desc.contains("complete managed installation"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_machine_offers_a_dedicated_controller_role() {
+        assert_eq!(ROLES[0].role, InstallRole::Controller);
+        assert!(ROLES[0].title.contains("Controller"));
+        assert!(ROLES[0].blurb.contains("resolver servers are installed separately"));
     }
 }

@@ -284,30 +284,23 @@ pub async fn run_resolver(
             .text(Field::NetworkDomain, None, Some(&domain_default), false)
             .await?
             .unwrap_or(domain_default);
-        ca_setup::announce_founding_policy(ans, &domain);
-        // The founding CA + this host's admin server + the superuser admin. The
+        // The founding controller/CA + this host's admin server + the superuser admin. The
         // returned `ServiceNeed` is intentionally dropped: this install ends with
         // one system-service offer, and the admin-server unit lands in the shared
         // units dir. `Some(true)` — a new cluster always stands up its admin
         // server (the `--no-admin-server` escape is handled by the gate above).
-        let (ca, _need) = ca_setup::create_vaulted_ca(
+        let (_ca, _need, identity) = super::controller::create_self_signed_controller(
             ans,
-            ca_setup::founding_ca_opts(
-                paths::user_ca_dir()?,
-                domain.clone(),
-                input.insecure_no_tpm,
-                Some(true),
-                machine_ip,
-                units_dir.clone(),
-            ),
+            domain.clone(),
+            None,
+            machine_ip,
+            units_dir.clone(),
+            input.insecure_no_tpm,
         )
         .await?;
         // Record the cluster this host just founded, so it reads back like a
         // joined cluster everywhere downstream (status glyph, saved-cluster list).
-        founding_identity = Some(NetworkIdentity::new(
-            domain.clone(),
-            &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?,
-        ));
+        founding_identity = Some(identity);
         ans.announce(
             "Resolver server",
             "Admin cluster setup complete, now installing the resolver server.",
@@ -1230,6 +1223,8 @@ async fn post_apply_admin_server(
                 units_dir,
                 resolver_config,
                 id_map,
+                None,
+                None,
             )
             .await
         }
@@ -1291,7 +1286,7 @@ fn merge_resolver_roles(
 /// works; it just isn't advertised to discovery from this host.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-async fn enroll_admin_server(
+pub async fn enroll_admin_server(
     ans: &mut dyn Answerer,
     net: &DiscoveredNetwork,
     kind: AuthKind,
@@ -1302,6 +1297,8 @@ async fn enroll_admin_server(
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
+    listen_override: Option<SocketAddr>,
+    replaces: Option<crate::admin_proto::AdminServerId>,
 ) -> Result<bool> {
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
@@ -1332,7 +1329,7 @@ async fn enroll_admin_server(
             }
         }
     }
-    let ip_default = resolver_listen.ip().to_string();
+    let ip_default = listen_override.unwrap_or(resolver_listen).ip().to_string();
     let ip: IpAddr = ans
         .text(Field::AdminServerListenIp, None, Some(&ip_default), false)
         .await?
@@ -1343,7 +1340,10 @@ async fn enroll_admin_server(
         .transpose()
         .context("invalid admin server listen IP")?
         .unwrap_or_else(|| resolver_listen.ip());
-    let port_default = crate::admin_proto::DEFAULT_PORT.to_string();
+    let port_default = listen_override
+        .map(|listen| listen.port())
+        .unwrap_or(crate::admin_proto::DEFAULT_PORT)
+        .to_string();
     let port: u16 = ans
         .text(Field::AdminServerListenPort, None, Some(&port_default), false)
         .await?
@@ -1383,6 +1383,7 @@ async fn enroll_admin_server(
         resolver_member: Some(resolver_member.clone()),
         resolver_members: resolver_members.clone(),
         cluster: cluster.clone(),
+        replaces,
     };
     let cluster_description = match &cluster {
         crate::admin_proto::ClusterPlacement::Create { base } => {
@@ -1420,6 +1421,7 @@ async fn enroll_admin_server(
             resolver_member,
             resolver_members,
             cluster,
+            replaces,
             &net.identity,
         )
         .await?

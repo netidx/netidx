@@ -70,6 +70,9 @@ pub struct QueuedReq {
     /// `Some` ⇒ a admin-server enrollment.
     #[serde(default)]
     pub enrollment: Option<EnrollmentRequest>,
+    /// Exact live certificate this approved restore request replaces.
+    #[serde(default)]
+    pub replaces_serial: Option<u64>,
 }
 
 impl QueuedReq {
@@ -93,6 +96,7 @@ impl QueuedReq {
             peer,
             renewal_of,
             enrollment,
+            replaces_serial: None,
         }
     }
 

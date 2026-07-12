@@ -10,6 +10,7 @@
 //! keytab) stay hard `bail!`s.
 
 use crate::{
+    admin_ops::slots::ExternalPending,
     admin_proto::{NodeKind, Secret},
     admin_server::AUTORENEW_ADMIN,
     answer::{Answerer, Field},
@@ -411,6 +412,96 @@ pub async fn create_vaulted_ca(
         ServiceNeed::NONE
     };
     Ok((ca, need))
+}
+
+/// Phase one of a controller CA whose certificate is signed by an external
+/// PKI. The controller key is generated and vaulted locally, a subordinate-CA
+/// CSR is emitted, and the served-controller credentials are prepared, but no
+/// daemon is started until [`crate::admin_ops::slots::external_install_cert`]
+/// installs the returned certificate.
+pub async fn create_vaulted_external_ca(
+    ans: &mut dyn Answerer,
+    opts: NewCaOpts,
+) -> Result<PathBuf> {
+    let common_name =
+        resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref()).await?;
+    let domain = match &opts.domain {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => common_name
+            .split_once('.')
+            .map(|(_, d)| d.to_string())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| common_name.clone()),
+    };
+    let set_up_server =
+        ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
+    let insecure_no_tpm = if set_up_server {
+        tpm_gate(ans, opts.insecure_no_tpm).await?
+    } else {
+        opts.insecure_no_tpm
+    };
+    let san = offline_ca::parse_sans(&opts.san, &common_name)?;
+    let stage = StagedCaDir::new(opts.dir.clone())?;
+    let stage_dir = stage.path().to_path_buf();
+    let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
+        directory: stage_dir.clone(),
+        subject: Subject {
+            common_name: common_name.clone(),
+            country: opts.country.clone(),
+            state: opts.state.clone(),
+            locality: opts.locality.clone(),
+            organization: opts.organization.clone(),
+        },
+        san,
+        key_bits: opts.key_bits,
+        validity: opts.ca_validity,
+    })?;
+    let (recovery_pw, cadir) = seal_ca_recovery(
+        &stage_dir,
+        &key_pem,
+        CaLifetimes {
+            leaf_validity: opts.leaf_validity,
+            ca_renew_threshold: opts.ca_renew_threshold,
+            externally_signed: true,
+        },
+    )?;
+    ExternalPending {
+        cn: common_name.clone(),
+        domain,
+        country: opts.country.clone(),
+        state: opts.state.clone(),
+        locality: opts.locality.clone(),
+        organization: opts.organization.clone(),
+        san: opts.san.clone(),
+        setup_server: set_up_server,
+        listen: opts.listen,
+        units_dir: opts.units_dir.clone(),
+    }
+    .store(&stage_dir)?;
+    show_recovery_password(ans, &recovery_pw).await?;
+    drop(cadir);
+    stage.commit()?;
+    let cadir = ca_store::CaDir::open(&opts.dir)
+        .context("opening the newly committed external CA directory")?;
+    let csr_path = offline_ca::default_csr_filename(&common_name);
+    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
+        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
+    if set_up_server {
+        let keytab = setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
+        ans.note(&format_compact!(
+            "provisioned the automatic-renewal (leaf) approval slot:\n  \
+             slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server after the \
+             external certificate is installed)\n  keytab: {} (0600 — do NOT back this file up)",
+            keytab.display()
+        ));
+        setup_superuser(ans, &cadir, &opts, &common_name).await?;
+    }
+    ans.note(&format_compact!(
+        "wrote {} — have the external PKI sign it as a subordinate CA, then run \
+         `netidx admin ca external install <signed-cert.pem> [--root <root.pem>]`",
+        csr_path.display()
+    ));
+    Ok(csr_path)
 }
 
 /// Build the [`NewCaOpts`] for the founding CA a resolver install stands

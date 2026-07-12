@@ -14,6 +14,7 @@
 use crate::admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupRequest,
     BackupResponse, ClientHello, EditPermsRequest, EditPermsResponse, EnrollRequest,
+    ExternalCaCsrResponse, ExternalCaInstallRequest, ExternalCaInstallResponse,
     ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult, ReadPermsRequest,
     ReadPermsResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
     RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
@@ -68,6 +69,44 @@ async fn connect(cfg_path: &Path) -> Result<UnixStream> {
 pub async fn daemon_running(cfg_path: &Path) -> bool {
     let path = crate::admin_server::local_socket_path(cfg_path);
     UnixStream::connect(&path).await.is_ok()
+}
+
+/// Emit a renewal CSR for this running externally-signed controller CA. The
+/// controller unlocks its in-memory vault credential; no recovery password or
+/// intentional outage is required.
+pub async fn external_ca_csr(cfg_path: &Path) -> Result<(String, String)> {
+    let mut s = connect(cfg_path).await?;
+    admin_proto::write_msg(&mut s, &Request::ExternalCaCsr).await?;
+    match admin_proto::read_msg::<_, ExternalCaCsrResponse>(&mut s).await? {
+        ExternalCaCsrResponse::Ok { common_name, csr_pem } => Ok((common_name, csr_pem)),
+        ExternalCaCsrResponse::Err { reason } => {
+            bail!("the controller refused to emit an external-CA CSR: {reason}")
+        }
+    }
+}
+
+/// Install a hardware/external-PKI-signed renewal while the controller keeps
+/// serving. Only the protected local socket exposes this operation.
+pub async fn external_ca_install(
+    cfg_path: &Path,
+    signed_cert_pem: String,
+    root_pem: Option<String>,
+) -> Result<String> {
+    let mut s = connect(cfg_path).await?;
+    admin_proto::write_msg(
+        &mut s,
+        &Request::ExternalCaInstall(ExternalCaInstallRequest {
+            signed_cert_pem,
+            root_pem,
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ExternalCaInstallResponse>(&mut s).await? {
+        ExternalCaInstallResponse::Ok { ca_fingerprint } => Ok(ca_fingerprint),
+        ExternalCaInstallResponse::Err { reason } => {
+            bail!("the controller refused the external-CA certificate: {reason}")
+        }
+    }
 }
 
 /// Ask the running controller to publish a point-in-time-consistent recovery
@@ -141,6 +180,7 @@ pub async fn enroll(
                 base: "/".to_string(),
             },
             renew_identity: Some(cfg.server_id),
+            replaces: None,
         }),
     )
     .await

@@ -3,7 +3,10 @@
 # strip, and deploy the stripped binary to each target VM. No args => devbox only.
 set -euo pipefail
 DEV=192.168.50.14
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=15"
+# The lab does not depend on host-wide SSH client configuration. In particular,
+# a libvirt/systemd-generated ssh_config drop-in may have ownership OpenSSH
+# refuses after a host restore, which should not prevent deploying to guests.
+SSH="ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15"
 
 echo "[1/4] sync repo -> devbox ($DEV)"
 rsync -az --delete --exclude '/target/' --exclude '/.git/' \

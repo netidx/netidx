@@ -581,27 +581,37 @@ pub async fn external_emit_csr(
     ans: &mut dyn Answerer,
     ca_dir: PathBuf,
 ) -> Result<PathBuf> {
-    let m = ExternalPending::load(&ca_dir)?;
+    let (key, _cadir) = external_ca_key(ans, &ca_dir).await?;
+    let (common_name, csr) = external_csr_with_key(&ca_dir, &key)?;
+    let csr_path = offline_ca::default_csr_filename(&common_name);
+    atomic::write_atomic(&csr_path, &csr, 0o644)
+        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
+    Ok(csr_path)
+}
+
+/// Build an external-CA renewal CSR using a key the running controller has
+/// already unlocked. This is the live/local-control counterpart of
+/// [`external_emit_csr`]; it performs no flock or vault access itself.
+pub fn external_csr_with_key(ca_dir: &Path, key_pem: &[u8]) -> Result<(String, Vec<u8>)> {
+    let m = ExternalPending::load(ca_dir)?;
+    anyhow::ensure!(
+        CaLifetimes::load(ca_dir)?.externally_signed,
+        "this controller CA is not externally signed"
+    );
     let san = if m.san.is_empty() {
         vec![SanEntry::Dns(m.cn.clone())]
     } else {
         offline_ca::parse_sans(&m.san, &m.cn)?
     };
-    // Rebuild the full subject so a renewal CSR carries the same DN as the
-    // original CA cert.
     let subject = Subject {
         common_name: m.cn.clone(),
-        country: m.country.clone(),
-        state: m.state.clone(),
-        locality: m.locality.clone(),
-        organization: m.organization.clone(),
+        country: m.country,
+        state: m.state,
+        locality: m.locality,
+        organization: m.organization,
     };
-    let (key, _cadir) = external_ca_key(ans, &ca_dir).await?;
-    let csr = ca::ca_csr_from_key(&key, &subject, &san)?;
-    let csr_path = offline_ca::default_csr_filename(&m.cn);
-    atomic::write_atomic(&csr_path, &csr, 0o644)
-        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
-    Ok(csr_path)
+    let csr = ca::ca_csr_from_key(key_pem, &subject, &san)?;
+    Ok((m.cn, csr))
 }
 
 /// The outcome of [`external_install_cert`], for the CLI to narrate + offer.
@@ -672,6 +682,19 @@ pub async fn external_install_cert(
         .await?;
         let cfg_path =
             server_setup::set_ca_autorenew(&offline_ca::autorenew_keytab_path()?)?;
+        let cfg = crate::admin_server_config::AdminServerConfig::load(&cfg_path)?;
+        crate::provenance::InstallRecord::new(
+            crate::provenance::InstallRole::Controller,
+            "/",
+            "admin-tls",
+            Some(crate::provenance::NetworkIdentity::new(
+                m.domain.clone(),
+                &crate::fingerprint::Fingerprint::of_cert_pem(&intermediate_pem)?,
+            )),
+            Some(cfg.listen),
+        )
+        .save_default()
+        .context("recording the controller install")?;
         return Ok(ExternalInstallOutcome::FirstInstall { need, cfg_path });
     }
     // Already configured: this is a renewal. Keep autorenew wired (idempotent).
@@ -1074,7 +1097,6 @@ mod tests {
         .unwrap();
         let mut cfg = AdminServerConfig::load(&fixture.config).unwrap();
         cfg.mdns = false;
-        cfg.save(&fixture.config).unwrap();
         let config = fixture.config.clone();
         let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
         for _ in 0..500 {
@@ -1098,6 +1120,167 @@ mod tests {
         assert_eq!(outcome.controller, fixture.server_id);
         assert_eq!(outcome.target, target);
         assert!(crate::backup::verify(&target).is_ok());
+        daemon.abort();
+    }
+
+    fn test_ca_cert(
+        subject_cn: &str,
+        issuer: Option<&openssl::x509::X509>,
+        public_key: &openssl::pkey::PKey<openssl::pkey::Private>,
+        signer: &openssl::pkey::PKey<openssl::pkey::Private>,
+        serial: u32,
+    ) -> openssl::x509::X509 {
+        use openssl::{
+            asn1::Asn1Time,
+            bn::BigNum,
+            hash::MessageDigest,
+            x509::{
+                X509Builder, X509NameBuilder,
+                extension::{BasicConstraints, KeyUsage},
+            },
+        };
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", subject_cn).unwrap();
+        let name = name.build();
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_serial_number(
+            &BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap(),
+        )
+        .unwrap();
+        b.set_subject_name(&name).unwrap();
+        b.set_issuer_name(issuer.map(|c| c.subject_name()).unwrap_or(&name)).unwrap();
+        b.set_pubkey(public_key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(365).unwrap()).unwrap();
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        b.append_extension(
+            KeyUsage::new().critical().key_cert_sign().crl_sign().build().unwrap(),
+        )
+        .unwrap();
+        b.sign(signer, MessageDigest::sha256()).unwrap();
+        b.build()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_external_controller_renews_through_local_rpc_only() {
+        use openssl::{pkey::PKey, rsa::Rsa};
+        let fixture = recoverable_controller();
+        recover_controller_with_password(
+            fixture.ca_dir.path(),
+            &fixture.config,
+            Some("127.0.0.1:0".parse().unwrap()),
+            &fixture.recovery,
+            true,
+            &fixture.keytab,
+        )
+        .unwrap();
+        let mut cfg = AdminServerConfig::load(&fixture.config).unwrap();
+        cfg.mdns = false;
+        cfg.save(&fixture.config).unwrap();
+        let unlocked = CAVault::new(fixture.ca_dir.path().to_path_buf())
+            .unlock(&fixture.recovery)
+            .unwrap();
+        let ca_key = PKey::private_key_from_pem(&unlocked.ca_key_pem).unwrap();
+        let root_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let root = test_ca_cert("hardware-root", None, &root_key, &root_key, 100);
+        let intermediate =
+            test_ca_cert("netidx-controller", Some(&root), &ca_key, &root_key, 101);
+        let root_pem = root.to_pem().unwrap();
+        let intermediate_pem = intermediate.to_pem().unwrap();
+        atomic::write_atomic(
+            &fixture.ca_dir.path().join("certificate.pem"),
+            &intermediate_pem,
+            0o644,
+        )
+        .unwrap();
+        let mut trusted = root_pem.clone();
+        trusted.extend_from_slice(&intermediate_pem);
+        cfg.trusted = fixture.ca_dir.path().join("trusted.pem");
+        atomic::write_atomic(&cfg.trusted, &trusted, 0o644).unwrap();
+        cfg.save(&fixture.config).unwrap();
+        let serving = std::fs::read_to_string(&cfg.serving_cert).unwrap();
+        let marker = "-----END CERTIFICATE-----";
+        let end = serving.find(marker).unwrap() + marker.len();
+        let chain = format!(
+            "{}\n{}",
+            &serving[..end],
+            String::from_utf8_lossy(&intermediate_pem)
+        );
+        atomic::write_atomic(&cfg.serving_cert, chain.as_bytes(), 0o644).unwrap();
+        CaLifetimes { externally_signed: true, ..CaLifetimes::default() }
+            .store(fixture.ca_dir.path())
+            .unwrap();
+        ExternalPending {
+            cn: "netidx-controller".into(),
+            domain: "example.com".into(),
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec!["dns:netidx-controller".into()],
+            setup_server: true,
+            listen: Some(cfg.listen),
+            units_dir: None,
+        }
+        .store(fixture.ca_dir.path())
+        .unwrap();
+        let config = fixture.config.clone();
+        let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
+        for _ in 0..500 {
+            if crate::admin_local::daemon_running(&config).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(crate::admin_local::daemon_running(&config).await);
+        let (_, csr) = crate::admin_local::external_ca_csr(&config).await.unwrap();
+        let csr = openssl::x509::X509Req::from_pem(csr.as_bytes()).unwrap();
+        assert_eq!(
+            csr.public_key().unwrap().public_key_to_der().unwrap(),
+            ca_key.public_key_to_der().unwrap()
+        );
+        let renewed =
+            test_ca_cert("netidx-controller", Some(&root), &ca_key, &root_key, 102);
+        let before_fp = Fingerprint::of_cert_pem(&intermediate_pem).unwrap();
+        let returned = crate::admin_local::external_ca_install(
+            &config,
+            String::from_utf8(renewed.to_pem().unwrap()).unwrap(),
+            Some(String::from_utf8(root_pem.clone()).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(returned, before_fp.text());
+        let live_ca_dir = cfg.roles.ca.as_ref().unwrap().dir.clone();
+        assert_eq!(
+            Fingerprint::of_cert_pem(
+                &std::fs::read(live_ca_dir.join("certificate.pem")).unwrap(),
+            )
+            .unwrap(),
+            before_fp
+        );
+        // A different hardware root cannot replace the pinned external issuer,
+        // even when it signs the existing netidx intermediate key.
+        let rogue_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let rogue_root = test_ca_cert("rogue-root", None, &rogue_key, &rogue_key, 200);
+        let rogue = test_ca_cert(
+            "netidx-controller",
+            Some(&rogue_root),
+            &ca_key,
+            &rogue_key,
+            201,
+        );
+        assert!(
+            crate::admin_local::external_ca_install(
+                &config,
+                String::from_utf8(rogue.to_pem().unwrap()).unwrap(),
+                Some(String::from_utf8(rogue_root.to_pem().unwrap()).unwrap()),
+            )
+            .await
+            .is_err()
+        );
+        assert!(!daemon.is_finished(), "the controller stayed online throughout");
         daemon.abort();
     }
 
@@ -1204,5 +1387,44 @@ mod tests {
         let s = external_status(dir.path()).unwrap();
         assert!(!s.cert_installed);
         assert_eq!(s.pending.as_ref().map(|(cn, _)| cn.as_str()), Some("ca.example.com"));
+    }
+
+    #[test]
+    fn live_external_csr_preserves_the_controller_ca_key() {
+        use openssl::{pkey::PKey, x509::X509Req};
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ca");
+        let (key, _csr) = Ca::init_vaulted_external(&crate::ca::CaParams {
+            directory: dir.clone(),
+            subject: Subject::cn("ca.example.com"),
+            san: vec![SanEntry::Dns("ca.example.com".into())],
+            key_bits: crate::ca::MIN_KEY_BITS,
+            validity: std::time::Duration::from_secs(86400),
+        })
+        .unwrap();
+        CaLifetimes { externally_signed: true, ..CaLifetimes::default() }
+            .store(&dir)
+            .unwrap();
+        ExternalPending {
+            cn: "ca.example.com".into(),
+            domain: "example.com".into(),
+            country: None,
+            state: None,
+            locality: None,
+            organization: None,
+            san: vec!["dns:ca.example.com".into()],
+            setup_server: true,
+            listen: None,
+            units_dir: None,
+        }
+        .store(&dir)
+        .unwrap();
+        let (cn, csr) = external_csr_with_key(&dir, &key).unwrap();
+        assert_eq!(cn, "ca.example.com");
+        let request = X509Req::from_pem(&csr).unwrap();
+        let csr_spki = request.public_key().unwrap().public_key_to_der().unwrap();
+        let key_spki =
+            PKey::private_key_from_pem(&key).unwrap().public_key_to_der().unwrap();
+        assert_eq!(csr_spki, key_spki);
     }
 }

@@ -96,6 +96,8 @@ pub mod discovery;
 /// everywhere — see [`design/ca-server.md`].
 pub mod fingerprint;
 pub mod id_map;
+/// Portable, role-level backup bundles and clean-target config restoration.
+pub mod install_bundle;
 /// Canonical operating-system identity names used by netidx Local auth.
 pub mod local_identity;
 pub mod netmap;

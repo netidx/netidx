@@ -22,6 +22,7 @@ mod activation;
 /// The strict-CLI `Answerer`: turns each subcommand into a non-interactive
 /// command that takes its values from flags or errors naming the flag.
 mod answer_cli;
+mod backup_restore;
 #[cfg(unix)]
 mod ca;
 mod client;
@@ -63,6 +64,10 @@ mod uninstall;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Params {
+    /// back up the currently installed netidx role
+    Backup(backup_restore::BackupArgs),
+    /// restore a netidx role from a backup bundle
+    Restore(backup_restore::RestoreArgs),
     /// authenticate once and persist a platform-sealed administrator session
     Login(answer_cli::RemoteAuthFlags),
     /// revoke and remove a cached administrator session
@@ -118,6 +123,8 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         None => return tui::run(),
     };
     match p {
+        Params::Backup(args) => backup_restore::backup(args),
+        Params::Restore(args) => backup_restore::restore(args),
         Params::Login(flags) => session::login(flags),
         Params::Logout(args) => session::logout(args),
         Params::Workstation { cmd } => roles::workstation::run(cmd),

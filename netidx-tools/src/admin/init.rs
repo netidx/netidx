@@ -237,7 +237,9 @@ fn finish_install(
 /// The clap `KeyProtArg` and the library's are structurally identical (the CLI
 /// keeps its own until the still-interactive `ca` duplicates that share it
 /// relocate in task 12); convert at the adapter boundary.
-fn lib_kp(k: Option<KeyProtArg>) -> Option<netidx_admin::plan::enroll::KeyProtArg> {
+pub(super) fn lib_kp(
+    k: Option<KeyProtArg>,
+) -> Option<netidx_admin::plan::enroll::KeyProtArg> {
     use netidx_admin::plan::enroll::KeyProtArg as L;
     k.map(|k| match k {
         KeyProtArg::Seal => L::Seal,

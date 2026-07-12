@@ -973,21 +973,27 @@ impl Modal {
                 popup(f, screen, "Confirm cluster identity", lines, 60);
             }
             Modal::Announce { title, body, .. } => {
-                let lines = vec![
-                    Line::from(Span::styled(body.clone(), theme::panel_style())),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " Press Enter to continue ",
-                        theme::selected_style(),
-                    )),
-                ];
+                let mut lines = body
+                    .lines()
+                    .map(|line| {
+                        Line::from(Span::styled(line.to_string(), theme::panel_style()))
+                    })
+                    .collect::<Vec<_>>();
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Press Enter to continue ",
+                    theme::selected_style(),
+                )));
                 popup(f, screen, title, lines, 64);
             }
             Modal::AnnounceIdentity { body, code, .. } => {
-                let mut lines = vec![
-                    Line::from(Span::styled(body.clone(), theme::panel_style())),
-                    Line::from(""),
-                ];
+                let mut lines = body
+                    .lines()
+                    .map(|line| {
+                        Line::from(Span::styled(line.to_string(), theme::panel_style()))
+                    })
+                    .collect::<Vec<_>>();
+                lines.push(Line::from(""));
                 lines.extend(widgets::identicon_lines(code));
                 lines.push(Line::from(""));
                 let fp = Style::default()

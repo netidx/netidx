@@ -226,6 +226,22 @@ pub struct RenderedTemplate {
 }
 
 impl RenderedTemplate {
+    /// Destinations this role template owns. Stored in install provenance so a
+    /// later role-level backup can prove it did not silently omit a custom
+    /// path outside the normal config root.
+    pub fn managed_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        paths.extend(self.client_config.as_ref().map(|(path, _)| path.clone()));
+        paths.extend(self.resolver_config.as_ref().map(|(path, _)| path.clone()));
+        paths.extend(self.perms_file.as_ref().map(|(path, _)| path.clone()));
+        paths.extend(self.id_map_file.as_ref().map(|(path, _)| path.clone()));
+        paths.extend(self.units_dir.iter().cloned());
+        paths.extend(self.tls_install.iter().map(|job| job.dest_dir.clone()));
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// Validate and read every fallible input that can be checked without
     /// touching an install destination. This is deliberately modest: each
     /// final file write is already atomic, and config validation that opens

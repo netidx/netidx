@@ -28,7 +28,8 @@ use crate::{
         DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, GetCrlResponse, GetInfoResponse, GetMapResponse,
+        EnrollRequest, ExternalCaCsrResponse, ExternalCaInstallRequest,
+        ExternalCaInstallResponse, GetCrlResponse, GetInfoResponse, GetMapResponse,
         GetMapVersionResponse, GetPermsResponse, InfoAuth, IssuedEntry,
         ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
         ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
@@ -867,7 +868,8 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
         | ApplyReferralEdit(_)
         | ApplyServiceControl(_) => RequestAuthorization::ControllerOnly,
         Register(_) | Deregister => RequestAuthorization::NodeSelf,
-        RotateRecovery | RotateAutorenew | Backup(_) => RequestAuthorization::LocalOnly,
+        RotateRecovery | RotateAutorenew | Backup(_) | ExternalCaCsr
+        | ExternalCaInstall(_) => RequestAuthorization::LocalOnly,
         Login(_)
         | Logout(_)
         | Sign(_)
@@ -922,6 +924,7 @@ fn request_mutates_durable_state(req: &Request) -> bool {
             | RemoveAdmin(_)
             | RotateRecovery
             | RotateAutorenew
+            | ExternalCaInstall(_)
     )
 }
 
@@ -970,7 +973,9 @@ fn password_credential(req: &Request) -> Option<&admin_proto::AdminCredential> {
         | ApplyPermsEdit(_)
         | ApplyServiceControl(_)
         | RotateRecovery
-        | RotateAutorenew => return None,
+        | RotateAutorenew
+        | ExternalCaCsr
+        | ExternalCaInstall(_) => return None,
         ReconcileController(req) => &req.credential,
     };
     matches!(credential, admin_proto::AdminCredential::Password { .. })
@@ -1189,26 +1194,40 @@ where
                                 }
                             })
                             .await?;
-                            match (signed.resp, signed.push) {
-                                (resp @ SignResponse::Err { .. }, _) => resp,
-                                (resp @ SignResponse::Ok { .. }, None) => resp,
-                                (
-                                    SignResponse::Ok {
-                                        signed_cert_pem,
-                                        trusted_pem,
-                                        mut warnings,
-                                        ..
-                                    },
-                                    Some(plan),
-                                ) => {
-                                    let (operation_id, push_warnings) =
+                            match signed.resp {
+                                resp @ SignResponse::Err { .. } => resp,
+                                SignResponse::Ok {
+                                    signed_cert_pem,
+                                    trusted_pem,
+                                    mut warnings,
+                                    ..
+                                } => {
+                                    let mut operation_id = None;
+                                    if let Some(plan) = signed.push {
+                                    let (op, push_warnings) =
                                         push_registrations(state, &plan).await;
                                     warnings.extend(push_warnings);
+                                        operation_id = Some(op);
+                                    }
+                                    if let Some(crl) = signed.replacement_crl {
+                                        let op = operation_id.unwrap_or_else(
+                                            admin_proto::OperationId::new,
+                                        );
+                                        for result in push_crl_to_peers(state, &crl, op).await {
+                                            if let Some(error) = result.error {
+                                                warnings.push(format!(
+                                                    "CRL push to {} at {}: {error}",
+                                                    result.server, result.addr
+                                                ));
+                                            }
+                                        }
+                                        operation_id = Some(op);
+                                    }
                                     SignResponse::Ok {
                                         signed_cert_pem,
                                         trusted_pem,
                                         warnings,
-                                        operation_id: Some(operation_id),
+                                        operation_id,
                                     }
                                 }
                             }
@@ -1228,6 +1247,7 @@ where
                                 resolver_member: req.resolver_member.clone(),
                                 resolver_members: req.resolver_members.clone(),
                                 cluster: req.cluster.clone(),
+                                replaces: req.replaces,
                             };
                             let resp = run_signing(&signs, {
                                 let state = state.clone();
@@ -1453,6 +1473,7 @@ where
                                     resp: SignResponse::Ok { mut warnings, .. },
                                     push,
                                     enrollment,
+                                    replacement_crl,
                                     ..
                                 }) => {
                                     // The cert is issued and committed atomically in
@@ -1460,7 +1481,7 @@ where
                                     // effects (the enrollee polls the cert back
                                     // regardless). Push-registration warnings go to
                                     // the approving admin's reply only.
-                                    let operation_id = if let Some(plan) = push {
+                                    let mut operation_id = if let Some(plan) = push {
                                         let (operation_id, push_warnings) =
                                             push_registrations(state, &plan).await;
                                         warnings.extend(push_warnings);
@@ -1468,6 +1489,20 @@ where
                                     } else {
                                         None
                                     };
+                                    if let Some(crl) = replacement_crl {
+                                        let op = operation_id.unwrap_or_else(
+                                            admin_proto::OperationId::new,
+                                        );
+                                        for result in push_crl_to_peers(state, &crl, op).await {
+                                            if let Some(error) = result.error {
+                                                warnings.push(format!(
+                                                    "CRL push to {} at {}: {error}",
+                                                    result.server, result.addr
+                                                ));
+                                            }
+                                        }
+                                        operation_id = Some(op);
+                                    }
                                     // An approved enrollment makes the new admin
                                     // server a peer — same side effect as the
                                     // synchronous Enroll, deferred to approval.
@@ -1899,9 +1934,162 @@ where
                         .await
                         .context("writing BackupResponse")
                 }
+                Request::ExternalCaCsr => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_external_ca_csr(&state, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ExternalCaCsrResponse")
+                }
+                Request::ExternalCaInstall(req) => {
+                    let state = state.clone();
+                    let resp = run_signing(&signs, move || {
+                        handle_external_ca_install(&state, &req, local)
+                    })
+                    .await?;
+                    admin_proto::write_msg(&mut tls, &resp)
+                        .await
+                        .context("writing ExternalCaInstallResponse")
+                }
             }
         })
         .await
+}
+
+fn handle_external_ca_csr(state: &Server, local: bool) -> ExternalCaCsrResponse {
+    let err = |reason: String| ExternalCaCsrResponse::Err { reason };
+    if !local {
+        return err("external-CA CSR emission is local-control-only".to_string());
+    }
+    let Some(ca) = state.ca.as_ref() else {
+        return err("this host is not the controller CA".to_string());
+    };
+    let Some(dir) = state.ca_dir() else {
+        return err("this controller has no CA directory".to_string());
+    };
+    let signing = match server_unlock(ca) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    match crate::admin_ops::slots::external_csr_with_key(dir, &signing.ca_key_pem) {
+        Ok((common_name, csr)) => match String::from_utf8(csr) {
+            Ok(csr_pem) => {
+                audit(dir, "local", "external-ca-csr", &common_name, Duration::ZERO);
+                ExternalCaCsrResponse::Ok { common_name, csr_pem }
+            }
+            Err(e) => err(format!("encoding the generated CSR: {e}")),
+        },
+        Err(e) => err(format!("generating the external-CA CSR: {e:#}")),
+    }
+}
+
+fn handle_external_ca_install(
+    state: &Server,
+    req: &ExternalCaInstallRequest,
+    local: bool,
+) -> ExternalCaInstallResponse {
+    let err = |reason: String| ExternalCaInstallResponse::Err { reason };
+    if !local {
+        return err("external-CA certificate installation is local-control-only".into());
+    }
+    let Some(ca) = state.ca.as_ref() else {
+        return err("this host is not the controller CA".into());
+    };
+    let Some(dir) = state.ca_dir() else {
+        return err("this controller has no CA directory".into());
+    };
+    match crate::ca::CaLifetimes::load(dir) {
+        Ok(l) if l.externally_signed => {}
+        Ok(_) => return err("this controller CA is not externally signed".into()),
+        Err(e) => return err(format!("reading CA lifetime policy: {e:#}")),
+    }
+    let signing = match server_unlock(ca) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+    let (intermediate, root) = match crate::ca::validate_external_ca_cert(
+        req.signed_cert_pem.as_bytes(),
+        req.root_pem.as_deref().map(str::as_bytes),
+        &signing.ca_key_pem,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err(format!("validating the signed CA certificate: {e:#}")),
+    };
+    // A live renewal may refresh the netidx intermediate and its existing
+    // issuer, but it may not smuggle in a new trust root. The ordinary renewal
+    // reconciler implements exactly that same-key/same-issuer rule.
+    let trusted_path = state.cfg.lock().trusted.clone();
+    let installed = match std::fs::read_to_string(&trusted_path) {
+        Ok(p) => p,
+        Err(e) => return err(format!("reading {}: {e:#}", trusted_path.display())),
+    };
+    let candidate = format!(
+        "{}{}",
+        String::from_utf8_lossy(&root),
+        String::from_utf8_lossy(&intermediate)
+    );
+    let reconciled = match admin_client::reconcile_trusted_bundle(&installed, &candidate)
+    {
+        Ok(p) => p,
+        Err(e) => return err(format!("reconciling the existing trust bundle: {e:#}")),
+    };
+    let new_fp = match crate::fingerprint::Fingerprint::of_cert_pem(&intermediate) {
+        Ok(fp) => fp,
+        Err(e) => return err(format!("fingerprinting the signed CA certificate: {e:#}")),
+    };
+    let new_der = match rustls_pemfile::certs(&mut std::io::Cursor::new(&intermediate))
+        .next()
+        .transpose()
+    {
+        Ok(Some(d)) => d,
+        Ok(None) => return err("the signed CA certificate is empty".into()),
+        Err(e) => return err(format!("parsing the signed CA certificate: {e}")),
+    };
+    let accepted =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(reconciled.as_bytes()))
+            .flatten()
+            .any(|d| d.as_ref() == new_der.as_ref());
+    if !accepted {
+        return err(
+            "the renewed CA certificate was not signed by the controller's already-pinned external issuer"
+                .into(),
+        );
+    }
+    let serving_path = state.cfg.lock().serving_cert.clone();
+    let serving = match std::fs::read_to_string(&serving_path) {
+        Ok(p) => p,
+        Err(e) => return err(format!("reading {}: {e:#}", serving_path.display())),
+    };
+    let marker = "-----END CERTIFICATE-----";
+    let Some(end) = serving.find(marker).map(|i| i + marker.len()) else {
+        return err(format!(
+            "{} contains no serving certificate",
+            serving_path.display()
+        ));
+    };
+    let mut refreshed_chain = serving[..end].to_string();
+    refreshed_chain.push('\n');
+    refreshed_chain.push_str(&String::from_utf8_lossy(&intermediate));
+    if let Err(e) =
+        crate::atomic::write_atomic(&dir.join("certificate.pem"), &intermediate, 0o644)
+    {
+        return err(format!("installing the renewed CA certificate: {e:#}"));
+    }
+    if let Err(e) =
+        crate::atomic::write_atomic(&trusted_path, reconciled.as_bytes(), 0o644)
+    {
+        return err(format!("installing the reconciled trust bundle: {e:#}"));
+    }
+    if let Err(e) =
+        crate::atomic::write_atomic(&serving_path, refreshed_chain.as_bytes(), 0o644)
+    {
+        return err(format!("refreshing the controller serving chain: {e:#}"));
+    }
+    audit(dir, "local", "external-ca-install", &new_fp.text(), Duration::ZERO);
+    ExternalCaInstallResponse::Ok { ca_fingerprint: new_fp.text() }
 }
 
 /// Run an Argon2-bound vault operation on `spawn_blocking`, bounded by
@@ -2392,6 +2580,9 @@ pub struct Signed {
     /// id-map registration: the issued name and the admin's chosen
     /// (policy-validated) groups.
     pub push: Option<PushPlan>,
+    /// A restore replacement revoked its old machine certificate and produced
+    /// this fresh CRL for immediate fanout.
+    pub replacement_crl: Option<String>,
 }
 
 /// What [`push_registrations`] needs after a successful sign.
@@ -2507,6 +2698,7 @@ fn handle_sign_request_op(
         Err(e) => Signed {
             resp: SignResponse::Err { reason: format!("internal error: {e:#}") },
             push: None,
+            replacement_crl: None,
         },
     }
 }
@@ -2518,7 +2710,7 @@ fn try_handle(
     record_req: &ca_store::QueuedReq,
     recheck_id: Option<&str>,
 ) -> Result<Signed> {
-    let failed = |resp: SignResponse| Signed { resp, push: None };
+    let failed = |resp: SignResponse| Signed { resp, push: None, replacement_crl: None };
     // 1. Authenticate the REQUESTING admin — no CA key (a role admin is a
     //    first-class issuer here; the server, not the admin, holds the key).
     let authd = match authenticate(ca, &req.credential) {
@@ -2594,6 +2786,7 @@ fn try_handle(
         groups,
         one_live_name(record_req.kind),
         None,
+        req.replaces_serial,
         None,
         op,
         recheck_id,
@@ -2625,6 +2818,8 @@ fn issue_locked(
     // lock, and refuse the renewal if it isn't. `None` for any
     // non-renewal issuance.
     renewal_of: Option<u64>,
+    // Restore replacement approved for this exact old serial.
+    replacement_of: Option<u64>,
     serving_identity: Option<crate::tls::AdminCertIdentity>,
     audit_op: &str,
     // For the approve path: re-check the queue entry is still Pending
@@ -2643,6 +2838,7 @@ fn issue_locked(
                         reason: "that request was already approved".to_string(),
                     },
                     push: None,
+                    replacement_crl: None,
                 });
             }
             Ok(ca_store::Status::Denied(_)) => {
@@ -2651,6 +2847,7 @@ fn issue_locked(
                         reason: "that request was already denied".to_string(),
                     },
                     push: None,
+                    replacement_crl: None,
                 });
             }
             Ok(ca_store::Status::Unknown) => {
@@ -2660,17 +2857,62 @@ fn issue_locked(
                             .to_string(),
                     },
                     push: None,
+                    replacement_crl: None,
                 });
             }
             Err(e) => return Err(e).context("re-checking the queue under the lock"),
         }
     }
+    let replacement_record = if let Some(serial) = replacement_of {
+        let records = store.list_signed().context("checking replacement serial")?;
+        match records.into_iter().find(|record| record.serial == serial) {
+            Some(record)
+                if record.name.eq_ignore_ascii_case(name)
+                    && restore_kind_matches(record.req.kind, record_req.kind)
+                    && record.live(ca_store::now_unix()) =>
+            {
+                Some(record)
+            }
+            Some(record)
+                if record.name.eq_ignore_ascii_case(name)
+                    && restore_kind_matches(record.req.kind, record_req.kind) =>
+            {
+                // An interrupted/manual recovery may already have revoked or
+                // outlived the exact old cert. Issuing is now an ordinary
+                // one-live-checked enrollment, so there is nothing left to
+                // revoke a second time.
+                None
+            }
+            Some(record) => {
+                return Ok(Signed {
+                    resp: reject(&format!(
+                        "replacement serial {serial} belongs to {:?} {:?}, not {:?} {:?}",
+                        record.req.kind, record.name, record_req.kind, name
+                    )),
+                    push: None,
+                    replacement_crl: None,
+                });
+            }
+            None => {
+                return Ok(Signed {
+                    resp: reject(&format!(
+                        "replacement serial {serial} is not a live certificate for {name:?}"
+                    )),
+                    push: None,
+                    replacement_crl: None,
+                });
+            }
+        }
+    } else {
+        None
+    };
     if one_live {
         let live = store.live_for_name(name).context("checking the issuance index")?;
-        if !live.is_empty() {
+        if live.iter().any(|record| Some(record.serial) != replacement_of) {
             return Ok(Signed {
                 resp: reject(&one_live_refusal(name, &live)),
                 push: None,
+                replacement_crl: None,
             });
         }
     }
@@ -2691,6 +2933,7 @@ fn issue_locked(
                      refused"
                 )),
                 push: None,
+                replacement_crl: None,
             });
         }
     }
@@ -2748,6 +2991,7 @@ fn issue_locked(
                 "the serving certificate being renewed has no valid protocol-v6 identity",
             ),
             push: None,
+            replacement_crl: None,
         });
     }
     let mut san = vec![SanEntry::Dns(name.to_string())];
@@ -2766,10 +3010,24 @@ fn issue_locked(
         validity,
         serial,
     )?;
+    let mut replacement_crl = None;
     if let SignResponse::Ok { ref signed_cert_pem, .. } = resp {
         store
             .commit_issuance(record_req, serial, name, signed_cert_pem, &groups)
             .context("committing the issuance")?;
+        if let Some(old) = replacement_record {
+            let revoked = store.revoke(
+                old.serial,
+                ca_store::Revocation {
+                    serial: old.serial,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: format!("replaced during restore by serial {serial}"),
+                },
+            )?;
+            anyhow::ensure!(revoked, "replacement certificate stopped being live");
+            store.write_crl(&signing.ca_key_pem)?;
+            replacement_crl = Some(std::fs::read_to_string(store.crl_path())?);
+        }
     }
     drop(store);
     audit(&dir, audit_admin, audit_op, name, validity);
@@ -2780,6 +3038,7 @@ fn issue_locked(
         } else {
             Some(PushPlan { id: record_req.id.clone(), name: name.to_string(), groups })
         },
+        replacement_crl,
     })
 }
 
@@ -2847,6 +3106,7 @@ fn try_enroll(
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
+            replaces: req.replaces,
         };
         if let Err(reason) = authorize_enrollment(&authd, &enrollment, map) {
             return Ok(reject(&reason));
@@ -2866,6 +3126,7 @@ fn try_enroll(
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
+            replaces: req.replaces,
         }),
     );
     let signing = match server_unlock(ca) {
@@ -2885,12 +3146,13 @@ fn try_enroll(
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
+            replaces: req.replaces,
         };
         let Some(map) = map else {
             return Ok(reject("the CA-owned network map is unavailable"));
         };
         let mut staged = map.clone();
-        if let Err(e) = netmap::enroll(&mut staged, identity.server_id, &enrollment) {
+        if let Err(e) = stage_enrollment(&mut staged, identity.server_id, &enrollment) {
             return Ok(reject(&format!("invalid enrollment grant: {e:#}")));
         }
     }
@@ -2903,6 +3165,7 @@ fn try_enroll(
         ca.lifetimes.leaf_validity,
         Vec::new(),
         false,
+        None,
         None,
         Some(identity),
         "enroll",
@@ -3084,6 +3347,51 @@ fn handle_enqueue(
         _ => None,
     };
     let verified_renewal = renewal_of.is_some();
+    let replacement_of = if verified_renewal {
+        None
+    } else if let Some(serial) = req.replaces_serial {
+        match store.list_signed() {
+            Ok(records) => {
+                match records.into_iter().find(|record| record.serial == serial) {
+                    Some(record)
+                        if record.name.eq_ignore_ascii_case(name)
+                            && restore_kind_matches(record.req.kind, req.kind)
+                            && record.live(ca_store::now_unix()) =>
+                    {
+                        Some(serial)
+                    }
+                    Some(record)
+                        if record.name.eq_ignore_ascii_case(name)
+                            && restore_kind_matches(record.req.kind, req.kind) =>
+                    {
+                        None
+                    }
+                    Some(record) => {
+                        return EnqueueResponse::Err {
+                            reason: format!(
+                                "replacement serial {serial} belongs to {:?} {:?}, not {:?} {:?}",
+                                record.req.kind, record.name, req.kind, name
+                            ),
+                        };
+                    }
+                    None => {
+                        return EnqueueResponse::Err {
+                            reason: format!(
+                                "replacement serial {serial} is not a live certificate for {name:?}"
+                            ),
+                        };
+                    }
+                }
+            }
+            Err(e) => {
+                return EnqueueResponse::Err {
+                    reason: format!("checking replacement serial: {e:#}"),
+                };
+            }
+        }
+    } else {
+        None
+    };
     if !verified_renewal {
         // Fail fast on the reserved name — approval would refuse it
         // anyway, but the enrollee should hear it now, not after the
@@ -3101,7 +3409,7 @@ fn handle_enqueue(
         // after the admin clicked through an approval that would only
         // be refused. Resolver replicas are the deliberate exception: each
         // has its own key but presents the cluster's shared TLS server name.
-        if one_live_name(req.kind) {
+        if one_live_name(req.kind) && replacement_of.is_none() {
             match store.live_for_name(name) {
                 Ok(live) if !live.is_empty() => {
                     return EnqueueResponse::Err {
@@ -3117,7 +3425,7 @@ fn handle_enqueue(
             }
         }
     }
-    let queued = ca_store::QueuedReq::new(
+    let mut queued = ca_store::QueuedReq::new(
         req.kind,
         req.csr_pem.clone(),
         name.to_string(),
@@ -3126,6 +3434,7 @@ fn handle_enqueue(
         renewal_of,
         None,
     );
+    queued.replaces_serial = replacement_of;
     match store.enqueue(&queued) {
         Ok(()) => {
             info!(
@@ -3143,6 +3452,15 @@ fn handle_enqueue(
 /// share one verified TLS server name while retaining independent private keys.
 fn one_live_name(kind: NodeKind) -> bool {
     kind != NodeKind::Resolver
+}
+
+fn restore_kind_matches(old: NodeKind, new: NodeKind) -> bool {
+    old == new
+        || matches!(
+            (old, new),
+            (NodeKind::Client, NodeKind::Resolver)
+                | (NodeKind::Resolver, NodeKind::Client)
+        )
 }
 
 /// List the pending queue for an authenticated admin.
@@ -3179,6 +3497,7 @@ fn handle_list_queue(state: &Server, req: &ListQueueRequest) -> ListQueueRespons
                         verified_renewal: q.renewal_of.is_some(),
                         enrollment: q.enrollment,
                         cluster_base,
+                        replaces_serial: q.replaces_serial,
                     }
                 })
                 .collect(),
@@ -3844,6 +4163,7 @@ struct Approved {
     resp: SignResponse,
     push: Option<PushPlan>,
     enrollment: Option<(admin_proto::AdminServerId, admin_proto::EnrollmentRequest)>,
+    replacement_crl: Option<String>,
 }
 
 /// Approve a queued request: look it up, then sign it through the
@@ -3895,7 +4215,7 @@ fn approve_locked(
         let mut staged = map
             .cloned()
             .ok_or_else(|| "the CA-owned network map is unavailable".to_string())?;
-        netmap::enroll(&mut staged, server_id, &enrollment)
+        stage_enrollment(&mut staged, server_id, &enrollment)
             .map_err(|e| format!("invalid enrollment grant: {e:#}"))?;
         let signing = server_unlock(ca)?;
         let signed = issue_locked(
@@ -3908,6 +4228,7 @@ fn approve_locked(
             Vec::new(),
             false,
             None,
+            None,
             Some(crate::tls::AdminCertIdentity { server_id, controller: false }),
             "enroll",
             Some(&req.request_id),
@@ -3915,7 +4236,12 @@ fn approve_locked(
         .map_err(|e| format!("internal error: {e:#}"))?;
         let enrollment = matches!(&signed.resp, SignResponse::Ok { .. })
             .then_some((server_id, enrollment));
-        return Ok(Approved { resp: signed.resp, push: signed.push, enrollment });
+        return Ok(Approved {
+            resp: signed.resp,
+            push: signed.push,
+            enrollment,
+            replacement_crl: signed.replacement_crl,
+        });
     }
     // A verified renewal: continuation of an already-approved identity —
     // possession of the live key was proven at enqueue. The SAN-scope and
@@ -3942,11 +4268,17 @@ fn approve_locked(
             false,
             Some(orig_serial),
             None,
+            None,
             "renew",
             Some(&req.request_id),
         )
         .map_err(|e| format!("internal error: {e:#}"))?;
-        return Ok(Approved { resp: signed.resp, push: signed.push, enrollment: None });
+        return Ok(Approved {
+            resp: signed.resp,
+            push: signed.push,
+            enrollment: None,
+            replacement_crl: signed.replacement_crl,
+        });
     }
     // Ordinary approval: the full policy checks under the *approving*
     // admin's slot, audited as `op=approve`, the record keyed by the
@@ -3958,10 +4290,16 @@ fn approve_locked(
         requested_name: queued.requested_name.clone(),
         requested_validity: queued.requested_validity,
         id_map_groups: req.id_map_groups.clone(),
+        replaces_serial: queued.replaces_serial,
     };
     let signed =
         handle_sign_request_op(ca, &sign_req, "approve", &queued, Some(&req.request_id));
-    Ok(Approved { resp: signed.resp, push: signed.push, enrollment: None })
+    Ok(Approved {
+        resp: signed.resp,
+        push: signed.push,
+        enrollment: None,
+        replacement_crl: signed.replacement_crl,
+    })
 }
 
 /// Read the autorenew slot's password from its keytab, unsealing if this
@@ -4599,10 +4937,73 @@ fn grant_enrollment(
 ) -> Result<admin_proto::ResolverClusterId> {
     let ca_dir = state.ca_dir().context("this host does not hold the CA")?;
     let mut map = state.map.lock();
+    let replaced_addr = enrollment.replaces.and_then(|old| {
+        map.servers.iter().find(|server| server.id == old).map(|server| server.addr)
+    });
     let mut staged = map.clone();
-    let cluster = netmap::enroll(&mut staged, server_id, enrollment)?;
+    let cluster = stage_enrollment(&mut staged, server_id, enrollment)?;
+    if let Some(old) = enrollment.replaces {
+        revoke_server_certificates(
+            state.ca.as_ref().context("this host does not hold the CA")?,
+            old,
+            "approved restore",
+        )
+        .context("revoking the replaced server identity")?;
+    }
     netmap::save(ca_dir, &staged).context("persisting the enrollment grant")?;
     *map = staged;
+    drop(map);
+    if let Some(old_addr) = replaced_addr {
+        let mut cfg = state.cfg.lock();
+        cfg.peers.retain(|peer| *peer != old_addr);
+        if let Some(path) = &state.cfg_path {
+            cfg.save(path).context("persisting removal of the replaced peer hint")?;
+        }
+    }
+    Ok(cluster)
+}
+
+/// Stage a new enrollment and, for restore, atomically replace the failed
+/// satellite named by the bundle. Enroll first so replacing the sole member of
+/// a cluster cannot transiently delete that stable cluster ID.
+fn stage_enrollment(
+    map: &mut NetworkMap,
+    server_id: admin_proto::AdminServerId,
+    enrollment: &admin_proto::EnrollmentRequest,
+) -> Result<admin_proto::ResolverClusterId> {
+    let replaced_cluster = match enrollment.replaces {
+        Some(old) if old == map.controller => {
+            bail!("the active controller cannot be replaced by satellite enrollment")
+        }
+        Some(old) => Some(
+            map.servers
+                .iter()
+                .find(|server| server.id == old)
+                .with_context(|| {
+                    format!(
+                        "replacement server {old} is absent from the authoritative map"
+                    )
+                })?
+                .cluster,
+        ),
+        None => None,
+    };
+    if let Some(old) = enrollment.replaces {
+        // The replacement normally owns the same resolver endpoint. Release
+        // that ownership on the staged copy before enrolling the fresh ID;
+        // the old server remains a cluster member until the new grant exists,
+        // so the stable cluster itself can never disappear in between.
+        if let Some(server) = map.servers.iter_mut().find(|server| server.id == old) {
+            server.resolver = None;
+        }
+    }
+    let cluster = netmap::enroll(map, server_id, enrollment)?;
+    if let Some(old) = enrollment.replaces {
+        if replaced_cluster.flatten() != Some(cluster) {
+            bail!("a restored server must rejoin the same resolver cluster it replaces");
+        }
+        netmap::remove(map, old)?;
+    }
     Ok(cluster)
 }
 
@@ -10373,6 +10774,19 @@ mod v6_tests {
             request_authorization(&Request::RotateRecovery),
             RequestAuthorization::LocalOnly,
         );
+        assert_eq!(
+            request_authorization(&Request::ExternalCaCsr),
+            RequestAuthorization::LocalOnly,
+        );
+        assert_eq!(
+            request_authorization(&Request::ExternalCaInstall(
+                ExternalCaInstallRequest {
+                    signed_cert_pem: "certificate".into(),
+                    root_pem: None,
+                },
+            )),
+            RequestAuthorization::LocalOnly,
+        );
 
         // A home-CA ordinary node may self-register, but it cannot invoke any
         // controller mutation. A foreign co-trusted certificate is represented
@@ -10506,6 +10920,40 @@ mod v6_tests {
     }
 
     #[test]
+    fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
+        let controller = admin_proto::AdminServerId::new();
+        let old = admin_proto::AdminServerId::new();
+        let fresh = admin_proto::AdminServerId::new();
+        let mut map = NetworkMap::empty(controller);
+        let member = ResolverAddr {
+            addr: "10.0.0.10:4564".parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        };
+        let initial = admin_proto::EnrollmentRequest {
+            listen: "10.0.0.10:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            resolver_member: Some(member.clone()),
+            resolver_members: vec![member.clone()],
+            cluster: admin_proto::ClusterPlacement::Create { base: "/eu".into() },
+            replaces: None,
+        };
+        let cluster = stage_enrollment(&mut map, old, &initial).unwrap();
+        let mut replacement = initial.clone();
+        replacement.cluster = admin_proto::ClusterPlacement::Join { cluster };
+        replacement.replaces = Some(old);
+        assert_eq!(stage_enrollment(&mut map, fresh, &replacement).unwrap(), cluster);
+        assert!(map.servers.iter().all(|server| server.id != old));
+        assert!(map.servers.iter().any(|server| server.id == fresh));
+        assert!(map.clusters.iter().any(|entry| entry.id == cluster));
+
+        replacement.replaces = Some(controller);
+        assert!(
+            stage_enrollment(&mut map, admin_proto::AdminServerId::new(), &replacement,)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn enrollment_policy_enforces_scope_roles_and_invariants() {
         let role_admin = ca_vault::Authenticated {
             slot_id: uuid::Uuid::new_v4(),
@@ -10535,6 +10983,7 @@ mod v6_tests {
                 auth: InfoAuth::Anonymous,
             }],
             cluster: admin_proto::ClusterPlacement::Create { base: base.into() },
+            replaces: None,
         };
         assert!(
             authorize_enrollment(

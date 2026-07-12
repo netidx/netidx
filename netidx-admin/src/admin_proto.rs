@@ -462,6 +462,18 @@ pub enum Request {
     /// [`ApplyControllerStateResponse`].
     #[pack(tag(40))]
     ApplyControllerState(ApplyControllerStateRequest),
+    /// Local-control-only: emit a renewal CSR for an externally-signed
+    /// controller CA using the live in-process CA key. The key never leaves
+    /// the daemon and the controller remains online. Answered with
+    /// [`ExternalCaCsrResponse`].
+    #[pack(tag(41))]
+    ExternalCaCsr,
+    /// Local-control-only: install a renewed externally-signed controller CA
+    /// certificate. The daemon requires the same CA key and the already-pinned
+    /// external issuer, then hot-reloads its serving chain. Answered with
+    /// [`ExternalCaInstallResponse`].
+    #[pack(tag(42))]
+    ExternalCaInstall(ExternalCaInstallRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -484,6 +496,28 @@ pub enum BackupResponse {
         bytes: u64,
         manifest_sha256: String,
     },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ExternalCaInstallRequest {
+    pub signed_cert_pem: String,
+    pub root_pem: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ExternalCaCsrResponse {
+    #[pack(tag(0))]
+    Ok { common_name: String, csr_pem: String },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum ExternalCaInstallResponse {
+    #[pack(tag(0))]
+    Ok { ca_fingerprint: String },
     #[pack(tag(1))]
     Err { reason: String },
 }
@@ -653,6 +687,12 @@ pub struct SignRequest {
     #[serde(default)]
     #[pack(default)]
     pub id_map_groups: Vec<String>,
+    /// Restore-time replacement of this exact still-live certificate serial.
+    /// The approving administrator sees and authorizes the replacement; the
+    /// CA issues the new key and immediately revokes this serial.
+    #[serde(default)]
+    #[pack(default)]
+    pub replaces_serial: Option<u64>,
 }
 
 /// Admin-server enrollment ([`Request::Enroll`]): the CSR is signed with
@@ -678,6 +718,13 @@ pub struct EnrollRequest {
     /// Accepted only on the protected local control socket, for renewing the
     /// already-installed controller identity across a key rotation.
     pub renew_identity: Option<AdminServerId>,
+    /// Restore-time replacement of a failed satellite. On approval the CA
+    /// atomically grants the fresh identity, removes this old identity, and
+    /// revokes all of its live serving certificates. Never accepted for the
+    /// active controller.
+    #[serde(default)]
+    #[pack(default)]
+    pub replaces: Option<AdminServerId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
@@ -695,6 +742,9 @@ pub struct EnrollmentRequest {
     pub resolver_member: Option<ResolverAddr>,
     pub resolver_members: Vec<ResolverAddr>,
     pub cluster: ClusterPlacement,
+    #[serde(default)]
+    #[pack(default)]
+    pub replaces: Option<AdminServerId>,
 }
 
 /// Response to both [`Request::Sign`] and [`Request::Enroll`].
@@ -771,6 +821,10 @@ pub struct EnqueueRequest {
     #[serde(default)]
     #[pack(default)]
     pub enrollment: Option<EnrollmentRequest>,
+    /// Restore-time replacement of an exact still-live leaf certificate.
+    #[serde(default)]
+    #[pack(default)]
+    pub replaces_serial: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -854,6 +908,10 @@ pub struct QueueEntry {
     #[serde(default)]
     #[pack(default)]
     pub cluster_base: Option<String>,
+    /// Exact live leaf serial replaced when this restore request is approved.
+    #[serde(default)]
+    #[pack(default)]
+    pub replaces_serial: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1547,6 +1605,27 @@ mod tests {
         max_validity: Duration,
     }
 
+    #[derive(netidx_derive::Pack)]
+    struct EnrollmentBeforeReplacement {
+        listen: SocketAddr,
+        roles: Vec<Role>,
+        resolver_member: Option<ResolverAddr>,
+        resolver_members: Vec<ResolverAddr>,
+        cluster: ClusterPlacement,
+    }
+
+    #[derive(netidx_derive::Pack)]
+    struct EnrollBeforeReplacement {
+        credential: AdminCredential,
+        csr_pem: String,
+        listen: SocketAddr,
+        roles: Vec<Role>,
+        resolver_member: Option<ResolverAddr>,
+        resolver_members: Vec<ResolverAddr>,
+        cluster: ClusterPlacement,
+        renew_identity: Option<AdminServerId>,
+    }
+
     #[test]
     fn secret_is_redacted_but_round_trips() {
         let s = Secret("hunter2".to_string());
@@ -1583,6 +1662,7 @@ mod tests {
         });
         let request = SignRequest::decode(&mut old.as_slice()).unwrap();
         assert!(request.id_map_groups.is_empty());
+        assert_eq!(request.replaces_serial, None);
 
         let old = encode(&PolicyBeforeRoleGrants {
             allowed_san: vec!["*.example.com".into()],
@@ -1595,6 +1675,29 @@ mod tests {
         assert!(policy.perms_edit_scopes.is_empty());
         assert!(!policy.may_manage_admins);
         assert!(policy.service_control_scopes.is_empty());
+
+        let old = encode(&EnrollmentBeforeReplacement {
+            listen: "127.0.0.1:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            resolver_member: None,
+            resolver_members: Vec::new(),
+            cluster: ClusterPlacement::Create { base: "/".into() },
+        });
+        let enrollment = EnrollmentRequest::decode(&mut old.as_slice()).unwrap();
+        assert_eq!(enrollment.replaces, None);
+
+        let old = encode(&EnrollBeforeReplacement {
+            credential: AdminCredential::password("admin", "pw"),
+            csr_pem: "CSR".into(),
+            listen: "127.0.0.1:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            resolver_member: None,
+            resolver_members: Vec::new(),
+            cluster: ClusterPlacement::Create { base: "/".into() },
+            renew_identity: None,
+        });
+        let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
+        assert_eq!(enroll.replaces, None);
     }
 
     #[test]
@@ -1636,6 +1739,12 @@ mod tests {
             crl_pem: "crl".into(),
         }));
         assert_eq!(apply[1], 40);
+        assert_eq!(encode(&Request::ExternalCaCsr), vec![2, 41]);
+        let external = encode(&Request::ExternalCaInstall(ExternalCaInstallRequest {
+            signed_cert_pem: "cert".into(),
+            root_pem: Some("root".into()),
+        }));
+        assert_eq!(external[1], 42);
     }
 
     #[tokio::test]
@@ -1683,6 +1792,7 @@ mod tests {
             requested_name: "resolver.example.com".to_string(),
             requested_validity: std::time::Duration::from_secs(365 * 86400),
             id_map_groups: vec!["users".to_string()],
+            replaces_serial: None,
         });
         write_msg(&mut a, &req).await.unwrap();
         let got: Request = read_msg(&mut b).await.unwrap();

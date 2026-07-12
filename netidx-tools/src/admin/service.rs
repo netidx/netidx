@@ -132,6 +132,18 @@ pub(super) fn install_with_defaults(scope: ScopeArg) -> Result<()> {
     })
 }
 
+pub(super) fn install_restored(
+    scope: ScopeArg,
+    service_name: String,
+    for_user: Option<String>,
+) -> Result<()> {
+    install(InstallArgs {
+        common: CommonArgs { scope, for_user, service_name },
+        netidx_binary: None,
+        activation_dir: None,
+    })
+}
+
 fn install(mut a: InstallArgs) -> Result<()> {
     let binary = match a.netidx_binary.take() {
         Some(p) => p,

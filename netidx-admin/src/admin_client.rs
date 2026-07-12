@@ -1125,6 +1125,32 @@ pub async fn request_cert(
     id_map_groups: Vec<String>,
     expected: &CaIdentity,
 ) -> Result<Issued> {
+    request_cert_replacing(
+        addr,
+        kind,
+        name,
+        admin,
+        password,
+        validity,
+        id_map_groups,
+        None,
+        expected,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn request_cert_replacing(
+    addr: SocketAddr,
+    kind: NodeKind,
+    name: &str,
+    admin: &str,
+    password: Zeroizing<String>,
+    validity: Duration,
+    id_map_groups: Vec<String>,
+    replaces_serial: Option<u64>,
+    expected: &CaIdentity,
+) -> Result<Issued> {
     // Local work first: our key + CSR.
     let kc = generate_key_and_csr(name)?;
     let req = Request::Sign(SignRequest {
@@ -1134,6 +1160,7 @@ pub async fn request_cert(
         requested_name: name.to_string(),
         requested_validity: validity,
         id_map_groups,
+        replaces_serial,
     });
     submit_csr(addr, kind, name, kc, req, expected).await
 }
@@ -1154,6 +1181,7 @@ pub async fn enroll(
     resolver_member: ResolverAddr,
     resolver_members: Vec<ResolverAddr>,
     cluster: admin_proto::ClusterPlacement,
+    replaces: Option<admin_proto::AdminServerId>,
     expected: &CaIdentity,
 ) -> Result<Issued> {
     let kc = generate_key_and_csr(SERVING_SAN)?;
@@ -1166,6 +1194,7 @@ pub async fn enroll(
         resolver_members,
         cluster,
         renew_identity: None,
+        replaces,
     });
     submit_csr(addr, NodeKind::AdminServer, SERVING_SAN, kc, req, expected).await
 }
@@ -1290,7 +1319,18 @@ pub async fn enqueue(
     validity: Duration,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
-    enqueue_inner(addr, kind, name, validity, None, expected).await
+    enqueue_inner(addr, kind, name, validity, None, None, expected).await
+}
+
+pub async fn enqueue_replacing(
+    addr: SocketAddr,
+    kind: NodeKind,
+    name: &str,
+    validity: Duration,
+    replaces_serial: u64,
+    expected: &CaIdentity,
+) -> Result<PendingEnrollment> {
+    enqueue_inner(addr, kind, name, validity, None, Some(replaces_serial), expected).await
 }
 
 /// Queue a **admin-server enrollment** for asynchronous admin approval:
@@ -1312,6 +1352,7 @@ pub async fn enqueue_enroll(
         SERVING_SAN,
         Duration::from_secs(1),
         Some(enrollment),
+        None,
         expected,
     )
     .await
@@ -1323,6 +1364,7 @@ async fn enqueue_inner(
     name: &str,
     validity: Duration,
     enrollment: Option<admin_proto::EnrollmentRequest>,
+    replaces_serial: Option<u64>,
     expected: &CaIdentity,
 ) -> Result<PendingEnrollment> {
     let kc = generate_key_and_csr(name)?;
@@ -1337,6 +1379,7 @@ async fn enqueue_inner(
             requested_name: name.to_string(),
             requested_validity: validity,
             enrollment,
+            replaces_serial,
         }),
     )
     .await?;
@@ -2154,6 +2197,7 @@ pub async fn enqueue_renewal(
             requested_name: name.to_string(),
             requested_validity: validity,
             enrollment: None,
+            replaces_serial: None,
         }),
     )
     .await?;

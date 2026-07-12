@@ -335,39 +335,50 @@ failed re-seal aborts the install loudly rather than degrading to
 plaintext. Recovery from a cleared TPM is re-issue — one command,
 which is the point of the whole renewal chapter: keys are disposable.
 
-### Restoring a controller on replacement hardware
+### Backing up and restoring an installed role
 
-The CA directory is portable even though daemon credentials are not. Its
-`vault.json` contains a `recovery` signing slot whose password is kept off-box;
-that slot unwraps the CA master key without the old TPM. Create a live,
-point-in-time-consistent bundle over the protected local control socket:
+Backup and restore are role-level install operations, not CA file-management
+operations. The same commands cover workstations, publishers, resolvers,
+dedicated controllers, and co-located controller/resolver hosts:
 
 ```text
-netidx admin ca backup /srv/backups/netidx-2026-07-12
+netidx admin backup /srv/backups/netidx-2026-07-12
 ```
 
-The daemon briefly blocks durable mutations while capturing the vault,
+The bundle records the installed components, current configuration and
+permissions, activation units, network pin, service intent, and the machine
+credentials that must be re-enrolled. On a controller the daemon briefly
+blocks durable mutations while capturing the vault,
 certificate/trust chain, issuance and revocation records, CRL, authoritative
 map, delegation records, lifetime settings, audit log, admin-server config,
-and referenced resolver/id-map configuration into memory. It resumes
+and referenced resolver/id-map configuration into an embedded, CA-signed
+controller snapshot. It resumes
 administration before writing the target. A versioned, hashed manifest signed
-by the CA key is published with the files through a new sibling directory and atomic rename;
-an existing target is never overwritten. The local-only RPC cannot be invoked
-with any network certificate. Sealed `autorenew.keytab` and TLS keys, sessions,
-locks, and temporary files are deliberately not recovery assets.
+by the CA key protects the controller snapshot. The complete bundle is
+published through a new sibling directory and atomic rename; an existing
+target is never overwritten. Sealed `autorenew.keytab` and TLS keys, sessions,
+locks, and temporary files are deliberately not backup assets. Non-controller
+TLS identities receive fresh keys through the normal enrollment ceremony on
+restore.
 
-After fencing the old controller, restore and recover the bundle directly:
+Restore is a special install. It verifies the complete bundle before writing,
+relocates managed paths to the current platform's config root, recreates the OS
+service recorded by the source install, and re-enrolls disposable machine
+identities. An interrupted approval wait is resumed by repeating the same
+command. Each enrollment names the certificate serial it replaces; approval
+issues the fresh key and certificate and immediately revokes that exact old
+certificate, so restoring a lost machine does not leave its prior credential
+usable. For a controller, first fence the old host and supply the off-box
+recovery password:
 
 ```text
-netidx admin ca recover-controller \
-    --backup /srv/backups/netidx-2026-07-12 \
-    --ca-dir /etc/netidx/ca \
-    --config /etc/netidx/admin-server.json \
+netidx admin restore /srv/backups/netidx-2026-07-12 \
+    --old-controller-fenced \
     --listen 10.0.0.20:4565 \
     --recovery-password-stdin
 ```
 
-The command accepts only the off-box `recovery` slot, verifies the config's CA
+Controller restore accepts only the off-box `recovery` slot, verifies the config's CA
 fingerprint and controller UUID against `netmap.json`, and then:
 
 - generates and seals a fresh serving key on the replacement machine;
@@ -379,6 +390,12 @@ fingerprint and controller UUID against `netmap.json`, and then:
   republishes the CRL;
 - updates the controller's authoritative map address and rewrites
   `admin-server.json` to the restored CA's canonical paths.
+
+A restored satellite receives a fresh server UUID during its approval
+ceremony. The request visibly names the failed UUID it replaces; approval
+atomically installs the new grant in the same stable cluster, removes the old
+grant, and revokes every old serving certificate. The active controller can
+never be replaced through this path.
 
 On first start the recovered controller sends its current immutable identity,
 possibly changed address, authoritative map, and CRL to every registered admin

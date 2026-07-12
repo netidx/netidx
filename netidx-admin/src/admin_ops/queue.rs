@@ -56,6 +56,8 @@ pub struct QueueItem {
     pub resolver_members: Vec<crate::admin_proto::ResolverAddr>,
     pub cluster: Option<crate::admin_proto::ClusterPlacement>,
     pub cluster_base: Option<String>,
+    pub replaces: Option<crate::admin_proto::AdminServerId>,
+    pub replaces_serial: Option<u64>,
     id: String,
 }
 
@@ -75,6 +77,8 @@ fn to_item(e: QueueEntry) -> QueueItem {
             .as_ref()
             .map(|e| e.resolver_members.clone())
             .unwrap_or_default(),
+        replaces: enrollment.as_ref().and_then(|e| e.replaces),
+        replaces_serial: e.replaces_serial,
         cluster: enrollment.map(|e| e.cluster),
         cluster_base: e.cluster_base,
         id: e.id,

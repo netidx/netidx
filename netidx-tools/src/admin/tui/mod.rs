@@ -918,8 +918,18 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             },
             out = async { match op.as_mut() { Some(f) => f.await, None => future::pending().await } } => {
                 op = None;
-                let result = complete_op(terminal, &mut app, &mut events, out);
-                app.finish_op(result);
+                match complete_op(terminal, &mut app, &mut events, out) {
+                    Ok((outcome, Some(next))) => {
+                        // The intermediate outcome is intentionally quiet; keep
+                        // the progress surface up and continue the same restore.
+                        launch(terminal, &mut app, &ui_tx, &mut op, &mut events, next);
+                        if !outcome.quiet {
+                            app.finish_op(Ok(outcome));
+                        }
+                    }
+                    Ok((outcome, None)) => app.finish_op(Ok(outcome)),
+                    Err(e) => app.finish_op(Err(e)),
+                }
             }
             ev = async {
                 match events.as_mut() {
@@ -1022,6 +1032,7 @@ fn launch(
                 lines: vec![msg],
                 refresh_local: true,
                 install_service: None,
+                after_service: None,
                 remote: None,
                 services: None,
                 quiet: false,
@@ -1048,18 +1059,24 @@ fn complete_op(
     app: &mut App,
     events: &mut Option<Fuse<EventStream>>,
     out: Result<Outcome>,
-) -> Result<Outcome> {
+) -> Result<(Outcome, Option<Action>)> {
     let mut outcome = out?;
-    if let Some(scope) = outcome.install_service.take() {
+    let mut service_ok = true;
+    if let Some(service) = outcome.install_service.take() {
         app.log_line(Line::from("registering the OS service…"));
-        match run_suspended(events, || privileged::install_service(terminal, scope)) {
+        match run_suspended(events, || privileged::install_service(terminal, &service)) {
             Ok(msg) => outcome.lines.push(msg),
             Err(e) => {
-                outcome.lines.push(format!("OS service registration failed: {e:#}"))
+                outcome.lines.push(format!("OS service registration failed: {e:#}"));
+                service_ok = false;
             }
         }
     }
-    Ok(outcome)
+    let after = if service_ok { outcome.after_service.take() } else { None };
+    if !service_ok {
+        outcome.quiet = false;
+    }
+    Ok((outcome, after))
 }
 
 /// Entry point for bare `netidx admin`: build a runtime, take over the terminal,
@@ -1219,6 +1236,31 @@ mod render_tests {
         assert!(
             s.contains("192.168.1.20"),
             "default not pre-filled into the field: {s:?}"
+        );
+    }
+
+    #[test]
+    fn announcement_preserves_explicit_line_breaks() {
+        let mut app = App::new();
+        let (tx, _rx) = oneshot::channel();
+        app.modal = Modal::from_request(UiRequest::Announce {
+            title: "Restore plan".into(),
+            body: "Components: [Workstation, Resolver]\nRole: workstation\nFresh enrollment required".into(),
+            reply: tx,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows = (0..buf.area().height)
+            .map(|y| {
+                (0..buf.area().width).map(|x| buf[(x, y)].symbol()).collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| row.contains("Components: [Workstation")));
+        assert!(rows.iter().any(|row| row.contains("Role: workstation")));
+        assert!(
+            !rows.iter().any(|row| row.contains("Resolver]Role:")),
+            "explicit newlines were collapsed: {rows:?}"
         );
     }
 

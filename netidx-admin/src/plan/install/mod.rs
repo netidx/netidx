@@ -27,6 +27,8 @@ use std::{
 };
 
 /// role install cascades.
+#[cfg(unix)]
+pub mod controller;
 pub mod publisher;
 pub mod resolver;
 pub mod workstation;
@@ -308,7 +310,7 @@ async fn finish_with_record_path(
     rt: RenderedTemplate,
     common: &InstallCommon,
     need: ServiceNeed,
-    record: InstallRecord,
+    mut record: InstallRecord,
     record_path_override: Option<&Path>,
     post_apply: impl AsyncFnOnce(&mut dyn Answerer) -> Result<()>,
 ) -> Result<Option<ServiceScope>> {
@@ -323,6 +325,7 @@ async fn finish_with_record_path(
             None => paths::user_install_record()
                 .context("resolving the install-record destination")?,
         };
+        record.set_managed_paths(rt.managed_paths());
         rt.apply().context("applying template")?;
         // The local role is now a real, usable install. Record it before the
         // network/admin completion tail: connectivity loss while enrolling a
@@ -751,6 +754,8 @@ mod tests {
         rt.perms_file = Some((perms_path.clone(), crate::perms::empty()));
         let record =
             InstallRecord::new(InstallRole::Resolver, "/", "anonymous", None, None);
+        let mut expected = record.clone();
+        expected.set_managed_paths(vec![perms_path.clone()]);
         let check_record = record_path.clone();
         let check_perms = perms_path.clone();
         let mut ans = TestAnswerer;
@@ -779,6 +784,6 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains("core install completed"));
         assert!(message.contains("simulated network failure"));
-        assert_eq!(InstallRecord::load(&record_path).unwrap(), record);
+        assert_eq!(InstallRecord::load(&record_path).unwrap(), expected);
     }
 }

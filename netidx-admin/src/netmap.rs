@@ -633,6 +633,7 @@ mod tests {
             resolver_member: Some(member.clone()),
             resolver_members: vec![member],
             cluster: ClusterPlacement::Create { base: base.into() },
+            replaces: None,
         }
     }
 
@@ -818,6 +819,7 @@ mod tests {
             resolver_member: Some(second_member.clone()),
             resolver_members: vec![second_member],
             cluster: ClusterPlacement::Join { cluster: child },
+            replaces: None,
         };
         assert_eq!(enroll(&mut map, second, &join).unwrap(), child);
         assert!(reparent(&mut map, child, parent).unwrap());

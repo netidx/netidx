@@ -798,6 +798,18 @@ pub async fn join_network(
     kp: Option<KeyProtArg>,
     identity: &CaIdentity,
 ) -> Result<(JoinedIdentity, TempDir)> {
+    join_network_replacing(ans, addr, kind, suggested_name, kp, None, identity).await
+}
+
+pub async fn join_network_replacing(
+    ans: &mut dyn Answerer,
+    addr: SocketAddr,
+    kind: NodeKind,
+    suggested_name: Option<&str>,
+    kp: Option<KeyProtArg>,
+    replaces_serial: Option<u64>,
+    identity: &CaIdentity,
+) -> Result<(JoinedIdentity, TempDir)> {
     let name = ans
         .text(
             Field::TlsName,
@@ -833,7 +845,7 @@ pub async fn join_network(
             .context("a CA admin name is required")?;
         let mut pw_secret = ans.secret(Field::AdminPassword, None).await?;
         let password = Zeroizing::new(std::mem::take(&mut pw_secret.0));
-        admin_client::request_cert(
+        admin_client::request_cert_replacing(
             addr,
             kind,
             &name,
@@ -841,12 +853,27 @@ pub async fn join_network(
             password,
             JOIN_VALIDITY,
             groups,
+            replaces_serial,
             identity,
         )
         .await?
     } else {
-        let pending =
-            admin_client::enqueue(addr, kind, &name, JOIN_VALIDITY, identity).await?;
+        let pending = match replaces_serial {
+            Some(serial) => {
+                admin_client::enqueue_replacing(
+                    addr,
+                    kind,
+                    &name,
+                    JOIN_VALIDITY,
+                    serial,
+                    identity,
+                )
+                .await?
+            }
+            None => {
+                admin_client::enqueue(addr, kind, &name, JOIN_VALIDITY, identity).await?
+            }
+        };
         ans.show_verification_code("enrollment request", &pending.fingerprint);
         ans.progress(Progress::new(
             Stage::WaitingApproval,

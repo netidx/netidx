@@ -8,8 +8,8 @@ use netidx_admin::{
     },
     admin_proto::{self, NodeKind},
     answer::{Answerer, Field},
-    atomic, backup as controller_backup,
-    ca::{self, Ca, CaParams, SanEntry, Subject},
+    atomic,
+    ca::{self, SanEntry, Subject},
     ca_vault,
     fingerprint::{ColorMode, Fingerprint},
     offline_ca::{default_csr_filename, parse_san_one, parse_sans},
@@ -23,6 +23,9 @@ use std::{
     time::Duration,
 };
 use zeroize::Zeroizing;
+
+#[cfg(test)]
+use netidx_admin::ca::{Ca, CaParams};
 
 use super::{
     answer_cli::{RemoteAuthFlags, make_offline_answerer},
@@ -44,6 +47,8 @@ fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, Stri
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
+    /// install this machine as the network's controller and certificate authority
+    Install(ControllerInstallArgs),
     /// create a new local CA (keyslot vault; can serve via `admin server`)
     Init(InitParams),
     /// issue a leaf certificate from a CA
@@ -78,9 +83,6 @@ pub(crate) enum Cmd {
     Servers(ServersArgs),
     /// permanently revoke and remove one dead admin-server identity
     RemoveServer(RemoveServerArgs),
-    /// capture a point-in-time-consistent recovery bundle from the running
-    /// local controller
-    Backup(BackupArgs),
     /// re-send the controller's current address, authoritative map, and CRL to
     /// every registered node (safe to repeat after partial failure)
     ReconcileController(ReconcileControllerArgs),
@@ -92,15 +94,46 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: RecoveryCmd,
     },
-    /// rebind a restored CA controller to replacement hardware, preserving its
-    /// immutable identity while replacing every machine-sealed credential
-    RecoverController(RecoverControllerArgs),
     /// manage an externally-signed (intermediate) CA: (re-)emit its CSR or
     /// install a signed certificate
     External {
         #[command(subcommand)]
         cmd: ExternalCmd,
     },
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ControllerInstallArgs {
+    /// Administrative network domain (default: local).
+    #[arg(long)]
+    domain: Option<String>,
+    /// Controller admin-server listen address.
+    #[arg(long)]
+    listen: Option<SocketAddr>,
+    /// Run the controller CA as an intermediate signed by an external PKI.
+    #[arg(long = "external-sign")]
+    external_sign: bool,
+    /// Proceed without TPM/Secure-Enclave sealing (test deployments only).
+    #[arg(long = "insecure-no-tpm")]
+    insecure_no_tpm: bool,
+    /// Print the installation plan without changing anything.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Do not write activation units.
+    #[arg(long = "no-units")]
+    no_units: bool,
+    /// Register the activation supervisor as an OS service.
+    #[arg(long = "with-service", conflicts_with = "no_service")]
+    with_service: bool,
+    /// Do not register an OS service.
+    #[arg(long = "no-service")]
+    no_service: bool,
+    /// Read the founding controller administrator password from a file.
+    #[arg(long = "admin-password-file")]
+    admin_password_file: Option<PathBuf>,
+    /// Read the founding controller administrator password from stdin.
+    #[arg(long = "admin-password-stdin", conflicts_with = "admin_password_file")]
+    admin_password_stdin: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,42 +214,6 @@ pub(crate) enum RecoveryCmd {
 pub(crate) struct RecoveryRotateArgs {
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct RecoverControllerArgs {
-    /// A bundle produced by `ca backup`. When supplied, the verified bundle is
-    /// restored into `--ca-dir` and `--config` before hardware rebinding; both
-    /// destinations must not already exist.
-    #[arg(long)]
-    pub backup: Option<PathBuf>,
-    /// Restored CA directory. Defaults to the normal local CA directory.
-    #[arg(long)]
-    pub ca_dir: Option<PathBuf>,
-    /// Restored admin-server config. Defaults to the discovered local config.
-    /// Its old serving-file paths may be unusable; identity fields are checked
-    /// against the restored CA and network map before replacement.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
-    /// New admin-server listen address. Defaults to the restored config value.
-    #[arg(long)]
-    pub listen: Option<SocketAddr>,
-    /// Proceed without TPM/Secure-Enclave sealing. This writes the replacement
-    /// autorenew credential and serving key in plaintext. Test CAs only.
-    #[arg(long = "insecure-no-tpm")]
-    pub insecure_no_tpm: bool,
-    #[command(flatten)]
-    pub recovery: RecoveryAuth,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct BackupArgs {
-    /// New backup directory to create on this controller. Existing targets are
-    /// never overwritten; relative paths are made absolute before the local RPC.
-    pub target: PathBuf,
-    /// Local admin-server config used to locate the protected control socket.
-    #[arg(long)]
-    pub config: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -758,6 +755,7 @@ pub(crate) struct SignArgs {
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
+        Cmd::Install(p) => install_controller(p),
         Cmd::Init(p) => init(p),
         Cmd::Issue(p) => issue(p),
         Cmd::Sign(p) => sign(p),
@@ -772,13 +770,44 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Revoke(p) => revoke(p),
         Cmd::Servers(p) => servers(p),
         Cmd::RemoveServer(p) => remove_server(p),
-        Cmd::Backup(p) => backup(p),
         Cmd::ReconcileController(p) => reconcile_controller(p),
         Cmd::AutoApprove(p) => auto_approve(p),
         Cmd::Recovery { cmd } => recovery(cmd),
-        Cmd::RecoverController(args) => recover_controller(args),
         Cmd::External { cmd } => external(cmd),
     }
+}
+
+fn install_controller(p: ControllerInstallArgs) -> Result<()> {
+    let mut ans = super::answer_cli::FlagAnswerer::install(
+        None,
+        false,
+        p.admin_password_file.as_deref(),
+        p.admin_password_stdin,
+        None,
+        false,
+        None,
+    )?;
+    let common = plan::install::InstallCommon {
+        dry_run: p.dry_run,
+        force: false,
+        no_units: p.no_units,
+        with_service: p.with_service,
+        no_service: p.no_service,
+    };
+    let input = plan::install::controller::ControllerInput {
+        domain: p.domain,
+        listen: p.listen,
+        units_dir: None,
+        external_sign: Some(p.external_sign),
+        insecure_no_tpm: p.insecure_no_tpm,
+        common,
+    };
+    let scope = runtime()?
+        .block_on(plan::install::controller::run_controller(&mut ans, input))?;
+    if let Some(scope) = scope {
+        service::install_with_defaults(scope.into())?;
+    }
+    Ok(())
 }
 
 // -- ca auto-approve ----------------------------------------------------------
@@ -1106,28 +1135,6 @@ fn remove_server(f: RemoveServerArgs) -> Result<()> {
     Ok(())
 }
 
-fn backup(a: BackupArgs) -> Result<()> {
-    let config = match a.config {
-        Some(path) => path,
-        None => paths::discover_admin_server_config()?,
-    };
-    let target = if a.target.is_absolute() {
-        a.target
-    } else {
-        std::env::current_dir()?.join(a.target)
-    };
-    let out = runtime()?.block_on(admin_local::backup(&config, &target))?;
-    println!("created controller recovery backup at {}", out.target.display());
-    println!("  CA fingerprint: {}", out.ca_fingerprint);
-    println!("  controller:     {}", out.controller);
-    println!("  map version:    {}", out.map_version);
-    println!("  highest serial: {}", out.highest_serial);
-    println!("  files:          {}", out.files);
-    println!("  bytes:          {}", out.bytes);
-    println!("  manifest SHA-256: {}", out.manifest_sha256);
-    Ok(())
-}
-
 fn reconcile_controller(a: ReconcileControllerArgs) -> Result<()> {
     let mut ans = a.auth.answerer()?;
     let server = a.auth.server_addr()?;
@@ -1208,56 +1215,6 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     Ok(())
 }
 
-fn recover_controller(a: RecoverControllerArgs) -> Result<()> {
-    let ca_dir = ca_dir_for(a.ca_dir)?;
-    let config = match (a.backup.as_ref(), a.config) {
-        (_, Some(path)) => path,
-        (Some(_), None) => paths::user_admin_server_config()?,
-        (None, None) => paths::discover_admin_server_config().context(
-            "no restored admin-server config found; pass --config <admin-server.json>",
-        )?,
-    };
-    if let Some(bundle) = &a.backup {
-        let manifest = controller_backup::restore(bundle, &ca_dir, &config)
-            .context("restoring verified controller backup")?;
-        println!(
-            "restored verified backup for controller {} (map version {}, highest serial {})",
-            manifest.controller, manifest.map_version, manifest.highest_serial
-        );
-    }
-    let mut ans = a.recovery.answerer()?;
-    let out = runtime()?.block_on(slots_ops::recover_controller(
-        &mut ans,
-        ca_dir,
-        config.clone(),
-        a.listen,
-        a.insecure_no_tpm,
-    ))?;
-    println!("recovered CA controller {}", out.server_id);
-    println!("  listen:       {}", out.listen);
-    println!("  config:       {}", config.display());
-    println!("  serving cert: {}", out.serving_certificate.display());
-    println!(
-        "  serving key:  {} ({})",
-        out.serving_key.display(),
-        if out.serving_key_sealed { "sealed to this machine" } else { "PLAINTEXT" }
-    );
-    println!(
-        "  autorenew:    {} ({})",
-        out.autorenew_keytab.display(),
-        if out.autorenew_keytab_sealed { "sealed to this machine" } else { "PLAINTEXT" }
-    );
-    println!(
-        "  revoked {} superseded controller serving certificate(s); CRL republished",
-        out.revoked_serving_certificates
-    );
-    println!(
-        "start the admin server, then re-enroll any other local TLS identities whose \
-         keys were sealed to the failed machine"
-    );
-    Ok(())
-}
-
 // -- ca external (intermediate CA signed by an external PKI) -----------------
 
 fn external(cmd: ExternalCmd) -> Result<()> {
@@ -1285,8 +1242,19 @@ fn ensure_externally_signed(dir: &Path) -> Result<()> {
 fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     ensure_externally_signed(&dir)?;
-    let mut ans = a.recovery.answerer()?;
-    let csr_path = runtime()?.block_on(slots_ops::external_emit_csr(&mut ans, dir))?;
+    let marker = slots_ops::ExternalPending::load(&dir)?;
+    let csr_path = if marker.setup_server && dir.join("certificate.pem").is_file() {
+        let cfg = external_controller_config(&dir)?;
+        let (common_name, csr) =
+            runtime()?.block_on(admin_local::external_ca_csr(&cfg))?;
+        let path = default_csr_filename(&common_name);
+        atomic::write_atomic(&path, csr.as_bytes(), 0o644)
+            .with_context(|| format!("writing CSR to {}", path.display()))?;
+        path
+    } else {
+        let mut ans = a.recovery.answerer()?;
+        runtime()?.block_on(slots_ops::external_emit_csr(&mut ans, dir))?
+    };
     println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
     println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
     Ok(())
@@ -1295,6 +1263,26 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
 fn external_install(a: ExternalInstallArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     ensure_externally_signed(&dir)?;
+    let marker = slots_ops::ExternalPending::load(&dir)?;
+    if marker.setup_server && dir.join("certificate.pem").is_file() {
+        let cfg = external_controller_config(&dir)?;
+        let signed = std::fs::read_to_string(&a.signed_cert)
+            .with_context(|| format!("reading {}", a.signed_cert.display()))?;
+        let root = a
+            .root
+            .as_ref()
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .with_context(|| format!("reading {}", p.display()))
+            })
+            .transpose()?;
+        let fingerprint =
+            runtime()?.block_on(admin_local::external_ca_install(&cfg, signed, root))?;
+        println!(
+            "renewed the externally-signed controller CA without stopping it\n  identity: {fingerprint}"
+        );
+        return Ok(());
+    }
     let mut ans = a.recovery.answerer()?;
     let gate = plan::service::ServiceGate {
         dry_run: false,
@@ -1316,6 +1304,25 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
         service::install_with_defaults(scope.into())?;
     }
     Ok(())
+}
+
+fn external_controller_config(ca_dir: &Path) -> Result<PathBuf> {
+    let cfg_path = paths::discover_admin_server_config().context(
+        "this externally-signed CA is configured as a controller, but no local admin-server config was found",
+    )?;
+    let cfg = netidx_admin::admin_server_config::AdminServerConfig::load(&cfg_path)?;
+    let configured = cfg
+        .roles
+        .ca
+        .as_ref()
+        .context("the local admin-server config does not hold the CA role")?;
+    anyhow::ensure!(
+        configured.dir == ca_dir,
+        "the local controller owns CA directory {}, not {}",
+        configured.dir.display(),
+        ca_dir.display()
+    );
+    Ok(cfg_path)
 }
 
 async fn report_external_install(
@@ -1398,103 +1405,7 @@ async fn external_bootstrap(
     ans: &mut dyn Answerer,
     opts: ca_setup::NewCaOpts,
 ) -> Result<service::ServiceNeed> {
-    let common_name =
-        ca_setup::resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref())
-            .await?;
-    let domain = match &opts.domain {
-        Some(d) if !d.is_empty() => d.clone(),
-        _ => match common_name.split_once('.') {
-            Some((_, d)) if !d.is_empty() => d.to_string(),
-            _ => common_name.clone(),
-        },
-    };
-    let set_up_server =
-        ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
-    // The TPM gate matters only for a served CA — the autorenew keytab is
-    // the sole TPM-sealed artifact; an offline external CA has none.
-    let insecure_no_tpm = if set_up_server {
-        ca_setup::tpm_gate(ans, opts.insecure_no_tpm).await?
-    } else {
-        opts.insecure_no_tpm
-    };
-    let san = parse_sans(&opts.san, &common_name)?;
-    let stage = ca_setup::StagedCaDir::new(opts.dir.clone())?;
-    let stage_dir = stage.path().to_path_buf();
-    let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
-        directory: stage_dir.clone(),
-        subject: Subject {
-            common_name: common_name.clone(),
-            country: opts.country.clone(),
-            state: opts.state.clone(),
-            locality: opts.locality.clone(),
-            organization: opts.organization.clone(),
-        },
-        san,
-        key_bits: opts.key_bits,
-        validity: opts.ca_validity,
-    })?;
-    let (recovery_pw, cadir) = ca_setup::seal_ca_recovery(
-        &stage_dir,
-        &key_pem,
-        ca::CaLifetimes {
-            leaf_validity: opts.leaf_validity,
-            ca_renew_threshold: opts.ca_renew_threshold,
-            externally_signed: true,
-        },
-    )?;
-    // Include the continuation marker in the atomic commit. If phase 1 is
-    // interrupted after publication, `ca external renew` can always recreate
-    // the CSR from this metadata.
-    slots_ops::ExternalPending {
-        cn: common_name.clone(),
-        domain,
-        country: opts.country.clone(),
-        state: opts.state.clone(),
-        locality: opts.locality.clone(),
-        organization: opts.organization.clone(),
-        san: opts.san.clone(),
-        setup_server: set_up_server,
-        listen: opts.listen,
-        units_dir: opts.units_dir.clone(),
-    }
-    .store(&stage_dir)?;
-    ca_setup::show_recovery_password(ans, &recovery_pw).await?;
-    drop(cadir);
-    stage.commit()?;
-    let cadir = netidx_admin::ca_store::CaDir::open(&opts.dir)
-        .context("opening the newly committed external CA directory")?;
-    ans.note(&format!(
-        "created the CA key at {} (awaiting an externally-signed certificate)",
-        opts.dir.display()
-    ));
-    // Write the CSR before the fallible/interactive slot setup. The committed
-    // marker can reproduce it if this write is interrupted.
-    let csr_path = default_csr_filename(&common_name);
-    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
-        .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
-    if set_up_server {
-        // Mint the box autorenew slot now (it needs the recovery password,
-        // which we hold here) so phase 2 can unlock passwordlessly; it is
-        // wired to the server config in phase 2. The superuser role slot
-        // needs no CA cert, so it is minted here too.
-        let keytab =
-            ca_setup::setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
-        ans.note(&format!(
-            "provisioned the automatic-renewal (leaf) approval slot:\n  \
-             slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server in phase 2)\n  \
-             keytab: {} (0600 — do NOT back this file up)",
-            keytab.display()
-        ));
-        ca_setup::setup_superuser(ans, &cadir, &opts, &common_name).await?;
-    }
-    ans.note(&format!(
-        "wrote {} — get it signed by your PKI as a subordinate CA, then run:\n  \
-         netidx admin ca external install <signed-cert.pem> [--root <root.pem>]\n\n\
-         NOTE: an externally-signed CA certificate does NOT auto-renew (netidx \
-         does not hold your PKI's key).",
-        csr_path.display()
-    ));
-    // Phase 1 stands up no server yet, so there is nothing to offer.
+    ca_setup::create_vaulted_external_ca(ans, opts).await?;
     Ok(service::ServiceNeed::NONE)
 }
 
@@ -2142,9 +2053,19 @@ fn queue(f: QueueArgs) -> Result<()> {
                 fmt_age(e.age_secs),
                 e.peer,
             );
+            if let Some(serial) = e.replaces_serial {
+                println!(
+                    "    restores certificate serial {serial} (approval revokes it)"
+                );
+            }
             if let Some(listen) = e.enroll_listen {
                 println!("    listen {listen}");
                 println!("    roles {:?}", e.requested_roles);
+                if let Some(old) = e.replaces {
+                    println!(
+                        "    replaces failed server {old} (old certificates will be revoked)"
+                    );
+                }
                 match &e.cluster {
                     Some(admin_proto::ClusterPlacement::Create { .. }) => println!(
                         "    cluster create at {}",
@@ -2388,44 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_controller_cli_requires_offline_recovery_inputs() {
-        let parsed = TestCaCli::try_parse_from([
-            "ca",
-            "recover-controller",
-            "--ca-dir",
-            "/restore/ca",
-            "--config",
-            "/restore/admin-server.json",
-            "--listen",
-            "10.0.0.20:14565",
-            "--recovery-password-stdin",
-            "--insecure-no-tpm",
-        ])
-        .unwrap();
-        let Cmd::RecoverController(args) = parsed.cmd else {
-            panic!("expected recover-controller")
-        };
-        assert_eq!(args.ca_dir.as_deref(), Some(Path::new("/restore/ca")));
-        assert_eq!(args.config.as_deref(), Some(Path::new("/restore/admin-server.json")));
-        assert_eq!(args.listen, Some("10.0.0.20:14565".parse().unwrap()));
-        assert!(args.recovery.recovery_password_stdin);
-        assert!(args.insecure_no_tpm);
-        assert!(args.backup.is_none());
-    }
-
-    #[test]
-    fn backup_and_reconcile_controller_cli_are_explicit() {
-        let parsed = TestCaCli::try_parse_from([
-            "ca",
-            "backup",
-            "/srv/backups/netidx-2026-07-12",
-            "--config",
-            "/etc/netidx/admin-server.json",
-        ])
-        .unwrap();
-        let Cmd::Backup(args) = parsed.cmd else { panic!("expected backup") };
-        assert_eq!(args.target, Path::new("/srv/backups/netidx-2026-07-12"));
-
+    fn reconcile_controller_cli_is_explicit() {
         let parsed = TestCaCli::try_parse_from([
             "ca",
             "reconcile-controller",
@@ -2439,24 +2323,12 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(parsed.cmd, Cmd::ReconcileController(_)));
+    }
 
-        let parsed = TestCaCli::try_parse_from([
-            "ca",
-            "recover-controller",
-            "--backup",
-            "/mnt/backup/controller",
-            "--ca-dir",
-            "/etc/netidx/ca",
-            "--config",
-            "/etc/netidx/admin-server.json",
-            "--recovery-password-stdin",
-            "--insecure-no-tpm",
-        ])
-        .unwrap();
-        let Cmd::RecoverController(args) = parsed.cmd else {
-            panic!("expected recover-controller")
-        };
-        assert_eq!(args.backup.as_deref(), Some(Path::new("/mnt/backup/controller")));
+    #[test]
+    fn ca_surface_has_no_backup_or_recover_controller_aliases() {
+        assert!(TestCaCli::try_parse_from(["ca", "backup", "/tmp/b"]).is_err());
+        assert!(TestCaCli::try_parse_from(["ca", "recover-controller"]).is_err());
     }
 
     #[test]
