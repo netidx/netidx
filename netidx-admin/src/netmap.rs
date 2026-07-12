@@ -516,14 +516,35 @@ pub fn register(
         }
         (None, None) => {}
     }
+    // A newly granted non-root cluster stays pending until delegation attaches it
+    // to an active parent. The first `/` cluster below a dedicated controller has
+    // no such ceremony: registration of its approved first member is what makes
+    // the administrative network routable.
+    let activate_root = cluster_id.is_some_and(|id| {
+        map.clusters.iter().any(|cluster| {
+            cluster.id == id
+                && cluster.base == "/"
+                && cluster.parent.is_none()
+                && cluster.state == ClusterState::Pending
+        })
+    });
     let server = &mut map.servers[pos];
-    let did_change = server.addr != addr || server.state != ServerState::Registered;
-    if did_change {
+    let server_changed = server.addr != addr || server.state != ServerState::Registered;
+    if server_changed {
         server.addr = addr;
         server.state = ServerState::Registered;
+    }
+    if activate_root {
+        map.clusters
+            .iter_mut()
+            .find(|cluster| Some(cluster.id) == cluster_id)
+            .unwrap()
+            .state = ClusterState::Active;
+    }
+    if server_changed || activate_root {
         changed(map);
     }
-    Ok(did_change)
+    Ok(server_changed || activate_root)
 }
 
 pub fn deregister(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool> {
@@ -672,6 +693,7 @@ mod tests {
         assert_eq!(map.servers[0].cluster, Some(cluster));
         assert_eq!(map.servers[0].roles, vec![Role::Resolver]);
         assert_eq!(map.servers[0].addr, "10.0.0.20:4565".parse().unwrap());
+        assert_eq!(map.clusters[0].state, ClusterState::Pending);
         let mut drift = facts.clone();
         drift.base = "/us".into();
         assert!(
@@ -679,6 +701,33 @@ mod tests {
                 .is_err()
         );
         assert_eq!(map.servers[0].addr, "10.0.0.20:4565".parse().unwrap());
+    }
+
+    #[test]
+    fn first_root_resolver_below_a_dedicated_controller_activates_on_registration() {
+        let controller = AdminServerId::new();
+        let server = AdminServerId::new();
+        let mut map = NetworkMap::empty(controller);
+        let request = enrollment("/", "10.0.0.10:4564");
+        let cluster = enroll(&mut map, server, &request).unwrap();
+        assert_eq!(map.clusters[0].state, ClusterState::Pending);
+        let facts = ClusterFacts {
+            members: request.resolver_members.clone(),
+            base: "/".into(),
+            parent: None,
+            children: vec![],
+        };
+        assert!(
+            register(&mut map, server, "10.0.0.10:4565".parse().unwrap(), Some(&facts),)
+                .unwrap()
+        );
+        assert_eq!(map.clusters[0].id, cluster);
+        assert_eq!(map.clusters[0].state, ClusterState::Active);
+        assert_eq!(map.servers[0].state, ServerState::Registered);
+        assert!(
+            !register(&mut map, server, "10.0.0.10:4565".parse().unwrap(), Some(&facts),)
+                .unwrap()
+        );
     }
 
     #[test]

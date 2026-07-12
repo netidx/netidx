@@ -1008,7 +1008,23 @@ fn bootstrap_cluster(
         .find(|s| s.id == server_id)
         .filter(|s| s.state == admin_proto::ServerState::Registered)
         .context("the verified bootstrap server is not registered in the network map")?;
-    let (resolvers, base, parent, children) = match bootstrap.cluster {
+    // A dedicated controller has no resolver cluster of its own. It is still a
+    // normal discovery seed, so map it to the one active root cluster when
+    // constructing client configuration. A satellite seed continues to select
+    // its exact cluster; hierarchy levels are never flattened.
+    let bootstrap_cluster = bootstrap.cluster.or_else(|| {
+        (bootstrap.id == map.controller)
+            .then(|| {
+                map.clusters.iter().find(|cluster| {
+                    cluster.base == "/"
+                        && cluster.parent.is_none()
+                        && cluster.state == admin_proto::ClusterState::Active
+                })
+            })
+            .flatten()
+            .map(|cluster| cluster.id)
+    });
+    let (resolvers, base, parent, children) = match bootstrap_cluster {
         None => (Vec::new(), None, None, Vec::new()),
         Some(cluster_id) => {
             let cluster = map
@@ -2710,6 +2726,7 @@ mod tests {
             ClusterEntry, ClusterState, ResolverClusterId, Role, ServerEntry, ServerState,
         };
         let controller = admin_proto::AdminServerId::new();
+        let root_server = admin_proto::AdminServerId::new();
         let satellite = admin_proto::AdminServerId::new();
         let waiting = admin_proto::AdminServerId::new();
         let root_cluster = ResolverClusterId::new();
@@ -2733,7 +2750,15 @@ mod tests {
                 ServerEntry {
                     id: controller,
                     addr: "192.168.50.11:4565".parse().unwrap(),
-                    roles: vec![Role::Ca, Role::Resolver],
+                    roles: vec![Role::Ca],
+                    resolver: None,
+                    cluster: None,
+                    state: ServerState::Registered,
+                },
+                ServerEntry {
+                    id: root_server,
+                    addr: "192.168.50.10:4565".parse().unwrap(),
+                    roles: vec![Role::Resolver],
                     resolver: Some(root.clone()),
                     cluster: Some(root_cluster),
                     state: ServerState::Registered,

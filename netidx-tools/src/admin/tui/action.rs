@@ -808,6 +808,7 @@ async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Out
         }
         Err(_) => netidx_admin::admin_ops::slots::external_emit_csr(ans, ca_dir).await?,
     };
+    let csr = std::fs::canonicalize(&csr).unwrap_or(csr);
     Ok(Outcome::plain(
         "CSR emitted",
         vec![format!(
@@ -1125,6 +1126,28 @@ async fn install(
         InstallRole::Publisher => run_publisher(ans, publisher_input(common)).await?,
         InstallRole::Workstation => run_workstation(ans, common).await?,
     };
+    #[cfg(unix)]
+    if !dry_run
+        && matches!(role, InstallRole::Controller)
+        && scope.is_none()
+        && let Ok(ca_dir) = paths::user_ca_dir()
+        && let Ok(status) = netidx_admin::admin_ops::slots::external_status(&ca_dir)
+        && let Some((common_name, _)) = status.pending
+    {
+        let relative = offline_ca::default_csr_filename(&common_name);
+        let csr = std::env::current_dir()?.join(relative);
+        return Ok(Outcome::plain(
+            "Controller awaiting external signature",
+            vec![
+                "The controller is not running yet; no OS service was registered."
+                    .into(),
+                format!("Subordinate-CA CSR: {}", csr.display()),
+                "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."
+                    .into(),
+            ],
+            true,
+        ));
+    }
     Ok(install_outcome(role, dry_run, scope))
 }
 

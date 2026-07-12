@@ -530,13 +530,15 @@ Expert escapes, all warned about where they're used:
 - `--no-admin-server` — skips the admin plane entirely; the host is
   invisible to discovery, and a network with no admin server anywhere
   has no enrollment and no certificate renewal.
-- External PKI / bring-your-own cert is **not** a wizard option: the
-  `admin install` wizard always uses the netidx CA (that is the point of
-  the control plane). To run TLS with your own certs, skip the wizard
-  and manage the resolver/publisher/subscriber TLS config by hand. To
-  chain the netidx CA to your existing PKI while keeping the admin plane,
-  use `netidx admin ca init --external-sign` (the CA runs as an
-  intermediate; its cert does not auto-renew — see ca-server.md).
+- Bring-your-own data-plane certificates are **not** a wizard option: to
+  run resolver/publisher/subscriber TLS with unrelated certificates,
+  manage those configs by hand. Chaining the netidx administrative CA to
+  an existing PKI is supported by the dedicated Controller / CA install:
+  choose external-root signing, have the external PKI sign the emitted
+  subordinate-CA CSR, then install the returned certificate from the
+  controller's local TUI. The netidx CA runs as an intermediate and its
+  certificate is renewed through the same explicit external ceremony
+  (see ca-server.md).
 
 ## Future capabilities (out of v1, design kept compatible)
 

@@ -512,9 +512,9 @@ pub async fn discover_network(
     let (field, standalone, join, default) = match kind {
         NodeKind::Resolver => (
             Field::ClusterMode,
-            "Create a new cluster",
-            "Connect to an existing cluster",
-            "Create a new cluster",
+            "Create a new administrative network (creates a CA)",
+            "Use an existing controller / CA",
+            "Create a new administrative network (creates a CA)",
         ),
         _ => {
             (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster")

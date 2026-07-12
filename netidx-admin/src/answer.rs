@@ -262,9 +262,11 @@ impl Field {
             },
             ClusterMode => FieldInfo {
                 flag: "--server",
-                label: "create or join a cluster",
-                help: "Create a new netidx cluster on this machine, or connect \
-                       to an existing cluster on your network.",
+                label: "choose an administrative network",
+                help: "Create a new administrative network and certificate \
+                       authority on this machine, or enroll under an existing \
+                       controller / CA. Choose the existing controller when \
+                       adding the first resolver below a dedicated CA host.",
             },
             Membership => FieldInfo {
                 flag: "--server",

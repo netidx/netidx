@@ -279,7 +279,7 @@ impl App {
             }
         }
         if self.modal.is_some() {
-            if self.modal.as_mut().unwrap().on_key(code) {
+            if self.modal.as_mut().unwrap().on_key_with_modifiers(code, mods) {
                 self.advance_modal();
             }
             return None;
@@ -1413,14 +1413,14 @@ mod render_tests {
         app.modal = Modal::from_request(UiRequest::Choice {
             field: Field::ClusterMode,
             choices: vec![
-                "Create a new cluster".into(),
-                "Connect to an existing cluster".into(),
+                "Create a new administrative network (creates a CA)".into(),
+                "Use an existing controller / CA".into(),
             ],
-            default: Some("Create a new cluster".into()),
+            default: Some("Create a new administrative network (creates a CA)".into()),
             reply: tx,
         });
         let s = render(&mut app);
         assert!(s.contains("(*)"), "selected radio marker missing: {s:?}");
-        assert!(s.contains("Create a new cluster"), "choice label missing: {s:?}");
+        assert!(s.contains("creates a CA"), "choice label missing: {s:?}");
     }
 }

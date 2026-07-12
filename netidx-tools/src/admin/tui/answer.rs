@@ -12,7 +12,7 @@
 
 use super::{theme, widgets};
 use anyhow::{Result, anyhow};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use netidx_admin::{
     admin_client::CaIdentity,
     admin_proto::Secret,
@@ -437,7 +437,18 @@ impl Modal {
 
     /// Handle a key. Returns `true` when the modal has resolved (answer sent)
     /// and should be removed.
+    #[cfg(test)]
     pub(super) fn on_key(&mut self, code: KeyCode) -> bool {
+        self.on_key_with_modifiers(code, KeyModifiers::NONE)
+    }
+
+    /// Modifier-aware input path used by the real terminal. Keeping the plain
+    /// [`Self::on_key`] wrapper makes modal unit tests concise.
+    pub(super) fn on_key_with_modifiers(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
         match self {
             Modal::Text { required, secret, input, error, reply, .. } => match code {
                 KeyCode::Esc => {
@@ -463,6 +474,10 @@ impl Modal {
                 }
                 KeyCode::Backspace => {
                     input.pop();
+                    false
+                }
+                KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.clear();
                     false
                 }
                 KeyCode::Char(c) => {
@@ -1135,6 +1150,24 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| modal.render(f, f.area())).unwrap();
         t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn ctrl_u_clears_a_prefilled_text_field() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut modal = Modal::from_request(UiRequest::Text {
+            field: Field::NetworkDomain,
+            default: Some("local".into()),
+            required: false,
+            reply: tx,
+        })
+        .unwrap();
+        assert!(!modal.on_key_with_modifiers(KeyCode::Char('u'), KeyModifiers::CONTROL,));
+        for c in "netidx.test".chars() {
+            assert!(!modal.on_key(KeyCode::Char(c)));
+        }
+        assert!(modal.on_key(KeyCode::Enter));
+        assert_eq!(rx.try_recv().unwrap().unwrap(), Some("netidx.test".into()));
     }
 
     #[test]

@@ -580,8 +580,8 @@ ask for), all sharing the `prompt_resolver_port` helper.
   carries the reserved SAN `netidx-ca-server`. The daemon's serving cert
   is just a normal CA-issued leaf with that reserved SAN; issuance
   policy must never grant that name to a normal join. The control
-  protocol is length-prefixed JSON (not Pack) — it's a one-shot control
-  path, so simplicity wins. `tokio` was promoted from an optional to a
+  protocol uses the same length-prefixed Pack framing as the remote admin
+  protocol. `tokio` was promoted from an optional to a
   base dependency of `netidx-admin` for the daemon/client.
 
 ---
@@ -604,7 +604,18 @@ when it approaches expiry; the admin server warns during the renewal
 window. Leaf issuance and leaf/serving-cert renewal are unaffected — the
 CA still holds its key and signs normally.
 
-### Two-phase ceremony (one command after bootstrap)
+### Two-phase ceremony
+
+The TUI exposes the complete ceremony. On a fresh dedicated host choose
+**Controller / CA**, answer yes to external-root signing, and save the recovery
+password. The result screen identifies the subordinate-CA CSR and makes clear
+that the controller is not running yet. After the external PKI returns a signed
+CA certificate, reopen the TUI and choose **Install Signed Certificate (External
+CA)**. Supply the signed certificate and, unless it is included in the returned
+chain, the external root certificate. Only then is the controller configured
+and its OS service registered.
+
+The equivalent strict CLI flow is:
 
 ```
 $ netidx admin ca init --external-sign        # phase 1: bootstrap
@@ -615,7 +626,7 @@ $ netidx admin ca init --external-sign        # phase 1: bootstrap
 
 # get ca.<domain>.csr signed by your PKI as a subordinate CA, then:
 
-$ netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]
+$ netidx admin ca external install <signed-cert.pem> [--root <root.pem>]
   ...validates the signed cert (its key matches the vaulted CA key, it is
   a CA cert, and it chains to the external root), installs it, and — on
   the first install — finishes the served-CA setup (serving cert, config)
@@ -623,11 +634,13 @@ $ netidx admin ca external renew <signed-cert.pem> [--root <root.pem>]
   passwordlessly via the box autorenew keytab.
 ```
 
-`ca external renew` is the single lifecycle command: with **no argument**
-it (re-)emits a CSR over the existing key (renewal); with a **signed
-cert** it installs it (first install finishes setup; later installs swap
-the cert and let the refreshed intermediate propagate to enrolled nodes
-on their next renewal).
+For renewal, **Emit Renewal CSR (External CA)** in the TUI (or `netidx admin ca
+external emit-csr`) emits a CSR over the existing CA key. After the external PKI
+signs it, **Install Renewed Certificate (External CA)** (or the same `external
+install` CLI command) swaps the certificate through the protected local control
+socket while the controller remains online. The CA glyph is the intermediate
+key fingerprint, so it does not change. `ca external renew` remains only as a
+compatibility alias for the explicit emit/install commands.
 
 ### On-disk layout and trust distribution
 

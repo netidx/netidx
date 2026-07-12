@@ -651,7 +651,9 @@ fn action_desc(action: &Action) -> &'static str {
         }
         Restore => "Restore a complete installation from a verified backup bundle.",
         FinishRestore { .. } => "Finish re-enrolling roles after controller startup.",
-        ExternalEmitCsr { .. } => "Re-emit a renewal CSR for this externally-signed CA.",
+        ExternalEmitCsr { .. } => {
+            "Write a subordinate-CA CSR for your external PKI to sign."
+        }
         ExternalInstall { .. } => {
             "Install the externally-signed CA certificate returned by your PKI."
         }
@@ -810,8 +812,13 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
             ));
         }
         if lca.external_signed {
+            let emit_label = if lca.external_installed {
+                "Emit Renewal CSR (External CA)"
+            } else {
+                "Re-emit Signing CSR (External CA)"
+            };
             items.push((
-                "Emit Renewal CSR (External CA)".to_string(),
+                emit_label.to_string(),
                 Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
             ));
             let label = if lca.external_installed {
