@@ -2552,8 +2552,11 @@ impl RemoteState {
             );
             return;
         }
-        let cols =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(inner);
+        let cols = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(widgets::IDENTICON_WIDTH),
+        ])
+        .split(inner);
         let items: Vec<ListItem> = visible
             .iter()
             .map(|(ci, addr)| {
@@ -2796,8 +2799,11 @@ impl RemoteState {
             RowKey::Cert { glyph, .. } => glyph.clone(),
             _ => None,
         });
-        let cols = Layout::horizontal([Constraint::Length(20), Constraint::Min(20)])
-            .split(inner);
+        let cols = Layout::horizontal([
+            Constraint::Length(widgets::IDENTICON_WIDTH),
+            Constraint::Min(20),
+        ])
+        .split(inner);
         // Left: the identicon (trim:false — its leading "off" cells are spaces).
         if let Some(fp) = &glyph {
             f.render_widget(

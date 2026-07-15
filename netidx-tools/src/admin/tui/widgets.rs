@@ -10,22 +10,58 @@ use ratatui::{
     widgets::Block,
 };
 
-/// Render a fingerprint's 8×8 identicon as ratatui lines, in the sigil's own
-/// color — the same cells the CLI's [`Fingerprint::identicon`] draws, but as
-/// styled spans rather than embedded ANSI. Each "on" cell is a colored `██`.
+pub(super) const IDENTICON_WIDTH: u16 = 20;
+pub(super) const IDENTICON_HEIGHT: u16 = 10;
+const IDENTICON_BORDER_ROW: &str = "                    ";
+
+/// Render a fingerprint's 8×8 identicon as ratatui lines on a black tile, in
+/// the sigil's own color — the same cells the CLI's [`Fingerprint::identicon`]
+/// draws, but as styled spans rather than embedded ANSI.
 pub(super) fn identicon_lines(fp: &Fingerprint) -> Vec<Line<'static>> {
     let (r, g, b) = fp.identicon_color();
-    let on = Style::default().fg(Color::Rgb(r, g, b));
-    fp.identicon_cells()
-        .into_iter()
-        .map(|row| {
-            let spans = row
-                .into_iter()
-                .map(|cell| if cell { Span::styled("██", on) } else { Span::raw("  ") })
+    let off = Style::default().bg(theme::GLYPH_BG);
+    let on = off.fg(Color::Rgb(r, g, b));
+    std::iter::once(Line::from(Span::styled(IDENTICON_BORDER_ROW, off)))
+        .chain(fp.identicon_cells().into_iter().map(|row| {
+            let spans = std::iter::once(Span::styled("  ", off))
+                .chain(row.into_iter().map(|cell| {
+                    Span::styled(
+                        if cell { "██" } else { "  " },
+                        if cell { on } else { off },
+                    )
+                }))
+                .chain(std::iter::once(Span::styled("  ", off)))
                 .collect::<Vec<_>>();
             Line::from(spans)
-        })
+        }))
+        .chain(std::iter::once(Line::from(Span::styled(IDENTICON_BORDER_ROW, off))))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identicon_has_a_black_background() {
+        let fp = Fingerprint::of_der(b"glyph background test");
+        let lines = identicon_lines(&fp);
+        assert_eq!(lines.len(), IDENTICON_HEIGHT as usize);
+        assert!(lines.iter().all(|line| line.width() == IDENTICON_WIDTH as usize));
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.bg == Some(theme::GLYPH_BG))
+        );
+        for line in [lines.first().unwrap(), lines.last().unwrap()] {
+            assert!(line.spans.iter().all(|span| span.content.trim().is_empty()));
+        }
+        for line in &lines[1..lines.len() - 1] {
+            assert!(line.spans.first().unwrap().content.trim().is_empty());
+            assert!(line.spans.last().unwrap().content.trim().is_empty());
+        }
+    }
 }
 
 /// A fingerprint's grouped-base32 text laid out four 5-char groups per line — a

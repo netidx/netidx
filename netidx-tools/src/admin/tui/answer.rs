@@ -790,10 +790,10 @@ impl Modal {
                 const MANUAL: &str = "Enter an address manually…";
                 let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
                 let w = 68u16.min(screen.width.saturating_sub(4)).max(40);
-                // Body holds the list (left) beside the selected glyph (right, 8
-                // identicon rows + a blank + up to 3 fingerprint lines). The list
-                // is the networks plus the poll-more and manual-entry rows.
-                let body_h = (networks.len() as u16 + 2).max(12);
+                // Body holds the list (left) beside the selected glyph (right, 10
+                // tile rows + a blank + up to 3 fingerprint lines). The list is
+                // the networks plus the poll-more and manual-entry rows.
+                let body_h = (networks.len() as u16 + 2).max(14);
                 let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
                     .min(screen.height);
                 let area = widgets::centered(w, h, screen);

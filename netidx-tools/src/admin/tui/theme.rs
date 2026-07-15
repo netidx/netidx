@@ -23,6 +23,8 @@ pub(super) const BACKDROP_FG: Color = Color::Rgb(205, 212, 228);
 pub(super) const PANEL_BG: Color = Color::Rgb(199, 199, 199);
 /// Text on a panel.
 pub(super) const PANEL_FG: Color = Color::Rgb(0, 0, 0);
+/// Background behind a fingerprint glyph.
+pub(super) const GLYPH_BG: Color = Color::Rgb(0, 0, 0);
 /// Muted text on a panel (help/hints) — an explicit gray, since `Modifier::DIM`
 /// reads unpredictably over an explicit background.
 pub(super) const HINT_FG: Color = Color::Rgb(88, 88, 88);

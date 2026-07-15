@@ -687,10 +687,12 @@ fn service_word(status: ServiceStatus) -> &'static str {
 fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncState) {
     let mut lines = detail_lines(d);
     lines.extend(sync_lines(sync));
-    // The right column (when present) is the glyph label + 8 identicon rows + a
+    // The right column (when present) is the glyph label + identicon tile + a
     // blank + the grouped fingerprint; size the dialog to whichever column is
     // taller so neither is clipped.
-    let glyph_h = d.ca.as_ref().map_or(0, |fp| 10 + widgets::group_fingerprint(fp).len());
+    let glyph_h = d.ca.as_ref().map_or(0, |fp| {
+        2 + widgets::IDENTICON_HEIGHT as usize + widgets::group_fingerprint(fp).len()
+    });
     let w = 90.min(screen.width.saturating_sub(4)).max(24);
     let h = ((lines.len().max(glyph_h)) as u16 + 2).min(screen.height); // + borders
     let area = widgets::centered(w, h, screen);
