@@ -763,11 +763,25 @@ pub async fn await_issuance(
     pending: &admin_client::PendingEnrollment,
     identity: &CaIdentity,
 ) -> Result<PollOutcome> {
-    loop {
+    let (purpose, message) = match kind {
+        NodeKind::AdminServer => (
+            "admin-server enrollment request",
+            "waiting for a CA admin to approve this admin-server enrollment…",
+        ),
+        NodeKind::Resolver
+        | NodeKind::Publisher
+        | NodeKind::Client
+        | NodeKind::Workstation => {
+            ("enrollment request", "waiting for a CA admin to approve this request…")
+        }
+    };
+    ans.show_verification_code(purpose, &pending.fingerprint);
+    ans.progress(Progress::new(Stage::WaitingApproval, message));
+    let settled = loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         match admin_client::poll(addr, kind, pending, identity).await {
             Ok(PollOutcome::Pending) => continue,
-            Ok(settled) => return Ok(settled),
+            Ok(settled) => break settled,
             Err(e) => {
                 ans.progress(Progress::new(
                     Stage::WaitingApproval,
@@ -778,7 +792,9 @@ pub async fn await_issuance(
                 continue;
             }
         }
-    }
+    };
+    ans.clear_verification_code();
+    Ok(settled)
 }
 
 /// Obtain a cert from an **already confirmed** network — every connection pins
@@ -874,11 +890,6 @@ pub async fn join_network_replacing(
                 admin_client::enqueue(addr, kind, &name, JOIN_VALIDITY, identity).await?
             }
         };
-        ans.show_verification_code("enrollment request", &pending.fingerprint);
-        ans.progress(Progress::new(
-            Stage::WaitingApproval,
-            "waiting for a CA admin to approve this request…",
-        ));
         match await_issuance(ans, addr, kind, &pending, identity).await? {
             PollOutcome::Issued(issued) => issued,
             PollOutcome::Denied(reason) => {

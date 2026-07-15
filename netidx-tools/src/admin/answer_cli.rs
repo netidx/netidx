@@ -370,6 +370,8 @@ impl Answerer for FlagAnswerer {
         let _ = writeln!(std::io::stderr(), "{purpose} code: {}", code.text());
     }
 
+    fn clear_verification_code(&mut self) {}
+
     fn progress(&mut self, p: Progress) {
         let _ = writeln!(std::io::stderr(), "… {}", p.message);
     }

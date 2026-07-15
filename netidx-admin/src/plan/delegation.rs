@@ -13,7 +13,7 @@ use crate::{
     answer::{Answerer, Progress, Stage},
     template::ReferralAuth,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
@@ -219,7 +219,7 @@ pub async fn delegate_under_parent(
         Stage::WaitingApproval,
         "waiting for the parent admin to approve this delegation…",
     ));
-    loop {
+    let settled = loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         match admin_client::poll_delegation(parent_conf_addr, &request_id, &identity)
             .await
@@ -227,11 +227,13 @@ pub async fn delegate_under_parent(
             Ok(DelegationPollResponse::Pending) => continue,
             Ok(DelegationPollResponse::Approved { parent }) => break Ok(parent),
             Ok(DelegationPollResponse::Denied { reason }) => {
-                bail!("the parent admin denied the delegation: {reason}")
+                break Err(anyhow!("the parent admin denied the delegation: {reason}"));
             }
-            Ok(DelegationPollResponse::Unknown) => bail!(
-                "the delegation request expired before approval; re-run to try again"
-            ),
+            Ok(DelegationPollResponse::Unknown) => {
+                break Err(anyhow!(
+                    "the delegation request expired before approval; re-run to try again"
+                ));
+            }
             // A comms failure here is transient: the parent admin server can be
             // restarting or briefly unreachable during the (human-paced) wait
             // for approval. The request is durable server-side, so keep polling
@@ -249,7 +251,9 @@ pub async fn delegate_under_parent(
                 continue;
             }
         }
-    }
+    };
+    ans.clear_verification_code();
+    settled
 }
 
 #[cfg(test)]

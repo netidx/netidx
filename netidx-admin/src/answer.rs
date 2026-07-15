@@ -735,6 +735,9 @@ pub trait Answerer: Send {
     /// its text + identicon; a TUI renders the identicon.
     fn show_verification_code(&mut self, purpose: &str, code: &Fingerprint);
 
+    /// Dismiss the verification code after its queued request settles.
+    fn clear_verification_code(&mut self);
+
     /// Report progress on a long or asynchronous step (discovery, waiting for
     /// approval). Non-blocking.
     fn progress(&mut self, progress: Progress);

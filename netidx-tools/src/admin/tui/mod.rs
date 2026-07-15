@@ -249,6 +249,16 @@ impl App {
             UiRequest::VerificationCode { purpose, code } => {
                 self.verification = Some((purpose, code))
             }
+            UiRequest::ClearVerificationCode => {
+                self.verification = None;
+                if self
+                    .progress
+                    .as_ref()
+                    .is_some_and(|(p, _)| p.stage == Stage::WaitingApproval)
+                {
+                    self.progress = None;
+                }
+            }
             blocking => {
                 // A question supersedes the progress bar: the op is no longer
                 // working, it's waiting on the operator.
@@ -1369,6 +1379,26 @@ mod render_tests {
             s.contains("send a screenshot of this window"),
             "verification prompt missing: {s:?}"
         );
+    }
+
+    #[test]
+    fn settled_verification_code_does_not_flash_in_busy_gaps() {
+        let mut app = App::new();
+        app.begin("Installing resolver".to_string());
+        let fp = Fingerprint::of_der(b"resolver certificate request");
+        app.handle_request(UiRequest::VerificationCode {
+            purpose: "enrollment request".to_string(),
+            code: fp,
+        });
+        app.handle_request(UiRequest::Progress(Progress::new(
+            Stage::WaitingApproval,
+            "waiting for approval…",
+        )));
+        app.handle_request(UiRequest::ClearVerificationCode);
+        let s = render(&mut app);
+        assert!(!s.contains("█"), "settled request glyph flashed: {s:?}");
+        assert!(!s.contains("waiting for approval"), "settled progress remained: {s:?}");
+        assert!(s.contains("working…"), "busy gap did not return to its quiet state");
     }
 
     #[test]

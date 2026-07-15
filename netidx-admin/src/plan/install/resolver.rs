@@ -43,7 +43,6 @@ use super::DEFAULT_TLS_DOMAIN;
 use crate::{
     admin_proto::{ResolverAddr, Role},
     admin_server_config::{AdminServerConfig, IdMapRole, ResolverRole, Roles},
-    answer::{Progress, Stage},
     atomic,
     fingerprint::Fingerprint,
     offline_ca,
@@ -1428,14 +1427,6 @@ pub async fn enroll_admin_server(
     } else {
         let pending =
             admin_client::enqueue_enroll(ca_addr, enrollment, &net.identity).await?;
-        ans.show_verification_code(
-            "admin-server enrollment request",
-            &pending.fingerprint,
-        );
-        ans.progress(Progress::new(
-            Stage::WaitingApproval,
-            "waiting for a CA admin to approve this admin-server enrollment…",
-        ));
         match enroll::await_issuance(
             ans,
             ca_addr,

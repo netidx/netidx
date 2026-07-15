@@ -118,6 +118,7 @@ pub(super) enum UiRequest {
         purpose: String,
         code: Fingerprint,
     },
+    ClearVerificationCode,
     Note(String),
     Warn(String),
     Progress(Progress),
@@ -269,6 +270,10 @@ impl Answerer for TuiAnswerer {
             purpose: purpose.to_string(),
             code: *code,
         });
+    }
+
+    fn clear_verification_code(&mut self) {
+        let _ = self.tx.send(UiRequest::ClearVerificationCode);
     }
 
     fn progress(&mut self, progress: Progress) {

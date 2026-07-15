@@ -614,6 +614,8 @@ mod tests {
             unreachable!()
         }
 
+        fn clear_verification_code(&mut self) {}
+
         fn progress(&mut self, _progress: Progress) {
             unreachable!()
         }
