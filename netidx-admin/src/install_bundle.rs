@@ -16,12 +16,12 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Component as PathComponent, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CONTROLLER_DIR: &str = "controller";
 const FILES_DIR: &str = "files";
@@ -90,6 +90,21 @@ pub struct ManifestFile {
     pub sha256: String,
 }
 
+/// The resolver endpoint owned by a co-located controller, including the
+/// actual local bind IP when the advertised address is behind NAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolverEndpoint {
+    pub listen: SocketAddr,
+    pub bind: IpAddr,
+}
+
+/// Address choices applied while restoring an installation onto a host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreAddresses {
+    pub admin_listen: Option<SocketAddr>,
+    pub resolver: Option<ResolverEndpoint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub format_version: u32,
@@ -107,6 +122,8 @@ pub struct Manifest {
     /// proposed address in the new enrollment grant; controller restore uses
     /// it unless the operator supplies a replacement address.
     pub admin_listen: Option<SocketAddr>,
+    /// Co-located controller resolver endpoint, when the CA-owned map has one.
+    pub resolver_endpoint: Option<ResolverEndpoint>,
     pub previous_admin_server: Option<crate::admin_proto::AdminServerId>,
     pub files: Vec<ManifestFile>,
 }
@@ -473,6 +490,45 @@ fn overlay_controller_roles(
 }
 
 #[cfg(unix)]
+fn controller_resolver_endpoint(
+    controller: &Path,
+    resolver_config: Option<&[u8]>,
+) -> Result<Option<ResolverEndpoint>> {
+    let inner = crate::backup::verify(controller)
+        .context("verifying embedded controller backup")?;
+    let map: crate::admin_proto::NetworkMap =
+        serde_json::from_slice(&fs::read(controller.join("ca/netmap.json"))?)
+            .context("parsing the controller backup's authoritative network map")?;
+    if map.controller != inner.controller {
+        bail!("embedded controller map identity does not match its signed manifest");
+    }
+    let Some(owned) = map.controller_entry().and_then(|server| server.resolver.as_ref())
+    else {
+        return Ok(None);
+    };
+    let bytes = resolver_config.context(
+        "the controller map owns a resolver endpoint but the backup has no resolver config",
+    )?;
+    let config: netidx::resolver_server::config::file::Config =
+        serde_json::from_slice(bytes).context("parsing the backed-up resolver config")?;
+    let mut matching =
+        config.member_servers.iter().filter(|member| member.addr == owned.addr);
+    let member = matching.next().with_context(|| {
+        format!(
+            "the controller's owned resolver endpoint {} is absent from resolver.json",
+            owned.addr,
+        )
+    })?;
+    if matching.next().is_some() {
+        bail!(
+            "the controller's owned resolver endpoint {} appears more than once in resolver.json",
+            owned.addr,
+        );
+    }
+    Ok(Some(ResolverEndpoint { listen: member.addr, bind: member.bind_addr }))
+}
+
+#[cfg(unix)]
 fn copy_controller_bundle(source: &Path, dest: &Path) -> Result<()> {
     fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
         fs::create_dir_all(dest)?;
@@ -605,6 +661,21 @@ pub fn create(
         })
         .collect::<Result<Vec<_>>>()?;
     let components = components(&root, install.role);
+    #[cfg(unix)]
+    let resolver_endpoint = match controller_bundle {
+        Some(controller) if components.contains(&Component::Resolver) => {
+            controller_resolver_endpoint(
+                controller,
+                captured
+                    .iter()
+                    .find(|file| file.relative == Path::new("resolver.json"))
+                    .map(|file| file.bytes.as_slice()),
+            )?
+        }
+        _ => None,
+    };
+    #[cfg(not(unix))]
+    let resolver_endpoint = None;
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         created_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
@@ -616,6 +687,7 @@ pub fn create(
         identities: identities.clone(),
         controller_bundle: controller_bundle.is_some(),
         admin_listen,
+        resolver_endpoint,
         previous_admin_server,
         files,
     };
@@ -726,10 +798,42 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     }
     if manifest.controller_bundle {
         #[cfg(unix)]
-        crate::backup::verify(&bundle.join(CONTROLLER_DIR))
-            .context("verifying embedded controller recovery bundle")?;
+        {
+            crate::backup::verify(&bundle.join(CONTROLLER_DIR))
+                .context("verifying embedded controller recovery bundle")?;
+            let outer_resolver = manifest
+                .files
+                .iter()
+                .find(|file| file.path == "resolver.json")
+                .map(|file| fs::read(bundle.join(FILES_DIR).join(&file.path)))
+                .transpose()?;
+            let inner_resolver =
+                match fs::read(bundle.join(CONTROLLER_DIR).join("roles/resolver.json")) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+            if outer_resolver != inner_resolver {
+                bail!(
+                    "the resolver config in the install bundle does not match the signed controller snapshot"
+                );
+            }
+            let endpoint = controller_resolver_endpoint(
+                &bundle.join(CONTROLLER_DIR),
+                inner_resolver.as_deref(),
+            )?;
+            if endpoint != manifest.resolver_endpoint {
+                bail!(
+                    "the resolver endpoint in the install manifest does not match the signed controller snapshot"
+                );
+            }
+        }
         #[cfg(not(unix))]
         bail!("controller restore is supported only on unix");
+    } else if manifest.resolver_endpoint.is_some() {
+        bail!(
+            "a backup without a controller may not claim a controller resolver endpoint"
+        );
     }
     Ok(manifest)
 }
@@ -830,19 +934,127 @@ pub fn controller_snapshot_prepared(
 /// Atomically publish the captured configuration at `root`. Existing roots are
 /// refused: restore is an install, never an implicit merge with live state.
 pub fn restore_files(bundle: &Path, root: &Path) -> Result<Manifest> {
+    restore_files_with_addresses(bundle, root, RestoreAddresses::default())
+}
+
+fn local_client_bind(endpoint: ResolverEndpoint) -> Option<String> {
+    if endpoint.listen.ip().is_loopback() && endpoint.bind.is_loopback() {
+        return None;
+    }
+    let prefix = if endpoint.bind.is_ipv4() { 32 } else { 128 };
+    Some(if endpoint.listen.ip() == endpoint.bind {
+        format!("{}/{prefix}", endpoint.bind)
+    } else {
+        format!("{}@{}/{prefix}", endpoint.listen.ip(), endpoint.bind)
+    })
+}
+
+fn restored_bytes(
+    file: &ManifestFile,
+    source: Vec<u8>,
+    manifest: &Manifest,
+    root: &Path,
+    addresses: RestoreAddresses,
+) -> Result<Vec<u8>> {
+    let destination = root.to_string_lossy();
+    let mut restored = match std::str::from_utf8(&source) {
+        Ok(text) if manifest.source_config_root != destination => {
+            text.replace(&manifest.source_config_root, &destination).into_bytes()
+        }
+        _ => source,
+    };
+    if file.path == "install.json"
+        && addresses.admin_listen.is_some()
+        && addresses.admin_listen != manifest.install.admin_server
+        && manifest.components.contains(&Component::Controller)
+    {
+        let mut install: InstallRecord = serde_json::from_slice(&restored)?;
+        install.admin_server = addresses.admin_listen;
+        restored = serde_json::to_vec_pretty(&install)?;
+    }
+    let Some(replacement) = addresses.resolver else { return Ok(restored) };
+    let original = manifest.resolver_endpoint.context(
+        "this backup has no co-located controller resolver endpoint to relocate",
+    )?;
+    if replacement == original {
+        return Ok(restored);
+    }
+    match file.path.as_str() {
+        "resolver.json" => {
+            let mut config: netidx::resolver_server::config::file::Config =
+                serde_json::from_slice(&restored)?;
+            let mut matching = config
+                .member_servers
+                .iter_mut()
+                .filter(|member| member.addr == original.listen);
+            let member = matching.next().with_context(|| {
+                format!(
+                    "the controller's owned resolver endpoint {} is absent from resolver.json",
+                    original.listen,
+                )
+            })?;
+            member.addr = replacement.listen;
+            member.bind_addr = replacement.bind;
+            if matching.next().is_some() {
+                bail!(
+                    "the controller's owned resolver endpoint {} appears more than once in resolver.json",
+                    original.listen,
+                );
+            }
+            restored = serde_json::to_vec_pretty(&config)?;
+        }
+        "client.json" => {
+            let mut config: netidx::config::file::Config =
+                serde_json::from_slice(&restored)?;
+            let mut changed = false;
+            for (addr, _) in &mut config.addrs {
+                if *addr == original.listen {
+                    *addr = replacement.listen;
+                    changed = true;
+                }
+            }
+            if changed {
+                config.default_bind_config = local_client_bind(replacement);
+                restored = serde_json::to_vec_pretty(&config)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(restored)
+}
+
+/// Restore with replacement host addresses. A controller's admin address and
+/// co-located resolver endpoint are applied to every local config before the
+/// staged directory is published.
+pub fn restore_files_with_addresses(
+    bundle: &Path,
+    root: &Path,
+    addresses: RestoreAddresses,
+) -> Result<Manifest> {
     let manifest = verify(bundle)?;
-    let relocate_manifest = |mut manifest: Manifest| {
+    if addresses.resolver.is_some() && manifest.resolver_endpoint.is_none() {
+        bail!("this backup has no co-located controller resolver endpoint to relocate");
+    }
+    let relocate_manifest = |mut manifest: Manifest| -> Result<Manifest> {
         let source = Path::new(&manifest.source_config_root);
         for path in &mut manifest.install.managed_paths {
             if let Ok(relative) = path.strip_prefix(source) {
                 *path = root.join(relative);
             }
         }
+        if let Some(listen) = addresses.admin_listen {
+            manifest.admin_listen = Some(listen);
+            if manifest.components.contains(&Component::Controller) {
+                manifest.install.admin_server = Some(listen);
+            }
+        }
+        if let Some(resolver) = addresses.resolver {
+            manifest.resolver_endpoint = Some(resolver);
+        }
         manifest.source_config_root = root.to_string_lossy().into_owned();
-        manifest
+        Ok(manifest)
     };
     if root.exists() {
-        let destination = root.to_string_lossy();
         let mut restored_identity_files = BTreeSet::new();
         for identity in &manifest.identities {
             let certificate = root.join(&identity.certificate);
@@ -886,17 +1098,16 @@ pub fn restore_files(bundle: &Path, root: &Path) -> Result<Manifest> {
             let Ok(source) = fs::read(bundle.join(FILES_DIR).join(&file.path)) else {
                 return false;
             };
-            let expected = match std::str::from_utf8(&source) {
-                Ok(text) if manifest.source_config_root != destination => {
-                    text.replace(&manifest.source_config_root, &destination).into_bytes()
-                }
-                _ => source,
+            let expected = match restored_bytes(file, source, &manifest, root, addresses)
+            {
+                Ok(expected) => expected,
+                Err(_) => return false,
             };
             fs::read(root.join(&file.path))
                 .is_ok_and(|actual| restored_file_matches(&file.path, &actual, &expected))
         });
         if complete {
-            return Ok(relocate_manifest(manifest));
+            return relocate_manifest(manifest);
         }
         bail!(
             "restore destination {} already contains different state; refusing to merge a backup with a live install",
@@ -914,12 +1125,7 @@ pub fn restore_files(bundle: &Path, root: &Path) -> Result<Manifest> {
     }
     for file in &manifest.files {
         let source = fs::read(bundle.join(FILES_DIR).join(&file.path))?;
-        let restored = match std::str::from_utf8(&source) {
-            Ok(text) if manifest.source_config_root != root.to_string_lossy() => text
-                .replace(&manifest.source_config_root, &root.to_string_lossy())
-                .into_bytes(),
-            _ => source,
-        };
+        let restored = restored_bytes(file, source, &manifest, root, addresses)?;
         atomic::write_atomic(&stage.path().join(&file.path), &restored, file.mode)?;
     }
     let staged = stage.keep();
@@ -927,7 +1133,7 @@ pub fn restore_files(bundle: &Path, root: &Path) -> Result<Manifest> {
         let _ = fs::remove_dir_all(&staged);
         return Err(e);
     }
-    Ok(relocate_manifest(manifest))
+    relocate_manifest(manifest)
 }
 
 #[cfg(test)]
@@ -979,6 +1185,129 @@ mod tests {
             br#"{"identities":{}}"#,
         ));
         assert!(!restored_file_matches("resolver.json", b"invalid", b"also invalid"));
+    }
+
+    #[test]
+    fn controller_resolver_restore_rewrites_one_owned_endpoint_everywhere() {
+        use netidx::{config::file as cfile, resolver_server::config::file as rfile};
+
+        let old_admin: SocketAddr = "10.0.0.1:4565".parse().unwrap();
+        let new_admin: SocketAddr = "10.1.0.4:5565".parse().unwrap();
+        let old = ResolverEndpoint {
+            listen: "10.0.0.1:4564".parse().unwrap(),
+            bind: "10.0.0.1".parse().unwrap(),
+        };
+        let new = ResolverEndpoint {
+            listen: "203.0.113.4:5564".parse().unwrap(),
+            bind: "10.1.0.4".parse().unwrap(),
+        };
+        let mut install = InstallRecord::new(
+            InstallRole::Resolver,
+            "/",
+            "anonymous",
+            None,
+            Some(old_admin),
+        );
+        install.created_unix = 1;
+        let manifest = Manifest {
+            format_version: FORMAT_VERSION,
+            created_unix: 1,
+            install: install.clone(),
+            source_config_root: "/old/netidx".into(),
+            config_scope: BundleScope::System,
+            components: vec![Component::Controller, Component::Resolver],
+            service: None,
+            identities: vec![],
+            controller_bundle: true,
+            admin_listen: Some(old_admin),
+            resolver_endpoint: Some(old),
+            previous_admin_server: None,
+            files: vec![],
+        };
+        let file = |path: &str| ManifestFile {
+            path: path.into(),
+            bytes: 0,
+            mode: 0o600,
+            sha256: String::new(),
+        };
+        let resolver = rfile::ConfigBuilder::default()
+            .member_servers(vec![
+                rfile::MemberServerBuilder::default()
+                    .addr(old.listen)
+                    .bind_addr(old.bind)
+                    .auth(rfile::Auth::Anonymous)
+                    .build()
+                    .unwrap(),
+                rfile::MemberServerBuilder::default()
+                    .addr("10.0.0.2:4564".parse().unwrap())
+                    .bind_addr("10.0.0.2".parse().unwrap())
+                    .auth(rfile::Auth::Anonymous)
+                    .build()
+                    .unwrap(),
+            ])
+            .build()
+            .unwrap();
+        let client = cfile::Config {
+            base: "/".into(),
+            addrs: vec![
+                (old.listen, cfile::Auth::Anonymous),
+                ("10.0.0.2:4564".parse().unwrap(), cfile::Auth::Anonymous),
+            ],
+            tls: None,
+            default_auth: netidx::config::DefaultAuthMech::Anonymous,
+            default_bind_config: Some("10.0.0.1/32".into()),
+        };
+        let addresses =
+            RestoreAddresses { admin_listen: Some(new_admin), resolver: Some(new) };
+
+        let resolver: rfile::Config = serde_json::from_slice(
+            &restored_bytes(
+                &file("resolver.json"),
+                serde_json::to_vec(&resolver).unwrap(),
+                &manifest,
+                Path::new("/new/netidx"),
+                addresses,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolver.member_servers[0].addr, new.listen);
+        assert_eq!(resolver.member_servers[0].bind_addr, new.bind);
+        assert_eq!(
+            resolver.member_servers[1].addr,
+            "10.0.0.2:4564".parse::<SocketAddr>().unwrap()
+        );
+
+        let client: cfile::Config = serde_json::from_slice(
+            &restored_bytes(
+                &file("client.json"),
+                serde_json::to_vec(&client).unwrap(),
+                &manifest,
+                Path::new("/new/netidx"),
+                addresses,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(client.addrs[0].0, new.listen);
+        assert_eq!(client.addrs[1].0, "10.0.0.2:4564".parse().unwrap());
+        assert_eq!(
+            client.default_bind_config.as_deref(),
+            Some("203.0.113.4@10.1.0.4/32")
+        );
+
+        let restored_install: InstallRecord = serde_json::from_slice(
+            &restored_bytes(
+                &file("install.json"),
+                serde_json::to_vec(&install).unwrap(),
+                &manifest,
+                Path::new("/new/netidx"),
+                addresses,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored_install.admin_server, Some(new_admin));
     }
 
     #[test]

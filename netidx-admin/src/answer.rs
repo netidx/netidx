@@ -155,6 +155,12 @@ pub enum Field {
     BackupTarget,
     /// Existing installation bundle selected for restore.
     RestoreSource,
+    /// Replacement controller admin address during restore.
+    RestoreAdminListen,
+    /// Replacement advertised endpoint for a co-located resolver.
+    RestoreResolverListen,
+    /// Replacement local bind IP for a co-located resolver.
+    RestoreResolverBind,
     /// Explicit split-brain fence attestation before controller restore.
     FenceOldController,
 }
@@ -550,6 +556,27 @@ impl Field {
                 label: "backup bundle directory",
                 help: "A bundle created by netidx admin backup. It is completely \
                        verified before restore writes anything.",
+            },
+            RestoreAdminListen => FieldInfo {
+                flag: "--listen",
+                label: "restored controller address",
+                help: "The routable address and port this replacement controller \
+                       will use. Keep the recorded value when restoring on the same \
+                       network address.",
+            },
+            RestoreResolverListen => FieldInfo {
+                flag: "--resolver-listen",
+                label: "restored resolver address",
+                help: "The advertised address and port of the resolver co-located \
+                       with this controller. This updates the resolver config, local \
+                       client config, and CA-owned cluster map together.",
+            },
+            RestoreResolverBind => FieldInfo {
+                flag: "--resolver-bind",
+                label: "restored resolver bind IP",
+                help: "The local interface IP the restored resolver binds. It usually \
+                       matches the advertised resolver IP; use a private interface IP \
+                       here when the advertised address is behind NAT.",
             },
             FenceOldController => FieldInfo {
                 flag: "--old-controller-fenced",

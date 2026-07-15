@@ -94,6 +94,70 @@ pub fn upsert_controller(
     Ok(did_change)
 }
 
+/// Move one server's resolver endpoint without changing its identity, grant,
+/// cluster placement, or data-plane authentication.
+pub fn relocate_resolver(
+    map: &mut NetworkMap,
+    server_id: AdminServerId,
+    addr: std::net::SocketAddr,
+) -> Result<bool> {
+    let server = map
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .with_context(|| format!("admin server {server_id} does not exist"))?;
+    if !server.roles.contains(&Role::Resolver) {
+        bail!("admin server {server_id} has no Resolver grant");
+    }
+    let old = server.resolver.clone().with_context(|| {
+        format!("admin server {server_id} has no owned resolver member")
+    })?;
+    if old.addr == addr {
+        return Ok(false);
+    }
+    if map.servers.iter().any(|server| {
+        server.id != server_id
+            && server.resolver.as_ref().is_some_and(|resolver| resolver.addr == addr)
+    }) {
+        bail!("resolver member {addr} is already owned by another admin server");
+    }
+    let cluster_id = server
+        .cluster
+        .with_context(|| format!("resolver admin server {server_id} has no cluster"))?;
+    let cluster = map
+        .clusters
+        .iter()
+        .find(|cluster| cluster.id == cluster_id)
+        .context("the server's assigned resolver cluster does not exist")?;
+    if cluster.members.iter().filter(|member| **member == old).count() != 1 {
+        bail!(
+            "resolver cluster {} does not contain exactly one copy of server {}'s owned member",
+            cluster.id,
+            server_id,
+        );
+    }
+
+    let replacement = ResolverAddr { addr, auth: old.auth.clone() };
+    map.servers
+        .iter_mut()
+        .find(|server| server.id == server_id)
+        .expect("server checked above")
+        .resolver = Some(replacement.clone());
+    let cluster = map
+        .clusters
+        .iter_mut()
+        .find(|cluster| cluster.id == cluster_id)
+        .expect("cluster checked above");
+    *cluster
+        .members
+        .iter_mut()
+        .find(|member| **member == old)
+        .expect("member checked above") = replacement;
+    normalize_addrs(&mut cluster.members);
+    changed(map);
+    Ok(true)
+}
+
 /// Insert the immutable grant at certificate issuance time. The enrollee does
 /// not choose either identity: `server_id` and a created cluster id come from
 /// the CA.
@@ -656,6 +720,113 @@ mod tests {
             cluster: ClusterPlacement::Create { base: base.into() },
             replaces: None,
         }
+    }
+
+    #[test]
+    fn resolver_relocation_changes_only_the_owned_endpoint() {
+        let controller = AdminServerId::new();
+        let peer = AdminServerId::new();
+        let cluster = ResolverClusterId::new();
+        let old = ResolverAddr {
+            addr: "10.0.0.1:4564".parse().unwrap(),
+            auth: InfoAuth::Tls { name: "resolver.example.com".into() },
+        };
+        let peer_addr = addr("10.0.0.2:4564");
+        let controller_entry = ServerEntry {
+            id: controller,
+            addr: "10.0.0.1:4565".parse().unwrap(),
+            roles: vec![Role::Ca, Role::Resolver],
+            resolver: Some(old.clone()),
+            cluster: Some(cluster),
+            state: ServerState::Registered,
+        };
+        let peer_entry = ServerEntry {
+            id: peer,
+            addr: "10.0.0.2:4565".parse().unwrap(),
+            roles: vec![Role::Resolver],
+            resolver: Some(peer_addr.clone()),
+            cluster: Some(cluster),
+            state: ServerState::Registered,
+        };
+        let mut map = NetworkMap {
+            version: 7,
+            controller,
+            servers: vec![controller_entry.clone(), peer_entry.clone()],
+            clusters: vec![ClusterEntry {
+                id: cluster,
+                base: "/".into(),
+                state: ClusterState::Active,
+                members: vec![old.clone(), peer_addr.clone()],
+                parent: None,
+                children: vec![],
+            }],
+        };
+
+        let new_addr = "10.1.0.1:5564".parse().unwrap();
+        assert!(relocate_resolver(&mut map, controller, new_addr).unwrap());
+        assert_eq!(map.version, 8);
+        let moved = map.controller_entry().unwrap();
+        assert_eq!(moved.addr, controller_entry.addr);
+        assert_eq!(moved.roles, controller_entry.roles);
+        assert_eq!(moved.cluster, controller_entry.cluster);
+        assert_eq!(moved.state, controller_entry.state);
+        assert_eq!(
+            moved.resolver,
+            Some(ResolverAddr { addr: new_addr, auth: old.auth.clone() })
+        );
+        assert_eq!(
+            map.servers.iter().find(|server| server.id == peer),
+            Some(&peer_entry)
+        );
+        assert_eq!(
+            map.clusters[0].members,
+            vec![peer_addr, ResolverAddr { addr: new_addr, auth: old.auth }]
+        );
+        assert!(!relocate_resolver(&mut map, controller, new_addr).unwrap());
+        assert_eq!(map.version, 8);
+    }
+
+    #[test]
+    fn resolver_relocation_rejects_another_servers_endpoint() {
+        let controller = AdminServerId::new();
+        let peer = AdminServerId::new();
+        let cluster = ResolverClusterId::new();
+        let old = addr("10.0.0.1:4564");
+        let peer_addr = addr("10.0.0.2:4564");
+        let mut map = NetworkMap {
+            version: 3,
+            controller,
+            servers: vec![
+                ServerEntry {
+                    id: controller,
+                    addr: "10.0.0.1:4565".parse().unwrap(),
+                    roles: vec![Role::Ca, Role::Resolver],
+                    resolver: Some(old.clone()),
+                    cluster: Some(cluster),
+                    state: ServerState::Registered,
+                },
+                ServerEntry {
+                    id: peer,
+                    addr: "10.0.0.2:4565".parse().unwrap(),
+                    roles: vec![Role::Resolver],
+                    resolver: Some(peer_addr.clone()),
+                    cluster: Some(cluster),
+                    state: ServerState::Registered,
+                },
+            ],
+            clusters: vec![ClusterEntry {
+                id: cluster,
+                base: "/".into(),
+                state: ClusterState::Active,
+                members: vec![old, peer_addr.clone()],
+                parent: None,
+                children: vec![],
+            }],
+        };
+        let before = map.clone();
+
+        assert!(relocate_resolver(&mut map, controller, peer_addr.addr).is_err());
+        assert_eq!(map, before);
     }
 
     #[test]

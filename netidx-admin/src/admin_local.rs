@@ -16,8 +16,9 @@ use crate::admin_proto::{
     BackupResponse, ClientHello, EditPermsRequest, EditPermsResponse, EnrollRequest,
     ExternalCaCsrResponse, ExternalCaInstallRequest, ExternalCaInstallResponse,
     ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult, ReadPermsRequest,
-    ReadPermsResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
-    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
+    ReadPermsResponse, ReconcileControllerRequest, ReconcileControllerResponse,
+    RemoveAdminRequest, Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret,
+    ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
@@ -140,6 +141,30 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
             manifest_sha256,
         }),
         BackupResponse::Err { reason } => bail!("the CA refused backup: {reason}"),
+    }
+}
+
+/// Re-push the restored controller route, authoritative map, CRL, and resolver
+/// topology over the protected local control socket.
+pub async fn reconcile_controller(
+    cfg_path: &Path,
+) -> Result<(admin_proto::OperationId, Vec<PeerResult>)> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    admin_proto::write_msg(
+        &mut s,
+        &Request::ReconcileController(ReconcileControllerRequest {
+            credential: admin_proto::AdminCredential::Password { admin, password },
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut s).await? {
+        ReconcileControllerResponse::Ok { operation_id, peers } => {
+            Ok((operation_id, peers))
+        }
+        ReconcileControllerResponse::Err { reason } => {
+            bail!("the CA refused controller reconciliation: {reason}")
+        }
     }
 }
 

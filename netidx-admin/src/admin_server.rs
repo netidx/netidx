@@ -4077,10 +4077,42 @@ async fn handle_reconcile_controller(
         &format!("operation {operation_id}"),
         Duration::ZERO,
     );
-    match push_controller_state_to_peers(state, operation_id).await {
-        Ok(peers) => ReconcileControllerResponse::Ok { operation_id, peers },
-        Err(e) => ReconcileControllerResponse::Err { reason: format!("{e:#}") },
+    let mut peers = match push_controller_state_to_peers(state, operation_id).await {
+        Ok(peers) => peers,
+        Err(e) => {
+            return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
+        }
+    };
+    let topology = {
+        let map = state.map.lock();
+        topology_fanout(&map, map.clusters.iter())
+    };
+    merge_topology_results(
+        &mut peers,
+        push_topology(state, topology, operation_id).await,
+    );
+    ReconcileControllerResponse::Ok { operation_id, peers }
+}
+
+fn merge_topology_results(peers: &mut Vec<PeerResult>, topology: Vec<PeerResult>) {
+    for mut result in topology {
+        let Some(existing) = peers.iter_mut().find(|peer| peer.server == result.server)
+        else {
+            if let Some(error) = result.error.as_mut() {
+                *error = format!("resolver topology: {error}");
+            }
+            peers.push(result);
+            continue;
+        };
+        let Some(error) = result.error else { continue };
+        existing.error = Some(match existing.error.take() {
+            Some(state_error) => {
+                format!("controller state: {state_error}; resolver topology: {error}")
+            }
+            None => format!("resolver topology: {error}"),
+        });
     }
+    peers.sort_by_key(|peer| peer.server);
 }
 
 async fn handle_revoke(
@@ -6566,8 +6598,19 @@ fn approve_delegation_prepare(
         &format!("operation {operation_id}: {}", child.base),
         Duration::ZERO,
     );
+    Ok(topology_fanout(&map, [&parent, &child]))
+}
+
+struct TopologyFanout {
+    targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
+}
+
+fn topology_fanout<'a>(
+    map: &NetworkMap,
+    clusters: impl IntoIterator<Item = &'a admin_proto::ClusterEntry>,
+) -> TopologyFanout {
     let mut targets = Vec::new();
-    for cluster in [&parent, &child] {
+    for cluster in clusters {
         for server in map.servers.iter().filter(|server| {
             server.cluster == Some(cluster.id)
                 && server.state == admin_proto::ServerState::Registered
@@ -6578,15 +6621,11 @@ fn approve_delegation_prepare(
             targets.push((
                 server.id,
                 server.addr,
-                topology_edit(&map, cluster, local_member),
+                topology_edit(map, cluster, local_member),
             ));
         }
     }
-    Ok(TopologyFanout { targets })
-}
-
-struct TopologyFanout {
-    targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
+    TopologyFanout { targets }
 }
 
 fn topology_edit(
@@ -10657,6 +10696,73 @@ mod v6_tests {
             children: vec![],
         };
         assert!(apply_referral_edit_local(&p, &wrong_auth).is_err());
+    }
+
+    #[test]
+    fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
+        let controller = admin_proto::AdminServerId::new();
+        let satellite = admin_proto::AdminServerId::new();
+        let root = admin_proto::ResolverClusterId::new();
+        let child = admin_proto::ResolverClusterId::new();
+        let resolver = |addr: &str| ResolverAddr {
+            addr: addr.parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        };
+        let root_member = resolver("10.1.0.1:4564");
+        let child_member = resolver("10.2.0.1:4564");
+        let map = NetworkMap {
+            version: 9,
+            controller,
+            servers: vec![
+                ServerEntry {
+                    id: controller,
+                    addr: "10.1.0.1:4565".parse().unwrap(),
+                    roles: vec![Role::Ca, Role::Resolver],
+                    resolver: Some(root_member.clone()),
+                    cluster: Some(root),
+                    state: admin_proto::ServerState::Registered,
+                },
+                ServerEntry {
+                    id: satellite,
+                    addr: "10.2.0.1:4565".parse().unwrap(),
+                    roles: vec![Role::Resolver],
+                    resolver: Some(child_member.clone()),
+                    cluster: Some(child),
+                    state: admin_proto::ServerState::Registered,
+                },
+            ],
+            clusters: vec![
+                admin_proto::ClusterEntry {
+                    id: root,
+                    base: "/".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![root_member.clone()],
+                    parent: None,
+                    children: vec![child],
+                },
+                admin_proto::ClusterEntry {
+                    id: child,
+                    base: "/eu".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![child_member.clone()],
+                    parent: Some(root),
+                    children: vec![],
+                },
+            ],
+        };
+
+        let fanout = topology_fanout(&map, map.clusters.iter());
+        assert_eq!(fanout.targets.len(), 2);
+        let (_, _, ReferralEdit::SetTopology { parent, children, .. }) =
+            fanout.targets.iter().find(|(server, _, _)| *server == controller).unwrap();
+        assert!(parent.is_none());
+        assert_eq!(children[0].path, "/eu");
+        assert_eq!(children[0].addrs, vec![child_member]);
+        let (_, _, ReferralEdit::SetTopology { parent, children, .. }) =
+            fanout.targets.iter().find(|(server, _, _)| *server == satellite).unwrap();
+        assert!(children.is_empty());
+        assert_eq!(parent.as_ref().unwrap().path, "/eu");
+        assert_eq!(parent.as_ref().unwrap().addrs, vec![root_member]);
     }
 
     #[test]

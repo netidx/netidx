@@ -29,7 +29,10 @@ use netidx_admin::{
     renewd,
     service::ServiceScope,
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
@@ -292,7 +295,11 @@ pub(super) enum Action {
     /// Select and restore an installation bundle on a fresh machine.
     Restore,
     /// Resume controller+resolver restore after the privileged service step.
-    FinishRestore { bundle: PathBuf, config_root: PathBuf },
+    FinishRestore {
+        bundle: PathBuf,
+        config_root: PathBuf,
+        addresses: install_bundle::RestoreAddresses,
+    },
     /// Re-emit a renewal CSR for this box's externally-signed CA (local).
     ExternalEmitCsr { ca_dir: PathBuf },
     /// Install an externally-signed CA certificate on this box (local).
@@ -441,8 +448,8 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
             backup(&mut ans, config_root, scope).await
         }
         Action::Restore => restore(&mut ans).await,
-        Action::FinishRestore { bundle, config_root } => {
-            finish_restore(&mut ans, bundle, config_root).await
+        Action::FinishRestore { bundle, config_root, addresses } => {
+            finish_restore(&mut ans, bundle, config_root, addresses).await
         }
         Action::Services(sa) => super::services::run(&mut ans, sa).await,
     }
@@ -618,31 +625,75 @@ fn restore_root(manifest: &install_bundle::Manifest) -> Result<PathBuf> {
 
 async fn finish_identities(
     ans: &mut TuiAnswerer,
-    bundle: &PathBuf,
     root: &PathBuf,
+    manifest: &install_bundle::Manifest,
 ) -> Result<()> {
-    let manifest = install_bundle::verify(bundle)?;
     if manifest.identities.is_empty()
-        || super::super::backup_restore::identities_complete(root, &manifest)
+        || super::super::backup_restore::identities_complete(root, manifest)
     {
         return Ok(());
     }
     let (controller, net) =
-        super::super::backup_restore::network_for_restore(&manifest, None)
+        super::super::backup_restore::network_for_restore(manifest, None)
             .await?
             .context(
                 "the backup contains TLS identities but no administrative network",
             )?;
     super::super::backup_restore::reenroll_data_identities(
-        ans, root, &manifest, controller, &net, None,
+        ans, root, manifest, controller, &net, None,
     )
     .await?;
     #[cfg(unix)]
     super::super::backup_restore::reenroll_satellite_admin(
-        ans, root, &manifest, &net, None,
+        ans, root, manifest, &net, None,
     )
     .await?;
     Ok(())
+}
+
+async fn restore_addresses(
+    ans: &mut TuiAnswerer,
+    manifest: &install_bundle::Manifest,
+) -> Result<install_bundle::RestoreAddresses> {
+    let controller = manifest.components.contains(&install_bundle::Component::Controller);
+    let admin_listen = if controller {
+        let default = manifest
+            .admin_listen
+            .map(|listen| listen.to_string())
+            .context("the controller backup has no recorded admin address")?;
+        Some(
+            ans.text(Field::RestoreAdminListen, None, Some(&default), true)
+                .await?
+                .context("the restored controller address is required")?
+                .parse::<SocketAddr>()
+                .context("the restored controller address must be IP:port")?,
+        )
+    } else {
+        None
+    };
+    let resolver = match manifest.resolver_endpoint {
+        Some(original) => {
+            let default = original.listen.to_string();
+            let listen = ans
+                .text(Field::RestoreResolverListen, None, Some(&default), true)
+                .await?
+                .context("the restored resolver address is required")?
+                .parse::<SocketAddr>()
+                .context("the restored resolver address must be IP:port")?;
+            let bind_default =
+                if listen == original.listen { original.bind } else { listen.ip() }
+                    .to_string();
+            let bind = ans
+                .text(Field::RestoreResolverBind, None, Some(&bind_default), true)
+                .await?
+                .context("the restored resolver bind IP is required")?
+                .parse::<IpAddr>()
+                .context("the restored resolver bind address must be an IP")?;
+            Some(install_bundle::ResolverEndpoint { listen, bind })
+        }
+        None => None,
+    };
+    Ok(install_bundle::RestoreAddresses { admin_listen, resolver })
 }
 
 async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
@@ -667,8 +718,44 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
     if controller && !ans.confirm(Field::FenceOldController, None, false).await? {
         bail!("controller restore cancelled until the old controller is fenced");
     }
+    let addresses = restore_addresses(ans, &preflight).await?;
+    let resolver_relocated = addresses
+        .resolver
+        .zip(preflight.resolver_endpoint)
+        .is_some_and(|(replacement, original)| replacement != original);
+    let recorded = preflight.service.as_ref().is_some_and(|service| service.installed);
+    let install_service =
+        ans.confirm(Field::Service, recorded.then_some(true), true).await?;
+    let service_scope = install_service.then_some(
+        match preflight
+            .service
+            .as_ref()
+            .map(|service| service.scope)
+            .unwrap_or(preflight.config_scope)
+        {
+            install_bundle::BundleScope::User => ServiceScope::User,
+            install_bundle::BundleScope::System => ServiceScope::System,
+        },
+    );
+    let service_install = service_scope.map(|scope| match &preflight.service {
+        Some(intent) => ServiceInstall {
+            scope,
+            name: intent.name.clone(),
+            for_user: intent.for_user.clone(),
+        },
+        None => ServiceInstall::defaults(scope),
+    });
+    if controller
+        && (!preflight.identities.is_empty() || resolver_relocated)
+        && service_install.is_none()
+    {
+        bail!(
+            "a controller with co-located roles must run its service before restore can finish enrollment and hierarchy reconciliation"
+        );
+    }
     let root = restore_root(&preflight)?;
-    let manifest = install_bundle::restore_files(&bundle, &root)?;
+    let manifest =
+        install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
     #[cfg(unix)]
     if controller {
         let ca_dir = root.join("ca");
@@ -707,6 +794,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                 ca_dir,
                 cfg_path.clone(),
                 manifest.admin_listen,
+                addresses.resolver.map(|resolver| resolver.listen),
                 false,
             )
             .await?;
@@ -728,28 +816,8 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
     if controller {
         bail!("controller restore is supported only on unix")
     }
-    let recorded = manifest.service.as_ref().is_some_and(|s| s.installed);
-    let install_service =
-        ans.confirm(Field::Service, recorded.then_some(true), true).await?;
-    let service_scope = install_service.then_some(
-        match manifest.service.as_ref().map(|s| s.scope).unwrap_or(manifest.config_scope)
-        {
-            install_bundle::BundleScope::User => ServiceScope::User,
-            install_bundle::BundleScope::System => ServiceScope::System,
-        },
-    );
-    let service_install = service_scope.map(|scope| match &manifest.service {
-        Some(intent) => ServiceInstall {
-            scope,
-            name: intent.name.clone(),
-            for_user: intent.for_user.clone(),
-        },
-        None => ServiceInstall::defaults(scope),
-    });
-    if controller && !manifest.identities.is_empty() {
-        let service_install = service_install.context(
-            "a controller with co-located TLS roles must run its service before those roles can re-enroll",
-        )?;
+    if controller && (!manifest.identities.is_empty() || resolver_relocated) {
+        let service_install = service_install.expect("required before restore writes");
         return Ok(Outcome {
             title: "Controller restored".to_string(),
             lines: vec![
@@ -758,13 +826,17 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
             ],
             refresh_local: false,
             install_service: Some(service_install),
-            after_service: Some(Action::FinishRestore { bundle, config_root: root }),
+            after_service: Some(Action::FinishRestore {
+                bundle,
+                config_root: root,
+                addresses,
+            }),
             remote: None,
             services: None,
             quiet: true,
         });
     }
-    finish_identities(ans, &bundle, &root).await?;
+    finish_identities(ans, &root, &manifest).await?;
     Ok(Outcome {
         title: "Restore complete".to_string(),
         lines: vec![format!(
@@ -784,15 +856,31 @@ async fn finish_restore(
     ans: &mut TuiAnswerer,
     bundle: PathBuf,
     config_root: PathBuf,
+    addresses: install_bundle::RestoreAddresses,
 ) -> Result<Outcome> {
-    let manifest = install_bundle::verify(&bundle)?;
-    finish_identities(ans, &bundle, &config_root).await?;
+    let preflight = install_bundle::verify(&bundle)?;
+    let resolver_relocated = addresses
+        .resolver
+        .zip(preflight.resolver_endpoint)
+        .is_some_and(|(replacement, original)| replacement != original);
+    let manifest =
+        install_bundle::restore_files_with_addresses(&bundle, &config_root, addresses)?;
+    finish_identities(ans, &config_root, &manifest).await?;
     super::super::backup_restore::start_restored_units(&config_root).await?;
-    Ok(Outcome::plain(
-        "Restore complete",
-        vec![format!("{} is installed and ready.", manifest.install.role.as_str())],
-        true,
-    ))
+    let operation = if resolver_relocated {
+        Some(
+            super::super::backup_restore::reconcile_restored_controller(&config_root)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let mut lines =
+        vec![format!("{} is installed and ready.", manifest.install.role.as_str())];
+    if let Some(operation) = operation {
+        lines.push(format!("Hierarchy reconciled (operation {operation})."));
+    }
+    Ok(Outcome::plain("Restore complete", lines, true))
 }
 
 /// Re-emit a renewal CSR for an externally-signed CA.

@@ -243,6 +243,7 @@ pub async fn recover_controller(
     ca_dir: PathBuf,
     config_path: PathBuf,
     listen: Option<SocketAddr>,
+    resolver_listen: Option<SocketAddr>,
     insecure_no_tpm: bool,
 ) -> Result<RecoverControllerOutcome> {
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
@@ -253,6 +254,7 @@ pub async fn recover_controller(
         &ca_dir,
         &config_path,
         listen,
+        resolver_listen,
         &recovery,
         insecure_no_tpm,
         &autorenew_keytab,
@@ -330,6 +332,7 @@ fn recover_controller_with_password(
     ca_dir: &Path,
     config_path: &Path,
     listen: Option<SocketAddr>,
+    resolver_listen: Option<SocketAddr>,
     recovery_password: &str,
     insecure_no_tpm: bool,
     autorenew_keytab: &Path,
@@ -396,6 +399,11 @@ fn recover_controller_with_password(
             "controller recovery needs a routable admin address, not {listen}; pass \
              --listen <address:port>"
         );
+    }
+    controller.addr = listen;
+    netmap::upsert_controller(&mut map, controller, None)?;
+    if let Some(resolver_listen) = resolver_listen {
+        netmap::relocate_resolver(&mut map, cfg.server_id, resolver_listen)?;
     }
 
     // Prepare both replacement secrets before touching the vault or issuance
@@ -485,8 +493,6 @@ fn recover_controller_with_password(
 
     atomic::write_atomic(&autorenew_keytab, &protected_autorenew.bytes, 0o600)?;
 
-    controller.addr = listen;
-    netmap::upsert_controller(&mut map, controller, None)?;
     netmap::save(ca_dir, &map)?;
 
     cfg.listen = listen;
@@ -932,10 +938,22 @@ mod tests {
     fn restored_controller_rebinds_to_new_machine_without_changing_identity() {
         let fixture = recoverable_controller();
         let new_listen: SocketAddr = "10.0.0.20:14565".parse().unwrap();
+        let old_resolver = crate::admin_proto::ResolverAddr {
+            addr: "10.0.0.10:4564".parse().unwrap(),
+            auth: crate::admin_proto::InfoAuth::Tls {
+                name: "resolver.example.com".into(),
+            },
+        };
+        let new_resolver: SocketAddr = "10.0.0.20:14564".parse().unwrap();
+        let mut map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
+        map.servers[0].resolver = Some(old_resolver.clone());
+        map.clusters[0].members = vec![old_resolver];
+        netmap::save(fixture.ca_dir.path(), &map).unwrap();
         let out = recover_controller_with_password(
             fixture.ca_dir.path(),
             &fixture.config,
             Some(new_listen),
+            Some(new_resolver),
             &fixture.recovery,
             true,
             &fixture.keytab,
@@ -957,6 +975,12 @@ mod tests {
         let identity = tls::admin_cert_identity_from_pem(&leaf).unwrap();
         assert_eq!(identity.server_id, fixture.server_id);
         assert!(identity.controller);
+        let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
+        assert_eq!(
+            map.controller_entry().unwrap().resolver.as_ref().unwrap().addr,
+            new_resolver
+        );
+        assert_eq!(map.clusters[0].members[0].addr, new_resolver);
         netidx::tls::load_private_key(None, &cfg.serving_key.to_string_lossy()).unwrap();
 
         let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
@@ -1028,6 +1052,7 @@ mod tests {
             &ca,
             &config,
             Some(new_listen),
+            None,
             &fixture.recovery,
             true,
             &keytab,
@@ -1090,6 +1115,7 @@ mod tests {
             fixture.ca_dir.path(),
             &fixture.config,
             Some(listen),
+            None,
             &fixture.recovery,
             true,
             &fixture.keytab,
@@ -1171,6 +1197,7 @@ mod tests {
             fixture.ca_dir.path(),
             &fixture.config,
             Some("127.0.0.1:0".parse().unwrap()),
+            None,
             &fixture.recovery,
             true,
             &fixture.keytab,
@@ -1296,6 +1323,7 @@ mod tests {
                 fixture.ca_dir.path(),
                 &fixture.config,
                 None,
+                None,
                 "definitely-wrong",
                 true,
                 &fixture.keytab,
@@ -1313,6 +1341,7 @@ mod tests {
         let error = recover_controller_with_password(
             fixture.ca_dir.path(),
             &fixture.config,
+            None,
             None,
             &fixture.old_autorenew,
             true,
@@ -1337,6 +1366,7 @@ mod tests {
             recover_controller_with_password(
                 fixture.ca_dir.path(),
                 &fixture.config,
+                None,
                 None,
                 &fixture.recovery,
                 true,

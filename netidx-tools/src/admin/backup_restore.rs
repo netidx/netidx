@@ -25,7 +25,7 @@ use netidx_admin::{
 #[cfg(unix)]
 use std::str::FromStr;
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -57,6 +57,14 @@ pub(crate) struct RestoreArgs {
     /// Override the restored admin-server listen address.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
+    /// Override the advertised address of a resolver co-located with the
+    /// restored controller.
+    #[arg(long = "resolver-listen")]
+    pub resolver_listen: Option<SocketAddr>,
+    /// Override the local bind IP of a resolver co-located with the restored
+    /// controller. When only --resolver-listen changes, its IP is the default.
+    #[arg(long = "resolver-bind")]
+    pub resolver_bind: Option<IpAddr>,
     /// Explicitly attest that the old controller cannot run. Required for a
     /// controller restore because two copies of the same controller identity
     /// would violate the administrative network's single-writer boundary.
@@ -103,6 +111,32 @@ pub(crate) struct RestoreArgs {
     /// Secure Enclave is usable. Test installations only.
     #[arg(long = "insecure-no-tpm")]
     pub insecure_no_tpm: bool,
+}
+
+fn restore_addresses(
+    manifest: &install_bundle::Manifest,
+    args: &RestoreArgs,
+) -> Result<install_bundle::RestoreAddresses> {
+    let resolver = match (args.resolver_listen, args.resolver_bind) {
+        (None, None) => None,
+        (listen, bind) => {
+            let original = manifest.resolver_endpoint.context(
+                "--resolver-listen/--resolver-bind require a backup of a controller with a co-located resolver",
+            )?;
+            let listen = listen.unwrap_or(original.listen);
+            Some(install_bundle::ResolverEndpoint {
+                listen,
+                bind: bind.unwrap_or_else(|| {
+                    if args.resolver_listen.is_some() {
+                        listen.ip()
+                    } else {
+                        original.bind
+                    }
+                }),
+            })
+        }
+    };
+    Ok(install_bundle::RestoreAddresses { admin_listen: args.listen, resolver })
 }
 
 fn scope_root(scope: BundleScope) -> Result<PathBuf> {
@@ -523,6 +557,30 @@ pub(super) async fn start_restored_units(root: &Path) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+pub(super) async fn reconcile_restored_controller(
+    root: &Path,
+) -> Result<netidx_admin::admin_proto::OperationId> {
+    use poolshark::local::LPooled;
+    use std::fmt::Write as _;
+
+    let (operation_id, peers) =
+        netidx_admin::admin_local::reconcile_controller(&root.join("admin-server.json"))
+            .await?;
+    let mut failures: LPooled<String> = LPooled::take();
+    for peer in peers {
+        if let Some(error) = peer.error {
+            let separator = if failures.is_empty() { "" } else { "; " };
+            let _ =
+                write!(failures, "{separator}{} at {}: {error}", peer.server, peer.addr,);
+        }
+    }
+    if !failures.is_empty() {
+        bail!("controller reconciliation operation {operation_id} failed: {failures}");
+    }
+    Ok(operation_id)
+}
+
 pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
     let bundle = a.bundle.canonicalize().context("canonicalizing backup bundle")?;
     let preflight = install_bundle::verify(&bundle)?;
@@ -536,6 +594,20 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         Some(root) => root.clone(),
         None => scope_root(preflight.config_scope)?,
     };
+    let addresses = restore_addresses(&preflight, &a)?;
+    let resolver_relocated = addresses
+        .resolver
+        .zip(preflight.resolver_endpoint)
+        .is_some_and(|(replacement, original)| replacement != original);
+    let service = desired_service(&preflight, &a);
+    if has_controller
+        && (!preflight.identities.is_empty() || resolver_relocated)
+        && service.is_none()
+    {
+        bail!(
+            "a controller with co-located roles requires restoring its OS service so it can finish enrollment and hierarchy reconciliation"
+        );
+    }
     println!("restoring {:?} to {}", preflight.components, root.display());
     if !preflight.identities.is_empty() {
         println!(
@@ -543,7 +615,8 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             preflight.identities.len()
         );
     }
-    let manifest = install_bundle::restore_files(&bundle, &root)?;
+    let manifest =
+        install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
 
     #[cfg(unix)]
     if has_controller {
@@ -597,7 +670,8 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 &mut recovery,
                 ca_dir,
                 cfg.clone(),
-                a.listen.or(manifest.admin_listen),
+                manifest.admin_listen,
+                addresses.resolver.map(|resolver| resolver.listen),
                 a.insecure_no_tpm,
             ))?;
         }
@@ -621,7 +695,6 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         bail!("controller restore is supported only on unix")
     }
 
-    let service = desired_service(&manifest, &a);
     // A recovered controller must be reachable before its co-located resolver
     // identities can pass through the normal enrollment ceremony.
     if has_controller {
@@ -676,6 +749,12 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             install_service(&manifest, &a, scope)?;
         }
     }
+    #[cfg(unix)]
+    if has_controller && resolver_relocated {
+        let operation_id = tokio::runtime::Runtime::new()?
+            .block_on(reconcile_restored_controller(&root))?;
+        println!("  controller hierarchy reconciled (operation {operation_id})");
+    }
     println!(
         "restore complete: {} is installed and ready",
         manifest.install.role.as_str()
@@ -711,10 +790,19 @@ mod tests {
             "/srv/netidx-backup",
             "--old-controller-fenced",
             "--recovery-password-stdin",
+            "--listen",
+            "10.1.0.4:5565",
+            "--resolver-listen",
+            "203.0.113.4:5564",
+            "--resolver-bind",
+            "10.1.0.4",
         ])
         .unwrap();
         let Command::Restore(args) = parsed.command else { panic!("restore") };
         assert!(args.old_controller_fenced);
         assert!(args.recovery_password_stdin);
+        assert_eq!(args.listen, Some("10.1.0.4:5565".parse().unwrap()));
+        assert_eq!(args.resolver_listen, Some("203.0.113.4:5564".parse().unwrap()));
+        assert_eq!(args.resolver_bind, Some("10.1.0.4".parse().unwrap()));
     }
 }
