@@ -1051,6 +1051,8 @@ fn fmt_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netidx_admin::provenance::NetworkIdentity;
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn service_word_matches_state() {
@@ -1077,5 +1079,32 @@ mod tests {
         assert_eq!(ROLES[0].role, InstallRole::Controller);
         assert!(ROLES[0].title.contains("Controller"));
         assert!(ROLES[0].blurb.contains("resolver servers are installed separately"));
+    }
+
+    #[test]
+    fn status_glyph_not_clipped() {
+        let fp = Fingerprint::of_der(b"installed network CA");
+        let detected = Detected {
+            record: InstallRecord::new(
+                InstallRole::Resolver,
+                "/",
+                "tls",
+                Some(NetworkIdentity::new("example.com", &fp)),
+                Some("127.0.0.1:4565".parse().unwrap()),
+            ),
+            service: ServiceStatus::Active,
+            scope: ServiceScope::System,
+            config_dir: PathBuf::from("/etc/netidx"),
+            ca: Some(fp),
+            local_ca: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| render_status_overlay(f, f.area(), &detected, &SyncState::InSync))
+            .unwrap();
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
+        );
     }
 }

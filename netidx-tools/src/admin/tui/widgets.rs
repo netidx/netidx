@@ -39,6 +39,26 @@ pub(super) fn identicon_lines(fp: &Fingerprint) -> Vec<Line<'static>> {
 }
 
 #[cfg(test)]
+pub(super) fn rendered_identicon_rows(buffer: &ratatui::buffer::Buffer) -> usize {
+    (0..buffer.area().height)
+        .filter(|&y| {
+            let mut run = 0;
+            for x in 0..buffer.area().width {
+                if buffer[(x, y)].bg == theme::GLYPH_BG {
+                    run += 1;
+                    if run >= IDENTICON_WIDTH {
+                        return true;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            false
+        })
+        .count()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

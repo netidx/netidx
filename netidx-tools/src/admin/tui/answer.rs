@@ -798,7 +798,8 @@ impl Modal {
                 // Body holds the list (left) beside the selected glyph (right, 10
                 // tile rows + a blank + up to 3 fingerprint lines). The list is
                 // the networks plus the poll-more and manual-entry rows.
-                let body_h = (networks.len() as u16 + 2).max(14);
+                let body_h =
+                    (networks.len() as u16 + 2).max(widgets::IDENTICON_HEIGHT + 4);
                 let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
                     .min(screen.height);
                 let area = widgets::centered(w, h, screen);
@@ -1151,10 +1152,20 @@ mod tests {
         }
     }
 
+    fn draw(modal: &Modal, w: u16, h: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| modal.render(f, f.area())).unwrap();
+        terminal
+    }
+
     fn render(modal: &Modal, w: u16, h: u16) -> String {
-        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        t.draw(|f| modal.render(f, f.area())).unwrap();
-        t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+        draw(modal, w, h)
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
     }
 
     #[test]
@@ -1245,6 +1256,22 @@ mod tests {
         assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
         assert!(modal.on_key(KeyCode::Enter));
         assert!(rx.try_recv().unwrap().is_ok());
+    }
+
+    #[test]
+    fn identity_announcement_glyph_not_clipped() {
+        let (tx, _rx) = oneshot::channel();
+        let modal = Modal::from_request(UiRequest::AnnounceIdentity {
+            body: "The certificate authority was created.".to_string(),
+            code: Fingerprint::of_der(b"new CA identity"),
+            reply: tx,
+        })
+        .unwrap();
+        let terminal = draw(&modal, 90, 24);
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

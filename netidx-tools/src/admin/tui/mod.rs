@@ -1128,11 +1128,15 @@ mod render_tests {
         );
     }
 
-    /// Render `app` into a `w`×`h` test terminal and flatten the buffer to text.
-    fn render_sized(app: &mut App, w: u16, h: u16) -> String {
+    fn draw(app: &mut App, w: u16, h: u16) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
-        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+        terminal
+    }
+
+    /// Render `app` into a `w`×`h` test terminal and flatten the buffer to text.
+    fn render_sized(app: &mut App, w: u16, h: u16) -> String {
+        draw(app, w, h).backend().buffer().content().iter().map(|c| c.symbol()).collect()
     }
 
     /// Render `app` into a 100×30 test terminal and flatten the buffer to text.
@@ -1218,9 +1222,13 @@ mod render_tests {
             Some((Progress::new(Stage::WaitingApproval, "waiting…"), Instant::now()));
         let fp = Fingerprint::of_der(b"a fake spki for the glyph clip test");
         app.verification = Some(("enrollment request".to_string(), fp));
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|f| app.render(f)).unwrap();
+        let terminal = draw(&mut app, 100, 30);
         let buf = terminal.backend().buffer();
+        assert_eq!(
+            widgets::rendered_identicon_rows(buf),
+            widgets::IDENTICON_HEIGHT as usize,
+            "identicon tile clipped"
+        );
         let rendered = (0..buf.area().height)
             .filter(|&y| (0..buf.area().width).any(|x| buf[(x, y)].symbol() == "█"))
             .count();
@@ -1229,6 +1237,21 @@ mod render_tests {
         assert_eq!(
             rendered, expected,
             "identicon clipped: {rendered} of {expected} rows rendered"
+        );
+    }
+
+    #[test]
+    fn confirmation_glyph_not_clipped() {
+        let fp = Fingerprint::of_der(b"approval confirmation glyph");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                render_confirm(f, f.area(), "Approve this request?", false, Some(&fp))
+            })
+            .unwrap();
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
         );
     }
 
@@ -1374,7 +1397,13 @@ mod render_tests {
         app.begin("Enrolling".to_string());
         let fp = Fingerprint::of_der(b"a fake spki for the test");
         app.verification = Some(("Approve this node".to_string(), fp));
-        let s = render(&mut app);
+        let terminal = draw(&mut app, 100, 24);
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
+        );
+        let s: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(
             s.contains("send a screenshot of this window"),
             "verification prompt missing: {s:?}"

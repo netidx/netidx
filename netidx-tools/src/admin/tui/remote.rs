@@ -2701,8 +2701,8 @@ impl RemoteState {
             );
         } else if matches!(panel, Panel::Queue | Panel::Delegations | Panel::Revocation) {
             let split = Layout::vertical([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
+                Constraint::Min(0),
+                Constraint::Length(widgets::IDENTICON_HEIGHT + 3),
             ])
             .split(area);
             self.render_panel_list(f, split[0], panel);
@@ -2783,7 +2783,7 @@ impl RemoteState {
     /// The detail pane under a glyph-bearing list: the selected row's glyph
     /// identicon (left) beside its summary + grouped hash (right) — the request
     /// code (queue / delegations) or the certificate's per-key glyph (issued
-    /// certs). Laid out horizontally so the 8-row identicon never clips the hash.
+    /// certs). Laid out horizontally so the identicon never clips the hash.
     fn render_panel_detail(&self, f: &mut Frame, area: Rect, panel: Panel) {
         let title = if matches!(panel, Panel::Revocation) {
             " Certificate "
@@ -2943,15 +2943,26 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
+    fn draw(state: &mut RemoteState, w: u16, h: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                state.render(f, area);
+            })
+            .unwrap();
+        terminal
+    }
+
     /// Render a `RemoteState` into a test terminal and flatten the buffer to text.
     fn render(state: &mut RemoteState, w: u16, h: u16) -> String {
-        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-        t.draw(|f| {
-            let area = f.area();
-            state.render(f, area);
-        })
-        .unwrap();
-        t.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+        draw(state, w, h)
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
     }
 
     /// A `RemoteState` on the Clusters screen with injected clusters + poll state
@@ -3022,6 +3033,11 @@ mod tests {
     fn present_cluster_shows_domain_and_glyph() {
         let (c, addr) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
         let mut s = clusters_state(vec![c], vec![PollState::Present { addr }]);
+        let terminal = draw(&mut s, 100, 20);
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
+        );
         let out = render(&mut s, 100, 20);
         assert!(out.contains("hq.local"), "domain missing: {out:?}");
         assert!(out.contains("CA glyph"), "glyph label missing: {out:?}");
@@ -3073,6 +3089,11 @@ mod tests {
             ],
         }];
         s.list.select(Some(0));
+        let terminal = draw(&mut s, 80, 24);
+        assert_eq!(
+            widgets::rendered_identicon_rows(terminal.backend().buffer()),
+            widgets::IDENTICON_HEIGHT as usize
+        );
         let out = render(&mut s, 100, 30);
         assert!(out.contains("Enrollment Queue"), "queue title missing: {out:?}");
         assert!(
