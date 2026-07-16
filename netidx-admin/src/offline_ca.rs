@@ -154,9 +154,9 @@ pub fn issue_and_record(
     // from (and committed back to) the store the daemon seeds its in-memory
     // counter from. Without this lock a `ca issue` run against a live daemon
     // would mint the serial the daemon allocates next, a duplicate X.509 serial.
-    let cadir = CaDir::open(&ca_dir)
+    let mut cadir = CaDir::open(&ca_dir)
         .context("cannot issue offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
+    let serial = cadir.store.next_serial()?;
     params.serial = serial;
     let name =
         first_dns_san(&params.san).unwrap_or_else(|| params.subject.common_name.clone());
@@ -169,7 +169,7 @@ pub fn issue_and_record(
     // fails, roll those back: an un-recorded cert is invisible to `next_serial`,
     // so leaving it would let its serial be handed out again.
     if let Err(e) = record_offline_issuance(
-        &mut cadir.store.lock(),
+        &mut cadir.store,
         serial,
         kind,
         &name,
@@ -197,14 +197,14 @@ pub fn sign_and_record(
     let ca_dir = ca.directory().to_path_buf();
     // See `issue_and_record`: hold the daemon's exclusive flock so offline
     // signing can't race the daemon's serial counter.
-    let cadir = CaDir::open(&ca_dir)
+    let mut cadir = CaDir::open(&ca_dir)
         .context("cannot sign offline: a running admin server owns this CA")?;
-    let serial = cadir.store.lock().next_serial()?;
+    let serial = cadir.store.next_serial()?;
     let cert = ca.sign_request(csr_pem, san, validity, serial)?;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
     let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
     record_offline_issuance(
-        &mut cadir.store.lock(),
+        &mut cadir.store,
         serial,
         kind,
         name,
@@ -257,7 +257,7 @@ pub fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutcome {
         Ok(pw) => pw,
         Err(e) => return KeytabOutcome::Failed(e),
     };
-    match cadir.vault.read().unlock(&pw) {
+    match cadir.vault.unlock(&pw) {
         Ok(u) => KeytabOutcome::Unlocked(u),
         Err(e) => KeytabOutcome::Failed(e),
     }
@@ -270,7 +270,7 @@ pub fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutcome {
 /// here.
 pub fn unlock_with_recovery(cadir: &CaDir, typed: &str) -> Result<Unlocked> {
     let pw = ca_vault::normalize_recovery_password(typed);
-    cadir.vault.read().unlock(&pw)
+    cadir.vault.unlock(&pw)
 }
 
 /// Recombine an already-unlocked master key with the CA cert on disk to produce

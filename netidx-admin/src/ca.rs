@@ -1518,8 +1518,8 @@ mod tests {
             generate_csr(&Subject::cn(name), &[SanEntry::Dns(name.into())], 2048, None)
                 .unwrap();
         let requested_validity = std::time::Duration::from_secs(365 * 86400);
-        let cadir = ca_store::CaDir::open(dir.path()).unwrap();
-        let serial = cadir.store.lock().next_serial().unwrap();
+        let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
+        let serial = cadir.store.next_serial().unwrap();
         let leaf = ca
             .sign_request(
                 &kr.csr_pem,
@@ -1539,11 +1539,10 @@ mod tests {
         );
         cadir
             .store
-            .lock()
             .commit_issuance(&req, serial, name, std::str::from_utf8(&leaf).unwrap(), &[])
             .unwrap();
         let now = ca_store::now_unix();
-        let rec = cadir.store.lock().live_for_name(name).unwrap();
+        let rec = cadir.store.live_for_name(name).unwrap();
         assert_eq!(rec.len(), 1, "the issuance should be recorded and live");
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record

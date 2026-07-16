@@ -2646,7 +2646,6 @@ mod tests {
             netidx_admin::ca_store::CaDir::open(&dir)
                 .unwrap()
                 .vault
-                .read()
                 .signing_slot_names()
                 .unwrap(),
             vec![ca_vault::RECOVERY_ADMIN.to_string()]
@@ -2654,7 +2653,6 @@ mod tests {
         let admins = netidx_admin::ca_store::CaDir::open(&dir)
             .unwrap()
             .vault
-            .read()
             .list_admins()
             .unwrap();
         assert_eq!(admins.len(), 1, "offline CA has only the recovery slot");

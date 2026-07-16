@@ -155,22 +155,18 @@ pub struct NewCaOpts {
 /// plaintext keytab with a note saying what that costs.
 pub fn setup_autorenew_slot(
     ans: &mut dyn Answerer,
-    cadir: &ca_store::CaDir,
+    cadir: &mut ca_store::CaDir,
     recovery_password: &str,
     insecure_no_tpm: bool,
 ) -> Result<PathBuf> {
     // Replace-not-fail: rotation and re-runs both land here.
-    let exists = cadir
-        .vault
-        .read()
-        .list_admins()?
-        .iter()
-        .any(|info| info.admin == AUTORENEW_ADMIN);
+    let exists =
+        cadir.vault.list_admins()?.iter().any(|info| info.admin == AUTORENEW_ADMIN);
     if exists {
-        cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false)?;
+        cadir.vault.remove_slot(AUTORENEW_ADMIN, false)?;
     }
     let password = ca_vault::random_signing_password();
-    cadir.vault.write().add_signing_slot(
+    cadir.vault.add_signing_slot(
         recovery_password,
         AUTORENEW_ADMIN,
         &password,
@@ -206,7 +202,7 @@ pub fn setup_autorenew_slot(
             // Refuse: undo the slot we just minted so the vault is unchanged,
             // and don't write the plaintext keytab. The operator can fix the
             // TPM and re-run, or opt in with --insecure-no-tpm.
-            let _ = cadir.vault.write().remove_slot(AUTORENEW_ADMIN, false);
+            let _ = cadir.vault.remove_slot(AUTORENEW_ADMIN, false);
             bail!(
                 "the autorenew credential could not be sealed to this host's {mech} \
                  ({e:#}). Writing it in plaintext would be equivalent to backing up the \
@@ -231,8 +227,8 @@ pub fn seal_ca_recovery(
     lifetimes: CaLifetimes,
 ) -> Result<(Zeroizing<String>, ca_store::CaDir)> {
     let recovery_pw = ca_vault::gen_recovery_password();
-    let cadir = ca_store::CaDir::open(dir).context("opening the new CA directory")?;
-    if let Err(e) = cadir.vault.write().create(
+    let mut cadir = ca_store::CaDir::open(dir).context("opening the new CA directory")?;
+    if let Err(e) = cadir.vault.create(
         key_pem,
         ca_vault::RECOVERY_ADMIN,
         &recovery_pw,
@@ -382,14 +378,15 @@ pub async fn create_vaulted_ca(
             },
         )
         .await?;
-        let cadir = ca_store::CaDir::open(&opts.dir)
+        let mut cadir = ca_store::CaDir::open(&opts.dir)
             .context("reopening the CA directory after serving-cert setup")?;
         // The box's `autorenew` credential — the only signing key the
         // daemon ever holds, and what it signs on a role admin's behalf
         // with. Mandatory for a server CA. Authorized by the recovery
         // password we just minted; sealed to the TPM (or plaintext under
         // --insecure-no-tpm, which the gate above already warned about).
-        let keytab = setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
+        let keytab =
+            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm)?;
         let cfg_path = server_setup::set_ca_autorenew(&keytab)?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
@@ -403,7 +400,7 @@ pub async fn create_vaulted_ca(
         // The founding SUPERUSER role admin: it directs the server (mint
         // admins, edit perms, enroll servers) but wraps no MK, so its
         // password can NEVER unlock the CA key — only the server signs.
-        setup_superuser(ans, &cadir, &opts, &common_name).await?;
+        setup_superuser(ans, &mut cadir, &opts, &common_name).await?;
         need
     } else {
         // An offline CA has no daemon to sign on anyone's behalf, so it
@@ -481,20 +478,21 @@ pub async fn create_vaulted_external_ca(
     show_recovery_password(ans, &recovery_pw).await?;
     drop(cadir);
     stage.commit()?;
-    let cadir = ca_store::CaDir::open(&opts.dir)
+    let mut cadir = ca_store::CaDir::open(&opts.dir)
         .context("opening the newly committed external CA directory")?;
     let csr_path = offline_ca::default_csr_filename(&common_name);
     atomic::write_atomic(&csr_path, &csr_pem, 0o644)
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
     if set_up_server {
-        let keytab = setup_autorenew_slot(ans, &cadir, &recovery_pw, insecure_no_tpm)?;
+        let keytab =
+            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm)?;
         ans.note(&format_compact!(
             "provisioned the automatic-renewal (leaf) approval slot:\n  \
              slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server after the \
              external certificate is installed)\n  keytab: {} (0600 — do NOT back this file up)",
             keytab.display()
         ));
-        setup_superuser(ans, &cadir, &opts, &common_name).await?;
+        setup_superuser(ans, &mut cadir, &opts, &common_name).await?;
     }
     ans.note(&format_compact!(
         "wrote {} — have the external PKI sign it as a subordinate CA, then run \
@@ -655,7 +653,7 @@ async fn confirm_new_password(ans: &mut dyn Answerer, field: Field) -> Result<Se
 /// CA (a role admin authenticates to the daemon).
 pub async fn setup_superuser(
     ans: &mut dyn Answerer,
-    cadir: &ca_store::CaDir,
+    cadir: &mut ca_store::CaDir,
     opts: &NewCaOpts,
     cn: &str,
 ) -> Result<()> {
@@ -706,7 +704,7 @@ pub async fn setup_superuser(
     policy.service_control_scopes = vec!["/".to_string()];
     let mut secret = confirm_new_password(ans, Field::AdminPassword).await?;
     let pw = Zeroizing::new(std::mem::take(&mut secret.0));
-    cadir.vault.write().add_role_slot(&name, &pw, policy)?;
+    cadir.vault.add_role_slot(&name, &pw, policy)?;
     ans.note(&format_compact!(
         "superuser role admin {name:?} created — it manages admins, edits perms, \
          and enrolls servers, but never unlocks the CA key (the server signs)."

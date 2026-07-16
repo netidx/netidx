@@ -156,6 +156,8 @@ fn default_slot_kind() -> SlotKind {
 /// zeroized on drop — hold the `Unlocked` only as long as needed to
 /// sign one request. Only a [`SlotKind::Signing`] slot can produce this.
 pub struct Unlocked {
+    pub slot_id: uuid::Uuid,
+    pub credential_revision: u64,
     pub admin: String,
     pub policy: Policy,
     pub ca_key_pem: Zeroizing<Vec<u8>>,
@@ -164,6 +166,7 @@ pub struct Unlocked {
 /// The result of a successful [`authenticate`]: who the password belongs
 /// to, what they may do, and which keyslot tier they hold — but NO CA
 /// key. Every non-signing admin op authorizes against this.
+#[derive(Clone)]
 pub struct Authenticated {
     pub slot_id: uuid::Uuid,
     pub credential_revision: u64,
@@ -172,13 +175,13 @@ pub struct Authenticated {
     pub kind: SlotKind,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct AeadBlob {
     nonce: String, // base64, 12 bytes
     ct: String,    // base64, ciphertext || tag
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Kdf {
     #[serde(rename = "type")]
     kind: String, // "argon2id"
@@ -188,7 +191,7 @@ struct Kdf {
     p_cost: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Slot {
     #[serde(default = "uuid::Uuid::new_v4")]
     id: uuid::Uuid,
@@ -206,7 +209,7 @@ struct Slot {
     policy: Policy,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct VaultFile {
     version: u32,
     key_enc: AeadBlob, // AES-256-GCM(MK, ca_key_pkcs8_pem)
@@ -219,6 +222,108 @@ struct VaultFile {
 /// checker enforces exclusion rather than a remembered global lock.
 pub struct CAVault {
     dir: PathBuf,
+}
+
+pub struct VaultSnapshot {
+    vault: VaultFile,
+}
+
+pub struct PreparedRoleSlot {
+    slot: Slot,
+}
+
+pub struct PreparedSigningReplacement {
+    authorizer: (uuid::Uuid, u64),
+    target: String,
+    previous: Option<(uuid::Uuid, u64)>,
+    replacement: Slot,
+}
+
+pub struct PreparedSigningRekey {
+    previous: (uuid::Uuid, u64),
+    replacement: Slot,
+}
+
+pub struct SigningRekeyRollback {
+    installed_revision: u64,
+    previous: Slot,
+}
+
+impl VaultSnapshot {
+    pub fn unlock(&self, password: &str) -> Result<Unlocked> {
+        unlock(&self.vault, password)
+    }
+
+    pub fn authenticate(&self, admin: &str, password: &str) -> Result<Authenticated> {
+        authenticate(&self.vault, admin, password)
+    }
+
+    pub fn prepare_role_slot(
+        &self,
+        new_admin: &str,
+        new_password: &str,
+        policy: Policy,
+    ) -> Result<PreparedRoleSlot> {
+        prepare_role_slot(&self.vault, new_admin, new_password, policy)
+    }
+
+    pub fn prepare_signing_replacement(
+        &self,
+        existing_password: &str,
+        target_admin: &str,
+        new_password: &str,
+        policy: Policy,
+    ) -> Result<PreparedSigningReplacement> {
+        let (authorizer, mk) = recover_mk(&self.vault, existing_password)?;
+        let authorizer = &self.vault.slots[authorizer];
+        let previous = self
+            .vault
+            .slots
+            .iter()
+            .find(|slot| slot.admin == target_admin)
+            .map(|slot| (slot.id, slot.credential_revision));
+        let replacement =
+            make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
+        Ok(PreparedSigningReplacement {
+            authorizer: (authorizer.id, authorizer.credential_revision),
+            target: target_admin.to_string(),
+            previous,
+            replacement,
+        })
+    }
+
+    pub fn prepare_signing_rekey(
+        &self,
+        target_admin: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<PreparedSigningRekey> {
+        let (idx, mk) = recover_mk(&self.vault, old_password)?;
+        let previous = &self.vault.slots[idx];
+        if previous.admin != target_admin {
+            bail!(
+                "that password unlocks {:?}, not {target_admin:?}; refusing to rekey a \
+                 different slot",
+                previous.admin
+            );
+        }
+        let mut replacement = make_slot(
+            &mk,
+            SlotKind::Signing,
+            target_admin,
+            new_password,
+            previous.policy.clone(),
+        )?;
+        replacement.id = previous.id;
+        replacement.credential_revision = previous
+            .credential_revision
+            .checked_add(1)
+            .context("the signing-slot credential revision is exhausted")?;
+        Ok(PreparedSigningRekey {
+            previous: (previous.id, previous.credential_revision),
+            replacement,
+        })
+    }
 }
 
 impl CAVault {
@@ -236,6 +341,10 @@ impl CAVault {
 
     fn vault_path(&self) -> PathBuf {
         self.dir.join(VAULT_FILE)
+    }
+
+    pub fn snapshot(&self) -> Result<VaultSnapshot> {
+        Ok(VaultSnapshot { vault: read_vault(&self.vault_path())? })
     }
 
     /// True if `dir` holds a vault-protected CA. A pre-open check (used to
@@ -275,18 +384,7 @@ impl CAVault {
     /// password check.
     pub fn unlock(&self, password: &str) -> Result<Unlocked> {
         let vault = read_vault(&self.vault_path())?;
-        let (slot, mk) = recover_mk(&vault, password)?;
-        let ca_key_pem = match aead_try_open(&mk, &vault.key_enc)? {
-            Some(pt) => pt,
-            None => {
-                bail!("vault: master key does not decrypt the CA key (corrupt vault)")
-            }
-        };
-        Ok(Unlocked {
-            admin: vault.slots[slot].admin.clone(),
-            policy: vault.slots[slot].policy.clone(),
-            ca_key_pem,
-        })
+        unlock(&vault, password)
     }
 
     /// Authenticate `admin` by `password` against any keyslot (signing or
@@ -298,29 +396,7 @@ impl CAVault {
     /// touching the CA private key.
     pub fn authenticate(&self, admin: &str, password: &str) -> Result<Authenticated> {
         let vault = read_vault(&self.vault_path())?;
-        for slot in &vault.slots {
-            if slot.admin != admin {
-                continue;
-            }
-            let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
-            let kek = derive_kek(
-                password.as_bytes(),
-                &salt,
-                slot.kdf.m_cost_kib,
-                slot.kdf.t_cost,
-                slot.kdf.p_cost,
-            )?;
-            if aead_try_open(&kek, &slot.wrap)?.is_some() {
-                return Ok(Authenticated {
-                    slot_id: slot.id,
-                    credential_revision: slot.credential_revision,
-                    admin: slot.admin.clone(),
-                    policy: slot.policy.clone(),
-                    kind: slot.kind,
-                });
-            }
-        }
-        bail!("authentication failed")
+        authenticate(&vault, admin, password)
     }
 
     /// Add a **signing** slot — one that wraps MK and so can recover the CA
@@ -391,21 +467,70 @@ impl CAVault {
         new_password: &str,
         policy: Policy,
     ) -> Result<()> {
-        if is_reserved_admin(new_admin) {
-            bail!(
-                "{new_admin:?} is a reserved signing-slot name (recovery / autorenew); \
-                 choose another name for a role admin"
-            );
-        }
         let path = self.vault_path();
         let mut vault = read_vault(&path)?;
-        if vault.slots.iter().any(|s| s.admin == new_admin) {
-            bail!("an admin named {new_admin:?} already exists");
+        let prepared = prepare_role_slot(&vault, new_admin, new_password, policy)?;
+        vault.slots.push(prepared.slot);
+        write_vault(&path, &vault)
+    }
+
+    pub fn add_prepared_role_slot(&mut self, prepared: PreparedRoleSlot) -> Result<()> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        validate_new_role_slot(&vault, &prepared.slot.admin)?;
+        vault.slots.push(prepared.slot);
+        write_vault(&path, &vault)
+    }
+
+    pub fn install_signing_replacement(
+        &mut self,
+        prepared: PreparedSigningReplacement,
+    ) -> Result<()> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        ensure_slot_revision(&vault, prepared.authorizer)?;
+        let current = vault
+            .slots
+            .iter()
+            .find(|slot| slot.admin == prepared.target)
+            .map(|slot| (slot.id, slot.credential_revision));
+        if current != prepared.previous {
+            bail!("the target signing slot changed while its replacement was prepared");
         }
-        let mut verifier = Zeroizing::new([0u8; 32]);
-        rand::rng().fill_bytes(&mut verifier[..]);
-        let slot = make_slot(&verifier, SlotKind::Role, new_admin, new_password, policy)?;
-        vault.slots.push(slot);
+        vault.slots.retain(|slot| slot.admin != prepared.target);
+        vault.slots.push(prepared.replacement);
+        write_vault(&path, &vault)
+    }
+
+    pub fn install_signing_rekey(
+        &mut self,
+        prepared: PreparedSigningRekey,
+    ) -> Result<SigningRekeyRollback> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        let idx = ensure_slot_revision(&vault, prepared.previous)?;
+        let previous = vault.slots[idx].clone();
+        let installed_revision = prepared.replacement.credential_revision;
+        vault.slots[idx] = prepared.replacement;
+        write_vault(&path, &vault)?;
+        Ok(SigningRekeyRollback { installed_revision, previous })
+    }
+
+    pub fn rollback_signing_rekey(
+        &mut self,
+        rollback: SigningRekeyRollback,
+    ) -> Result<()> {
+        let path = self.vault_path();
+        let mut vault = read_vault(&path)?;
+        let idx = vault
+            .slots
+            .iter()
+            .position(|slot| {
+                slot.id == rollback.previous.id
+                    && slot.credential_revision == rollback.installed_revision
+            })
+            .context("the signing slot changed again before rollback")?;
+        vault.slots[idx] = rollback.previous;
         write_vault(&path, &vault)
     }
 
@@ -545,7 +670,10 @@ impl CAVault {
         }
         let policy = vault.slots[idx].policy.clone();
         let old_id = vault.slots[idx].id;
-        let revision = vault.slots[idx].credential_revision.saturating_add(1);
+        let revision = vault.slots[idx]
+            .credential_revision
+            .checked_add(1)
+            .context("the signing-slot credential revision is exhausted")?;
         let mut replacement =
             make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
         replacement.id = old_id;
@@ -556,6 +684,82 @@ impl CAVault {
 }
 
 // -- internals ----------------------------------------------------------------
+
+fn validate_new_role_slot(vault: &VaultFile, new_admin: &str) -> Result<()> {
+    if is_reserved_admin(new_admin) {
+        bail!(
+            "{new_admin:?} is a reserved signing-slot name (recovery / autorenew); \
+             choose another name for a role admin"
+        );
+    }
+    if vault.slots.iter().any(|slot| slot.admin == new_admin) {
+        bail!("an admin named {new_admin:?} already exists");
+    }
+    Ok(())
+}
+
+fn prepare_role_slot(
+    vault: &VaultFile,
+    new_admin: &str,
+    new_password: &str,
+    policy: Policy,
+) -> Result<PreparedRoleSlot> {
+    validate_new_role_slot(vault, new_admin)?;
+    let mut verifier = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(&mut verifier[..]);
+    Ok(PreparedRoleSlot {
+        slot: make_slot(&verifier, SlotKind::Role, new_admin, new_password, policy)?,
+    })
+}
+
+fn ensure_slot_revision(vault: &VaultFile, expected: (uuid::Uuid, u64)) -> Result<usize> {
+    vault
+        .slots
+        .iter()
+        .position(|slot| slot.id == expected.0 && slot.credential_revision == expected.1)
+        .context("the authorizing signing slot changed while the operation was prepared")
+}
+
+fn unlock(vault: &VaultFile, password: &str) -> Result<Unlocked> {
+    let (slot, mk) = recover_mk(vault, password)?;
+    let ca_key_pem = match aead_try_open(&mk, &vault.key_enc)? {
+        Some(pt) => pt,
+        None => bail!("vault: master key does not decrypt the CA key (corrupt vault)"),
+    };
+    Ok(Unlocked {
+        slot_id: vault.slots[slot].id,
+        credential_revision: vault.slots[slot].credential_revision,
+        admin: vault.slots[slot].admin.clone(),
+        policy: vault.slots[slot].policy.clone(),
+        ca_key_pem,
+    })
+}
+
+fn authenticate(vault: &VaultFile, admin: &str, password: &str) -> Result<Authenticated> {
+    for slot in &vault.slots {
+        if slot.admin != admin {
+            continue;
+        }
+        let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
+        let kek = derive_kek(
+            password.as_bytes(),
+            &salt,
+            slot.kdf.m_cost_kib,
+            slot.kdf.t_cost,
+            slot.kdf.p_cost,
+        )?;
+        if aead_try_open(&kek, &slot.wrap)?.is_some() {
+            return Ok(Authenticated {
+                slot_id: slot.id,
+                credential_revision: slot.credential_revision,
+                admin: slot.admin.clone(),
+                policy: slot.policy.clone(),
+                kind: slot.kind,
+            });
+        }
+    }
+    bail!("authentication failed")
+}
 
 /// Try every **signing** slot; return the index of the slot `password`
 /// unlocks plus the recovered master key. Role slots are skipped — their
@@ -805,6 +1009,94 @@ mod tests {
         assert!(v.replace_signing_slot("epw", "recovery", "x", pol("*")).is_err());
         assert!(v.replace_signing_slot("wrong", "recovery", "x", pol("*")).is_err());
         assert!(v.unlock("rpw").is_ok(), "recovery slot must survive a failed re-key");
+    }
+
+    #[test]
+    fn snapshot_authentication_is_revalidated_against_the_live_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.add_role_slot("eve", "old", role_pol("/eu")).unwrap();
+        let snapshot = v.snapshot().unwrap();
+        let authenticated = snapshot.authenticate("eve", "old").unwrap();
+
+        v.remove_slot("eve", false).unwrap();
+        v.add_role_slot("eve", "new", role_pol("/us")).unwrap();
+
+        assert!(snapshot.authenticate("eve", "old").is_ok());
+        assert!(
+            v.resolve_session_slot(
+                authenticated.slot_id,
+                authenticated.credential_revision,
+            )
+            .is_err()
+        );
+        assert!(v.authenticate("eve", "old").is_err());
+        assert_eq!(v.authenticate("eve", "new").unwrap().policy, role_pol("/us"));
+    }
+
+    #[test]
+    fn prepared_role_slot_rechecks_name_at_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        let prepared = v
+            .snapshot()
+            .unwrap()
+            .prepare_role_slot("eve", "first", role_pol("/eu"))
+            .unwrap();
+
+        v.add_role_slot("eve", "second", role_pol("/us")).unwrap();
+
+        assert!(v.add_prepared_role_slot(prepared).is_err());
+        assert!(v.authenticate("eve", "first").is_err());
+        assert!(v.authenticate("eve", "second").is_ok());
+    }
+
+    #[test]
+    fn prepared_signing_replacement_rechecks_authorizer_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).unwrap();
+        let stale_authorizer = v
+            .snapshot()
+            .unwrap()
+            .prepare_signing_replacement("apw", "recovery", "replacement", pol("*.a"))
+            .unwrap();
+        v.rekey_signing_slot("autorenew", "apw", "next-apw").unwrap();
+        assert!(v.install_signing_replacement(stale_authorizer).is_err());
+        assert!(v.unlock("rpw").is_ok());
+
+        let stale_target = v
+            .snapshot()
+            .unwrap()
+            .prepare_signing_replacement("next-apw", "recovery", "stale", pol("*.a"))
+            .unwrap();
+        v.replace_signing_slot("next-apw", "recovery", "current", pol("*.a")).unwrap();
+        assert!(v.install_signing_replacement(stale_target).is_err());
+        assert!(v.unlock("current").is_ok());
+        assert!(v.unlock("stale").is_err());
+    }
+
+    #[test]
+    fn prepared_signing_rekey_can_be_committed_and_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "old", pol("*.a")).unwrap();
+        let prepared = v
+            .snapshot()
+            .unwrap()
+            .prepare_signing_rekey("recovery", "old", "new")
+            .unwrap();
+
+        let rollback = v.install_signing_rekey(prepared).unwrap();
+        assert!(v.unlock("old").is_err());
+        assert!(v.unlock("new").is_ok());
+
+        v.rollback_signing_rekey(rollback).unwrap();
+        assert!(v.unlock("old").is_ok());
+        assert!(v.unlock("new").is_err());
     }
 
     #[test]

@@ -1,9 +1,8 @@
 //! The CA's request store — one self-contained JSON record per request,
 //! one atomic write per state transition. The daemon is the sole owner
-//! (a single exclusive flock on the CA dir, taken at startup), so the
-//! only mutual exclusion needed for issuance is an in-process mutex; the
-//! filesystem supplies the rest, because each fact that must be atomic
-//! lives in exactly one file.
+//! (a single exclusive flock on the CA dir, taken at startup) and its state
+//! loop serializes mutations. Each fact that must be atomic lives in exactly
+//! one file.
 //!
 //! Three directories keep the active working set away from history:
 //!   - `queue/<id>.json`  — Pending requests (the active queue).
@@ -27,7 +26,6 @@ use crate::{
     atomic,
 };
 use anyhow::{Context, Result};
-use parking_lot::{Mutex, RwLock};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -63,7 +61,7 @@ pub struct QueuedReq {
     /// live, in-index certificate of serial `serial` for exactly
     /// `requested_name` (and its presented key matched that record) — a
     /// proof-of-possession renewal. The serial is re-checked still-live
-    /// under the issuer lock at approval, so a revocation between enqueue
+    /// by the state owner at approval, so a revocation between enqueue
     /// and approval cannot be outrun. `None` ⇒ an ordinary request.
     #[serde(default)]
     pub renewal_of: Option<u64>,
@@ -220,27 +218,10 @@ pub const CRL_REFRESH: Duration = Duration::from_secs(30 * 24 * 3600);
 /// and held for this value's lifetime (dropping it releases the lock). A
 /// second opener for the same dir fails at `open`.
 ///
-/// In-process the store and vault have SEPARATE locks, chosen for their
-/// different access patterns. Issuance is inherently sequential (one serial
-/// counter, one atomic commit), so [`store`](Self::store) is a `Mutex`. The
-/// vault's expensive ops — `authenticate` / `unlock` (Argon2) — are *reads*
-/// of the vault file, so [`vault`](Self::vault) is an `RwLock`: they run
-/// concurrently and never serialize issuance; only the admin writes
-/// (`add_*` / `remove_slot` / `set_policy`) take the write lock. Read
-/// methods take `&self`, writes `&mut self` — the lock guard's `Deref`
-/// makes the compiler enforce that. The daemon keeps one in its mutable state
-/// and snapshots an `Arc<CaDir>` for operations; a CLI op holds one transiently.
 pub struct CaDir {
-    pub store: Mutex<CAStore>,
-    pub vault: RwLock<crate::ca_vault::CAVault>,
-    /// The server's signing credential — the box-held `autorenew` password,
-    /// set by the daemon after [`open`](Self::open). Behind a lock because
-    /// `ca recovery`/`auto-approve` rotate it live over the local control
-    /// socket (the daemon hot-swaps the in-process credential after
-    /// re-wrapping the slot), while the issuance path reads it on every sign.
-    /// `None` for offline/CLI use and for a read-only CA (no credential ⇒ the
-    /// server cannot sign).
-    pub autorenew_pw: RwLock<Option<Zeroizing<String>>>,
+    pub store: CAStore,
+    pub vault: crate::ca_vault::CAVault,
+    pub autorenew_pw: Option<Zeroizing<String>>,
     /// The CA's configured lifetime policy (default leaf validity, CA renewal
     /// threshold), read from `lifetimes.json` at open. Defaults when absent,
     /// so a CA predating the file keeps today's behaviour. A daemon picks up
@@ -265,9 +246,9 @@ impl CaDir {
         let _lock = exclusive_lock(&dir)?;
         let lifetimes = crate::ca::CaLifetimes::load(&dir)?;
         Ok(CaDir {
-            store: Mutex::new(CAStore::open(dir.clone())?),
-            vault: RwLock::new(crate::ca_vault::CAVault::new(dir.clone())),
-            autorenew_pw: RwLock::new(None),
+            store: CAStore::open(dir.clone())?,
+            vault: crate::ca_vault::CAVault::new(dir.clone()),
+            autorenew_pw: None,
             lifetimes,
             sessions: crate::session::SessionStore::default(),
             dir,
@@ -757,9 +738,8 @@ impl CAStore {
     //
     // Folded in from the former `ca_index` module: the CRL is just the
     // revoked-but-unexpired set rendered and signed. `&mut self` on the
-    // writers (plus the dir lock the daemon holds via `Arc<Mutex<CaDir>>`)
-    // gives the scan→sign→rename serialization the old global `CRL_LOCK`
-    // provided — one writer can't drop a just-revoked serial by racing.
+    // writers and the owning state loop give scan→sign→rename one serialized
+    // mutation, so one writer can't drop a just-revoked serial by racing.
 
     /// Canonical CRL location: `<ca-dir>/crl.pem`. The admin server serves it
     /// (`GetCrl`); the renewal daemon copies it beside each resolver's
@@ -897,42 +877,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Need a CA cert for the trust bundle in the Signed outcome.
         std::fs::write(dir.path().join("certificate.pem"), b"CA-CERT").unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let r = req("alice.example.com");
-        ca.store.lock().enqueue(&r).unwrap();
-        assert_eq!(ca.store.lock().pending().unwrap().len(), 1);
-        assert!(matches!(ca.store.lock().status(&r.id).unwrap(), Status::Pending(_)));
+        ca.store.enqueue(&r).unwrap();
+        assert_eq!(ca.store.pending().unwrap().len(), 1);
+        assert!(matches!(ca.store.status(&r.id).unwrap(), Status::Pending(_)));
 
         ca.store
-            .lock()
             .commit_signed(&issued(r.clone(), 5, "alice.example.com", now_unix() + 1000))
             .unwrap();
         // Moved out of the active queue, status now Signed with the cert + bundle.
-        assert!(ca.store.lock().pending().unwrap().is_empty());
-        match ca.store.lock().status(&r.id).unwrap() {
+        assert!(ca.store.pending().unwrap().is_empty());
+        match ca.store.status(&r.id).unwrap() {
             Status::Signed(o) => {
                 assert_eq!(o.signed_cert_pem, "CERT5");
                 assert_eq!(o.trusted_pem, "CA-CERT");
             }
             _ => panic!("expected Signed"),
         }
-        assert!(!ca.store.lock().queue_path(&r.id).exists());
-        assert!(ca.store.lock().issued_path(&r.id).exists());
+        assert!(!ca.store.queue_path(&r.id).exists());
+        assert!(ca.store.issued_path(&r.id).exists());
     }
 
     #[test]
     fn deny_moves_out_and_status_is_denied() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let r = req("bob.example.com");
-        ca.store.lock().enqueue(&r).unwrap();
-        ca.store.lock().deny(&r, "ask your manager").unwrap();
-        assert!(ca.store.lock().pending().unwrap().is_empty());
-        match ca.store.lock().status(&r.id).unwrap() {
+        ca.store.enqueue(&r).unwrap();
+        ca.store.deny(&r, "ask your manager").unwrap();
+        assert!(ca.store.pending().unwrap().is_empty());
+        match ca.store.status(&r.id).unwrap() {
             Status::Denied(d) => assert_eq!(d.reason, "ask your manager"),
             _ => panic!("expected Denied"),
         }
-        assert!(!ca.store.lock().queue_path(&r.id).exists());
+        assert!(!ca.store.queue_path(&r.id).exists());
     }
 
     #[test]
@@ -943,16 +922,16 @@ mod tests {
         // index stays empty, so a later request for the same name is free to
         // queue.
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let r = req("eric.ryu-oh.org");
-        ca.store.lock().enqueue(&r).unwrap();
-        ca.store.lock().deny(&r, "not this time").unwrap();
+        ca.store.enqueue(&r).unwrap();
+        ca.store.deny(&r, "not this time").unwrap();
         assert!(
-            ca.store.lock().live_for_name("eric.ryu-oh.org").unwrap().is_empty(),
+            ca.store.live_for_name("eric.ryu-oh.org").unwrap().is_empty(),
             "a denied request must not create a live certificate"
         );
-        assert!(!ca.store.lock().issued_path(&r.id).exists());
-        assert!(ca.store.lock().list_signed().unwrap().is_empty());
+        assert!(!ca.store.issued_path(&r.id).exists());
+        assert!(ca.store.list_signed().unwrap().is_empty());
     }
 
     #[test]
@@ -970,31 +949,25 @@ mod tests {
     #[test]
     fn one_live_and_revoke_and_crl() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let a = req("eric.ryu-oh.org");
         ca.store
-            .lock()
             .commit_signed(&issued(a.clone(), 2, "eric.ryu-oh.org", now + 1000))
             .unwrap();
         let b = req("bob.ryu-oh.org");
-        ca.store
-            .lock()
-            .commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000))
-            .unwrap();
+        ca.store.commit_signed(&issued(b, 3, "bob.ryu-oh.org", now + 1000)).unwrap();
         let old = req("old.ryu-oh.org");
         ca.store
-            .lock()
             .commit_signed(&issued(old, 4, "old.ryu-oh.org", now.saturating_sub(10)))
             .unwrap();
 
-        assert_eq!(ca.store.lock().live_for_name("ERIC.RYU-OH.ORG").unwrap().len(), 1);
-        assert!(ca.store.lock().live_for_name("old.ryu-oh.org").unwrap().is_empty());
-        assert!(ca.store.lock().revoked_unexpired().unwrap().is_empty());
+        assert_eq!(ca.store.live_for_name("ERIC.RYU-OH.ORG").unwrap().len(), 1);
+        assert!(ca.store.live_for_name("old.ryu-oh.org").unwrap().is_empty());
+        assert!(ca.store.revoked_unexpired().unwrap().is_empty());
 
         assert!(
             ca.store
-                .lock()
                 .revoke(
                     2,
                     Revocation {
@@ -1005,14 +978,13 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(ca.store.lock().live_for_name("eric.ryu-oh.org").unwrap().is_empty());
-        let crl = ca.store.lock().revoked_unexpired().unwrap();
+        assert!(ca.store.live_for_name("eric.ryu-oh.org").unwrap().is_empty());
+        let crl = ca.store.revoked_unexpired().unwrap();
         assert_eq!(crl.len(), 1);
         assert_eq!(crl[0].serial, 2);
         // Revoking an unknown / already-revoked serial is a no-op false.
         assert!(
             !ca.store
-                .lock()
                 .revoke(
                     2,
                     Revocation { serial: 2, revoked_unix: now, reason: "x".into() }
@@ -1021,7 +993,6 @@ mod tests {
         );
         assert!(
             !ca.store
-                .lock()
                 .revoke(
                     999,
                     Revocation { serial: 999, revoked_unix: now, reason: "x".into() }
@@ -1029,34 +1000,34 @@ mod tests {
                 .unwrap()
         );
 
-        assert_eq!(ca.store.lock().max_serial().unwrap(), Some(4));
+        assert_eq!(ca.store.max_serial().unwrap(), Some(4));
     }
 
     #[test]
     fn push_done_recovery_set() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let now = now_unix();
         let r = req("u.example.com");
         let mut rec = issued(r.clone(), 7, "u.example.com", now + 1000);
         rec.groups = vec!["users".into()];
-        ca.store.lock().commit_signed(&rec).unwrap();
+        ca.store.commit_signed(&rec).unwrap();
         // Has groups, not pushed → in the recovery set.
-        assert_eq!(ca.store.lock().pending_pushes().unwrap().len(), 1);
-        ca.store.lock().set_push_done(&r.id).unwrap();
-        assert!(ca.store.lock().pending_pushes().unwrap().is_empty());
+        assert_eq!(ca.store.pending_pushes().unwrap().len(), 1);
+        ca.store.set_push_done(&r.id).unwrap();
+        assert!(ca.store.pending_pushes().unwrap().is_empty());
     }
 
     #[test]
     fn prune_keeps_issued_clears_old_queue_and_denied() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         let old = now_unix() - TTL.as_secs() - 10;
         let mut stale = req("stale.example.com");
         stale.received_unix = old;
-        std::fs::create_dir_all(ca.store.lock().queue_dir()).unwrap();
+        std::fs::create_dir_all(ca.store.queue_dir()).unwrap();
         atomic::write_atomic(
-            &ca.store.lock().queue_path(&stale.id),
+            &ca.store.queue_path(&stale.id),
             &serde_json::to_vec_pretty(&stale).unwrap(),
             0o644,
         )
@@ -1064,7 +1035,6 @@ mod tests {
         // A live issued record survives prune.
         let live = req("live.example.com");
         ca.store
-            .lock()
             .commit_signed(&issued(
                 live.clone(),
                 9,
@@ -1072,19 +1042,19 @@ mod tests {
                 now_unix() + 1000,
             ))
             .unwrap();
-        ca.store.lock().prune().unwrap();
-        assert!(!ca.store.lock().queue_path(&stale.id).exists());
-        assert!(ca.store.lock().issued_path(&live.id).exists());
+        ca.store.prune().unwrap();
+        assert!(!ca.store.queue_path(&stale.id).exists());
+        assert!(ca.store.issued_path(&live.id).exists());
     }
 
     #[test]
     fn queue_cap_enforced() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = CaDir::open(dir.path()).unwrap();
+        let mut ca = CaDir::open(dir.path()).unwrap();
         for i in 0..MAX_PENDING {
-            ca.store.lock().enqueue(&req(&format!("n{i}.example.com"))).unwrap();
+            ca.store.enqueue(&req(&format!("n{i}.example.com"))).unwrap();
         }
-        let err = ca.store.lock().enqueue(&req("overflow.example.com")).unwrap_err();
+        let err = ca.store.enqueue(&req("overflow.example.com")).unwrap_err();
         assert!(format!("{err:#}").contains("full"));
     }
 }

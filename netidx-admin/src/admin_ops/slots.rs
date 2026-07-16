@@ -84,10 +84,11 @@ pub async fn auto_approve(
     // is unsealable anyway, so recovery is the only way in.
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
     let recovery = ca_vault::normalize_recovery_password(typed.as_str());
-    let cadir = CaDir::open(&ca_dir).context(
+    let mut cadir = CaDir::open(&ca_dir).context(
         "setting up autorenew needs exclusive access; the admin server must be stopped",
     )?;
-    let keytab = ca_setup::setup_autorenew_slot(ans, &cadir, &recovery, insecure_no_tpm)?;
+    let keytab =
+        ca_setup::setup_autorenew_slot(ans, &mut cadir, &recovery, insecure_no_tpm)?;
     let (cfg_path, cfg_error) = match server_setup::set_ca_autorenew(&keytab) {
         Ok(p) => (Some(p), None),
         Err(e) => (None, Some(format!("{e:#}"))),
@@ -171,13 +172,13 @@ pub async fn recovery_rotate(
             keytab.display()
         )
     })?;
-    let cadir = CaDir::open(&ca_dir).context(
+    let mut cadir = CaDir::open(&ca_dir).context(
         "rotating recovery needs exclusive access; stop the admin server first",
     )?;
     // Confirm the keytab credential unlocks this CA BEFORE removing the old
     // recovery slot — a stale keytab must not leave the CA with no recovery
     // slot. (The recovered key is dropped/zeroized immediately.)
-    cadir.vault.read().unlock(&autorenew_pw).with_context(|| {
+    cadir.vault.unlock(&autorenew_pw).with_context(|| {
         format!(
             "the autorenew keytab ({}) did not unlock this CA — its credential is \
              stale. Re-mint it with `netidx admin ca auto-approve --rotate` (needs \
@@ -190,7 +191,7 @@ pub async fn recovery_rotate(
     // write leaves the old recovery slot intact — the CA is never momentarily
     // left with no recovery credential (the former remove-then-add window).
     let new_pw = ca_vault::gen_recovery_password();
-    cadir.vault.write().replace_signing_slot(
+    cadir.vault.replace_signing_slot(
         &autorenew_pw,
         ca_vault::RECOVERY_ADMIN,
         &new_pw,
@@ -362,12 +363,11 @@ fn recover_controller_with_password(
     // One exclusive lock covers recovery-password verification, serial/CRL
     // mutation, vault re-key, and authoritative map update. A running daemon
     // therefore cannot race a disaster-recovery attempt.
-    let cadir = CaDir::open(ca_dir).context(
+    let mut cadir = CaDir::open(ca_dir).context(
         "controller recovery requires exclusive CA access; stop the admin server",
     )?;
     let unlocked = cadir
         .vault
-        .read()
         .unlock(recovery_password)
         .context("the recovery password did not unlock the restored CA")?;
     if unlocked.admin != ca_vault::RECOVERY_ADMIN {
@@ -417,7 +417,7 @@ fn recover_controller_with_password(
 
     let signer = offline_ca::load_ca_from_unlocked(ca_dir, &unlocked)?;
     let validity = cadir.lifetimes.leaf_validity;
-    let serial = cadir.store.lock().next_serial()?;
+    let serial = cadir.store.next_serial()?;
     let sans = [
         SanEntry::Dns(SERVING_SAN.to_string()),
         SanEntry::Uri(cfg.server_id.uri()),
@@ -435,7 +435,7 @@ fn recover_controller_with_password(
 
     // Atomically replace the machine credential in the vault using the
     // recovery slot as authority. The recovery slot itself is unchanged.
-    cadir.vault.write().replace_signing_slot(
+    cadir.vault.replace_signing_slot(
         recovery_password,
         crate::admin_server::AUTORENEW_ADMIN,
         &new_autorenew,
@@ -443,7 +443,7 @@ fn recover_controller_with_password(
     )?;
 
     let now = crate::ca_store::now_unix();
-    let mut store = cadir.store.lock();
+    let store = &mut cadir.store;
     let old_serials: Vec<_> = store
         .list_signed()?
         .into_iter()
@@ -456,7 +456,7 @@ fn recover_controller_with_password(
         .map(|record| record.serial)
         .collect();
     offline_ca::record_offline_issuance(
-        &mut store,
+        store,
         serial,
         NodeKind::AdminServer,
         SERVING_SAN,
@@ -479,7 +479,6 @@ fn recover_controller_with_password(
         }
     }
     store.write_crl(&unlocked.ca_key_pem)?;
-    drop(store);
 
     let server_dir = ca_dir.join("server");
     std::fs::create_dir_all(&server_dir)
@@ -491,7 +490,7 @@ fn recover_controller_with_password(
     atomic::write_atomic(&serving_certificate, &chain, 0o644)?;
     write_protected_key(&serving_key, &protected_serving)?;
 
-    atomic::write_atomic(&autorenew_keytab, &protected_autorenew.bytes, 0o600)?;
+    atomic::write_atomic(autorenew_keytab, &protected_autorenew.bytes, 0o600)?;
 
     netmap::save(ca_dir, &map)?;
 
@@ -876,7 +875,6 @@ mod tests {
             let cadir = CaDir::open(ca_dir.path()).unwrap();
             cadir
                 .store
-                .lock()
                 .list_signed()
                 .unwrap()
                 .into_iter()
@@ -987,7 +985,7 @@ mod tests {
         assert_eq!(map.controller_entry().unwrap().addr, new_listen);
 
         let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
-        let records = cadir.store.lock().list_signed().unwrap();
+        let records = cadir.store.list_signed().unwrap();
         let old = records.iter().find(|r| r.serial == fixture.old_serial).unwrap();
         assert!(old.revoked.is_some());
         let live: Vec<_> = records
@@ -1000,11 +998,11 @@ mod tests {
             })
             .collect();
         assert_eq!(live.len(), 1);
-        assert!(cadir.store.lock().crl_path().is_file());
-        assert!(cadir.vault.read().unlock(&fixture.recovery).is_ok());
-        assert!(cadir.vault.read().unlock(&fixture.old_autorenew).is_err());
+        assert!(cadir.store.crl_path().is_file());
+        assert!(cadir.vault.unlock(&fixture.recovery).is_ok());
+        assert!(cadir.vault.unlock(&fixture.old_autorenew).is_err());
         let replacement = read_autorenew_password(&fixture.keytab).unwrap();
-        let unlocked = cadir.vault.read().unlock(&replacement).unwrap();
+        let unlocked = cadir.vault.unlock(&replacement).unwrap();
         assert_eq!(unlocked.admin, crate::admin_server::AUTORENEW_ADMIN);
     }
 
@@ -1015,8 +1013,8 @@ mod tests {
         let (map_version, highest_serial, ca_key) = {
             let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
             let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
-            let highest = cadir.store.lock().max_serial().unwrap().unwrap();
-            let key = cadir.vault.read().unlock(&fixture.recovery).unwrap().ca_key_pem;
+            let highest = cadir.store.max_serial().unwrap().unwrap();
+            let key = cadir.vault.unlock(&fixture.recovery).unwrap().ca_key_pem;
             (map.version, highest, key)
         };
         let snapshot = crate::backup::capture(
@@ -1071,8 +1069,8 @@ mod tests {
         let (map_version, highest_serial, ca_key) = {
             let map = netmap::load(fixture.ca_dir.path(), fixture.server_id).unwrap();
             let cadir = CaDir::open(fixture.ca_dir.path()).unwrap();
-            let highest = cadir.store.lock().max_serial().unwrap().unwrap();
-            let key = cadir.vault.read().unlock(&fixture.recovery).unwrap().ca_key_pem;
+            let highest = cadir.store.max_serial().unwrap().unwrap();
+            let key = cadir.vault.unlock(&fixture.recovery).unwrap().ca_key_pem;
             (map.version, highest, key)
         };
         let snapshot = crate::backup::capture(
