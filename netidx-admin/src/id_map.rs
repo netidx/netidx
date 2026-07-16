@@ -55,6 +55,14 @@ pub fn load_default() -> Result<IdMap> {
     load(user_id_map_path()?)
 }
 
+pub async fn load_async<P: AsRef<Path>>(path: P) -> Result<IdMap> {
+    let path = path.as_ref();
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("reading id-map {path:?}"))?;
+    parse_bytes(&bytes)
+}
+
 /// Validate, then atomically save at mode 0600.
 ///
 /// The id-map JSON is the policy file mapping netidx names to unix
@@ -71,6 +79,12 @@ pub fn save<P: AsRef<Path>>(path: P, map: &IdMap) -> Result<()> {
 /// Save to the user default path.
 pub fn save_default(map: &IdMap) -> Result<()> {
     save(user_id_map_path()?, map)
+}
+
+pub async fn save_async<P: AsRef<Path>>(path: P, map: &IdMap) -> Result<()> {
+    map.validate().context("id-map structural validation")?;
+    let bytes = serde_json::to_vec_pretty(map).context("serialize id-map JSON")?;
+    atomic::write_atomic_async(path.as_ref(), &bytes, 0o600).await
 }
 
 /// Starter map with a single `users` group at gid 100 — matches the

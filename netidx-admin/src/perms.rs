@@ -16,7 +16,7 @@
 //! Mirrored from `cfg/perms.json` in this repo.
 
 use crate::atomic;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use netidx::resolver_server::auth::Permissions;
 pub use netidx::resolver_server::config::PMap;
@@ -33,6 +33,18 @@ pub fn load_perms<P: AsRef<Path>>(path: P) -> Result<PMap> {
 /// Atomically save `p` to `path` at mode 0o644.
 pub fn save_perms<P: AsRef<Path>>(path: P, p: &PMap) -> Result<()> {
     atomic::write_atomic_pretty_json(path.as_ref(), p)
+}
+
+pub async fn load_perms_async<P: AsRef<Path>>(path: P) -> Result<PMap> {
+    let path = path.as_ref();
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("reading perms file {path:?}"))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing perms file {path:?}"))
+}
+
+pub async fn save_perms_async<P: AsRef<Path>>(path: P, p: &PMap) -> Result<()> {
+    atomic::write_atomic_pretty_json_async(path.as_ref(), p).await
 }
 
 /// Insert or replace a (path, entity, perm-string) entry. Validates the

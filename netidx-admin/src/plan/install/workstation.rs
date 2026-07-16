@@ -262,7 +262,7 @@ pub async fn run_workstation_join(
     ans: &mut dyn Answerer,
     input: WorkstationJoinInput,
 ) -> Result<()> {
-    let mut rec = InstallRecord::load_default()?.context(
+    let mut rec = InstallRecord::load_default_async().await?.context(
         "no install record found — `workstation join` operates on an existing \
          workstation install",
     )?;
@@ -324,7 +324,7 @@ pub async fn run_workstation_join(
     ans.note("ok");
     rec.network = Some(network);
     rec.admin_server = admin_server;
-    rec.save_default().context("updating the install record")?;
+    rec.save_default_async().await.context("updating the install record")?;
     ans.note(&format_compact!(
         "joined network {:?} — restart the local resolver to use it",
         rec.network.as_ref().expect("just set").domain,

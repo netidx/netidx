@@ -15,7 +15,7 @@ use netidx_admin::{
     reconcile::{self, EditPlan},
     resolver::ResolverConfig,
 };
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::Path, time::Duration};
 
 pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -23,9 +23,11 @@ pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// against the network (pinned to the CA identity recorded at install). The
 /// caller renders `plan.describe()` and applies it. Errors if this host is
 /// local-only (nothing to update) or the wrong role.
-pub(super) async fn update_plan(role: InstallRole) -> Result<EditPlan> {
-    let rec = InstallRecord::load_default()?
-        .context("no install record (install.json) found on this host")?;
+pub(super) async fn update_plan(
+    config_root: &Path,
+    role: InstallRole,
+) -> Result<EditPlan> {
+    let rec = InstallRecord::load(&config_root.join("install.json"))?;
     if rec.role != role {
         bail!("this host is a {} install, not a {}", rec.role.as_str(), role.as_str());
     }
@@ -66,9 +68,8 @@ pub(super) async fn update_plan(role: InstallRole) -> Result<EditPlan> {
 /// Fetch the network map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
 /// part of a cluster or no admin server answers with the pinned identity.
-pub(super) async fn fetch_local_map() -> Result<NetworkMap> {
-    let rec = InstallRecord::load_default()?
-        .context("no install record (install.json) found on this host")?;
+pub(super) async fn fetch_local_map(config_root: &Path) -> Result<NetworkMap> {
+    let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec
         .network
         .as_ref()

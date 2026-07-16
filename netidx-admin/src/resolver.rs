@@ -32,6 +32,16 @@ impl ResolverConfig {
         Self::load(paths::discover_resolver_config()?)
     }
 
+    pub async fn load_async<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading resolver config {path:?}"))?;
+        let cfg: file::Config = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing resolver config {path:?}"))?;
+        Ok(Self(cfg))
+    }
+
     /// Validate, then atomically save to `path` at mode 0o644.
     ///
     /// Validation resolves relative `include_permissions` entries
@@ -47,6 +57,19 @@ impl ResolverConfig {
 
     pub fn save_default(&self) -> Result<()> {
         self.save(paths::user_resolver_config()?)
+    }
+
+    pub async fn save_async<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = path.as_ref().to_path_buf();
+        let this = self.clone();
+        tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || this.validate_for_path(&path)
+        })
+        .await
+        .context("resolver config validation task panicked")?
+        .context("resolver config failed validation")?;
+        atomic::write_atomic_pretty_json_async(&path, &self.0).await
     }
 
     /// Validate as if the config were stored at `path`: relative

@@ -524,35 +524,47 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     //    acceptor watches. The resolver keeps running throughout.
     let cert_pem = std::fs::read_to_string(&resolver_issued.certificate)?;
     let now = ca_store::now_unix();
-    let mut cadir = ca_store::CaDir::open(ca_dir.clone())?;
-    cadir.store.commit_signed(&ca_store::IssuedRecord {
-        req: ca_store::QueuedReq::new(
-            netidx_admin::admin_proto::NodeKind::Resolver,
-            String::new(),
-            "resolver.revoked.example".into(),
-            std::time::Duration::from_secs(30 * 86400),
-            "(e2e)".into(),
-            None,
-            None,
-        ),
-        serial: 2,
-        name: "resolver.revoked.example".into(),
-        spki_fp: String::new(),
-        cert_pem,
-        groups: vec![],
-        not_after_unix: now + 30 * 24 * 3600,
-        issued_unix: now,
-        warnings: vec![],
-        revoked: None,
-        push_done: true,
-    })?;
-    let revoked = cadir.store.revoke(
-        2,
-        ca_store::Revocation { serial: 2, revoked_unix: now, reason: "e2e test".into() },
-    )?;
+    let lock =
+        netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?;
+    let mut cadir = ca_store::CaDir::open(lock, ca_dir.clone()).await?;
+    cadir
+        .store
+        .commit_signed(&ca_store::IssuedRecord {
+            req: ca_store::QueuedReq::new(
+                netidx_admin::admin_proto::NodeKind::Resolver,
+                String::new(),
+                "resolver.revoked.example".into(),
+                std::time::Duration::from_secs(30 * 86400),
+                "(e2e)".into(),
+                None,
+                None,
+            ),
+            serial: 2,
+            name: "resolver.revoked.example".into(),
+            spki_fp: String::new(),
+            cert_pem,
+            groups: vec![],
+            not_after_unix: now + 30 * 24 * 3600,
+            issued_unix: now,
+            warnings: vec![],
+            revoked: None,
+            push_done: true,
+        })
+        .await?;
+    let revoked = cadir
+        .store
+        .revoke(
+            2,
+            ca_store::Revocation {
+                serial: 2,
+                revoked_unix: now,
+                reason: "e2e test".into(),
+            },
+        )
+        .await?;
     assert!(revoked, "the issued serial should be live, then revoked");
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
-    cadir.store.write_crl(&ca_key)?;
+    cadir.store.write_crl(&ca_key).await?;
     let rcfg =
         netidx_admin::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
     let mut installed = false;

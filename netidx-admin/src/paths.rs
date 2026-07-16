@@ -157,6 +157,19 @@ pub fn discover_admin_server_config() -> Result<PathBuf> {
     bail!("no admin-server config found in any standard location")
 }
 
+pub async fn discover_admin_server_config_async() -> Result<PathBuf> {
+    if let Ok(path) = user_admin_server_config()
+        && tokio::fs::try_exists(&path).await.unwrap_or(false)
+    {
+        return Ok(path);
+    }
+    let path = system_admin_server_config();
+    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        return Ok(path);
+    }
+    bail!("no admin-server config found in any standard location")
+}
+
 /// Find the first existing client config in the standard search order:
 /// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
 /// `${HOME}/.config/netidx/client.json`, then the system path. Errors

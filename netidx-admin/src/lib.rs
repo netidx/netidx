@@ -80,6 +80,7 @@ pub mod client;
 /// Internal cloud-metadata / container detection backing [`netshape`].
 #[cfg(feature = "cloud-detect")]
 mod cloud;
+pub mod config_lock;
 /// The admin server's resolver-hierarchy delegation request store (the
 /// `add-parent` / `review-delegation` ceremony), parallel to [`ca_store`].
 /// Unix-only — it lives in the CA dir.
@@ -109,7 +110,7 @@ pub mod netmap;
 pub mod netshape;
 /// Offline (pre-daemon) CA issuance glue — the non-interactive half of
 /// `ca sign` / `ca issue`, shared with the install flow and the daemon's own
-/// sign path (serial allocation under the CA flock, issuance recording, SAN
+/// sign path (serial allocation under the config-directory guard, issuance recording, SAN
 /// parsing). Unix-only — it operates directly on the CA dir. The
 /// Answerer-driven orchestration lives in [`admin_ops::offline`].
 #[cfg(unix)]

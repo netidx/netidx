@@ -15,6 +15,7 @@ use netidx_admin::plan::{AuthKind, install::resolver::enroll_admin_server};
 use netidx_admin::{
     admin_client,
     admin_proto::NodeKind,
+    config_lock::ConfigDirLock,
     install_bundle::{self, BundleScope, Component, IdentityKind, ServiceIntent},
     paths,
     plan::enroll::{self, DiscoveredNetwork},
@@ -594,6 +595,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         Some(root) => root.clone(),
         None => scope_root(preflight.config_scope)?,
     };
+    let mut config_lock = Some(ConfigDirLock::acquire(&root)?);
     let addresses = restore_addresses(&preflight, &a)?;
     let resolver_relocated = addresses
         .resolver
@@ -625,6 +627,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         if !install_bundle::controller_recovered(&bundle, &cfg)? {
             if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg)? {
                 netidx_admin::backup::restore(
+                    config_lock.as_ref().expect("restore lock held"),
                     &bundle.join(install_bundle::CONTROLLER_DIR),
                     &ca_dir,
                     &cfg,
@@ -658,22 +661,26 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                     bail!("--external-cert was supplied for a self-signed netidx CA");
                 }
                 runtime.block_on(
-                    netidx_admin::admin_ops::slots::external_install_cert(
+                    netidx_admin::admin_ops::slots::external_install_cert_with_lock(
                         &mut recovery,
+                        config_lock.as_ref().expect("restore lock held"),
                         ca_dir.clone(),
                         signed,
                         a.external_root.as_deref(),
                     ),
                 )?;
             }
-            runtime.block_on(netidx_admin::admin_ops::slots::recover_controller(
-                &mut recovery,
-                ca_dir,
-                cfg.clone(),
-                manifest.admin_listen,
-                addresses.resolver.map(|resolver| resolver.listen),
-                a.insecure_no_tpm,
-            ))?;
+            runtime.block_on(
+                netidx_admin::admin_ops::slots::recover_controller_with_lock(
+                    &mut recovery,
+                    config_lock.as_ref().expect("restore lock held"),
+                    ca_dir,
+                    cfg.clone(),
+                    manifest.admin_listen,
+                    addresses.resolver.map(|resolver| resolver.listen),
+                    a.insecure_no_tpm,
+                ),
+            )?;
         }
         // The inner controller snapshot uses portable recovered-* role paths;
         // reconnect it to the complete role configs restored by the outer bundle.
@@ -698,6 +705,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
     // A recovered controller must be reachable before its co-located resolver
     // identities can pass through the normal enrollment ceremony.
     if has_controller {
+        drop(config_lock.take());
         if let Some(scope) = service {
             install_service(&manifest, &a, scope)?;
         }
@@ -745,6 +753,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         }
     }
     if !has_controller {
+        drop(config_lock.take());
         if let Some(scope) = service {
             install_service(&manifest, &a, scope)?;
         }

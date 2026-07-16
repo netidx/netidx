@@ -343,7 +343,7 @@ async fn finish_with_record_path(
         // network/admin completion tail: connectivity loss while enrolling a
         // local admin server or requesting delegation must not turn this into
         // an unrecorded install that a retry mistakes for foreign files.
-        record.save(&record_path).context("writing the install record")?;
+        record.save_async(&record_path).await.context("writing the install record")?;
         ans.note("ok");
         post_apply(ans).await.with_context(|| {
             format!(

@@ -164,6 +164,21 @@ impl CaLifetimes {
         let bytes = serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
         atomic::write_atomic(&ca_dir.join(Self::FILE), &bytes, 0o644)
     }
+
+    pub async fn load_async(ca_dir: &Path) -> Result<Self> {
+        let path = ca_dir.join(Self::FILE);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub async fn store_async(&self, ca_dir: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
+        atomic::write_atomic_async(&ca_dir.join(Self::FILE), &bytes, 0o644).await
+    }
 }
 
 fn check_key_bits(bits: u32) -> Result<()> {
@@ -292,7 +307,7 @@ pub struct IssuedFiles {
 /// A loaded local certificate authority. Pure crypto: serial allocation
 /// and the issuance index belong to the daemon's `ca_store`, so callers
 /// hand `sign_request`/`issue` a serial.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ca {
     directory: PathBuf,
     cert: X509,
@@ -1069,6 +1084,15 @@ fn parse_key_pem(pem: &[u8], password: Option<&str>) -> Result<PKey<Private>> {
 /// caller falls back to the default).
 pub fn ca_cert_serial(dir: &Path) -> Option<u64> {
     let cert_pem = std::fs::read(dir.join("certificate.pem")).ok()?;
+    ca_cert_serial_from_pem(&cert_pem)
+}
+
+pub async fn ca_cert_serial_async(dir: &Path) -> Option<u64> {
+    let cert_pem = tokio::fs::read(dir.join("certificate.pem")).await.ok()?;
+    ca_cert_serial_from_pem(&cert_pem)
+}
+
+fn ca_cert_serial_from_pem(cert_pem: &[u8]) -> Option<u64> {
     let cert = X509::from_pem(&cert_pem).ok()?;
     let bn = cert.serial_number().to_bn().ok()?;
     bn.to_dec_str().ok()?.parse::<u64>().ok()
@@ -1508,8 +1532,8 @@ mod tests {
     /// outlives the CA (a 365-day leaf against a 30-day CA) is shortened —
     /// and recording the request instead would mark an already-expired
     /// cert "live", wedging its replacement and pinning it in the CRL.
-    #[test]
-    fn commit_issuance_records_the_signed_validity_not_the_requested() {
+    #[tokio::test]
+    async fn commit_issuance_records_the_signed_validity_not_the_requested() {
         use crate::{admin_proto::NodeKind, ca_store};
         let dir = tempfile::tempdir().unwrap();
         let ca = small_ca(dir.path()); // 30-day CA
@@ -1518,8 +1542,11 @@ mod tests {
             generate_csr(&Subject::cn(name), &[SanEntry::Dns(name.into())], 2048, None)
                 .unwrap();
         let requested_validity = std::time::Duration::from_secs(365 * 86400);
-        let mut cadir = ca_store::CaDir::open(dir.path()).unwrap();
-        let serial = cadir.store.next_serial().unwrap();
+        let lock = crate::config_lock::ConfigDirLock::acquire_for_ca_dir(dir.path())
+            .await
+            .unwrap();
+        let mut cadir = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        let serial = cadir.store.next_serial().await.unwrap();
         let leaf = ca
             .sign_request(
                 &kr.csr_pem,
@@ -1540,9 +1567,10 @@ mod tests {
         cadir
             .store
             .commit_issuance(&req, serial, name, std::str::from_utf8(&leaf).unwrap(), &[])
+            .await
             .unwrap();
         let now = ca_store::now_unix();
-        let rec = cadir.store.live_for_name(name).unwrap();
+        let rec = cadir.store.live_for_name(name).await.unwrap();
         assert_eq!(rec.len(), 1, "the issuance should be recorded and live");
         let not_after = rec[0].not_after_unix;
         // The 30-day CA clamps the 365-day request to ~28 days; the record

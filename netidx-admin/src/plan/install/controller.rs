@@ -75,8 +75,9 @@ pub async fn run_controller(
     input: ControllerInput,
 ) -> Result<Option<ServiceScope>> {
     let record_path = paths::user_install_record()?;
-    if !input.common.dry_run && record_path.exists() {
-        let existing = InstallRecord::load(&record_path)
+    if !input.common.dry_run && tokio::fs::try_exists(&record_path).await? {
+        let existing = InstallRecord::load_async(&record_path)
+            .await
             .map(|r| r.role.as_str().to_string())
             .unwrap_or_else(|_| "existing".to_string());
         bail!(
@@ -141,7 +142,7 @@ pub async fn run_controller(
         ca_setup::create_vaulted_external_ca(ans, opts).await?;
         let record =
             InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
-        record.save_default()?;
+        record.save_default_async().await?;
         ans.note(
             "controller key and recovery material installed; the controller remains \
              pending until the external PKI returns and you install its certificate",
@@ -157,10 +158,11 @@ pub async fn run_controller(
         input.insecure_no_tpm,
     )
     .await?;
-    let cfg_path = paths::discover_admin_server_config().context(
+    let cfg_path = paths::discover_admin_server_config_async().await.context(
         "the controller CA was created but its admin-server config is missing",
     )?;
-    let cfg = crate::admin_server_config::AdminServerConfig::load(&cfg_path)?;
+    let cfg =
+        crate::admin_server_config::AdminServerConfig::load_async(&cfg_path).await?;
     InstallRecord::new(
         InstallRole::Controller,
         "/",
@@ -168,7 +170,8 @@ pub async fn run_controller(
         Some(identity),
         Some(cfg.listen),
     )
-    .save_default()?;
+    .save_default_async()
+    .await?;
     offer(
         ans,
         need,

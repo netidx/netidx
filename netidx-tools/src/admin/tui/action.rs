@@ -268,11 +268,11 @@ pub(super) enum Action {
     /// Renew this host's certificates now.
     Renew { server: Option<SocketAddr> },
     /// Reconcile this host's config with the network (add/remove peers).
-    Update { role: InstallRole },
+    Update { role: InstallRole, config_root: PathBuf },
     /// Graduate a local-only workstation onto a network. `dry_run` previews.
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
-    AddParent,
+    AddParent { config_root: PathBuf },
     /// A Tab-2 remote-admin op (connect / list / approve / …).
     Remote(super::remote::RemoteAction),
     /// Tear down an install (config + OS service). Terminal-owning; handled
@@ -335,7 +335,7 @@ impl Action {
                     "Joining a cluster".to_string()
                 }
             }
-            Action::AddParent => "Adding a parent".to_string(),
+            Action::AddParent { .. } => "Adding a parent".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
             Action::AutoApprove { rotate, .. } => if *rotate {
@@ -374,7 +374,7 @@ impl Action {
             | Action::Renew { .. }
             | Action::Update { .. }
             | Action::Join { .. }
-            | Action::AddParent
+            | Action::AddParent { .. }
             | Action::AutoApprove { rotate: false, .. }
             | Action::Backup { .. }
             | Action::Restore
@@ -427,9 +427,9 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
     match action {
         Action::Install { role, dry_run } => install(&mut ans, role, dry_run).await,
         Action::Renew { server } => renew(&mut ans, server).await,
-        Action::Update { role } => update(&mut ans, role).await,
+        Action::Update { role, config_root } => update(&mut ans, role, config_root).await,
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
-        Action::AddParent => add_parent(&mut ans).await,
+        Action::AddParent { config_root } => add_parent(&mut ans, config_root).await,
         Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
         Action::Uninstall { .. } => {
             bail!("internal error: uninstall is not an op future")
@@ -783,6 +783,9 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         );
     }
     let root = restore_root(&preflight)?;
+    let config_lock =
+        netidx_admin::config_lock::ConfigDirLock::acquire_async(&root).await?;
+    config_lock.require_contained(&root)?;
     let manifest =
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
     #[cfg(unix)]
@@ -793,6 +796,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
             if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg_path)?
             {
                 netidx_admin::backup::restore(
+                    &config_lock,
                     &bundle.join(install_bundle::CONTROLLER_DIR),
                     &ca_dir,
                     &cfg_path,
@@ -810,16 +814,18 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                     .await?
                     .context("the renewed external-CA certificate is required")?;
                 let root = ans.text(Field::ExternalRoot, None, None, false).await?;
-                netidx_admin::admin_ops::slots::external_install_cert(
+                netidx_admin::admin_ops::slots::external_install_cert_with_lock(
                     ans,
+                    &config_lock,
                     ca_dir.clone(),
                     PathBuf::from(signed).as_path(),
                     root.as_deref().filter(|s| !s.is_empty()).map(std::path::Path::new),
                 )
                 .await?;
             }
-            netidx_admin::admin_ops::slots::recover_controller(
+            netidx_admin::admin_ops::slots::recover_controller_with_lock(
                 ans,
+                &config_lock,
                 ca_dir,
                 cfg_path.clone(),
                 manifest.admin_listen,
@@ -839,7 +845,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
             role.map = root.join("id-map.json");
         }
         cfg.save(&cfg_path)?;
-        manifest.install.save(&root.join("install.json"))?;
+        manifest.install.save_async(&root.join("install.json")).await?;
     }
     #[cfg(not(unix))]
     if controller {
@@ -896,19 +902,21 @@ async fn finish_restore(
         install_bundle::restore_files_with_addresses(&bundle, &config_root, addresses)?;
     finish_identities(ans, &config_root, &manifest).await?;
     super::super::backup_restore::start_restored_units(&config_root).await?;
-    let operation = if resolver_relocated {
-        Some(
-            super::super::backup_restore::reconcile_restored_controller(&config_root)
-                .await?,
-        )
-    } else {
-        None
-    };
-    let mut lines =
+    let lines =
         vec![format!("{} is installed and ready.", manifest.install.role.as_str())];
-    if let Some(operation) = operation {
+    #[cfg(unix)]
+    let lines = if resolver_relocated {
+        let mut lines = lines;
+        let operation =
+            super::super::backup_restore::reconcile_restored_controller(&config_root)
+                .await?;
         lines.push(format!("Hierarchy reconciled (operation {operation})."));
-    }
+        lines
+    } else {
+        lines
+    };
+    #[cfg(not(unix))]
+    let _ = resolver_relocated;
     Ok(Outcome::plain("Restore complete", lines, true))
 }
 
@@ -1010,9 +1018,13 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
 }
 
 /// Reconcile config with the network and apply the resulting edit plan.
-async fn update(ans: &mut TuiAnswerer, role: InstallRole) -> Result<Outcome> {
+async fn update(
+    ans: &mut TuiAnswerer,
+    role: InstallRole,
+    config_root: PathBuf,
+) -> Result<Outcome> {
     ans.progress(Progress::new(Stage::Discovering, "checking the cluster for changes…"));
-    let plan = super::lifecycle::update_plan(role).await?;
+    let plan = super::lifecycle::update_plan(&config_root, role).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
             "Up to date",
@@ -1083,7 +1095,7 @@ async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
 
 /// Attach this resolver under a parent by delegation (child side).
 #[cfg(unix)]
-async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
+async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outcome> {
     use super::answer::{ParentRow, ParentSelection};
     use netidx_admin::{
         admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
@@ -1097,7 +1109,7 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
     // Candidate parents come from the network map (each resolver + its level),
     // minus this host's own resolvers. If the map is unreachable or offers no
     // other resolver, fall back to typing an admin-server address.
-    let map = super::lifecycle::fetch_local_map().await.ok();
+    let map = super::lifecycle::fetch_local_map(&config_root).await.ok();
     // netidx-admin owns the first advertisable member in this host's resolver
     // config (the same member GetInfo has always reported). Unlike excluding
     // the whole config roster, excluding only this identity still shows AP2
@@ -1207,7 +1219,7 @@ async fn add_parent(ans: &mut TuiAnswerer) -> Result<Outcome> {
 }
 
 #[cfg(not(unix))]
-async fn add_parent(_ans: &mut TuiAnswerer) -> Result<Outcome> {
+async fn add_parent(_ans: &mut TuiAnswerer, _config_root: PathBuf) -> Result<Outcome> {
     bail!("adding a parent (delegation) is only available on unix hosts")
 }
 
@@ -1248,7 +1260,7 @@ async fn install(
         && matches!(role, InstallRole::Controller)
         && scope.is_none()
         && let Ok(ca_dir) = paths::user_ca_dir()
-        && let Ok(status) = netidx_admin::admin_ops::slots::external_status(&ca_dir)
+        && let Ok(status) = netidx_admin::admin_ops::slots::external_status(&ca_dir).await
         && let Some((common_name, _)) = status.pending
     {
         let relative = offline_ca::default_csr_filename(&common_name);

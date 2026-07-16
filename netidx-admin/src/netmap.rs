@@ -41,6 +41,32 @@ pub fn save(ca_dir: &Path, map: &NetworkMap) -> Result<()> {
     atomic::write_atomic_pretty_json(&path(ca_dir), map)
 }
 
+pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
+    let p = path(ca_dir);
+    match tokio::fs::read(&p).await {
+        Ok(bytes) => {
+            let map: NetworkMap = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing network map {p:?}"))?;
+            if map.controller != controller {
+                bail!(
+                    "network map controller {} does not match installed controller certificate {}",
+                    map.controller,
+                    controller
+                );
+            }
+            Ok(map)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(NetworkMap::empty(controller))
+        }
+        Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
+    }
+}
+
+pub async fn save_async(ca_dir: &Path, map: &NetworkMap) -> Result<()> {
+    atomic::write_atomic_pretty_json_async(&path(ca_dir), map).await
+}
+
 fn changed(map: &mut NetworkMap) {
     map.servers.sort_by_key(|s| s.id);
     map.clusters.sort_by_key(|c| c.id);

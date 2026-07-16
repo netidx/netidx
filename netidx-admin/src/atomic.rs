@@ -12,8 +12,10 @@
 //! is no portable way to fsync a directory handle on Windows).
 
 use anyhow::{Context, Result, bail};
+use compact_str::format_compact;
 use serde::Serialize;
 use std::{io::Write, path::Path};
+use tokio::io::AsyncWriteExt;
 
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.
@@ -53,6 +55,54 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
+pub async fn write_atomic_async(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let raw_dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("atomic write target {:?} has no parent dir", path))?;
+    let dir: &Path =
+        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating parent dir {dir:?}"))?;
+    let tmp = dir.join(format_compact!(".tmp-netidx-{}", uuid::Uuid::new_v4()).as_str());
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .await
+            .with_context(|| format!("creating temp file in {dir:?}"))?;
+        file.write_all(bytes)
+            .await
+            .with_context(|| format!("writing temp file for {path:?}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+                .await
+                .with_context(|| {
+                    format!("setting mode {:o} on temp file for {path:?}", mode)
+                })?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        file.sync_all().await.context("fsync temp file")?;
+        drop(file);
+        final_commit(|| {
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("atomic rename to {path:?}"))?;
+            #[cfg(unix)]
+            fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
+            Ok(())
+        })
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
 /// Atomically publish a newly-created directory by renaming it to a sibling
 /// destination that must not already exist. The caller builds all sensitive
 /// state under `src`; until this succeeds, dropping its temporary-directory
@@ -75,6 +125,33 @@ pub fn publish_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn publish_dir_async(src: &Path, dst: &Path) -> Result<()> {
+    if tokio::fs::try_exists(dst).await? {
+        bail!("refusing to replace existing directory {dst:?}");
+    }
+    let raw_parent = dst
+        .parent()
+        .ok_or_else(|| anyhow!("directory publish target {dst:?} has no parent"))?;
+    let parent =
+        if raw_parent.as_os_str().is_empty() { Path::new(".") } else { raw_parent };
+    #[cfg(not(unix))]
+    let _ = parent;
+    final_commit(|| {
+        std::fs::rename(src, dst)
+            .with_context(|| format!("publishing staged directory {src:?} as {dst:?}"))?;
+        #[cfg(unix)]
+        fsync_dir(parent).with_context(|| format!("fsync parent dir {parent:?}"))?;
+        Ok(())
+    })
+}
+
+fn final_commit(f: impl FnOnce() -> Result<()>) -> Result<()> {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 #[cfg(unix)]
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
@@ -85,6 +162,14 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
 pub fn write_atomic_pretty_json<T: Serialize>(path: &Path, val: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(val).context("serialize JSON")?;
     write_atomic(path, &bytes, 0o644)
+}
+
+pub async fn write_atomic_pretty_json_async<T: Serialize>(
+    path: &Path,
+    val: &T,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(val).context("serialize JSON")?;
+    write_atomic_async(path, &bytes, 0o644).await
 }
 
 #[cfg(test)]
@@ -150,5 +235,14 @@ mod tests {
         assert!(publish_dir(&other, &dst).is_err());
         assert!(other.exists());
         assert_eq!(std::fs::read(dst.join("value")).unwrap(), b"ready");
+    }
+
+    #[tokio::test]
+    async fn async_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value");
+        write_atomic_async(&path, b"one", 0o600).await.unwrap();
+        write_atomic_async(&path, b"two", 0o600).await.unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), b"two");
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     atomic,
     ca::{self, Ca, CaLifetimes, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
     ca_store, ca_vault,
+    config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
     offline_ca, paths,
     plan::{enroll, server_setup, service::ServiceNeed},
@@ -43,7 +44,13 @@ pub struct StagedCaDir {
 impl StagedCaDir {
     /// Create staging beside `final_path`, so commit is one same-filesystem
     /// rename. Existing paths are never replaced, including empty directories.
-    pub fn new(final_path: PathBuf) -> Result<Self> {
+    pub async fn new(final_path: PathBuf) -> Result<Self> {
+        tokio::task::spawn_blocking(move || Self::new_blocking(final_path))
+            .await
+            .context("CA staging task panicked")?
+    }
+
+    fn new_blocking(final_path: PathBuf) -> Result<Self> {
         if final_path.exists() {
             bail!(
                 "CA path {} already exists; move it aside or choose a new directory",
@@ -73,10 +80,13 @@ impl StagedCaDir {
     }
 
     /// Publish the completed CA and remove the now-empty staging parent.
-    pub fn commit(self) -> Result<PathBuf> {
-        atomic::publish_dir(&self.staged, &self.final_path)?;
-        drop(self.owner);
-        Ok(self.final_path)
+    pub async fn commit(self) -> Result<PathBuf> {
+        let Self { owner, staged, final_path } = self;
+        atomic::publish_dir_async(&staged, &final_path).await?;
+        tokio::task::spawn_blocking(move || drop(owner))
+            .await
+            .context("CA staging cleanup task panicked")?;
+        Ok(final_path)
     }
 }
 
@@ -153,7 +163,7 @@ pub struct NewCaOpts {
 /// Sealed, the file is inert anywhere but this machine. A host with no
 /// TPM (or a flaky one — setup must not dead-end) falls back to the
 /// plaintext keytab with a note saying what that costs.
-pub fn setup_autorenew_slot(
+pub async fn setup_autorenew_slot(
     ans: &mut dyn Answerer,
     cadir: &mut ca_store::CaDir,
     recovery_password: &str,
@@ -163,15 +173,18 @@ pub fn setup_autorenew_slot(
     let exists =
         cadir.vault.list_admins()?.iter().any(|info| info.admin == AUTORENEW_ADMIN);
     if exists {
-        cadir.vault.remove_slot(AUTORENEW_ADMIN, false)?;
+        cadir.vault.remove_slot(AUTORENEW_ADMIN, false).await?;
     }
     let password = ca_vault::random_signing_password();
-    cadir.vault.add_signing_slot(
-        recovery_password,
-        AUTORENEW_ADMIN,
-        &password,
-        crate::ca_policy::autorenew_policy(),
-    )?;
+    cadir
+        .vault
+        .add_signing_slot(
+            recovery_password,
+            AUTORENEW_ADMIN,
+            &password,
+            crate::ca_policy::autorenew_policy(),
+        )
+        .await?;
     let keytab = offline_ca::autorenew_keytab_path()?;
     // `available()` (which the caller's TPM gate checked) only proves the
     // device opened, NOT that a seal will succeed — a present-but-locked or
@@ -179,9 +192,15 @@ pub fn setup_autorenew_slot(
     // keytab is a master-key-equivalent credential, so falling back to it
     // silently would defeat the whole gate. Only `--insecure-no-tpm` accepts
     // that, and then loudly; otherwise we refuse and roll the slot back.
-    match netidx_tpm::seal(password.as_bytes()) {
+    let sealed = tokio::task::spawn_blocking({
+        let password = password.clone();
+        move || netidx_tpm::seal(password.as_bytes())
+    })
+    .await
+    .context("credential sealing task panicked")?;
+    match sealed {
         Ok(blob) => {
-            atomic::write_atomic(&keytab, &blob, 0o600)?;
+            atomic::write_atomic_async(&keytab, &blob, 0o600).await?;
             ans.note(&format_compact!(
                 "  the keytab is sealed to this machine's {} — copied \
                  anywhere else (disk image, backup) it is useless",
@@ -189,7 +208,7 @@ pub fn setup_autorenew_slot(
             ));
         }
         Err(e) if insecure_no_tpm => {
-            atomic::write_atomic(&keytab, password.as_bytes(), 0o600)?;
+            atomic::write_atomic_async(&keytab, password.as_bytes(), 0o600).await?;
             ans.warn(&format_compact!(
                 "the autorenew keytab is PLAINTEXT ({} sealing failed: {e:#}). \
                  Any backup or disk image of this machine now contains a \
@@ -202,7 +221,7 @@ pub fn setup_autorenew_slot(
             // Refuse: undo the slot we just minted so the vault is unchanged,
             // and don't write the plaintext keytab. The operator can fix the
             // TPM and re-run, or opt in with --insecure-no-tpm.
-            let _ = cadir.vault.remove_slot(AUTORENEW_ADMIN, false);
+            let _ = cadir.vault.remove_slot(AUTORENEW_ADMIN, false).await;
             bail!(
                 "the autorenew credential could not be sealed to this host's {mech} \
                  ({e:#}). Writing it in plaintext would be equivalent to backing up the \
@@ -217,28 +236,35 @@ pub fn setup_autorenew_slot(
 }
 
 /// Seal a freshly generated CA key into the vault's `recovery` slot and
-/// persist the lifetime policy, under one flock held for the rest of init.
+/// persist the lifetime policy under the installation guard held for init.
 /// Shared by the self-signed [`create_vaulted_ca`] and the external-sign
 /// bootstrap. On a mid-write failure, roll back whatever init committed so
 /// the dir isn't a keyless half-CA that blocks a clean retry.
-pub fn seal_ca_recovery(
+pub async fn seal_ca_recovery(
+    config_lock: ConfigDirLock,
     dir: &Path,
     key_pem: &Zeroizing<Vec<u8>>,
     lifetimes: CaLifetimes,
 ) -> Result<(Zeroizing<String>, ca_store::CaDir)> {
     let recovery_pw = ca_vault::gen_recovery_password();
-    let mut cadir = ca_store::CaDir::open(dir).context("opening the new CA directory")?;
-    if let Err(e) = cadir.vault.create(
-        key_pem,
-        ca_vault::RECOVERY_ADMIN,
-        &recovery_pw,
-        crate::ca_policy::recovery_policy(),
-    ) {
-        let _ = std::fs::remove_file(dir.join("certificate.pem"));
-        let _ = std::fs::remove_file(dir.join("serial"));
+    let mut cadir = ca_store::CaDir::open_staged(config_lock, dir)
+        .await
+        .context("opening the new CA directory")?;
+    if let Err(e) = cadir
+        .vault
+        .create(
+            key_pem,
+            ca_vault::RECOVERY_ADMIN,
+            &recovery_pw,
+            crate::ca_policy::recovery_policy(),
+        )
+        .await
+    {
+        let _ = tokio::fs::remove_file(dir.join("certificate.pem")).await;
+        let _ = tokio::fs::remove_file(dir.join("serial")).await;
         return Err(e).context("sealing CA key into the vault");
     }
-    lifetimes.store(dir).context("writing CA lifetimes")?;
+    lifetimes.store_async(dir).await.context("writing CA lifetimes")?;
     Ok((recovery_pw, cadir))
 }
 
@@ -258,6 +284,7 @@ pub async fn create_vaulted_ca(
     ans: &mut dyn Answerer,
     opts: NewCaOpts,
 ) -> Result<(Ca, ServiceNeed)> {
+    let config_lock = ConfigDirLock::acquire_for_ca_dir(&opts.dir).await?;
     // No "a CA will be created" announce here: the caller already framed it
     // (the resolver install's opening "new admin cluster" dialog, or the
     // explicit `ca init` command), and the CA's creation + identity are
@@ -294,14 +321,14 @@ pub async fn create_vaulted_ca(
     // receipt of its sole off-box recovery credential. Requiring the final
     // path to be absent also prevents a rename from replacing any existing
     // state.
-    let stage = StagedCaDir::new(opts.dir.clone())?;
+    let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
 
     // Generate the CA (its key is returned, never written to disk in
     // plaintext) and seal it into the vault under the `recovery` slot —
     // the off-box break-glass credential whose generated password is shown
     // once and never stored.
-    let (ca, key_pem) = Ca::init_vaulted(&CaParams {
+    let params = CaParams {
         directory: stage_dir.clone(),
         subject: Subject {
             common_name: common_name.clone(),
@@ -313,11 +340,14 @@ pub async fn create_vaulted_ca(
         san,
         key_bits: opts.key_bits,
         validity: opts.ca_validity,
-    })?;
+    };
+    let (ca, key_pem) = tokio::task::spawn_blocking(move || Ca::init_vaulted(&params))
+        .await
+        .context("CA generation task panicked")??;
     // Seal the key into the recovery slot and persist the lifetime policy
-    // (self-signed CA — externally_signed is false). One flock is held for
-    // the rest of init.
+    // (self-signed CA — externally_signed is false).
     let (recovery_pw, cadir) = seal_ca_recovery(
+        config_lock.clone(),
         &stage_dir,
         &key_pem,
         CaLifetimes {
@@ -325,15 +355,16 @@ pub async fn create_vaulted_ca(
             ca_renew_threshold: opts.ca_renew_threshold,
             externally_signed: false,
         },
-    )?;
+    )
+    .await?;
 
     // Present the new CA's identity (the glyph joiners verify) in a dialog, then
     // the one-time recovery secret.
     let ca_fp = {
         let cert =
-            std::fs::read(stage_dir.join("certificate.pem")).with_context(|| {
-                format!("reading staged CA cert in {}", stage_dir.display())
-            })?;
+            tokio::fs::read(stage_dir.join("certificate.pem")).await.with_context(
+                || format!("reading staged CA cert in {}", stage_dir.display()),
+            )?;
         Fingerprint::of_cert_pem(&cert)?
     };
     ans.announce_identity(
@@ -349,9 +380,10 @@ pub async fn create_vaulted_ca(
     // before renaming (required on Windows), publish the complete directory in
     // one same-filesystem operation, then rebind/reopen the live handles.
     drop(cadir);
-    let live_dir = stage.commit()?;
+    let live_dir = stage.commit().await?;
     let ca = ca.relocated(live_dir);
-    let cadir = ca_store::CaDir::open(&opts.dir)
+    let cadir = ca_store::CaDir::open(config_lock.clone(), &opts.dir)
+        .await
         .context("opening the newly committed CA directory")?;
     ans.note(&format_compact!("created a new CA at {}", opts.dir.display()));
 
@@ -361,16 +393,14 @@ pub async fn create_vaulted_ca(
         ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     let need = if set_up_server {
         // setup_server signs the serving cert through the offline issuance
-        // path, which takes the CA flock itself — so release ours first,
-        // then reacquire for the remaining slot setup. During init no daemon
-        // competes for the brand-new dir, so the brief unlock is safe; this
-        // is the same drop-and-reopen the offline `ca issue`/`sign` paths use.
+        // path, so close this CA view before it reopens the same durable state.
         drop(cadir);
         let need = server_setup::setup_server(
             ans,
             server_setup::SetupArgs {
                 ca_dir: &opts.dir,
                 ca: &ca,
+                config_lock: config_lock.clone(),
                 domain: &domain,
                 listen: opts.listen,
                 listen_hint: opts.listen_hint,
@@ -378,7 +408,8 @@ pub async fn create_vaulted_ca(
             },
         )
         .await?;
-        let mut cadir = ca_store::CaDir::open(&opts.dir)
+        let mut cadir = ca_store::CaDir::open(config_lock.clone(), &opts.dir)
+            .await
             .context("reopening the CA directory after serving-cert setup")?;
         // The box's `autorenew` credential — the only signing key the
         // daemon ever holds, and what it signs on a role admin's behalf
@@ -386,8 +417,8 @@ pub async fn create_vaulted_ca(
         // password we just minted; sealed to the TPM (or plaintext under
         // --insecure-no-tpm, which the gate above already warned about).
         let keytab =
-            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm)?;
-        let cfg_path = server_setup::set_ca_autorenew(&keytab)?;
+            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm).await?;
+        let cfg_path = server_setup::set_ca_autorenew(&config_lock, &keytab).await?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
              \x20 slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)\n\
@@ -420,6 +451,7 @@ pub async fn create_vaulted_external_ca(
     ans: &mut dyn Answerer,
     opts: NewCaOpts,
 ) -> Result<PathBuf> {
+    let config_lock = ConfigDirLock::acquire_for_ca_dir(&opts.dir).await?;
     let common_name =
         resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref()).await?;
     let domain = match &opts.domain {
@@ -438,9 +470,9 @@ pub async fn create_vaulted_external_ca(
         opts.insecure_no_tpm
     };
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
-    let stage = StagedCaDir::new(opts.dir.clone())?;
+    let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
-    let (key_pem, csr_pem) = Ca::init_vaulted_external(&CaParams {
+    let params = CaParams {
         directory: stage_dir.clone(),
         subject: Subject {
             common_name: common_name.clone(),
@@ -452,8 +484,13 @@ pub async fn create_vaulted_external_ca(
         san,
         key_bits: opts.key_bits,
         validity: opts.ca_validity,
-    })?;
+    };
+    let (key_pem, csr_pem) =
+        tokio::task::spawn_blocking(move || Ca::init_vaulted_external(&params))
+            .await
+            .context("external CA generation task panicked")??;
     let (recovery_pw, cadir) = seal_ca_recovery(
+        config_lock.clone(),
         &stage_dir,
         &key_pem,
         CaLifetimes {
@@ -461,7 +498,8 @@ pub async fn create_vaulted_external_ca(
             ca_renew_threshold: opts.ca_renew_threshold,
             externally_signed: true,
         },
-    )?;
+    )
+    .await?;
     ExternalPending {
         cn: common_name.clone(),
         domain,
@@ -474,18 +512,21 @@ pub async fn create_vaulted_external_ca(
         listen: opts.listen,
         units_dir: opts.units_dir.clone(),
     }
-    .store(&stage_dir)?;
+    .store_async(&stage_dir)
+    .await?;
     show_recovery_password(ans, &recovery_pw).await?;
     drop(cadir);
-    stage.commit()?;
-    let mut cadir = ca_store::CaDir::open(&opts.dir)
+    stage.commit().await?;
+    let mut cadir = ca_store::CaDir::open(config_lock, &opts.dir)
+        .await
         .context("opening the newly committed external CA directory")?;
     let csr_path = offline_ca::default_csr_filename(&common_name);
-    atomic::write_atomic(&csr_path, &csr_pem, 0o644)
+    atomic::write_atomic_async(&csr_path, &csr_pem, 0o644)
+        .await
         .with_context(|| format!("writing CSR to {}", csr_path.display()))?;
     if set_up_server {
         let keytab =
-            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm)?;
+            setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm).await?;
         ans.note(&format_compact!(
             "provisioned the automatic-renewal (leaf) approval slot:\n  \
              slot:   {AUTORENEW_ADMIN:?} (empty scope; wired to the server after the \
@@ -577,7 +618,10 @@ pub fn announce_founding_policy(ans: &mut dyn Answerer, domain: &str) {
 /// ([`setup_autorenew_slot`]) — the flag alone is not enough, because an
 /// interactive confirm here can turn a `false` flag into an accepted override.
 pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<bool> {
-    if netidx_tpm::available() {
+    if tokio::task::spawn_blocking(netidx_tpm::available)
+        .await
+        .context("platform sealing probe panicked")?
+    {
         return Ok(false);
     }
     let mech = netidx_tpm::MECHANISM;
@@ -617,8 +661,9 @@ pub async fn show_recovery_password(ans: &mut dyn Answerer, pw: &str) -> Result<
 
 /// Show the CA's own identity (fingerprint + identicon) as an out-of-band
 /// verification code, so anyone joining can match it before trusting the CA.
-pub fn show_ca_identity(ans: &mut dyn Answerer, ca_dir: &Path) -> Result<()> {
-    let cert = std::fs::read(ca_dir.join("certificate.pem"))
+pub async fn show_ca_identity(ans: &mut dyn Answerer, ca_dir: &Path) -> Result<()> {
+    let cert = tokio::fs::read(ca_dir.join("certificate.pem"))
+        .await
         .with_context(|| format!("reading CA cert in {}", ca_dir.display()))?;
     let fp = Fingerprint::of_cert_pem(&cert)?;
     ans.show_verification_code("CA identity", &fp);
@@ -704,7 +749,7 @@ pub async fn setup_superuser(
     policy.service_control_scopes = vec!["/".to_string()];
     let mut secret = confirm_new_password(ans, Field::AdminPassword).await?;
     let pw = Zeroizing::new(std::mem::take(&mut secret.0));
-    cadir.vault.add_role_slot(&name, &pw, policy)?;
+    cadir.vault.add_role_slot(&name, &pw, policy).await?;
     ans.note(&format_compact!(
         "superuser role admin {name:?} created — it manages admins, edits perms, \
          and enrolls servers, but never unlocks the CA key (the server signs)."
@@ -858,14 +903,17 @@ pub async fn gather_policy(
 /// True if the default CA location holds a usable CA — both the cert
 /// and the private key. (A cert with no key is a trust anchor we
 /// imported, not a CA we can sign with.)
-pub fn default_ca_present() -> bool {
+pub async fn default_ca_present() -> bool {
     match paths::user_ca_dir() {
         Ok(dir) => {
             // A CA exists if its cert is present and *either* a vault
             // (the current format) or a legacy unencrypted/encrypted
             // `private.key` is alongside it.
-            dir.join("certificate.pem").is_file()
-                && (ca_vault::CAVault::exists(&dir) || dir.join("private.key").is_file())
+            tokio::fs::try_exists(dir.join("certificate.pem")).await.unwrap_or(false)
+                && (ca_vault::CAVault::exists_async(&dir).await
+                    || tokio::fs::try_exists(dir.join("private.key"))
+                        .await
+                        .unwrap_or(false))
         }
         Err(_) => false,
     }
@@ -879,26 +927,40 @@ pub fn default_ca_present() -> bool {
 ///
 /// `password = Some(p)` encrypts the on-disk private key with `p`
 /// (PKCS#8 + AES-256-CBC). `None` writes an unencrypted key.
-pub fn issue_identity(
+pub async fn issue_identity(
+    config_lock: &ConfigDirLock,
     ca: &Ca,
     name: &str,
     out_dir: PathBuf,
     password: Option<&str>,
+    groups: &[String],
 ) -> Result<IssuedFiles> {
-    issue_identity_into(ca, name, out_dir, ca::DEFAULT_KEY_BITS, password)
+    issue_identity_into(
+        config_lock,
+        ca,
+        name,
+        out_dir,
+        ca::DEFAULT_KEY_BITS,
+        password,
+        groups,
+    )
+    .await
 }
 
 /// Inner form of [`issue_identity`] with the destination directory
 /// and key size as parameters — lets tests issue into a tempdir with
 /// a fast key.
-pub fn issue_identity_into(
+pub async fn issue_identity_into(
+    config_lock: &ConfigDirLock,
     ca: &Ca,
     name: &str,
     out_dir: PathBuf,
     key_bits: u32,
     password: Option<&str>,
+    groups: &[String],
 ) -> Result<IssuedFiles> {
     offline_ca::issue_and_record(
+        config_lock,
         ca,
         NodeKind::Client,
         IssueParams {
@@ -912,6 +974,8 @@ pub fn issue_identity_into(
             password: password.map(|s| s.to_string()),
             serial: 0, // assigned by issue_and_record
         },
+        groups,
     )
+    .await
     .with_context(|| format!("issuing certificate for {name}"))
 }

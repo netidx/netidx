@@ -2,7 +2,7 @@
 //!
 //! Unlike the remote-admin groups in this module, `ca sign` / `ca issue` are
 //! **local**: no admin server, no `--server`, no glyph. They unlock the CA's
-//! keyslot vault directly (holding the daemon's exclusive flock) and mint a
+//! keyslot vault directly (holding the daemon's config-directory guard) and mint a
 //! cert on the box. The pure primitives — the unlock split, `sign_and_record`,
 //! `issue_and_record`, the SAN helpers — live in [`crate::offline_ca`]; the
 //! orchestration here is thin, and the only operator interaction is the
@@ -87,7 +87,7 @@ pub struct SignOutcome {
 }
 
 /// Sign an external CSR offline: unlock the CA, resolve the SAN, refuse the
-/// reserved serving name, sign + record (allocating a serial under the flock),
+/// reserved serving name, sign + record (allocating a serial under the guard),
 /// write the cert, then optionally register the identity in the local id-map.
 /// The SAN is resolved (and fails fast) before the CA is unlocked, so a
 /// bad/missing SAN errors before any password prompt. `out` defaults to
@@ -101,7 +101,13 @@ pub async fn ca_sign(
     out: Option<PathBuf>,
     id_map: IdMapAction,
 ) -> Result<SignOutcome> {
-    let summary = ca::inspect_csr(&csr_pem).context("inspecting CSR")?;
+    let summary = tokio::task::spawn_blocking({
+        let csr_pem = csr_pem.clone();
+        move || ca::inspect_csr(&csr_pem)
+    })
+    .await
+    .context("CSR inspection task panicked")?
+    .context("inspecting CSR")?;
     let out = out.unwrap_or_else(|| {
         offline_ca::default_cert_filename(summary.common_name.as_deref())
     });
@@ -110,16 +116,19 @@ pub async fn ca_sign(
     let name = offline_ca::first_dns_san(&san)
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
-    let ca = offline_ca::open_ca(ans, &ca_dir).await?;
+    let (ca, config_lock) = offline_ca::open_ca(ans, &ca_dir).await?;
     let cert_pem = offline_ca::sign_and_record(
+        &config_lock,
         &ca,
         NodeKind::Client,
         &csr_pem,
         &san,
         &name,
         validity,
-    )?;
-    atomic::write_atomic(&out, &cert_pem, 0o644)
+    )
+    .await?;
+    atomic::write_atomic_async(&out, &cert_pem, 0o644)
+        .await
         .with_context(|| format!("writing certificate to {}", out.display()))?;
     let id_map = register_id_map(ans, &summary, &san, id_map).await?;
     Ok(SignOutcome { summary, san, name, out, id_map })
@@ -196,7 +205,7 @@ async fn register_id_map(
         None => return Ok(IdMapResult::NoIdentityName),
     };
     let map_path = id_map::user_id_map_path()?;
-    let mut map = match id_map::load(&map_path) {
+    let mut map = match id_map::load_async(&map_path).await {
         Ok(m) => m,
         Err(_) => return Ok(IdMapResult::NoMap { path: map_path }),
     };
@@ -248,7 +257,7 @@ async fn register_id_map(
                 uid: old.uid,
                 primary_group: old.primary_group.to_string(),
             });
-    id_map::save(&map_path, &map)?;
+    id_map::save_async(&map_path, &map).await?;
     Ok(IdMapResult::Registered(IdMapRegistration {
         name: identity_name,
         uid,
@@ -268,7 +277,7 @@ pub struct IssueOutcome {
 
 /// Issue a fresh key + cert offline: refuse the reserved serving name, unlock
 /// the CA, generate the key, sign it, and record the issuance (serial allocated
-/// under the flock). `leaf_password` encrypts the on-disk private key when set
+/// under the guard). `leaf_password` encrypts the on-disk private key when set
 /// (the bare CLI passes `None`; the install flow, which knows where a netidx
 /// process finds the passphrase, is the encrypted-leaf path).
 pub async fn ca_issue(
@@ -283,8 +292,9 @@ pub async fn ca_issue(
 ) -> Result<IssueOutcome> {
     offline_ca::ensure_san_not_reserved(&san)?;
     let cn = subject.common_name.clone();
-    let ca = offline_ca::open_ca(ans, &ca_dir).await?;
+    let (ca, config_lock) = offline_ca::open_ca(ans, &ca_dir).await?;
     let issued = offline_ca::issue_and_record(
+        &config_lock,
         &ca,
         NodeKind::Client,
         IssueParams {
@@ -296,7 +306,9 @@ pub async fn ca_issue(
             password: leaf_password.map(|s| s.as_str().to_string()),
             serial: 0, // assigned by issue_and_record
         },
-    )?;
+        &[],
+    )
+    .await?;
     Ok(IssueOutcome {
         cn,
         private_key: issued.private_key,

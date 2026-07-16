@@ -474,6 +474,11 @@ pub enum Request {
     /// [`ExternalCaInstallResponse`].
     #[pack(tag(42))]
     ExternalCaInstall(ExternalCaInstallRequest),
+    /// Local-control-only: report the running CA's credential and external-PKI
+    /// state without racing its durable state through an offline reader.
+    /// Answered with [`CaStatusResponse`].
+    #[pack(tag(43))]
+    CaStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -518,6 +523,23 @@ pub enum ExternalCaCsrResponse {
 pub enum ExternalCaInstallResponse {
     #[pack(tag(0))]
     Ok { ca_fingerprint: String },
+    #[pack(tag(1))]
+    Err { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct CaStatus {
+    pub autorenew_slot_present: bool,
+    pub recovery_slot_present: bool,
+    pub externally_signed: bool,
+    pub cert_installed: bool,
+    pub pending: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum CaStatusResponse {
+    #[pack(tag(0))]
+    Ok { status: CaStatus },
     #[pack(tag(1))]
     Err { reason: String },
 }
@@ -1745,6 +1767,7 @@ mod tests {
             root_pem: Some("root".into()),
         }));
         assert_eq!(external[1], 42);
+        assert_eq!(encode(&Request::CaStatus), vec![2, 43]);
     }
 
     #[tokio::test]

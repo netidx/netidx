@@ -19,6 +19,7 @@
 //! root and the canonical service-unit path.
 
 use crate::{
+    config_lock::ConfigDirLock,
     paths,
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
 };
@@ -132,6 +133,7 @@ fn uninstall_with_service(
     if !root.exists() {
         return Ok(report);
     }
+    let _lock = if p.dry_run { None } else { Some(ConfigDirLock::acquire(&root)?) };
 
     // Snapshot entries first so an error mid-walk doesn't leave us in
     // a half-known state — and so the report ordering is stable.

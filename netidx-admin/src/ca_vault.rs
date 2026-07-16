@@ -217,11 +217,12 @@ struct VaultFile {
 }
 
 /// A CA directory's keyslot vault (`<ca-dir>/<VAULT_FILE>`). Reached
-/// through [`crate::ca_store::CaDir`], which holds the dir's exclusive lock;
+/// through [`crate::ca_store::CaDir`], which retains the config-directory guard;
 /// read methods take `&self`, write methods `&mut self`, so the borrow
 /// checker enforces exclusion rather than a remembered global lock.
 pub struct CAVault {
     dir: PathBuf,
+    vault: Option<VaultFile>,
 }
 
 pub struct VaultSnapshot {
@@ -327,16 +328,24 @@ impl VaultSnapshot {
 }
 
 impl CAVault {
-    /// A file-backed handle to the vault at `dir`. `pub(crate)` on purpose:
-    /// the only way to reach a vault from outside this crate is through
-    /// [`crate::ca_store::CaDir`], which holds the dir's exclusive flock. That
-    /// makes the daemon (and `ca init` / offline issuance, which open a
-    /// `CaDir` themselves) the only writers — no CLI can touch the vault
-    /// behind the daemon's back. The vault is stateless (every method re-reads
-    /// the file), so the handle itself takes no lock; the flock lives on the
-    /// `CaDir` that owns it.
+    #[cfg(test)]
     pub(crate) fn new(dir: PathBuf) -> Self {
-        CAVault { dir }
+        Self { dir, vault: None }
+    }
+
+    pub(crate) async fn open(dir: PathBuf) -> Result<Self> {
+        let path = dir.join(VAULT_FILE);
+        let vault = match read_vault(&path).await {
+            Ok(vault) => Some(vault),
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Self { dir, vault })
     }
 
     fn vault_path(&self) -> PathBuf {
@@ -344,7 +353,7 @@ impl CAVault {
     }
 
     pub fn snapshot(&self) -> Result<VaultSnapshot> {
-        Ok(VaultSnapshot { vault: read_vault(&self.vault_path())? })
+        Ok(VaultSnapshot { vault: self.current()?.clone() })
     }
 
     /// True if `dir` holds a vault-protected CA. A pre-open check (used to
@@ -354,28 +363,52 @@ impl CAVault {
         dir.join(VAULT_FILE).exists()
     }
 
+    pub async fn exists_async(dir: &Path) -> bool {
+        tokio::fs::try_exists(dir.join(VAULT_FILE)).await.unwrap_or(false)
+    }
+
+    fn current(&self) -> Result<&VaultFile> {
+        self.vault
+            .as_ref()
+            .with_context(|| format!("no vault at {}", self.vault_path().display()))
+    }
+
+    async fn commit(&mut self, vault: VaultFile) -> Result<()> {
+        write_vault(&self.vault_path(), &vault).await?;
+        self.vault = Some(vault);
+        Ok(())
+    }
+
     /// Create a new vault: generate a master key, encrypt `ca_key_pem` (an
     /// unencrypted PKCS#8 PEM) under it, and write the first admin's slot.
     /// Refuses to clobber an existing vault.
-    pub fn create(
+    pub async fn create(
         &mut self,
         ca_key_pem: &[u8],
         admin: &str,
         password: &str,
         policy: Policy,
     ) -> Result<()> {
-        let path = self.vault_path();
-        if path.exists() {
-            bail!("a vault already exists at {}", path.display());
+        if self.vault.is_some() {
+            bail!("a vault already exists at {}", self.vault_path().display());
         }
-        let mut mk = Zeroizing::new([0u8; 32]);
-        rand::rng().fill_bytes(&mut mk[..]);
-        let key_enc = aead_seal(&mk, ca_key_pem)?;
-        let slot = make_slot(&mk, SlotKind::Signing, admin, password, policy)?;
-        write_vault(
-            &path,
-            &VaultFile { version: VAULT_VERSION, key_enc, slots: vec![slot] },
-        )
+        let ca_key_pem = Zeroizing::new(ca_key_pem.to_vec());
+        let admin = admin.to_string();
+        let password = Zeroizing::new(password.to_string());
+        let vault = tokio::task::spawn_blocking(move || {
+            let mut mk = Zeroizing::new([0u8; 32]);
+            rand::rng().fill_bytes(&mut mk[..]);
+            let key_enc = aead_seal(&mk, &ca_key_pem)?;
+            let slot = make_slot(&mk, SlotKind::Signing, &admin, &password, policy)?;
+            Ok::<_, anyhow::Error>(VaultFile {
+                version: VAULT_VERSION,
+                key_enc,
+                slots: vec![slot],
+            })
+        })
+        .await
+        .context("vault creation task panicked")??;
+        self.commit(vault).await
     }
 
     /// Recover the CA key (and the unlocking admin's identity + policy)
@@ -383,8 +416,15 @@ impl CAVault {
     /// clean error, not a panic; the GCM tag on each slot's wrap is the
     /// password check.
     pub fn unlock(&self, password: &str) -> Result<Unlocked> {
-        let vault = read_vault(&self.vault_path())?;
-        unlock(&vault, password)
+        unlock(self.current()?, password)
+    }
+
+    pub(crate) async fn unlock_async(&self, password: &str) -> Result<Unlocked> {
+        let snapshot = self.snapshot()?;
+        let password = Zeroizing::new(password.to_string());
+        tokio::task::spawn_blocking(move || snapshot.unlock(&password))
+            .await
+            .context("vault unlock task panicked")?
     }
 
     /// Authenticate `admin` by `password` against any keyslot (signing or
@@ -395,8 +435,7 @@ impl CAVault {
     /// a role keyslot is a first-class admin for those ops without ever
     /// touching the CA private key.
     pub fn authenticate(&self, admin: &str, password: &str) -> Result<Authenticated> {
-        let vault = read_vault(&self.vault_path())?;
-        authenticate(&vault, admin, password)
+        authenticate(self.current()?, admin, password)
     }
 
     /// Add a **signing** slot — one that wraps MK and so can recover the CA
@@ -406,22 +445,30 @@ impl CAVault {
     /// bootstrap authority). In the server-signs model the only routine caller
     /// is autorenew setup (re-minting the box's `autorenew` slot, authorized
     /// by the `recovery` password); init mints `recovery` via [`create`](Self::create).
-    pub fn add_signing_slot(
+    pub async fn add_signing_slot(
         &mut self,
         existing_password: &str,
         new_admin: &str,
         new_password: &str,
         policy: Policy,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
-        if vault.slots.iter().any(|s| s.admin == new_admin) {
-            bail!("an admin named {new_admin:?} already exists");
-        }
-        let (_slot, mk) = recover_mk(&vault, existing_password)?;
-        let slot = make_slot(&mk, SlotKind::Signing, new_admin, new_password, policy)?;
-        vault.slots.push(slot);
-        write_vault(&path, &vault)
+        let mut vault = self.current()?.clone();
+        let existing_password = Zeroizing::new(existing_password.to_string());
+        let new_admin = new_admin.to_string();
+        let new_password = Zeroizing::new(new_password.to_string());
+        let vault = tokio::task::spawn_blocking(move || {
+            if vault.slots.iter().any(|s| s.admin == new_admin) {
+                bail!("an admin named {new_admin:?} already exists");
+            }
+            let (_slot, mk) = recover_mk(&vault, &existing_password)?;
+            let slot =
+                make_slot(&mk, SlotKind::Signing, &new_admin, &new_password, policy)?;
+            vault.slots.push(slot);
+            Ok::<_, anyhow::Error>(vault)
+        })
+        .await
+        .context("signing-slot creation task panicked")??;
+        self.commit(vault).await
     }
 
     /// Atomically re-key a signing slot: recover the master key via a *different*
@@ -433,23 +480,27 @@ impl CAVault {
     /// write leaves the old slot intact — so rotating the sole `recovery` slot
     /// can't leave the CA with no recovery credential. `admin` need not already
     /// exist (then this is a plain add).
-    pub fn replace_signing_slot(
+    pub async fn replace_signing_slot(
         &mut self,
         existing_password: &str,
         admin: &str,
         new_password: &str,
         policy: Policy,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
-        // Authorize via a different slot BEFORE touching anything: the caller
-        // is re-keying `admin`, so `existing_password` must be some other
-        // signing slot (recovering MK proves the authority to mint a new one).
-        let (_slot, mk) = recover_mk(&vault, existing_password)?;
-        let slot = make_slot(&mk, SlotKind::Signing, admin, new_password, policy)?;
-        vault.slots.retain(|s| s.admin != admin);
-        vault.slots.push(slot);
-        write_vault(&path, &vault)
+        let mut vault = self.current()?.clone();
+        let existing_password = Zeroizing::new(existing_password.to_string());
+        let admin = admin.to_string();
+        let new_password = Zeroizing::new(new_password.to_string());
+        let vault = tokio::task::spawn_blocking(move || {
+            let (_slot, mk) = recover_mk(&vault, &existing_password)?;
+            let slot = make_slot(&mk, SlotKind::Signing, &admin, &new_password, policy)?;
+            vault.slots.retain(|s| s.admin != admin);
+            vault.slots.push(slot);
+            Ok::<_, anyhow::Error>(vault)
+        })
+        .await
+        .context("signing-slot replacement task panicked")??;
+        self.commit(vault).await
     }
 
     /// Add a **role** slot: a keyslot that authenticates and carries `policy`
@@ -461,33 +512,40 @@ impl CAVault {
     /// holds the vault file; the wire handler checks `may_manage_admins` + the
     /// no-escalation subset rule). The hard-wired `SlotKind::Role` is the
     /// guard that this path can never mint a new MK-holder.
-    pub fn add_role_slot(
+    pub async fn add_role_slot(
         &mut self,
         new_admin: &str,
         new_password: &str,
         policy: Policy,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
-        let prepared = prepare_role_slot(&vault, new_admin, new_password, policy)?;
+        let mut vault = self.current()?.clone();
+        let snapshot = vault.clone();
+        let new_admin = new_admin.to_string();
+        let new_password = Zeroizing::new(new_password.to_string());
+        let prepared = tokio::task::spawn_blocking(move || {
+            prepare_role_slot(&snapshot, &new_admin, &new_password, policy)
+        })
+        .await
+        .context("role-slot creation task panicked")??;
         vault.slots.push(prepared.slot);
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
-    pub fn add_prepared_role_slot(&mut self, prepared: PreparedRoleSlot) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+    pub async fn add_prepared_role_slot(
+        &mut self,
+        prepared: PreparedRoleSlot,
+    ) -> Result<()> {
+        let mut vault = self.current()?.clone();
         validate_new_role_slot(&vault, &prepared.slot.admin)?;
         vault.slots.push(prepared.slot);
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
-    pub fn install_signing_replacement(
+    pub async fn install_signing_replacement(
         &mut self,
         prepared: PreparedSigningReplacement,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+        let mut vault = self.current()?.clone();
         ensure_slot_revision(&vault, prepared.authorizer)?;
         let current = vault
             .slots
@@ -499,29 +557,27 @@ impl CAVault {
         }
         vault.slots.retain(|slot| slot.admin != prepared.target);
         vault.slots.push(prepared.replacement);
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
-    pub fn install_signing_rekey(
+    pub async fn install_signing_rekey(
         &mut self,
         prepared: PreparedSigningRekey,
     ) -> Result<SigningRekeyRollback> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+        let mut vault = self.current()?.clone();
         let idx = ensure_slot_revision(&vault, prepared.previous)?;
         let previous = vault.slots[idx].clone();
         let installed_revision = prepared.replacement.credential_revision;
         vault.slots[idx] = prepared.replacement;
-        write_vault(&path, &vault)?;
+        self.commit(vault).await?;
         Ok(SigningRekeyRollback { installed_revision, previous })
     }
 
-    pub fn rollback_signing_rekey(
+    pub async fn rollback_signing_rekey(
         &mut self,
         rollback: SigningRekeyRollback,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+        let mut vault = self.current()?.clone();
         let idx = vault
             .slots
             .iter()
@@ -531,7 +587,7 @@ impl CAVault {
             })
             .context("the signing slot changed again before rollback")?;
         vault.slots[idx] = rollback.previous;
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
     /// Remove (revoke) an admin's slot. A low-level primitive — authority
@@ -540,9 +596,8 @@ impl CAVault {
     /// only MK-holder, and removing it orphans the CA key forever (no password
     /// could ever unlock it again). Removing a role slot never trips the
     /// guard.
-    pub fn remove_slot(&mut self, target_admin: &str, force: bool) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+    pub async fn remove_slot(&mut self, target_admin: &str, force: bool) -> Result<()> {
+        let mut vault = self.current()?.clone();
         let idx = vault
             .slots
             .iter()
@@ -557,7 +612,7 @@ impl CAVault {
             );
         }
         vault.slots.remove(idx);
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
     /// Replace the [`Policy`] on `target_admin`'s slot. A low-level primitive
@@ -565,29 +620,28 @@ impl CAVault {
     /// subset check). It rewrites **only** the (plaintext) `policy` field; the
     /// slot's `kind` and `wrap` are untouched, so it can never promote a Role
     /// slot to Signing (a Role admin can be rescoped but never handed MK).
-    pub fn set_policy(&mut self, target_admin: &str, policy: Policy) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
+    pub async fn set_policy(&mut self, target_admin: &str, policy: Policy) -> Result<()> {
+        let mut vault = self.current()?.clone();
         let idx = vault
             .slots
             .iter()
             .position(|s| s.admin == target_admin)
             .ok_or_else(|| anyhow!("no admin named {target_admin:?}"))?;
         vault.slots[idx].policy = policy;
-        write_vault(&path, &vault)
+        self.commit(vault).await
     }
 
     /// List the admins, their tiers, and their policies (no secrets).
     pub fn list_admins(&self) -> Result<Vec<AdminInfo>> {
-        let vault = read_vault(&self.vault_path())?;
-        Ok(vault
+        Ok(self
+            .current()?
             .slots
-            .into_iter()
+            .iter()
             .map(|s| AdminInfo {
                 slot_id: s.id,
-                admin: s.admin,
+                admin: s.admin.clone(),
                 kind: s.kind,
-                policy: s.policy,
+                policy: s.policy.clone(),
             })
             .collect())
     }
@@ -597,8 +651,8 @@ impl CAVault {
     /// backup-crackable extra key-holder. Used by init/recovery + as an
     /// invariant check.
     pub fn signing_slot_names(&self) -> Result<Vec<String>> {
-        let vault = read_vault(&self.vault_path())?;
-        Ok(vault
+        Ok(self
+            .current()?
             .slots
             .iter()
             .filter(|s| s.kind == SlotKind::Signing)
@@ -608,8 +662,7 @@ impl CAVault {
 
     /// One slot's tier + policy (no secrets), by admin name.
     pub fn slot_policy(&self, admin: &str) -> Result<(SlotKind, Policy)> {
-        let vault = read_vault(&self.vault_path())?;
-        vault
+        self.current()?
             .slots
             .iter()
             .find(|s| s.admin == admin)
@@ -622,8 +675,8 @@ impl CAVault {
         slot_id: uuid::Uuid,
         credential_revision: u64,
     ) -> Result<Authenticated> {
-        let vault = read_vault(&self.vault_path())?;
-        let slot = vault
+        let slot = self
+            .current()?
             .slots
             .iter()
             .find(|s| s.id == slot_id)
@@ -652,34 +705,46 @@ impl CAVault {
     /// the `recovery` backstop is untouched. Returns an error (and leaves the
     /// vault unchanged) if the password unlocks a *different* slot, so a
     /// caller can't rekey the wrong credential by mistake.
-    pub fn rekey_signing_slot(
+    pub async fn rekey_signing_slot(
         &mut self,
         target_admin: &str,
         old_password: &str,
         new_password: &str,
     ) -> Result<()> {
-        let path = self.vault_path();
-        let mut vault = read_vault(&path)?;
-        let (idx, mk) = recover_mk(&vault, old_password)?;
-        if vault.slots[idx].admin != target_admin {
-            bail!(
-                "that password unlocks {:?}, not {target_admin:?}; refusing to rekey a \
-                 different slot",
-                vault.slots[idx].admin
-            );
-        }
-        let policy = vault.slots[idx].policy.clone();
-        let old_id = vault.slots[idx].id;
-        let revision = vault.slots[idx]
-            .credential_revision
-            .checked_add(1)
-            .context("the signing-slot credential revision is exhausted")?;
-        let mut replacement =
-            make_slot(&mk, SlotKind::Signing, target_admin, new_password, policy)?;
-        replacement.id = old_id;
-        replacement.credential_revision = revision;
-        vault.slots[idx] = replacement;
-        write_vault(&path, &vault)
+        let mut vault = self.current()?.clone();
+        let target_admin = target_admin.to_string();
+        let old_password = Zeroizing::new(old_password.to_string());
+        let new_password = Zeroizing::new(new_password.to_string());
+        let vault = tokio::task::spawn_blocking(move || {
+            let (idx, mk) = recover_mk(&vault, &old_password)?;
+            if vault.slots[idx].admin != target_admin {
+                bail!(
+                    "that password unlocks {:?}, not {target_admin:?}; refusing to rekey a \
+                     different slot",
+                    vault.slots[idx].admin
+                );
+            }
+            let policy = vault.slots[idx].policy.clone();
+            let old_id = vault.slots[idx].id;
+            let revision = vault.slots[idx]
+                .credential_revision
+                .checked_add(1)
+                .context("the signing-slot credential revision is exhausted")?;
+            let mut replacement = make_slot(
+                &mk,
+                SlotKind::Signing,
+                &target_admin,
+                &new_password,
+                policy,
+            )?;
+            replacement.id = old_id;
+            replacement.credential_revision = revision;
+            vault.slots[idx] = replacement;
+            Ok::<_, anyhow::Error>(vault)
+        })
+        .await
+        .context("signing-slot rekey task panicked")??;
+        self.commit(vault).await
     }
 }
 
@@ -878,14 +943,16 @@ fn b64d(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("base64: {e}"))
 }
 
-fn write_vault(path: &Path, vault: &VaultFile) -> Result<()> {
+async fn write_vault(path: &Path, vault: &VaultFile) -> Result<()> {
     let json = serde_json::to_vec_pretty(vault).context("serializing vault")?;
-    atomic::write_atomic(path, &json, 0o600)
+    atomic::write_atomic_async(path, &json, 0o600)
+        .await
         .with_context(|| format!("writing vault {}", path.display()))
 }
 
-fn read_vault(path: &Path) -> Result<VaultFile> {
-    let bytes = std::fs::read(path)
+async fn read_vault(path: &Path) -> Result<VaultFile> {
+    let bytes = tokio::fs::read(path)
+        .await
         .with_context(|| format!("reading vault {}", path.display()))?;
     let vault: VaultFile = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {}", path.display()))?;
@@ -929,11 +996,11 @@ mod tests {
     const KEY: &[u8] =
         b"-----BEGIN PRIVATE KEY-----\nMOCKKEYBYTES\n-----END PRIVATE KEY-----\n";
 
-    #[test]
-    fn create_unlock_round_trip() {
+    #[tokio::test]
+    async fn create_unlock_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "alice", "hunter2", pol("*.a.example")).unwrap();
+        v.create(KEY, "alice", "hunter2", pol("*.a.example")).await.unwrap();
         assert!(CAVault::exists(dir.path()));
         let u = v.unlock("hunter2").unwrap();
         assert_eq!(u.admin, "alice");
@@ -941,33 +1008,33 @@ mod tests {
         assert_eq!(&u.ca_key_pem[..], KEY);
     }
 
-    #[test]
-    fn wrong_password_is_rejected() {
+    #[tokio::test]
+    async fn wrong_password_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "alice", "hunter2", pol("*.a")).unwrap();
+        v.create(KEY, "alice", "hunter2", pol("*.a")).await.unwrap();
         assert!(v.unlock("wrong").is_err());
         // And it doesn't leak the key on failure (nothing to assert
         // beyond the error, but exercise the path).
         assert!(v.unlock("").is_err());
     }
 
-    #[test]
-    fn create_refuses_to_clobber() {
+    #[tokio::test]
+    async fn create_refuses_to_clobber() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "alice", "pw", pol("*")).unwrap();
-        assert!(v.create(KEY, "bob", "pw2", pol("*")).is_err());
+        v.create(KEY, "alice", "pw", pol("*")).await.unwrap();
+        assert!(v.create(KEY, "bob", "pw2", pol("*")).await.is_err());
     }
 
-    #[test]
-    fn the_two_signing_slots_each_unlock() {
+    #[tokio::test]
+    async fn the_two_signing_slots_each_unlock() {
         // The server-only model keeps two signing slots: recovery + the
         // box's autorenew. Both wrap MK and unlock; both yield the same key.
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).await.unwrap();
 
         let r = v.unlock("rpw").unwrap();
         assert_eq!(r.admin, "recovery");
@@ -977,16 +1044,16 @@ mod tests {
         assert_eq!(v.signing_slot_names().unwrap().len(), 2);
     }
 
-    #[test]
-    fn replace_signing_slot_atomically_rekeys() {
+    #[tokio::test]
+    async fn replace_signing_slot_atomically_rekeys() {
         // Rotate the recovery slot, authorized by the *autorenew* slot: the old
         // recovery password stops working and the new one unlocks the same MK,
         // in a single write (the old slot is never momentarily absent).
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "old-rpw", pol("*.a")).unwrap();
-        v.add_signing_slot("old-rpw", "autorenew", "apw", pol("*.b")).unwrap();
-        v.replace_signing_slot("apw", "recovery", "new-rpw", pol("*.a")).unwrap();
+        v.create(KEY, "recovery", "old-rpw", pol("*.a")).await.unwrap();
+        v.add_signing_slot("old-rpw", "autorenew", "apw", pol("*.b")).await.unwrap();
+        v.replace_signing_slot("apw", "recovery", "new-rpw", pol("*.a")).await.unwrap();
         assert!(v.unlock("old-rpw").is_err(), "old recovery password must stop working");
         let r = v.unlock("new-rpw").unwrap();
         assert_eq!(r.admin, "recovery");
@@ -997,31 +1064,33 @@ mod tests {
         assert_eq!(&r.ca_key_pem[..], &a.ca_key_pem[..]);
     }
 
-    #[test]
-    fn replace_signing_slot_needs_signing_authority_and_leaves_slot_intact() {
+    #[tokio::test]
+    async fn replace_signing_slot_needs_signing_authority_and_leaves_slot_intact() {
         // Re-keying recovers MK first, so it needs a *signing* authority — a
         // role password or a wrong one can't do it, and the failed attempt
         // leaves the existing recovery slot untouched (no destructive window).
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
-        assert!(v.replace_signing_slot("epw", "recovery", "x", pol("*")).is_err());
-        assert!(v.replace_signing_slot("wrong", "recovery", "x", pol("*")).is_err());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        assert!(v.replace_signing_slot("epw", "recovery", "x", pol("*")).await.is_err());
+        assert!(
+            v.replace_signing_slot("wrong", "recovery", "x", pol("*")).await.is_err()
+        );
         assert!(v.unlock("rpw").is_ok(), "recovery slot must survive a failed re-key");
     }
 
-    #[test]
-    fn snapshot_authentication_is_revalidated_against_the_live_slot() {
+    #[tokio::test]
+    async fn snapshot_authentication_is_revalidated_against_the_live_slot() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_role_slot("eve", "old", role_pol("/eu")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "old", role_pol("/eu")).await.unwrap();
         let snapshot = v.snapshot().unwrap();
         let authenticated = snapshot.authenticate("eve", "old").unwrap();
 
-        v.remove_slot("eve", false).unwrap();
-        v.add_role_slot("eve", "new", role_pol("/us")).unwrap();
+        v.remove_slot("eve", false).await.unwrap();
+        v.add_role_slot("eve", "new", role_pol("/us")).await.unwrap();
 
         assert!(snapshot.authenticate("eve", "old").is_ok());
         assert!(
@@ -1035,37 +1104,37 @@ mod tests {
         assert_eq!(v.authenticate("eve", "new").unwrap().policy, role_pol("/us"));
     }
 
-    #[test]
-    fn prepared_role_slot_rechecks_name_at_commit() {
+    #[tokio::test]
+    async fn prepared_role_slot_rechecks_name_at_commit() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
         let prepared = v
             .snapshot()
             .unwrap()
             .prepare_role_slot("eve", "first", role_pol("/eu"))
             .unwrap();
 
-        v.add_role_slot("eve", "second", role_pol("/us")).unwrap();
+        v.add_role_slot("eve", "second", role_pol("/us")).await.unwrap();
 
-        assert!(v.add_prepared_role_slot(prepared).is_err());
+        assert!(v.add_prepared_role_slot(prepared).await.is_err());
         assert!(v.authenticate("eve", "first").is_err());
         assert!(v.authenticate("eve", "second").is_ok());
     }
 
-    #[test]
-    fn prepared_signing_replacement_rechecks_authorizer_and_target() {
+    #[tokio::test]
+    async fn prepared_signing_replacement_rechecks_authorizer_and_target() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).await.unwrap();
         let stale_authorizer = v
             .snapshot()
             .unwrap()
             .prepare_signing_replacement("apw", "recovery", "replacement", pol("*.a"))
             .unwrap();
-        v.rekey_signing_slot("autorenew", "apw", "next-apw").unwrap();
-        assert!(v.install_signing_replacement(stale_authorizer).is_err());
+        v.rekey_signing_slot("autorenew", "apw", "next-apw").await.unwrap();
+        assert!(v.install_signing_replacement(stale_authorizer).await.is_err());
         assert!(v.unlock("rpw").is_ok());
 
         let stale_target = v
@@ -1073,54 +1142,58 @@ mod tests {
             .unwrap()
             .prepare_signing_replacement("next-apw", "recovery", "stale", pol("*.a"))
             .unwrap();
-        v.replace_signing_slot("next-apw", "recovery", "current", pol("*.a")).unwrap();
-        assert!(v.install_signing_replacement(stale_target).is_err());
+        v.replace_signing_slot("next-apw", "recovery", "current", pol("*.a"))
+            .await
+            .unwrap();
+        assert!(v.install_signing_replacement(stale_target).await.is_err());
         assert!(v.unlock("current").is_ok());
         assert!(v.unlock("stale").is_err());
     }
 
-    #[test]
-    fn prepared_signing_rekey_can_be_committed_and_rolled_back() {
+    #[tokio::test]
+    async fn prepared_signing_rekey_can_be_committed_and_rolled_back() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "old", pol("*.a")).unwrap();
+        v.create(KEY, "recovery", "old", pol("*.a")).await.unwrap();
         let prepared = v
             .snapshot()
             .unwrap()
             .prepare_signing_rekey("recovery", "old", "new")
             .unwrap();
 
-        let rollback = v.install_signing_rekey(prepared).unwrap();
+        let rollback = v.install_signing_rekey(prepared).await.unwrap();
         assert!(v.unlock("old").is_err());
         assert!(v.unlock("new").is_ok());
 
-        v.rollback_signing_rekey(rollback).unwrap();
+        v.rollback_signing_rekey(rollback).await.unwrap();
         assert!(v.unlock("old").is_ok());
         assert!(v.unlock("new").is_err());
     }
 
-    #[test]
-    fn add_signing_slot_requires_signing_authority_and_unique_name() {
+    #[tokio::test]
+    async fn add_signing_slot_requires_signing_authority_and_unique_name() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
         // A password unlocking no signing slot can't mint another MK-holder.
-        assert!(v.add_signing_slot("nope", "autorenew", "apw", pol("*.b")).is_err());
+        assert!(
+            v.add_signing_slot("nope", "autorenew", "apw", pol("*.b")).await.is_err()
+        );
         // A role password is not signing authority either.
-        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
-        assert!(v.add_signing_slot("epw", "autorenew", "apw", pol("*")).is_err());
+        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        assert!(v.add_signing_slot("epw", "autorenew", "apw", pol("*")).await.is_err());
         // Duplicate name rejected.
-        assert!(v.add_signing_slot("rpw", "recovery", "x", pol("*")).is_err());
+        assert!(v.add_signing_slot("rpw", "recovery", "x", pol("*")).await.is_err());
     }
 
-    #[test]
-    fn role_slot_management_needs_no_password_and_cannot_reach_mk() {
+    #[tokio::test]
+    async fn role_slot_management_needs_no_password_and_cannot_reach_mk() {
         // The vault primitives carry no authority of their own (the server /
         // local FS gates them); they only ever touch non-MK plaintext.
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
 
         // A role authenticates and gets its scoped policy, but NEVER unlocks.
         let a = v.authenticate("eve", "epw").unwrap();
@@ -1130,41 +1203,41 @@ mod tests {
 
         // Rescoping a role — even to broad issuance authority — never hands
         // it MK: it stays a Role slot and its password still can't unlock.
-        v.set_policy("eve", pol("*")).unwrap();
+        v.set_policy("eve", pol("*")).await.unwrap();
         assert_eq!(v.slot_policy("eve").unwrap().0, SlotKind::Role);
         assert!(v.unlock("epw").is_err());
 
         // remove_slot drops a role with no password; the signing slot stays.
-        v.remove_slot("eve", false).unwrap();
+        v.remove_slot("eve", false).await.unwrap();
         assert!(v.authenticate("eve", "epw").is_err());
         assert!(v.unlock("rpw").is_ok());
     }
 
-    #[test]
-    fn remove_slot_guards_the_last_signing_slot() {
+    #[tokio::test]
+    async fn remove_slot_guards_the_last_signing_slot() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
 
         // Removing a role never trips the guard.
-        v.remove_slot("eve", false).unwrap();
+        v.remove_slot("eve", false).await.unwrap();
         // Two signing slots: removing one is fine (one MK-holder remains).
-        v.remove_slot("autorenew", false).unwrap();
+        v.remove_slot("autorenew", false).await.unwrap();
         // Now `recovery` is the only signing slot: refused without force
         // (removing it would orphan the CA key forever), allowed with it.
-        assert!(v.remove_slot("recovery", false).is_err());
-        v.remove_slot("recovery", true).unwrap();
+        assert!(v.remove_slot("recovery", false).await.is_err());
+        v.remove_slot("recovery", true).await.unwrap();
         assert!(v.unlock("rpw").is_err());
     }
 
-    #[test]
-    fn list_and_signing_slot_names() {
+    #[tokio::test]
+    async fn list_and_signing_slot_names() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
         let mut admins = v.list_admins().unwrap();
         admins.sort_by(|a, b| a.admin.cmp(&b.admin));
         let kinds: Vec<_> = admins.iter().map(|a| (a.admin.clone(), a.kind)).collect();
@@ -1179,14 +1252,14 @@ mod tests {
         assert_eq!(v.signing_slot_names().unwrap(), vec!["recovery".to_string()]);
     }
 
-    #[test]
-    fn reserved_names_cannot_be_role_admins() {
+    #[tokio::test]
+    async fn reserved_names_cannot_be_role_admins() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        v.create(KEY, "recovery", "rpw", pol("*.a")).unwrap();
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
         // A role admin may never take a reserved signing-slot name (any case).
-        assert!(v.add_role_slot("recovery", "x", role_pol("/")).is_err());
-        assert!(v.add_role_slot("AutoRenew", "x", role_pol("/")).is_err());
+        assert!(v.add_role_slot("recovery", "x", role_pol("/")).await.is_err());
+        assert!(v.add_role_slot("AutoRenew", "x", role_pol("/")).await.is_err());
         assert!(is_reserved_admin("recovery") && is_reserved_admin("AUTORENEW"));
         assert!(!is_reserved_admin("eve"));
     }
@@ -1209,24 +1282,24 @@ mod tests {
         assert_eq!(normalize_recovery_password("o0-iI lL-ab").as_str(), "001111AB");
     }
 
-    #[test]
-    fn a_minted_recovery_password_actually_unlocks() {
+    #[tokio::test]
+    async fn a_minted_recovery_password_actually_unlocks() {
         // The canonical (ungrouped) password is the slot password; a copy
         // re-typed in grouped/confusable form normalizes back and unlocks.
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
         let pw = gen_recovery_password();
-        v.create(KEY, RECOVERY_ADMIN, &pw, pol("*.a")).unwrap();
+        v.create(KEY, RECOVERY_ADMIN, &pw, pol("*.a")).await.unwrap();
         assert!(v.unlock(&pw).is_ok());
         let retyped = normalize_recovery_password(&group_recovery_password(&pw));
         assert!(v.unlock(&retyped).is_ok());
     }
 
-    #[test]
-    fn pre_rbac_vault_without_kind_loads_as_signing() {
+    #[tokio::test]
+    async fn pre_rbac_vault_without_kind_loads_as_signing() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = CAVault::new(dir.path().to_path_buf());
-        vault.create(KEY, "alice", "apw", pol("*.a")).unwrap();
+        vault.create(KEY, "alice", "apw", pol("*.a")).await.unwrap();
         // Simulate a vault written before slot tiering: drop the `kind`
         // field from every slot. The serde default must read it as Signing
         // — pre-RBAC slots all wrap MK, so they really are signing slots.
@@ -1238,16 +1311,18 @@ mod tests {
         }
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
 
+        let vault = CAVault::open(dir.path().to_path_buf()).await.unwrap();
+
         assert_eq!(vault.list_admins().unwrap()[0].kind, SlotKind::Signing);
         assert_eq!(vault.unlock("apw").unwrap().admin, "alice");
         assert_eq!(vault.authenticate("alice", "apw").unwrap().kind, SlotKind::Signing);
     }
 
-    #[test]
-    fn tampering_with_the_key_ciphertext_is_detected() {
+    #[tokio::test]
+    async fn tampering_with_the_key_ciphertext_is_detected() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = CAVault::new(dir.path().to_path_buf());
-        vault.create(KEY, "alice", "apw", pol("*")).unwrap();
+        vault.create(KEY, "alice", "apw", pol("*")).await.unwrap();
         // Flip a byte in key_enc.ct and confirm unlock fails rather than
         // returning garbage.
         let path = vault.vault_path();
@@ -1260,6 +1335,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
         // The password still unlocks a slot (MK recovered), but the CA
         // key AEAD now fails its tag → clean error, not garbage.
+        let vault = CAVault::open(dir.path().to_path_buf()).await.unwrap();
         assert!(vault.unlock("apw").is_err());
     }
 }

@@ -162,11 +162,11 @@ mod tests {
         }
     }
 
-    fn setup() -> (tempfile::TempDir, CAVault) {
+    async fn setup() -> (tempfile::TempDir, CAVault) {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = CAVault::new(dir.path().to_path_buf());
-        vault.create(b"mock-ca-key", "recovery", "rpw", policy("/")).unwrap();
-        vault.add_role_slot("alice", "pw", policy("/eu")).unwrap();
+        vault.create(b"mock-ca-key", "recovery", "rpw", policy("/")).await.unwrap();
+        vault.add_role_slot("alice", "pw", policy("/eu")).await.unwrap();
         (dir, vault)
     }
 
@@ -178,9 +178,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn login_use_logout_and_restart() {
-        let (_dir, vault) = setup();
+    #[tokio::test]
+    async fn login_use_logout_and_restart() {
+        let (_dir, vault) = setup().await;
         let mut store = SessionStore::default();
         let token = login(&mut store, &vault);
         let credential = AdminCredential::Session { token: token.clone() };
@@ -196,20 +196,20 @@ mod tests {
         assert!(restarted.authenticate_session(&vault, &token).is_err());
     }
 
-    #[test]
-    fn expiry_slot_recreation_and_live_policy_changes_invalidate_correctly() {
-        let (_dir, mut vault) = setup();
+    #[tokio::test]
+    async fn expiry_slot_recreation_and_live_policy_changes_invalidate_correctly() {
+        let (_dir, mut vault) = setup().await;
         let mut store = SessionStore::default();
         let token = login(&mut store, &vault);
         let credential = AdminCredential::Session { token: token.clone() };
         let mut reduced = policy("/eu/narrow");
         reduced.may_manage_admins = true;
-        vault.set_policy("alice", reduced.clone()).unwrap();
+        vault.set_policy("alice", reduced.clone()).await.unwrap();
         let AdminCredential::Session { token } = &credential else { unreachable!() };
         assert_eq!(store.authenticate_session(&vault, token).unwrap().policy, reduced);
 
-        vault.remove_slot("alice", false).unwrap();
-        vault.add_role_slot("alice", "pw", policy("/eu")).unwrap();
+        vault.remove_slot("alice", false).await.unwrap();
+        vault.add_role_slot("alice", "pw", policy("/eu")).await.unwrap();
         assert!(store.authenticate_session(&vault, token).is_err());
 
         let mut expiring = SessionStore::default();
@@ -218,9 +218,9 @@ mod tests {
         assert!(expiring.authenticate_session(&vault, &expired).is_err());
     }
 
-    #[test]
-    fn capacity_prunes_the_least_recently_used_session() {
-        let (_dir, vault) = setup();
+    #[tokio::test]
+    async fn capacity_prunes_the_least_recently_used_session() {
+        let (_dir, vault) = setup().await;
         let mut store = SessionStore::default();
         for i in 0..MAX_SESSIONS {
             let mut hash = [0u8; 32];

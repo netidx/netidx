@@ -16,6 +16,7 @@ use crate::{
     answer::{Answerer, Field},
     atomic,
     ca::{self, Ca, SanEntry},
+    config_lock::ConfigDirLock,
     offline_ca, paths,
     plan::service::ServiceNeed,
     service::ServiceScope,
@@ -32,6 +33,7 @@ use std::{
 pub struct SetupArgs<'a> {
     pub ca_dir: &'a Path,
     pub ca: &'a Ca,
+    pub config_lock: ConfigDirLock,
     /// The network's TLS domain — what discovery groups by.
     pub domain: &'a str,
     /// Explicit `--listen` (skips the prompt).
@@ -60,7 +62,8 @@ pub async fn setup_server(
     a: SetupArgs<'_>,
 ) -> Result<ServiceNeed> {
     let server_dir = a.ca_dir.join("server");
-    std::fs::create_dir_all(&server_dir)
+    tokio::fs::create_dir_all(&server_dir)
+        .await
         .with_context(|| format!("creating {}", server_dir.display()))?;
     // Generate the serving key + CSR (ECDSA) and have the CA sign it.
     // This is bootstrap — before the daemon owns the CA — so record the
@@ -70,6 +73,7 @@ pub async fn setup_server(
     let server_id = AdminServerId::new();
     let kc = admin_client::generate_key_and_csr(SERVING_SAN)?;
     let leaf = offline_ca::sign_and_record(
+        &a.config_lock,
         a.ca,
         NodeKind::AdminServer,
         kc.csr_pem.as_bytes(),
@@ -79,12 +83,14 @@ pub async fn setup_server(
             SanEntry::Uri(CONTROLLER_ROLE_URI.to_string()),
         ],
         SERVING_SAN,
-        ca::CaLifetimes::load(a.ca_dir)
+        ca::CaLifetimes::load_async(a.ca_dir)
+            .await
             .map(|l| l.leaf_validity)
             .unwrap_or(ca::DEFAULT_LEAF_VALIDITY),
     )
+    .await
     .context("signing the admin server's serving certificate")?;
-    let ca_cert = std::fs::read(a.ca_dir.join("certificate.pem"))?;
+    let ca_cert = tokio::fs::read(a.ca_dir.join("certificate.pem")).await?;
     let home_ca_fingerprint =
         crate::fingerprint::Fingerprint::of_cert_pem(&ca_cert)?.text();
     // Chain = [serving leaf, ca cert] so the client receives the CA.
@@ -92,8 +98,15 @@ pub async fn setup_server(
     chain.extend_from_slice(&ca_cert);
     let serving_cert = server_dir.join("cert.pem");
     let serving_key = server_dir.join("key.pem");
-    atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    match tls::write_private_key_maybe_sealed(&serving_key, &kc.private_key_pem)? {
+    atomic::write_atomic_async(&serving_cert, &chain, 0o644).await?;
+    let key_write = tokio::task::spawn_blocking({
+        let serving_key = serving_key.clone();
+        let private_key_pem = kc.private_key_pem;
+        move || tls::write_private_key_maybe_sealed(&serving_key, &private_key_pem)
+    })
+    .await
+    .context("serving-key protection task panicked")??;
+    match key_write {
         tls::KeyWrite::Sealed => {
             ans.note(&format_compact!(
                 "  serving key sealed to this machine's {}",
@@ -142,7 +155,11 @@ pub async fn setup_server(
     // bundle when one exists, else the CA's own cert.
     let trusted = {
         let bundle = a.ca_dir.join("trusted.pem");
-        if bundle.is_file() { bundle } else { a.ca_dir.join("certificate.pem") }
+        if tokio::fs::try_exists(&bundle).await? {
+            bundle
+        } else {
+            a.ca_dir.join("certificate.pem")
+        }
     };
     let cfg = AdminServerConfig {
         domain: a.domain.to_string(),
@@ -168,7 +185,15 @@ pub async fn setup_server(
         activation_units_dir: None,
     };
     let cfg_path = paths::user_admin_server_config()?;
-    cfg.save(&cfg_path)?;
+    let cfg_root = cfg_path.parent().context("admin-server config has no parent")?;
+    anyhow::ensure!(
+        a.config_lock.contains(&cfg_path)?
+            && a.config_lock.require_descendant(a.ca_dir).is_ok(),
+        "served CA directory {} is not below config directory {}",
+        a.ca_dir.display(),
+        cfg_root.display()
+    );
+    cfg.save_async(&cfg_path).await?;
 
     ans.note(&format_compact!(
         "admin server configured:\n\
@@ -191,7 +216,7 @@ pub async fn setup_server(
         ));
         return Ok(ServiceNeed::NONE);
     };
-    install_unit(ans, units_dir, &cfg_path)?;
+    install_unit(ans, units_dir, &cfg_path).await?;
     // An admin server is a network daemon → system-scope service.
     Ok(ServiceNeed::at(ServiceScope::System))
 }
@@ -199,23 +224,26 @@ pub async fn setup_server(
 /// Write the `admin-server` activation unit into `units_dir`, pointing
 /// at the config at `cfg_path`. Shared by [`setup_server`] (the CA
 /// host) and the resolver install's enrollment path (everyone else).
-pub fn install_unit(
+pub async fn install_unit(
     ans: &mut dyn Answerer,
     units_dir: &Path,
     cfg_path: &Path,
 ) -> Result<()> {
     use crate::template::services::admin_server::{self, AdminServerServiceParams};
-    std::fs::create_dir_all(units_dir)
-        .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
     let netidx_binary = std::env::current_exe()
         .context("could not determine current netidx binary for the admin-server unit")?;
     let unit = admin_server::unit(&AdminServerServiceParams {
         netidx_binary,
         config: cfg_path.to_path_buf(),
     })?;
-    let dir = activation::ActivationDir::open(Some(units_dir))?;
-    dir.save("admin-server", &unit)
-        .context("writing the admin-server activation unit")?;
+    let units_dir_owned = units_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let dir = activation::ActivationDir::open(Some(&units_dir_owned))?;
+        dir.save("admin-server", &unit)
+            .context("writing the admin-server activation unit")
+    })
+    .await
+    .context("activation-unit write task panicked")??;
     ans.note(&format_compact!(
         "  unit:     {}",
         activation::unit_path_in(units_dir, "admin-server").display()
@@ -227,11 +255,13 @@ pub fn install_unit(
 /// install flows call this after standing up the resolver / id-map so
 /// the daemon advertises what actually runs here. A missing config is
 /// an error: roles only make sense on a host that has one.
-pub fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
-    let cfg_path = paths::discover_admin_server_config()?;
-    let mut cfg = AdminServerConfig::load(&cfg_path)?;
+pub async fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
+    let cfg_path = paths::discover_admin_server_config_async().await?;
+    let root = cfg_path.parent().context("admin-server config has no parent")?;
+    let _lock = ConfigDirLock::acquire_async(root).await?;
+    let mut cfg = AdminServerConfig::load_async(&cfg_path).await?;
     update(&mut cfg.roles);
-    cfg.save(&cfg_path)?;
+    cfg.save_async(&cfg_path).await?;
     Ok(cfg_path)
 }
 
@@ -239,14 +269,23 @@ pub fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
 /// running admin-server daemon approves verified renewals in-process. The
 /// config must already exist and hold a CA role — autorenew is a CA-host
 /// feature, and the keytab path is all the daemon needs to read the slot.
-pub fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
-    let cfg_path = paths::discover_admin_server_config()?;
-    let mut cfg = AdminServerConfig::load(&cfg_path)?;
+pub async fn set_ca_autorenew(
+    config_lock: &ConfigDirLock,
+    keytab: &Path,
+) -> Result<PathBuf> {
+    let cfg_path = paths::discover_admin_server_config_async().await?;
+    anyhow::ensure!(
+        config_lock.contains(&cfg_path)?,
+        "admin-server config {} is outside locked config directory {}",
+        cfg_path.display(),
+        config_lock.root().display()
+    );
+    let mut cfg = AdminServerConfig::load_async(&cfg_path).await?;
     let ca = cfg.roles.ca.as_mut().ok_or_else(|| {
         anyhow!("admin-server config {} has no CA role", cfg_path.display())
     })?;
     ca.autorenew = Some(keytab.to_path_buf());
-    cfg.save(&cfg_path)?;
+    cfg.save_async(&cfg_path).await?;
     Ok(cfg_path)
 }
 
@@ -256,7 +295,10 @@ pub fn set_ca_autorenew(keytab: &Path) -> Result<PathBuf> {
 /// server usually co-locates with a resolver, so its address is the
 /// resolver's.
 async fn default_listen_ip(hint: Option<IpAddr>) -> IpAddr {
-    if let Some(ip) = hint.or_else(existing_resolver_listen_ip) {
+    if let Some(ip) = hint {
+        return ip;
+    }
+    if let Some(ip) = existing_resolver_listen_ip().await {
         return ip;
     }
     crate::plan::install::detected_advertised_ip()
@@ -266,8 +308,10 @@ async fn default_listen_ip(hint: Option<IpAddr>) -> IpAddr {
 
 /// The listen IP of the default resolver config, if one is present and
 /// parseable.
-fn existing_resolver_listen_ip() -> Option<IpAddr> {
-    crate::resolver::ResolverConfig::load_default()
+async fn existing_resolver_listen_ip() -> Option<IpAddr> {
+    let path = paths::discover_resolver_config().ok()?;
+    crate::resolver::ResolverConfig::load_async(path)
+        .await
         .ok()
         .and_then(|c| c.0.member_servers.first().map(|m| m.addr.ip()))
 }

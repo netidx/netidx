@@ -414,7 +414,14 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
 /// new destinations. Existing destinations are never overwritten. Captured
 /// resolver/id-map files are restored beside the admin config and its role
 /// paths are rewritten; machine-bound TLS identities remain recovery's job.
-pub fn restore(bundle: &Path, ca_dir: &Path, config_path: &Path) -> Result<Manifest> {
+pub fn restore(
+    lock: &crate::config_lock::ConfigDirLock,
+    bundle: &Path,
+    ca_dir: &Path,
+    config_path: &Path,
+) -> Result<Manifest> {
+    lock.require_descendant(ca_dir)?;
+    lock.require_contained(config_path)?;
     let manifest = verify(bundle)?;
     if ca_dir.exists() || config_path.exists() {
         let mut expected_cfg: AdminServerConfig =

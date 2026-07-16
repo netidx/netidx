@@ -210,7 +210,7 @@ pub async fn run_resolver(
     let founding_new_cluster = probe.have().is_none()
         && input.parent_admin_server.is_none()
         && !input.common.dry_run
-        && !ca_setup::default_ca_present();
+        && !ca_setup::default_ca_present().await;
     // Frame the whole "new cluster" install up front, before any machine or CA
     // questions, so they have context: administering netidx is always
     // authenticated over TLS by the CA no matter how the data plane
@@ -728,8 +728,8 @@ impl ResolvedAuth {
 /// (`service/host.domain@REALM`). The local hostname is usually the short form,
 /// so qualify it: keep it as-is if it already has a domain, otherwise borrow the
 /// realm's domain (the krb5 convention is realm == the upper-cased DNS domain).
-fn default_krb5_spn() -> Option<String> {
-    let krb5 = std::fs::read_to_string("/etc/krb5.conf").ok()?;
+async fn default_krb5_spn() -> Option<String> {
+    let krb5 = tokio::fs::read_to_string("/etc/krb5.conf").await.ok()?;
     let realm = krb5.lines().find_map(|l| {
         l.trim()
             .strip_prefix("default_realm")
@@ -767,7 +767,7 @@ async fn resolver_self_auth(
              install`; for a network resolver choose anonymous, krb5, or tls."
         ),
         AuthKind::Krb5 => {
-            let spn = match default_krb5_spn() {
+            let spn = match default_krb5_spn().await {
                 Some(def) => {
                     let answer = ans
                         .text(Field::Spn, input.spn.clone(), Some(&def), false)
@@ -896,7 +896,7 @@ async fn resolver_tls_generate(
     let identity_dir = tls::identity_dir(name)?;
 
     if input.common.dry_run {
-        if ca_setup::default_ca_present() {
+        if ca_setup::default_ca_present().await {
             ans.note(&format_compact!(
                 "[dry-run] would issue a resolver certificate {name:?} from the \
                  local CA at {}",
@@ -922,7 +922,7 @@ async fn resolver_tls_generate(
         });
     }
 
-    let ca = if ca_setup::default_ca_present() {
+    let (ca, config_lock) = if ca_setup::default_ca_present().await {
         ans.note(&format_compact!("issuing from the local CA at {}", ca_dir.display()));
         offline_ca::open_default_ca(ans).await?
     } else {
@@ -975,7 +975,9 @@ async fn resolver_tls_generate(
             ),
         )
         .await?;
-        created
+        let config_lock =
+            crate::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?;
+        (created, config_lock)
     };
     // Local-CA-issue path: choose how the leaf key is protected at rest. The
     // askpass goes into the emitted client config as the password case's
@@ -990,11 +992,14 @@ async fn resolver_tls_generate(
         "issuing resolver certificate {name:?} (this may take a moment)…"
     ));
     let issued = ca_setup::issue_identity(
+        &config_lock,
         &ca,
         name,
         staging.path().to_path_buf(),
         protection.password(),
-    )?;
+        &["users".to_string()],
+    )
+    .await?;
     // The sealed password rides beside the staged key; apply()'s identity
     // install copies sidecars with their keys.
     protection.write_sidecar(&issued.private_key)?;
@@ -1191,15 +1196,15 @@ async fn post_apply_admin_server(
         // must MERGE the new resolver/id-map roles into that config — never
         // enroll a fresh admin server, whose join-shape config drops the `ca`
         // role and silently disables signing.
-        Some(net) if host_holds_ca(net) => {
+        Some(net) if host_holds_ca(net).await => {
             match admin_plane_decision(kind, no_admin_server) {
                 // Honor an explicit `--no-admin-server` (and Local auth) — don't
                 // advertise this resolver — even though the admin server itself
                 // keeps running here (it's the CA).
                 AdminPlane::Skip => Ok(false),
                 _ => {
-                    merge_resolver_roles(ans, resolver_config, id_map)?;
-                    Ok(paths::discover_admin_server_config().is_ok())
+                    merge_resolver_roles(ans, resolver_config, id_map).await?;
+                    Ok(paths::discover_admin_server_config_async().await.is_ok())
                 }
             }
         }
@@ -1221,8 +1226,8 @@ async fn post_apply_admin_server(
             .await
         }
         None => {
-            merge_resolver_roles(ans, resolver_config, id_map)?;
-            Ok(paths::discover_admin_server_config().is_ok())
+            merge_resolver_roles(ans, resolver_config, id_map).await?;
+            Ok(paths::discover_admin_server_config_async().await.is_ok())
         }
     }
 }
@@ -1232,14 +1237,14 @@ async fn post_apply_admin_server(
 /// against the discovered identity so we only short-circuit for genuinely our
 /// own CA, never a different network that merely happens to be reachable.
 #[cfg(unix)]
-fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
-    if !ca_setup::default_ca_present() {
+async fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
+    if !ca_setup::default_ca_present().await {
         return false;
     }
     let Ok(ca_dir) = paths::user_ca_dir() else {
         return false;
     };
-    let Ok(pem) = std::fs::read(ca_dir.join("certificate.pem")) else {
+    let Ok(pem) = tokio::fs::read(ca_dir.join("certificate.pem")).await else {
         return false;
     };
     matches!(Fingerprint::of_cert_pem(&pem), Ok(fp) if fp == net.identity.fingerprint)
@@ -1249,12 +1254,12 @@ fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
 /// `admin-server.json`, preserving every other role (notably `ca`). No existing
 /// config ⇒ the operator declined a admin server here, so there's nothing to do.
 #[cfg(unix)]
-fn merge_resolver_roles(
+async fn merge_resolver_roles(
     ans: &mut dyn Answerer,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
 ) -> Result<()> {
-    if paths::discover_admin_server_config().is_err() {
+    if paths::discover_admin_server_config_async().await.is_err() {
         return Ok(());
     }
     let path = server_setup::update_roles(|roles| {
@@ -1262,7 +1267,8 @@ fn merge_resolver_roles(
         if let Some(map) = id_map {
             roles.id_map = Some(IdMapRole { map });
         }
-    })?;
+    })
+    .await?;
     ans.note(&format_compact!("updated admin-server roles in {}", path.display()));
     Ok(())
 }
@@ -1347,7 +1353,7 @@ pub async fn enroll_admin_server(
         .context("invalid admin server listen port")?
         .unwrap_or(crate::admin_proto::DEFAULT_PORT);
     let listen = SocketAddr::new(ip, port);
-    let resolver = crate::resolver::ResolverConfig::load(&resolver_config)?;
+    let resolver = crate::resolver::ResolverConfig::load_async(&resolver_config).await?;
     let resolver_members = resolver.resolver_addrs();
     let resolver_member = resolver_members
         .iter()
@@ -1459,15 +1465,23 @@ pub async fn enroll_admin_server(
     // the CA cert at the end of the chain, exactly like the CA host's own admin
     // server.
     let dir = paths::user_config_root()?.join("admin-server");
-    std::fs::create_dir_all(&dir)
+    tokio::fs::create_dir_all(&dir)
+        .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let mut chain = issued.cert_pem.clone().into_bytes();
     chain.extend_from_slice(net.identity.ca_pem().as_bytes());
     let serving_cert = dir.join("cert.pem");
     let serving_key = dir.join("key.pem");
     let trusted = dir.join("trusted.pem");
-    atomic::write_atomic(&serving_cert, &chain, 0o644)?;
-    match tls::write_private_key_maybe_sealed(&serving_key, &issued.private_key_pem)? {
+    atomic::write_atomic_async(&serving_cert, &chain, 0o644).await?;
+    let key_write = tokio::task::spawn_blocking({
+        let serving_key = serving_key.clone();
+        let private_key_pem = issued.private_key_pem.clone();
+        move || tls::write_private_key_maybe_sealed(&serving_key, &private_key_pem)
+    })
+    .await
+    .context("serving-key protection task panicked")??;
+    match key_write {
         tls::KeyWrite::Sealed => ans.note(&format_compact!(
             "  serving key sealed to this machine's {}",
             netidx_tpm::MECHANISM
@@ -1477,7 +1491,7 @@ pub async fn enroll_admin_server(
             netidx_tpm::MECHANISM
         )),
     }
-    atomic::write_atomic(&trusted, issued.trusted_pem.as_bytes(), 0o644)?;
+    atomic::write_atomic_async(&trusted, issued.trusted_pem.as_bytes(), 0o644).await?;
     let cfg = AdminServerConfig {
         domain: net.identity.domain.clone(),
         server_id: tls::admin_cert_identity_from_pem(issued.cert_pem.as_bytes())?
@@ -1498,7 +1512,7 @@ pub async fn enroll_admin_server(
         activation_units_dir: None,
     };
     let cfg_path = paths::user_admin_server_config()?;
-    cfg.save(&cfg_path)?;
+    cfg.save_async(&cfg_path).await?;
     ans.note(&format_compact!(
         "admin server configured:\n\
          \x20 config:   {}\n\
@@ -1508,7 +1522,7 @@ pub async fn enroll_admin_server(
         net.identity.domain
     ));
     if let Some(units_dir) = units_dir {
-        server_setup::install_unit(ans, units_dir, &cfg_path)?;
+        server_setup::install_unit(ans, units_dir, &cfg_path).await?;
     } else {
         ans.note(&format_compact!(
             "  (--no-units: no activation unit written; run it yourself with\n\

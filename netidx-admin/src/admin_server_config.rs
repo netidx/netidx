@@ -141,23 +141,41 @@ impl AdminServerConfig {
         Ok(cfg)
     }
 
+    pub async fn load_for_recovery_async(path: &Path) -> Result<Self> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading admin-server config {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub async fn load_async(path: &Path) -> Result<Self> {
+        let cfg = Self::load_for_recovery_async(path).await?;
+        cfg.validate_structure()?;
+        let pem = tokio::fs::read(&cfg.serving_cert).await.with_context(|| {
+            format!("reading serving certificate {}", cfg.serving_cert.display())
+        })?;
+        cfg.validate_with_serving_cert(&pem)
+            .with_context(|| format!("invalid admin-server config {}", path.display()))?;
+        Ok(cfg)
+    }
+
     /// A non-CA admin server must know its CA: without `ca_addr` it can
     /// neither register its facts nor version-check + pull the network
     /// map, so it would be silently invisible to the map. Only the CA host
     /// (`roles.ca` set), which *is* the map's owner, may omit it.
     pub fn validate(&self) -> Result<()> {
-        if self.roles.ca.is_none() && self.ca_addr.is_none() {
-            bail!(
-                "a non-CA admin server must set `ca_addr` — the CA it registers \
-                 with and fetches the network map from. Only the CA host (with \
-                 a `ca` role) may omit it."
-            );
-        }
-        let configured_fp = Fingerprint::parse_text(&self.home_ca_fingerprint)
-            .context("invalid home_ca_fingerprint")?;
+        self.validate_structure()?;
         let pem = std::fs::read(&self.serving_cert).with_context(|| {
             format!("reading serving certificate {}", self.serving_cert.display())
         })?;
+        self.validate_with_serving_cert(&pem)
+    }
+
+    fn validate_with_serving_cert(&self, pem: &[u8]) -> Result<()> {
+        self.validate_structure()?;
+        let configured_fp = Fingerprint::parse_text(&self.home_ca_fingerprint)
+            .context("invalid home_ca_fingerprint")?;
         let mut cursor = std::io::Cursor::new(&pem);
         let mut certs = rustls_pemfile::certs(&mut cursor);
         let leaf = certs
@@ -192,10 +210,27 @@ impl AdminServerConfig {
         Ok(())
     }
 
+    fn validate_structure(&self) -> Result<()> {
+        if self.roles.ca.is_none() && self.ca_addr.is_none() {
+            bail!(
+                "a non-CA admin server must set `ca_addr` — the CA it registers \
+                 with and fetches the network map from. Only the CA host (with \
+                 a `ca` role) may omit it."
+            );
+        }
+        Ok(())
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let bytes =
             serde_json::to_vec_pretty(self).context("serializing admin-server config")?;
         atomic::write_atomic(path, &bytes, 0o644)
+    }
+
+    pub async fn save_async(&self, path: &Path) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(self).context("serializing admin-server config")?;
+        atomic::write_atomic_async(path, &bytes, 0o644).await
     }
 }
 

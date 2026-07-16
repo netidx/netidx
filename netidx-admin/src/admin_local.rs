@@ -13,12 +13,12 @@
 
 use crate::admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupRequest,
-    BackupResponse, ClientHello, EditPermsRequest, EditPermsResponse, EnrollRequest,
-    ExternalCaCsrResponse, ExternalCaInstallRequest, ExternalCaInstallResponse,
-    ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult, ReadPermsRequest,
-    ReadPermsResponse, ReconcileControllerRequest, ReconcileControllerResponse,
-    RemoveAdminRequest, Request, RotateAutorenewResponse, RotateRecoveryResponse, Secret,
-    ServerHello, SetAdminPolicyRequest, SignResponse,
+    BackupResponse, CaStatus, CaStatusResponse, ClientHello, EditPermsRequest,
+    EditPermsResponse, EnrollRequest, ExternalCaCsrResponse, ExternalCaInstallRequest,
+    ExternalCaInstallResponse, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult,
+    ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
+    ReconcileControllerResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
+    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
@@ -64,9 +64,9 @@ async fn connect(cfg_path: &Path) -> Result<UnixStream> {
 /// Whether the admin daemon is reachable on its local control socket — a
 /// cheap connect probe. Commands that have an offline break-glass path
 /// (`recovery rotate`, `auto-approve`) use this to choose the daemon-mediated
-/// path when it's up and the offline flock path when it isn't. There's a
+/// path when it's up and the offline guarded path when it isn't. There's a
 /// benign TOCTOU (the daemon could stop right after): the offline path takes
-/// the CA flock, which fails cleanly if the daemon is in fact up.
+/// the config-directory guard, which fails cleanly if the daemon is in fact up.
 pub async fn daemon_running(cfg_path: &Path) -> bool {
     let path = crate::admin_server::local_socket_path(cfg_path);
     UnixStream::connect(&path).await.is_ok()
@@ -107,6 +107,15 @@ pub async fn external_ca_install(
         ExternalCaInstallResponse::Err { reason } => {
             bail!("the controller refused the external-CA certificate: {reason}")
         }
+    }
+}
+
+pub async fn ca_status(cfg_path: &Path) -> Result<CaStatus> {
+    let mut s = connect(cfg_path).await?;
+    admin_proto::write_msg(&mut s, &Request::CaStatus).await?;
+    match admin_proto::read_msg::<_, CaStatusResponse>(&mut s).await? {
+        CaStatusResponse::Ok { status } => Ok(status),
+        CaStatusResponse::Err { reason } => bail!("the CA refused status: {reason}"),
     }
 }
 
@@ -189,7 +198,7 @@ pub async fn enroll(
     csr_pem: &str,
     listen: SocketAddr,
 ) -> Result<SignResponse> {
-    let cfg = crate::admin_server_config::AdminServerConfig::load(cfg_path)?;
+    let cfg = crate::admin_server_config::AdminServerConfig::load_async(cfg_path).await?;
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     admin_proto::write_msg(

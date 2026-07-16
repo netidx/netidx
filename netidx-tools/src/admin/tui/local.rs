@@ -163,10 +163,27 @@ fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
         return None;
     }
     let cfg = paths::discover_admin_server_config().ok();
-    let aa = slots::auto_approve_status(&ca_dir, cfg.as_deref()).ok();
-    let ext = slots::external_status(&ca_dir).ok();
-    let recovery_present =
-        slots::recovery_status(&ca_dir).map(|s| s.slot_present).unwrap_or(false);
+    let (aa, recovery, ext) = {
+        let probe = async {
+            let (aa, recovery, ext) = tokio::join!(
+                slots::auto_approve_status(&ca_dir, cfg.as_deref()),
+                slots::recovery_status(&ca_dir),
+                slots::external_status(&ca_dir),
+            );
+            (aa.ok(), recovery.ok(), ext.ok())
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle)
+                if handle.runtime_flavor()
+                    == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(|| handle.block_on(probe))
+            }
+            Ok(_) => (None, None, None),
+            Err(_) => tokio::runtime::Runtime::new().ok()?.block_on(probe),
+        }
+    };
+    let recovery_present = recovery.map(|s| s.slot_present).unwrap_or(false);
     Some(LocalCa {
         auto_approve_present: aa.as_ref().map(|s| s.slot_present).unwrap_or(false),
         auto_approve_wired: aa.as_ref().map(|s| s.wired_in_config).unwrap_or(false),
@@ -378,7 +395,7 @@ impl LocalState {
     /// Networked installs whose sync hasn't been checked yet; marks each
     /// `Checking` so the event loop launches exactly one background check per
     /// install. Standalone (local-only) installs are never checked.
-    pub(super) fn take_pending_checks(&mut self) -> Vec<(usize, InstallRole)> {
+    pub(super) fn take_pending_checks(&mut self) -> Vec<(usize, InstallRole, PathBuf)> {
         let mut out = Vec::new();
         for i in 0..self.installs.len() {
             if self.installs[i].record.network.is_some()
@@ -386,7 +403,11 @@ impl LocalState {
                 && matches!(self.sync[i], SyncState::Unchecked)
             {
                 self.sync[i] = SyncState::Checking;
-                out.push((i, self.installs[i].record.role));
+                out.push((
+                    i,
+                    self.installs[i].record.role,
+                    self.installs[i].config_dir.clone(),
+                ));
             }
         }
         out
@@ -507,7 +528,10 @@ impl LocalState {
                 let d = &self.installs[self.selected];
                 if d.record.network.is_some() && d.record.role != InstallRole::Controller
                 {
-                    return Some(Action::Update { role: d.record.role });
+                    return Some(Action::Update {
+                        role: d.record.role,
+                        config_root: d.config_dir.clone(),
+                    });
                 }
             }
             Char('r') => {
@@ -650,7 +674,7 @@ fn action_desc(action: &Action) -> &'static str {
             "Graduate this local-only workstation onto a cluster, enrolling a TLS identity."
         }
         Join { dry_run: true } => "Preview joining a cluster, without changing anything.",
-        AddParent => "Attach this resolver under a parent resolver by delegation.",
+        AddParent { .. } => "Attach this resolver under a parent resolver by delegation.",
         Remote(_) => "Connect to a remote admin server.",
         Uninstall { remove_ca: false, .. } => {
             "Remove this install — its config and OS service."
@@ -762,7 +786,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let networked = d.record.network.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
     if networked && role != InstallRole::Controller {
-        items.push(("Update Resolvers".to_string(), Action::Update { role }));
+        items.push((
+            "Update Resolvers".to_string(),
+            Action::Update { role, config_root: d.config_dir.clone() },
+        ));
     }
     if role == InstallRole::Workstation && !networked {
         items.push(("Join a Cluster".to_string(), Action::Join { dry_run: false }));
@@ -770,7 +797,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
             .push(("Preview Join (Dry Run)".to_string(), Action::Join { dry_run: true }));
     }
     if role == InstallRole::Resolver {
-        items.push(("Add a Parent".to_string(), Action::AddParent));
+        items.push((
+            "Add a Parent".to_string(),
+            Action::AddParent { config_root: d.config_dir.clone() },
+        ));
         // Delegation review is deliberately NOT offered here: the daemon's
         // delegation handlers require an authenticated admin password and have no
         // local-superuser control-socket bypass (unlike roster/perms/rotate), so
@@ -1030,11 +1060,11 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
 /// [`SyncState`]. Self-contained (owns its inputs, borrows no UI state) so the
 /// event loop can poll it as a background future without a `spawn`.
 pub(super) async fn check_sync(
-    pending: Vec<(usize, InstallRole)>,
+    pending: Vec<(usize, InstallRole, PathBuf)>,
 ) -> Vec<(usize, SyncState)> {
     let mut out = Vec::with_capacity(pending.len());
-    for (i, role) in pending {
-        let st = match super::lifecycle::update_plan(role).await {
+    for (i, role, config_root) in pending {
+        let st = match super::lifecycle::update_plan(&config_root, role).await {
             Ok(plan) if plan.is_empty() => SyncState::InSync,
             Ok(plan) => SyncState::OutOfSync(
                 plan.changes.iter().map(|c| c.text().to_string()).collect(),
@@ -1152,5 +1182,34 @@ mod tests {
             widgets::rendered_identicon_rows(terminal.backend().buffer()),
             widgets::IDENTICON_HEIGHT as usize
         );
+    }
+
+    #[test]
+    fn system_install_actions_keep_the_selected_config_root() {
+        let fp = Fingerprint::of_der(b"system install CA");
+        let config_root = PathBuf::from("/etc/netidx");
+        let detected = Detected {
+            record: InstallRecord::new(
+                InstallRole::Resolver,
+                "/",
+                "tls",
+                Some(NetworkIdentity::new("example.com", &fp)),
+                Some("127.0.0.1:4565".parse().unwrap()),
+            ),
+            service: ServiceStatus::Active,
+            scope: ServiceScope::System,
+            config_dir: config_root.clone(),
+            ca: Some(fp),
+            local_ca: None,
+        };
+        let actions = action_items(&detected);
+        assert!(actions.iter().any(|(_, action)| matches!(
+            action,
+            Action::Update { config_root: root, .. } if root == &config_root
+        )));
+        assert!(actions.iter().any(|(_, action)| matches!(
+            action,
+            Action::AddParent { config_root: root } if root == &config_root
+        )));
     }
 }

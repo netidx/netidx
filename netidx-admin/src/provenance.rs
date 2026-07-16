@@ -136,6 +136,14 @@ impl InstallRecord {
             .with_context(|| format!("parsing install record {}", path.display()))
     }
 
+    pub async fn load_async(path: &Path) -> Result<Self> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading install record {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing install record {}", path.display()))
+    }
+
     /// Read the record at the user-default path, or `None` if there is
     /// none (e.g. a hand-rolled config, or an install predating the
     /// record). Errors only on a present-but-unreadable file.
@@ -147,14 +155,30 @@ impl InstallRecord {
         Ok(Some(Self::load(&path)?))
     }
 
+    pub async fn load_default_async() -> Result<Option<Self>> {
+        let path = paths::user_install_record()?;
+        if !tokio::fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        Ok(Some(Self::load_async(&path).await?))
+    }
+
     /// Atomically write the record (mode 0644) to `path`.
     pub fn save(&self, path: &Path) -> Result<()> {
         atomic::write_atomic_pretty_json(path, self)
     }
 
+    pub async fn save_async(&self, path: &Path) -> Result<()> {
+        atomic::write_atomic_pretty_json_async(path, self).await
+    }
+
     /// Write the record to the user-default path.
     pub fn save_default(&self) -> Result<()> {
         self.save(&paths::user_install_record()?)
+    }
+
+    pub async fn save_default_async(&self) -> Result<()> {
+        self.save_async(&paths::user_install_record()?).await
     }
 }
 

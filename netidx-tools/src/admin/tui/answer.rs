@@ -1314,7 +1314,14 @@ mod tests {
         assert!(create.await.unwrap().is_err());
         assert!(!ca_dir.exists(), "cancelled CA must never become live");
         assert_eq!(
-            std::fs::read_dir(scratch.path()).unwrap().count(),
+            std::fs::read_dir(scratch.path())
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .is_ok_and(|entry| entry.file_name() != ".ca.netidx.lock")
+                })
+                .count(),
             0,
             "staged CA state must be removed when the operation is cancelled"
         );

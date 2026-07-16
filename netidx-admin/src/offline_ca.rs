@@ -3,7 +3,7 @@
 //! sign path.
 //!
 //! "Offline" issuance runs while *no* admin server owns the CA: it takes the
-//! same exclusive flock the daemon would, allocates a serial from (and commits
+//! same installation guard the daemon would, allocates a serial from (and commits
 //! back into) the store the daemon reads, and records the issuance so the cert
 //! is revocable like any other. The SAN/serial/issuance-recording primitives
 //! are pure of operator I/O — the CA is already unlocked and the decisions
@@ -14,11 +14,11 @@
 
 use crate::{
     admin_proto::{NodeKind, SERVING_SAN},
-    admin_server::read_autorenew_password,
     answer::{Answerer, Field},
     ca::{Ca, IssueParams, IssuedFiles, SanEntry},
     ca_store::{CAStore, CaDir, QueuedReq},
     ca_vault::{self, CAVault, Unlocked},
+    config_lock::ConfigDirLock,
     paths,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -120,7 +120,7 @@ pub fn default_cert_filename(csr_cn: Option<&str>) -> PathBuf {
 /// daemon records its own — seeding the serial from, and committing back into,
 /// the same store the daemon reads, so serials stay unique and the bootstrap
 /// cert is revocable. `csr_pem` is empty when the key was generated internally.
-pub fn record_offline_issuance(
+pub async fn record_offline_issuance(
     store: &mut CAStore,
     serial: u64,
     kind: NodeKind,
@@ -128,6 +128,7 @@ pub fn record_offline_issuance(
     csr_pem: &str,
     cert_pem: &str,
     validity: Duration,
+    groups: &[String],
 ) -> Result<()> {
     let req = QueuedReq::new(
         kind,
@@ -138,33 +139,40 @@ pub fn record_offline_issuance(
         None,
         None,
     );
-    store.commit_issuance(&req, serial, name, cert_pem, &[])
+    store.commit_issuance(&req, serial, name, cert_pem, groups).await
 }
 
 /// Issue a leaf offline, allocating a fresh serial and recording the issuance.
 /// Returns the written files.
-pub fn issue_and_record(
+pub async fn issue_and_record(
+    config_lock: &ConfigDirLock,
     ca: &Ca,
     kind: NodeKind,
     mut params: IssueParams,
+    groups: &[String],
 ) -> Result<IssuedFiles> {
     let ca_dir = ca.directory().to_path_buf();
-    // Take the same exclusive flock the daemon holds: offline issuance is only
+    // Take the same installation guard the daemon holds: offline issuance is only
     // legitimate before the daemon owns the CA, and the serial is allocated
     // from (and committed back to) the store the daemon seeds its in-memory
     // counter from. Without this lock a `ca issue` run against a live daemon
     // would mint the serial the daemon allocates next, a duplicate X.509 serial.
-    let mut cadir = CaDir::open(&ca_dir)
+    let mut cadir = CaDir::open(config_lock.clone(), &ca_dir)
+        .await
         .context("cannot issue offline: a running admin server owns this CA")?;
-    let serial = cadir.store.next_serial()?;
+    let serial = cadir.store.next_serial().await?;
     params.serial = serial;
     let name =
         first_dns_san(&params.san).unwrap_or_else(|| params.subject.common_name.clone());
     let validity = params.validity;
-    let issued = ca.issue(&params)?;
-    let cert_pem = std::fs::read_to_string(&issued.certificate).with_context(|| {
-        format!("reading issued cert {}", issued.certificate.display())
-    })?;
+    let ca = ca.clone();
+    let issued = tokio::task::spawn_blocking(move || ca.issue(&params))
+        .await
+        .context("offline CA issuance task panicked")??;
+    let cert_pem =
+        tokio::fs::read_to_string(&issued.certificate).await.with_context(|| {
+            format!("reading issued cert {}", issued.certificate.display())
+        })?;
     // `ca.issue` already wrote the key + cert to disk. If recording the issuance
     // fails, roll those back: an un-recorded cert is invisible to `next_serial`,
     // so leaving it would let its serial be handed out again.
@@ -176,9 +184,12 @@ pub fn issue_and_record(
         "",
         &cert_pem,
         validity,
-    ) {
-        let _ = std::fs::remove_file(&issued.certificate);
-        let _ = std::fs::remove_file(&issued.private_key);
+        groups,
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_file(&issued.certificate).await;
+        let _ = tokio::fs::remove_file(&issued.private_key).await;
         return Err(e);
     }
     Ok(issued)
@@ -186,7 +197,8 @@ pub fn issue_and_record(
 
 /// Sign an external CSR offline, allocating a fresh serial and recording the
 /// issuance. Returns the leaf PEM.
-pub fn sign_and_record(
+pub async fn sign_and_record(
+    config_lock: &ConfigDirLock,
     ca: &Ca,
     kind: NodeKind,
     csr_pem: &[u8],
@@ -195,12 +207,20 @@ pub fn sign_and_record(
     validity: Duration,
 ) -> Result<Vec<u8>> {
     let ca_dir = ca.directory().to_path_buf();
-    // See `issue_and_record`: hold the daemon's exclusive flock so offline
+    // See `issue_and_record`: hold the daemon's installation guard so offline
     // signing can't race the daemon's serial counter.
-    let mut cadir = CaDir::open(&ca_dir)
+    let mut cadir = CaDir::open(config_lock.clone(), &ca_dir)
+        .await
         .context("cannot sign offline: a running admin server owns this CA")?;
-    let serial = cadir.store.next_serial()?;
-    let cert = ca.sign_request(csr_pem, san, validity, serial)?;
+    let serial = cadir.store.next_serial().await?;
+    let ca = ca.clone();
+    let csr = csr_pem.to_vec();
+    let sans = san.to_vec();
+    let cert = tokio::task::spawn_blocking(move || {
+        ca.sign_request(&csr, &sans, validity, serial)
+    })
+    .await
+    .context("offline CA signing task panicked")??;
     let cert_str = std::str::from_utf8(&cert).context("signed cert is not utf8")?;
     let csr_str = std::str::from_utf8(csr_pem).unwrap_or("");
     record_offline_issuance(
@@ -211,7 +231,9 @@ pub fn sign_and_record(
         csr_str,
         cert_str,
         validity,
-    )?;
+        &[],
+    )
+    .await?;
     Ok(cert)
 }
 
@@ -223,7 +245,7 @@ pub fn sign_and_record(
 // the operator keeps in a safe. These are the pure primitives — try the keytab,
 // fold-and-unlock a typed recovery password, recombine the recovered key with
 // the cert. The Answerer that prompts for the recovery password (and holds one
-// flock across both attempts) lives in [`crate::admin_ops::offline`].
+// guard across both attempts) lives in [`crate::admin_ops::offline`].
 
 /// `${config}/netidx/autorenew.keytab` — deliberately NOT in the CA dir: never
 /// back this file up; recreating it is one `ca auto-approve --rotate`.
@@ -249,15 +271,17 @@ pub enum KeytabOutcome {
 /// to do with [`Failed`](KeytabOutcome::Failed). The keytab path is a parameter
 /// (rather than [`autorenew_keytab_path`]) so this stays testable against a
 /// tempdir.
-pub fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutcome {
-    if !keytab.exists() {
-        return KeytabOutcome::Absent;
+pub async fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutcome {
+    match tokio::fs::try_exists(keytab).await {
+        Ok(true) => {}
+        Ok(false) => return KeytabOutcome::Absent,
+        Err(e) => return KeytabOutcome::Failed(e.into()),
     }
-    let pw = match read_autorenew_password(keytab) {
+    let pw = match crate::admin_server::read_autorenew_password_async(keytab).await {
         Ok(pw) => pw,
         Err(e) => return KeytabOutcome::Failed(e),
     };
-    match cadir.vault.unlock(&pw) {
+    match cadir.vault.unlock_async(&pw).await {
         Ok(u) => KeytabOutcome::Unlocked(u),
         Err(e) => KeytabOutcome::Failed(e),
     }
@@ -274,12 +298,17 @@ pub fn unlock_with_recovery(cadir: &CaDir, typed: &str) -> Result<Unlocked> {
 }
 
 /// Recombine an already-unlocked master key with the CA cert on disk to produce
-/// a signer. The final step of both unlock paths, split out so the flock held
+/// a signer. The final step of both unlock paths, split out so the guard held
 /// while unlocking can drop before this reads the (public) cert.
-pub fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
-    let cert = std::fs::read(dir.join("certificate.pem"))
+pub async fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
+    let cert = tokio::fs::read(dir.join("certificate.pem"))
+        .await
         .with_context(|| format!("reading CA cert in {}", dir.display()))?;
-    Ca::from_pem(dir.to_path_buf(), &unlocked.ca_key_pem, &cert)
+    let directory = dir.to_path_buf();
+    let key = unlocked.ca_key_pem.to_vec();
+    tokio::task::spawn_blocking(move || Ca::from_pem(directory, &key, &cert))
+        .await
+        .context("CA loading task panicked")?
         .with_context(|| format!("loading CA at {}", dir.display()))
 }
 
@@ -287,7 +316,7 @@ pub fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
 ///
 /// Vaulted (current) CAs: try the box's own autorenew keytab first (no human
 /// secret), and only if that is absent or fails ask for the off-box recovery
-/// password via the Answerer. One [`CaDir`] flock is held across **both**
+/// password via the Answerer. One installation guard is held across **both**
 /// attempts, so a running admin server can't slip in between them; it drops
 /// before the returned [`Ca`] is used to sign (which re-opens its own `CaDir`
 /// for serial allocation). Legacy `private.key` CAs open directly, prompting
@@ -300,27 +329,40 @@ pub fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca> {
 /// that signs offline (`ca issue` / `ca sign`, the resolver's local-CA
 /// issuance, `ca external`) goes through it, so they all transparently handle
 /// both vault formats.
-pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
-    if CAVault::exists(dir) {
-        // Scope the flock to the unlock: it drops when `unlocked` is bound,
+pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<(Ca, ConfigDirLock)> {
+    let config_lock = ConfigDirLock::acquire_for_ca_dir(dir).await?;
+    if CAVault::exists_async(dir).await {
+        // Scope the CA view to the unlock: it drops when `unlocked` is bound,
         // before `load_ca_from_unlocked` (which only reads the public cert) and
         // before the caller's sign/issue re-opens its own CaDir.
         let unlocked = {
-            let cadir = CaDir::open(dir).context(
+            let cadir = CaDir::open(config_lock.clone(), dir).await.context(
                 "cannot open the CA offline: a running admin server owns it — stop it first",
             )?;
             unlock_held(ans, &cadir, dir).await?
         };
-        load_ca_from_unlocked(dir, &unlocked)
+        Ok((load_ca_from_unlocked(dir, &unlocked).await?, config_lock))
     } else {
         // Legacy single-key CA — prompt for the key passphrase only if the
         // on-disk key turns out to be encrypted.
-        match Ca::open(dir, None) {
-            Ok(ca) => Ok(ca),
+        let directory = dir.to_path_buf();
+        match tokio::task::spawn_blocking(move || Ca::open(directory, None))
+            .await
+            .context("legacy CA loading task panicked")?
+        {
+            Ok(ca) => Ok((ca, config_lock)),
             Err(e) if format!("{e:#}").contains("encrypted") => {
                 let pw = ans.secret(Field::KeyPassword, None).await?;
-                Ca::open(dir, Some(pw.as_str()))
-                    .with_context(|| format!("opening CA at {}", dir.display()))
+                let directory = dir.to_path_buf();
+                Ok((
+                    tokio::task::spawn_blocking(move || {
+                        Ca::open(directory, Some(pw.as_str()))
+                    })
+                    .await
+                    .context("encrypted CA loading task panicked")?
+                    .with_context(|| format!("opening CA at {}", dir.display()))?,
+                    config_lock,
+                ))
             }
             Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
         }
@@ -328,14 +370,14 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<Ca> {
 }
 
 /// [`open_ca`] at the conventional `${basedir}/ca/` location.
-pub async fn open_default_ca(ans: &mut dyn Answerer) -> Result<Ca> {
+pub async fn open_default_ca(ans: &mut dyn Answerer) -> Result<(Ca, ConfigDirLock)> {
     open_ca(ans, &paths::user_ca_dir()?).await
 }
 
-/// Unlock the vault at `cadir` while the caller holds its flock: try the box's
+/// Unlock the vault at `cadir` while the caller holds the installation guard: try the box's
 /// autorenew keytab first (no human secret), falling back to the operator's
 /// recovery password (via the Answerer) on absence or failure. Shared by
-/// [`open_ca`] (which drops the flock before signing) and `ca external` (which
+/// [`open_ca`] (which closes its CA view before signing) and `ca external` (which
 /// keeps it), so both fold a typed recovery password to canonical form — the
 /// fix for the external path's former raw-password unlock.
 pub async fn unlock_held(
@@ -344,7 +386,7 @@ pub async fn unlock_held(
     dir: &Path,
 ) -> Result<Unlocked> {
     let keytab = autorenew_keytab_path()?;
-    match try_unlock_with_keytab(cadir, &keytab) {
+    match try_unlock_with_keytab(cadir, &keytab).await {
         KeytabOutcome::Unlocked(u) => Ok(u),
         // No autorenew slot on this box — the normal offline case.
         KeytabOutcome::Absent => recovery_unlock(ans, cadir, dir).await,
@@ -368,7 +410,11 @@ async fn recovery_unlock(
     dir: &Path,
 ) -> Result<Unlocked> {
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
-    unlock_with_recovery(cadir, typed.as_str())
+    let password = ca_vault::normalize_recovery_password(typed.as_str());
+    cadir
+        .vault
+        .unlock_async(&password)
+        .await
         .with_context(|| format!("unlocking the CA vault at {}", dir.display()))
 }
 
@@ -458,7 +504,7 @@ mod tests {
     /// mirroring `admin_server`'s test setup and the real install path. Returns
     /// `(recovery_password, autorenew_password)`; the recovery password is
     /// freshly minted (as at init) so we can feed it back to `unlock`.
-    fn vaulted_ca(dir: &Path) -> (zeroize::Zeroizing<String>, String) {
+    async fn vaulted_ca(dir: &Path) -> (zeroize::Zeroizing<String>, String) {
         use crate::ca::{CaParams, Subject};
         let params = CaParams {
             directory: dir.to_path_buf(),
@@ -470,6 +516,7 @@ mod tests {
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
         let mut vault = ca_vault::CAVault::new(dir.to_path_buf());
+        let _lock = ConfigDirLock::acquire_for_ca_dir(dir).await.unwrap();
         let recovery_pw = ca_vault::gen_recovery_password();
         vault
             .create(
@@ -478,6 +525,7 @@ mod tests {
                 &recovery_pw,
                 crate::ca_policy::recovery_policy(),
             )
+            .await
             .unwrap();
         std::fs::remove_file(dir.join("private.key")).unwrap();
         let autorenew_pw = "renew-secret-01234".to_string();
@@ -488,15 +536,17 @@ mod tests {
                 &autorenew_pw,
                 crate::ca_policy::autorenew_policy(),
             )
+            .await
             .unwrap();
         (recovery_pw, autorenew_pw)
     }
 
-    #[test]
-    fn recovery_password_unlocks_canonical_and_grouped() {
+    #[tokio::test]
+    async fn recovery_password_unlocks_canonical_and_grouped() {
         let dir = tempfile::tempdir().unwrap();
-        let (recovery_pw, _) = vaulted_ca(dir.path());
-        let cadir = CaDir::open(dir.path()).unwrap();
+        let (recovery_pw, _) = vaulted_ca(dir.path()).await;
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let cadir = CaDir::open(lock, dir.path()).await.unwrap();
         // The canonical minted form unlocks.
         let u = unlock_with_recovery(&cadir, &recovery_pw).unwrap();
         assert_eq!(u.admin, ca_vault::RECOVERY_ADMIN);
@@ -509,36 +559,42 @@ mod tests {
         let u2 = unlock_with_recovery(&cadir, &grouped).unwrap();
         assert_eq!(u2.admin, ca_vault::RECOVERY_ADMIN);
         // The recovered key recombines with the cert into a usable signer.
-        load_ca_from_unlocked(dir.path(), &u2).unwrap();
+        load_ca_from_unlocked(dir.path(), &u2).await.unwrap();
     }
 
-    #[test]
-    fn wrong_recovery_password_is_rejected() {
+    #[tokio::test]
+    async fn wrong_recovery_password_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = vaulted_ca(dir.path());
-        let cadir = CaDir::open(dir.path()).unwrap();
+        let _ = vaulted_ca(dir.path()).await;
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let cadir = CaDir::open(lock, dir.path()).await.unwrap();
         assert!(unlock_with_recovery(&cadir, "NOT THE PASSWORD").is_err());
     }
 
-    #[test]
-    fn keytab_absent_is_absent_not_error() {
+    #[tokio::test]
+    async fn keytab_absent_is_absent_not_error() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = vaulted_ca(dir.path());
-        let cadir = CaDir::open(dir.path()).unwrap();
+        let _ = vaulted_ca(dir.path()).await;
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let cadir = CaDir::open(lock, dir.path()).await.unwrap();
         let keytab = dir.path().join("does-not-exist.keytab");
-        assert!(matches!(try_unlock_with_keytab(&cadir, &keytab), KeytabOutcome::Absent));
+        assert!(matches!(
+            try_unlock_with_keytab(&cadir, &keytab).await,
+            KeytabOutcome::Absent
+        ));
     }
 
-    #[test]
-    fn keytab_unlocks_with_the_box_credential() {
+    #[tokio::test]
+    async fn keytab_unlocks_with_the_box_credential() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, autorenew_pw) = vaulted_ca(dir.path());
+        let (_, autorenew_pw) = vaulted_ca(dir.path()).await;
         // A plaintext keytab is just the password; the install path seals it to
         // the TPM when it can, and `read_autorenew_password` handles both.
         let keytab = dir.path().join("autorenew.keytab");
         std::fs::write(&keytab, &autorenew_pw).unwrap();
-        let cadir = CaDir::open(dir.path()).unwrap();
-        match try_unlock_with_keytab(&cadir, &keytab) {
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let cadir = CaDir::open(lock, dir.path()).await.unwrap();
+        match try_unlock_with_keytab(&cadir, &keytab).await {
             KeytabOutcome::Unlocked(u) => {
                 assert_eq!(u.admin, crate::admin_server::AUTORENEW_ADMIN)
             }
@@ -546,17 +602,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn keytab_with_wrong_password_fails_not_absent() {
+    #[tokio::test]
+    async fn keytab_with_wrong_password_fails_not_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = vaulted_ca(dir.path());
+        let _ = vaulted_ca(dir.path()).await;
         let keytab = dir.path().join("autorenew.keytab");
         std::fs::write(&keytab, "wrong-password").unwrap();
-        let cadir = CaDir::open(dir.path()).unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let cadir = CaDir::open(lock, dir.path()).await.unwrap();
         // A present-but-wrong keytab is Failed (→ caller notes it and falls back
         // to the recovery password), NOT Absent (→ silent fall back).
         assert!(matches!(
-            try_unlock_with_keytab(&cadir, &keytab),
+            try_unlock_with_keytab(&cadir, &keytab).await,
             KeytabOutcome::Failed(_)
         ));
     }

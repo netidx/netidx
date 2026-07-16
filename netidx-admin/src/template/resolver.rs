@@ -496,7 +496,8 @@ fn default_local_client_bind_cfg(p: &ResolverParams) -> Option<String> {
     if let Some(override_) = p.local_client_bind.as_ref() {
         return Some(override_.clone());
     }
-    let ip = p.bind.unwrap_or_else(|| p.listen.ip());
+    let bind = p.bind.unwrap_or_else(|| p.listen.ip());
+    let ip = if bind.is_unspecified() { p.listen.ip() } else { bind };
     if ip.is_loopback() {
         return None;
     }
@@ -608,6 +609,20 @@ mod tests {
         p.with_local_client = true;
         let client_path = out.path().join("client.json");
         p.client_config_path = Some(client_path.clone());
+        let rt = resolver(&p).unwrap();
+        let (_, c) = rt.client_config.as_ref().unwrap();
+        assert_eq!(c.0.default_bind_config.as_deref(), Some("10.0.0.1/32"));
+    }
+
+    #[test]
+    fn local_client_default_bind_uses_listen_for_wildcard_resolver_bind() {
+        let out = tempfile::tempdir().unwrap();
+        let mut p = anon_params(&out);
+        p.listen = "10.0.0.1:4564".parse().unwrap();
+        p.bind = Some("0.0.0.0".parse().unwrap());
+        p.with_local_client = true;
+        p.client_config_path = Some(out.path().join("client.json"));
+
         let rt = resolver(&p).unwrap();
         let (_, c) = rt.client_config.as_ref().unwrap();
         assert_eq!(c.0.default_bind_config.as_deref(), Some("10.0.0.1/32"));

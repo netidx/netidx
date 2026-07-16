@@ -833,7 +833,8 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     let dir = ca_dir_for(None)?;
     let cfg = paths::discover_admin_server_config().ok();
     if p.status {
-        let s = slots_ops::auto_approve_status(&dir, cfg.as_deref())?;
+        let s =
+            runtime()?.block_on(slots_ops::auto_approve_status(&dir, cfg.as_deref()))?;
         println!("auto-approve status:");
         println!(
             "  autorenew slot: {}",
@@ -1180,7 +1181,7 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
         RecoveryCmd::Rotate(a) => recovery_rotate(a),
         RecoveryCmd::Status(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
-            let s = slots_ops::recovery_status(&dir)?;
+            let s = runtime()?.block_on(slots_ops::recovery_status(&dir))?;
             println!("recovery status:");
             println!(
                 "  recovery slot:  {}",
@@ -1361,7 +1362,7 @@ async fn report_external_install(
 
 fn external_status(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    let s = slots_ops::external_status(&dir)?;
+    let s = runtime()?.block_on(slots_ops::external_status(&dir))?;
     println!("external CA status:");
     println!("  externally signed: {}", if s.externally_signed { "yes" } else { "no" });
     println!(
@@ -2569,14 +2570,25 @@ mod tests {
         )
         .unwrap();
         let out = tempfile::tempdir().unwrap();
-        let issued = netidx_admin::plan::ca_setup::issue_identity_into(
-            &ca,
-            "resolver.example.com",
-            out.path().to_path_buf(),
-            2048,
-            None,
-        )
-        .unwrap();
+        let issued = runtime()
+            .unwrap()
+            .block_on(async {
+                let lock = netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(
+                    ca_dir.path(),
+                )
+                .await?;
+                netidx_admin::plan::ca_setup::issue_identity_into(
+                    &lock,
+                    &ca,
+                    "resolver.example.com",
+                    out.path().to_path_buf(),
+                    2048,
+                    None,
+                    &[],
+                )
+                .await
+            })
+            .unwrap();
         assert!(issued.certificate.exists());
         assert!(issued.private_key.exists());
         let cert = std::fs::read(&issued.certificate).unwrap();
@@ -2642,19 +2654,20 @@ mod tests {
             .unwrap();
         // Exactly the recovery signing slot, and nothing else — no autorenew
         // (no daemon), no superuser role (offline).
+        let cadir = runtime()
+            .unwrap()
+            .block_on(async {
+                let lock =
+                    netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&dir)
+                        .await?;
+                netidx_admin::ca_store::CaDir::open(lock, &dir).await
+            })
+            .unwrap();
         assert_eq!(
-            netidx_admin::ca_store::CaDir::open(&dir)
-                .unwrap()
-                .vault
-                .signing_slot_names()
-                .unwrap(),
+            cadir.vault.signing_slot_names().unwrap(),
             vec![ca_vault::RECOVERY_ADMIN.to_string()]
         );
-        let admins = netidx_admin::ca_store::CaDir::open(&dir)
-            .unwrap()
-            .vault
-            .list_admins()
-            .unwrap();
+        let admins = cadir.vault.list_admins().unwrap();
         assert_eq!(admins.len(), 1, "offline CA has only the recovery slot");
         assert_eq!(admins[0].admin, ca_vault::RECOVERY_ADMIN);
         assert_eq!(admins[0].kind, ca_vault::SlotKind::Signing);
