@@ -228,8 +228,8 @@ pub const CRL_REFRESH: Duration = Duration::from_secs(30 * 24 * 3600);
 /// concurrently and never serialize issuance; only the admin writes
 /// (`add_*` / `remove_slot` / `set_policy`) take the write lock. Read
 /// methods take `&self`, writes `&mut self` — the lock guard's `Deref`
-/// makes the compiler enforce that. The daemon shares one via `Arc<Server>`
-/// (CaDir is `Sync`); a CLI op holds one transiently.
+/// makes the compiler enforce that. The daemon keeps one in its mutable state
+/// and snapshots an `Arc<CaDir>` for operations; a CLI op holds one transiently.
 pub struct CaDir {
     pub store: Mutex<CAStore>,
     pub vault: RwLock<crate::ca_vault::CAVault>,

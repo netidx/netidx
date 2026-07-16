@@ -1,6 +1,6 @@
 //! Point-in-time controller recovery bundles.
 //!
-//! Capture is called while the running daemon holds the durable state, issuance
+//! Capture is called while the running daemon holds the mutable state, issuance
 //! store, and vault guards. Bytes are collected into memory under that pause;
 //! target I/O happens afterwards through a sibling staging directory and one
 //! atomic directory publish. Machine-bound serving keys, TPM sidecars,
