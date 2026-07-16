@@ -1,10 +1,10 @@
 //! Point-in-time controller recovery bundles.
 //!
-//! Capture is called only while the running daemon holds its exclusive backup
-//! barrier. Bytes are collected into memory under that short pause; target I/O
-//! happens afterwards through a sibling staging directory and one atomic
-//! directory publish. Machine-bound serving keys, TPM sidecars, autorenew
-//! keytabs, sessions, and lock/temp files are intentionally absent.
+//! Capture is called while the running daemon holds the durable state, issuance
+//! store, and vault guards. Bytes are collected into memory under that pause;
+//! target I/O happens afterwards through a sibling staging directory and one
+//! atomic directory publish. Machine-bound serving keys, TPM sidecars,
+//! autorenew keytabs, sessions, and lock/temp files are intentionally absent.
 
 use crate::{
     admin_proto::AdminServerId, admin_server_config::AdminServerConfig, atomic,
@@ -198,7 +198,7 @@ fn capture_ca_tree(
 }
 
 /// Capture the controller's recovery assets into memory. The caller must hold
-/// the running server's exclusive backup barrier for this entire call.
+/// every owner of mutable recovery state for this entire call.
 pub fn capture(
     cfg: &AdminServerConfig,
     cfg_path: &Path,

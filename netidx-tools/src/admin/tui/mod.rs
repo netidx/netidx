@@ -1164,7 +1164,8 @@ mod render_tests {
         // Dismiss the welcome dialog to reveal the role menu behind it.
         app.local.on_key(KeyCode::Enter);
         let s = render(&mut app);
-        assert!(s.contains("Install a Role"), "role menu missing: {s:?}");
+        assert!(s.contains("Set Up This Machine"), "setup menu missing: {s:?}");
+        assert!(s.contains("Restore from Backup"), "restore choice missing: {s:?}");
         assert!(
             !s.contains("Cluster"),
             "tab bar should be hidden on a fresh machine: {s:?}"
@@ -1181,7 +1182,7 @@ mod render_tests {
         }
         let s = render_sized(&mut app, 46, 24);
         assert!(
-            s.contains("Publisher."),
+            s.contains("installation."),
             "welcome body truncated at narrow width: {s:?}"
         );
     }

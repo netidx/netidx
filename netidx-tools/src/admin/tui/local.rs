@@ -1,5 +1,5 @@
 //! Tab 1 — **Local**: detect this machine's netidx install and show its status,
-//! or, on a fresh machine, offer the role menu that starts an install.
+//! or, on a fresh machine, offer installation and restore choices.
 //!
 //! Read-only detection today; the install / uninstall / renew actions land once
 //! the [`TuiAnswerer`](super::answer::TuiAnswerer) exists.
@@ -21,72 +21,86 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
-/// A role the operator can install on a fresh machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshAction {
+    Install(InstallRole),
+    Restore,
+}
+
 #[derive(Clone, Copy)]
-struct RoleChoice {
-    role: InstallRole,
+struct FreshChoice {
+    action: FreshAction,
     title: &'static str,
     blurb: &'static str,
 }
 
+const RESTORE_CHOICE: FreshChoice = FreshChoice {
+    action: FreshAction::Restore,
+    title: "Restore from Backup",
+    blurb: "Restore a complete managed installation from a verified backup bundle. The \
+            destination must be a clean machine or an identical interrupted restore.",
+};
+
 #[cfg(unix)]
-const ROLES: [RoleChoice; 4] = [
-    RoleChoice {
-        role: InstallRole::Controller,
+const FRESH_CHOICES: [FreshChoice; 5] = [
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Controller),
         title: "Controller / CA",
         blurb: "Install the administrative network's one active controller and \
                 certificate authority on this machine. It may be dedicated to this role; \
                 resolver servers are installed separately and enroll with it.",
     },
-    RoleChoice {
-        role: InstallRole::Workstation,
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Workstation),
         title: "Workstation",
         blurb: "Turn this machine into a full netidx node: a local resolver serving a \
                 /local namespace plus a matching client. Join an existing network to \
                 enroll a TLS identity, or run standalone. The usual choice for a laptop \
                 or desktop.",
     },
-    RoleChoice {
-        role: InstallRole::Resolver,
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
         blurb: "A network-facing resolver server — the directory that maps paths to \
                 publishers for a whole network or a delegated subtree. Can mint a new \
                 network's certificate authority and admin server, or enroll under an \
                 existing one.",
     },
-    RoleChoice {
-        role: InstallRole::Publisher,
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
         blurb: "A client configuration for a host that publishes data: point it at a \
                 network's resolvers with the right auth. Installs a certificate-renewal \
                 service when the network uses TLS.",
     },
+    RESTORE_CHOICE,
 ];
 
 #[cfg(not(unix))]
-const ROLES: [RoleChoice; 3] = [
-    RoleChoice {
-        role: InstallRole::Workstation,
+const FRESH_CHOICES: [FreshChoice; 4] = [
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Workstation),
         title: "Workstation",
         blurb: "Turn this machine into a full netidx node: a local resolver serving a \
                 /local namespace plus a matching client. Join an existing network to \
                 enroll a TLS identity, or run standalone. The usual choice for a laptop \
                 or desktop.",
     },
-    RoleChoice {
-        role: InstallRole::Resolver,
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
         blurb: "A network-facing resolver server — the directory that maps paths to \
                 publishers for a whole network or a delegated subtree. Enrolls under an \
                 existing controller.",
     },
-    RoleChoice {
-        role: InstallRole::Publisher,
+    FreshChoice {
+        action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
         blurb: "A client configuration for a host that publishes data: point it at a \
                 network's resolvers with the right auth. Installs a certificate-renewal \
                 service when the network uses TLS.",
     },
+    RESTORE_CHOICE,
 ];
 
 /// One detected install on this machine.
@@ -431,14 +445,23 @@ impl LocalState {
                 Up | Char('k') => self.role_menu.select_previous(),
                 Down | Char('j') => self.role_menu.select_next(),
                 Enter => {
-                    let role = ROLES[self.role_menu.selected().unwrap_or(0)].role;
-                    return Some(Action::Install { role, dry_run: false });
+                    return Some(
+                        match FRESH_CHOICES[self.role_menu.selected().unwrap_or(0)].action
+                        {
+                            FreshAction::Install(role) => {
+                                Action::Install { role, dry_run: false }
+                            }
+                            FreshAction::Restore => Action::Restore,
+                        },
+                    );
                 }
                 Char('p') => {
-                    let role = ROLES[self.role_menu.selected().unwrap_or(0)].role;
-                    return Some(Action::Install { role, dry_run: true });
+                    if let FreshAction::Install(role) =
+                        FRESH_CHOICES[self.role_menu.selected().unwrap_or(0)].action
+                    {
+                        return Some(Action::Install { role, dry_run: true });
+                    }
                 }
-                Char('r') => return Some(Action::Restore),
                 _ => {}
             }
             return None;
@@ -528,27 +551,29 @@ impl LocalState {
     fn render_role_menu(&mut self, f: &mut Frame, area: Rect) {
         let cols =
             Layout::horizontal([Constraint::Length(24), Constraint::Min(0)]).split(area);
-        let items: Vec<ListItem> = ROLES.iter().map(|r| ListItem::new(r.title)).collect();
+        let items: Vec<ListItem> =
+            FRESH_CHOICES.iter().map(|choice| ListItem::new(choice.title)).collect();
+        let selected = self.role_menu.selected().unwrap_or(0);
+        let hint = match FRESH_CHOICES[selected].action {
+            FreshAction::Install(_) => " Enter · p preview ",
+            FreshAction::Restore => " Enter restore ",
+        };
         let list = List::new(items)
             .style(theme::panel_style())
             .block(
                 theme::panel_block()
-                    .title(Span::styled(" Install a Role ", theme::title_style()))
-                    .title_bottom(Line::from(Span::styled(
-                        " ↑/↓ select · Enter install · p preview · r restore ",
-                        theme::hint_style(),
-                    ))),
+                    .title(Span::styled(" Set Up This Machine ", theme::title_style()))
+                    .title_bottom(Line::from(Span::styled(hint, theme::hint_style()))),
             )
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, cols[0], &mut self.role_menu);
 
-        let sel = self.role_menu.selected().unwrap_or(0);
-        let blurb = Paragraph::new(ROLES[sel].blurb)
+        let blurb = Paragraph::new(FRESH_CHOICES[selected].blurb)
             .wrap(Wrap { trim: true })
             .style(theme::panel_style())
             .block(theme::panel_block().title(Span::styled(
-                format!(" {} ", ROLES[sel].title),
+                format!(" {} ", FRESH_CHOICES[selected].title),
                 theme::title_style(),
             )));
         f.render_widget(blurb, cols[1]);
@@ -869,9 +894,9 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
 /// wrapped height via [`wrapped_rows`].
 fn render_welcome(f: &mut Frame, screen: Rect) {
     let heading = "netidx isn't installed on this machine.";
-    let body = "Choose an install option — a Workstation for a laptop or desktop, a \
-                Resolver to run a network's directory, or a Publisher. Press r to \
-                restore any role from a backup bundle.";
+    let body = "Choose a role to install — a Workstation for a laptop or desktop, a \
+                Resolver to run a network's directory, or a Publisher — or choose \
+                Restore from Backup to recover any managed installation.";
     let prompt = " Press Enter to continue ";
     let w = 64.min(screen.width.saturating_sub(4)).max(24);
     let lines = vec![
@@ -1076,9 +1101,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fresh_machine_offers_a_dedicated_controller_role() {
-        assert_eq!(ROLES[0].role, InstallRole::Controller);
-        assert!(ROLES[0].title.contains("Controller"));
-        assert!(ROLES[0].blurb.contains("resolver servers are installed separately"));
+        assert_eq!(
+            FRESH_CHOICES[0].action,
+            FreshAction::Install(InstallRole::Controller)
+        );
+        assert!(FRESH_CHOICES[0].title.contains("Controller"));
+        assert!(
+            FRESH_CHOICES[0].blurb.contains("resolver servers are installed separately")
+        );
+    }
+
+    #[test]
+    fn fresh_machine_restore_is_an_explicit_menu_action() {
+        let mut local = LocalState::new();
+        if !local.is_fresh() {
+            return;
+        }
+        local.welcome_seen = true;
+        local.role_menu.select(Some(FRESH_CHOICES.len() - 1));
+        assert_eq!(FRESH_CHOICES.last().unwrap().action, FreshAction::Restore);
+        assert!(matches!(
+            local.on_key(crossterm::event::KeyCode::Enter),
+            Some(Action::Restore)
+        ));
+        assert!(local.on_key(crossterm::event::KeyCode::Char('r')).is_none());
     }
 
     #[test]

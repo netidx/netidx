@@ -988,16 +988,20 @@ pub fn cluster_topology_by_base(map: &NetworkMap, base: &str) -> Result<ClusterT
     cluster_topology(map, cluster.id)
 }
 
+struct BootstrapSelection {
+    controller: SocketAddr,
+    resolver: Option<ResolverSelection>,
+}
+
+struct ResolverSelection {
+    base: String,
+    topology: ClusterTopology,
+}
+
 fn bootstrap_cluster(
     map: &NetworkMap,
     server_id: admin_proto::AdminServerId,
-) -> Result<(
-    SocketAddr,
-    Vec<ResolverAddr>,
-    Option<String>,
-    Option<admin_proto::ClusterEdge>,
-    Vec<admin_proto::ClusterEdge>,
-)> {
+) -> Result<BootstrapSelection> {
     let controller = map
         .controller_entry()
         .filter(|s| s.state == admin_proto::ServerState::Registered)
@@ -1024,8 +1028,8 @@ fn bootstrap_cluster(
             .flatten()
             .map(|cluster| cluster.id)
     });
-    let (resolvers, base, parent, children) = match bootstrap_cluster {
-        None => (Vec::new(), None, None, Vec::new()),
+    let resolver = match bootstrap_cluster {
+        None => None,
         Some(cluster_id) => {
             let cluster = map
                 .clusters
@@ -1034,15 +1038,10 @@ fn bootstrap_cluster(
                 .context("the bootstrap server's resolver cluster is absent")?;
             let topology = cluster_topology(map, cluster_id)
                 .context("the bootstrap server's resolver cluster is not active")?;
-            (
-                topology.members,
-                Some(cluster.base.clone()),
-                topology.parent,
-                topology.children,
-            )
+            Some(ResolverSelection { base: cluster.base.clone(), topology })
         }
     };
-    Ok((controller.addr, resolvers, base, parent, children))
+    Ok(BootstrapSelection { controller: controller.addr, resolver })
 }
 
 /// Try `seeds` and their advertised peers as candidate paths to the exact
@@ -1109,13 +1108,19 @@ pub async fn aggregate(
     let map = authoritative.context(
         "reachable admin servers did not yield a controller-authoritative network map",
     )?;
-    let (controller, resolvers, resolver_base, resolver_parent, resolver_children) =
+    let BootstrapSelection { controller, resolver } =
         bootstrap_cluster(&map, expected.server_id)?;
     info.ca_addr = Some(controller);
-    info.resolvers = resolvers;
-    info.resolver_base = resolver_base;
-    info.resolver_parent = resolver_parent;
-    info.resolver_children = resolver_children;
+    if let Some(ResolverSelection {
+        base,
+        topology: ClusterTopology { members, parent, children },
+    }) = resolver
+    {
+        info.resolvers = members;
+        info.resolver_base = Some(base);
+        info.resolver_parent = parent;
+        info.resolver_children = children;
+    }
     Ok(info)
 }
 
@@ -2800,16 +2805,34 @@ mod tests {
             ],
         };
 
-        let (_, root_members, root_base, root_parent, root_children) =
-            bootstrap_cluster(&map, controller).unwrap();
-        let (_, child_members, child_base, child_parent, child_children) =
-            bootstrap_cluster(&map, satellite).unwrap();
+        let root_selection = bootstrap_cluster(&map, controller).unwrap();
+        let child_selection = bootstrap_cluster(&map, satellite).unwrap();
+        assert_eq!(root_selection.controller, "192.168.50.11:4565".parse().unwrap());
+        assert_eq!(child_selection.controller, root_selection.controller);
+        let ResolverSelection {
+            base: root_base,
+            topology:
+                ClusterTopology {
+                    members: root_members,
+                    parent: root_parent,
+                    children: root_children,
+                },
+        } = root_selection.resolver.unwrap();
+        let ResolverSelection {
+            base: child_base,
+            topology:
+                ClusterTopology {
+                    members: child_members,
+                    parent: child_parent,
+                    children: child_children,
+                },
+        } = child_selection.resolver.unwrap();
         let child_by_base = cluster_topology_by_base(&map, "/eu").unwrap();
         assert_eq!(root_members, vec![root.clone()]);
         assert_eq!(child_members, vec![child.clone()]);
         assert_eq!(child_by_base.members, vec![child]);
-        assert_eq!(root_base.as_deref(), Some("/"));
-        assert_eq!(child_base.as_deref(), Some("/eu"));
+        assert_eq!(root_base, "/");
+        assert_eq!(child_base, "/eu");
         assert!(root_parent.is_none());
         assert_eq!(root_children.len(), 1);
         assert_eq!(root_children[0].path, "/eu");

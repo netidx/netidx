@@ -561,15 +561,16 @@ impl Field {
                 flag: "--listen",
                 label: "restored controller address",
                 help: "The routable address and port this replacement controller \
-                       will use. Keep the recorded value when restoring on the same \
-                       network address.",
+                       will use. The IP defaults from this host's interfaces and the \
+                       port comes from the backup.",
             },
             RestoreResolverListen => FieldInfo {
                 flag: "--resolver-listen",
                 label: "restored resolver address",
                 help: "The advertised address and port of the resolver co-located \
-                       with this controller. This updates the resolver config, local \
-                       client config, and CA-owned cluster map together.",
+                       with this controller. The IP defaults from this host's interfaces \
+                       and the port comes from the backup. This updates the resolver \
+                       config, local client config, and CA-owned cluster map together.",
             },
             RestoreResolverBind => FieldInfo {
                 flag: "--resolver-bind",

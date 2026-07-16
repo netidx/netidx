@@ -12,6 +12,7 @@ use super::{
     DEFAULT_RESOLVER_NAME, InstallCommon, detect_resolver_shape, finish_with,
     install_renew_unit, network_provenance, prompt_ip_or_addr,
     prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
+    warn_incomplete_resolver_address,
 };
 use crate::{
     admin_client,
@@ -360,15 +361,7 @@ pub async fn run_resolver(
         l
     } else {
         let s = shape.as_ref().expect("shape detected when --listen/--bind absent");
-        if s.needs_operator_hint {
-            ans.warn(
-                "detected container environment with no NETIDX_PUBLIC_IP env var \
-                 and no reachable cloud metadata. The suggested IP is the \
-                 container's private IP — only useful for internal traffic. \
-                 Override with the externally-visible address (or set \
-                 NETIDX_PUBLIC_IP / pass --listen).",
-            );
-        }
+        warn_incomplete_resolver_address(ans, s);
         // Accept either a bare IP (then ask the port) or a full host:port. The
         // IP is the one thing the operator has to know; the port defaults.
         let default_ip = machine_ip.map(|ip| ip.to_string());

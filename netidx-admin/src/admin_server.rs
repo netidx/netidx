@@ -7,12 +7,10 @@
 //!
 //! The request-handling cores ([`handle_sign_request`],
 //! [`handle_enroll_request`], [`handle_add_identity`]) are pure of TLS
-//! and directly testable: the sign/enroll paths unlock the vault with
-//! the admin password, enforce that admin's per-slot issuance
-//! [`Policy`], sign via the existing [`Ca::sign_request`], and append
-//! an audit line. The TLS accept loop is a thin shell over them.
-//!
-//! Unix-only — the signer is openssl-backed.
+//! and directly testable: the sign/enroll paths authenticate the supplied
+//! administrator credential, enforce that administrator's live [`Policy`],
+//! sign with the controller's own credential, and append an audit line. The
+//! TLS accept loop is a thin shell over them.
 
 use crate::{
     admin_client,
@@ -102,9 +100,6 @@ const CONN_TIMEOUT: Duration = Duration::from_secs(30);
 /// under [`CONN_TIMEOUT`] so a dead id-map host degrades a join to a
 /// warning instead of timing the connection out.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long the push fan-out browses mDNS for id-map hosts not in the
-/// configured peer list.
 
 /// The dedicated auto-renewal admin: a vault slot with an empty issuance
 /// policy whose only over-the-wire power is approving verified renewals.
@@ -372,11 +367,55 @@ mod password_limiter_tests {
     }
 }
 
-/// Shared state of a running admin server.
+struct DurableStateInner {
+    cfg: AdminServerConfig,
+    map: NetworkMap,
+}
+
+struct DurableState {
+    inner: Mutex<DurableStateInner>,
+}
+
+impl DurableState {
+    fn new(cfg: AdminServerConfig, map: NetworkMap) -> Self {
+        Self { inner: Mutex::new(DurableStateInner { cfg, map }) }
+    }
+
+    fn read<T>(&self, f: impl FnOnce(&DurableStateInner) -> T) -> T {
+        f(&self.inner.lock())
+    }
+
+    fn write<T>(&self, f: impl FnOnce(&mut DurableStateInner) -> T) -> T {
+        f(&mut self.inner.lock())
+    }
+
+    fn add_identity(&self, req: &AddIdentityRequest) -> AddIdentityResponse {
+        self.write(|state| match state.cfg.roles.id_map.as_ref() {
+            Some(role) => handle_add_identity(&role.map, req),
+            None => AddIdentityResponse::Err {
+                reason: "this host has no id-map role".to_string(),
+            },
+        })
+    }
+
+    fn apply_referral_edit(
+        &self,
+        req: &ApplyReferralEditRequest,
+    ) -> ApplyReferralEditResponse {
+        self.write(|state| match state.cfg.roles.resolver.as_ref() {
+            Some(role) => match apply_referral_edit_local(&role.config, &req.edit) {
+                Ok(()) => ApplyReferralEditResponse::Ok,
+                Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
+            },
+            None => ApplyReferralEditResponse::Err {
+                reason: "this host has no resolver role to edit".to_string(),
+            },
+        })
+    }
+}
+
 pub struct Server {
-    /// The config, mutable because [`Request::Enroll`] appends the
-    /// enrollee to `peers`.
-    cfg: Mutex<AdminServerConfig>,
+    durable: DurableState,
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
@@ -385,10 +424,10 @@ pub struct Server {
     /// store nor the vault (a lockless accessor that avoids taking the CA
     /// mutex just to read a path).
     ca_dir: Option<PathBuf>,
-    /// The locked CA directory: the request store, the key vault, the serial
-    /// counter, and the box-held signing credential, all under one mutex —
-    /// which also owns the `<ca-dir>/ca.lock` flock, so exactly one daemon
-    /// owns the CA. `None` when this host holds no CA role.
+    /// The locked CA directory, whose store, vault, and box-held credential
+    /// each own their synchronization. It also owns the `<ca-dir>/ca.lock`
+    /// flock, so exactly one daemon owns the CA. `None` when this host holds
+    /// no CA role.
     ca: Option<ca_store::CaDir>,
     /// Serving chain + key, doubling as the client identity for
     /// outbound server-to-server pushes.
@@ -400,25 +439,9 @@ pub struct Server {
     /// The one home CA for application-level admin authorization. Other
     /// certificates in `trusted.pem` remain data-plane federation anchors.
     home_ca_der: CertificateDer<'static>,
-    /// Serializes read-modify-write cycles on the local id-map file.
-    id_map_lock: Mutex<()>,
-    /// Serializes read-modify-write cycles on the local resolver config
-    /// (delegation children/parent edits) and the delegation queue's
-    /// approve/deny transitions — so exactly one of a concurrent
-    /// approve/deny lands and edits don't interleave.
-    resolver_edit_lock: Mutex<()>,
-    /// The network map: on the CA host the authoritative, persisted copy
-    /// (the CA is its only writer); on every other host an in-memory cache
-    /// the refresh loop keeps current. Served whole to clients in one shot.
-    map: Mutex<NetworkMap>,
     /// Failed-password sliding windows and one-in-flight gates, keyed by the
     /// network source. Used only for network requests handled by a CA.
     password_limiter: Arc<PasswordLimiter>,
-    /// A live-backup barrier. Every durable mutation takes a shared guard;
-    /// backup takes the exclusive guard only while capturing bytes into
-    /// memory, so the published bundle is one controller-state instant without
-    /// stopping read-only service or holding the pause across target I/O.
-    mutation_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl Server {
@@ -536,7 +559,7 @@ impl Server {
             None => NetworkMap::default(),
         };
         Ok(Arc::new(Server {
-            cfg: Mutex::new(cfg),
+            durable: DurableState::new(cfg, map),
             cfg_path,
             ca_dir,
             ca,
@@ -544,11 +567,7 @@ impl Server {
             serving_key_pem,
             roots,
             home_ca_der,
-            id_map_lock: Mutex::new(()),
-            resolver_edit_lock: Mutex::new(()),
-            map: Mutex::new(map),
             password_limiter: Arc::new(PasswordLimiter::default()),
-            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
         }))
     }
 
@@ -558,7 +577,7 @@ impl Server {
     }
 
     fn roles(&self) -> Vec<Role> {
-        roles_of(&self.cfg.lock())
+        self.durable.read(|state| roles_of(&state.cfg))
     }
 
     /// The serving cert + key to present as a *client* on outbound
@@ -569,10 +588,9 @@ impl Server {
     /// here). Pushes are rare, so two file reads are cheap; reuses the same
     /// `load_serving_keypair` (incl. TPM unseal) the inbound reloader uses.
     fn outbound_identity(&self) -> (Vec<u8>, Vec<u8>) {
-        let (cert_path, key_path) = {
-            let cfg = self.cfg.lock();
-            (cfg.serving_cert.clone(), cfg.serving_key.clone())
-        };
+        let (cert_path, key_path) = self.durable.read(|state| {
+            (state.cfg.serving_cert.clone(), state.cfg.serving_key.clone())
+        });
         load_serving_keypair(&cert_path, &key_path).unwrap_or_else(|e| {
             warn!(
                 "admin-server: re-reading serving identity for push failed, \
@@ -605,7 +623,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     // Advertise over mDNS. The beacon is a hint only — fingerprint +
     // roles ride in TXT purely for pre-connect display/grouping.
     let _advert = if mdns {
-        let domain = state.cfg.lock().domain.clone();
+        let domain = state.durable.read(|state| state.cfg.domain.clone());
         let fp_short = ca_fingerprint_short(&state.serving_cert_pem)?;
         match discovery::advertise(listen, &domain, &state.roles(), &fp_short) {
             Ok(ad) => Some(ad),
@@ -894,40 +912,6 @@ fn request_authorization(req: &Request) -> RequestAuthorization {
     }
 }
 
-/// Durable controller/node state changes participate in the live-backup
-/// barrier. The backup request itself takes the exclusive side in its handler;
-/// read-only requests and in-memory login sessions do not delay a snapshot.
-fn request_mutates_durable_state(req: &Request) -> bool {
-    use Request::*;
-    matches!(
-        req,
-        Sign(_)
-            | Enroll(_)
-            | AddIdentity(_)
-            | Enqueue(_)
-            | Approve(_)
-            | Deny(_)
-            | Revoke(_)
-            | RequestDelegation(_)
-            | ApproveDelegation(_)
-            | DenyDelegation(_)
-            | ApplyReferralEdit(_)
-            | ApplyCrl(_)
-            | ApplyControllerState(_)
-            | Register(_)
-            | Deregister
-            | RemoveServer(_)
-            | EditPerms(_)
-            | ApplyPermsEdit(_)
-            | AddRoleAdmin(_)
-            | SetAdminPolicy(_)
-            | RemoveAdmin(_)
-            | RotateRecovery
-            | RotateAutorenew
-            | ExternalCaInstall(_)
-    )
-}
-
 /// The credential of a request that can actually invoke the password KDF.
 /// `Logout` deliberately is not included: it accepts only a session token and
 /// rejects a password without consulting the vault.
@@ -1077,11 +1061,9 @@ where
     let peer_is_controller = peer_admin.is_some_and(|p| p.controller);
     let hello: ClientHello =
         admin_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
-    let domain = state.cfg.lock().domain.clone();
-    let (server_id, controller) = {
-        let cfg = state.cfg.lock();
-        (cfg.server_id, cfg.roles.ca.is_some())
-    };
+    let (domain, server_id, controller) = state.durable.read(|state| {
+        (state.cfg.domain.clone(), state.cfg.server_id, state.cfg.roles.ca.is_some())
+    });
     admin_proto::write_msg(
         &mut tls,
         &ServerHello {
@@ -1119,21 +1101,14 @@ where
         } else {
             None
         };
-    // A waiting backup writer prevents new mutations from entering; once all
-    // in-flight shared guards drain it captures one durable instant. Acquire
-    // after the per-source delay so a throttled attacker cannot stall a local
-    // backup without even reaching authentication. Keep the guard across the
-    // complete operation, including post-commit fanout.
-    let _mutation_guard = if request_mutates_durable_state(&req) {
-        Some(state.mutation_gate.read().await)
-    } else {
-        None
-    };
     REQUEST_PASSWORD_ATTEMPT
         .scope(password_attempt, async move {
             match req {
                 Request::GetInfo => {
-                    let resp = get_info(state);
+                    let info_state = state.clone();
+                    let resp = tokio::task::spawn_blocking(move || get_info(&info_state))
+                        .await
+                        .context("get-info task panicked")?;
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
                         .context("writing GetInfoResponse")
@@ -1252,26 +1227,41 @@ where
                             let resp = run_signing(&signs, {
                                 let state = state.clone();
                                 move || {
+                                    let map =
+                                        state.durable.read(|state| state.map.clone());
                                     handle_enroll_request(
                                         state.ca.as_ref().expect("CA role held"),
                                         &req,
                                         local,
-                                        Some(&state.map.lock()),
+                                        Some(&map),
                                     )
                                 }
                             })
                             .await?;
-                            if let SignResponse::Ok { signed_cert_pem, .. } = &resp {
-                                if !local {
-                                    match crate::tls::admin_cert_identity_from_pem(
-                                        signed_cert_pem.as_bytes(),
-                                    )
-                                    .and_then(|id| {
-                                        grant_enrollment(state, id.server_id, &enrollment)
-                                    }) {
-                                        Ok(_) => record_peer(state, enrollment.listen),
-                                        Err(e) => {
-                                            return admin_proto::write_msg(
+                            if let SignResponse::Ok { signed_cert_pem, .. } = &resp
+                                && !local
+                            {
+                                let identity = crate::tls::admin_cert_identity_from_pem(
+                                    signed_cert_pem.as_bytes(),
+                                );
+                                let grant = match identity {
+                                    Ok(identity) => {
+                                        let grant_state = state.clone();
+                                        run_signing(&signs, move || {
+                                            grant_enrollment(
+                                                &grant_state,
+                                                identity.server_id,
+                                                &enrollment,
+                                            )?;
+                                            record_peer(&grant_state, enrollment.listen);
+                                            Ok::<(), anyhow::Error>(())
+                                        })
+                                        .await?
+                                    }
+                                    Err(e) => Err(e),
+                                };
+                                if let Err(e) = grant {
+                                    return admin_proto::write_msg(
                                         &mut tls,
                                         &SignResponse::Err {
                                             reason: format!(
@@ -1281,8 +1271,6 @@ where
                                     )
                                     .await
                                     .context("writing SignResponse");
-                                        }
-                                    }
                                 }
                             }
                             resp
@@ -1300,23 +1288,12 @@ where
                                 .to_string(),
                         }
                     } else {
-                        let map_path = {
-                            state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone())
-                        };
-                        match map_path {
-                            None => AddIdentityResponse::Err {
-                                reason: "this host has no id-map role".to_string(),
-                            },
-                            Some(path) => {
-                                let state = state.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    let _guard = state.id_map_lock.lock();
-                                    handle_add_identity(&path, &req)
-                                })
-                                .await
-                                .context("id-map registration task panicked")?
-                            }
-                        }
+                        let state = state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            state.durable.add_identity(&req)
+                        })
+                        .await
+                        .context("id-map registration task panicked")?
                     };
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
@@ -1450,10 +1427,12 @@ where
                             let signed = run_signing(&signs, {
                                 let state = state.clone();
                                 move || {
+                                    let map =
+                                        state.durable.read(|state| state.map.clone());
                                     handle_approve(
                                         state.ca.as_ref().expect("CA role held"),
                                         &req,
-                                        Some(&state.map.lock()),
+                                        Some(&map),
                                     )
                                 }
                             })
@@ -1507,14 +1486,23 @@ where
                                     // server a peer — same side effect as the
                                     // synchronous Enroll, deferred to approval.
                                     if let Some((server_id, enrollment)) = enrollment {
-                                        match grant_enrollment(
-                                            state,
-                                            server_id,
-                                            &enrollment,
-                                        ) {
-                                            Ok(_) => {
-                                                record_peer(state, enrollment.listen)
-                                            }
+                                        let grant_state = state.clone();
+                                        match run_signing(&signs, move || {
+                                            grant_enrollment(
+                                                &grant_state,
+                                                server_id,
+                                                &enrollment,
+                                            )?;
+                                            record_peer(
+                                                &grant_state,
+                                                enrollment.listen,
+                                            );
+                                            Ok::<(), anyhow::Error>(())
+                                        })
+                                        .await
+                                        .and_then(|result| result)
+                                        {
+                                            Ok(()) => {}
                                             Err(e) => warnings.push(format!(
                                                 "recording enrollment grant: {e:#}"
                                             )),
@@ -1538,10 +1526,12 @@ where
                             run_signing(&signs, {
                                 let state = state.clone();
                                 move || {
+                                    let map =
+                                        state.durable.read(|state| state.map.clone());
                                     handle_deny(
                                         state.ca.as_ref().expect("CA role held"),
                                         &req,
-                                        Some(&state.map.lock()),
+                                        Some(&map),
                                     )
                                 }
                             })
@@ -1740,14 +1730,17 @@ where
                         .context("writing RegisterResponse")
                 }
                 Request::GetMapVersion => {
-                    let resp =
-                        GetMapVersionResponse::Ok { version: state.map.lock().version };
+                    let resp = GetMapVersionResponse::Ok {
+                        version: state.durable.read(|state| state.map.version),
+                    };
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
                         .context("writing GetMapVersionResponse")
                 }
                 Request::GetMap => {
-                    let resp = GetMapResponse::Ok { map: state.map.lock().clone() };
+                    let resp = GetMapResponse::Ok {
+                        map: state.durable.read(|state| state.map.clone()),
+                    };
                     admin_proto::write_msg(&mut tls, &resp)
                         .await
                         .context("writing GetMapResponse")
@@ -2018,10 +2011,11 @@ fn handle_external_ca_install(
         Ok(v) => v,
         Err(e) => return err(format!("validating the signed CA certificate: {e:#}")),
     };
+    state.durable.write(|state| {
     // A live renewal may refresh the netidx intermediate and its existing
     // issuer, but it may not smuggle in a new trust root. The ordinary renewal
     // reconciler implements exactly that same-key/same-issuer rule.
-    let trusted_path = state.cfg.lock().trusted.clone();
+    let trusted_path = state.cfg.trusted.clone();
     let installed = match std::fs::read_to_string(&trusted_path) {
         Ok(p) => p,
         Err(e) => return err(format!("reading {}: {e:#}", trusted_path.display())),
@@ -2058,7 +2052,7 @@ fn handle_external_ca_install(
                 .into(),
         );
     }
-    let serving_path = state.cfg.lock().serving_cert.clone();
+    let serving_path = state.cfg.serving_cert.clone();
     let serving = match std::fs::read_to_string(&serving_path) {
         Ok(p) => p,
         Err(e) => return err(format!("reading {}: {e:#}", serving_path.display())),
@@ -2090,6 +2084,7 @@ fn handle_external_ca_install(
     }
     audit(dir, "local", "external-ca-install", &new_fp.text(), Duration::ZERO);
     ExternalCaInstallResponse::Ok { ca_fingerprint: new_fp.text() }
+    })
 }
 
 /// Run an Argon2-bound vault operation on `spawn_blocking`, bounded by
@@ -2154,33 +2149,36 @@ async fn handle_backup(
             };
         }
     };
-    let gate = state.mutation_gate.clone().write_owned().await;
-    let cfg = state.cfg.lock().clone();
-    let map_version = state.map.lock().version;
-    let highest_serial = match ca.store.lock().max_serial() {
-        Ok(serial) => serial.unwrap_or(0),
+    let capture_state = state.clone();
+    let capture_ca_dir = ca_dir.clone();
+    let snapshot = match tokio::task::spawn_blocking(move || {
+        let ca = capture_state.ca.as_ref().expect("CA role held");
+        capture_state.durable.write(|state| {
+            let store = ca.store.lock();
+            let _vault = ca.vault.read();
+            let highest_serial = store.max_serial()?.unwrap_or(0);
+            crate::backup::capture(
+                &state.cfg,
+                &cfg_path,
+                &capture_ca_dir,
+                state.map.version,
+                highest_serial,
+                &unlocked.ca_key_pem,
+            )
+        })
+    })
+    .await
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(e)) => {
+            return BackupResponse::Err { reason: format!("capturing backup: {e:#}") };
+        }
         Err(e) => {
             return BackupResponse::Err {
-                reason: format!("reading serial state: {e:#}"),
+                reason: format!("backup capture task panicked: {e}"),
             };
         }
     };
-    let snapshot = match crate::backup::capture(
-        &cfg,
-        &cfg_path,
-        &ca_dir,
-        map_version,
-        highest_serial,
-        &unlocked.ca_key_pem,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            return BackupResponse::Err { reason: format!("capturing backup: {e:#}") };
-        }
-    };
-    // The consistent bytes are fixed; let administration resume before the
-    // potentially slow target filesystem is touched.
-    drop(gate);
     let ca_dir_for_publish = ca_dir.clone();
     let outcome = match tokio::task::spawn_blocking(move || {
         crate::backup::publish(snapshot, &target, &ca_dir_for_publish)
@@ -2218,40 +2216,44 @@ async fn handle_backup(
 /// it when we have a config path). The CA host thereby becomes the
 /// well-known starting point for peer walks.
 fn record_peer(state: &Server, peer: SocketAddr) {
-    let mut cfg = state.cfg.lock();
-    if peer == cfg.listen || cfg.peers.contains(&peer) {
-        return;
-    }
-    cfg.peers.push(peer);
-    if let Some(path) = &state.cfg_path
-        && let Err(e) = cfg.save(path)
-    {
-        warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
-    }
+    state.durable.write(|inner| {
+        let cfg = &mut inner.cfg;
+        if peer == cfg.listen || cfg.peers.contains(&peer) {
+            return;
+        }
+        cfg.peers.push(peer);
+        if let Some(path) = &state.cfg_path
+            && let Err(e) = cfg.save(path)
+        {
+            warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
+        }
+    });
 }
 
 /// Local facts + known peers. Cheap and network-free: the resolver
 /// address/auth is read fresh from the resolver config so config edits
 /// show up without a daemon restart; everything else is our own config.
 fn get_info(state: &Server) -> GetInfoResponse {
-    let cfg = state.cfg.lock();
-    let resolver =
-        cfg.roles.resolver.as_ref().and_then(|r| match resolver_info(&r.config) {
-            Ok(x) => x,
-            Err(e) => {
-                warn!(
-                    "admin-server: could not derive resolver info from {}: {e:#}",
-                    r.config.display()
-                );
-                None
-            }
-        });
-    GetInfoResponse {
-        domain: cfg.domain.clone(),
-        ca_addr: if cfg.roles.ca.is_some() { Some(cfg.listen) } else { cfg.ca_addr },
-        resolver,
-        peers: cfg.peers.clone(),
-    }
+    state.durable.read(|state| {
+        let cfg = &state.cfg;
+        let resolver =
+            cfg.roles.resolver.as_ref().and_then(|r| match resolver_info(&r.config) {
+                Ok(x) => x,
+                Err(e) => {
+                    warn!(
+                        "admin-server: could not derive resolver info from {}: {e:#}",
+                        r.config.display()
+                    );
+                    None
+                }
+            });
+        GetInfoResponse {
+            domain: cfg.domain.clone(),
+            ca_addr: if cfg.roles.ca.is_some() { Some(cfg.listen) } else { cfg.ca_addr },
+            resolver,
+            peers: cfg.peers.clone(),
+        }
+    })
 }
 
 /// Derive this host's advertised resolver address + data-plane auth
@@ -2292,10 +2294,9 @@ async fn push_registrations(
         groups: secondary.to_vec(),
     };
     let mut warnings = Vec::new();
-    let (my_id, controller_id, targets) = {
-        let cfg = state.cfg.lock();
-        let map = state.map.lock();
-        let mut targets: Vec<_> = map
+    let (my_id, controller_id, targets) = state.durable.read(|state| {
+        let mut targets: Vec<_> = state
+            .map
             .servers
             .iter()
             .filter(|s| {
@@ -2305,20 +2306,14 @@ async fn push_registrations(
             .map(|s| (s.id, s.addr))
             .collect();
         targets.sort_by_key(|(id, _)| *id);
-        (cfg.server_id, map.controller, targets)
-    };
+        (state.cfg.server_id, state.map.controller, targets)
+    });
     // Local id-map first (no TLS loopback).
-    let local_map = { state.cfg.lock().roles.id_map.as_ref().map(|r| r.map.clone()) };
-    if targets.iter().any(|(id, _)| *id == my_id)
-        && let Some(path) = local_map
-    {
+    if targets.iter().any(|(id, _)| *id == my_id) {
         let r = tokio::task::spawn_blocking({
             let state = state.clone();
             let req = req.clone();
-            move || {
-                let _guard = state.id_map_lock.lock();
-                handle_add_identity(&path, &req)
-            }
+            move || state.durable.add_identity(&req)
         })
         .await;
         match r {
@@ -2455,7 +2450,7 @@ fn build_server_config(
 fn serving_crl_path(state: &Server) -> PathBuf {
     match state.ca.as_ref() {
         Some(ca) => ca.store.lock().crl_path(),
-        None => state.cfg.lock().trusted.with_file_name("crl.pem"),
+        None => state.durable.read(|state| state.cfg.trusted.with_file_name("crl.pem")),
     }
 }
 
@@ -2534,8 +2529,9 @@ const SERVING_RELOAD_POLL: Duration = Duration::from_secs(30);
 /// `acceptor` when either changes. New connections pick up the new acceptor;
 /// in-flight handshakes keep the one they started with.
 fn spawn_serving_reload(state: &Arc<Server>, acceptor: Arc<RwLock<TlsAcceptor>>) {
-    let cert_path = state.cfg.lock().serving_cert.clone();
-    let key_path = state.cfg.lock().serving_key.clone();
+    let (cert_path, key_path) = state
+        .durable
+        .read(|state| (state.cfg.serving_cert.clone(), state.cfg.serving_key.clone()));
     let crl_path = serving_crl_path(state);
     let weak = Arc::downgrade(state);
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
@@ -3205,7 +3201,7 @@ fn sign_csr(
 /// Handle an id-map registration against the map at `map_path`. A
 /// missing file starts from the seeded empty map — zero-touch joins
 /// must work on a host whose id-map daemon hasn't registered anyone
-/// yet. The caller holds the id-map lock.
+/// yet.
 pub fn handle_add_identity(
     map_path: &Path,
     req: &AddIdentityRequest,
@@ -3469,7 +3465,7 @@ fn handle_list_queue(state: &Server, req: &ListQueueRequest) -> ListQueueRespons
     if let Err(reason) = authenticate(ca, &req.credential) {
         return ListQueueResponse::Err { reason };
     }
-    let map = state.map.lock().clone();
+    let map = state.durable.read(|state| state.map.clone());
     match ca.store.lock().pending() {
         Ok(reqs) => ListQueueResponse::Ok {
             requests: reqs
@@ -3559,7 +3555,7 @@ fn prepare_revoke(
         };
     let now = ca_store::now_unix();
     let mut warnings = Vec::new();
-    // Scope-check before taking the issuance lock. Removal takes the map lock
+    // Scope-check before taking the issuance lock. Removal takes durable state
     // before the issuance lock, so looking up topology while holding the store
     // would invert that order and permit a deadlock.
     let mut serials = Vec::new();
@@ -3570,20 +3566,22 @@ fn prepare_revoke(
                 crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
                     .ok()
                     .and_then(|identity| {
-                        let map = state.map.lock();
-                        let cluster = map
-                            .servers
-                            .iter()
-                            .find(|server| server.id == identity.server_id)?
-                            .cluster?;
-                        map.clusters.iter().find(|entry| entry.id == cluster).map(
-                            |entry| {
-                                perms_scope_covers(
-                                    &authd.policy.server_enroll_scopes,
-                                    &entry.base,
-                                )
-                            },
-                        )
+                        state.durable.read(|state| {
+                            let map = &state.map;
+                            let cluster = map
+                                .servers
+                                .iter()
+                                .find(|server| server.id == identity.server_id)?
+                                .cluster?;
+                            map.clusters.iter().find(|entry| entry.id == cluster).map(
+                                |entry| {
+                                    perms_scope_covers(
+                                        &authd.policy.server_enroll_scopes,
+                                        &entry.base,
+                                    )
+                                },
+                            )
+                        })
                     })
                     .unwrap_or(false)
             } else {
@@ -3704,16 +3702,12 @@ fn validate_home_crl(crl_pem: &str, home_ca_der: &[u8]) -> Result<()> {
 /// Every local trust bundle whose inbound TLS authentication is administered
 /// by this daemon. The admin-plane bundle is always present; a resolver role
 /// may name the same bundle more than once, so destinations are deduplicated.
-fn local_crl_destinations(state: &Server) -> Result<BTreeSet<PathBuf>> {
+fn local_crl_destinations(cfg: &AdminServerConfig) -> Result<BTreeSet<PathBuf>> {
     use netidx::resolver_server::config::file::Auth;
-    let (admin_trusted, resolver_config) = {
-        let cfg = state.cfg.lock();
-        (cfg.trusted.clone(), cfg.roles.resolver.as_ref().map(|role| role.config.clone()))
-    };
     let mut destinations = BTreeSet::new();
-    destinations.insert(admin_trusted.with_file_name("crl.pem"));
-    if let Some(path) = resolver_config {
-        let cfg = crate::resolver::ResolverConfig::load(&path)
+    destinations.insert(cfg.trusted.with_file_name("crl.pem"));
+    if let Some(path) = cfg.roles.resolver.as_ref().map(|role| &role.config) {
+        let cfg = crate::resolver::ResolverConfig::load(path)
             .with_context(|| format!("loading resolver config {}", path.display()))?;
         for member in &cfg.as_file().member_servers {
             if let Auth::Tls { trusted, .. } = &member.auth {
@@ -3760,11 +3754,13 @@ fn apply_crl_to_destinations(
 }
 
 fn apply_crl_local(state: &Server, crl_pem: &str) -> Result<()> {
-    apply_crl_to_destinations(
-        crl_pem,
-        state.home_ca_der.as_ref(),
-        local_crl_destinations(state)?,
-    )
+    state.durable.write(|durable| {
+        apply_crl_to_destinations(
+            crl_pem,
+            state.home_ca_der.as_ref(),
+            local_crl_destinations(&durable.cfg)?,
+        )
+    })
 }
 
 fn handle_apply_crl(state: &Server, req: &ApplyCrlRequest) -> ApplyCrlResponse {
@@ -3780,15 +3776,6 @@ fn handle_apply_controller_state(
     req: &ApplyControllerStateRequest,
 ) -> ApplyControllerStateResponse {
     let err = |reason: String| ApplyControllerStateResponse::Err { reason };
-    let installed_controller = state.map.lock().controller;
-    if req.controller != installed_controller
-        || req.map.controller != installed_controller
-    {
-        return err(format!(
-            "controller identity mismatch (installed {}, request {}, map {})",
-            installed_controller, req.controller, req.map.controller
-        ));
-    }
     let Some(controller) = req.map.controller_entry() else {
         return err("authoritative map has no controller entry".to_string());
     };
@@ -3800,50 +3787,69 @@ fn handle_apply_controller_state(
         return err("authoritative map does not bind the claimed registered CA controller address"
             .to_string());
     }
-    if req.map.version < state.map.lock().version {
-        return err(format!(
-            "refusing controller-state rollback from map version {} to {}",
-            state.map.lock().version,
-            req.map.version
-        ));
-    }
     if let Err(e) = validate_home_crl(&req.crl_pem, state.home_ca_der.as_ref()) {
         return err(format!("validating controller CRL: {e:#}"));
     }
-
-    // Persist the new route before publishing the map in memory. The
-    // controller itself deliberately keeps `ca_addr = None`.
-    if state.ca.is_none() {
-        let Some(cfg_path) = state.cfg_path.as_ref() else {
-            return err(
-                "this node has no persistent admin-server config path".to_string()
-            );
-        };
-        let mut next = state.cfg.lock().clone();
-        next.ca_addr = Some(req.addr);
-        if let Err(e) = next.save(cfg_path) {
-            return err(format!("persisting the relocated controller address: {e:#}"));
+    state.durable.write(|durable| {
+        let installed_controller = durable.map.controller;
+        if req.controller != installed_controller
+            || req.map.controller != installed_controller
+        {
+            return err(format!(
+                "controller identity mismatch (installed {}, request {}, map {})",
+                installed_controller, req.controller, req.map.controller
+            ));
         }
-        *state.cfg.lock() = next;
-    }
-    if let Err(e) = apply_crl_local(state, &req.crl_pem) {
-        return err(format!("installing reconciled CRL: {e:#}"));
-    }
-    *state.map.lock() = req.map.clone();
-    ApplyControllerStateResponse::Ok
+        if req.map.version < durable.map.version {
+            return err(format!(
+                "refusing controller-state rollback from map version {} to {}",
+                durable.map.version, req.map.version
+            ));
+        }
+        if state.ca.is_none() {
+            let Some(cfg_path) = state.cfg_path.as_ref() else {
+                return err(
+                    "this node has no persistent admin-server config path".to_string()
+                );
+            };
+            let mut next = durable.cfg.clone();
+            next.ca_addr = Some(req.addr);
+            if let Err(e) = next.save(cfg_path) {
+                return err(format!(
+                    "persisting the relocated controller address: {e:#}"
+                ));
+            }
+            durable.cfg = next;
+        }
+        if let Err(e) = apply_crl_to_destinations(
+            &req.crl_pem,
+            state.home_ca_der.as_ref(),
+            match local_crl_destinations(&durable.cfg) {
+                Ok(destinations) => destinations,
+                Err(e) => {
+                    return err(format!("locating reconciled CRL destinations: {e:#}"));
+                }
+            },
+        ) {
+            return err(format!("installing reconciled CRL: {e:#}"));
+        }
+        durable.map = req.map.clone();
+        ApplyControllerStateResponse::Ok
+    })
 }
 
 fn registered_crl_targets(
     state: &Server,
 ) -> Vec<(admin_proto::AdminServerId, SocketAddr)> {
-    let mut targets: Vec<_> = state
-        .map
-        .lock()
-        .servers
-        .iter()
-        .filter(|server| server.state == admin_proto::ServerState::Registered)
-        .map(|server| (server.id, server.addr))
-        .collect();
+    let mut targets: Vec<_> = state.durable.read(|state| {
+        state
+            .map
+            .servers
+            .iter()
+            .filter(|server| server.state == admin_proto::ServerState::Registered)
+            .map(|server| (server.id, server.addr))
+            .collect()
+    });
     targets.sort_by_key(|(server, _)| *server);
     targets
 }
@@ -3881,8 +3887,8 @@ async fn push_crl_to_peers(
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
     let targets = registered_crl_targets(state);
-    let my_id = state.cfg.lock().server_id;
-    let controller = state.map.lock().controller;
+    let (my_id, controller) =
+        state.durable.read(|state| (state.cfg.server_id, state.map.controller));
     let mut results = Vec::new();
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let state = state.clone();
@@ -3938,7 +3944,8 @@ async fn push_controller_state_to_peers(
     state: &Arc<Server>,
     operation_id: admin_proto::OperationId,
 ) -> Result<Vec<PeerResult>> {
-    let map = state.map.lock().clone();
+    let (map, my_id) =
+        state.durable.read(|state| (state.map.clone(), state.cfg.server_id));
     let controller = map
         .controller_entry()
         .filter(|entry| entry.state == admin_proto::ServerState::Registered)
@@ -3957,7 +3964,6 @@ async fn push_controller_state_to_peers(
         crl_pem,
     };
     let targets = registered_crl_targets(state);
-    let my_id = state.cfg.lock().server_id;
     let mut results = Vec::new();
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let state = state.clone();
@@ -4084,7 +4090,7 @@ async fn handle_reconcile_controller(
         }
     };
     let topology = {
-        let map = state.map.lock();
+        let map = state.durable.read(|state| state.map.clone());
         topology_fanout(&map, map.clusters.iter())
     };
     merge_topology_results(
@@ -4428,7 +4434,7 @@ const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// read-replica — if the CA is unreachable we keep serving the last copy
 /// we cached, and the re-register self-heals a push lost while it was down.
 fn spawn_map_refresh(state: &Arc<Server>) {
-    if state.cfg.lock().roles.ca.is_some() {
+    if state.durable.read(|state| state.cfg.roles.ca.is_some()) {
         return; // the CA owns the map — nothing to refresh
     }
     let weak = Arc::downgrade(state);
@@ -4436,17 +4442,17 @@ fn spawn_map_refresh(state: &Arc<Server>) {
         loop {
             let Some(state) = weak.upgrade() else { break };
             let (cert, key) = state.outbound_identity();
-            let (ca_addr, req, roots) = {
-                let cfg = state.cfg.lock();
+            let roots = state.roots.clone();
+            let (ca_addr, req) = state.durable.read(|state| {
+                let cfg = &state.cfg;
                 (
                     cfg.ca_addr,
                     RegisterRequest {
                         addr: cfg.listen,
-                        resolver: local_cluster_facts(&cfg),
+                        resolver: local_cluster_facts(cfg),
                     },
-                    state.roots.clone(),
                 )
-            };
+            });
             let Some(ca_addr) = ca_addr else {
                 drop(state);
                 tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
@@ -4470,7 +4476,7 @@ fn spawn_map_refresh(state: &Arc<Server>) {
             .await
             {
                 Ok(v) => {
-                    let stale = state.map.lock().version != v;
+                    let stale = state.durable.read(|state| state.map.version != v);
                     if stale {
                         match admin_client::get_map_from_controller(
                             ca_addr,
@@ -4480,7 +4486,7 @@ fn spawn_map_refresh(state: &Arc<Server>) {
                         )
                         .await
                         {
-                            Ok(map) => *state.map.lock() = map,
+                            Ok(map) => state.durable.write(|state| state.map = map),
                             Err(e) => warn!(
                                 "admin-server: pulling the network map from {ca_addr} failed \
                                  (serving the cached copy): {e:#}"
@@ -4520,17 +4526,14 @@ fn spawn_autorenew(state: &Arc<Server>) {
             // the local control socket (`recovery rotate` / `auto-approve`)
             // is honored without restarting the daemon. A transient `None`
             // (mid-rotation, or a retired CA) just skips this sweep.
-            let Some(pw) =
-                state.ca.as_ref().expect("CA role held").autorenew_pw.read().clone()
-            else {
+            let pw = state.ca.as_ref().expect("CA role held").autorenew_pw.read().clone();
+            let Some(pw) = pw else {
                 tokio::time::sleep(AUTORENEW_POLL).await;
                 continue;
             };
-            let gate = state.mutation_gate.clone().read_owned().await;
             // Hand the Arc to the blocking task and let it drop there, so
             // we never hold the server alive across the sleep below.
             if let Err(e) = tokio::task::spawn_blocking(move || {
-                let _gate = gate;
                 autorenew_sweep(state.ca.as_ref().expect("CA role held"), &pw);
             })
             .await
@@ -4671,22 +4674,24 @@ fn handle_request_delegation(
         req.child_servers.clone(),
         peer.to_string(),
     );
-    // Validate the complete proposal against one snapshot without changing the
-    // authoritative map. Approval re-validates under the resolver-edit lock.
-    let mut staged = state.map.lock().clone();
-    if let Err(e) = netmap::delegate(
-        &mut staged,
-        &pending.proposed_path,
-        pending.proposed_child,
-        &pending.parent_servers,
-        &pending.child_servers,
-    ) {
-        return DelegationResponse::Err { reason: format!("invalid delegation: {e:#}") };
-    }
-    match delegation_store::enqueue(ca_dir, &pending) {
-        Ok(()) => DelegationResponse::Ok { request_id: pending.id },
-        Err(e) => DelegationResponse::Err { reason: format!("{e:#}") },
-    }
+    state.durable.write(|state| {
+        let mut staged = state.map.clone();
+        if let Err(e) = netmap::delegate(
+            &mut staged,
+            &pending.proposed_path,
+            pending.proposed_child,
+            &pending.parent_servers,
+            &pending.child_servers,
+        ) {
+            return DelegationResponse::Err {
+                reason: format!("invalid delegation: {e:#}"),
+            };
+        }
+        match delegation_store::enqueue(ca_dir, &pending) {
+            Ok(()) => DelegationResponse::Ok { request_id: pending.id },
+            Err(e) => DelegationResponse::Err { reason: format!("{e:#}") },
+        }
+    })
 }
 
 /// `PollDelegation` (unauthenticated): map the stored status to the wire.
@@ -4718,7 +4723,7 @@ fn handle_list_delegations(
         return ListDelegationsResponse::Err { reason };
     }
     let dir = ca.dir().to_path_buf();
-    let map = state.map.lock();
+    let map = state.durable.read(|state| state.map.clone());
     let reqs = delegation_store::pending(&dir).and_then(|pending| {
         let mut reqs: Vec<_> = pending.into_iter().map(|req| (req, false)).collect();
         reqs.extend(
@@ -4763,8 +4768,6 @@ fn handle_list_delegations(
     }
 }
 
-/// `DenyDelegation` (admin-authenticated): deny a pending request, under
-/// the resolver-edit lock so it's mutually exclusive with approve.
 fn handle_deny_delegation(
     state: &Server,
     req: &DenyDelegationRequest,
@@ -4782,29 +4785,30 @@ fn handle_deny_delegation(
             Ok(a) => a,
             Err(reason) => return DenyDelegationResponse::Err { reason },
         };
-    let _guard = state.resolver_edit_lock.lock();
-    match delegation_store::read_pending(&ca_dir, &req.request_id) {
-        Ok(Some(pending)) => {
-            if !delegation_authority(&authd, &pending.proposed_path) {
-                return DenyDelegationResponse::Err {
-                    reason: format!(
-                        "admin {} is not authorized to decide delegations at {:?}",
-                        authd.admin, pending.proposed_path
-                    ),
-                };
+    state.durable.write(|_| {
+        match delegation_store::read_pending(&ca_dir, &req.request_id) {
+            Ok(Some(pending)) => {
+                if !delegation_authority(&authd, &pending.proposed_path) {
+                    return DenyDelegationResponse::Err {
+                        reason: format!(
+                            "admin {} is not authorized to decide delegations at {:?}",
+                            authd.admin, pending.proposed_path
+                        ),
+                    };
+                }
+                match delegation_store::deny(&ca_dir, &pending, &req.reason) {
+                    Ok(()) => DenyDelegationResponse::Ok,
+                    Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
+                }
             }
-            match delegation_store::deny(&ca_dir, &pending, &req.reason) {
-                Ok(()) => DenyDelegationResponse::Ok,
-                Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
-            }
-        }
-        Ok(None) => DenyDelegationResponse::Err {
-            reason: "no such pending delegation request (expired, never queued, or \
+            Ok(None) => DenyDelegationResponse::Err {
+                reason: "no such pending delegation request (expired, never queued, or \
                      already decided)"
-                .to_string(),
-        },
-        Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
-    }
+                    .to_string(),
+            },
+            Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
+        }
+    })
 }
 
 fn info_to_refauth(a: &InfoAuth) -> netidx::resolver_server::config::file::RefAuth {
@@ -4906,19 +4910,7 @@ fn handle_apply_referral_edit(
         "admin-server: applying referral operation {}: {:?}",
         req.operation_id, req.edit
     );
-    let path = match state.cfg.lock().roles.resolver.as_ref().map(|r| r.config.clone()) {
-        Some(p) => p,
-        None => {
-            return ApplyReferralEditResponse::Err {
-                reason: "this host has no resolver role to edit".to_string(),
-            };
-        }
-    };
-    let _guard = state.resolver_edit_lock.lock();
-    match apply_referral_edit_local(&path, &req.edit) {
-        Ok(()) => ApplyReferralEditResponse::Ok,
-        Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
-    }
+    state.durable.apply_referral_edit(req)
 }
 
 /// The role list a admin-server config implies.
@@ -4956,10 +4948,20 @@ fn local_cluster_facts(cfg: &AdminServerConfig) -> Option<admin_proto::ClusterFa
 /// This host's own resolver base (the single level a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
 fn own_base(state: &Server) -> Option<String> {
-    let id = state.cfg.lock().server_id;
-    let map = state.map.lock();
-    let cluster = map.servers.iter().find(|s| s.id == id)?.cluster?;
-    map.clusters.iter().find(|c| c.id == cluster).map(|c| c.base.clone())
+    state.durable.read(|state| {
+        let cluster = state
+            .map
+            .servers
+            .iter()
+            .find(|server| server.id == state.cfg.server_id)?
+            .cluster?;
+        state
+            .map
+            .clusters
+            .iter()
+            .find(|cluster_entry| cluster_entry.id == cluster)
+            .map(|cluster_entry| cluster_entry.base.clone())
+    })
 }
 
 fn grant_enrollment(
@@ -4968,31 +4970,38 @@ fn grant_enrollment(
     enrollment: &admin_proto::EnrollmentRequest,
 ) -> Result<admin_proto::ResolverClusterId> {
     let ca_dir = state.ca_dir().context("this host does not hold the CA")?;
-    let mut map = state.map.lock();
-    let replaced_addr = enrollment.replaces.and_then(|old| {
-        map.servers.iter().find(|server| server.id == old).map(|server| server.addr)
-    });
-    let mut staged = map.clone();
-    let cluster = stage_enrollment(&mut staged, server_id, enrollment)?;
-    if let Some(old) = enrollment.replaces {
-        revoke_server_certificates(
-            state.ca.as_ref().context("this host does not hold the CA")?,
-            old,
-            "approved restore",
-        )
-        .context("revoking the replaced server identity")?;
-    }
-    netmap::save(ca_dir, &staged).context("persisting the enrollment grant")?;
-    *map = staged;
-    drop(map);
-    if let Some(old_addr) = replaced_addr {
-        let mut cfg = state.cfg.lock();
-        cfg.peers.retain(|peer| *peer != old_addr);
-        if let Some(path) = &state.cfg_path {
-            cfg.save(path).context("persisting removal of the replaced peer hint")?;
+    state.durable.write(|durable| {
+        let replaced_addr = enrollment.replaces.and_then(|old| {
+            durable
+                .map
+                .servers
+                .iter()
+                .find(|server| server.id == old)
+                .map(|server| server.addr)
+        });
+        let mut staged = durable.map.clone();
+        let cluster = stage_enrollment(&mut staged, server_id, enrollment)?;
+        if let Some(old) = enrollment.replaces {
+            revoke_server_certificates(
+                state.ca.as_ref().context("this host does not hold the CA")?,
+                old,
+                "approved restore",
+            )
+            .context("revoking the replaced server identity")?;
         }
-    }
-    Ok(cluster)
+        netmap::save(ca_dir, &staged).context("persisting the enrollment grant")?;
+        durable.map = staged;
+        if let Some(old_addr) = replaced_addr {
+            durable.cfg.peers.retain(|peer| *peer != old_addr);
+            if let Some(path) = &state.cfg_path {
+                durable
+                    .cfg
+                    .save(path)
+                    .context("persisting removal of the replaced peer hint")?;
+            }
+        }
+        Ok(cluster)
+    })
 }
 
 /// Stage a new enrollment and, for restore, atomically replace the failed
@@ -5056,20 +5065,23 @@ fn handle_register(
             };
         }
     };
-    let mut map = state.map.lock();
-    let updated =
-        match netmap::register(&mut map, server_id, req.addr, req.resolver.as_ref()) {
+    state.durable.write(|state| {
+        let updated = match netmap::register(
+            &mut state.map,
+            server_id,
+            req.addr,
+            req.resolver.as_ref(),
+        ) {
             Ok(updated) => updated,
             Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
         };
-    if updated {
-        if let Err(e) = netmap::save(&ca_dir, &map) {
+        if updated && let Err(e) = netmap::save(&ca_dir, &state.map) {
             return RegisterResponse::Err {
                 reason: format!("persisting the network map: {e:#}"),
             };
         }
-    }
-    RegisterResponse::Ok { version: map.version }
+        RegisterResponse::Ok { version: state.map.version }
+    })
 }
 
 /// CA-side: drop a admin server from the map on uninstall.
@@ -5085,19 +5097,18 @@ fn handle_deregister(
             };
         }
     };
-    let mut map = state.map.lock();
-    let updated = match netmap::deregister(&mut map, server_id) {
-        Ok(updated) => updated,
-        Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
-    };
-    if updated {
-        if let Err(e) = netmap::save(&ca_dir, &map) {
+    state.durable.write(|state| {
+        let updated = match netmap::deregister(&mut state.map, server_id) {
+            Ok(updated) => updated,
+            Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
+        };
+        if updated && let Err(e) = netmap::save(&ca_dir, &state.map) {
             return RegisterResponse::Err {
                 reason: format!("persisting the network map: {e:#}"),
             };
         }
-    }
-    RegisterResponse::Ok { version: map.version }
+        RegisterResponse::Ok { version: state.map.version }
+    })
 }
 
 struct RemoveServerPrepare {
@@ -5112,7 +5123,7 @@ struct RemoveServerPrepare {
 /// The blocking half of permanent server removal: authenticate, validate the
 /// transition, revoke every certificate for the immutable identity, and commit
 /// the new authoritative map. The returned topology fanout is deliberately
-/// separate: network I/O must not hold the map lock or signing semaphore.
+/// separate: network I/O must not hold durable state or the signing semaphore.
 fn remove_server_prepare(
     state: &Server,
     req: &RemoveServerRequest,
@@ -5137,78 +5148,50 @@ fn remove_server_prepare(
     // Validate the authoritative-map transition on a copy first. Certificate
     // revocation is irreversible, so do not begin it for an invalid removal
     // (notably, removal of the active controller).
-    let mut map = state.map.lock();
-    let target_base = map
-        .servers
-        .iter()
-        .find(|server| server.id == req.server)
-        .and_then(|server| server.cluster)
-        .and_then(|cluster| map.clusters.iter().find(|entry| entry.id == cluster))
-        .map(|cluster| cluster.base.as_str());
-    let scoped = match target_base {
-        Some(base) => perms_scope_covers(&authd.policy.server_enroll_scopes, base),
-        // On an idempotent repeat the removed entry no longer tells us its
-        // cluster. A scoped admin may safely reconcile topology only inside its
-        // own enrollment scopes.
-        None => !authd.policy.server_enroll_scopes.is_empty(),
-    };
-    if !broad && !scoped {
-        return Err(err(format!(
-            "admin {} is not authorized to remove server {} at {}",
-            authd.admin,
-            req.server,
-            target_base.unwrap_or("<unknown>")
-        )));
-    }
-    // Keep the removed cluster and each directly connected cluster in the
-    // reconciliation set. If the last member disappears, `netmap::remove`
-    // deletes that cluster and detaches its children; the surviving parent and
-    // children still need fresh topology.
-    let mut affected_ids = BTreeSet::new();
-    if let Some(cluster_id) = map
-        .servers
-        .iter()
-        .find(|server| server.id == req.server)
-        .and_then(|server| server.cluster)
-    {
-        affected_ids.insert(cluster_id);
-        if let Some(cluster) = map.clusters.iter().find(|entry| entry.id == cluster_id) {
-            affected_ids.extend(cluster.parent);
-            affected_ids.extend(cluster.children.iter().copied());
+    state.durable.write(|durable| {
+        let map = &mut durable.map;
+        let target_base = map
+            .servers
+            .iter()
+            .find(|server| server.id == req.server)
+            .and_then(|server| server.cluster)
+            .and_then(|cluster| map.clusters.iter().find(|entry| entry.id == cluster))
+            .map(|cluster| cluster.base.as_str());
+        let scoped = match target_base {
+            Some(base) => perms_scope_covers(&authd.policy.server_enroll_scopes, base),
+            // On an idempotent repeat the removed entry no longer tells us its
+            // cluster. A scoped admin may safely reconcile topology only inside its
+            // own enrollment scopes.
+            None => !authd.policy.server_enroll_scopes.is_empty(),
+        };
+        if !broad && !scoped {
+            return Err(err(format!(
+                "admin {} is not authorized to remove server {} at {}",
+                authd.admin,
+                req.server,
+                target_base.unwrap_or("<unknown>")
+            )));
         }
-    }
-    let mut affected_clusters: Vec<_> = map
-        .clusters
-        .iter()
-        .filter(|cluster| affected_ids.contains(&cluster.id))
-        .map(|cluster| cluster.base.clone())
-        .collect();
-    affected_clusters.sort();
-    affected_clusters.dedup();
-    let mut next = map.clone();
-    let removed = match netmap::remove(&mut next, req.server) {
-        Ok(removed) => removed,
-        Err(e) => return Err(err(format!("{e:#}"))),
-    };
-    // A repeat after partial fanout cannot recover the removed identity's
-    // cluster from the current map (there is deliberately no durable job
-    // record). Broad administrators therefore reconcile every surviving
-    // cluster on an idempotent repeat; scoped administrators reconcile only
-    // clusters their enrollment policy covers.
-    if !removed {
-        affected_ids.extend(
-            map.clusters
-                .iter()
-                .filter(|cluster| {
-                    broad
-                        || perms_scope_covers(
-                            &authd.policy.server_enroll_scopes,
-                            &cluster.base,
-                        )
-                })
-                .map(|cluster| cluster.id),
-        );
-        affected_clusters = map
+        // Keep the removed cluster and each directly connected cluster in the
+        // reconciliation set. If the last member disappears, `netmap::remove`
+        // deletes that cluster and detaches its children; the surviving parent and
+        // children still need fresh topology.
+        let mut affected_ids = BTreeSet::new();
+        if let Some(cluster_id) = map
+            .servers
+            .iter()
+            .find(|server| server.id == req.server)
+            .and_then(|server| server.cluster)
+        {
+            affected_ids.insert(cluster_id);
+            if let Some(cluster) =
+                map.clusters.iter().find(|entry| entry.id == cluster_id)
+            {
+                affected_ids.extend(cluster.parent);
+                affected_ids.extend(cluster.children.iter().copied());
+            }
+        }
+        let mut affected_clusters: Vec<_> = map
             .clusters
             .iter()
             .filter(|cluster| affected_ids.contains(&cluster.id))
@@ -5216,75 +5199,106 @@ fn remove_server_prepare(
             .collect();
         affected_clusters.sort();
         affected_clusters.dedup();
-    }
-    let mut revoked = 0;
-    if removed {
-        let ca = state.ca.as_ref().expect("CA role held");
-        revoked =
-            revoke_server_certificates(ca, req.server, &authd.admin).map_err(|e| {
-                err(format!("revoking the server's serving certificates: {e:#}"))
-            })?;
-        if let Err(e) = netmap::save(&ca_dir, &next) {
-            return Err(err(format!("persisting the network map: {e:#}")));
+        let mut next = map.clone();
+        let removed = match netmap::remove(&mut next, req.server) {
+            Ok(removed) => removed,
+            Err(e) => return Err(err(format!("{e:#}"))),
+        };
+        // A repeat after partial fanout cannot recover the removed identity's
+        // cluster from the current map (there is deliberately no durable job
+        // record). Broad administrators therefore reconcile every surviving
+        // cluster on an idempotent repeat; scoped administrators reconcile only
+        // clusters their enrollment policy covers.
+        if !removed {
+            affected_ids.extend(
+                map.clusters
+                    .iter()
+                    .filter(|cluster| {
+                        broad
+                            || perms_scope_covers(
+                                &authd.policy.server_enroll_scopes,
+                                &cluster.base,
+                            )
+                    })
+                    .map(|cluster| cluster.id),
+            );
+            affected_clusters = map
+                .clusters
+                .iter()
+                .filter(|cluster| affected_ids.contains(&cluster.id))
+                .map(|cluster| cluster.base.clone())
+                .collect();
+            affected_clusters.sort();
+            affected_clusters.dedup();
         }
-        *map = next;
-        audit(
-            &ca_dir,
-            &authd.admin,
-            "remove-server",
-            &format!("operation {operation_id}: {}", req.server),
-            Duration::ZERO,
-        );
-    } else {
-        audit(
-            &ca_dir,
-            &authd.admin,
-            "reconcile-server-removal",
-            &format!("operation {operation_id}: {}", req.server),
-            Duration::ZERO,
-        );
-    }
-    // Always carry the current CRL on an idempotent retry as well: a previous
-    // removal may have committed the revocation but only partially delivered
-    // it. Repeating force-remove is the manual reconciliation path for both
-    // topology and revocation state.
-    let crl_pem = {
-        let path = state.ca.as_ref().expect("CA role held").store.lock().crl_path();
-        match std::fs::read_to_string(&path) {
-            Ok(pem) => Some(pem),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                return Err(err(format!(
-                    "reading the current CRL for immediate distribution: {e:#}"
-                )));
+        let mut revoked = 0;
+        if removed {
+            let ca = state.ca.as_ref().expect("CA role held");
+            revoked = revoke_server_certificates(ca, req.server, &authd.admin).map_err(
+                |e| err(format!("revoking the server's serving certificates: {e:#}")),
+            )?;
+            if let Err(e) = netmap::save(&ca_dir, &next) {
+                return Err(err(format!("persisting the network map: {e:#}")));
+            }
+            *map = next;
+            audit(
+                &ca_dir,
+                &authd.admin,
+                "remove-server",
+                &format!("operation {operation_id}: {}", req.server),
+                Duration::ZERO,
+            );
+        } else {
+            audit(
+                &ca_dir,
+                &authd.admin,
+                "reconcile-server-removal",
+                &format!("operation {operation_id}: {}", req.server),
+                Duration::ZERO,
+            );
+        }
+        // Always carry the current CRL on an idempotent retry as well: a previous
+        // removal may have committed the revocation but only partially delivered
+        // it. Repeating force-remove is the manual reconciliation path for both
+        // topology and revocation state.
+        let crl_pem = {
+            let path = state.ca.as_ref().expect("CA role held").store.lock().crl_path();
+            match std::fs::read_to_string(&path) {
+                Ok(pem) => Some(pem),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(err(format!(
+                        "reading the current CRL for immediate distribution: {e:#}"
+                    )));
+                }
+            }
+        };
+        let mut targets = Vec::new();
+        for cluster in
+            map.clusters.iter().filter(|cluster| affected_ids.contains(&cluster.id))
+        {
+            for server in map.servers.iter().filter(|server| {
+                server.cluster == Some(cluster.id)
+                    && server.state == admin_proto::ServerState::Registered
+            }) {
+                let Some(local_member) = server.resolver.clone() else {
+                    continue;
+                };
+                targets.push((
+                    server.id,
+                    server.addr,
+                    topology_edit(map, cluster, local_member),
+                ));
             }
         }
-    };
-    let mut targets = Vec::new();
-    for cluster in
-        map.clusters.iter().filter(|cluster| affected_ids.contains(&cluster.id))
-    {
-        for server in map.servers.iter().filter(|server| {
-            server.cluster == Some(cluster.id)
-                && server.state == admin_proto::ServerState::Registered
-        }) {
-            let Some(local_member) = server.resolver.clone() else {
-                continue;
-            };
-            targets.push((
-                server.id,
-                server.addr,
-                topology_edit(&map, cluster, local_member),
-            ));
-        }
-    }
-    Ok(RemoveServerPrepare {
-        version: map.version,
-        revoked: revoked as u64,
-        removed,
-        affected_clusters,
-        fanout: TopologyFanout { targets },
-        crl_pem,
+        Ok(RemoveServerPrepare {
+            version: map.version,
+            revoked: revoked as u64,
+            removed,
+            affected_clusters,
+            fanout: TopologyFanout { targets },
+            crl_pem,
+        })
     })
 }
 
@@ -5371,14 +5385,14 @@ fn revoke_server_certificates(
 /// The local resolver's permissions file, resolved against its config dir.
 fn local_perms_path(state: &Server) -> Result<PathBuf> {
     let rconfig = state
-        .cfg
-        .lock()
-        .roles
-        .resolver
-        .as_ref()
-        .map(|r| r.config.clone())
+        .durable
+        .read(|state| state.cfg.roles.resolver.as_ref().map(|role| role.config.clone()))
         .context("this host has no resolver role — no perms to read or edit")?;
-    let rc = crate::resolver::ResolverConfig::load(&rconfig)?;
+    perms_path(&rconfig)
+}
+
+fn perms_path(rconfig: &Path) -> Result<PathBuf> {
+    let rc = crate::resolver::ResolverConfig::load(rconfig)?;
     let inc = rc.as_file().include_permissions.first().cloned().context(
         "this resolver has no permissions file (include_permissions is empty — an \
          anonymous network has no perms)",
@@ -5490,11 +5504,18 @@ async fn handle_read_perms(
     // including satellites that do not have the CA role. It may read only the
     // host's own level and never consults or trusts remote map hints.
     if local {
-        let (server, addr) = {
-            let cfg = state.cfg.lock();
-            (cfg.server_id, cfg.listen)
+        let (server, addr) =
+            state.durable.read(|state| (state.cfg.server_id, state.cfg.listen));
+        let read_state = state.clone();
+        let read = match tokio::task::spawn_blocking(move || {
+            handle_get_perms(&read_state)
+        })
+        .await
+        {
+            Ok(read) => read,
+            Err(e) => return err(format!("local permissions read task panicked: {e}")),
         };
-        return match handle_get_perms(state) {
+        return match read {
             GetPermsResponse::Ok { perms_json } => {
                 ReadPermsResponse::Ok { server, addr, perms_json }
             }
@@ -5502,7 +5523,7 @@ async fn handle_read_perms(
         };
     }
     let targets = {
-        let map = state.map.lock();
+        let map = state.durable.read(|state| state.map.clone());
         match cluster_members_for(&map, &req.target_path) {
             Some(targets) => targets,
             None => {
@@ -5522,7 +5543,7 @@ async fn handle_read_perms(
     );
     let (cert, key) = state.outbound_identity();
     let roots = state.roots.clone();
-    let controller = state.map.lock().controller;
+    let controller = state.durable.read(|state| state.map.controller);
     let home_ca = state.home_ca_der.clone();
     let mut failures = Vec::new();
     for (server, addr) in targets {
@@ -5557,10 +5578,7 @@ async fn handle_read_perms(
     ))
 }
 
-/// Write `perms_json` to the local perms file under the resolver-edit lock,
-/// validating the resolver config and reverting the file if it goes invalid.
 fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
-    let path = local_perms_path(state)?;
     let pmap: crate::perms::PMap =
         serde_json::from_str(perms_json).context("parsing the new perms")?;
     // Validate the permission bits before touching the file — `load_perms`
@@ -5573,42 +5591,39 @@ fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
                 format!("invalid permission bits {bits:?} for {e:?} at {p:?}")
             })?;
     }
-    let rconfig = state
-        .cfg
-        .lock()
-        .roles
-        .resolver
-        .as_ref()
-        .map(|r| r.config.clone())
-        .context("no resolver role")?;
-    let _guard = state.resolver_edit_lock.lock();
-    let backup = std::fs::read(&path).ok();
-    crate::perms::save_perms(&path, &pmap)?;
-    if let Err(e) = crate::resolver::ResolverConfig::load(&rconfig)
-        .and_then(|rc| rc.validate_for_path(&rconfig))
-    {
-        // Roll back to *exactly* the prior state — restore the old bytes
-        // (atomically), or remove the file we just created if there was
-        // none before. A failed rollback is itself reported: never claim
-        // "reverted" while leaving an invalid perms file in place.
-        let rolled_back = match &backup {
-            Some(old) => crate::atomic::write_atomic(&path, old, 0o644)
-                .context("restoring the previous perms file"),
-            None => {
-                std::fs::remove_file(&path).context("removing the rejected perms file")
-            }
-        };
-        return match rolled_back {
-            Ok(()) => Err(e)
-                .context("the edited perms made the resolver config invalid; reverted"),
-            Err(re) => Err(e).context(format!(
-                "the edited perms made the resolver config invalid AND the revert \
-                 failed ({re:#}); the perms file at {} may be left invalid",
-                path.display()
-            )),
-        };
-    }
-    Ok(())
+    state.durable.write(|state| {
+        let rconfig = state
+            .cfg
+            .roles
+            .resolver
+            .as_ref()
+            .map(|role| role.config.clone())
+            .context("no resolver role")?;
+        let path = perms_path(&rconfig)?;
+        let backup = std::fs::read(&path).ok();
+        crate::perms::save_perms(&path, &pmap)?;
+        if let Err(e) = crate::resolver::ResolverConfig::load(&rconfig)
+            .and_then(|rc| rc.validate_for_path(&rconfig))
+        {
+            let rolled_back = match &backup {
+                Some(old) => crate::atomic::write_atomic(&path, old, 0o644)
+                    .context("restoring the previous perms file"),
+                None => std::fs::remove_file(&path)
+                    .context("removing the rejected perms file"),
+            };
+            return match rolled_back {
+                Ok(()) => Err(e).context(
+                    "the edited perms made the resolver config invalid; reverted",
+                ),
+                Err(re) => Err(e).context(format!(
+                    "the edited perms made the resolver config invalid AND the revert \
+                     failed ({re:#}); the perms file at {} may be left invalid",
+                    path.display()
+                )),
+            };
+        }
+        Ok(())
+    })
 }
 
 /// Server-to-server receive side of a perms edit (peer-cert-gated).
@@ -5706,7 +5721,7 @@ async fn push_perms_edit_to_peers(
 ) -> Vec<PeerResult> {
     let (cert, key) = state.outbound_identity();
     let roots = state.roots.clone();
-    let controller = state.map.lock().controller;
+    let controller = state.durable.read(|state| state.map.controller);
     let home_ca = state.home_ca_der.clone();
     let mut results: Vec<_> =
         stream::iter(targets.iter().copied().map(|(server, addr)| {
@@ -5767,7 +5782,7 @@ async fn handle_edit_perms(
         return err(reason);
     }
     let members = {
-        let map = state.map.lock();
+        let map = state.durable.read(|state| state.map.clone());
         match cluster_members_for(&map, &req.target_path) {
             Some(m) => m,
             None => {
@@ -5863,7 +5878,7 @@ async fn handle_control_service(
     // The target server's cluster base is its authorization scope. A server not
     // in the map (or running no resolver) has no base — only a signing slot may
     // control it, so an unknown target can't be reached by a scoped role admin.
-    let base = base_for_server(&state.map.lock(), req.target_server);
+    let base = state.durable.read(|state| base_for_server(&state.map, req.target_server));
     let authorized = match &base {
         Some(base) => service_control_authority(&authd, base),
         None => matches!(authd.kind, ca_vault::SlotKind::Signing),
@@ -5899,11 +5914,9 @@ async fn handle_control_service(
         ),
         Duration::ZERO,
     );
-    let (my_id, target_addr) = {
-        let map = state.map.lock();
-        let addr = registered_server_addr(&map, req.target_server);
-        (state.cfg.lock().server_id, addr)
-    };
+    let (my_id, target_addr) = state.durable.read(|state| {
+        (state.cfg.server_id, registered_server_addr(&state.map, req.target_server))
+    });
     let Some(target_addr) = target_addr else {
         return err(
             "target server is not registered in the authoritative map".to_string()
@@ -5924,7 +5937,8 @@ async fn handle_control_service(
     } else {
         let (cert, key) = state.outbound_identity();
         let roots = state.roots.clone();
-        let target_is_controller = req.target_server == state.map.lock().controller;
+        let target_is_controller =
+            state.durable.read(|state| req.target_server == state.map.controller);
         tokio::time::timeout(
             PUSH_TIMEOUT,
             admin_client::push_service_control(
@@ -5969,10 +5983,8 @@ async fn handle_apply_service_control(
     // run with a custom `--units` dir), else the default search location —
     // the same resolution the supervisor itself uses to place the socket.
     let units_dir = state
-        .cfg
-        .lock()
-        .activation_units_dir
-        .clone()
+        .durable
+        .read(|state| state.cfg.activation_units_dir.clone())
         .or_else(netidx_activation::runtime::default_units_dir);
     let dir = match units_dir {
         Some(dir) => dir,
@@ -6434,8 +6446,9 @@ fn handle_rotate_autorenew(state: &Server, local: bool) -> RotateAutorenewRespon
                 .to_string(),
         );
     };
-    let Some(keytab) =
-        state.cfg.lock().roles.ca.as_ref().and_then(|c| c.autorenew.clone())
+    let Some(keytab) = state
+        .durable
+        .read(|state| state.cfg.roles.ca.as_ref().and_then(|ca| ca.autorenew.clone()))
     else {
         return err(
             "this CA's config names no autorenew keytab, so there is nowhere to write \
@@ -6540,65 +6553,64 @@ fn approve_delegation_prepare(
         .ok_or_else(|| err("this host does not hold the CA".to_string()))?;
     let ca = state.ca.as_ref().expect("CA role held");
     let authd = authenticate(ca, &req.credential).map_err(err)?;
-    // The resolver edit + commit happen under this lock — mutually
-    // exclusive with deny and other approves.
-    let _guard = state.resolver_edit_lock.lock();
-    // Pending ⇒ approve + commit; Approved ⇒ re-sync (re-apply + re-push,
-    // already committed); else an error.
-    let (pending, commit) = match delegation_store::status(&ca_dir, &req.request_id) {
-        Ok(delegation_store::Status::Pending(p)) => (p, true),
-        Ok(delegation_store::Status::Approved { .. }) => {
-            match delegation_store::read_approved(&ca_dir, &req.request_id) {
-                Ok(Some(rec)) => (rec.req, false),
-                _ => return Err(err("the approved record vanished".to_string())),
+    state.durable.write(|durable| {
+        // Pending ⇒ approve + commit; Approved ⇒ re-sync (re-apply + re-push,
+        // already committed); else an error.
+        let (pending, commit) = match delegation_store::status(&ca_dir, &req.request_id) {
+            Ok(delegation_store::Status::Pending(p)) => (p, true),
+            Ok(delegation_store::Status::Approved { .. }) => {
+                match delegation_store::read_approved(&ca_dir, &req.request_id) {
+                    Ok(Some(rec)) => (rec.req, false),
+                    _ => return Err(err("the approved record vanished".to_string())),
+                }
             }
+            Ok(delegation_store::Status::Denied { .. }) => {
+                return Err(err("that delegation was already denied".to_string()));
+            }
+            Ok(delegation_store::Status::Unknown) => {
+                return Err(err(
+                    "no such pending delegation request (expired or never queued)"
+                        .to_string(),
+                ));
+            }
+            Err(e) => return Err(err(format!("{e:#}"))),
+        };
+        let map = &mut durable.map;
+        if !delegation_authority(&authd, &pending.proposed_path) {
+            return Err(err(format!(
+                "admin {} is not authorized to decide delegations at {:?}",
+                authd.admin, pending.proposed_path
+            )));
         }
-        Ok(delegation_store::Status::Denied { .. }) => {
-            return Err(err("that delegation was already denied".to_string()));
+        // Persist a staged snapshot before publishing it in memory. A failed disk
+        // write must not leave the live controller map ahead of its durable map.
+        let mut staged = map.clone();
+        let change = netmap::delegate(
+            &mut staged,
+            &pending.proposed_path,
+            pending.proposed_child,
+            &pending.parent_servers,
+            &pending.child_servers,
+        )
+        .map_err(|e| err(format!("updating authoritative topology: {e:#}")))?;
+        let parent = change.parent;
+        let child = change.child;
+        netmap::save(&ca_dir, &staged)
+            .map_err(|e| err(format!("persisting authoritative topology: {e:#}")))?;
+        *map = staged;
+        if commit {
+            delegation_store::approve(&ca_dir, &pending, parent.members.clone())
+                .map_err(|e| err(format!("committing the approval: {e:#}")))?;
         }
-        Ok(delegation_store::Status::Unknown) => {
-            return Err(err(
-                "no such pending delegation request (expired or never queued)"
-                    .to_string(),
-            ));
-        }
-        Err(e) => return Err(err(format!("{e:#}"))),
-    };
-    let mut map = state.map.lock();
-    if !delegation_authority(&authd, &pending.proposed_path) {
-        return Err(err(format!(
-            "admin {} is not authorized to decide delegations at {:?}",
-            authd.admin, pending.proposed_path
-        )));
-    }
-    // Persist a staged snapshot before publishing it in memory. A failed disk
-    // write must not leave the live controller map ahead of its durable map.
-    let mut staged = map.clone();
-    let change = netmap::delegate(
-        &mut staged,
-        &pending.proposed_path,
-        pending.proposed_child,
-        &pending.parent_servers,
-        &pending.child_servers,
-    )
-    .map_err(|e| err(format!("updating authoritative topology: {e:#}")))?;
-    let parent = change.parent;
-    let child = change.child;
-    netmap::save(&ca_dir, &staged)
-        .map_err(|e| err(format!("persisting authoritative topology: {e:#}")))?;
-    *map = staged;
-    if commit {
-        delegation_store::approve(&ca_dir, &pending, parent.members.clone())
-            .map_err(|e| err(format!("committing the approval: {e:#}")))?;
-    }
-    audit(
-        &ca_dir,
-        &authd.admin,
-        if commit { "approve-delegation" } else { "reconcile-delegation" },
-        &format!("operation {operation_id}: {}", child.base),
-        Duration::ZERO,
-    );
-    Ok(topology_fanout(&map, [&parent, &child]))
+        audit(
+            &ca_dir,
+            &authd.admin,
+            if commit { "approve-delegation" } else { "reconcile-delegation" },
+            &format!("operation {operation_id}: {}", child.base),
+            Duration::ZERO,
+        );
+        Ok(topology_fanout(map, [&parent, &child]))
+    })
 }
 
 struct TopologyFanout {
@@ -6671,7 +6683,7 @@ async fn push_topology(
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
     let (cert, key) = state.outbound_identity();
-    let controller = state.map.lock().controller;
+    let controller = state.durable.read(|state| state.map.controller);
     let mut targets = fanout.targets;
     targets.sort_by_key(|(id, _, _)| *id);
     let home_ca = state.home_ca_der.clone();
@@ -8194,7 +8206,7 @@ mod tests {
         assert!(san.iter().any(|n| n.dnsname() == Some(SERVING_SAN)));
         // The CA recorded the enrollee as a peer (and serves it in
         // GetInfo, making the CA host the well-known walk seed).
-        assert!(a_state.cfg.lock().peers.contains(&new_listen));
+        assert!(a_state.durable.read(|state| state.cfg.peers.contains(&new_listen)));
         let info =
             admin_client::get_info(a_addr, NodeKind::Client, &identity).await.unwrap();
         assert!(info.peers.contains(&new_listen));
@@ -8237,7 +8249,7 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("may not enroll"));
         // A refused enrollment must not record the peer.
-        assert!(!a_state.cfg.lock().peers.contains(&new_listen));
+        assert!(!a_state.durable.read(|state| state.cfg.peers.contains(&new_listen)));
     }
 
     /// Hand-rolled AddIdentity sender with NO client certificate — what
@@ -8600,7 +8612,7 @@ mod tests {
         assert!(san.iter().any(|n| n.dnsname() == Some(SERVING_SAN)));
         // The CA now knows the new admin server as a peer (the start of
         // future installs' peer walks).
-        assert!(state.cfg.lock().peers.contains(&listen));
+        assert!(state.durable.read(|state| state.cfg.peers.contains(&listen)));
         let log = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
         assert!(log.contains("op=enroll"));
     }
@@ -11233,7 +11245,7 @@ mod v6_tests {
         new_map.version = 5;
         new_map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = new_addr;
         let state = Server {
-            cfg: Mutex::new(cfg),
+            durable: DurableState::new(cfg, old_map),
             cfg_path: Some(cfg_path.clone()),
             ca_dir: None,
             ca: None,
@@ -11241,11 +11253,7 @@ mod v6_tests {
             serving_key_pem: vec![],
             roots: RootCertStore::empty(),
             home_ca_der: CertificateDer::from(home_ca),
-            id_map_lock: Mutex::new(()),
-            resolver_edit_lock: Mutex::new(()),
-            map: Mutex::new(old_map),
             password_limiter: Arc::new(PasswordLimiter::default()),
-            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
         };
         let req = ApplyControllerStateRequest {
             operation_id: admin_proto::OperationId::new(),
@@ -11260,7 +11268,7 @@ mod v6_tests {
         ));
         let persisted = AdminServerConfig::load_for_recovery(&cfg_path).unwrap();
         assert_eq!(persisted.ca_addr, Some(new_addr));
-        assert_eq!(*state.map.lock(), new_map);
+        assert_eq!(state.durable.read(|state| state.map.clone()), new_map);
         assert_eq!(std::fs::read_to_string(root.path().join("crl.pem")).unwrap(), crl);
 
         let mut stale = req.clone();

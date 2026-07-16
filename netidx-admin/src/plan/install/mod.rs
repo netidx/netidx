@@ -100,6 +100,18 @@ pub struct ResolverShape {
     pub elastic_local_client_bind: Option<String>,
 }
 
+pub fn warn_incomplete_resolver_address(ans: &mut dyn Answerer, shape: &ResolverShape) {
+    if shape.needs_operator_hint {
+        ans.warn(
+            "detected container environment with no NETIDX_PUBLIC_IP env var \
+             and no reachable cloud metadata. The suggested IP is the \
+             container's private IP — only useful for internal traffic. \
+             Override with the externally-visible address (or set \
+             NETIDX_PUBLIC_IP / pass --listen).",
+        );
+    }
+}
+
 /// Detect the resolver environment shape (see [`ResolverShape`]).
 #[cfg(feature = "cloud-detect")]
 pub async fn detect_resolver_shape() -> ResolverShape {

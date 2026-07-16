@@ -651,16 +651,41 @@ async fn finish_identities(
     Ok(())
 }
 
+fn restored_listen_default(original: SocketAddr, detected: Option<IpAddr>) -> SocketAddr {
+    SocketAddr::new(detected.unwrap_or_else(|| original.ip()), original.port())
+}
+
+fn restored_bind_default(
+    original: install_bundle::ResolverEndpoint,
+    detected: Option<IpAddr>,
+    detected_bind: Option<IpAddr>,
+    listen: SocketAddr,
+) -> IpAddr {
+    detected_bind.unwrap_or_else(|| match detected {
+        Some(_) => listen.ip(),
+        None if listen.ip() == original.listen.ip() => original.bind,
+        None => listen.ip(),
+    })
+}
+
 async fn restore_addresses(
     ans: &mut TuiAnswerer,
     manifest: &install_bundle::Manifest,
 ) -> Result<install_bundle::RestoreAddresses> {
     let controller = manifest.components.contains(&install_bundle::Component::Controller);
+    let shape = if controller || manifest.resolver_endpoint.is_some() {
+        let shape = netidx_admin::plan::install::detect_resolver_shape().await;
+        netidx_admin::plan::install::warn_incomplete_resolver_address(ans, &shape);
+        Some(shape)
+    } else {
+        None
+    };
+    let detected = shape.as_ref().and_then(|shape| shape.advertised_ip);
     let admin_listen = if controller {
-        let default = manifest
+        let original = manifest
             .admin_listen
-            .map(|listen| listen.to_string())
             .context("the controller backup has no recorded admin address")?;
+        let default = restored_listen_default(original, detected).to_string();
         Some(
             ans.text(Field::RestoreAdminListen, None, Some(&default), true)
                 .await?
@@ -673,16 +698,20 @@ async fn restore_addresses(
     };
     let resolver = match manifest.resolver_endpoint {
         Some(original) => {
-            let default = original.listen.to_string();
+            let default = restored_listen_default(original.listen, detected).to_string();
             let listen = ans
                 .text(Field::RestoreResolverListen, None, Some(&default), true)
                 .await?
                 .context("the restored resolver address is required")?
                 .parse::<SocketAddr>()
                 .context("the restored resolver address must be IP:port")?;
-            let bind_default =
-                if listen == original.listen { original.bind } else { listen.ip() }
-                    .to_string();
+            let bind_default = restored_bind_default(
+                original,
+                detected,
+                shape.as_ref().and_then(|shape| shape.bind_override),
+                listen,
+            )
+            .to_string();
             let bind = ans
                 .text(Field::RestoreResolverBind, None, Some(&bind_default), true)
                 .await?
@@ -1361,5 +1390,46 @@ mod tests {
         assert_eq!(input.base, "/local");
         assert!(input.with_perms_file);
         assert!(input.with_container);
+    }
+
+    #[test]
+    fn restore_uses_the_current_host_ip_and_the_backed_up_ports() {
+        let old_admin: SocketAddr = "192.0.2.10:14565".parse().unwrap();
+        let old_resolver = install_bundle::ResolverEndpoint {
+            listen: "192.0.2.10:14564".parse().unwrap(),
+            bind: "10.0.0.10".parse().unwrap(),
+        };
+        let detected: IpAddr = "198.51.100.20".parse().unwrap();
+
+        assert_eq!(
+            restored_listen_default(old_admin, Some(detected)),
+            "198.51.100.20:14565".parse().unwrap()
+        );
+        let listen = restored_listen_default(old_resolver.listen, Some(detected));
+        assert_eq!(listen, "198.51.100.20:14564".parse().unwrap());
+        assert_eq!(
+            restored_bind_default(old_resolver, Some(detected), None, listen),
+            detected
+        );
+    }
+
+    #[test]
+    fn restore_uses_the_detected_nat_bind_or_falls_back_to_the_backup() {
+        let original = install_bundle::ResolverEndpoint {
+            listen: "203.0.113.10:4564".parse().unwrap(),
+            bind: "10.0.0.10".parse().unwrap(),
+        };
+        let public: IpAddr = "203.0.113.20".parse().unwrap();
+        let private: IpAddr = "10.0.0.20".parse().unwrap();
+        let listen = restored_listen_default(original.listen, Some(public));
+        assert_eq!(
+            restored_bind_default(original, Some(public), Some(private), listen),
+            private
+        );
+        assert_eq!(restored_listen_default(original.listen, None), original.listen);
+        assert_eq!(
+            restored_bind_default(original, None, None, original.listen),
+            original.bind
+        );
     }
 }
