@@ -14,7 +14,7 @@
 use crate::{atomic, paths};
 use anyhow::{Context, Result, anyhow, bail};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// What an installed identity looks like on disk.
 #[derive(Debug, Clone)]
@@ -57,8 +57,10 @@ pub fn install_identity(p: &InstallIdentity<'_>) -> Result<InstalledIdentity> {
 
     let cert_bytes = std::fs::read(p.certificate_src)
         .with_context(|| format!("reading certificate source {:?}", p.certificate_src))?;
-    let key_bytes = std::fs::read(p.private_key_src)
-        .with_context(|| format!("reading private key source {:?}", p.private_key_src))?;
+    let key_bytes =
+        Zeroizing::new(std::fs::read(p.private_key_src).with_context(|| {
+            format!("reading private key source {:?}", p.private_key_src)
+        })?);
     let ca_bytes = std::fs::read(p.trusted_src)
         .with_context(|| format!("reading trusted CA source {:?}", p.trusted_src))?;
 
@@ -124,8 +126,14 @@ pub fn seal_private_key(plain_pem: &str) -> Result<(String, Vec<u8>)> {
 /// `seal_private_key` returned (the encrypted key and its sidecar blob).
 pub fn unseal_private_key(enc_pem: &str, blob: &[u8]) -> Result<Zeroizing<String>> {
     let secret = netidx_tpm::unseal(blob).context("unsealing the sealed password")?;
-    let password =
-        String::from_utf8(secret.to_vec()).context("sealed password is not utf8")?;
+    let password = match String::from_utf8(secret.to_vec()) {
+        Ok(password) => Zeroizing::new(password),
+        Err(e) => {
+            let mut bytes = e.into_bytes();
+            bytes.zeroize();
+            bail!("sealed password is not utf8")
+        }
+    };
     netidx::tls::decrypt_private_key(enc_pem, &password)
         .context("decrypting the sealed private key")
 }

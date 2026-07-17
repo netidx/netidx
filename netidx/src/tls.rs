@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use x509_parser::prelude::GeneralName;
+use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) fn load_certs(
     path: &str,
@@ -69,7 +70,7 @@ pub(crate) fn get_names(cert: &[u8]) -> Result<Option<Names>> {
     Ok(cn.map(|cn| Names { cn, alt_name }))
 }
 
-static CACHED: LazyLock<Mutex<AHashMap<String, String>>> =
+static CACHED: LazyLock<Mutex<AHashMap<String, Zeroizing<String>>>> =
     LazyLock::new(|| Mutex::new(AHashMap::default()));
 
 /// pre cache the password for a private key.
@@ -78,17 +79,12 @@ static CACHED: LazyLock<Mutex<AHashMap<String, String>>> =
 /// method as part of startup, you can provide it here and the system
 /// keychain won't be consulted.
 pub fn pre_cache_password(path: &str, password: &str) {
-    CACHED.lock().insert(path.into(), password.into());
+    CACHED.lock().insert(path.into(), Zeroizing::new(password.into()));
 }
 
 /// clear all cached passwords
 pub fn clear_cached_passwords() {
-    for (_, p) in CACHED.lock().drain() {
-        let mut v = p.into_bytes();
-        for i in 0..v.len() {
-            v[i] = 0;
-        }
-    }
+    CACHED.lock().clear();
 }
 
 /// The TPM-sealed password sidecar for the key at `path` — `<path>.tpm`.
@@ -108,12 +104,12 @@ pub fn sealed_password_path(path: &str) -> String {
 /// will never be answered is strictly worse than a clear failure, and
 /// the fix is one command. Otherwise: the keychain, or else askpass, or
 /// else fail.
-pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
+pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<Zeroizing<String>> {
     use keyring::Entry;
     use std::process::Command;
     let mut cache = CACHED.lock();
     if let Some(pass) = cache.get(path) {
-        return Ok(pass.into());
+        return Ok(pass.clone());
     }
     let sealed = sealed_password_path(path);
     if std::path::Path::new(&sealed).exists() {
@@ -132,8 +128,14 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
                 netidx_tpm::MECHANISM
             )
         })?;
-        let password =
-            String::from_utf8(secret.to_vec()).context("sealed password is not utf8")?;
+        let password = match String::from_utf8(secret.to_vec()) {
+            Ok(password) => Zeroizing::new(password),
+            Err(e) => {
+                let mut bytes = e.into_bytes();
+                bytes.zeroize();
+                bail!("sealed password is not utf8")
+            }
+        };
         cache.insert(path.into(), password.clone());
         return Ok(password);
     }
@@ -141,6 +143,7 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
     let entry = Entry::new("netidx", path)?;
     match entry.get_password() {
         Ok(password) => {
+            let password = Zeroizing::new(password);
             cache.insert(path.into(), password.clone());
             Ok(password)
         }
@@ -150,16 +153,19 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<String> {
             }
             Some(askpass) => {
                 info!("failed to find password entry for netidx {}, error {}", path, e);
-                let res = Command::new(askpass).arg(path).output()?;
-                let password = String::from_utf8_lossy(&res.stdout);
-                let password = password.trim_matches(|c| c == '\r' || c == '\n');
-                if let Err(e) = entry.set_password(password) {
+                let mut res = Command::new(askpass).arg(path).output()?;
+                let password = Zeroizing::new(
+                    String::from_utf8_lossy(&res.stdout)
+                        .trim_matches(|c| c == '\r' || c == '\n')
+                        .to_owned(),
+                );
+                res.stdout.zeroize();
+                if let Err(e) = entry.set_password(password.as_str()) {
                     warn!(
                         "failed to set password entry for netidx {}, error {}",
                         path, e
                     );
                 }
-                let password = String::from(password);
                 cache.insert(path.into(), password.clone());
                 Ok(password)
             }
@@ -178,10 +184,7 @@ pub fn save_password_for_key(path: &str, password: &str) -> Result<()> {
 /// returning the plaintext PKCS#8 PEM. For loaders that don't go
 /// through [`load_private_key`] (e.g. handing PEM bytes to rustls
 /// directly); the returned value is key material — hold it briefly.
-pub fn decrypt_private_key(
-    enc_pem: &str,
-    password: &str,
-) -> Result<pkcs8::der::zeroize::Zeroizing<String>> {
+pub fn decrypt_private_key(enc_pem: &str, password: &str) -> Result<Zeroizing<String>> {
     use pkcs8::{
         EncryptedPrivateKeyInfo, LineEnding, PrivateKeyInfo, SecretDocument,
         der::pem::PemLabel,
@@ -232,12 +235,11 @@ pub fn load_private_key(
     path: &str,
 ) -> Result<PrivateKeyDer<'static>> {
     use pkcs8::{
-        EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument,
-        der::{pem::PemLabel, zeroize::Zeroize},
+        EncryptedPrivateKeyInfo, PrivateKeyInfo, SecretDocument, der::pem::PemLabel,
     };
     debug!("reading key from {}", path);
-    let doc = std::fs::read_to_string(path)?;
-    let (label, doc) = match SecretDocument::from_pem(&doc) {
+    let encoded = Zeroizing::new(std::fs::read_to_string(path)?);
+    let (label, doc) = match SecretDocument::from_pem(encoded.as_str()) {
         Ok((label, doc)) => (label, doc),
         Err(e) => bail!("failed to load pem {}, error: {}", path, e),
     };
@@ -248,12 +250,11 @@ pub fn load_private_key(
             Err(e) => bail!("failed to parse encrypted key {}", e),
         };
         debug!("decrypting key");
-        let mut password = load_key_password(askpass, path)?;
-        let doc = match doc.decrypt(&password) {
+        let password = load_key_password(askpass, path)?;
+        let doc = match doc.decrypt(password.as_bytes()) {
             Ok(doc) => doc,
             Err(e) => bail!("failed to decrypt key {}", e),
         };
-        password.zeroize();
         let key =
             PrivateKeyDer::from_pem(SectionKind::PrivateKey, Vec::from(doc.as_bytes()))
                 .ok_or_else(|| anyhow!("invalid key"))?;
@@ -621,6 +622,15 @@ mod test {
         assert_eq!(r, Some(1));
         let r = get_match(&m, "com.mydomain.qux.").copied();
         assert_eq!(r, Some(1));
+    }
+
+    #[test]
+    fn cached_key_password_is_zeroizing() {
+        const PATH: &str = "netidx-test-zeroizing-password";
+        pre_cache_password(PATH, "secret");
+        let password: Zeroizing<String> = load_key_password(None, PATH).unwrap();
+        assert_eq!(password.as_str(), "secret");
+        CACHED.lock().remove(PATH);
     }
 
     // `f` is a bare fn pointer (can't capture), so the "build" counts through

@@ -63,6 +63,7 @@ tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 triomphe = { workspace = true }
 x509-parser = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
