@@ -57,9 +57,6 @@ impl<C: K5Ctx + Debug + Send + 'static> Deref for K5CtxWrap<C> {
     }
 }
 
-/// Send a single unencrypted message directly to the specified
-/// socket. This is intended to be used to do some initialization
-/// before the proper channel can be created.
 /// Write a single, small, unencrypted message to the specified socket,
 /// length-prefixed (4-byte big-endian). Intended for connection
 /// initialization before the encrypted [`Channel`] is established — e.g.

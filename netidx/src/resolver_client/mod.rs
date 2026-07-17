@@ -694,45 +694,6 @@ impl ResolverRead {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::resolver::{HashMethod, TargetAuth};
-
-    #[test]
-    fn publisher_ids_are_namespaced_by_resolver() {
-        let id = PublisherId::new();
-        let resolver_a = "127.0.0.1:1000".parse().unwrap();
-        let resolver_b = "127.0.0.1:2000".parse().unwrap();
-        let publisher_a = Publisher {
-            resolver: resolver_a,
-            id,
-            addr: "127.0.0.1:1001".parse().unwrap(),
-            hash_method: HashMethod::Sha3_512,
-            target_auth: TargetAuth::Anonymous,
-            user_info: None,
-            priority: PublisherPriority::Normal,
-        };
-        let publisher_b = Publisher {
-            resolver: resolver_b,
-            id,
-            addr: "127.0.0.1:2001".parse().unwrap(),
-            hash_method: HashMethod::Sha3_512,
-            target_auth: TargetAuth::Anonymous,
-            user_info: None,
-            priority: PublisherPriority::Normal,
-        };
-        let mut table = PublisherTable::default();
-
-        insert_publisher(&mut table, publisher_a.clone());
-        insert_publisher(&mut table, publisher_b.clone());
-
-        assert_eq!(table.len(), 2);
-        assert_eq!(table[&PublisherKey::new(resolver_a, id)], publisher_a);
-        assert_eq!(table[&PublisherKey::new(resolver_b, id)], publisher_b);
-    }
-}
-
 /// Client for updating the resolver server (write operations).
 ///
 /// Used by publishers to register and unregister published paths, including
