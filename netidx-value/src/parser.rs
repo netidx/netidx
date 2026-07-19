@@ -375,7 +375,7 @@ where
         }),
         constant("error")
             .with(value(must_escape, esc))
-            .map(|v| Value::Error(Arc::new(v))),
+            .map(|v| Value::Error(v.into())),
         attempt(constant("decimal"))
             .with(flt::<_, Decimal>())
             .map(|d| Value::Decimal(Arc::new(d))),

@@ -72,7 +72,7 @@ impl Default for ValArrayBase {
 /// Rust stack consumed is proportional to the value nesting depth:
 /// ~100k levels overflow a 2MiB thread stack in drop glue, killing
 /// the whole runtime (SIGABRT). Past this many re-entrant frames the
-/// array is moved to a thread-local deferred queue instead, and the
+/// array is moved to a global deferred queue instead, and the
 /// OUTERMOST drop frame destroys the queue iteratively, bounding
 /// stack use for arbitrary nesting. The twin of immutable_chunkmap's
 /// `Node::drop` guard (nested maps).
@@ -762,11 +762,11 @@ impl<'de> Visitor<'de> for ValArrayVisitor {
     where
         A: serde::de::SeqAccess<'de>,
     {
-        let mut tmp: SmallVec<[Value; 64]> = smallvec![];
+        let mut tmp: LPooled<Vec<Value>> = LPooled::take();
         while let Some(v) = seq.next_element()? {
             tmp.push(v);
         }
-        Ok(ValArray::from(tmp))
+        Ok(ValArray::from_iter_exact(tmp.drain(..)))
     }
 }
 

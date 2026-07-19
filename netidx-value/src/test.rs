@@ -1,4 +1,4 @@
-use crate::{Map, PBytes, Typ, Value, abstract_type::Abstract, array::ValArray};
+use crate::{Map, PBytes, Typ, ValError, Value, abstract_type::Abstract, array::ValArray};
 use anyhow::{Result, anyhow};
 use arcstr::{ArcStr, literal};
 use bytes::Bytes;
@@ -194,7 +194,8 @@ fn get_unchecked() {
     }
     {
         let v = Arc::new(Value::I64(42));
-        get_as_unchecked::<Arc<Value>>(Value::Error(v.clone()), &v)
+        let e = ValError::from(v);
+        get_as_unchecked::<ValError>(Value::Error(e.clone()), &e)
     }
     {
         let a = ValArray::from_iter_exact([Value::I16(42)].into_iter());
@@ -504,49 +505,64 @@ fn cast_error_to_error_is_identity() {
     assert_eq!(e.clone().cast(Typ::Error), Some(e));
 }
 
+fn deep_array(n: usize) -> Value {
+    let mut v = Value::I64(42);
+    for _ in 0..n {
+        v = Value::Array(ValArray::from_iter_exact([v].into_iter()));
+    }
+    v
+}
+
+fn deep_map(n: usize) -> Value {
+    let mut v = Value::I64(42);
+    for _ in 0..n {
+        let m = Map::new().insert(Value::I64(0), v).0;
+        v = Value::Map(m);
+    }
+    v
+}
+
+fn deep_error(n: usize) -> Value {
+    let mut v = Value::I64(42);
+    for _ in 0..n {
+        v = Value::Error(v.into());
+    }
+    v
+}
+
+fn deep_mixed(n: usize) -> Value {
+    let mut v = Value::I64(42);
+    for i in 0..n {
+        v = match i % 3 {
+            0 => Value::Array(ValArray::from_iter_exact([v].into_iter())),
+            1 => Value::Map(Map::new().insert(Value::I64(0), v).0),
+            2 => Value::Error(v.into()),
+            _ => unreachable!(),
+        };
+    }
+    v
+}
+
 // Every recursive Value operation must handle ARBITRARY nesting depth
 // without overflowing the thread stack: a cons-style recursive ADT's
 // nesting depth is its LENGTH, so ~100k-deep values arise from
 // perfectly reasonable programs (and `decode` receives depth from the
 // WIRE — a hostile peer must not be able to crash the process). Drop
-// is guarded in ValArrayBase::drop (and chunkmap's Node::drop for
-// maps); hash/eq/cmp/Display/Pack are iterative (op.rs, print.rs, the
-// lib.rs Pack impl). 200k levels on a 1MiB stack — the recursive
-// versions overflowed well under 20k.
+// is iterative for errors and guarded in ValArrayBase::drop and
+// chunkmap's Node::drop; hash/eq/cmp/Display/Pack/flatten are iterative
+// (op.rs, print.rs, the lib.rs Pack impl). 200k levels on a 1MiB
+// stack — the recursive versions overflowed well under 20k.
 #[test]
 fn deep_value_operations_bounded_stack() {
-    fn deep_array(n: usize) -> Value {
-        let mut v = Value::I64(42);
-        for _ in 0..n {
-            v = Value::Array(ValArray::from_iter_exact([v].into_iter()));
-        }
-        v
-    }
-    fn deep_map(n: usize) -> Value {
-        let mut v = Value::I64(42);
-        for _ in 0..n {
-            let m = Map::new().insert(Value::I64(0), v).0;
-            v = Value::Map(m);
-        }
-        v
-    }
-    fn deep_mixed(n: usize) -> Value {
-        let mut v = Value::I64(42);
-        for i in 0..n {
-            v = if i % 2 == 0 {
-                Value::Array(ValArray::from_iter_exact([v].into_iter()))
-            } else {
-                Value::Map(Map::new().insert(Value::I64(0), v).0)
-            };
-        }
-        v
-    }
     std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
             use std::hash::Hash;
             const N: usize = 200_000;
-            for v in [deep_array(N), deep_map(N), deep_mixed(N)] {
+            let mut flattened = deep_array(N).flatten();
+            assert_eq!(flattened.next(), Some(Value::I64(42)));
+            assert_eq!(flattened.next(), None);
+            for v in [deep_array(N), deep_map(N), deep_error(N), deep_mixed(N)] {
                 // hash
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 v.hash(&mut h);
@@ -601,18 +617,28 @@ fn deep_value_drop_at_thread_teardown() {
         .stack_size(1024 * 1024)
         .spawn(|| {
             SLOT.with(|s| assert!(s.borrow().is_none()));
-            let mut v = Value::I64(42);
-            for i in 0..200_000 {
-                v = if i % 2 == 0 {
-                    Value::Array(ValArray::from_iter_exact([v].into_iter()))
-                } else {
-                    Value::Map(Map::new().insert(Value::I64(0), v).0)
-                };
-            }
+            let v = Value::Array([deep_error(200_000), deep_mixed(200_000)].into());
             SLOT.with(|s| *s.borrow_mut() = Some(v));
             // dropped by SLOT's TLS destructor after thread exit
         })
         .expect("spawn")
         .join()
         .expect("teardown drop of a deep value overflowed the stack");
+}
+
+#[test]
+fn valerror_is_pointer_sized_and_stops_at_shared_arcs() {
+    assert_eq!(std::mem::size_of::<ValError>(), std::mem::size_of::<Arc<Value>>());
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            let Value::Error(e) = deep_error(200_000) else { unreachable!() };
+            let Value::Error(next) = &*e else { unreachable!() };
+            let shared = next.clone();
+            drop(e);
+            drop(shared);
+        })
+        .expect("spawn")
+        .join()
+        .expect("shared deep error drop overflowed the stack");
 }

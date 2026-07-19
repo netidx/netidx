@@ -79,9 +79,9 @@ use netidx_core::{
     pack::{self, MAX_VEC, Pack, PackError},
     utils,
 };
+use poolshark::local::LPooled;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use smallvec::{SmallVec, smallvec};
 use std::{
     any::Any, hint::unreachable_unchecked, iter, mem, ptr, result, str::FromStr,
     time::Duration,
@@ -91,6 +91,7 @@ use triomphe::Arc;
 pub mod abstract_type;
 pub mod array;
 mod convert;
+mod error;
 mod op;
 pub mod parser;
 pub mod pbuf;
@@ -102,6 +103,7 @@ mod typ;
 pub use abstract_type::Abstract;
 pub use array::ValArray;
 pub use convert::FromValue;
+pub use error::ValError;
 pub use pbuf::PBytes;
 pub use print::{NakedValue, printf};
 pub use typ::Typ;
@@ -179,7 +181,7 @@ pub enum Value {
     /// byte array
     Bytes(PBytes) = 0x4000_0000,
     /// An explicit error
-    Error(Arc<Value>) = 0x2000_0000,
+    Error(ValError) = 0x2000_0000,
     /// An array of values
     Array(ValArray) = 0x1000_0000,
     /// A Map of values
@@ -334,7 +336,8 @@ impl Pack for Value {
     // pre-order sequence the recursion produced.
     fn encoded_len(&self) -> usize {
         let mut total = 0usize;
-        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        let mut stack: LPooled<Vec<&Value>> = LPooled::take();
+        stack.push(self);
         while let Some(v) = stack.pop() {
             // the tag byte, then the payload (a pushed child accounts
             // its own tag when popped — same sum as the recursion)
@@ -389,7 +392,8 @@ impl Pack for Value {
     // the high two bits of the tag are reserved for wrapper types,
     // max tag is therefore 0x3F
     fn encode(&self, buf: &mut impl BufMut) -> result::Result<(), PackError> {
-        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        let mut stack: LPooled<Vec<&Value>> = LPooled::take();
+        stack.push(self);
         while let Some(v) = stack.pop() {
             match v {
                 Value::U32(i) => {
@@ -524,11 +528,15 @@ impl Pack for Value {
         // input costs memory (bounded by the existing per-container
         // size checks) instead of the thread's stack.
         enum Frame {
-            Array { len: usize, elts: Vec<Value> },
-            Map { len: usize, pairs: Vec<(Value, Value)>, key: Option<Value> },
+            Array { len: usize, elts: LPooled<Vec<Value>> },
+            Map {
+                len: usize,
+                pairs: LPooled<Vec<(Value, Value)>>,
+                key: Option<Value>,
+            },
             Error,
         }
-        let mut frames: SmallVec<[Frame; 8]> = smallvec![];
+        let mut frames: LPooled<Vec<Frame>> = LPooled::take();
         loop {
             let done = match <u8 as Pack>::decode(buf)? {
                 0 => Value::U32(Pack::decode(buf)?),
@@ -552,9 +560,7 @@ impl Pack for Value {
                 18 => {
                     // backwards compatible with previous encodings of error when it
                     // was only a string
-                    Value::Error(Arc::new(Value::String(<ArcStr as Pack>::decode(
-                        buf,
-                    )?)))
+                    Value::Error(Value::String(<ArcStr as Pack>::decode(buf)?).into())
                 }
                 19 => {
                     let elts = pack::decode_varint(buf)? as usize;
@@ -565,7 +571,9 @@ impl Pack for Value {
                     if elts == 0 {
                         Value::Array(ValArray::from([]))
                     } else {
-                        frames.push(Frame::Array { len: elts, elts: Vec::with_capacity(elts) });
+                        let mut values: LPooled<Vec<Value>> = LPooled::take();
+                        values.reserve(elts);
+                        frames.push(Frame::Array { len: elts, elts: values });
                         continue;
                     }
                 }
@@ -579,9 +587,11 @@ impl Pack for Value {
                     if elts == 0 {
                         Value::Map(Map::new())
                     } else {
+                        let mut pairs: LPooled<Vec<(Value, Value)>> = LPooled::take();
+                        pairs.reserve(elts);
                         frames.push(Frame::Map {
                             len: elts,
-                            pairs: Vec::with_capacity(elts),
+                            pairs,
                             key: None,
                         });
                         continue;
@@ -606,7 +616,7 @@ impl Pack for Value {
                     None => return Ok(val),
                     Some(Frame::Error) => {
                         frames.pop();
-                        val = Value::Error(Arc::new(val));
+                        val = Value::Error(val.into());
                     }
                     Some(Frame::Array { len, elts }) => {
                         elts.push(val);
@@ -788,7 +798,7 @@ impl Value {
         match self {
             Value::String(s) => match typ {
                 Typ::String => Some(Value::String(s)),
-                Typ::Error => Some(Value::Error(Arc::new(Value::String(s)))),
+                Typ::Error => Some(Value::Error(Value::String(s).into())),
                 Typ::Array => Some(Value::Array([Value::String(s)].into())),
                 _ => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
             },
@@ -809,9 +819,9 @@ impl Value {
             Value::Array(elts) => match typ {
                 Typ::Array => Some(Value::Array(elts)),
                 Typ::Map => {
-                    match Value::Array(elts).cast_to::<SmallVec<[(Value, Value); 8]>>() {
+                    match Value::Array(elts).cast_to::<LPooled<Vec<(Value, Value)>>>() {
                         Err(_) => None,
-                        Ok(vals) => Some(Value::Map(Map::from_iter(vals))),
+                        Ok(mut vals) => Some(Value::Map(Map::from_iter(vals.drain(..)))),
                     }
                 }
                 typ => elts.first().and_then(|v| v.clone().cast(typ)),
@@ -1026,12 +1036,12 @@ impl Value {
         use std::fmt::Write;
         let mut tmp = CompactString::new("");
         write!(tmp, "{e}").unwrap();
-        Value::Error(Arc::new(Value::String(tmp.as_str().into())))
+        Value::Error(Value::String(tmp.as_str().into()).into())
     }
 
     /// construct a Value::Error from `e`
     pub fn error<S: Into<ArcStr>>(e: S) -> Value {
-        Value::Error(Arc::new(Value::String(e.into())))
+        Value::Error(Value::String(e.into()).into())
     }
 
     /// return true if the value is some kind of number, otherwise
@@ -1105,7 +1115,7 @@ impl Value {
         use utils::Either;
         match self {
             Value::Array(elts) => {
-                let mut stack: SmallVec<[(ValArray, usize); 8]> = SmallVec::new();
+                let mut stack: LPooled<Vec<(ValArray, usize)>> = LPooled::take();
                 stack.push((elts, 0));
                 Either::Left(iter::from_fn(move || {
                     loop {

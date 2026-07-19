@@ -5,8 +5,8 @@ use bytes::BytesMut;
 use compact_str::CompactString;
 use escaping::Escape;
 use netidx_core::utils::pack;
+use poolshark::local::LPooled;
 use rust_decimal::Decimal;
-use smallvec::smallvec;
 use std::{
     cell::RefCell,
     fmt::{self, Write},
@@ -58,13 +58,12 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
     use compact_str::{CompactString, format_compact};
     use fish_printf::{Arg, ToArg, printf_c_locale};
     use rust_decimal::prelude::ToPrimitive;
-    use smallvec::SmallVec;
     enum T<'a> {
         Arg(Arg<'a>),
         Index(usize),
     }
-    let mut strings: SmallVec<[CompactString; 4]> = smallvec![];
-    let mut fish_args: SmallVec<[T; 8]> = smallvec![];
+    let mut strings: LPooled<Vec<CompactString>> = LPooled::take();
+    let mut fish_args: LPooled<Vec<T>> = LPooled::take();
     for v in args {
         fish_args.push(match v {
             Value::U8(v) => T::Arg(v.to_arg()),
@@ -109,14 +108,14 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
             }
         })
     }
-    let mut fish_args: SmallVec<[Arg; 8]> = fish_args
-        .into_iter()
-        .map(|t| match t {
+    let mut args: LPooled<Vec<Arg>> = LPooled::take();
+    for t in fish_args.drain(..) {
+        args.push(match t {
             T::Arg(a) => a,
             T::Index(i) => strings[i].to_arg(),
-        })
-        .collect();
-    printf_c_locale(f, fmt, &mut fish_args).map_err(|e| anyhow!(format!("{e:?}")))
+        });
+    }
+    printf_c_locale(f, fmt, &mut args).map_err(|e| anyhow!(format!("{e:?}")))
 }
 
 impl Value {
@@ -174,7 +173,8 @@ impl Value {
             Val(&'a Value),
             Lit(&'static str),
         }
-        let mut stack: smallvec::SmallVec<[T; 32]> = smallvec::smallvec![T::Val(self)];
+        let mut stack: LPooled<Vec<T>> = LPooled::take();
+        stack.push(T::Val(self));
         while let Some(t) = stack.pop() {
             let this = match t {
                 T::Lit(s) => {
@@ -346,11 +346,8 @@ impl Value {
             Value::Map(m) => {
                 write!(f, "{{")?;
                 stack.push(T::Lit("}"));
-                let pairs: smallvec::SmallVec<[(&Value, &Value); 16]> =
-                    m.into_iter().collect();
-                for i in (0..pairs.len()).rev() {
-                    let (k, v) = pairs[i];
-                    if i < pairs.len() - 1 {
+                for (i, (k, v)) in m.into_iter().rev().enumerate() {
+                    if i > 0 {
                         stack.push(T::Lit(", "));
                     }
                     stack.push(T::Val(v));

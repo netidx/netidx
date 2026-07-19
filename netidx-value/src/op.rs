@@ -1,8 +1,8 @@
 use crate::{Typ, ValArray, Value};
 use arcstr::literal;
 use compact_str::format_compact;
+use poolshark::local::LPooled;
 use rust_decimal::Decimal;
-use smallvec::{smallvec, SmallVec};
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     hash::Hash,
@@ -22,7 +22,8 @@ impl Hash for Value {
         // so pops preserve the original hash byte sequence exactly)
         // instead of recursing. The twin guards live in
         // `ValArrayBase::drop` and chunkmap's `Node::drop`.
-        let mut stack: SmallVec<[&Value; 32]> = smallvec![self];
+        let mut stack: LPooled<Vec<&Value>> = LPooled::take();
+        stack.push(self);
         while let Some(this) = stack.pop() {
         match this {
             Value::U32(v) => {
@@ -152,7 +153,8 @@ impl PartialEq for Value {
         // ITERATIVE over nested containers — see the Hash impl's
         // comment. Order is irrelevant for equality; containers push
         // their child pairs instead of recursing.
-        let mut stack: SmallVec<[(&Value, &Value); 32]> = smallvec![(self, rhs)];
+        let mut stack: LPooled<Vec<(&Value, &Value)>> = LPooled::take();
+        stack.push((self, rhs));
         while let Some((this, rhs)) = stack.pop() {
             let ok = Typ::get(this) == Typ::get(rhs)
             && match (this, rhs) {
@@ -231,7 +233,8 @@ impl PartialOrd for Value {
             Pair(&'a Value, &'a Value),
             LenTie(usize, usize),
         }
-        let mut stack: SmallVec<[W; 32]> = smallvec![W::Pair(self, other)];
+        let mut stack: LPooled<Vec<W>> = LPooled::take();
+        stack.push(W::Pair(self, other));
         while let Some(w) = stack.pop() {
             let (this, other) = match w {
                 W::LenTie(l, r) => {
@@ -290,9 +293,11 @@ impl PartialOrd for Value {
                 }
                 (Value::Map(l), Value::Map(r)) => {
                     stack.push(W::LenTie(l.len(), r.len()));
-                    let pairs: SmallVec<[_; 16]> =
-                        l.into_iter().zip(r.into_iter()).collect();
-                    for ((kl, vl), (kr, vr)) in pairs.into_iter().rev() {
+                    let mut l = l.into_iter();
+                    let mut r = r.into_iter();
+                    while let (Some((kl, vl)), Some((kr, vr))) =
+                        (l.next_back(), r.next_back())
+                    {
                         stack.push(W::Pair(vl, vr));
                         stack.push(W::Pair(kl, kr));
                     }

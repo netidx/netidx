@@ -572,7 +572,7 @@ mod publisher {
             prop_oneof![
                 collection::vec(inner.clone(), 0..100)
                     .prop_map(|e| Value::Array(ValArray::from(e))),
-                inner.clone().prop_map(|v| Value::Error(Arc::new(v))),
+                inner.clone().prop_map(|v| Value::Error(v.into())),
                 collection::vec((inner.clone(), inner.clone()), 0..100).prop_map(|v| {
                     Value::Map(immutable_chunkmap::map::Map::from_iter(dbg!(v)))
                 })
