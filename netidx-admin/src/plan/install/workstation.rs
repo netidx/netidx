@@ -179,6 +179,7 @@ pub async fn run_workstation(
                         net,
                         NodeKind::Workstation,
                         have_identity,
+                        common.dry_run,
                         key_protection,
                         &mut tls_identities,
                         &mut tls_staging,
@@ -191,8 +192,14 @@ pub async fn run_workstation(
                     })
                 }
                 None => {
-                    match prompt_parent_referral(ans, &base, key_protection, &probe)
-                        .await?
+                    match prompt_parent_referral(
+                        ans,
+                        &base,
+                        key_protection,
+                        &probe,
+                        common.dry_run,
+                    )
+                    .await?
                     {
                         None => None,
                         Some((parent_ref, maybe_ident)) => {
@@ -305,6 +312,7 @@ pub async fn run_workstation_join(
         net,
         NodeKind::Workstation,
         false,
+        input.dry_run,
         input.key_protection,
         &mut tls_identities,
         &mut tls_staging,
@@ -343,6 +351,7 @@ async fn prompt_parent_referral(
     default_path: &str,
     kp: Option<KeyProtArg>,
     probe: &AdminServers,
+    dry_run: bool,
 ) -> Result<Option<(ParentRef, Option<StagedIdentity>)>> {
     let addr = match prompt_ip_or_addr(ans, Field::ParentAddr, None, false).await? {
         Some(addr) => addr,
@@ -382,9 +391,14 @@ async fn prompt_parent_referral(
             // a hard bail if no admin server is reachable). Suggest our SAN as
             // `<user>.<domain>`.
             let suggested = suggest_client_san(&server_name);
-            let staged =
-                enroll::prompt_tls_client_identity(ans, suggested.as_deref(), kp, probe)
-                    .await?;
+            let staged = enroll::prompt_tls_client_identity(
+                ans,
+                suggested.as_deref(),
+                kp,
+                probe,
+                dry_run,
+            )
+            .await?;
             (ReferralAuth::Tls(ArcStr::from(server_name.as_str())), Some(staged))
         }
     };

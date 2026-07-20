@@ -33,6 +33,7 @@ use crate::{admin_local, admin_proto};
 use anyhow::{Context, Result, anyhow, bail};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -53,6 +54,103 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 /// resumed next cycle).
 const APPROVAL_POLL: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct Clients {
+    pki: Vec<CachedPkiClient>,
+    authenticated: Vec<CachedAuthenticatedClient>,
+}
+
+struct CachedPkiClient {
+    trusted: PathBuf,
+    digest: [u8; 32],
+    roots: rustls::RootCertStore,
+    client: admin_client::PkiClient,
+}
+
+struct CachedAuthenticatedClient {
+    certificate: PathBuf,
+    private_key: PathBuf,
+    trust_digest: [u8; 32],
+    identity_digest: [u8; 32],
+    client: admin_client::AuthenticatedPkiClient,
+}
+
+impl Clients {
+    fn pki(
+        &mut self,
+        trusted: &Path,
+    ) -> Result<(admin_client::PkiClient, rustls::RootCertStore, [u8; 32])> {
+        let pem = std::fs::read(trusted)
+            .with_context(|| format!("reading trust bundle {}", trusted.display()))?;
+        let digest: [u8; 32] = Sha256::digest(&pem).into();
+        if let Some(cached) = self
+            .pki
+            .iter()
+            .find(|cached| cached.trusted == trusted && cached.digest == digest)
+        {
+            return Ok((cached.client.clone(), cached.roots.clone(), digest));
+        }
+        let roots = load_roots_from_pem(&pem, trusted)?;
+        let client = admin_client::PkiClient::new(roots.clone())?;
+        let cached = CachedPkiClient {
+            trusted: trusted.to_path_buf(),
+            digest,
+            roots: roots.clone(),
+            client: client.clone(),
+        };
+        match self.pki.iter().position(|cached| cached.trusted == trusted) {
+            Some(i) => self.pki[i] = cached,
+            None => self.pki.push(cached),
+        }
+        Ok((client, roots, digest))
+    }
+
+    fn authenticated(
+        &mut self,
+        identity: &Identity,
+        roots: rustls::RootCertStore,
+        trust_digest: [u8; 32],
+    ) -> Result<admin_client::AuthenticatedPkiClient> {
+        let cert = std::fs::read(&identity.certificate)
+            .with_context(|| format!("reading {}", identity.certificate.display()))?;
+        let key =
+            netidx::tls::load_private_key(None, &identity.private_key.to_string_lossy())
+                .with_context(|| {
+                    format!("loading private key {}", identity.private_key.display())
+                })?;
+        let mut digest = Sha256::new();
+        digest.update(cert.len().to_le_bytes());
+        digest.update(&cert);
+        digest.update(key.secret_der().len().to_le_bytes());
+        digest.update(key.secret_der());
+        let identity_digest = digest.finalize().into();
+        if let Some(cached) = self.authenticated.iter().find(|cached| {
+            cached.certificate == identity.certificate
+                && cached.private_key == identity.private_key
+                && cached.trust_digest == trust_digest
+                && cached.identity_digest == identity_digest
+        }) {
+            return Ok(cached.client.clone());
+        }
+        let client = admin_client::AuthenticatedPkiClient::new(roots, &cert, key)?;
+        let cached = CachedAuthenticatedClient {
+            certificate: identity.certificate.clone(),
+            private_key: identity.private_key.clone(),
+            trust_digest,
+            identity_digest,
+            client: client.clone(),
+        };
+        match self.authenticated.iter().position(|cached| {
+            cached.certificate == identity.certificate
+                && cached.private_key == identity.private_key
+        }) {
+            Some(i) => self.authenticated[i] = cached,
+            None => self.authenticated.push(cached),
+        }
+        Ok(client)
+    }
+}
 
 /// A TLS identity this host owns: where its files live. The renewal
 /// window and SAN come from the certificate itself.
@@ -154,11 +252,9 @@ pub fn needs_renewal(not_before: u64, not_after: u64, now: u64) -> bool {
     not_after.saturating_sub(now) < window
 }
 
-fn load_roots(trusted: &Path) -> Result<rustls::RootCertStore> {
-    let pem = std::fs::read(trusted)
-        .with_context(|| format!("reading trust bundle {}", trusted.display()))?;
+fn load_roots_from_pem(pem: &[u8], trusted: &Path) -> Result<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
-    for der in rustls_pemfile::certs(&mut std::io::Cursor::new(&pem)) {
+    for der in rustls_pemfile::certs(&mut std::io::Cursor::new(pem)) {
         roots.add(der.context("parsing trust bundle")?).context("adding trust anchor")?;
     }
     anyhow::ensure!(!roots.is_empty(), "{} contains no certificates", trusted.display());
@@ -171,7 +267,7 @@ fn load_roots(trusted: &Path) -> Result<rustls::RootCertStore> {
 /// that don't verify against our trust bundle are just skipped.
 async fn find_ca_addr(
     server: Option<SocketAddr>,
-    roots: &rustls::RootCertStore,
+    client: &admin_client::PkiClient,
 ) -> Result<SocketAddr> {
     if let Some(s) = server {
         return Ok(s);
@@ -202,7 +298,7 @@ async fn find_ca_addr(
             continue;
         }
         visited.push(addr);
-        match admin_client::get_info_pki(addr, NodeKind::Client, roots.clone()).await {
+        match admin_client::get_info_pki(client, addr, NodeKind::Client).await {
             Ok(info) => {
                 if let Some(ca) = info.ca_addr {
                     let ca = if ca.ip().is_unspecified() {
@@ -320,6 +416,7 @@ fn clear_pending(certificate: &Path) {
 async fn renew_identity(
     id: &Identity,
     server: Option<SocketAddr>,
+    clients: &mut Clients,
 ) -> Result<&'static str> {
     let (name, nb, na) = cert_facts(&id.certificate)?;
     let now = now_unix();
@@ -328,7 +425,7 @@ async fn renew_identity(
         clear_pending(&id.certificate);
         return Ok("current");
     }
-    let roots = load_roots(&id.trusted)?;
+    let (pki_client, roots, trust_digest) = clients.pki(&id.trusted)?;
     let installed_pem = std::fs::read_to_string(&id.trusted)
         .with_context(|| format!("reading trust bundle {}", id.trusted.display()))?;
     // Co-located serving-cert re-mint over the local control socket. The
@@ -385,32 +482,25 @@ async fn renew_identity(
             };
         }
     }
-    let ca_addr = find_ca_addr(server, &roots).await?;
+    let ca_addr = find_ca_addr(server, &pki_client).await?;
     let pending = match load_pending(&id.certificate)? {
         Some(pending) => {
             info!("renewd: resuming renewal of {name} (request {})", pending.request_id);
             pending
         }
         None => {
-            let cert_pem = std::fs::read(&id.certificate)?;
-            let key =
-                netidx::tls::load_private_key(None, &id.private_key.to_string_lossy())
-                    .with_context(|| {
-                        format!("loading private key {}", id.private_key.display())
-                    })?;
             // The original validity is what we re-request (capped by the
             // approving admin's policy server-side). Kept at second
             // resolution so a short-lived cert renews to the same short
             // window rather than silently rounding up to a day.
             let validity = Duration::from_secs(na.saturating_sub(nb).max(1));
+            let authenticated = clients.authenticated(id, roots.clone(), trust_digest)?;
             let pending = admin_client::enqueue_renewal(
+                &authenticated,
                 ca_addr,
                 NodeKind::Client,
                 &name,
                 validity,
-                &cert_pem,
-                key,
-                roots.clone(),
             )
             .await
             .with_context(|| format!("queueing renewal of {name}"))?;
@@ -430,11 +520,11 @@ async fn renew_identity(
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         match admin_client::poll_renewal(
+            &pki_client,
             ca_addr,
             NodeKind::Client,
             &pending,
             &installed_pem,
-            roots.clone(),
         )
         .await?
         {
@@ -529,7 +619,11 @@ fn install(id: &Identity, issued: &admin_client::Issued) -> Result<()> {
 /// Pull the network CRL and install it beside every trust bundle on
 /// this host (only when changed — the resolver's CRL-watching acceptor
 /// rebuilds on mtime, so gratuitous writes would churn it).
-async fn distribute_crl(ids: &[Identity], server: Option<SocketAddr>) -> Result<bool> {
+async fn distribute_crl(
+    ids: &[Identity],
+    server: Option<SocketAddr>,
+    clients: &mut Clients,
+) -> Result<bool> {
     let mut updated = false;
     let mut done: Vec<&Path> = Vec::new();
     for id in ids {
@@ -537,10 +631,10 @@ async fn distribute_crl(ids: &[Identity], server: Option<SocketAddr>) -> Result<
             continue;
         }
         done.push(id.trusted.as_path());
-        let roots = load_roots(&id.trusted)?;
-        let ca_addr = find_ca_addr(server, &roots).await?;
+        let (client, _, _) = clients.pki(&id.trusted)?;
+        let ca_addr = find_ca_addr(server, &client).await?;
         let crl =
-            match admin_client::get_crl_pki(ca_addr, NodeKind::Client, roots).await? {
+            match admin_client::get_crl_pki(&client, ca_addr, NodeKind::Client).await? {
                 Some(pem) => pem,
                 None => continue, // nothing ever revoked
             };
@@ -558,30 +652,35 @@ async fn distribute_crl(ids: &[Identity], server: Option<SocketAddr>) -> Result<
 /// One full pass: renew what needs renewing, distribute the CRL.
 /// Errors on individual identities are reported, not fatal — one
 /// broken identity must not stop the others from renewing.
-pub async fn run_once(server: Option<SocketAddr>) -> Result<()> {
+async fn run_once_with(server: Option<SocketAddr>, clients: &mut Clients) -> Result<()> {
     let ids = host_identities();
     if ids.is_empty() {
         info!("renewd: no TLS identities on this host");
         return Ok(());
     }
     for id in &ids {
-        match renew_identity(id, server).await {
+        match renew_identity(id, server, clients).await {
             Ok(status) => {
                 info!("renewd: {} — {status}", id.certificate.display())
             }
             Err(e) => warn!("renewd: {} — {e:#}", id.certificate.display()),
         }
     }
-    if let Err(e) = distribute_crl(&ids, server).await {
+    if let Err(e) = distribute_crl(&ids, server, clients).await {
         warn!("renewd: CRL distribution failed: {e:#}");
     }
     Ok(())
 }
 
+pub async fn run_once(server: Option<SocketAddr>) -> Result<()> {
+    run_once_with(server, &mut Clients::default()).await
+}
+
 /// Run forever: an immediate pass, then one per `interval`.
 pub async fn run(server: Option<SocketAddr>, interval: Duration) -> Result<()> {
+    let mut clients = Clients::default();
     loop {
-        if let Err(e) = run_once(server).await {
+        if let Err(e) = run_once_with(server, &mut clients).await {
             warn!("renewd: pass failed: {e:#}");
         }
         tokio::time::sleep(interval).await;

@@ -152,6 +152,7 @@ pub async fn run_publisher(
                 net,
                 NodeKind::Publisher,
                 have_identity,
+                common.dry_run,
                 key_protection,
                 &mut tls_identities,
                 &mut tls_staging,
@@ -202,6 +203,7 @@ pub async fn run_publisher(
                     suggested.as_deref(),
                     key_protection,
                     &probe,
+                    common.dry_run,
                 )
                 .await?;
                 tls_identities.push(si.spec);

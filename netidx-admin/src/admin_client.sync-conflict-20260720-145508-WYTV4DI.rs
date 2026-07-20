@@ -59,24 +59,41 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
+use netidx_core::pack::Pack;
 use parking_lot::Mutex;
-use rustls::{ClientConfig, client::Resumption, crypto::CryptoProvider};
+use rustls::{
+    ClientConfig, NamedGroup,
+    client::{
+        ClientSessionMemoryCache, ClientSessionStore, Resumption,
+        Tls12ClientSessionValue, Tls13ClientSessionValue,
+    },
+    crypto::CryptoProvider,
+};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::{
     collections::VecDeque,
     net::SocketAddr,
-    sync::{Arc, LazyLock},
+    pin::Pin,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf},
+    net::TcpStream,
+    sync::Notify,
+};
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
 /// A black-holed candidate must not hold discovery, enrollment, renewal, or
 /// administration on the operating system's multi-minute TCP timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_TICKET_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_TLS_ENDPOINTS: usize = 256;
-const TLS_SESSIONS_PER_ENDPOINT: usize = 16;
 
 static TLS_PROVIDER: LazyLock<Arc<CryptoProvider>> =
     LazyLock::new(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
@@ -92,6 +109,176 @@ struct TlsClientInner {
 struct TlsEndpoint {
     addr: SocketAddr,
     config: Arc<ClientConfig>,
+    sessions: Arc<TicketStore>,
+}
+
+struct TicketWait {
+    sessions: Arc<TicketStore>,
+    generation: u64,
+}
+
+struct AdminConnection {
+    tls: tokio_rustls::client::TlsStream<TcpStream>,
+    tickets: Option<TicketWait>,
+}
+
+impl AdminConnection {
+    fn new(tls: tokio_rustls::client::TlsStream<TcpStream>, tickets: TicketWait) -> Self {
+        Self { tls, tickets: Some(tickets) }
+    }
+
+    async fn read_response<T: Pack>(&mut self) -> Result<T> {
+        let response = admin_proto::read_msg(&mut self.tls).await?;
+        if let Some(tickets) = self.tickets.take() {
+            receive_session_ticket(&mut self.tls, tickets).await?;
+        }
+        Ok(response)
+    }
+}
+
+impl AsyncRead for AdminConnection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().tls).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for AdminConnection {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().tls).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().tls).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().tls).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.tls.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().tls).poll_write_vectored(cx, bufs)
+    }
+}
+
+#[derive(Debug)]
+struct TicketStore {
+    inner: ClientSessionMemoryCache,
+    generation: AtomicU64,
+    support: AtomicU8,
+    notify: Notify,
+}
+
+impl TicketStore {
+    fn new() -> Self {
+        Self {
+            inner: ClientSessionMemoryCache::new(8),
+            generation: AtomicU64::new(0),
+            support: AtomicU8::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn stored(&self) {
+        eprintln!("stored ticket");
+        self.generation.fetch_add(1, Ordering::Release);
+        self.support.store(1, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn snapshot(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn should_wait(&self) -> bool {
+        self.support.load(Ordering::Acquire) != 2
+    }
+
+    fn mark_unsupported(&self) {
+        self.support.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).ok();
+    }
+
+    async fn wait_for_change(&self, generation: u64) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.snapshot() != generation {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl ClientSessionStore for TicketStore {
+    fn set_kx_hint(&self, server_name: ServerName<'static>, group: NamedGroup) {
+        self.inner.set_kx_hint(server_name, group);
+    }
+
+    fn kx_hint(&self, server_name: &ServerName<'_>) -> Option<NamedGroup> {
+        self.inner.kx_hint(server_name)
+    }
+
+    fn set_tls12_session(
+        &self,
+        server_name: ServerName<'static>,
+        value: Tls12ClientSessionValue,
+    ) {
+        self.inner.set_tls12_session(server_name, value);
+        self.stored();
+    }
+
+    fn tls12_session(
+        &self,
+        server_name: &ServerName<'_>,
+    ) -> Option<Tls12ClientSessionValue> {
+        self.inner.tls12_session(server_name)
+    }
+
+    fn remove_tls12_session(&self, server_name: &ServerName<'static>) {
+        self.inner.remove_tls12_session(server_name);
+    }
+
+    fn insert_tls13_ticket(
+        &self,
+        server_name: ServerName<'static>,
+        value: Tls13ClientSessionValue,
+    ) {
+        eprintln!("insert ticket {:p} {server_name:?}", self);
+        self.inner.insert_tls13_ticket(server_name, value);
+        self.stored();
+    }
+
+    fn take_tls13_ticket(
+        &self,
+        server_name: &ServerName<'static>,
+    ) -> Option<Tls13ClientSessionValue> {
+        let result = self.inner.take_tls13_ticket(server_name);
+        eprintln!("take ticket {:p} {server_name:?}: {}", self, result.is_some());
+        result
+    }
 }
 
 impl TlsClient {
@@ -104,23 +291,30 @@ impl TlsClient {
         }))
     }
 
-    fn connector(&self, addr: SocketAddr) -> TlsConnector {
+    fn connector(&self, addr: SocketAddr) -> (TlsConnector, TicketWait) {
         let TlsClientInner { template, endpoints } = &*self.0;
         let mut endpoints = endpoints.lock();
         if let Some(i) = endpoints.iter().position(|cached| cached.addr == addr) {
-            let TlsEndpoint { addr, config } =
+            let TlsEndpoint { addr, config, sessions } =
                 endpoints.remove(i).expect("position came from iter");
-            endpoints.push_back(TlsEndpoint { addr, config: config.clone() });
-            return TlsConnector::from(config);
+            let wait = TicketWait {
+                generation: sessions.snapshot(),
+                sessions: sessions.clone(),
+            };
+            endpoints.push_back(TlsEndpoint { addr, config: config.clone(), sessions });
+            return (TlsConnector::from(config), wait);
         }
         let mut config = template.clone();
-        config.resumption = Resumption::in_memory_sessions(TLS_SESSIONS_PER_ENDPOINT);
+        let sessions = Arc::new(TicketStore::new());
+        config.resumption = Resumption::store(sessions.clone());
         let config = Arc::new(config);
+        let wait =
+            TicketWait { generation: sessions.snapshot(), sessions: sessions.clone() };
         if endpoints.len() == MAX_TLS_ENDPOINTS {
             endpoints.pop_front();
         }
-        endpoints.push_back(TlsEndpoint { addr, config: config.clone() });
-        TlsConnector::from(config)
+        endpoints.push_back(TlsEndpoint { addr, config: config.clone(), sessions });
+        (TlsConnector::from(config), wait)
     }
 }
 
@@ -301,8 +495,12 @@ pub fn issuing_ca_pem(bundle: &str, leaf_pem: &str) -> Result<String> {
 async fn connect_tofu(
     addr: SocketAddr,
     client: &TlsClient,
-) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<CertificateDer<'static>>)> {
-    let connector = client.connector(addr);
+) -> Result<(
+    tokio_rustls::client::TlsStream<TcpStream>,
+    Vec<CertificateDer<'static>>,
+    TicketWait,
+)> {
+    let (connector, tickets) = client.connector(addr);
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
         .with_context(|| format!("timed out connecting to admin server {addr}"))?
@@ -320,7 +518,7 @@ async fn connect_tofu(
             .map(|c| c.clone().into_owned())
             .collect()
     };
-    Ok((tls, chain))
+    Ok((tls, chain, tickets))
 }
 
 /// Split a presented chain into `(serving_leaf, ca)`. The daemon's
@@ -360,6 +558,50 @@ async fn exchange_hello(
     Ok(hello)
 }
 
+async fn receive_session_ticket(
+    tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    wait: TicketWait,
+) -> Result<()> {
+    let TicketWait { sessions, generation } = wait;
+    tls.get_mut()
+        .1
+        .process_new_packets()
+        .context("processing buffered TLS session tickets")?;
+    if sessions.snapshot() != generation || !sessions.should_wait() {
+        return Ok(());
+    }
+    let mut byte = [0];
+    let outcome = tokio::time::timeout(SESSION_TICKET_TIMEOUT, async {
+        tokio::select! {
+            biased;
+            _ = sessions.wait_for_change(generation) => Ok(()),
+            read = tls.read(&mut byte) => {
+                let processed = tls.get_mut().1.process_new_packets();
+                if sessions.snapshot() != generation {
+                    Ok(())
+                } else {
+                    processed.context("processing TLS session tickets")?;
+                    match read {
+                        Ok(0) | Err(_) => {
+                            sessions.mark_unsupported();
+                            Ok(())
+                        }
+                        Ok(_) => bail!("admin server sent unexpected data after its response"),
+                    }
+                }
+            },
+        }
+    })
+    .await;
+    match outcome {
+        Ok(result) => result,
+        Err(_) => {
+            sessions.mark_unsupported();
+            Ok(())
+        }
+    }
+}
+
 /// Connect to the admin server at `addr`, TOFU-handshake, exchange
 /// hellos, and return its verified identity — **sending nothing
 /// secret**. The connection is closed before returning, so the operator
@@ -377,7 +619,7 @@ async fn fetch_identity_with(
     kind: NodeKind,
     tls_client: TlsClient,
 ) -> Result<CaIdentity> {
-    let (mut tls, chain) = connect_tofu(addr, &tls_client).await?;
+    let (mut tls, chain, _tickets) = connect_tofu(addr, &tls_client).await?;
     let (serving_der, ca_der) = split_chain(&chain)?;
     let cert_identity = verify_serving_cert(serving_der, ca_der).context(
         "the admin server's serving certificate is not bound to the CA it presented",
@@ -424,8 +666,8 @@ async fn connect_pinned(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-    let (mut tls, chain) = connect_tofu(addr, &expected.tls_client).await?;
+) -> Result<AdminConnection> {
+    let (mut tls, chain, tickets) = connect_tofu(addr, &expected.tls_client).await?;
     let (serving_der, presented_ca) = split_chain(&chain)?;
     // An unparseable CA cert is treated as a mismatch — fail closed.
     let presented_fp = Fingerprint::of_cert_der(presented_ca.as_ref()).ok();
@@ -448,7 +690,7 @@ async fn connect_pinned(
     {
         bail!("admin server hello identity does not match its certificate");
     }
-    Ok(tls)
+    Ok(AdminConnection::new(tls, tickets))
 }
 
 /// Resolve and verify the one active controller without sending a credential.
@@ -459,7 +701,7 @@ async fn connect_controller_pinned(
     bootstrap: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+) -> Result<AdminConnection> {
     let map = get_map_pinned(bootstrap, kind, expected).await?;
     let controller = map
         .controller_entry()
@@ -517,7 +759,7 @@ pub async fn login(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, admin_proto::LoginResponse>(&mut tls).await? {
+    match tls.read_response::<admin_proto::LoginResponse>().await? {
         admin_proto::LoginResponse::Ok {
             admin,
             token,
@@ -551,7 +793,7 @@ pub async fn logout(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, admin_proto::LogoutResponse>(&mut tls).await? {
+    match tls.read_response::<admin_proto::LogoutResponse>().await? {
         admin_proto::LogoutResponse::Ok => Ok(()),
         admin_proto::LogoutResponse::Err { reason } => bail!("logout refused: {reason}"),
     }
@@ -566,7 +808,7 @@ pub async fn get_info(
 ) -> Result<GetInfoResponse> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetInfo).await?;
-    admin_proto::read_msg(&mut tls).await
+    tls.read_response().await
 }
 
 /// Fetch the whole network map from one admin server, pinned to the
@@ -580,7 +822,7 @@ pub async fn get_map_pinned(
 ) -> Result<NetworkMap> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    let hint = match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    let hint = match tls.read_response::<GetMapResponse>().await? {
         GetMapResponse::Ok { map } => map,
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     };
@@ -605,7 +847,7 @@ pub async fn get_map_pinned(
     }
     let mut tls = connect_pinned(controller_addr, kind, &identity).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    match tls.read_response::<GetMapResponse>().await? {
         GetMapResponse::Ok { map } if map.controller == controller_id => Ok(map),
         GetMapResponse::Ok { .. } => {
             bail!("controller returned a map for another controller")
@@ -644,7 +886,7 @@ pub async fn push_perms_edit(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
+    match tls.read_response::<ApplyPermsEditResponse>().await? {
         ApplyPermsEditResponse::Ok => Ok(()),
         ApplyPermsEditResponse::Err { reason } => {
             bail!("peer refused the perms edit: {reason}")
@@ -682,7 +924,7 @@ pub async fn push_crl(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApplyCrlResponse>(&mut tls).await? {
+    match tls.read_response::<ApplyCrlResponse>().await? {
         ApplyCrlResponse::Ok => Ok(()),
         ApplyCrlResponse::Err { reason } => {
             bail!("peer refused the CRL update: {reason}")
@@ -712,7 +954,7 @@ pub async fn push_controller_state(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::ApplyControllerState(request)).await?;
-    match admin_proto::read_msg::<_, ApplyControllerStateResponse>(&mut tls).await? {
+    match tls.read_response::<ApplyControllerStateResponse>().await? {
         ApplyControllerStateResponse::Ok => Ok(()),
         ApplyControllerStateResponse::Err { reason } => {
             bail!("peer refused controller-state reconciliation: {reason}")
@@ -743,7 +985,7 @@ pub(crate) async fn pull_perms(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetPerms).await?;
-    match admin_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
+    match tls.read_response::<GetPermsResponse>().await? {
         GetPermsResponse::Ok { perms_json } => Ok(perms_json),
         GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
     }
@@ -767,7 +1009,7 @@ pub async fn read_perms(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ReadPermsResponse>(&mut tls).await? {
+    match tls.read_response::<ReadPermsResponse>().await? {
         ReadPermsResponse::Ok { perms_json, .. } => Ok(perms_json),
         ReadPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
@@ -798,7 +1040,7 @@ pub async fn edit_perms(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
+    match tls.read_response::<EditPermsResponse>().await? {
         EditPermsResponse::Ok { peers, .. } => Ok(peers),
         EditPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
@@ -833,7 +1075,7 @@ pub async fn add_role_admin(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match tls.read_response::<AdminMgmtResponse>().await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
@@ -860,7 +1102,7 @@ pub async fn set_admin_policy(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match tls.read_response::<AdminMgmtResponse>().await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
@@ -885,7 +1127,7 @@ pub async fn remove_admin(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+    match tls.read_response::<AdminMgmtResponse>().await? {
         AdminMgmtResponse::Ok => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
@@ -906,7 +1148,7 @@ pub async fn list_admins(
         &Request::ListAdmins(ListAdminsRequest { credential: credential.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
+    match tls.read_response::<AdminListResponse>().await? {
         AdminListResponse::Ok { admins } => Ok(admins),
         AdminListResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
@@ -937,7 +1179,7 @@ pub async fn control_service(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
+    match tls.read_response::<ControlServiceResponse>().await? {
         ControlServiceResponse::Ok { units, .. } => Ok(units),
         ControlServiceResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
@@ -977,7 +1219,7 @@ pub async fn push_service_control(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
+    match tls.read_response::<ApplyServiceControlResponse>().await? {
         ApplyServiceControlResponse::Ok { units } => Ok(units),
         ApplyServiceControlResponse::Err { reason } => {
             bail!("peer refused service control: {reason}")
@@ -1339,7 +1581,7 @@ async fn submit_csr(
     let our_spki = csr_spki(&kc.csr_pem)?;
     let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &req).await?;
-    match admin_proto::read_msg::<_, SignResponse>(&mut tls).await? {
+    match tls.read_response::<SignResponse>().await? {
         SignResponse::Ok { signed_cert_pem, trusted_pem, warnings, .. } => {
             verify_issued(expected, name, &our_spki, &signed_cert_pem, &trusted_pem)?;
             Ok(Issued {
@@ -1507,7 +1749,7 @@ async fn enqueue_inner(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
+    match tls.read_response::<EnqueueResponse>().await? {
         EnqueueResponse::Ok { request_id } => Ok(PendingEnrollment {
             request_id,
             fingerprint,
@@ -1538,7 +1780,7 @@ pub async fn poll(
         &Request::Poll(PollRequest { request_id: pending.request_id.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, PollResponse>(&mut tls).await? {
+    match tls.read_response::<PollResponse>().await? {
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
@@ -1573,7 +1815,7 @@ pub async fn list_queue(
         &Request::ListQueue(ListQueueRequest { credential: credential.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ListQueueResponse>(&mut tls).await? {
+    match tls.read_response::<ListQueueResponse>().await? {
         ListQueueResponse::Ok { requests } => Ok(requests),
         ListQueueResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1602,7 +1844,7 @@ pub async fn approve(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApproveResponse>(&mut tls).await? {
+    match tls.read_response::<ApproveResponse>().await? {
         ApproveResponse::Ok { warnings, .. } => Ok(warnings),
         ApproveResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1619,7 +1861,7 @@ pub async fn get_crl(
 ) -> Result<Option<String>> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetCrl).await?;
-    let resp: admin_proto::GetCrlResponse = admin_proto::read_msg(&mut tls).await?;
+    let resp: admin_proto::GetCrlResponse = tls.read_response().await?;
     Ok(resp.crl_pem)
 }
 
@@ -1641,7 +1883,7 @@ pub async fn deny(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
+    match tls.read_response::<DenyResponse>().await? {
         DenyResponse::Ok => Ok(()),
         DenyResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1690,7 +1932,7 @@ pub async fn request_delegation(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, DelegationResponse>(&mut tls).await? {
+    match tls.read_response::<DelegationResponse>().await? {
         DelegationResponse::Ok { request_id } => Ok(request_id),
         DelegationResponse::Err { reason } => {
             bail!("the parent refused the delegation request: {reason}")
@@ -1713,7 +1955,7 @@ pub async fn poll_delegation(
         &Request::PollDelegation(PollRequest { request_id: request_id.to_string() }),
     )
     .await?;
-    admin_proto::read_msg(&mut tls).await
+    tls.read_response().await
 }
 
 /// List the pending delegation queue, authenticated as `admin` (pinned).
@@ -1730,7 +1972,7 @@ pub async fn list_delegations(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
+    match tls.read_response::<ListDelegationsResponse>().await? {
         ListDelegationsResponse::Ok { requests } => Ok(requests),
         ListDelegationsResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1755,7 +1997,7 @@ pub async fn approve_delegation(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
+    match tls.read_response::<ApproveDelegationResponse>().await? {
         ApproveDelegationResponse::Ok { peers, .. } => Ok(peers),
         ApproveDelegationResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1781,7 +2023,7 @@ pub async fn deny_delegation(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
+    match tls.read_response::<DenyDelegationResponse>().await? {
         DenyDelegationResponse::Ok => Ok(()),
         DenyDelegationResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1820,7 +2062,7 @@ pub async fn push_referral_edit(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
+    match tls.read_response::<ApplyReferralEditResponse>().await? {
         ApplyReferralEditResponse::Ok => Ok(()),
         ApplyReferralEditResponse::Err { reason } => {
             bail!("peer refused the referral edit: {reason}")
@@ -1842,7 +2084,7 @@ pub async fn list_issued(
         &Request::ListIssued(ListIssuedRequest { credential: credential.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
+    match tls.read_response::<ListIssuedResponse>().await? {
         ListIssuedResponse::Ok { entries } => Ok(entries),
         ListIssuedResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
@@ -1870,7 +2112,7 @@ pub async fn revoke(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
+    match tls.read_response::<RevokeResponse>().await? {
         RevokeResponse::Ok { warnings, operation_id, peers } => {
             Ok((warnings, operation_id, peers))
         }
@@ -1912,7 +2154,7 @@ pub async fn push_identity(
         return Ok(None);
     }
     admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
-    match admin_proto::read_msg::<_, AddIdentityResponse>(&mut tls).await? {
+    match tls.read_response::<AddIdentityResponse>().await? {
         AddIdentityResponse::Ok { uid } => Ok(Some(uid)),
         AddIdentityResponse::Err { reason } => {
             bail!("admin server refused the identity: {reason}")
@@ -1948,7 +2190,7 @@ pub async fn register(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
-    match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+    match tls.read_response::<RegisterResponse>().await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the registration: {reason}")
@@ -1970,7 +2212,7 @@ pub async fn deregister(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Deregister).await?;
-    match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
+    match tls.read_response::<RegisterResponse>().await? {
         RegisterResponse::Ok { version } => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the deregistration: {reason}")
@@ -1987,7 +2229,7 @@ pub async fn get_map_version(
 ) -> Result<u64> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
-    match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
+    match tls.read_response::<GetMapVersionResponse>().await? {
         GetMapVersionResponse::Ok { version } => Ok(version),
         GetMapVersionResponse::Err { reason } => {
             bail!("map version query refused: {reason}")
@@ -2009,7 +2251,7 @@ pub async fn get_map_version_from_controller(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
-    match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
+    match tls.read_response::<GetMapVersionResponse>().await? {
         GetMapVersionResponse::Ok { version } => Ok(version),
         GetMapVersionResponse::Err { reason } => {
             bail!("map version query refused: {reason}")
@@ -2026,7 +2268,7 @@ pub async fn get_map(
 ) -> Result<NetworkMap> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    match tls.read_response::<GetMapResponse>().await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
@@ -2046,7 +2288,7 @@ pub async fn get_map_from_controller(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
-    match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
+    match tls.read_response::<GetMapResponse>().await? {
         GetMapResponse::Ok { map } => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
@@ -2079,7 +2321,7 @@ pub async fn remove_server(
         &Request::RemoveServer(RemoveServerRequest { credential, server }),
     )
     .await?;
-    match admin_proto::read_msg::<_, RemoveServerResponse>(&mut tls).await? {
+    match tls.read_response::<RemoveServerResponse>().await? {
         RemoveServerResponse::Ok {
             version,
             operation_id,
@@ -2118,7 +2360,7 @@ pub async fn reconcile_controller(
         &Request::ReconcileController(ReconcileControllerRequest { credential }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut tls).await? {
+    match tls.read_response::<ReconcileControllerResponse>().await? {
         ReconcileControllerResponse::Ok { operation_id, peers } => {
             Ok((operation_id, peers))
         }
@@ -2134,7 +2376,7 @@ async fn connect_pki<C: HasTlsClient>(
     client: &C,
     addr: SocketAddr,
     kind: NodeKind,
-) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
+) -> Result<(AdminConnection, ServerHello)> {
     connect_pki_target(client, addr, kind, None).await
 }
 
@@ -2149,8 +2391,8 @@ async fn connect_pki_target<C: HasTlsClient>(
     addr: SocketAddr,
     kind: NodeKind,
     target: Option<ExactTarget<'_>>,
-) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, ServerHello)> {
-    let connector = client.tls_client().connector(addr);
+) -> Result<(AdminConnection, ServerHello)> {
+    let (connector, tickets) = client.tls_client().connector(addr);
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
         .with_context(|| format!("timed out connecting to admin server {addr}"))?
@@ -2194,7 +2436,7 @@ async fn connect_pki_target<C: HasTlsClient>(
         leaf.verify_signature(Some(ca.public_key()))
             .map_err(|e| anyhow!("target is not issued by the exact home CA: {e}"))?;
     }
-    Ok((tls, hello))
+    Ok((AdminConnection::new(tls, tickets), hello))
 }
 
 /// A queued renewal awaiting (possibly automatic) approval.
@@ -2275,7 +2517,7 @@ pub async fn enqueue_renewal(
         }),
     )
     .await?;
-    match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
+    match tls.read_response::<EnqueueResponse>().await? {
         EnqueueResponse::Ok { request_id } => {
             Ok(PendingRenewal { request_id, name: name.to_string(), our_spki, kc })
         }
@@ -2304,7 +2546,7 @@ pub async fn poll_renewal(
         &Request::Poll(PollRequest { request_id: pending.request_id.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, PollResponse>(&mut tls).await? {
+    match tls.read_response::<PollResponse>().await? {
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
@@ -2336,7 +2578,7 @@ pub async fn get_info_pki(
 ) -> Result<GetInfoResponse> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetInfo).await?;
-    admin_proto::read_msg(&mut tls).await
+    tls.read_response().await
 }
 
 /// [`get_crl`] over real PKI — the renewal daemon's CRL pull.
@@ -2347,7 +2589,7 @@ pub async fn get_crl_pki(
 ) -> Result<Option<String>> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetCrl).await?;
-    let resp: admin_proto::GetCrlResponse = admin_proto::read_msg(&mut tls).await?;
+    let resp: admin_proto::GetCrlResponse = tls.read_response().await?;
     Ok(resp.crl_pem)
 }
 
@@ -2758,10 +3000,10 @@ mod tests {
         (addr, handshakes_rx, task)
     }
 
-    async fn complete_test_request(mut tls: tokio_rustls::client::TlsStream<TcpStream>) {
+    async fn complete_test_request(mut tls: AdminConnection) {
         admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await.unwrap();
         assert!(matches!(
-            admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await.unwrap(),
+            tls.read_response::<GetMapVersionResponse>().await.unwrap(),
             GetMapVersionResponse::Ok { version: 1 }
         ));
     }
@@ -2782,7 +3024,7 @@ mod tests {
             connect_pinned(addr_a, NodeKind::Client, &identity_a).await.unwrap(),
         )
         .await;
-        assert_eq!(handshakes_a.recv().await.unwrap(), (Resumed, false));
+        assert_eq!(handshakes_a.recv().await.unwrap(), (Full, false));
 
         let identity_b =
             fetch_identity_with(addr_b, NodeKind::Client, identity_a.tls_client.clone())
@@ -2798,7 +3040,7 @@ mod tests {
             connect_pinned(addr_b, NodeKind::Client, &identity_b).await.unwrap(),
         )
         .await;
-        assert_eq!(handshakes_b.recv().await.unwrap(), (Resumed, false));
+        assert_eq!(handshakes_b.recv().await.unwrap(), (Full, false));
         complete_test_request(
             connect_pinned(addr_b, NodeKind::Client, &identity_b).await.unwrap(),
         )

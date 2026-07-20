@@ -51,11 +51,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, stream};
 use globset::Glob;
 use log::{debug, error, info, warn};
+use parking_lot::Mutex;
 use password_limiter::PasswordLimiter;
 use rustls::{
-    RootCertStore, ServerConfig as RustlsServerConfig, server::WebPkiClientVerifier,
+    RootCertStore, ServerConfig as RustlsServerConfig,
+    server::{ServerSessionMemoryCache, WebPkiClientVerifier},
 };
 use rustls_pki_types::CertificateDer;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     net::{IpAddr, SocketAddr},
@@ -228,6 +231,7 @@ mod state_tests {
             RootCertStore::empty(),
             CertificateDer::from(Vec::new()),
         )
+        .unwrap()
     }
 
     fn limiter_server() -> Arc<Server> {
@@ -337,19 +341,34 @@ struct MutableState {
     password_limiter: PasswordLimiter,
 }
 
+struct CachedOutboundClient {
+    digest: [u8; 32],
+    client: admin_client::AuthenticatedPkiClient,
+}
+
+fn outbound_identity_digest(cert_pem: &[u8], key_pem: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(cert_pem.len().to_le_bytes());
+    digest.update(cert_pem);
+    digest.update(key_pem.len().to_le_bytes());
+    digest.update(key_pem);
+    digest.finalize().into()
+}
+
 pub struct Server {
     state: RwLock<MutableState>,
     _config_lock: ConfigDirLock,
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
-    /// Serving chain + key, doubling as the client identity for
-    /// outbound server-to-server pushes.
+    /// Startup serving chain and key, retained for the initial acceptor.
     serving_cert_pem: Vec<u8>,
     serving_key_pem: Vec<u8>,
     /// Trust anchors (the CA bundle) for verifying peers — both their
     /// serving certs outbound and their client certs inbound.
     roots: RootCertStore,
+    pki_client: admin_client::PkiClient,
+    outbound_tls: Mutex<Option<CachedOutboundClient>>,
     /// The one home CA for application-level admin authorization. Other
     /// certificates in `trusted.pem` remain data-plane federation anchors.
     home_ca_der: CertificateDer<'static>,
@@ -466,7 +485,7 @@ impl Server {
             }
             None => NetworkMap::default(),
         };
-        Ok(Server::from_state(
+        Server::from_state(
             config_lock,
             MutableState { cfg, map, ca, password_limiter: PasswordLimiter::default() },
             cfg_path,
@@ -474,7 +493,7 @@ impl Server {
             serving_key_pem,
             roots,
             home_ca_der,
-        ))
+        )
     }
 
     fn from_state(
@@ -485,16 +504,31 @@ impl Server {
         serving_key_pem: Vec<u8>,
         roots: RootCertStore,
         home_ca_der: CertificateDer<'static>,
-    ) -> Arc<Self> {
-        Arc::new(Server {
+    ) -> Result<Arc<Self>> {
+        let pki_client = admin_client::PkiClient::new(roots.clone())?;
+        let outbound_tls = if serving_cert_pem.is_empty() || serving_key_pem.is_empty() {
+            None
+        } else {
+            Some(CachedOutboundClient {
+                digest: outbound_identity_digest(&serving_cert_pem, &serving_key_pem),
+                client: admin_client::AuthenticatedPkiClient::from_pem(
+                    roots.clone(),
+                    &serving_cert_pem,
+                    &serving_key_pem,
+                )?,
+            })
+        };
+        Ok(Arc::new(Server {
             state: RwLock::new(state),
             _config_lock: config_lock,
             cfg_path,
             serving_cert_pem,
             serving_key_pem,
             roots,
+            pki_client,
+            outbound_tls: Mutex::new(outbound_tls),
             home_ca_der,
-        })
+        }))
     }
 
     async fn read<T, F>(&self, f: F) -> T
@@ -576,26 +610,42 @@ impl Server {
         self.read(move |state| roles_of(&state.cfg)).await
     }
 
-    /// The serving cert + key to present as a *client* on outbound
-    /// server-to-server pushes, re-read from disk so a renewal the renewal
-    /// daemon installed is used without a restart — the in-memory
-    /// `serving_cert_pem`/`serving_key_pem` are only the startup copy (kept
-    /// for the acceptor seed, the mDNS fingerprint, and as the fallback
-    /// here). Pushes are rare, so two file reads are cheap; reuses the same
-    /// `load_serving_keypair` (incl. TPM unseal) the inbound reloader uses.
-    async fn outbound_identity(&self) -> (Vec<u8>, Vec<u8>) {
+    async fn outbound_client(&self) -> Result<admin_client::AuthenticatedPkiClient> {
         let (cert_path, key_path) = self
             .read(move |state| {
                 (state.cfg.serving_cert.clone(), state.cfg.serving_key.clone())
             })
             .await;
-        load_serving_keypair(&cert_path, &key_path).await.unwrap_or_else(|e| {
-            warn!(
-                "admin-server: re-reading serving identity for push failed, \
-                 using startup copy: {e:#}"
-            );
-            (self.serving_cert_pem.clone(), self.serving_key_pem.clone())
-        })
+        let (cert, key) = match load_serving_keypair(&cert_path, &key_path).await {
+            Ok(identity) => identity,
+            Err(e) => {
+                warn!(
+                    "admin-server: re-reading serving identity for push failed, \
+                     using cached identity: {e:#}"
+                );
+                return self
+                    .outbound_tls
+                    .lock()
+                    .as_ref()
+                    .map(|cached| cached.client.clone())
+                    .context("no cached outbound serving identity");
+            }
+        };
+        let digest = outbound_identity_digest(&cert, &key);
+        let mut cached = self.outbound_tls.lock();
+        if let Some(cached) = &*cached
+            && cached.digest == digest
+        {
+            return Ok(cached.client.clone());
+        }
+        let client = admin_client::AuthenticatedPkiClient::from_pem(
+            self.roots.clone(),
+            &cert,
+            &key,
+        )
+        .context("building outbound TLS client")?;
+        *cached = Some(CachedOutboundClient { digest, client: client.clone() });
+        Ok(client)
     }
 }
 
@@ -985,6 +1035,7 @@ fn request_needs_server_unlock(req: &Request) -> bool {
             | Request::Approve(_)
             | Request::Revoke(_)
             | Request::RemoveServer(_)
+            | Request::ReconcileController(_)
             | Request::Backup(_)
             | Request::ExternalCaCsr
             | Request::ExternalCaInstall(_)
@@ -1118,7 +1169,8 @@ async fn handle_conn(
     state: &Arc<Server>,
     signs: Arc<Semaphore>,
 ) -> Result<()> {
-    let tls = acceptor.accept(tcp).await.context("TLS handshake")?;
+    let mut tls = acceptor.accept(tcp).await.context("TLS handshake")?;
+    tls.flush().await.context("flushing TLS session tickets")?;
     // If the client presented a cert, the verifier already validated it
     // against our roots. What remains is identifying *who*: the SAN
     // authorizes server-to-server requests (the reserved name) and
@@ -2408,22 +2460,17 @@ async fn local_resolver_data(
 #[derive(Clone)]
 struct IdentityPusher {
     controller: admin_proto::AdminServerId,
-    cert: Vec<u8>,
-    key: Vec<u8>,
-    roots: RootCertStore,
+    client: admin_client::AuthenticatedPkiClient,
     home_ca: CertificateDer<'static>,
 }
 
 impl IdentityPusher {
-    async fn new(state: &Server) -> Self {
-        let (cert, key) = state.outbound_identity().await;
-        IdentityPusher {
+    async fn new(state: &Server) -> Result<Self> {
+        Ok(IdentityPusher {
             controller: state.read(move |state| state.map.controller).await,
-            cert,
-            key,
-            roots: state.roots.clone(),
+            client: state.outbound_client().await?,
             home_ca: state.home_ca_der.clone(),
-        }
+        })
     }
 
     async fn push(
@@ -2435,13 +2482,11 @@ impl IdentityPusher {
         tokio::time::timeout(
             PUSH_TIMEOUT,
             admin_client::push_identity(
+                &self.client,
                 addr,
                 server,
                 server == self.controller,
                 self.home_ca.clone(),
-                &self.cert,
-                &self.key,
-                self.roots.clone(),
                 req,
             ),
         )
@@ -2504,7 +2549,13 @@ async fn push_registrations(
             }
         }
     }
-    let pusher = IdentityPusher::new(state).await;
+    let pusher = match IdentityPusher::new(state).await {
+        Ok(pusher) => pusher,
+        Err(e) => {
+            warnings.push(format!("loading outbound identity failed: {e:#}"));
+            return (operation_id, warnings);
+        }
+    };
     let mut results: Vec<_> = stream::iter(
         targets.into_iter().filter(|(id, _)| *id != my_id).map(|(id, addr)| {
             let req = req.clone();
@@ -2585,7 +2636,7 @@ async fn reconcile_identities_to_target(
     records.sort_by_key(|record| record.serial);
     let now = ca_store::now_unix();
     let operation_id = admin_proto::OperationId::new();
-    let pusher = IdentityPusher::new(state).await;
+    let pusher = IdentityPusher::new(state).await?;
     let mut audited = false;
     for (index, record) in records.iter().enumerate() {
         if !reconcile_identity_at(&records, index, now) {
@@ -2676,12 +2727,16 @@ fn build_server_config(
             .build()
             .context("building client cert verifier with CRL")?
     };
-    RustlsServerConfig::builder_with_provider(provider)
+    let mut config = RustlsServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .context("selecting TLS versions")?
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
-        .context("building TLS server config")
+        .context("building TLS server config")?;
+    config.session_storage = ServerSessionMemoryCache::new(256);
+    config.send_tls13_tickets = 2;
+    config.max_early_data_size = 0;
+    Ok(config)
 }
 
 /// The CRL this admin server enforces on inbound peer certs: the CA's own
@@ -2915,7 +2970,7 @@ async fn server_unlock(
         return Err("the prepared CA key did not come from the autorenew slot".into());
     }
     match ca.store.refresh_crl_if_stale(&unlocked.ca_key_pem).await {
-        Ok(true) => info!("admin-server: re-signed the CRL (was nearing nextUpdate)"),
+        Ok(true) => info!("admin-server: created or refreshed the CRL"),
         Ok(false) => (),
         Err(e) => warn!("admin-server: opportunistic CRL refresh failed: {e:#}"),
     }
@@ -4218,28 +4273,37 @@ async fn push_crl_to_peers(
             apply_crl_local(state, &crl_pem).await.err().map(|e| format!("{e:#}"));
         results.push(PeerResult { server, addr, error });
     }
-    let (cert, key) = state.outbound_identity().await;
-    let roots = state.roots.clone();
+    let client = match state.outbound_client().await {
+        Ok(client) => client,
+        Err(e) => {
+            results.extend(
+                targets.into_iter().filter(|(server, _)| *server != my_id).map(
+                    |(server, addr)| PeerResult {
+                        server,
+                        addr,
+                        error: Some(format!("loading outbound identity failed: {e:#}")),
+                    },
+                ),
+            );
+            return results;
+        }
+    };
     let home_ca = state.home_ca_der.clone();
     let mut remote = collect_peer_results(
         targets.into_iter().filter(|(server, _)| *server != my_id),
         |server, addr| {
-            let cert = cert.clone();
-            let key = key.clone();
-            let roots = roots.clone();
+            let client = client.clone();
             let home_ca = home_ca.clone();
             let crl_pem = crl_pem.to_string();
             async move {
                 tokio::time::timeout(
                     PUSH_TIMEOUT,
                     admin_client::push_crl(
+                        &client,
                         addr,
                         server,
                         server == controller,
                         home_ca,
-                        &cert,
-                        &key,
-                        roots,
                         operation_id,
                         &crl_pem,
                     ),
@@ -4267,18 +4331,27 @@ async fn push_controller_state_to_peers(
         .filter(|entry| entry.state == admin_proto::ServerState::Registered)
         .cloned()
         .context("the authoritative map has no registered controller")?;
-    let crl_path = state
-        .read(move |state| {
-            state
+    let crl_pem = state
+        .write_async(async move |state| {
+            let ca = state
                 .ca
-                .as_ref()
-                .context("controller reconciliation requires the CA role")
-                .map(|ca| ca.store.crl_path())
+                .as_mut()
+                .context("controller reconciliation requires the CA role")?;
+            let crl_path = ca.store.crl_path();
+            match tokio::fs::read_to_string(&crl_path).await {
+                Ok(crl_pem) => Ok(crl_pem),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    server_unlock(ca).await.map_err(|reason| anyhow!(reason))?;
+                    tokio::fs::read_to_string(&crl_path).await.with_context(|| {
+                        format!("reading newly initialized CRL {}", crl_path.display())
+                    })
+                }
+                Err(e) => Err(e).with_context(|| {
+                    format!("reading current CRL {}", crl_path.display())
+                }),
+            }
         })
         .await?;
-    let crl_pem = tokio::fs::read_to_string(&crl_path)
-        .await
-        .with_context(|| format!("reading current CRL {}", crl_path.display()))?;
     let request = ApplyControllerStateRequest {
         operation_id,
         controller: controller.id,
@@ -4297,28 +4370,23 @@ async fn push_controller_state_to_peers(
         let error = local.err().map(|e| format!("{e:#}"));
         results.push(PeerResult { server, addr, error });
     }
-    let (cert, key) = state.outbound_identity().await;
-    let roots = state.roots.clone();
+    let client = state.outbound_client().await?;
     let home_ca = state.home_ca_der.clone();
     let mut remote = collect_peer_results(
         targets.into_iter().filter(|(server, _)| *server != my_id),
         |server, addr| {
-            let cert = cert.clone();
-            let key = key.clone();
-            let roots = roots.clone();
+            let client = client.clone();
             let home_ca = home_ca.clone();
             let request = request.clone();
             async move {
                 tokio::time::timeout(
                     PUSH_TIMEOUT,
                     admin_client::push_controller_state(
+                        &client,
                         addr,
                         server,
                         server == controller.id,
                         home_ca,
-                        &cert,
-                        &key,
-                        roots,
                         request,
                     ),
                 )
@@ -4749,8 +4817,15 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { break };
-            let (cert, key) = state.outbound_identity().await;
-            let roots = state.roots.clone();
+            let client = match state.outbound_client().await {
+                Ok(client) => client,
+                Err(e) => {
+                    warn!("admin-server: loading outbound identity failed: {e:#}");
+                    drop(state);
+                    tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
+                    continue;
+                }
+            };
             let cfg = state.read(move |state| state.cfg.clone()).await;
             let (_, resolver) = local_resolver_data(&cfg).await;
             let ca_addr = cfg.ca_addr;
@@ -4762,7 +4837,8 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
             };
             // Self-heal: (re)register our own facts. Idempotent at the CA.
             if let Err(e) =
-                admin_client::register(ca_addr, &cert, &key, roots.clone(), &req).await
+                admin_client::register(&client, ca_addr, state.home_ca_der.clone(), &req)
+                    .await
             {
                 warn!(
                     "admin-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
@@ -4770,8 +4846,8 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
             }
             // Refresh the cache: cheap version check, full pull only when changed.
             match admin_client::get_map_version_from_controller(
+                &state.pki_client,
                 ca_addr,
-                roots.clone(),
                 state.home_ca_der.clone(),
                 NodeKind::AdminServer,
             )
@@ -4781,8 +4857,8 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
                     let stale = state.read(move |state| state.map.version != v).await;
                     if stale {
                         match admin_client::get_map_from_controller(
+                            &state.pki_client,
                             ca_addr,
-                            roots,
                             state.home_ca_der.clone(),
                             NodeKind::AdminServer,
                         )
@@ -5418,7 +5494,7 @@ fn stage_enrollment(
 /// map and persist it. Peer-cert-gated at the dispatch. The CA is the
 /// map's only writer, so a non-CA host refuses.
 async fn handle_register(
-    state: &Server,
+    state: &Arc<Server>,
     server_id: admin_proto::AdminServerId,
     req: &RegisterRequest,
 ) -> RegisterResponse {
@@ -5466,7 +5542,7 @@ async fn handle_register(
             reason: format!("reconciling existing identities before registration: {e:#}"),
         };
     }
-    state
+    let (response, fanout) = state
         .write_async(async move |state| {
             let updated = match netmap::register(
                 &mut state.map,
@@ -5475,16 +5551,36 @@ async fn handle_register(
                 req.resolver.as_ref(),
             ) {
                 Ok(updated) => updated,
-                Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
+                Err(e) => {
+                    return (RegisterResponse::Err { reason: format!("{e:#}") }, None);
+                }
             };
             if updated && let Err(e) = netmap::save_async(&ca_dir, &state.map).await {
-                return RegisterResponse::Err {
-                    reason: format!("persisting the network map: {e:#}"),
-                };
+                return (
+                    RegisterResponse::Err {
+                        reason: format!("persisting the network map: {e:#}"),
+                    },
+                    None,
+                );
             }
-            RegisterResponse::Ok { version: state.map.version }
+            let fanout = updated
+                .then(|| registration_topology_fanout(&state.map, server_id))
+                .flatten();
+            (RegisterResponse::Ok { version: state.map.version }, fanout)
         })
-        .await
+        .await;
+    if let Some(fanout) = fanout {
+        let operation_id = admin_proto::OperationId::new();
+        for result in push_topology(state, fanout, operation_id).await {
+            if let Some(error) = result.error {
+                warn!(
+                    "admin-server: registration topology push {} at {} failed: {}",
+                    result.server, result.addr, error
+                );
+            }
+        }
+    }
+    response
 }
 
 /// CA-side: drop a admin server from the map on uninstall.
@@ -5957,8 +6053,10 @@ async fn handle_read_perms(
         Duration::ZERO,
     )
     .await;
-    let (cert, key) = state.outbound_identity().await;
-    let roots = state.roots.clone();
+    let client = match state.outbound_client().await {
+        Ok(client) => client,
+        Err(e) => return err(format!("loading outbound identity: {e:#}")),
+    };
     let controller = state.read(move |state| state.map.controller).await;
     let home_ca = state.home_ca_der.clone();
     let mut failures = Vec::new();
@@ -5966,13 +6064,11 @@ async fn handle_read_perms(
         let result = tokio::time::timeout(
             PUSH_TIMEOUT,
             admin_client::pull_perms(
+                &client,
                 addr,
                 server,
                 server == controller,
                 home_ca.clone(),
-                &cert,
-                &key,
-                roots.clone(),
             ),
         )
         .await;
@@ -6129,27 +6225,34 @@ async fn push_perms_edit_to_peers(
     targets: &[(admin_proto::AdminServerId, SocketAddr)],
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
-    let (cert, key) = state.outbound_identity().await;
-    let roots = state.roots.clone();
+    let client = match state.outbound_client().await {
+        Ok(client) => client,
+        Err(e) => {
+            return targets
+                .iter()
+                .map(|(server, addr)| PeerResult {
+                    server: *server,
+                    addr: *addr,
+                    error: Some(format!("loading outbound identity failed: {e:#}")),
+                })
+                .collect();
+        }
+    };
     let controller = state.read(move |state| state.map.controller).await;
     let home_ca = state.home_ca_der.clone();
     let mut results: Vec<_> =
         stream::iter(targets.iter().copied().map(|(server, addr)| {
-            let cert = cert.clone();
-            let key = key.clone();
-            let roots = roots.clone();
+            let client = client.clone();
             let home_ca = home_ca.clone();
             async move {
                 let res = tokio::time::timeout(
                     PUSH_TIMEOUT,
                     admin_client::push_perms_edit(
+                        &client,
                         addr,
                         server,
                         server == controller,
                         home_ca,
-                        &cert,
-                        &key,
-                        roots,
                         operation_id,
                         perms_json,
                     ),
@@ -6346,20 +6449,20 @@ async fn handle_control_service(
             ApplyServiceControlResponse::Err { reason } => Err(reason),
         }
     } else {
-        let (cert, key) = state.outbound_identity().await;
-        let roots = state.roots.clone();
+        let client = match state.outbound_client().await {
+            Ok(client) => client,
+            Err(e) => return err(format!("loading outbound identity: {e:#}")),
+        };
         let target_is_controller =
             state.read(move |state| target_server == state.map.controller).await;
         tokio::time::timeout(
             PUSH_TIMEOUT,
             admin_client::push_service_control(
+                &client,
                 target_addr,
                 req.target_server,
                 target_is_controller,
                 state.home_ca_der.clone(),
-                &cert,
-                &key,
-                roots,
                 operation_id,
                 req.units.clone(),
                 req.op,
@@ -7127,6 +7230,26 @@ struct TopologyFanout {
     targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
 }
 
+fn registration_topology_fanout(
+    map: &NetworkMap,
+    server_id: admin_proto::AdminServerId,
+) -> Option<TopologyFanout> {
+    let cluster = map
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)?
+        .cluster
+        .and_then(|id| map.clusters.iter().find(|cluster| cluster.id == id))?;
+    Some(topology_fanout(
+        map,
+        map.clusters.iter().filter(|candidate| {
+            candidate.id == cluster.id
+                || cluster.parent == Some(candidate.id)
+                || cluster.children.contains(&candidate.id)
+        }),
+    ))
+}
+
 fn topology_fanout<'a>(
     map: &NetworkMap,
     clusters: impl IntoIterator<Item = &'a admin_proto::ClusterEntry>,
@@ -7184,37 +7307,44 @@ fn topology_edit(
     }
 }
 
-/// Propagate the two delegation edits to every registered server in the parent
-/// and child clusters using CA-owned routing addresses. A down or rejecting
-/// target is reported, and re-approval idempotently re-runs reconciliation.
+/// Propagate topology edits to every registered server in the affected
+/// clusters using CA-owned routing addresses.
 async fn push_topology(
     state: &Arc<Server>,
     fanout: TopologyFanout,
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
-    let (cert, key) = state.outbound_identity().await;
+    let client = match state.outbound_client().await {
+        Ok(client) => client,
+        Err(e) => {
+            return fanout
+                .targets
+                .into_iter()
+                .map(|(server, addr, _)| PeerResult {
+                    server,
+                    addr,
+                    error: Some(format!("loading outbound identity failed: {e:#}")),
+                })
+                .collect();
+        }
+    };
     let controller = state.read(move |state| state.map.controller).await;
     let mut targets = fanout.targets;
     targets.sort_by_key(|(id, _, _)| *id);
     let home_ca = state.home_ca_der.clone();
-    let roots = state.roots.clone();
     let mut results: Vec<_> =
         stream::iter(targets.into_iter().map(|(server, addr, edit)| {
-            let cert = cert.clone();
-            let key = key.clone();
+            let client = client.clone();
             let home_ca = home_ca.clone();
-            let roots = roots.clone();
             async move {
                 let res = tokio::time::timeout(
                     PUSH_TIMEOUT,
                     admin_client::push_referral_edit(
+                        &client,
                         addr,
                         server,
                         server == controller,
                         home_ca,
-                        &cert,
-                        &key,
-                        roots,
                         operation_id,
                         &edit,
                     ),
@@ -7520,6 +7650,97 @@ mod v6_tests {
         assert!(children.is_empty());
         assert_eq!(parent.as_ref().unwrap().path, "/eu");
         assert_eq!(parent.as_ref().unwrap().addrs, vec![root_member]);
+    }
+
+    #[test]
+    fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
+        let controller = admin_proto::AdminServerId::new();
+        let joining = admin_proto::AdminServerId::new();
+        let peer = admin_proto::AdminServerId::new();
+        let grandchild_server = admin_proto::AdminServerId::new();
+        let sibling_server = admin_proto::AdminServerId::new();
+        let root = admin_proto::ResolverClusterId::new();
+        let child = admin_proto::ResolverClusterId::new();
+        let grandchild = admin_proto::ResolverClusterId::new();
+        let sibling = admin_proto::ResolverClusterId::new();
+        let resolver = |addr: &str| ResolverAddr {
+            addr: addr.parse().unwrap(),
+            auth: InfoAuth::Anonymous,
+        };
+        let server = |id, admin_addr: &str, member: ResolverAddr, cluster| ServerEntry {
+            id,
+            addr: admin_addr.parse().unwrap(),
+            roles: vec![Role::Resolver],
+            resolver: Some(member),
+            cluster: Some(cluster),
+            state: admin_proto::ServerState::Registered,
+        };
+        let root_member = resolver("10.1.0.1:4564");
+        let joining_member = resolver("10.2.0.1:4564");
+        let peer_member = resolver("10.2.0.2:4564");
+        let grandchild_member = resolver("10.3.0.1:4564");
+        let sibling_member = resolver("10.4.0.1:4564");
+        let map = NetworkMap {
+            version: 12,
+            controller,
+            servers: vec![
+                server(controller, "10.1.0.1:4565", root_member.clone(), root),
+                server(joining, "10.2.0.1:4565", joining_member.clone(), child),
+                server(peer, "10.2.0.2:4565", peer_member.clone(), child),
+                server(
+                    grandchild_server,
+                    "10.3.0.1:4565",
+                    grandchild_member.clone(),
+                    grandchild,
+                ),
+                server(sibling_server, "10.4.0.1:4565", sibling_member.clone(), sibling),
+            ],
+            clusters: vec![
+                admin_proto::ClusterEntry {
+                    id: root,
+                    base: "/".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![root_member],
+                    parent: None,
+                    children: vec![child, sibling],
+                },
+                admin_proto::ClusterEntry {
+                    id: child,
+                    base: "/eu".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![joining_member, peer_member],
+                    parent: Some(root),
+                    children: vec![grandchild],
+                },
+                admin_proto::ClusterEntry {
+                    id: grandchild,
+                    base: "/eu/fr".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![grandchild_member],
+                    parent: Some(child),
+                    children: vec![],
+                },
+                admin_proto::ClusterEntry {
+                    id: sibling,
+                    base: "/us".into(),
+                    state: admin_proto::ClusterState::Active,
+                    members: vec![sibling_member],
+                    parent: Some(root),
+                    children: vec![],
+                },
+            ],
+        };
+
+        let mut targets: Vec<_> = registration_topology_fanout(&map, joining)
+            .unwrap()
+            .targets
+            .into_iter()
+            .map(|(server, _, _)| server)
+            .collect();
+        targets.sort();
+        let mut expected = vec![controller, joining, peer, grandchild_server];
+        expected.sort();
+        assert_eq!(targets, expected);
     }
 
     #[test]
@@ -8054,7 +8275,8 @@ mod v6_tests {
             vec![],
             RootCertStore::empty(),
             CertificateDer::from(home_ca),
-        );
+        )
+        .unwrap();
         let req = ApplyControllerStateRequest {
             operation_id: admin_proto::OperationId::new(),
             controller,

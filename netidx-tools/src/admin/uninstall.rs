@@ -361,8 +361,10 @@ fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
         let trusted = std::fs::read(&cfg.trusted)
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
         let roots = admin_server::load_roots(&trusted)?;
+        let home_ca = admin_client::home_ca_from_chain(&cert)?;
+        let client = admin_client::AuthenticatedPkiClient::from_pem(roots, &cert, &key)?;
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-        rt.block_on(admin_client::deregister(ca_addr, &cert, &key, roots))?;
+        rt.block_on(admin_client::deregister(&client, ca_addr, home_ca))?;
         Ok(())
     })();
     match result {

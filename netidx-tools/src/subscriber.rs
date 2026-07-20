@@ -35,7 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{self, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     time,
 };
 
@@ -58,6 +58,18 @@ pub(super) struct Params {
 
 static RPC_ARG_ESC: LazyLock<Escape> =
     LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
+
+async fn write_buffer<W>(writer: &mut W, buffer: &mut BytesMut) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if !buffer.is_empty() {
+        let to_write = buffer.split().freeze();
+        writer.write_all(&to_write).await?;
+        writer.flush().await?;
+    }
+    Ok(())
+}
 
 fn rpc_arg<I>() -> impl Parser<I, Output = (String, Value)>
 where
@@ -339,14 +351,8 @@ impl Ctx {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        if self.to_stdout.len() > 0 {
-            let to_write = self.to_stdout.split().freeze();
-            self.stdout.write_all(&*to_write).await?;
-        }
-        if self.to_stderr.len() > 0 {
-            let to_write = self.to_stderr.split().freeze();
-            self.stderr.write_all(&*to_write).await?;
-        }
+        write_buffer(&mut self.stdout, &mut self.to_stdout).await?;
+        write_buffer(&mut self.stderr, &mut self.to_stderr).await?;
         Ok(())
     }
 
@@ -412,11 +418,59 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    #[derive(Default)]
+    struct FlushProbe {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl AsyncWrite for FlushProbe {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.bytes.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.flushes += 1;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn oneshot_waits_through_referral_unsubscribe_for_a_value() {
         assert!(!completes_oneshot(&Event::Unsubscribed));
         assert!(completes_oneshot(&Event::Update(Value::Bool(true))));
+    }
+
+    #[tokio::test]
+    async fn buffered_output_is_flushed_before_oneshot_exit() {
+        let mut writer = FlushProbe::default();
+        let mut buffer = BytesMut::from(&b"value\n"[..]);
+
+        write_buffer(&mut writer, &mut buffer).await.unwrap();
+
+        assert_eq!(writer.bytes, b"value\n");
+        assert_eq!(writer.flushes, 1);
+        assert!(buffer.is_empty());
     }
 }
 

@@ -346,7 +346,7 @@ pub async fn create_vaulted_ca(
         .context("CA generation task panicked")??;
     // Seal the key into the recovery slot and persist the lifetime policy
     // (self-signed CA — externally_signed is false).
-    let (recovery_pw, cadir) = seal_ca_recovery(
+    let (recovery_pw, mut cadir) = seal_ca_recovery(
         config_lock.clone(),
         &stage_dir,
         &key_pem,
@@ -357,6 +357,7 @@ pub async fn create_vaulted_ca(
         },
     )
     .await?;
+    cadir.store.write_crl(&key_pem).await.context("creating the initial empty CRL")?;
 
     // Present the new CA's identity (the glyph joiners verify) in a dialog, then
     // the one-time recovery secret.

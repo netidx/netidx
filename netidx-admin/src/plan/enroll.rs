@@ -106,23 +106,44 @@ pub struct StagedIdentity {
     pub staging: Option<TempDir>,
 }
 
+fn identity_spec(
+    name: &str,
+    certificate: PathBuf,
+    private_key: PathBuf,
+    trusted: PathBuf,
+    askpass: Option<PathBuf>,
+) -> TlsIdentitySpec {
+    let server_pattern = tls::domain_from_san(name)
+        .map(str::to_string)
+        .unwrap_or_else(|_| name.to_string());
+    TlsIdentitySpec {
+        server_pattern: ArcStr::from(server_pattern.as_str()),
+        our_name: ArcStr::from(name),
+        certificate,
+        private_key,
+        trusted,
+        dest_dir: None,
+        askpass,
+    }
+}
+
+fn planned_identity_spec(name: &str) -> Result<TlsIdentitySpec> {
+    let dir = tls::identity_dir(name)?;
+    Ok(identity_spec(
+        name,
+        dir.join("certificate.pem"),
+        dir.join("private.key"),
+        dir.join("trusted.pem"),
+        None,
+    ))
+}
+
 /// Convert an installed [`JoinedIdentity`] into a client-side
 /// [`TlsIdentitySpec`]. The files are already at their canonical home, so
 /// `dest_dir` is `None` and the engine's install step is the harmless
 /// self-copy the `check_no_overwrite` guard already allows.
 pub fn joined_to_spec(j: JoinedIdentity) -> TlsIdentitySpec {
-    let server_pattern = tls::domain_from_san(&j.name)
-        .map(|d| d.to_string())
-        .unwrap_or_else(|_| j.name.clone());
-    TlsIdentitySpec {
-        server_pattern: ArcStr::from(server_pattern.as_str()),
-        our_name: ArcStr::from(j.name.as_str()),
-        certificate: j.certificate,
-        private_key: j.private_key,
-        trusted: j.trusted,
-        dest_dir: None,
-        askpass: j.askpass,
-    }
+    identity_spec(&j.name, j.certificate, j.private_key, j.trusted, j.askpass)
 }
 
 /// Convert an installed [`JoinedIdentity`] into the resolver's own
@@ -652,6 +673,7 @@ pub async fn network_addrs_and_identity(
     net: &DiscoveredNetwork,
     kind: NodeKind,
     have_identity: bool,
+    dry_run: bool,
     kp: Option<KeyProtArg>,
     tls_identities: &mut Vec<TlsIdentitySpec>,
     tls_staging: &mut Vec<TempDir>,
@@ -699,11 +721,20 @@ pub async fn network_addrs_and_identity(
             _ => current_username(),
         };
         let suggested = base.map(|n| format!("{n}.{}", net.identity.domain));
-        let (j, staging) =
-            join_network(ans, ca_addr, kind, suggested.as_deref(), kp, &net.identity)
-                .await?;
-        tls_identities.push(joined_to_spec(j));
-        tls_staging.push(staging);
+        if dry_run {
+            let identity = planned_tls_client_identity(ans, suggested.as_deref()).await?;
+            ans.note(&format_compact!(
+                "[dry-run] would enroll TLS identity {:?} from admin server {ca_addr}",
+                identity.spec.our_name
+            ));
+            tls_identities.push(identity.spec);
+        } else {
+            let (j, staging) =
+                join_network(ans, ca_addr, kind, suggested.as_deref(), kp, &net.identity)
+                    .await?;
+            tls_identities.push(joined_to_spec(j));
+            tls_staging.push(staging);
+        }
     }
     Ok(addrs)
 }
@@ -720,6 +751,18 @@ pub async fn maybe_join_ca_server(
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
 ) -> Result<Option<(JoinedIdentity, TempDir)>> {
+    let Some((ca_addr, identity)) = selected_ca_server(ans, probe, kind).await? else {
+        return Ok(None);
+    };
+    let joined = join_network(ans, ca_addr, kind, suggested_name, kp, &identity).await?;
+    Ok(Some(joined))
+}
+
+async fn selected_ca_server(
+    ans: &mut dyn Answerer,
+    probe: &AdminServers,
+    kind: NodeKind,
+) -> Result<Option<(SocketAddr, CaIdentity)>> {
     let probed_here;
     let net = match probe {
         AdminServers::DontHave => return Ok(None),
@@ -739,9 +782,7 @@ pub async fn maybe_join_ca_server(
         ));
         return Ok(None);
     };
-    let (j, staging) =
-        join_network(ans, ca_addr, kind, suggested_name, kp, &net.identity).await?;
-    Ok(Some((j, staging)))
+    Ok(Some((ca_addr, net.identity.clone())))
 }
 
 /// Poll a queued request until it settles (approved / denied / expired),
@@ -826,18 +867,7 @@ pub async fn join_network_replacing(
     replaces_serial: Option<u64>,
     identity: &CaIdentity,
 ) -> Result<(JoinedIdentity, TempDir)> {
-    let name = ans
-        .text(
-            Field::TlsName,
-            None,
-            suggested_name,
-            // Not a required-explicit decision: the enrolling node's identity
-            // defaults to `<user-or-host>.<domain>` (the interactive default),
-            // so a non-interactive join still enrolls without an identity flag.
-            false,
-        )
-        .await?
-        .context("a TLS identity name is required (no default could be derived)")?;
+    let name = prompt_identity_name(ans, suggested_name).await?;
     // Key protection is decided before the request: the operator is here now,
     // and the queued path may wait on a remote admin for a long time after.
     let protection = choose_key_protection(
@@ -940,6 +970,31 @@ pub async fn join_network_replacing(
     ))
 }
 
+async fn prompt_identity_name(
+    ans: &mut dyn Answerer,
+    suggested_name: Option<&str>,
+) -> Result<String> {
+    ans.text(
+        Field::TlsName,
+        None,
+        suggested_name,
+        // Not a required-explicit decision: the enrolling node's identity
+        // defaults to `<user-or-host>.<domain>` (the interactive default),
+        // so a non-interactive join still enrolls without an identity flag.
+        false,
+    )
+    .await?
+    .context("a TLS identity name is required (no default could be derived)")
+}
+
+async fn planned_tls_client_identity(
+    ans: &mut dyn Answerer,
+    suggested_name: Option<&str>,
+) -> Result<StagedIdentity> {
+    let name = prompt_identity_name(ans, suggested_name).await?;
+    Ok(StagedIdentity { spec: planned_identity_spec(&name)?, staging: None })
+}
+
 /// Obtain a client-side TLS identity by enrolling over the admin plane: a
 /// discovered admin server signs our CSR on the spot (cross-platform, rcgen).
 /// Requires a reachable admin server; there is no in-wizard bring-your-own-cert
@@ -949,11 +1004,30 @@ pub async fn prompt_tls_client_identity(
     suggested_name: Option<&str>,
     kp: Option<KeyProtArg>,
     probe: &AdminServers,
+    dry_run: bool,
 ) -> Result<StagedIdentity> {
-    match maybe_join_ca_server(ans, probe, NodeKind::Client, suggested_name, kp).await? {
-        Some((j, staging)) => {
-            Ok(StagedIdentity { spec: joined_to_spec(j), staging: Some(staging) })
+    let identity = if dry_run {
+        match selected_ca_server(ans, probe, NodeKind::Client).await? {
+            Some((ca_addr, _)) => {
+                let identity = planned_tls_client_identity(ans, suggested_name).await?;
+                ans.note(&format_compact!(
+                    "[dry-run] would enroll TLS identity {:?} from admin server {ca_addr}",
+                    identity.spec.our_name
+                ));
+                Some(identity)
+            }
+            None => None,
         }
+    } else {
+        maybe_join_ca_server(ans, probe, NodeKind::Client, suggested_name, kp).await?.map(
+            |(j, staging)| StagedIdentity {
+                spec: joined_to_spec(j),
+                staging: Some(staging),
+            },
+        )
+    };
+    match identity {
+        Some(identity) => Ok(identity),
         None => bail!(
             "a TLS identity via the wizard requires a reachable admin server to \
              enroll against; none was found. To run TLS without an admin server, \
@@ -998,4 +1072,24 @@ pub fn current_username() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planned_identity_uses_only_the_intended_canonical_paths() {
+        let name = "dry-run.example.com";
+        let dir = tls::identity_dir(name).unwrap();
+        let spec = planned_identity_spec(name).unwrap();
+
+        assert_eq!(&*spec.server_pattern, "example.com");
+        assert_eq!(&*spec.our_name, name);
+        assert_eq!(spec.certificate, dir.join("certificate.pem"));
+        assert_eq!(spec.private_key, dir.join("private.key"));
+        assert_eq!(spec.trusted, dir.join("trusted.pem"));
+        assert!(spec.dest_dir.is_none());
+        assert!(spec.askpass.is_none());
+    }
 }

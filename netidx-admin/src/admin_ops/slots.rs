@@ -885,7 +885,7 @@ pub async fn external_install_cert_with_lock(
         ),
         None => None,
     };
-    let (key, cadir) = external_ca_key_with_lock(ans, lock.clone(), &ca_dir).await?;
+    let (key, mut cadir) = external_ca_key_with_lock(ans, lock.clone(), &ca_dir).await?;
     let (intermediate_pem, external_root_pem) =
         ca::validate_external_ca_cert(&signed_pem, root_pem.as_deref(), &key)?;
     // certificate.pem is the intermediate ALONE (the network glyph is its key);
@@ -893,6 +893,7 @@ pub async fn external_install_cert_with_lock(
     atomic::write_atomic_async(&ca_dir.join("certificate.pem"), &intermediate_pem, 0o644)
         .await
         .context("installing certificate.pem")?;
+    cadir.store.write_crl(&key).await.context("creating the initial empty CRL")?;
     let mut trusted = external_root_pem;
     trusted.extend_from_slice(&intermediate_pem);
     atomic::write_atomic_async(&ca_dir.join("trusted.pem"), &trusted, 0o644)

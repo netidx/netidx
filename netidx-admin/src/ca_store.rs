@@ -773,13 +773,17 @@ impl CAStore {
         crl_next_update_at(&self.crl_path()).await
     }
 
-    /// Re-sign the CRL if one exists and is nearing its `nextUpdate`.
+    /// Create the CRL if it is missing, or re-sign it when it is nearing its
+    /// `nextUpdate`.
     /// Called opportunistically wherever the vault is already unlocked (an
     /// admin password is the only thing that can sign) — best-effort; a
     /// failure is logged by the caller, never fatal.
     pub async fn refresh_crl_if_stale(&mut self, ca_key_pem: &[u8]) -> Result<bool> {
         match self.crl_next_update().await? {
-            None => Ok(false),
+            None => {
+                self.write_crl(ca_key_pem).await?;
+                Ok(true)
+            }
             Some(next_update) => {
                 if next_update.saturating_sub(now_unix()) < CRL_REFRESH.as_secs() {
                     self.write_crl(ca_key_pem).await?;
@@ -1028,6 +1032,32 @@ mod tests {
         );
 
         assert_eq!(ca.store.max_serial().await.unwrap(), Some(4));
+    }
+
+    #[tokio::test]
+    async fn refresh_creates_a_missing_empty_crl() {
+        use crate::ca::{Ca, CaParams, Subject};
+
+        let dir = tempfile::tempdir().unwrap();
+        Ca::init(
+            &CaParams {
+                directory: dir.path().to_path_buf(),
+                subject: Subject::cn("test-ca"),
+                san: vec![],
+                key_bits: 2048,
+                validity: Duration::from_secs(30 * 86400),
+            },
+            None,
+        )
+        .unwrap();
+        let key = std::fs::read(dir.path().join("private.key")).unwrap();
+        let mut ca = open(dir.path()).await;
+
+        assert!(!ca.store.crl_path().exists());
+        assert!(ca.store.refresh_crl_if_stale(&key).await.unwrap());
+        assert!(ca.store.crl_path().exists());
+        assert!(ca.store.crl_next_update().await.unwrap().is_some());
+        assert!(!ca.store.refresh_crl_if_stale(&key).await.unwrap());
     }
 
     #[tokio::test]

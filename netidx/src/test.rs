@@ -22,6 +22,40 @@ mod resolver {
         Path::from(p)
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_local_server_does_not_replace_live_auth_socket() {
+        use crate::{os::local_auth::AuthClient, resolver_server::config::Config};
+        use std::net::TcpListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let auth_socket = dir.path().join("auth.sock");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let cfg = Config::parse(&format!(
+            r#"{{
+                "parent": null,
+                "children": [],
+                "member_servers": [{{
+                    "addr": "{addr}",
+                    "bind_addr": "127.0.0.1",
+                    "auth": {{"Local": "{}"}}
+                }}],
+                "perms": {{}}
+            }}"#,
+            auth_socket.display()
+        ))
+        .unwrap();
+        let server = Server::new(cfg.clone(), false, 0).await.unwrap();
+
+        AuthClient::token(auth_socket.to_str().unwrap()).await.unwrap();
+        assert!(Server::new(cfg, false, 0).await.is_err());
+        AuthClient::token(auth_socket.to_str().unwrap()).await.unwrap();
+
+        drop(server);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn publish_resolve_simple() {
         let _ = env_logger::try_init();

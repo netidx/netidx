@@ -872,6 +872,12 @@ async fn server_loop(
     let delay_reads =
         if delay_reads { Some(Instant::now() + member.writer_ttl) } else { None };
     let id = member.addr;
+    let listen_addr = SocketAddr::new(member.bind_addr, id.port());
+    debug!("creating tcp listener on {:?}", listen_addr);
+    let listener = match listener {
+        None => TcpListener::bind(listen_addr).await?,
+        Some(listener) => listener,
+    };
     debug!("creating security context");
     let secctx = SecCtx::new(&cfg, &member).await?;
     debug!("creating resolver store");
@@ -881,12 +887,6 @@ async fn server_loop(
         secctx.clone(),
         id,
     );
-    let listen_addr = SocketAddr::new(member.bind_addr, id.port());
-    debug!("creating tcp listener on {:?}", listen_addr);
-    let listener = match listener {
-        None => TcpListener::bind(listen_addr).await?,
-        Some(listener) => listener,
-    };
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
