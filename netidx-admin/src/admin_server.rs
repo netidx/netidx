@@ -197,6 +197,16 @@ fn prepared_authentication(
 mod state_tests {
     use super::*;
 
+    #[test]
+    fn custom_config_root_retains_the_offline_ca_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let ca_dir = root.path().join("ca");
+        let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
+        let alias = acquire_ca_alias_lock(&config_lock, Some(&ca_dir)).unwrap();
+        assert!(alias.is_some());
+        assert!(ConfigDirLock::acquire(&ca_dir).is_err());
+    }
+
     fn test_server(ca: Option<ca_store::CaDir>) -> Arc<Server> {
         let id = admin_proto::AdminServerId::new();
         let config_lock =
@@ -206,6 +216,7 @@ mod state_tests {
             });
         Server::from_state(
             config_lock,
+            None,
             MutableState {
                 cfg: AdminServerConfig {
                     domain: String::new(),
@@ -355,9 +366,23 @@ fn outbound_identity_digest(cert_pem: &[u8], key_pem: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn acquire_ca_alias_lock(
+    config_lock: &ConfigDirLock,
+    ca_dir: Option<&Path>,
+) -> Result<Option<ConfigDirLock>> {
+    let Some(ca_dir) = ca_dir else { return Ok(None) };
+    let root = ConfigDirLock::root_for_ca_dir(ca_dir)?;
+    if root == config_lock.root() {
+        Ok(None)
+    } else {
+        ConfigDirLock::acquire(root).map(Some)
+    }
+}
+
 pub struct Server {
     state: RwLock<MutableState>,
-    _config_lock: ConfigDirLock,
+    config_lock: ConfigDirLock,
+    _ca_alias_lock: Option<ConfigDirLock>,
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
@@ -407,6 +432,7 @@ impl Server {
         // The installation guard was acquired before parsing the config. If we
         // hold the CA, it must be nested below that guarded root.
         let ca_dir = cfg.roles.ca.as_ref().map(|r| r.dir.clone());
+        let ca_alias_lock = acquire_ca_alias_lock(&config_lock, ca_dir.as_deref())?;
         // The server's signing credential: the box-held autorenew password,
         // read + unsealed once. In the server-only model this is the only key
         // to the CA. Without it the CA authenticates + serves read-only but
@@ -480,13 +506,14 @@ impl Server {
                     },
                     facts,
                 )?;
-                netmap::save_async(dir, &m).await?;
+                netmap::save_async(&config_lock, dir, &m).await?;
                 m
             }
             None => NetworkMap::default(),
         };
         Server::from_state(
             config_lock,
+            ca_alias_lock,
             MutableState { cfg, map, ca, password_limiter: PasswordLimiter::default() },
             cfg_path,
             serving_cert_pem,
@@ -498,6 +525,7 @@ impl Server {
 
     fn from_state(
         config_lock: ConfigDirLock,
+        ca_alias_lock: Option<ConfigDirLock>,
         state: MutableState,
         cfg_path: Option<PathBuf>,
         serving_cert_pem: Vec<u8>,
@@ -520,7 +548,8 @@ impl Server {
         };
         Ok(Arc::new(Server {
             state: RwLock::new(state),
-            _config_lock: config_lock,
+            config_lock,
+            _ca_alias_lock: ca_alias_lock,
             cfg_path,
             serving_cert_pem,
             serving_key_pem,
@@ -559,6 +588,10 @@ impl Server {
         f(&mut *self.state.write().await).await
     }
 
+    fn config_lock(&self) -> &ConfigDirLock {
+        &self.config_lock
+    }
+
     async fn has_ca(&self) -> bool {
         self.read(move |state| state.ca.is_some()).await
     }
@@ -578,8 +611,9 @@ impl Server {
 
     async fn add_identity(&self, req: &AddIdentityRequest) -> AddIdentityResponse {
         let req = req.clone();
+        let config_lock = self.config_lock.clone();
         self.write_async(async move |state| match state.cfg.roles.id_map.as_ref() {
-            Some(role) => handle_add_identity(&role.map, &req).await,
+            Some(role) => handle_add_identity(&config_lock, &role.map, &req).await,
             None => AddIdentityResponse::Err {
                 reason: "this host has no id-map role".to_string(),
             },
@@ -592,9 +626,12 @@ impl Server {
         req: &ApplyReferralEditRequest,
     ) -> ApplyReferralEditResponse {
         let req = req.clone();
+        let config_lock = self.config_lock.clone();
         self.write_async(async move |state| match state.cfg.roles.resolver.as_ref() {
             Some(role) => {
-                match apply_referral_edit_local(&role.config, &req.edit).await {
+                match apply_referral_edit_local(&config_lock, &role.config, &req.edit)
+                    .await
+                {
                     Ok(()) => ApplyReferralEditResponse::Ok,
                     Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
                 }
@@ -652,8 +689,7 @@ impl Server {
 /// Run the admin server described by the config at `cfg_path` until the
 /// process is killed.
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
-    let config_root = cfg_path.parent().unwrap_or_else(|| Path::new("."));
-    let config_lock = ConfigDirLock::acquire_async(config_root).await?;
+    let config_lock = ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
     let cfg = AdminServerConfig::load_async(&cfg_path).await?;
     // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
     // this machine; `load_serving_keypair` unseals + decrypts in memory.
@@ -810,17 +846,21 @@ pub fn local_socket_path(cfg_path: &Path) -> PathBuf {
 /// reach it (defence in depth on top of the per-connection `SO_PEERCRED`
 /// check). We hold the installation guard, so any socket file here is stale from a
 /// prior run and safe to replace.
-async fn bind_local_control(path: &Path) -> Result<UnixListener> {
+async fn bind_local_control(
+    config_lock: &ConfigDirLock,
+    path: &Path,
+) -> Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt;
+    let path = config_lock.require_contained(path)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let _ = tokio::fs::remove_file(path).await;
-    let listener = UnixListener::bind(path)
+    let _ = tokio::fs::remove_file(&path).await;
+    let listener = UnixListener::bind(&path)
         .with_context(|| format!("binding {}", path.display()))?;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .await
         .with_context(|| format!("setting 0600 on {}", path.display()))?;
     Ok(listener)
@@ -849,7 +889,7 @@ fn local_peer_allowed(stream: &tokio::net::UnixStream) -> bool {
 async fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
     let Some(cfg_path) = state.cfg_path.clone() else { return };
     let path = local_socket_path(&cfg_path);
-    let listener = match bind_local_control(&path).await {
+    let listener = match bind_local_control(state.config_lock(), &path).await {
         Ok(l) => l,
         Err(e) => {
             warn!(
@@ -2117,14 +2157,16 @@ async fn handle_external_ca_install(
     local: bool,
 ) -> ExternalCaInstallResponse {
     let req = req.clone();
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
-            handle_external_ca_install_inner(state, &req, local).await
+            handle_external_ca_install_inner(&config_lock, state, &req, local).await
         })
         .await
 }
 
 async fn handle_external_ca_install_inner(
+    config_lock: &ConfigDirLock,
     state: &mut MutableState,
     req: &ExternalCaInstallRequest,
     local: bool,
@@ -2136,7 +2178,10 @@ async fn handle_external_ca_install_inner(
     let Some(ca) = state.ca.as_mut() else {
         return err("this host is not the controller CA".into());
     };
-    let dir = ca.dir().to_path_buf();
+    let dir = match config_lock.require_contained(ca.dir()) {
+        Ok(dir) => dir,
+        Err(e) => return err(format!("{e:#}")),
+    };
     match crate::ca::CaLifetimes::load_async(&dir).await {
         Ok(l) if l.externally_signed => {}
         Ok(_) => return err("this controller CA is not externally signed".into()),
@@ -2164,8 +2209,13 @@ async fn handle_external_ca_install_inner(
         }
         Ok(Ok(v)) => v,
     };
-    let (trusted_path, serving_path) =
-        (state.cfg.trusted.clone(), state.cfg.serving_cert.clone());
+    let (trusted_path, serving_path) = match (
+        config_lock.require_contained(&state.cfg.trusted),
+        config_lock.require_contained(&state.cfg.serving_cert),
+    ) {
+        (Ok(trusted), Ok(serving)) => (trusted, serving),
+        (Err(e), _) | (_, Err(e)) => return err(format!("{e:#}")),
+    };
     // A live renewal may refresh the netidx intermediate and its existing
     // issuer, but it may not smuggle in a new trust root. The ordinary renewal
     // reconciler implements exactly that same-key/same-issuer rule.
@@ -2387,6 +2437,7 @@ async fn handle_backup(
 /// well-known starting point for peer walks.
 async fn record_peer(state: &Server, peer: SocketAddr) {
     let cfg_path = state.cfg_path.clone();
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |inner| {
             let cfg = &mut inner.cfg;
@@ -2395,7 +2446,7 @@ async fn record_peer(state: &Server, peer: SocketAddr) {
             }
             cfg.peers.push(peer);
             if let Some(path) = &cfg_path
-                && let Err(e) = cfg.save_async(path).await
+                && let Err(e) = cfg.save_async(&config_lock, path).await
             {
                 warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
             }
@@ -3144,6 +3195,7 @@ async fn issue_serialized(
     recheck_id: Option<&str>,
 ) -> Result<Signed> {
     let dir = ca.dir().to_path_buf();
+    let config_lock = ca.config_lock();
     let store = &mut ca.store;
     if let Some(id) = recheck_id {
         match store.status(id).await {
@@ -3278,9 +3330,11 @@ async fn issue_serialized(
         } else {
             let rs = store.alloc_serial();
             let renewal_dir = dir.clone();
+            let config_lock = config_lock.clone();
             let ca_key_pem = signing.ca_key_pem.to_vec();
             let renewed = tokio::task::spawn_blocking(move || {
                 crate::ca::maybe_renew_ca_cert(
+                    &config_lock,
                     &renewal_dir,
                     &ca_key_pem,
                     rs,
@@ -3549,6 +3603,7 @@ async fn sign_csr(
 /// must work on a host whose id-map daemon hasn't registered anyone
 /// yet.
 pub async fn handle_add_identity(
+    config_lock: &ConfigDirLock,
     map_path: &Path,
     req: &AddIdentityRequest,
 ) -> AddIdentityResponse {
@@ -3556,8 +3611,12 @@ pub async fn handle_add_identity(
         "admin-server: applying id-map registration operation {} for {:?}",
         req.operation_id, req.san
     );
-    let mut map = if tokio::fs::try_exists(map_path).await.unwrap_or(false) {
-        match id_map::load_async(map_path).await {
+    let map_path = match config_lock.require_contained(map_path) {
+        Ok(path) => path,
+        Err(e) => return AddIdentityResponse::Err { reason: format!("{e:#}") },
+    };
+    let mut map = if tokio::fs::try_exists(&map_path).await.unwrap_or(false) {
+        match id_map::load_async(&map_path).await {
             Ok(m) => m,
             Err(e) => {
                 return AddIdentityResponse::Err {
@@ -3570,7 +3629,7 @@ pub async fn handle_add_identity(
     };
     let groups: Vec<&str> = req.groups.iter().map(|s| s.as_str()).collect();
     match id_map::register_identity(&mut map, &req.san, &req.primary_group, &groups) {
-        Ok(uid) => match id_map::save_async(map_path, &map).await {
+        Ok(uid) => match id_map::save_async(&map_path, &map).await {
             Ok(()) => AddIdentityResponse::Ok { uid },
             Err(e) => {
                 AddIdentityResponse::Err { reason: format!("saving id-map: {e:#}") }
@@ -4087,13 +4146,18 @@ async fn local_crl_destinations(cfg: &AdminServerConfig) -> Result<BTreeSet<Path
 /// Install a verified CRL atomically beside all local trust bundles. Identical
 /// content is left untouched so file watchers do not rebuild TLS state twice.
 async fn apply_crl_to_destinations(
+    config_lock: &ConfigDirLock,
     crl_pem: &str,
     home_ca_der: &[u8],
     destinations: BTreeSet<PathBuf>,
 ) -> Result<()> {
     validate_home_crl(crl_pem, home_ca_der)?;
+    let destinations = destinations
+        .into_iter()
+        .map(|destination| config_lock.require_contained(destination))
+        .collect::<Result<Vec<_>>>()?;
     let mut failures = Vec::new();
-    for destination in destinations {
+    for destination in destinations.iter() {
         match tokio::fs::read(&destination).await {
             Ok(current) if current == crl_pem.as_bytes() => continue,
             Ok(_) => {}
@@ -4123,10 +4187,17 @@ async fn apply_crl_to_destinations(
 async fn apply_crl_local(state: &Server, crl_pem: &str) -> Result<()> {
     let crl_pem = crl_pem.to_string();
     let home_ca_der = state.home_ca_der.clone();
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |mutable| {
             let destinations = local_crl_destinations(&mutable.cfg).await?;
-            apply_crl_to_destinations(&crl_pem, home_ca_der.as_ref(), destinations).await
+            apply_crl_to_destinations(
+                &config_lock,
+                &crl_pem,
+                home_ca_der.as_ref(),
+                destinations,
+            )
+            .await
         })
         .await
 }
@@ -4160,6 +4231,7 @@ async fn handle_apply_controller_state(
     }
     let req = req.clone();
     let cfg_path = state.cfg_path.clone();
+    let config_lock = state.config_lock.clone();
     let home_ca_der = state.home_ca_der.clone();
     state
         .write_async(async move |mutable| {
@@ -4185,7 +4257,7 @@ async fn handle_apply_controller_state(
                 };
                 let mut next = mutable.cfg.clone();
                 next.ca_addr = Some(req.addr);
-                if let Err(e) = next.save_async(cfg_path).await {
+                if let Err(e) = next.save_async(&config_lock, cfg_path).await {
                     return err(format!(
                         "persisting the relocated controller address: {e:#}"
                     ));
@@ -4199,6 +4271,7 @@ async fn handle_apply_controller_state(
                 }
             };
             if let Err(e) = apply_crl_to_destinations(
+                &config_lock,
                 &req.crl_pem,
                 home_ca_der.as_ref(),
                 destinations,
@@ -5097,6 +5170,7 @@ async fn handle_request_delegation(
         req.child_servers.clone(),
         peer.to_string(),
     );
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
             let mut staged = state.map.clone();
@@ -5111,7 +5185,7 @@ async fn handle_request_delegation(
                     reason: format!("invalid delegation: {e:#}"),
                 };
             }
-            match delegation_store::enqueue(&ca_dir, &pending).await {
+            match delegation_store::enqueue(&config_lock, &ca_dir, &pending).await {
                 Ok(()) => DelegationResponse::Ok { request_id: pending.id },
                 Err(e) => DelegationResponse::Err { reason: format!("{e:#}") },
             }
@@ -5234,6 +5308,7 @@ async fn handle_deny_delegation_inner(
         };
     };
     let ca_dir = ca.dir().to_path_buf();
+    let config_lock = ca.config_lock();
     let authd = match authenticate(ca, &req.credential) {
         Ok(a) => a,
         Err(reason) => return DenyDelegationResponse::Err { reason },
@@ -5248,7 +5323,9 @@ async fn handle_deny_delegation_inner(
                     ),
                 };
             }
-            match delegation_store::deny(&ca_dir, &pending, &req.reason).await {
+            match delegation_store::deny(&config_lock, &ca_dir, &pending, &req.reason)
+                .await
+            {
                 Ok(()) => DenyDelegationResponse::Ok,
                 Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
             }
@@ -5276,11 +5353,13 @@ fn info_to_refauth(a: &InfoAuth) -> netidx::resolver_server::config::file::RefAu
 /// no-op); validated via `validate_for_path` (so children-constraint
 /// violations fail here) before the atomic save.
 async fn apply_referral_edit_local(
+    config_lock: &ConfigDirLock,
     resolver_config_path: &Path,
     edit: &ReferralEdit,
 ) -> Result<()> {
+    let resolver_config_path = config_lock.require_contained(resolver_config_path)?;
     use netidx::resolver_server::config::file::Referral;
-    let mut rc = crate::resolver::ResolverConfig::load_async(resolver_config_path)
+    let mut rc = crate::resolver::ResolverConfig::load_async(&resolver_config_path)
         .await
         .with_context(|| {
             format!("loading resolver config {}", resolver_config_path.display())
@@ -5347,7 +5426,7 @@ async fn apply_referral_edit_local(
                 .collect();
         }
     }
-    rc.save_async(resolver_config_path)
+    rc.save_async(&resolver_config_path)
         .await
         .context("the referral edit would make the resolver config invalid")
 }
@@ -5410,6 +5489,7 @@ async fn grant_enrollment(
     enrollment: &admin_proto::EnrollmentRequest,
 ) -> Result<admin_proto::ResolverClusterId> {
     let cfg_path = state.cfg_path.clone();
+    let config_lock = state.config_lock.clone();
     let enrollment = enrollment.clone();
     state
         .write_async(async move |mutable| {
@@ -5429,14 +5509,14 @@ async fn grant_enrollment(
                     .await
                     .context("revoking the replaced server identity")?;
             }
-            netmap::save_async(&ca_dir, &staged)
+            netmap::save_async(&config_lock, &ca_dir, &staged)
                 .await
                 .context("persisting the enrollment grant")?;
             *map = staged;
             if let Some(old_addr) = replaced_addr {
                 cfg.peers.retain(|peer| *peer != old_addr);
                 if let Some(path) = &cfg_path {
-                    cfg.save_async(path)
+                    cfg.save_async(&config_lock, path)
                         .await
                         .context("persisting removal of the replaced peer hint")?;
                 }
@@ -5542,6 +5622,7 @@ async fn handle_register(
             reason: format!("reconciling existing identities before registration: {e:#}"),
         };
     }
+    let config_lock = state.config_lock.clone();
     let (response, fanout) = state
         .write_async(async move |state| {
             let updated = match netmap::register(
@@ -5555,7 +5636,10 @@ async fn handle_register(
                     return (RegisterResponse::Err { reason: format!("{e:#}") }, None);
                 }
             };
-            if updated && let Err(e) = netmap::save_async(&ca_dir, &state.map).await {
+            if updated
+                && let Err(e) =
+                    netmap::save_async(&config_lock, &ca_dir, &state.map).await
+            {
                 return (
                     RegisterResponse::Err {
                         reason: format!("persisting the network map: {e:#}"),
@@ -5596,13 +5680,17 @@ async fn handle_deregister(
             };
         }
     };
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
             let updated = match netmap::deregister(&mut state.map, server_id) {
                 Ok(updated) => updated,
                 Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
             };
-            if updated && let Err(e) = netmap::save_async(&ca_dir, &state.map).await {
+            if updated
+                && let Err(e) =
+                    netmap::save_async(&config_lock, &ca_dir, &state.map).await
+            {
                 return RegisterResponse::Err {
                     reason: format!("persisting the network map: {e:#}"),
                 };
@@ -5751,7 +5839,8 @@ async fn remove_server_prepare_inner(
                 revoke_server_certificates(ca, req.server, &authd.admin).await.map_err(
                     |e| err(format!("revoking the server's serving certificates: {e:#}")),
                 )?;
-            if let Err(e) = netmap::save_async(&ca_dir, &next).await {
+            let config_lock = ca.config_lock();
+            if let Err(e) = netmap::save_async(&config_lock, &ca_dir, &next).await {
                 return Err(err(format!("persisting the network map: {e:#}")));
             }
             *map = next;
@@ -6103,6 +6192,7 @@ async fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
                 format!("invalid permission bits {bits:?} for {e:?} at {p:?}")
             })?;
     }
+    let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
             let rconfig = state
@@ -6113,7 +6203,8 @@ async fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
                 .map(|role| role.config.clone())
                 .context("no resolver role")?;
             let rc = crate::resolver::ResolverConfig::load_async(&rconfig).await?;
-            let path = perms_path_from_config(&rconfig, &rc)?;
+            let path =
+                config_lock.require_contained(perms_path_from_config(&rconfig, &rc)?)?;
             let check = rc.clone();
             let check_config = rconfig.clone();
             let check_path = path.clone();
@@ -7037,6 +7128,10 @@ async fn rotate_autorenew(
         Ok(captured) => captured,
         Err(e) => return err(format!("{e:#}")),
     };
+    let keytab = match state.config_lock.require_contained(keytab) {
+        Ok(keytab) => keytab,
+        Err(e) => return err(format!("{e:#}")),
+    };
     let current = match tokio::fs::read(&keytab).await {
         Ok(current) => current,
         Err(e) => {
@@ -7205,14 +7300,20 @@ async fn approve_delegation_prepare_inner(
         .map_err(|e| err(format!("updating authoritative topology: {e:#}")))?;
         let parent = change.parent;
         let child = change.child;
-        netmap::save_async(&ca_dir, &staged)
+        let config_lock = ca.config_lock();
+        netmap::save_async(&config_lock, &ca_dir, &staged)
             .await
             .map_err(|e| err(format!("persisting authoritative topology: {e:#}")))?;
         *map = staged;
         if commit {
-            delegation_store::approve(&ca_dir, &pending, parent.members.clone())
-                .await
-                .map_err(|e| err(format!("committing the approval: {e:#}")))?;
+            delegation_store::approve(
+                &config_lock,
+                &ca_dir,
+                &pending,
+                parent.members.clone(),
+            )
+            .await
+            .map_err(|e| err(format!("committing the approval: {e:#}")))?;
         }
         audit(
             &ca_dir,
@@ -7506,6 +7607,7 @@ mod v6_tests {
         use netidx::resolver_server::config::file as rfile;
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("ap1.json");
+        let config_lock = ConfigDirLock::acquire(dir.path()).unwrap();
         let member = |addr: &str| {
             let addr = addr.parse::<SocketAddr>().unwrap();
             rfile::MemberServerBuilder::default()
@@ -7539,7 +7641,7 @@ mod v6_tests {
             children: vec![],
         };
 
-        apply_referral_edit_local(&p, &edit).await.unwrap();
+        apply_referral_edit_local(&config_lock, &p, &edit).await.unwrap();
         let rc = crate::resolver::ResolverConfig::load(&p).unwrap();
         assert_eq!(
             rc.as_file().member_servers.iter().map(|m| m.addr).collect::<Vec<_>>(),
@@ -7567,7 +7669,7 @@ mod v6_tests {
             .build()
             .unwrap();
         std::fs::write(&local_only, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
-        apply_referral_edit_local(&local_only, &edit).await.unwrap();
+        apply_referral_edit_local(&config_lock, &local_only, &edit).await.unwrap();
         let rc = crate::resolver::ResolverConfig::load(&local_only).unwrap();
         assert_eq!(rc.as_file().member_servers.len(), 1);
         assert_eq!(rc.as_file().member_servers[0].addr, resolver("10.0.60.1:4564").addr);
@@ -7582,7 +7684,7 @@ mod v6_tests {
             parent: None,
             children: vec![],
         };
-        assert!(apply_referral_edit_local(&p, &wrong_auth).await.is_err());
+        assert!(apply_referral_edit_local(&config_lock, &p, &wrong_auth).await.is_err());
     }
 
     #[test]
@@ -8189,22 +8291,32 @@ mod v6_tests {
         let (home_crl, home_ca) = signed_empty_crl(home.path(), "home-ca").await;
         let (foreign_crl, _) = signed_empty_crl(foreign.path(), "foreign-ca").await;
         let root = tempfile::tempdir().unwrap();
+        let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
         let destinations = BTreeSet::from([
             root.path().join("admin/crl.pem"),
             root.path().join("resolver/crl.pem"),
         ]);
 
-        apply_crl_to_destinations(&home_crl, &home_ca, destinations.clone())
-            .await
-            .unwrap();
+        apply_crl_to_destinations(
+            &config_lock,
+            &home_crl,
+            &home_ca,
+            destinations.clone(),
+        )
+        .await
+        .unwrap();
         for path in &destinations {
             assert_eq!(std::fs::read_to_string(path).unwrap(), home_crl);
         }
 
-        let error =
-            apply_crl_to_destinations(&foreign_crl, &home_ca, destinations.clone())
-                .await
-                .unwrap_err();
+        let error = apply_crl_to_destinations(
+            &config_lock,
+            &foreign_crl,
+            &home_ca,
+            destinations.clone(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{error:#}").contains("does not verify"));
         for path in &destinations {
             assert_eq!(
@@ -8246,7 +8358,9 @@ mod v6_tests {
             mdns: false,
             activation_units_dir: None,
         };
-        cfg.save(&cfg_path).unwrap();
+        let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
+        cfg.save(&config_lock, &cfg_path).unwrap();
+        drop(config_lock);
         let entry = |id, addr, roles| ServerEntry {
             id,
             addr,
@@ -8264,6 +8378,7 @@ mod v6_tests {
         new_map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = new_addr;
         let state = Server::from_state(
             ConfigDirLock::acquire(root.path()).unwrap(),
+            None,
             MutableState {
                 cfg,
                 map: old_map,

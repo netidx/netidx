@@ -15,7 +15,7 @@
 //! is appended by [`Ca::sign_request`] itself. Still deferred:
 //! hardware-token backing, `Ca::trust_into_*` config-wiring helpers.
 
-use crate::atomic;
+use crate::{atomic, config_lock::ConfigDirLock};
 use anyhow::{Context, Result};
 use openssl::{
     asn1::Asn1Time,
@@ -160,7 +160,8 @@ impl CaLifetimes {
         }
     }
 
-    pub fn store(&self, ca_dir: &Path) -> Result<()> {
+    pub fn store(&self, config_lock: &ConfigDirLock, ca_dir: &Path) -> Result<()> {
+        let ca_dir = config_lock.require_contained(ca_dir)?;
         let bytes = serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
         atomic::write_atomic(&ca_dir.join(Self::FILE), &bytes, 0o644)
     }
@@ -175,7 +176,12 @@ impl CaLifetimes {
         }
     }
 
-    pub async fn store_async(&self, ca_dir: &Path) -> Result<()> {
+    pub async fn store_async(
+        &self,
+        config_lock: &ConfigDirLock,
+        ca_dir: &Path,
+    ) -> Result<()> {
+        let ca_dir = config_lock.require_contained(ca_dir)?;
         let bytes = serde_json::to_vec_pretty(self).context("encoding CA lifetimes")?;
         atomic::write_atomic_async(&ca_dir.join(Self::FILE), &bytes, 0o644).await
     }
@@ -651,17 +657,19 @@ pub fn ca_cert_needs_renewal(ca_dir: &Path, threshold: Duration) -> bool {
 }
 
 pub fn maybe_renew_ca_cert(
+    config_lock: &ConfigDirLock,
     ca_dir: &Path,
     ca_key_pem: &[u8],
     serial: u64,
     threshold: Duration,
 ) -> Result<bool> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
     // An externally-signed CA cert cannot be self-renewed: netidx does
     // not hold the external issuer's key, so re-signing here would
     // clobber the external signature and silently revert the
     // intermediate to a self-signed root. The primary gate lives in
     // admin_server's approve path; this is defense in depth.
-    if CaLifetimes::load(ca_dir)?.externally_signed {
+    if CaLifetimes::load(&ca_dir)?.externally_signed {
         return Ok(false);
     }
     let cert_pem = std::fs::read(ca_dir.join("certificate.pem"))

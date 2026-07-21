@@ -85,8 +85,8 @@ pub async fn auto_approve(
     // is unsealable anyway, so recovery is the only way in.
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
     let recovery = ca_vault::normalize_recovery_password(typed.as_str());
-    let lock = match cfg.as_deref().and_then(Path::parent) {
-        Some(root) => ConfigDirLock::acquire_async(root).await?,
+    let lock = match cfg.as_deref() {
+        Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
         None => ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?,
     };
     let mut cadir = CaDir::open(lock, &ca_dir).await.context(
@@ -179,8 +179,8 @@ pub async fn auto_approve_status(
     let slot_present = match live_ca_status(ca_dir, cfg).await? {
         Some(status) => status.autorenew_slot_present,
         None => {
-            let lock = match cfg.and_then(Path::parent) {
-                Some(root) => ConfigDirLock::acquire_async(root).await?,
+            let lock = match cfg {
+                Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
                 None => ConfigDirLock::acquire_for_ca_dir(ca_dir).await?,
             };
             CAVault::exists_async(ca_dir).await
@@ -249,8 +249,8 @@ pub async fn recovery_rotate(
                 keytab.display()
             )
         })?;
-    let lock = match cfg.as_deref().and_then(Path::parent) {
-        Some(root) => ConfigDirLock::acquire_async(root).await?,
+    let lock = match cfg.as_deref() {
+        Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
         None => ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?,
     };
     let mut cadir = CaDir::open(lock, &ca_dir).await.context(
@@ -341,8 +341,7 @@ pub async fn recover_controller(
     resolver_listen: Option<SocketAddr>,
     insecure_no_tpm: bool,
 ) -> Result<RecoverControllerOutcome> {
-    let root = config_path.parent().context("admin-server config has no parent")?;
-    let lock = ConfigDirLock::acquire_async(root).await?;
+    let lock = ConfigDirLock::acquire_for_file_async(&config_path).await?;
     recover_controller_with_lock(
         ans,
         &lock,
@@ -432,9 +431,14 @@ fn protect_autorenew_keytab(
     }
 }
 
-async fn write_protected_key(path: &Path, protected: &ProtectedBytes) -> Result<()> {
-    atomic::write_atomic_async(path, &protected.bytes, 0o600).await?;
-    let sidecar = tls::sealed_sidecar(path);
+async fn write_protected_key(
+    config_lock: &ConfigDirLock,
+    path: &Path,
+    protected: &ProtectedBytes,
+) -> Result<()> {
+    let path = config_lock.require_contained(path)?;
+    atomic::write_atomic_async(&path, &protected.bytes, 0o600).await?;
+    let sidecar = tls::sealed_sidecar(&path);
     match &protected.sidecar {
         Some(blob) => atomic::write_atomic_async(&sidecar, blob, 0o600).await,
         None => {
@@ -484,6 +488,12 @@ async fn recover_controller_with_password_and_lock(
     autorenew_keytab: &Path,
     lock: Option<ConfigDirLock>,
 ) -> Result<RecoverControllerOutcome> {
+    let lock = match lock {
+        Some(lock) => lock,
+        None => ConfigDirLock::acquire_for_file_async(config_path).await?,
+    };
+    lock.require_descendant(ca_dir)?;
+    lock.require_contained(config_path)?;
     if !CAVault::exists_async(ca_dir).await {
         bail!("no vault-protected CA at {}", ca_dir.display());
     }
@@ -507,22 +517,11 @@ async fn recover_controller_with_password_and_lock(
         );
     }
 
-    // One config-directory guard covers recovery-password verification, serial/CRL
-    // mutation, vault re-key, and authoritative map update. A running daemon
-    // therefore cannot race a disaster-recovery attempt.
-    let lock = match lock {
-        Some(lock) => lock,
-        None => {
-            let root =
-                config_path.parent().context("admin-server config has no parent")?;
-            ConfigDirLock::acquire_async(root).await?
-        }
-    };
-    lock.require_descendant(ca_dir)?;
-    lock.require_contained(config_path)?;
     let mut cadir = CaDir::open(lock, ca_dir).await.context(
         "controller recovery requires exclusive CA access; stop the admin server",
     )?;
+    let config_lock = cadir.config_lock();
+    let autorenew_keytab = config_lock.require_contained(autorenew_keytab)?;
     let unlocked = cadir
         .vault
         .unlock_async(recovery_password)
@@ -669,12 +668,12 @@ async fn recover_controller_with_password_and_lock(
     let mut chain = leaf;
     chain.extend_from_slice(&ca_cert);
     atomic::write_atomic_async(&serving_certificate, &chain, 0o644).await?;
-    write_protected_key(&serving_key, &protected_serving).await?;
+    write_protected_key(&config_lock, &serving_key, &protected_serving).await?;
 
-    atomic::write_atomic_async(autorenew_keytab, &protected_autorenew.bytes, 0o600)
+    atomic::write_atomic_async(&autorenew_keytab, &protected_autorenew.bytes, 0o600)
         .await?;
 
-    netmap::save_async(ca_dir, &map).await?;
+    netmap::save_async(&config_lock, ca_dir, &map).await?;
 
     cfg.listen = listen;
     cfg.home_ca_fingerprint = restored_fingerprint.text();
@@ -691,8 +690,8 @@ async fn recover_controller_with_password_and_lock(
     cfg.ca_addr = None;
     let role = cfg.roles.ca.as_mut().expect("CA role checked above");
     role.dir = ca_dir.to_path_buf();
-    role.autorenew = Some(autorenew_keytab.to_path_buf());
-    cfg.save_async(config_path).await?;
+    role.autorenew = Some(autorenew_keytab.clone());
+    cfg.save_async(&config_lock, config_path).await?;
     AdminServerConfig::load_async(config_path)
         .await
         .context("the recovered admin-server configuration failed validation")?;
@@ -739,13 +738,19 @@ pub struct ExternalPending {
 impl ExternalPending {
     const FILE: &'static str = "external_pending.json";
 
-    pub fn store(&self, dir: &Path) -> Result<()> {
+    pub fn store(&self, config_lock: &ConfigDirLock, dir: &Path) -> Result<()> {
+        let dir = config_lock.require_contained(dir)?;
         let bytes = serde_json::to_vec_pretty(self)
             .context("encoding the external-sign marker")?;
         atomic::write_atomic(&dir.join(Self::FILE), &bytes, 0o644)
     }
 
-    pub async fn store_async(&self, dir: &Path) -> Result<()> {
+    pub async fn store_async(
+        &self,
+        config_lock: &ConfigDirLock,
+        dir: &Path,
+    ) -> Result<()> {
+        let dir = config_lock.require_contained(dir)?;
         let bytes = serde_json::to_vec_pretty(self)
             .context("encoding the external-sign marker")?;
         atomic::write_atomic_async(&dir.join(Self::FILE), &bytes, 0o644).await
@@ -1074,7 +1079,6 @@ mod tests {
         )
         .await
         .unwrap();
-        drop(config_lock);
         let server_dir = ca_dir.join("server");
         std::fs::create_dir_all(&server_dir).unwrap();
         let serving_cert = server_dir.join("cert.pem");
@@ -1106,7 +1110,7 @@ mod tests {
             parent: None,
             children: vec![],
         });
-        netmap::save(&ca_dir, &map).unwrap();
+        netmap::save(&config_lock, &ca_dir, &map).unwrap();
 
         let config = root.path().join("admin-server.json");
         let keytab = root.path().join("replacement-autorenew.keytab");
@@ -1145,6 +1149,7 @@ mod tests {
             0o600,
         )
         .unwrap();
+        drop(config_lock);
         let old_serial = {
             let lock = crate::config_lock::ConfigDirLock::acquire(root.path()).unwrap();
             let cadir = CaDir::open(lock, &ca_dir).await.unwrap();
@@ -1225,7 +1230,9 @@ mod tests {
         let mut map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
         map.servers[0].resolver = Some(old_resolver.clone());
         map.clusters[0].members = vec![old_resolver];
-        netmap::save(fixture.ca_dir.as_path(), &map).unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(&fixture.ca_dir).await.unwrap();
+        netmap::save(&lock, fixture.ca_dir.as_path(), &map).unwrap();
+        drop(lock);
         let out = recover_controller_with_password(
             fixture.ca_dir.as_path(),
             &fixture.config,
@@ -1424,7 +1431,9 @@ mod tests {
         .unwrap();
         let mut cfg = AdminServerConfig::load(&fixture.config).unwrap();
         cfg.mdns = false;
-        cfg.save_async(&fixture.config).await.unwrap();
+        let lock = ConfigDirLock::acquire_for_file(&fixture.config).unwrap();
+        cfg.save_async(&lock, &fixture.config).await.unwrap();
+        drop(lock);
         let config = fixture.config.clone();
         let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
         for _ in 0..500 {
@@ -1515,7 +1524,8 @@ mod tests {
         .unwrap();
         let mut cfg = AdminServerConfig::load(&fixture.config).unwrap();
         cfg.mdns = false;
-        cfg.save(&fixture.config).unwrap();
+        let lock = ConfigDirLock::acquire_for_file(&fixture.config).unwrap();
+        cfg.save(&lock, &fixture.config).unwrap();
         let unlocked = CAVault::open(fixture.ca_dir.clone())
             .await
             .unwrap()
@@ -1538,7 +1548,8 @@ mod tests {
         trusted.extend_from_slice(&intermediate_pem);
         cfg.trusted = fixture.ca_dir.join("trusted.pem");
         atomic::write_atomic(&cfg.trusted, &trusted, 0o644).unwrap();
-        cfg.save(&fixture.config).unwrap();
+        cfg.save(&lock, &fixture.config).unwrap();
+        drop(lock);
         let serving = std::fs::read_to_string(&cfg.serving_cert).unwrap();
         let marker = "-----END CERTIFICATE-----";
         let end = serving.find(marker).unwrap() + marker.len();
@@ -1548,8 +1559,9 @@ mod tests {
             String::from_utf8_lossy(&intermediate_pem)
         );
         atomic::write_atomic(&cfg.serving_cert, chain.as_bytes(), 0o644).unwrap();
+        let lock = ConfigDirLock::acquire_for_file(&fixture.config).unwrap();
         CaLifetimes { externally_signed: true, ..CaLifetimes::default() }
-            .store_async(fixture.ca_dir.as_path())
+            .store_async(&lock, fixture.ca_dir.as_path())
             .await
             .unwrap();
         ExternalPending {
@@ -1564,8 +1576,9 @@ mod tests {
             listen: Some(cfg.listen),
             units_dir: None,
         }
-        .store(fixture.ca_dir.as_path())
+        .store(&lock, fixture.ca_dir.as_path())
         .unwrap();
+        drop(lock);
         let config = fixture.config.clone();
         let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
         for _ in 0..500 {
@@ -1710,6 +1723,7 @@ mod tests {
         assert!(s.cert_installed);
         assert!(s.pending.is_none());
         // Drop a pending marker as `ca init --external-sign` would.
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         ExternalPending {
             cn: "ca.example.com".to_string(),
             domain: "example.com".to_string(),
@@ -1722,8 +1736,9 @@ mod tests {
             listen: None,
             units_dir: None,
         }
-        .store(dir.path())
+        .store(&lock, dir.path())
         .unwrap();
+        drop(lock);
         // With the cert still on disk, the CA is installed — NOT pending — even
         // though the marker persists for future renewals.
         assert!(external_status(dir.path()).await.unwrap().pending.is_none());
@@ -1741,6 +1756,7 @@ mod tests {
         use openssl::{pkey::PKey, x509::X509Req};
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("ca");
+        let lock = ConfigDirLock::acquire(root.path()).unwrap();
         let (key, _csr) = Ca::init_vaulted_external(&crate::ca::CaParams {
             directory: dir.clone(),
             subject: Subject::cn("ca.example.com"),
@@ -1750,7 +1766,7 @@ mod tests {
         })
         .unwrap();
         CaLifetimes { externally_signed: true, ..CaLifetimes::default() }
-            .store(&dir)
+            .store(&lock, &dir)
             .unwrap();
         ExternalPending {
             cn: "ca.example.com".into(),
@@ -1764,7 +1780,7 @@ mod tests {
             listen: None,
             units_dir: None,
         }
-        .store(&dir)
+        .store(&lock, &dir)
         .unwrap();
         let (cn, csr) = external_csr_with_key(&dir, &key).await.unwrap();
         assert_eq!(cn, "ca.example.com");

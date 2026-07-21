@@ -7,6 +7,7 @@ use crate::{
         Role, ServerEntry, ServerState,
     },
     atomic,
+    config_lock::ConfigDirLock,
 };
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -37,8 +38,9 @@ pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
     }
 }
 
-pub fn save(ca_dir: &Path, map: &NetworkMap) -> Result<()> {
-    atomic::write_atomic_pretty_json(&path(ca_dir), map)
+pub fn save(config_lock: &ConfigDirLock, ca_dir: &Path, map: &NetworkMap) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
+    atomic::write_atomic_pretty_json(&path(&ca_dir), map)
 }
 
 pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
@@ -63,8 +65,13 @@ pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<Netw
     }
 }
 
-pub async fn save_async(ca_dir: &Path, map: &NetworkMap) -> Result<()> {
-    atomic::write_atomic_pretty_json_async(&path(ca_dir), map).await
+pub async fn save_async(
+    config_lock: &ConfigDirLock,
+    ca_dir: &Path,
+    map: &NetworkMap,
+) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
+    atomic::write_atomic_pretty_json_async(&path(&ca_dir), map).await
 }
 
 fn changed(map: &mut NetworkMap) {

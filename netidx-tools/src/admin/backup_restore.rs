@@ -694,7 +694,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         if let Some(role) = cfgv.roles.id_map.as_mut() {
             role.map = root.join("id-map.json");
         }
-        cfgv.save(&cfg)?;
+        cfgv.save(config_lock.as_ref().expect("restore lock held"), &cfg)?;
         manifest.install.save(&root.join("install.json"))?;
     }
     #[cfg(not(unix))]

@@ -13,6 +13,7 @@ use crate::{
     admin_client,
     admin_proto::{InfoAuth, PeerResult, ResolverAddr},
     answer::Answerer,
+    config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
     plan::delegation::delegate_under_parent,
     resolver::ResolverConfig,
@@ -300,12 +301,23 @@ pub async fn add_parent(
             "the delegation was approved, but the controller did not write this resolver's complete topology; do not apply a parent-only edit. Re-approve the delegation to reconcile the failed target"
         );
     } else {
-        let rt = template::set_parent_referral(resolver_config, parent_ref)?;
-        ans.note(&rt.describe());
-        rt.apply().context("writing the parent referral")?;
+        let config_lock = ConfigDirLock::acquire_for_file_async(resolver_config).await?;
+        apply_parent_referral(&config_lock, ans, resolver_config, parent_ref)?;
     }
     let propagation = ClusterPropagation::ControllerManaged;
     Ok(AddParentOutcome { proposed_path: proposed_path.to_string(), propagation })
+}
+
+fn apply_parent_referral(
+    config_lock: &ConfigDirLock,
+    ans: &mut dyn Answerer,
+    resolver_config: &Path,
+    parent_ref: ParentRef,
+) -> Result<()> {
+    let resolver_config = config_lock.require_contained(resolver_config)?;
+    let rt = template::set_parent_referral(&resolver_config, parent_ref)?;
+    ans.note(&rt.describe());
+    rt.apply().context("writing the parent referral")
 }
 
 #[cfg(test)]

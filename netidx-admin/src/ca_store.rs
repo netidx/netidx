@@ -237,13 +237,6 @@ impl CaDir {
         Self::open_inner(lock, dir).await
     }
 
-    pub(crate) async fn open_staged(
-        lock: ConfigDirLock,
-        dir: impl Into<PathBuf>,
-    ) -> Result<Self> {
-        Self::open_inner(lock, dir.into()).await
-    }
-
     async fn open_inner(lock: ConfigDirLock, dir: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&dir)
             .await

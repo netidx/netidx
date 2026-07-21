@@ -169,6 +169,8 @@ pub async fn setup_autorenew_slot(
     recovery_password: &str,
     insecure_no_tpm: bool,
 ) -> Result<PathBuf> {
+    let keytab =
+        cadir.config_lock().require_contained(offline_ca::autorenew_keytab_path()?)?;
     // Replace-not-fail: rotation and re-runs both land here.
     let exists =
         cadir.vault.list_admins()?.iter().any(|info| info.admin == AUTORENEW_ADMIN);
@@ -185,7 +187,6 @@ pub async fn setup_autorenew_slot(
             crate::ca_policy::autorenew_policy(),
         )
         .await?;
-    let keytab = offline_ca::autorenew_keytab_path()?;
     // `available()` (which the caller's TPM gate checked) only proves the
     // device opened, NOT that a seal will succeed — a present-but-locked or
     // busy TPM fails here. The seal decision is the real one: a plaintext
@@ -247,7 +248,7 @@ pub async fn seal_ca_recovery(
     lifetimes: CaLifetimes,
 ) -> Result<(Zeroizing<String>, ca_store::CaDir)> {
     let recovery_pw = ca_vault::gen_recovery_password();
-    let mut cadir = ca_store::CaDir::open_staged(config_lock, dir)
+    let mut cadir = ca_store::CaDir::open(config_lock, dir)
         .await
         .context("opening the new CA directory")?;
     if let Err(e) = cadir
@@ -264,8 +265,22 @@ pub async fn seal_ca_recovery(
         let _ = tokio::fs::remove_file(dir.join("serial")).await;
         return Err(e).context("sealing CA key into the vault");
     }
-    lifetimes.store_async(dir).await.context("writing CA lifetimes")?;
+    lifetimes
+        .store_async(&cadir.config_lock(), dir)
+        .await
+        .context("writing CA lifetimes")?;
     Ok((recovery_pw, cadir))
+}
+
+async fn staged_ca_lock(
+    config_lock: &ConfigDirLock,
+    stage_dir: &Path,
+) -> Result<ConfigDirLock> {
+    if config_lock.contains(stage_dir)? {
+        Ok(config_lock.clone())
+    } else {
+        ConfigDirLock::acquire_for_ca_dir(stage_dir).await
+    }
 }
 
 /// **The** entry point for building a new vaulted CA, shared verbatim
@@ -323,6 +338,7 @@ pub async fn create_vaulted_ca(
     // state.
     let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
+    let stage_lock = staged_ca_lock(&config_lock, &stage_dir).await?;
 
     // Generate the CA (its key is returned, never written to disk in
     // plaintext) and seal it into the vault under the `recovery` slot —
@@ -347,7 +363,7 @@ pub async fn create_vaulted_ca(
     // Seal the key into the recovery slot and persist the lifetime policy
     // (self-signed CA — externally_signed is false).
     let (recovery_pw, mut cadir) = seal_ca_recovery(
-        config_lock.clone(),
+        stage_lock,
         &stage_dir,
         &key_pem,
         CaLifetimes {
@@ -473,6 +489,7 @@ pub async fn create_vaulted_external_ca(
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
     let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
+    let stage_lock = staged_ca_lock(&config_lock, &stage_dir).await?;
     let params = CaParams {
         directory: stage_dir.clone(),
         subject: Subject {
@@ -491,7 +508,7 @@ pub async fn create_vaulted_external_ca(
             .await
             .context("external CA generation task panicked")??;
     let (recovery_pw, cadir) = seal_ca_recovery(
-        config_lock.clone(),
+        stage_lock,
         &stage_dir,
         &key_pem,
         CaLifetimes {
@@ -513,7 +530,7 @@ pub async fn create_vaulted_external_ca(
         listen: opts.listen,
         units_dir: opts.units_dir.clone(),
     }
-    .store_async(&stage_dir)
+    .store_async(&cadir.config_lock(), &stage_dir)
     .await?;
     show_recovery_password(ans, &recovery_pw).await?;
     drop(cadir);

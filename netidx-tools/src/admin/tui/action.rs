@@ -844,7 +844,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         if let Some(role) = cfg.roles.id_map.as_mut() {
             role.map = root.join("id-map.json");
         }
-        cfg.save(&cfg_path)?;
+        cfg.save(&config_lock, &cfg_path)?;
         manifest.install.save_async(&root.join("install.json")).await?;
     }
     #[cfg(not(unix))]
@@ -1024,6 +1024,8 @@ async fn update(
     config_root: PathBuf,
 ) -> Result<Outcome> {
     ans.progress(Progress::new(Stage::Discovering, "checking the cluster for changes…"));
+    let config_lock =
+        netidx_admin::config_lock::ConfigDirLock::acquire_async(&config_root).await?;
     let plan = super::lifecycle::update_plan(&config_root, role).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
@@ -1033,7 +1035,7 @@ async fn update(
         ));
     }
     let mut lines: Vec<String> = plan.describe().lines().map(str::to_string).collect();
-    plan.apply()?;
+    plan.apply(&config_lock)?;
     lines.push(String::new());
     lines.push(super::lifecycle::restart_hint_for_plan(role, &plan).to_string());
     Ok(Outcome {

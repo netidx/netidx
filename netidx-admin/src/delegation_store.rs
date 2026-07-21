@@ -22,6 +22,7 @@ use crate::{
     admin_proto::{AdminServerId, ResolverAddr, ResolverClusterId},
     atomic,
     ca_store::{TTL, new_id, now_unix, valid_id},
+    config_lock::ConfigDirLock,
 };
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -125,20 +126,25 @@ fn denied_path(ca_dir: &Path, id: &str) -> PathBuf {
 
 /// Add a delegation request to the active queue. Prunes first; refuses at
 /// [`MAX_PENDING`].
-pub async fn enqueue(ca_dir: &Path, req: &PendingDelegation) -> Result<()> {
+pub async fn enqueue(
+    config_lock: &ConfigDirLock,
+    ca_dir: &Path,
+    req: &PendingDelegation,
+) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
-    let dir = queue_dir(ca_dir);
+    let dir = queue_dir(&ca_dir);
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
-    prune(ca_dir).await?;
+    prune(config_lock, &ca_dir).await?;
     anyhow::ensure!(
-        pending(ca_dir).await?.len() < MAX_PENDING,
+        pending(&ca_dir).await?.len() < MAX_PENDING,
         "the delegation queue is full ({MAX_PENDING} pending requests)"
     );
     let bytes =
         serde_json::to_vec_pretty(req).context("serializing delegation request")?;
-    atomic::write_atomic_async(&queue_path(ca_dir, &req.id), &bytes, 0o644).await
+    atomic::write_atomic_async(&queue_path(&ca_dir, &req.id), &bytes, 0o644).await
 }
 
 /// Every pending delegation (active, not expired, not already terminal),
@@ -266,52 +272,61 @@ pub async fn approved(ca_dir: &Path) -> Result<Vec<ApprovedRecord>> {
 /// Commit an approval: write the `approved/` record (the atomic commit),
 /// then remove the `queue/` entry. The single write is the transaction.
 pub async fn approve(
+    config_lock: &ConfigDirLock,
     ca_dir: &Path,
     req: &PendingDelegation,
     parent: Vec<ResolverAddr>,
 ) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
-    let dir = approved_dir(ca_dir);
+    let dir = approved_dir(&ca_dir);
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let rec = ApprovedRecord { req: req.clone(), parent, approved_unix: now_unix() };
     let bytes =
         serde_json::to_vec_pretty(&rec).context("serializing approved delegation")?;
-    atomic::write_atomic_async(&approved_path(ca_dir, &req.id), &bytes, 0o644).await?;
-    let _ = tokio::fs::remove_file(queue_path(ca_dir, &req.id)).await;
+    atomic::write_atomic_async(&approved_path(&ca_dir, &req.id), &bytes, 0o644).await?;
+    let _ = tokio::fs::remove_file(queue_path(&ca_dir, &req.id)).await;
     Ok(())
 }
 
 /// Commit a denial: write the `denied/` record, then remove the queue
 /// entry.
-pub async fn deny(ca_dir: &Path, req: &PendingDelegation, reason: &str) -> Result<()> {
+pub async fn deny(
+    config_lock: &ConfigDirLock,
+    ca_dir: &Path,
+    req: &PendingDelegation,
+    reason: &str,
+) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
     anyhow::ensure!(valid_id(&req.id), "malformed request id");
-    let dir = denied_dir(ca_dir);
+    let dir = denied_dir(&ca_dir);
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
     let rec = DeniedRecord { req: req.clone(), reason: reason.to_string() };
     let bytes =
         serde_json::to_vec_pretty(&rec).context("serializing denied delegation")?;
-    atomic::write_atomic_async(&denied_path(ca_dir, &req.id), &bytes, 0o644).await?;
-    let _ = tokio::fs::remove_file(queue_path(ca_dir, &req.id)).await;
+    atomic::write_atomic_async(&denied_path(&ca_dir, &req.id), &bytes, 0o644).await?;
+    let _ = tokio::fs::remove_file(queue_path(&ca_dir, &req.id)).await;
     Ok(())
 }
 
 /// Drop expired/terminal-shadowed queue entries and expired denied/approved
 /// records. Best-effort; called on every enqueue.
-pub async fn prune(ca_dir: &Path) -> Result<()> {
+pub async fn prune(config_lock: &ConfigDirLock, ca_dir: &Path) -> Result<()> {
+    let ca_dir = config_lock.require_contained(ca_dir)?;
     let now = now_unix();
-    if let Ok(mut entries) = tokio::fs::read_dir(queue_dir(ca_dir)).await {
+    if let Ok(mut entries) = tokio::fs::read_dir(queue_dir(&ca_dir)).await {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
             if !valid_id(id) {
                 continue;
             }
-            let shadowed = tokio::fs::try_exists(approved_path(ca_dir, id)).await?
-                || tokio::fs::try_exists(denied_path(ca_dir, id)).await?;
+            let shadowed = tokio::fs::try_exists(approved_path(&ca_dir, id)).await?
+                || tokio::fs::try_exists(denied_path(&ca_dir, id)).await?;
             let expired = match tokio::fs::read(&path).await {
                 Ok(b) => match serde_json::from_slice::<PendingDelegation>(&b) {
                     Ok(req) => now.saturating_sub(req.received_unix) > TTL.as_secs(),
@@ -324,7 +339,7 @@ pub async fn prune(ca_dir: &Path) -> Result<()> {
             }
         }
     }
-    for dir in [denied_dir(ca_dir), approved_dir(ca_dir)] {
+    for dir in [denied_dir(&ca_dir), approved_dir(&ca_dir)] {
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
@@ -370,18 +385,19 @@ mod tests {
     async fn enqueue_pending_approve_status() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path();
+        let lock = ConfigDirLock::acquire(ca).unwrap();
         let req = PendingDelegation::new(
             "/ap".into(),
             vec![AdminServerId::new()],
             vec![AdminServerId::new()],
             "10.0.0.2:5000".into(),
         );
-        enqueue(ca, &req).await.unwrap();
+        enqueue(&lock, ca, &req).await.unwrap();
         assert_eq!(pending(ca).await.unwrap().len(), 1);
         assert!(matches!(status(ca, &req.id).await.unwrap(), Status::Pending(_)));
         assert!(read_pending(ca, &req.id).await.unwrap().is_some());
 
-        approve(ca, &req, vec![ra("10.0.0.1:4564")]).await.unwrap();
+        approve(&lock, ca, &req, vec![ra("10.0.0.1:4564")]).await.unwrap();
         // Terminal wins; queue entry removed.
         assert!(pending(ca).await.unwrap().is_empty());
         match status(ca, &req.id).await.unwrap() {
@@ -398,14 +414,15 @@ mod tests {
     async fn deny_is_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path();
+        let lock = ConfigDirLock::acquire(ca).unwrap();
         let req = PendingDelegation::new(
             "/ap".into(),
             vec![AdminServerId::new()],
             vec![AdminServerId::new()],
             "p".into(),
         );
-        enqueue(ca, &req).await.unwrap();
-        deny(ca, &req, "not authorized").await.unwrap();
+        enqueue(&lock, ca, &req).await.unwrap();
+        deny(&lock, ca, &req, "not authorized").await.unwrap();
         assert!(pending(ca).await.unwrap().is_empty());
         match status(ca, &req.id).await.unwrap() {
             Status::Denied { reason } => assert_eq!(reason, "not authorized"),

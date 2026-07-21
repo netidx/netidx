@@ -7,7 +7,10 @@
 //! finds lying around. `peers` is the complex-network fallback for
 //! hosts mDNS can't see; on a flat LAN discovery makes it redundant.
 
-use crate::{admin_proto::AdminServerId, atomic, fingerprint::Fingerprint};
+use crate::{
+    admin_proto::AdminServerId, atomic, config_lock::ConfigDirLock,
+    fingerprint::Fingerprint,
+};
 use anyhow::{Context, Result, bail};
 use serde_derive::{Deserialize, Serialize};
 use std::{
@@ -221,16 +224,22 @@ impl AdminServerConfig {
         Ok(())
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&self, config_lock: &ConfigDirLock, path: &Path) -> Result<()> {
+        let path = config_lock.require_contained(path)?;
         let bytes =
             serde_json::to_vec_pretty(self).context("serializing admin-server config")?;
-        atomic::write_atomic(path, &bytes, 0o644)
+        atomic::write_atomic(&path, &bytes, 0o644)
     }
 
-    pub async fn save_async(&self, path: &Path) -> Result<()> {
+    pub async fn save_async(
+        &self,
+        config_lock: &ConfigDirLock,
+        path: &Path,
+    ) -> Result<()> {
+        let path = config_lock.require_contained(path)?;
         let bytes =
             serde_json::to_vec_pretty(self).context("serializing admin-server config")?;
-        atomic::write_atomic_async(path, &bytes, 0o644).await
+        atomic::write_atomic_async(&path, &bytes, 0o644).await
     }
 }
 
@@ -270,8 +279,9 @@ mod tests {
     fn round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("admin-server.json");
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         let cfg = sample();
-        cfg.save(&p).unwrap();
+        cfg.save(&lock, &p).unwrap();
         let bytes = std::fs::read(&p).unwrap();
         assert_eq!(serde_json::from_slice::<AdminServerConfig>(&bytes).unwrap(), cfg);
     }
@@ -311,10 +321,11 @@ mod tests {
         // rejected at load, not silently accepted (it would never register).
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("admin-server.json");
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         let mut bad = sample();
         bad.roles.ca = None;
         bad.ca_addr = None;
-        bad.save(&p).unwrap(); // save does not validate
+        bad.save(&lock, &p).unwrap(); // save does not validate
         assert!(AdminServerConfig::load(&p).is_err(), "load rejects non-CA + no ca_addr");
     }
 

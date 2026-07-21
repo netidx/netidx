@@ -61,6 +61,8 @@ pub async fn setup_server(
     ans: &mut dyn Answerer,
     a: SetupArgs<'_>,
 ) -> Result<ServiceNeed> {
+    a.config_lock.require_descendant(a.ca_dir)?;
+    let cfg_path = a.config_lock.require_contained(paths::user_admin_server_config()?)?;
     let server_dir = a.ca_dir.join("server");
     tokio::fs::create_dir_all(&server_dir)
         .await
@@ -184,16 +186,7 @@ pub async fn setup_server(
         mdns: true,
         activation_units_dir: None,
     };
-    let cfg_path = paths::user_admin_server_config()?;
-    let cfg_root = cfg_path.parent().context("admin-server config has no parent")?;
-    anyhow::ensure!(
-        a.config_lock.contains(&cfg_path)?
-            && a.config_lock.require_descendant(a.ca_dir).is_ok(),
-        "served CA directory {} is not below config directory {}",
-        a.ca_dir.display(),
-        cfg_root.display()
-    );
-    cfg.save_async(&cfg_path).await?;
+    cfg.save_async(&a.config_lock, &cfg_path).await?;
 
     ans.note(&format_compact!(
         "admin server configured:\n\
@@ -257,11 +250,10 @@ pub async fn install_unit(
 /// an error: roles only make sense on a host that has one.
 pub async fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
     let cfg_path = paths::discover_admin_server_config_async().await?;
-    let root = cfg_path.parent().context("admin-server config has no parent")?;
-    let _lock = ConfigDirLock::acquire_async(root).await?;
+    let lock = ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
     let mut cfg = AdminServerConfig::load_async(&cfg_path).await?;
     update(&mut cfg.roles);
-    cfg.save_async(&cfg_path).await?;
+    cfg.save_async(&lock, &cfg_path).await?;
     Ok(cfg_path)
 }
 
@@ -273,6 +265,7 @@ pub async fn set_ca_autorenew(
     config_lock: &ConfigDirLock,
     keytab: &Path,
 ) -> Result<PathBuf> {
+    let keytab = config_lock.require_contained(keytab)?;
     let cfg_path = paths::discover_admin_server_config_async().await?;
     anyhow::ensure!(
         config_lock.contains(&cfg_path)?,
@@ -284,8 +277,8 @@ pub async fn set_ca_autorenew(
     let ca = cfg.roles.ca.as_mut().ok_or_else(|| {
         anyhow!("admin-server config {} has no CA role", cfg_path.display())
     })?;
-    ca.autorenew = Some(keytab.to_path_buf());
-    cfg.save_async(&cfg_path).await?;
+    ca.autorenew = Some(keytab);
+    cfg.save_async(config_lock, &cfg_path).await?;
     Ok(cfg_path)
 }
 

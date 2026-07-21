@@ -1464,7 +1464,11 @@ pub async fn enroll_admin_server(
     // Serving identity: chain = [issued leaf, confirmed CA] so clients receive
     // the CA cert at the end of the chain, exactly like the CA host's own admin
     // server.
+    let cfg_path = paths::user_admin_server_config()?;
+    let config_lock =
+        crate::config_lock::ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
     let dir = paths::user_config_root()?.join("admin-server");
+    config_lock.require_contained(&dir)?;
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("creating {}", dir.display()))?;
@@ -1511,8 +1515,7 @@ pub async fn enroll_admin_server(
         mdns: true,
         activation_units_dir: None,
     };
-    let cfg_path = paths::user_admin_server_config()?;
-    cfg.save_async(&cfg_path).await?;
+    cfg.save_async(&config_lock, &cfg_path).await?;
     ans.note(&format_compact!(
         "admin server configured:\n\
          \x20 config:   {}\n\

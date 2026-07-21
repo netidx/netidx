@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::id_map;
+use netidx_admin::{config_lock::ConfigDirLock, id_map};
 use std::path::PathBuf;
 
 use super::editor;
@@ -117,34 +117,46 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Init { file, default_uid, default_gid } => {
-            init(resolve(file)?, default_uid, default_gid)
+            let (lock, file) = resolve_locked(file)?;
+            init(&lock, file, default_uid, default_gid)
         }
         Cmd::Show { file } => show(resolve(file)?),
-        Cmd::Edit { file } => edit(resolve(file)?),
+        Cmd::Edit { file } => {
+            let (lock, file) = resolve_locked(file)?;
+            edit(&lock, file)
+        }
         Cmd::List { file } => list(resolve(file)?),
         Cmd::AddGroup { file, name, gid } => {
-            let file = resolve(file)?;
-            let m = load_or_empty(&file)?;
-            let gid = gid
-                .or_else(|| m.groups.get(name.as_str()).map(|g| g.gid))
-                .unwrap_or_else(|| next_group_gid(&m));
-            add_group(file, name, gid)
+            let (lock, file) = resolve_locked(file)?;
+            add_group(&lock, file, name, gid)
         }
-        Cmd::RemoveGroup { file, name } => remove_group(resolve(file)?, name),
+        Cmd::RemoveGroup { file, name } => {
+            let (lock, file) = resolve_locked(file)?;
+            remove_group(&lock, file, name)
+        }
         Cmd::AddUser { file, name, uid, primary_group, groups } => {
-            let file = resolve(file)?;
-            let m = load_or_empty(&file)?;
-            let uid = uid
-                .or_else(|| m.identities.get(name.as_str()).map(|i| i.uid))
-                .unwrap_or_else(|| next_user_uid(&m));
-            add_user(file, name, uid, primary_group, groups)
+            let (lock, file) = resolve_locked(file)?;
+            add_user(&lock, file, name, uid, primary_group, groups)
         }
-        Cmd::RemoveUser { file, name } => remove_user(resolve(file)?, name),
-        Cmd::AddMember { file, name, group } => add_member(resolve(file)?, name, group),
+        Cmd::RemoveUser { file, name } => {
+            let (lock, file) = resolve_locked(file)?;
+            remove_user(&lock, file, name)
+        }
+        Cmd::AddMember { file, name, group } => {
+            let (lock, file) = resolve_locked(file)?;
+            add_member(&lock, file, name, group)
+        }
         Cmd::RemoveMember { file, name, group } => {
-            remove_member(resolve(file)?, name, group)
+            let (lock, file) = resolve_locked(file)?;
+            remove_member(&lock, file, name, group)
         }
     }
+}
+
+fn resolve_locked(file: Option<PathBuf>) -> Result<(ConfigDirLock, PathBuf)> {
+    let file = resolve(file)?;
+    let lock = ConfigDirLock::acquire_for_file(&file)?;
+    Ok((lock, file))
 }
 
 fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
@@ -154,7 +166,13 @@ fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn init(file: PathBuf, default_uid: u32, default_gid: u32) -> Result<()> {
+fn init(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    default_uid: u32,
+    default_gid: u32,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     if file.exists() {
         bail!("{} already exists; refusing to overwrite", file.display());
     }
@@ -172,7 +190,8 @@ fn show(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn edit(file: PathBuf) -> Result<()> {
+fn edit(config_lock: &ConfigDirLock, file: PathBuf) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let initial = if file.exists() {
         let m = id_map::load(&file)?;
         serde_json::to_string_pretty(&m)?
@@ -245,8 +264,17 @@ fn next_group_gid(m: &id_map::IdMap) -> u32 {
     next_id(m.groups.values().map(|g| g.gid))
 }
 
-fn add_group(file: PathBuf, name: String, gid: u32) -> Result<()> {
+fn add_group(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    name: String,
+    gid: Option<u32>,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = load_or_empty(&file)?;
+    let gid = gid
+        .or_else(|| m.groups.get(name.as_str()).map(|g| g.gid))
+        .unwrap_or_else(|| next_group_gid(&m));
     let prev = id_map::upsert_group(&mut m, &name, gid);
     id_map::save(&file, &m)?;
     match prev {
@@ -256,7 +284,8 @@ fn add_group(file: PathBuf, name: String, gid: u32) -> Result<()> {
     Ok(())
 }
 
-fn remove_group(file: PathBuf, name: String) -> Result<()> {
+fn remove_group(config_lock: &ConfigDirLock, file: PathBuf, name: String) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = id_map::load(&file)?;
     id_map::remove_group(&mut m, &name)?;
     id_map::save(&file, &m)?;
@@ -265,13 +294,18 @@ fn remove_group(file: PathBuf, name: String) -> Result<()> {
 }
 
 fn add_user(
+    config_lock: &ConfigDirLock,
     file: PathBuf,
     name: String,
-    uid: u32,
+    uid: Option<u32>,
     primary_group: String,
     groups: Vec<String>,
 ) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = load_or_empty(&file)?;
+    let uid = uid
+        .or_else(|| m.identities.get(name.as_str()).map(|i| i.uid))
+        .unwrap_or_else(|| next_user_uid(&m));
     let group_refs: Vec<&str> = groups.iter().map(|s| s.as_str()).collect();
     let prev = id_map::upsert_identity(&mut m, &name, uid, &primary_group, &group_refs)?;
     id_map::save(&file, &m)?;
@@ -287,7 +321,8 @@ fn add_user(
     Ok(())
 }
 
-fn remove_user(file: PathBuf, name: String) -> Result<()> {
+fn remove_user(config_lock: &ConfigDirLock, file: PathBuf, name: String) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = id_map::load(&file)?;
     match id_map::remove_identity(&mut m, &name) {
         Some(_) => {
@@ -299,7 +334,13 @@ fn remove_user(file: PathBuf, name: String) -> Result<()> {
     Ok(())
 }
 
-fn add_member(file: PathBuf, name: String, group: String) -> Result<()> {
+fn add_member(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    name: String,
+    group: String,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = id_map::load(&file)?;
     id_map::add_group_member(&mut m, &name, &group)?;
     id_map::save(&file, &m)?;
@@ -307,7 +348,13 @@ fn add_member(file: PathBuf, name: String, group: String) -> Result<()> {
     Ok(())
 }
 
-fn remove_member(file: PathBuf, name: String, group: String) -> Result<()> {
+fn remove_member(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    name: String,
+    group: String,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     let mut m = id_map::load(&file)?;
     id_map::remove_group_member(&mut m, &name, &group)?;
     id_map::save(&file, &m)?;
@@ -323,15 +370,17 @@ mod tests {
     fn end_to_end_editing_flow() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("id-map.json");
-        init(f.clone(), 65534, 65534).unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        init(&lock, f.clone(), 65534, 65534).unwrap();
         // Groups first, then identities — the validate step enforces
         // referential integrity on every save.
-        add_group(f.clone(), "users".into(), 100).unwrap();
-        add_group(f.clone(), "wheel".into(), 10).unwrap();
+        add_group(&lock, f.clone(), "users".into(), Some(100)).unwrap();
+        add_group(&lock, f.clone(), "wheel".into(), Some(10)).unwrap();
         add_user(
+            &lock,
             f.clone(),
             "alice.example.com".into(),
-            1000,
+            Some(1000),
             "users".into(),
             vec!["wheel".into()],
         )
@@ -342,18 +391,19 @@ mod tests {
         assert_eq!(m.groups.len(), 2);
 
         // Add-member is idempotent; remove-member won't drop the primary.
-        add_member(f.clone(), "alice.example.com".into(), "wheel".into()).unwrap();
+        add_member(&lock, f.clone(), "alice.example.com".into(), "wheel".into()).unwrap();
         assert!(
-            remove_member(f.clone(), "alice.example.com".into(), "users".into()).is_err(),
+            remove_member(&lock, f.clone(), "alice.example.com".into(), "users".into(),)
+                .is_err(),
             "removing primary via remove-member must error",
         );
 
-        remove_user(f.clone(), "alice.example.com".into()).unwrap();
+        remove_user(&lock, f.clone(), "alice.example.com".into()).unwrap();
         let m = id_map::load(&f).unwrap();
         assert!(m.identities.is_empty());
 
         // remove-group succeeds now that nothing references them.
-        remove_group(f.clone(), "wheel".into()).unwrap();
+        remove_group(&lock, f.clone(), "wheel".into()).unwrap();
         let m = id_map::load(&f).unwrap();
         assert_eq!(m.groups.len(), 1);
     }
@@ -362,8 +412,9 @@ mod tests {
     fn init_refuses_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("id-map.json");
-        init(f.clone(), 65534, 65534).unwrap();
-        let err = init(f, 65534, 65534).unwrap_err();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        init(&lock, f.clone(), 65534, 65534).unwrap();
+        let err = init(&lock, f, 65534, 65534).unwrap_err();
         assert!(format!("{err:#}").contains("already exists"));
     }
 
@@ -371,8 +422,10 @@ mod tests {
     fn add_user_rejects_unknown_primary() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("id-map.json");
-        init(f.clone(), 65534, 65534).unwrap();
-        let err = add_user(f, "alice".into(), 1000, "ghost".into(), vec![]).unwrap_err();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        init(&lock, f.clone(), 65534, 65534).unwrap();
+        let err = add_user(&lock, f, "alice".into(), Some(1000), "ghost".into(), vec![])
+            .unwrap_err();
         assert!(format!("{err:#}").contains("primary_group"), "got {err:#}",);
     }
 }

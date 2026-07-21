@@ -71,17 +71,36 @@ impl ConfigDirLock {
 
     fn acquire_for_ca_dir_sync(ca_dir: impl AsRef<Path>) -> Result<Self> {
         let ca_dir = normalize(ca_dir.as_ref())?;
-        let user =
-            crate::paths::user_config_root().ok().and_then(|root| normalize(&root).ok());
-        let system = normalize(&crate::paths::system_config_root()).ok();
-        let root = user
-            .into_iter()
-            .chain(system)
-            .find(|root| ca_dir.starts_with(root))
-            .unwrap_or_else(|| ca_dir.clone());
+        let root = Self::root_for_ca_dir(&ca_dir)?;
         let lock = Self::acquire(root)?;
         lock.require_contained(ca_dir)?;
         Ok(lock)
+    }
+
+    pub(crate) fn root_for_ca_dir(ca_dir: impl AsRef<Path>) -> Result<PathBuf> {
+        let ca_dir = normalize(ca_dir.as_ref())?;
+        Ok(standard_root(&ca_dir).unwrap_or(ca_dir))
+    }
+
+    pub fn acquire_for_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = normalize(path.as_ref())?;
+        let root = match standard_root(&path) {
+            Some(root) => root,
+            None => path
+                .parent()
+                .context("configuration file has no parent directory")?
+                .to_path_buf(),
+        };
+        let lock = Self::acquire(root)?;
+        lock.require_contained(path)?;
+        Ok(lock)
+    }
+
+    pub async fn acquire_for_file_async(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        tokio::task::spawn_blocking(move || Self::acquire_for_file(path))
+            .await
+            .context("config-directory lock task panicked")?
     }
 
     pub fn root(&self) -> &Path {
@@ -120,6 +139,13 @@ impl ConfigDirLock {
     fn lock_path(&self) -> &Path {
         &self.0.lock_path
     }
+}
+
+fn standard_root(path: &Path) -> Option<PathBuf> {
+    let user =
+        crate::paths::user_config_root().ok().and_then(|root| normalize(&root).ok());
+    let system = normalize(&crate::paths::system_config_root()).ok();
+    user.into_iter().chain(system).find(|root| path.starts_with(root))
 }
 
 fn open_lock(path: &Path) -> Result<File> {
@@ -216,6 +242,19 @@ mod tests {
         let first = ConfigDirLock::acquire_for_ca_dir(&ca).await.unwrap();
         assert_eq!(first.root(), ca);
         assert_eq!(first.require_contained(&ca).unwrap(), ca);
+        assert!(first.require_contained(parent.path().join("id-map.json")).is_err());
         assert!(ConfigDirLock::acquire_for_ca_dir(&ca).await.is_err());
+    }
+
+    #[test]
+    fn standalone_file_uses_its_parent_as_the_lock_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("id-map.json");
+        let lock = ConfigDirLock::acquire_for_file(&path).unwrap();
+        assert_eq!(lock.root(), parent.path());
+        assert_eq!(lock.require_contained(&path).unwrap(), path);
+        assert!(
+            ConfigDirLock::acquire_for_file(parent.path().join("perms.json")).is_err()
+        );
     }
 }

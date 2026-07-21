@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::{paths, resolver::ResolverConfig};
+use netidx_admin::{config_lock::ConfigDirLock, paths, resolver::ResolverConfig};
 use std::path::PathBuf;
 
 use super::editor;
@@ -44,6 +44,8 @@ fn edit(file: Option<PathBuf>) -> Result<()> {
         Some(p) => p,
         None => paths::user_resolver_config()?,
     };
+    let config_lock = ConfigDirLock::acquire_for_file(&target)?;
+    let target = config_lock.require_contained(target)?;
     let initial = if target.exists() {
         let cfg = ResolverConfig::load(&target)?;
         serde_json::to_string_pretty(cfg.as_file())?

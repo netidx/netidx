@@ -14,6 +14,7 @@ use crate::{
     answer::{Answerer, Field},
     atomic,
     ca::{self, CsrSummary, IssueParams, SanEntry, Subject},
+    config_lock::ConfigDirLock,
     id_map, offline_ca,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -117,6 +118,18 @@ pub async fn ca_sign(
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
     let (ca, config_lock) = offline_ca::open_ca(ans, &ca_dir).await?;
+    let id_map_lock = match &id_map {
+        IdMapAction::Skip => config_lock.clone(),
+        IdMapAction::Ask if !ans.interactive() => config_lock.clone(),
+        IdMapAction::Ask | IdMapAction::Register { .. } => {
+            let map_path = id_map::user_id_map_path()?;
+            if config_lock.contains(&map_path)? {
+                config_lock.clone()
+            } else {
+                ConfigDirLock::acquire_for_file_async(map_path).await?
+            }
+        }
+    };
     let cert_pem = offline_ca::sign_and_record(
         &config_lock,
         &ca,
@@ -130,7 +143,7 @@ pub async fn ca_sign(
     atomic::write_atomic_async(&out, &cert_pem, 0o644)
         .await
         .with_context(|| format!("writing certificate to {}", out.display()))?;
-    let id_map = register_id_map(ans, &summary, &san, id_map).await?;
+    let id_map = register_id_map(&id_map_lock, ans, &summary, &san, id_map).await?;
     Ok(SignOutcome { summary, san, name, out, id_map })
 }
 
@@ -177,6 +190,7 @@ async fn resolve_san(
 /// prompts (groups then uid) for `Ask` under an interactive frontend. Group and
 /// uid validity is enforced by [`id_map::upsert_identity`].
 async fn register_id_map(
+    config_lock: &ConfigDirLock,
     ans: &mut dyn Answerer,
     summary: &CsrSummary,
     san: &[SanEntry],
@@ -204,7 +218,7 @@ async fn register_id_map(
         Some(n) => n,
         None => return Ok(IdMapResult::NoIdentityName),
     };
-    let map_path = id_map::user_id_map_path()?;
+    let map_path = config_lock.require_contained(id_map::user_id_map_path()?)?;
     let mut map = match id_map::load_async(&map_path).await {
         Ok(m) => m,
         Err(_) => return Ok(IdMapResult::NoMap { path: map_path }),

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::{paths, perms};
+use netidx_admin::{config_lock::ConfigDirLock, paths, perms};
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -39,9 +39,21 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { file, path } => list(resolve(file)?, path),
-        Cmd::Set { file, path, entity, bits } => set(resolve(file)?, path, entity, bits),
-        Cmd::Remove { file, path, entity } => remove(resolve(file)?, path, entity),
+        Cmd::Set { file, path, entity, bits } => {
+            let (lock, file) = resolve_locked(file)?;
+            set(&lock, file, path, entity, bits)
+        }
+        Cmd::Remove { file, path, entity } => {
+            let (lock, file) = resolve_locked(file)?;
+            remove(&lock, file, path, entity)
+        }
     }
+}
+
+fn resolve_locked(file: Option<PathBuf>) -> Result<(ConfigDirLock, PathBuf)> {
+    let file = resolve(file)?;
+    let lock = ConfigDirLock::acquire_for_file(&file)?;
+    Ok((lock, file))
 }
 
 fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
@@ -84,7 +96,14 @@ fn list(file: PathBuf, path_filter: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn set(file: PathBuf, path: String, entity: String, bits: String) -> Result<()> {
+fn set(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    path: String,
+    entity: String,
+    bits: String,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
         .with_context(|| format!("validating bits {bits:?}"))?;
     let mut pmap = load_or_empty(&file)?;
@@ -94,7 +113,13 @@ fn set(file: PathBuf, path: String, entity: String, bits: String) -> Result<()> 
     Ok(())
 }
 
-fn remove(file: PathBuf, path: String, entity: String) -> Result<()> {
+fn remove(
+    config_lock: &ConfigDirLock,
+    file: PathBuf,
+    path: String,
+    entity: String,
+) -> Result<()> {
+    let file = config_lock.require_contained(file)?;
     if !file.exists() {
         bail!("perms file {file:?} does not exist");
     }

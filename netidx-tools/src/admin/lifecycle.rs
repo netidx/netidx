@@ -13,6 +13,7 @@ use clap::Args;
 use netidx_admin::{
     admin_client::{self, NetworkInfo},
     admin_proto::{NetworkMap, NodeKind},
+    config_lock::ConfigDirLock,
     discovery, paths,
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     reconcile,
@@ -173,20 +174,18 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     )?;
     let rpath = resolver_config_path()?;
     let info = fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client)?;
+    let mode = if flags.dry_run {
+        UpdateMode::DryRun
+    } else {
+        UpdateMode::Apply(ConfigDirLock::acquire_for_file(&rpath)?)
+    };
     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
     if plan.is_empty() {
         println!("already in sync with network {:?} — nothing to do", net_id.domain);
         return Ok(());
     }
     println!("update plan for network {:?}:", net_id.domain);
-    print!("{}", plan.describe());
-    if flags.dry_run {
-        println!("(dry-run: nothing written)");
-        return Ok(());
-    }
-    plan.apply()?;
-    println!("ok — restart the local resolver to serve the new peers");
-    Ok(())
+    run_update(plan, mode, "restart the local resolver to serve the new peers")
 }
 
 // -- shared helpers for the map-driven roles (resolver / publisher) ------------
@@ -243,9 +242,14 @@ fn fetch_map_pinned(
 
 /// Apply a reconcile plan (or just describe it) — the shared tail of every
 /// map-driven `update`.
+enum UpdateMode {
+    DryRun,
+    Apply(ConfigDirLock),
+}
+
 fn run_update(
     plan: reconcile::EditPlan,
-    dry_run: bool,
+    mode: UpdateMode,
     restart_hint: &str,
 ) -> Result<()> {
     if plan.is_empty() {
@@ -253,12 +257,13 @@ fn run_update(
         return Ok(());
     }
     print!("{}", plan.describe());
-    if dry_run {
-        println!("(dry-run: nothing written)");
-        return Ok(());
+    match mode {
+        UpdateMode::DryRun => println!("(dry-run: nothing written)"),
+        UpdateMode::Apply(config_lock) => {
+            plan.apply(&config_lock)?;
+            println!("ok — {restart_hint}");
+        }
     }
-    plan.apply()?;
-    println!("ok — {restart_hint}");
     Ok(())
 }
 
@@ -320,13 +325,18 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
          nothing to update",
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver)?;
+    let rpath = resolver_config_path()?;
+    let mode = if flags.dry_run {
+        UpdateMode::DryRun
+    } else {
+        UpdateMode::Apply(ConfigDirLock::acquire_for_file(&rpath)?)
+    };
     // The client config (the resolvers this host talks to), if present.
     let mut plan = match client_config_path() {
         Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
         Err(_) => reconcile::EditPlan::default(),
     };
     // The parent referral, if this resolver is a child. NEVER member_servers.
-    let rpath = resolver_config_path()?;
     if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
         plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
     }
@@ -338,7 +348,7 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
         "re-run client processes to use the new resolver addresses; no resolver service \
          restart is needed"
     };
-    run_update(plan, flags.dry_run, hint)
+    run_update(plan, mode, hint)
 }
 
 // -- publisher ----------------------------------------------------------------
@@ -375,6 +385,11 @@ pub(crate) fn publisher_update(flags: UpdateFlags) -> Result<()> {
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher)?;
     let cpath = client_config_path()?;
+    let mode = if flags.dry_run {
+        UpdateMode::DryRun
+    } else {
+        UpdateMode::Apply(ConfigDirLock::acquire_for_file(&cpath)?)
+    };
     let plan = reconcile::reconcile_client_peers(&cpath, &map)?;
-    run_update(plan, flags.dry_run, "re-run publishers to use the new resolvers")
+    run_update(plan, mode, "re-run publishers to use the new resolvers")
 }

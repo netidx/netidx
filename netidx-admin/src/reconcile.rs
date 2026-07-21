@@ -17,6 +17,7 @@ use crate::{
     admin_client::NetworkInfo,
     admin_proto::{InfoAuth, NetworkMap, ResolverAddr},
     client::ClientConfig,
+    config_lock::ConfigDirLock,
     resolver::ResolverConfig,
 };
 use anyhow::{Context, Result};
@@ -91,12 +92,26 @@ impl EditPlan {
     /// `save` re-validates (the resolver via `validate_for_path`), so an
     /// edit that would yield an invalid config fails here, before any
     /// write touches disk.
-    pub fn apply(&self) -> Result<()> {
-        if let Some((path, cfg)) = &self.resolver_edit {
+    pub fn apply(&self, config_lock: &ConfigDirLock) -> Result<()> {
+        let resolver_path = self
+            .resolver_edit
+            .as_ref()
+            .map(|(path, _)| config_lock.require_contained(path))
+            .transpose()?;
+        let client_path = self
+            .client_edit
+            .as_ref()
+            .map(|(path, _)| config_lock.require_contained(path))
+            .transpose()?;
+        if let Some((path, cfg)) =
+            resolver_path.as_ref().zip(self.resolver_edit.as_ref().map(|(_, cfg)| cfg))
+        {
             cfg.save(path)
                 .with_context(|| format!("saving resolver config {}", path.display()))?;
         }
-        if let Some((path, cfg)) = &self.client_edit {
+        if let Some((path, cfg)) =
+            client_path.as_ref().zip(self.client_edit.as_ref().map(|(_, cfg)| cfg))
+        {
             cfg.save(path)
                 .with_context(|| format!("saving client config {}", path.display()))?;
         }
@@ -465,7 +480,8 @@ mod tests {
         let plan = reconcile_resolver_peers(&path, &network).unwrap();
         assert_eq!(plan.changes.len(), 1, "exactly one new peer (B)");
         assert!(plan.changes[0].text().contains("10.0.0.2:4564"));
-        plan.apply().unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
         // Both peers now present on disk.
         let cfg = ResolverConfig::load(&path).unwrap();
         let parent = cfg.as_file().parent.as_ref().unwrap();
@@ -610,7 +626,8 @@ mod tests {
         let body = plan.describe();
         assert!(body.contains("+ add") && body.contains("10.0.0.16:4564"), "{body}");
         assert!(body.contains("- remove") && body.contains("10.0.0.99:4564"), "{body}");
-        plan.apply().unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
         let cfg = ClientConfig::load(&path).unwrap();
         let addrs: Vec<_> = cfg.as_file().addrs.iter().map(|(a, _)| *a).collect();
         assert!(addrs.contains(&addr("10.0.0.15:4564")));
@@ -628,7 +645,8 @@ mod tests {
         let plan = reconcile_client_peers(&path, &m).unwrap();
         assert!(plan.changes.is_empty());
         assert!(!plan.warnings.is_empty(), "warns rather than wiping");
-        plan.apply().unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
         assert_eq!(
             ClientConfig::load(&path).unwrap().as_file().addrs.len(),
             1,
@@ -650,7 +668,8 @@ mod tests {
         )]);
         let plan = reconcile_parent_peers(&path, &m).unwrap();
         assert_eq!(plan.changes.len(), 2, "add .12, remove .99");
-        plan.apply().unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
         let cfg = ResolverConfig::load(&path).unwrap();
         let addrs: Vec<_> = cfg
             .as_file()
