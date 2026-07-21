@@ -242,7 +242,7 @@ impl Process {
         ) {
             match task::block_in_place(|| cfg.command()) {
                 Err(e) => error!("failed to setup process {} failed with {}", cfg.exe, e),
-                Ok(c) => match platform::spawn(c, job) {
+                Ok(c) => match platform::spawn(c, Some(job)) {
                     Err(e) => {
                         error!("failed to spawn process {} failed with {}", cfg.exe, e)
                     }

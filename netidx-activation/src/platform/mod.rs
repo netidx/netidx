@@ -16,6 +16,10 @@ mod imp;
 mod imp;
 
 pub(crate) use imp::*;
+// The supervised-child quartet is re-exported publicly by the
+// [`crate::process`] façade; the explicit non-glob use gives it `pub`
+// paths to name (the glob above stays crate-private).
+pub use imp::{spawn, stop_proc, Job, Spawned};
 
 /// What a platform signal source produced. The supervisor reacts to two
 /// things: a request to shut down, or a request to reload its unit

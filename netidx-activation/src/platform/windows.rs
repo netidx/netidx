@@ -61,18 +61,30 @@ static EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A spawned, supervised child plus the manual-reset event used to ask
 /// it to shut down gracefully.
-pub(crate) struct Spawned {
+pub struct Spawned {
     child: Child,
     shutdown_event: OwnedHandle,
 }
 
 impl Spawned {
-    pub(crate) fn id(&self) -> Option<u32> {
+    pub fn id(&self) -> Option<u32> {
         self.child.id()
     }
 
-    pub(crate) async fn wait(&mut self) -> Result<ExitStatus> {
+    pub async fn wait(&mut self) -> Result<ExitStatus> {
         Ok(self.child.wait().await?)
+    }
+
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.stderr.take()
     }
 }
 
@@ -83,10 +95,10 @@ impl Spawned {
 /// the job closes when the supervisor and all unit tasks have dropped
 /// their clones.
 #[derive(Clone)]
-pub(crate) struct Job(Arc<OwnedHandle>);
+pub struct Job(Arc<OwnedHandle>);
 
 impl Job {
-    pub(crate) fn new() -> Result<Job> {
+    pub fn new() -> Result<Job> {
         let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
             .context("CreateJobObjectW")?;
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -131,7 +143,7 @@ pub(crate) fn configure_privileges(
 /// Spawn the configured command: create its shutdown event, pass the
 /// event name in the environment, spawn, and assign the child to the job
 /// for orphan reaping.
-pub(crate) fn spawn(mut cmd: Command, job: &Job) -> Result<Spawned> {
+pub fn spawn(mut cmd: Command, job: Option<&Job>) -> Result<Spawned> {
     let n = EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = format!(r"Local\netidx-shutdown-{}-{n}", std::process::id());
     let wname: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -149,7 +161,9 @@ pub(crate) fn spawn(mut cmd: Command, job: &Job) -> Result<Spawned> {
     // window; CREATE_NO_WINDOW gives it a console with no window instead.
     cmd.creation_flags(CREATE_NO_WINDOW.0);
     let child = cmd.spawn()?;
-    if let Some(h) = child.raw_handle() {
+    if let Some(job) = job
+        && let Some(h) = child.raw_handle()
+    {
         // Best-effort: a child that crashes between spawn and assign
         // escapes the job (a microsecond race accepted for v1).
         if let Err(e) = job.assign(h) {
@@ -162,7 +176,7 @@ pub(crate) fn spawn(mut cmd: Command, job: &Job) -> Result<Spawned> {
 /// Signal graceful shutdown via the child's event, give it `grace`, then
 /// `TerminateProcess` as the backstop and reap. A daemon that ignores the
 /// event simply hits the backstop.
-pub(crate) async fn stop_proc(proc: &mut Spawned, grace: Duration) {
+pub async fn stop_proc(proc: &mut Spawned, grace: Duration) {
     let h = HANDLE(proc.shutdown_event.as_raw_handle() as *mut c_void);
     if let Err(e) = unsafe { SetEvent(h) } {
         error!("activation: SetEvent(shutdown) failed: {e}");

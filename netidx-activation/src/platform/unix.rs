@@ -25,17 +25,29 @@ use tokio::{
 /// A spawned, supervised child process. On unix the tokio [`Child`] is
 /// all we need — graceful stop is a SIGTERM, so there is no per-child
 /// handle to carry alongside it (cf. the Windows shutdown event).
-pub(crate) struct Spawned {
+pub struct Spawned {
     child: Child,
 }
 
 impl Spawned {
-    pub(crate) fn id(&self) -> Option<u32> {
+    pub fn id(&self) -> Option<u32> {
         self.child.id()
     }
 
-    pub(crate) async fn wait(&mut self) -> Result<ExitStatus> {
+    pub async fn wait(&mut self) -> Result<ExitStatus> {
         Ok(self.child.wait().await?)
+    }
+
+    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.stderr.take()
     }
 }
 
@@ -44,10 +56,10 @@ impl Spawned {
 /// re-registering. `Clone` so each per-unit task can hold one (matches
 /// the Windows job-object handle that must be shared).
 #[derive(Clone)]
-pub(crate) struct Job;
+pub struct Job;
 
 impl Job {
-    pub(crate) fn new() -> Result<Job> {
+    pub fn new() -> Result<Job> {
         Ok(Job)
     }
 }
@@ -67,15 +79,17 @@ pub(crate) fn configure_privileges(
     Ok(())
 }
 
-/// Spawn the configured command. `job` is unused on unix.
-pub(crate) fn spawn(mut cmd: Command, _job: &Job) -> Result<Spawned> {
+/// Spawn the configured command. `job` is unused on unix (accepted for
+/// signature parity with Windows, where `Some` assigns the child to the
+/// job object and `None` spawns it detached).
+pub fn spawn(mut cmd: Command, _job: Option<&Job>) -> Result<Spawned> {
     let child = cmd.spawn()?;
     Ok(Spawned { child })
 }
 
 /// SIGTERM a running child, give it `grace` to exit, then SIGKILL and
 /// reap. A no-op for a child that has already exited.
-pub(crate) async fn stop_proc(proc: &mut Spawned, grace: Duration) {
+pub async fn stop_proc(proc: &mut Spawned, grace: Duration) {
     match proc.child.id() {
         None => {
             let _ = proc.child.kill().await;
