@@ -12,13 +12,15 @@
 //! the daemon on this socket.
 
 use crate::admin_proto::{
-    self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupRequest,
-    BackupResponse, CaStatus, CaStatusResponse, ClientHello, EditPermsRequest,
-    EditPermsResponse, EnrollRequest, ExternalCaCsrResponse, ExternalCaInstallRequest,
+    self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupOk,
+    BackupRequest, BackupResponse, CaStatus, CaStatusResponse, ClientHello,
+    EditPermsRequest, EditPermsResponse, EnrollRequest, ExternalCaCsrOk,
+    ExternalCaCsrResponse, ExternalCaInstallOk, ExternalCaInstallRequest,
     ExternalCaInstallResponse, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult,
-    ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
-    ReconcileControllerResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
-    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
+    PropagationOk, ReadPermsOk, ReadPermsRequest, ReadPermsResponse,
+    ReconcileControllerRequest, ReconcileControllerResponse, RemoveAdminRequest, Request,
+    RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
+    SetAdminPolicyRequest, SignResponse,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, path::Path};
@@ -79,7 +81,9 @@ pub async fn external_ca_csr(cfg_path: &Path) -> Result<(String, String)> {
     let mut s = connect(cfg_path).await?;
     admin_proto::write_msg(&mut s, &Request::ExternalCaCsr).await?;
     match admin_proto::read_msg::<_, ExternalCaCsrResponse>(&mut s).await? {
-        ExternalCaCsrResponse::Ok { common_name, csr_pem } => Ok((common_name, csr_pem)),
+        ExternalCaCsrResponse::Ok(ExternalCaCsrOk { common_name, csr_pem }) => {
+            Ok((common_name, csr_pem))
+        }
         ExternalCaCsrResponse::Err { reason } => {
             bail!("the controller refused to emit an external-CA CSR: {reason}")
         }
@@ -103,7 +107,9 @@ pub async fn external_ca_install(
     )
     .await?;
     match admin_proto::read_msg::<_, ExternalCaInstallResponse>(&mut s).await? {
-        ExternalCaInstallResponse::Ok { ca_fingerprint } => Ok(ca_fingerprint),
+        ExternalCaInstallResponse::Ok(ExternalCaInstallOk { ca_fingerprint }) => {
+            Ok(ca_fingerprint)
+        }
         ExternalCaInstallResponse::Err { reason } => {
             bail!("the controller refused the external-CA certificate: {reason}")
         }
@@ -114,7 +120,7 @@ pub async fn ca_status(cfg_path: &Path) -> Result<CaStatus> {
     let mut s = connect(cfg_path).await?;
     admin_proto::write_msg(&mut s, &Request::CaStatus).await?;
     match admin_proto::read_msg::<_, CaStatusResponse>(&mut s).await? {
-        CaStatusResponse::Ok { status } => Ok(status),
+        CaStatusResponse::Ok(status) => Ok(status),
         CaStatusResponse::Err { reason } => bail!("the CA refused status: {reason}"),
     }
 }
@@ -130,7 +136,7 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
     )
     .await?;
     match admin_proto::read_msg::<_, BackupResponse>(&mut s).await? {
-        BackupResponse::Ok {
+        BackupResponse::Ok(BackupOk {
             target,
             ca_fingerprint,
             controller,
@@ -139,7 +145,7 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
             files,
             bytes,
             manifest_sha256,
-        } => Ok(BackupOutcome {
+        }) => Ok(BackupOutcome {
             target: target.into(),
             ca_fingerprint,
             controller,
@@ -168,7 +174,7 @@ pub async fn reconcile_controller(
     )
     .await?;
     match admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut s).await? {
-        ReconcileControllerResponse::Ok { operation_id, peers } => {
+        ReconcileControllerResponse::Ok(PropagationOk { operation_id, peers }) => {
             Ok((operation_id, peers))
         }
         ReconcileControllerResponse::Err { reason } => {
@@ -242,7 +248,7 @@ pub async fn add_role_admin(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
@@ -265,7 +271,7 @@ pub async fn set_admin_policy(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
@@ -283,7 +289,7 @@ pub async fn remove_admin(cfg_path: &Path, target: &str) -> Result<()> {
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
@@ -300,7 +306,7 @@ pub async fn list_admins(cfg_path: &Path) -> Result<Vec<crate::ca_policy::AdminI
     )
     .await?;
     match admin_proto::read_msg::<_, AdminListResponse>(&mut s).await? {
-        AdminListResponse::Ok { admins } => Ok(admins),
+        AdminListResponse::Ok(admins) => Ok(admins),
         AdminListResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
@@ -320,7 +326,7 @@ pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
     )
     .await?;
     match admin_proto::read_msg::<_, ReadPermsResponse>(&mut s).await? {
-        ReadPermsResponse::Ok { perms_json, .. } => Ok(perms_json),
+        ReadPermsResponse::Ok(ReadPermsOk { perms_json, .. }) => Ok(perms_json),
         ReadPermsResponse::Err { reason } => bail!("the admin daemon refused: {reason}"),
     }
 }
@@ -348,7 +354,7 @@ pub async fn edit_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut s).await? {
-        EditPermsResponse::Ok { peers, .. } => Ok(peers),
+        EditPermsResponse::Ok(PropagationOk { peers, .. }) => Ok(peers),
         EditPermsResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
@@ -361,7 +367,7 @@ pub async fn rotate_recovery(cfg_path: &Path) -> Result<Zeroizing<String>> {
     let mut s = connect(cfg_path).await?;
     admin_proto::write_msg(&mut s, &Request::RotateRecovery).await?;
     match admin_proto::read_msg::<_, RotateRecoveryResponse>(&mut s).await? {
-        RotateRecoveryResponse::Ok { recovery_password } => {
+        RotateRecoveryResponse::Ok(recovery_password) => {
             Ok(Zeroizing::new(recovery_password.0.clone()))
         }
         RotateRecoveryResponse::Err { reason } => bail!("the CA refused: {reason}"),
@@ -375,7 +381,7 @@ pub async fn rotate_autorenew(cfg_path: &Path) -> Result<Option<String>> {
     let mut s = connect(cfg_path).await?;
     admin_proto::write_msg(&mut s, &Request::RotateAutorenew).await?;
     match admin_proto::read_msg::<_, RotateAutorenewResponse>(&mut s).await? {
-        RotateAutorenewResponse::Ok { warning } => Ok(warning),
+        RotateAutorenewResponse::Ok(warning) => Ok(warning),
         RotateAutorenewResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }

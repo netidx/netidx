@@ -17,29 +17,31 @@ mod password_limiter;
 use crate::{
     admin_client,
     admin_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyControllerStateRequest,
-        ApplyControllerStateResponse, ApplyCrlRequest, ApplyCrlResponse,
-        ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
-        ApplyReferralEditResponse, ApplyServiceControlRequest,
+        self, AddIdentityOk, AddIdentityRequest, AddIdentityResponse,
+        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse,
+        ApplyControllerStateRequest, ApplyControllerStateResponse, ApplyCrlRequest,
+        ApplyCrlResponse, ApplyPermsEditRequest, ApplyPermsEditResponse,
+        ApplyReferralEditRequest, ApplyReferralEditResponse, ApplyServiceControlRequest,
         ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
-        ApproveRequest, ApproveResponse, BackupResponse, ClientHello,
-        ControlServiceRequest, ControlServiceResponse, DelegationEntry,
-        DelegationPollResponse, DelegationRequest, DelegationResponse,
+        ApproveOk, ApproveRequest, ApproveResponse, BackupOk, BackupResponse,
+        ClientHello, ControlServiceOk, ControlServiceRequest, ControlServiceResponse,
+        DelegationEntry, DelegationPollResponse, DelegationRequest, DelegationResponse,
         DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
         EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
-        EnrollRequest, ExternalCaCsrResponse, ExternalCaInstallRequest,
-        ExternalCaInstallResponse, GetCrlResponse, GetInfoResponse, GetMapResponse,
-        GetMapVersionResponse, GetPermsResponse, InfoAuth, IssuedEntry,
-        ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
-        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
-        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
-        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReconcileControllerResponse,
+        EnrollRequest, ExternalCaCsrOk, ExternalCaCsrResponse, ExternalCaInstallOk,
+        ExternalCaInstallRequest, ExternalCaInstallResponse, GetCrlResponse,
+        GetInfoResponse, GetMapResponse, GetMapVersionResponse, GetPermsResponse,
+        InfoAuth, IssuedEntry, ListAdminsRequest, ListDelegationsRequest,
+        ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
+        ListQueueResponse, MapVersion, NetworkMap, NodeKind, PROTOCOL_VERSION,
+        PeerResult, PollRequest, PollResponse, PropagationOk, QueueEntry, QueuedOk,
+        ReadPermsOk, ReadPermsRequest, ReadPermsResponse, ReconcileControllerResponse,
         ReferralEdit, RegisterRequest, RegisterResponse, RemoveAdminRequest,
-        RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr, RevokeRequest,
-        RevokeResponse, Role, RotateAutorenewResponse, RotateRecoveryResponse,
-        SERVING_SAN, Secret, ServerEntry, ServerHello, ServiceUnit, ServiceUnitDef,
-        SetAdminPolicyRequest, SignRequest, SignResponse,
+        RemoveServerOk, RemoveServerRequest, RemoveServerResponse, Request, ResolverAddr,
+        RevokeOk, RevokeRequest, RevokeResponse, Role, RotateAutorenewResponse,
+        RotateRecoveryResponse, SERVING_SAN, Secret, ServerEntry, ServerHello,
+        ServiceUnit, ServiceUnitDef, SetAdminPolicyRequest, SignOk, SignRequest,
+        SignResponse,
     },
     admin_server_config::AdminServerConfig,
     ca::{Ca, SanEntry},
@@ -633,7 +635,7 @@ impl Server {
                 match apply_referral_edit_local(&config_lock, &role.config, &req.edit)
                     .await
                 {
-                    Ok(()) => ApplyReferralEditResponse::Ok,
+                    Ok(()) => ApplyReferralEditResponse::Ok(()),
                     Err(e) => ApplyReferralEditResponse::Err { reason: format!("{e:#}") },
                 }
             }
@@ -1404,12 +1406,12 @@ where
                             .await;
                         match signed.resp {
                             resp @ SignResponse::Err { .. } => resp,
-                            SignResponse::Ok {
+                            SignResponse::Ok(SignOk {
                                 signed_cert_pem,
                                 trusted_pem,
                                 mut warnings,
                                 ..
-                            } => {
+                            }) => {
                                 let mut operation_id = None;
                                 if let Some(plan) = signed.push {
                                     let (op, push_warnings) =
@@ -1431,12 +1433,12 @@ where
                                     }
                                     operation_id = Some(op);
                                 }
-                                SignResponse::Ok {
+                                SignResponse::Ok(SignOk {
                                     signed_cert_pem,
                                     trusted_pem,
                                     warnings,
                                     operation_id,
-                                }
+                                })
                             }
                         }
                     }
@@ -1469,7 +1471,7 @@ where
                                 .await
                             })
                             .await;
-                        if let SignResponse::Ok { signed_cert_pem, .. } = &resp
+                        if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) = &resp
                             && !local
                         {
                             let identity = crate::tls::admin_cert_identity_from_pem(
@@ -1575,12 +1577,12 @@ where
                                         }
                                         _ => None,
                                     };
-                                    let o = PollResponse::Signed {
+                                    let o = PollResponse::Signed(SignOk {
                                         signed_cert_pem: s.signed_cert_pem,
                                         trusted_pem: s.trusted_pem,
                                         warnings: s.warnings,
                                         operation_id: None,
-                                    };
+                                    });
                                     (o, repush)
                                 }
                                 Ok(ca_store::Status::Denied(d)) => {
@@ -1600,11 +1602,11 @@ where
                             // success); the enrollee gets its cert regardless.
                             let (operation_id, push_warnings) =
                                 push_registrations(state, &plan).await;
-                            if let PollResponse::Signed {
+                            if let PollResponse::Signed(SignOk {
                                 warnings,
                                 operation_id: response_operation_id,
                                 ..
-                            } = &mut resp
+                            }) = &mut resp
                             {
                                 warnings.extend(push_warnings);
                                 *response_operation_id = Some(operation_id);
@@ -1658,7 +1660,7 @@ where
                                 ApproveResponse::Err { reason }
                             }
                             Ok(Approved {
-                                resp: SignResponse::Ok { mut warnings, .. },
+                                resp: SignResponse::Ok(SignOk { mut warnings, .. }),
                                 push,
                                 enrollment,
                                 replacement_crl,
@@ -1709,7 +1711,7 @@ where
                                         )),
                                     }
                                 }
-                                ApproveResponse::Ok { operation_id, warnings }
+                                ApproveResponse::Ok(ApproveOk { operation_id, warnings })
                             }
                         }
                     }
@@ -1923,17 +1925,16 @@ where
                     .context("writing RegisterResponse")
             }
             Request::GetMapVersion => {
-                let resp = GetMapVersionResponse::Ok {
+                let resp = GetMapVersionResponse::Ok(MapVersion {
                     version: state.read(move |state| state.map.version).await,
-                };
+                });
                 admin_proto::write_msg(&mut tls, &resp)
                     .await
                     .context("writing GetMapVersionResponse")
             }
             Request::GetMap => {
-                let resp = GetMapResponse::Ok {
-                    map: state.read(move |state| state.map.clone()).await,
-                };
+                let resp =
+                    GetMapResponse::Ok(state.read(move |state| state.map.clone()).await);
                 admin_proto::write_msg(&mut tls, &resp)
                     .await
                     .context("writing GetMapResponse")
@@ -2144,15 +2145,13 @@ async fn handle_ca_status(state: &Server, local: bool) -> admin_proto::CaStatusR
             .ok()
             .map(|pending| (pending.cn, pending.domain))
     };
-    CaStatusResponse::Ok {
-        status: admin_proto::CaStatus {
-            autorenew_slot_present,
-            recovery_slot_present,
-            externally_signed,
-            cert_installed,
-            pending,
-        },
-    }
+    CaStatusResponse::Ok(admin_proto::CaStatus {
+        autorenew_slot_present,
+        recovery_slot_present,
+        externally_signed,
+        cert_installed,
+        pending,
+    })
 }
 
 async fn handle_external_ca_csr(state: &Server, local: bool) -> ExternalCaCsrResponse {
@@ -2183,7 +2182,7 @@ async fn handle_external_ca_csr_inner(
             Ok(csr_pem) => {
                 audit(&dir, "local", "external-ca-csr", &common_name, Duration::ZERO)
                     .await;
-                ExternalCaCsrResponse::Ok { common_name, csr_pem }
+                ExternalCaCsrResponse::Ok(ExternalCaCsrOk { common_name, csr_pem })
             }
             Err(e) => err(format!("encoding the generated CSR: {e}")),
         },
@@ -2334,7 +2333,7 @@ async fn handle_external_ca_install_inner(
         return err(format!("refreshing the controller serving chain: {e:#}"));
     }
     audit(&dir, "local", "external-ca-install", &new_fp.text(), Duration::ZERO).await;
-    ExternalCaInstallResponse::Ok { ca_fingerprint: new_fp.text() }
+    ExternalCaInstallResponse::Ok(ExternalCaInstallOk { ca_fingerprint: new_fp.text() })
 }
 
 /// Run an Argon2-bound vault operation on `spawn_blocking`, bounded by
@@ -2460,7 +2459,7 @@ async fn handle_backup(
         Duration::ZERO,
     )
     .await;
-    BackupResponse::Ok {
+    BackupResponse::Ok(BackupOk {
         target: outcome.target.to_string_lossy().into_owned(),
         ca_fingerprint: outcome.ca_fingerprint,
         controller: outcome.controller,
@@ -2469,7 +2468,7 @@ async fn handle_backup(
         files: outcome.files,
         bytes: outcome.bytes,
         manifest_sha256: outcome.manifest_sha256,
-    }
+    })
 }
 
 /// Append a freshly enrolled admin server to our peer list (and persist
@@ -2634,7 +2633,7 @@ async fn push_registrations(
     // Local id-map first (no TLS loopback).
     if targets.iter().any(|(id, _)| *id == my_id) {
         match state.add_identity(&req).await {
-            AddIdentityResponse::Ok { .. } => (),
+            AddIdentityResponse::Ok(_) => (),
             AddIdentityResponse::Err { reason } => {
                 warnings.push(format!("local id-map registration failed: {reason}"))
             }
@@ -3437,7 +3436,7 @@ async fn issue_serialized(
     )
     .await?;
     let mut replacement_crl = None;
-    if let SignResponse::Ok { ref signed_cert_pem, .. } = resp {
+    if let SignResponse::Ok(SignOk { ref signed_cert_pem, .. }) = resp {
         store
             .commit_issuance(record_req, serial, name, signed_cert_pem, &groups)
             .await
@@ -3630,12 +3629,12 @@ async fn sign_csr(
     .await
     .context("CA signing task panicked")??;
     let trusted_pem = store.read_trusted_bundle().await?;
-    Ok(SignResponse::Ok {
+    Ok(SignResponse::Ok(SignOk {
         signed_cert_pem: String::from_utf8(signed).context("signed cert not utf8")?,
         trusted_pem,
         warnings: Vec::new(),
         operation_id: None,
-    })
+    }))
 }
 
 /// Handle an id-map registration against the map at `map_path`. A
@@ -3670,7 +3669,7 @@ pub async fn handle_add_identity(
     let groups: Vec<&str> = req.groups.iter().map(|s| s.as_str()).collect();
     match id_map::register_identity(&mut map, &req.san, &req.primary_group, &groups) {
         Ok(uid) => match id_map::save_async(&map_path, &map).await {
-            Ok(()) => AddIdentityResponse::Ok { uid },
+            Ok(()) => AddIdentityResponse::Ok(AddIdentityOk { uid }),
             Err(e) => {
                 AddIdentityResponse::Err { reason: format!("saving id-map: {e:#}") }
             }
@@ -3743,7 +3742,7 @@ async fn handle_enqueue(
                     "admin-server: queued enrollment {} (listen {}) from {peer}",
                     queued.id, enrollment.listen,
                 );
-                EnqueueResponse::Ok { request_id: queued.id }
+                EnqueueResponse::Ok(QueuedOk { request_id: queued.id })
             }
             Err(e) => EnqueueResponse::Err { reason: format!("{e:#}") },
         };
@@ -3883,7 +3882,7 @@ async fn handle_enqueue(
                 if verified_renewal { "verified renewal" } else { "signing request" },
                 queued.id
             );
-            EnqueueResponse::Ok { request_id: queued.id }
+            EnqueueResponse::Ok(QueuedOk { request_id: queued.id })
         }
         Err(e) => EnqueueResponse::Err { reason: format!("{e:#}") },
     }
@@ -3920,9 +3919,8 @@ async fn handle_list_queue_inner(
         return ListQueueResponse::Err { reason };
     }
     match ca.store.pending().await {
-        Ok(reqs) => ListQueueResponse::Ok {
-            requests: reqs
-                .into_iter()
+        Ok(reqs) => ListQueueResponse::Ok(
+            reqs.into_iter()
                 .map(|q| {
                     let cluster_base =
                         q.enrollment.as_ref().and_then(|e| match &e.cluster {
@@ -3950,7 +3948,7 @@ async fn handle_list_queue_inner(
                     }
                 })
                 .collect(),
-        },
+        ),
         Err(e) => ListQueueResponse::Err { reason: format!("listing the queue: {e:#}") },
     }
 }
@@ -4245,7 +4243,7 @@ async fn apply_crl_local(state: &Server, crl_pem: &str) -> Result<()> {
 async fn handle_apply_crl(state: &Server, req: &ApplyCrlRequest) -> ApplyCrlResponse {
     info!("admin-server: applying CRL operation {}", req.operation_id);
     match apply_crl_local(state, &req.crl_pem).await {
-        Ok(()) => ApplyCrlResponse::Ok,
+        Ok(()) => ApplyCrlResponse::Ok(()),
         Err(e) => ApplyCrlResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -4321,7 +4319,7 @@ async fn handle_apply_controller_state(
                 return err(format!("installing reconciled CRL: {e:#}"));
             }
             mutable.map = req.map.clone();
-            ApplyControllerStateResponse::Ok
+            ApplyControllerStateResponse::Ok(())
         })
         .await
 }
@@ -4477,7 +4475,7 @@ async fn push_controller_state_to_peers(
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let request = request.clone();
         let local = match handle_apply_controller_state(state, &request).await {
-            ApplyControllerStateResponse::Ok => Ok(()),
+            ApplyControllerStateResponse::Ok(()) => Ok(()),
             ApplyControllerStateResponse::Err { reason } => Err(anyhow!(reason)),
         };
         let error = local.err().map(|e| format!("{e:#}"));
@@ -4590,7 +4588,7 @@ async fn handle_reconcile_controller(
         &mut peers,
         push_topology(state, topology, operation_id).await,
     );
-    ReconcileControllerResponse::Ok { operation_id, peers }
+    ReconcileControllerResponse::Ok(PropagationOk { operation_id, peers })
 }
 
 fn merge_topology_results(peers: &mut Vec<PeerResult>, topology: Vec<PeerResult>) {
@@ -4646,7 +4644,7 @@ async fn handle_revoke(state: &Arc<Server>, req: &RevokeRequest) -> RevokeRespon
                 .collect()
         }
     };
-    RevokeResponse::Ok { warnings, operation_id: Some(operation_id), peers }
+    RevokeResponse::Ok(RevokeOk { warnings, operation_id: Some(operation_id), peers })
 }
 
 async fn start_list_issued(
@@ -4741,7 +4739,7 @@ async fn approve_serialized(
         )
         .await
         .map_err(|e| format!("internal error: {e:#}"))?;
-        let enrollment = matches!(&signed.resp, SignResponse::Ok { .. })
+        let enrollment = matches!(&signed.resp, SignResponse::Ok(_))
             .then_some((server_id, enrollment));
         return Ok(Approved {
             resp: signed.resp,
@@ -4875,7 +4873,7 @@ async fn autorenew_sweep(ca: &mut ca_store::CaDir, password: &str) -> usize {
         };
         let result = handle_approve(ca, &req, None).await;
         match result {
-            Ok(Approved { resp: SignResponse::Ok { .. }, .. }) => {
+            Ok(Approved { resp: SignResponse::Ok(_), .. }) => {
                 approved += 1;
                 info!("autorenew: approved renewal of {:?}", q.requested_name);
             }
@@ -5152,7 +5150,7 @@ async fn handle_deny(
         Ok(()) => {
             audit(ca.dir(), &authd.admin, "deny", &queued.requested_name, Duration::ZERO)
                 .await;
-            DenyResponse::Ok
+            DenyResponse::Ok(())
         }
         Err(e) => DenyResponse::Err { reason: format!("storing the denial: {e:#}") },
     }
@@ -5210,7 +5208,7 @@ async fn handle_request_delegation(
                 };
             }
             match delegation_store::enqueue(&config_lock, &ca_dir, &pending).await {
-                Ok(()) => DelegationResponse::Ok { request_id: pending.id },
+                Ok(()) => DelegationResponse::Ok(QueuedOk { request_id: pending.id }),
                 Err(e) => DelegationResponse::Err { reason: format!("{e:#}") },
             }
         })
@@ -5277,9 +5275,8 @@ async fn handle_list_delegations_inner(
     }
     .await;
     match reqs {
-        Ok(reqs) => ListDelegationsResponse::Ok {
-            requests: reqs
-                .into_iter()
+        Ok(reqs) => ListDelegationsResponse::Ok(
+            reqs.into_iter()
                 .filter_map(|(r, approved)| {
                     let mut staged = map.clone();
                     let change = netmap::delegate(
@@ -5307,7 +5304,7 @@ async fn handle_list_delegations_inner(
                     })
                 })
                 .collect(),
-        },
+        ),
         Err(e) => ListDelegationsResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -5350,7 +5347,7 @@ async fn handle_deny_delegation_inner(
             match delegation_store::deny(&config_lock, &ca_dir, &pending, &req.reason)
                 .await
             {
-                Ok(()) => DenyDelegationResponse::Ok,
+                Ok(()) => DenyDelegationResponse::Ok(()),
                 Err(e) => DenyDelegationResponse::Err { reason: format!("{e:#}") },
             }
         }
@@ -5674,7 +5671,7 @@ async fn handle_register(
             let fanout = updated
                 .then(|| registration_topology_fanout(&state.map, server_id))
                 .flatten();
-            (RegisterResponse::Ok { version: state.map.version }, fanout)
+            (RegisterResponse::Ok(MapVersion { version: state.map.version }), fanout)
         })
         .await;
     if let Some(fanout) = fanout {
@@ -5719,7 +5716,7 @@ async fn handle_deregister(
                     reason: format!("persisting the network map: {e:#}"),
                 };
             }
-            RegisterResponse::Ok { version: state.map.version }
+            RegisterResponse::Ok(MapVersion { version: state.map.version })
         })
         .await
 }
@@ -5949,7 +5946,7 @@ async fn handle_remove_server(
         None => Vec::new(),
     };
     let peers = push_topology(state, prepared.fanout, operation_id).await;
-    RemoveServerResponse::Ok {
+    RemoveServerResponse::Ok(RemoveServerOk {
         version: prepared.version,
         operation_id: Some(operation_id),
         revoked: prepared.revoked,
@@ -5957,7 +5954,7 @@ async fn handle_remove_server(
         affected_clusters: prepared.affected_clusters,
         peers,
         crl_peers,
-    }
+    })
 }
 
 /// Revoke every still-live serving certificate carrying `server_id`, including
@@ -6041,7 +6038,7 @@ async fn handle_get_perms(state: &Server) -> GetPermsResponse {
         serde_json::to_string(&pmap).context("serializing perms")
     };
     match read.await {
-        Ok(perms_json) => GetPermsResponse::Ok { perms_json },
+        Ok(perms_json) => GetPermsResponse::Ok(perms_json),
         Err(e) => GetPermsResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -6140,8 +6137,8 @@ async fn handle_read_perms(
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
         let read = handle_get_perms(state).await;
         return match read {
-            GetPermsResponse::Ok { perms_json } => {
-                ReadPermsResponse::Ok { server, addr, perms_json }
+            GetPermsResponse::Ok(perms_json) => {
+                ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms_json })
             }
             GetPermsResponse::Err { reason } => err(reason),
         };
@@ -6187,7 +6184,7 @@ async fn handle_read_perms(
         .await;
         match result {
             Ok(Ok(perms_json)) => {
-                return ReadPermsResponse::Ok { server, addr, perms_json };
+                return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms_json });
             }
             Ok(Err(e)) => failures.push(format!("{server} at {addr}: {e:#}")),
             Err(_) => failures.push(format!(
@@ -6254,7 +6251,7 @@ async fn handle_apply_perms_edit(
 ) -> ApplyPermsEditResponse {
     info!("admin-server: applying permissions operation {}", req.operation_id);
     match apply_perms_local(state, &req.perms_json).await {
-        Ok(()) => ApplyPermsEditResponse::Ok,
+        Ok(()) => ApplyPermsEditResponse::Ok(()),
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -6426,7 +6423,7 @@ async fn handle_edit_perms(
     .await;
     let peers =
         push_perms_edit_to_peers(state, &req.perms_json, &members, operation_id).await;
-    EditPermsResponse::Ok { operation_id, peers }
+    EditPermsResponse::Ok(PropagationOk { operation_id, peers })
 }
 
 // -- remote service control ---------------------------------------------------
@@ -6556,7 +6553,7 @@ async fn handle_control_service(
             op: req.op,
         };
         match handle_apply_service_control(state, &apply).await {
-            ApplyServiceControlResponse::Ok { units } => Ok(units),
+            ApplyServiceControlResponse::Ok(units) => Ok(units),
             ApplyServiceControlResponse::Err { reason } => Err(reason),
         }
     } else {
@@ -6584,7 +6581,7 @@ async fn handle_control_service(
         .and_then(|result| result.map_err(|e| format!("{e:#}")))
     };
     match applied {
-        Ok(units) => ControlServiceResponse::Ok { operation_id, units },
+        Ok(units) => ControlServiceResponse::Ok(ControlServiceOk { operation_id, units }),
         Err(reason) => err(format!(
             "operation {operation_id} on server {} at {target_addr}: {reason}",
             req.target_server
@@ -6646,7 +6643,7 @@ async fn handle_apply_service_control(
             ServiceUnit { unit: u.unit, state: u.state, definition }
         })
         .collect();
-    ApplyServiceControlResponse::Ok { units }
+    ApplyServiceControlResponse::Ok(units)
 }
 
 // -- remote admin management --------------------------------------------------
@@ -6852,7 +6849,7 @@ async fn handle_add_role_admin_inner(
     match added {
         Ok(()) => {
             audit(&dir, &authd.admin, "add-role-admin", &req.name, Duration::ZERO).await;
-            AdminMgmtResponse::Ok
+            AdminMgmtResponse::Ok(())
         }
         Err(e) => err(format!("{e:#}")),
     }
@@ -6926,7 +6923,7 @@ async fn handle_set_admin_policy_inner(
         Ok(()) => {
             audit(&dir, &authd.admin, "set-admin-policy", &req.target, Duration::ZERO)
                 .await;
-            AdminMgmtResponse::Ok
+            AdminMgmtResponse::Ok(())
         }
         Err(e) => err(format!("{e:#}")),
     }
@@ -6993,7 +6990,7 @@ async fn handle_remove_admin_inner(
     match vault.remove_slot(&req.target, false).await {
         Ok(()) => {
             audit(&dir, &authd.admin, "remove-admin", &req.target, Duration::ZERO).await;
-            AdminMgmtResponse::Ok
+            AdminMgmtResponse::Ok(())
         }
         Err(e) => err(format!("{e:#}")),
     }
@@ -7023,7 +7020,7 @@ fn handle_list_admins_inner(
         return err(reason);
     }
     match ca.vault.list_admins() {
-        Ok(admins) => AdminListResponse::Ok { admins },
+        Ok(admins) => AdminListResponse::Ok(admins),
         Err(e) => err(format!("listing admins: {e:#}")),
     }
 }
@@ -7092,7 +7089,7 @@ async fn rotate_recovery(
                 Duration::ZERO,
             )
             .await;
-            RotateRecoveryResponse::Ok { recovery_password: Secret(canonical) }
+            RotateRecoveryResponse::Ok(Secret(canonical))
         })
         .await
 }
@@ -7241,7 +7238,7 @@ async fn rotate_autorenew(
             ca.autorenew_pw = Some(prepared.new_pw);
             audit(ca.dir(), "local", "rotate-autorenew", AUTORENEW_ADMIN, Duration::ZERO)
                 .await;
-            RotateAutorenewResponse::Ok { warning: prepared.warning }
+            RotateAutorenewResponse::Ok(prepared.warning)
         })
         .await
 }
@@ -7511,7 +7508,7 @@ async fn handle_approve_delegation(
         Err(response) => return response,
     };
     let peers = push_topology(state, fanout, operation_id).await;
-    ApproveDelegationResponse::Ok { operation_id, peers }
+    ApproveDelegationResponse::Ok(PropagationOk { operation_id, peers })
 }
 
 /// True if `name` matches any of the admin's `allowed` glob patterns.
@@ -8424,7 +8421,7 @@ mod v6_tests {
         };
         assert!(matches!(
             handle_apply_controller_state(&state, &req).await,
-            ApplyControllerStateResponse::Ok
+            ApplyControllerStateResponse::Ok(())
         ));
         let persisted = AdminServerConfig::load_for_recovery(&cfg_path).unwrap();
         assert_eq!(persisted.ca_addr, Some(new_addr));

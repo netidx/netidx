@@ -33,26 +33,28 @@
 
 use crate::{
     admin_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, AddRoleAdminRequest,
-        AdminListResponse, AdminMgmtResponse, ApplyControllerStateRequest,
-        ApplyControllerStateResponse, ApplyCrlRequest, ApplyCrlResponse,
-        ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
-        ApplyReferralEditResponse, ApplyServiceControlRequest,
+        self, AddIdentityOk, AddIdentityRequest, AddIdentityResponse,
+        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse,
+        ApplyControllerStateRequest, ApplyControllerStateResponse, ApplyCrlRequest,
+        ApplyCrlResponse, ApplyPermsEditRequest, ApplyPermsEditResponse,
+        ApplyReferralEditRequest, ApplyReferralEditResponse, ApplyServiceControlRequest,
         ApplyServiceControlResponse, ApproveDelegationRequest, ApproveDelegationResponse,
-        ApproveRequest, ApproveResponse, ClientHello, ControlServiceRequest,
-        ControlServiceResponse, DelegationEntry, DelegationPollResponse,
-        DelegationRequest, DelegationResponse, DenyDelegationRequest,
-        DenyDelegationResponse, DenyRequest, DenyResponse, EditPermsRequest,
-        EditPermsResponse, EnqueueRequest, EnqueueResponse, EnrollRequest,
-        GetInfoResponse, GetMapResponse, GetMapVersionResponse, GetPermsResponse,
-        IssuedEntry, ListAdminsRequest, ListDelegationsRequest, ListDelegationsResponse,
-        ListIssuedRequest, ListIssuedResponse, ListQueueRequest, ListQueueResponse,
-        NetworkMap, NodeKind, PROTOCOL_VERSION, PeerResult, PollRequest, PollResponse,
-        QueueEntry, ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
+        ApproveOk, ApproveRequest, ApproveResponse, ClientHello, ControlServiceOk,
+        ControlServiceRequest, ControlServiceResponse, DelegationEntry,
+        DelegationPollResponse, DelegationRequest, DelegationResponse,
+        DenyDelegationRequest, DenyDelegationResponse, DenyRequest, DenyResponse,
+        EditPermsRequest, EditPermsResponse, EnqueueRequest, EnqueueResponse,
+        EnrollRequest, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
+        GetPermsResponse, IssuedEntry, ListAdminsRequest, ListDelegationsRequest,
+        ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
+        ListQueueResponse, LoginOk, MapVersion, NetworkMap, NodeKind, PROTOCOL_VERSION,
+        PeerResult, PollRequest, PollResponse, PropagationOk, QueueEntry, QueuedOk,
+        ReadPermsOk, ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
         ReconcileControllerResponse, ReferralEdit, RegisterRequest, RegisterResponse,
-        RemoveAdminRequest, RemoveServerRequest, RemoveServerResponse, Request,
-        ResolverAddr, RevokeRequest, RevokeResponse, Role, SERVING_SAN, Secret,
-        ServerHello, SetAdminPolicyRequest, SignRequest, SignResponse,
+        RemoveAdminRequest, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
+        Request, ResolverAddr, RevokeOk, RevokeRequest, RevokeResponse, Role,
+        SERVING_SAN, Secret, ServerHello, SetAdminPolicyRequest, SignOk, SignRequest,
+        SignResponse,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -519,13 +521,13 @@ pub async fn login(
     )
     .await?;
     match admin_proto::read_msg::<_, admin_proto::LoginResponse>(&mut tls).await? {
-        admin_proto::LoginResponse::Ok {
+        admin_proto::LoginResponse::Ok(LoginOk {
             admin,
             token,
             issued_unix,
             absolute_deadline_unix,
             idle_timeout_secs,
-        } => Ok(LoginSession {
+        }) => Ok(LoginSession {
             admin,
             token,
             issued_unix,
@@ -553,7 +555,7 @@ pub async fn logout(
     )
     .await?;
     match admin_proto::read_msg::<_, admin_proto::LogoutResponse>(&mut tls).await? {
-        admin_proto::LogoutResponse::Ok => Ok(()),
+        admin_proto::LogoutResponse::Ok(()) => Ok(()),
         admin_proto::LogoutResponse::Err { reason } => bail!("logout refused: {reason}"),
     }
 }
@@ -582,7 +584,7 @@ pub async fn get_map_pinned(
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     let hint = match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
-        GetMapResponse::Ok { map } => map,
+        GetMapResponse::Ok(map) => map,
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     };
     if expected.controller && expected.server_id == hint.controller {
@@ -607,8 +609,8 @@ pub async fn get_map_pinned(
     let mut tls = connect_pinned(controller_addr, kind, &identity).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
-        GetMapResponse::Ok { map } if map.controller == controller_id => Ok(map),
-        GetMapResponse::Ok { .. } => {
+        GetMapResponse::Ok(map) if map.controller == controller_id => Ok(map),
+        GetMapResponse::Ok(_) => {
             bail!("controller returned a map for another controller")
         }
         GetMapResponse::Err { reason } => bail!("controller map query refused: {reason}"),
@@ -646,7 +648,7 @@ pub async fn push_perms_edit(
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyPermsEditResponse>(&mut tls).await? {
-        ApplyPermsEditResponse::Ok => Ok(()),
+        ApplyPermsEditResponse::Ok(()) => Ok(()),
         ApplyPermsEditResponse::Err { reason } => {
             bail!("peer refused the perms edit: {reason}")
         }
@@ -684,7 +686,7 @@ pub async fn push_crl(
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyCrlResponse>(&mut tls).await? {
-        ApplyCrlResponse::Ok => Ok(()),
+        ApplyCrlResponse::Ok(()) => Ok(()),
         ApplyCrlResponse::Err { reason } => {
             bail!("peer refused the CRL update: {reason}")
         }
@@ -714,7 +716,7 @@ pub async fn push_controller_state(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::ApplyControllerState(request)).await?;
     match admin_proto::read_msg::<_, ApplyControllerStateResponse>(&mut tls).await? {
-        ApplyControllerStateResponse::Ok => Ok(()),
+        ApplyControllerStateResponse::Ok(()) => Ok(()),
         ApplyControllerStateResponse::Err { reason } => {
             bail!("peer refused controller-state reconciliation: {reason}")
         }
@@ -745,7 +747,7 @@ pub(crate) async fn pull_perms(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetPerms).await?;
     match admin_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
-        GetPermsResponse::Ok { perms_json } => Ok(perms_json),
+        GetPermsResponse::Ok(perms_json) => Ok(perms_json),
         GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
     }
 }
@@ -769,7 +771,7 @@ pub async fn read_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, ReadPermsResponse>(&mut tls).await? {
-        ReadPermsResponse::Ok { perms_json, .. } => Ok(perms_json),
+        ReadPermsResponse::Ok(ReadPermsOk { perms_json, .. }) => Ok(perms_json),
         ReadPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,
@@ -800,7 +802,7 @@ pub async fn edit_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
-        EditPermsResponse::Ok { peers, .. } => Ok(peers),
+        EditPermsResponse::Ok(PropagationOk { peers, .. }) => Ok(peers),
         EditPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,
@@ -835,7 +837,7 @@ pub async fn add_role_admin(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
         }
@@ -862,7 +864,7 @@ pub async fn set_admin_policy(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
         }
@@ -887,7 +889,7 @@ pub async fn remove_admin(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
-        AdminMgmtResponse::Ok => Ok(()),
+        AdminMgmtResponse::Ok(()) => Ok(()),
         AdminMgmtResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
         }
@@ -908,7 +910,7 @@ pub async fn list_admins(
     )
     .await?;
     match admin_proto::read_msg::<_, AdminListResponse>(&mut tls).await? {
-        AdminListResponse::Ok { admins } => Ok(admins),
+        AdminListResponse::Ok(admins) => Ok(admins),
         AdminListResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
         }
@@ -939,7 +941,7 @@ pub async fn control_service(
     )
     .await?;
     match admin_proto::read_msg::<_, ControlServiceResponse>(&mut tls).await? {
-        ControlServiceResponse::Ok { units, .. } => Ok(units),
+        ControlServiceResponse::Ok(ControlServiceOk { units, .. }) => Ok(units),
         ControlServiceResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "the CA refused", reason))
         }
@@ -979,7 +981,7 @@ pub async fn push_service_control(
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyServiceControlResponse>(&mut tls).await? {
-        ApplyServiceControlResponse::Ok { units } => Ok(units),
+        ApplyServiceControlResponse::Ok(units) => Ok(units),
         ApplyServiceControlResponse::Err { reason } => {
             bail!("peer refused service control: {reason}")
         }
@@ -1341,7 +1343,7 @@ async fn submit_csr(
     let mut tls = connect_controller_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &req).await?;
     match admin_proto::read_msg::<_, SignResponse>(&mut tls).await? {
-        SignResponse::Ok { signed_cert_pem, trusted_pem, warnings, .. } => {
+        SignResponse::Ok(SignOk { signed_cert_pem, trusted_pem, warnings, .. }) => {
             verify_issued(expected, name, &our_spki, &signed_cert_pem, &trusted_pem)?;
             Ok(Issued {
                 cert_pem: signed_cert_pem,
@@ -1509,7 +1511,7 @@ async fn enqueue_inner(
     )
     .await?;
     match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
-        EnqueueResponse::Ok { request_id } => Ok(PendingEnrollment {
+        EnqueueResponse::Ok(QueuedOk { request_id }) => Ok(PendingEnrollment {
             request_id,
             fingerprint,
             name: name.to_string(),
@@ -1543,7 +1545,9 @@ pub async fn poll(
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
-        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings, .. } => {
+        PollResponse::Signed(SignOk {
+            signed_cert_pem, trusted_pem, warnings, ..
+        }) => {
             verify_issued(
                 expected,
                 &pending.name,
@@ -1575,7 +1579,7 @@ pub async fn list_queue(
     )
     .await?;
     match admin_proto::read_msg::<_, ListQueueResponse>(&mut tls).await? {
-        ListQueueResponse::Ok { requests } => Ok(requests),
+        ListQueueResponse::Ok(requests) => Ok(requests),
         ListQueueResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1604,7 +1608,7 @@ pub async fn approve(
     )
     .await?;
     match admin_proto::read_msg::<_, ApproveResponse>(&mut tls).await? {
-        ApproveResponse::Ok { warnings, .. } => Ok(warnings),
+        ApproveResponse::Ok(ApproveOk { warnings, .. }) => Ok(warnings),
         ApproveResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1643,7 +1647,7 @@ pub async fn deny(
     )
     .await?;
     match admin_proto::read_msg::<_, DenyResponse>(&mut tls).await? {
-        DenyResponse::Ok => Ok(()),
+        DenyResponse::Ok(()) => Ok(()),
         DenyResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1692,7 +1696,7 @@ pub async fn request_delegation(
     )
     .await?;
     match admin_proto::read_msg::<_, DelegationResponse>(&mut tls).await? {
-        DelegationResponse::Ok { request_id } => Ok(request_id),
+        DelegationResponse::Ok(QueuedOk { request_id }) => Ok(request_id),
         DelegationResponse::Err { reason } => {
             bail!("the parent refused the delegation request: {reason}")
         }
@@ -1732,7 +1736,7 @@ pub async fn list_delegations(
     )
     .await?;
     match admin_proto::read_msg::<_, ListDelegationsResponse>(&mut tls).await? {
-        ListDelegationsResponse::Ok { requests } => Ok(requests),
+        ListDelegationsResponse::Ok(requests) => Ok(requests),
         ListDelegationsResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1757,7 +1761,7 @@ pub async fn approve_delegation(
     )
     .await?;
     match admin_proto::read_msg::<_, ApproveDelegationResponse>(&mut tls).await? {
-        ApproveDelegationResponse::Ok { peers, .. } => Ok(peers),
+        ApproveDelegationResponse::Ok(PropagationOk { peers, .. }) => Ok(peers),
         ApproveDelegationResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1783,7 +1787,7 @@ pub async fn deny_delegation(
     )
     .await?;
     match admin_proto::read_msg::<_, DenyDelegationResponse>(&mut tls).await? {
-        DenyDelegationResponse::Ok => Ok(()),
+        DenyDelegationResponse::Ok(()) => Ok(()),
         DenyDelegationResponse::Err { reason } => {
             Err(admin_refusal(expected, &credential, "admin server refused", reason))
         }
@@ -1822,7 +1826,7 @@ pub async fn push_referral_edit(
     )
     .await?;
     match admin_proto::read_msg::<_, ApplyReferralEditResponse>(&mut tls).await? {
-        ApplyReferralEditResponse::Ok => Ok(()),
+        ApplyReferralEditResponse::Ok(()) => Ok(()),
         ApplyReferralEditResponse::Err { reason } => {
             bail!("peer refused the referral edit: {reason}")
         }
@@ -1880,7 +1884,7 @@ pub async fn revoke(
     )
     .await?;
     match admin_proto::read_msg::<_, RevokeResponse>(&mut tls).await? {
-        RevokeResponse::Ok { warnings, operation_id, peers } => {
+        RevokeResponse::Ok(RevokeOk { warnings, operation_id, peers }) => {
             Ok((warnings, operation_id, peers))
         }
         RevokeResponse::Err { reason } => {
@@ -1922,7 +1926,7 @@ pub async fn push_identity(
     }
     admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
     match admin_proto::read_msg::<_, AddIdentityResponse>(&mut tls).await? {
-        AddIdentityResponse::Ok { uid } => Ok(Some(uid)),
+        AddIdentityResponse::Ok(AddIdentityOk { uid }) => Ok(Some(uid)),
         AddIdentityResponse::Err { reason } => {
             bail!("admin server refused the identity: {reason}")
         }
@@ -1958,7 +1962,7 @@ pub async fn register(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
-        RegisterResponse::Ok { version } => Ok(version),
+        RegisterResponse::Ok(MapVersion { version }) => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the registration: {reason}")
         }
@@ -1980,7 +1984,7 @@ pub async fn deregister(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Deregister).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
-        RegisterResponse::Ok { version } => Ok(version),
+        RegisterResponse::Ok(MapVersion { version }) => Ok(version),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the deregistration: {reason}")
         }
@@ -1997,7 +2001,7 @@ pub async fn get_map_version(
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
     match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
-        GetMapVersionResponse::Ok { version } => Ok(version),
+        GetMapVersionResponse::Ok(MapVersion { version }) => Ok(version),
         GetMapVersionResponse::Err { reason } => {
             bail!("map version query refused: {reason}")
         }
@@ -2019,7 +2023,7 @@ pub async fn get_map_version_from_controller(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await?;
     match admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await? {
-        GetMapVersionResponse::Ok { version } => Ok(version),
+        GetMapVersionResponse::Ok(MapVersion { version }) => Ok(version),
         GetMapVersionResponse::Err { reason } => {
             bail!("map version query refused: {reason}")
         }
@@ -2036,7 +2040,7 @@ pub async fn get_map(
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
-        GetMapResponse::Ok { map } => Ok(map),
+        GetMapResponse::Ok(map) => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
 }
@@ -2056,7 +2060,7 @@ pub async fn get_map_from_controller(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
-        GetMapResponse::Ok { map } => Ok(map),
+        GetMapResponse::Ok(map) => Ok(map),
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     }
 }
@@ -2089,7 +2093,7 @@ pub async fn remove_server(
     )
     .await?;
     match admin_proto::read_msg::<_, RemoveServerResponse>(&mut tls).await? {
-        RemoveServerResponse::Ok {
+        RemoveServerResponse::Ok(RemoveServerOk {
             version,
             operation_id,
             revoked,
@@ -2097,7 +2101,7 @@ pub async fn remove_server(
             affected_clusters,
             peers,
             crl_peers,
-        } => Ok(RemoveServerOutcome {
+        }) => Ok(RemoveServerOutcome {
             version,
             operation_id,
             revoked,
@@ -2128,7 +2132,7 @@ pub async fn reconcile_controller(
     )
     .await?;
     match admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut tls).await? {
-        ReconcileControllerResponse::Ok { operation_id, peers } => {
+        ReconcileControllerResponse::Ok(PropagationOk { operation_id, peers }) => {
             Ok((operation_id, peers))
         }
         ReconcileControllerResponse::Err { reason } => {
@@ -2285,7 +2289,7 @@ pub async fn enqueue_renewal(
     )
     .await?;
     match admin_proto::read_msg::<_, EnqueueResponse>(&mut tls).await? {
-        EnqueueResponse::Ok { request_id } => {
+        EnqueueResponse::Ok(QueuedOk { request_id }) => {
             Ok(PendingRenewal { request_id, name: name.to_string(), our_spki, kc })
         }
         EnqueueResponse::Err { reason } => {
@@ -2317,7 +2321,9 @@ pub async fn poll_renewal(
         PollResponse::Pending => Ok(PollOutcome::Pending),
         PollResponse::Denied { reason } => Ok(PollOutcome::Denied(reason)),
         PollResponse::Unknown => Ok(PollOutcome::Expired),
-        PollResponse::Signed { signed_cert_pem, trusted_pem, warnings, .. } => {
+        PollResponse::Signed(SignOk {
+            signed_cert_pem, trusted_pem, warnings, ..
+        }) => {
             verify_issued_any(
                 installed_pem,
                 &pending.name,
@@ -2754,7 +2760,7 @@ mod tests {
                     Ok(Request::GetMapVersion) => {
                         admin_proto::write_msg(
                             &mut tls,
-                            &GetMapVersionResponse::Ok { version: 1 },
+                            &GetMapVersionResponse::Ok(MapVersion { version: 1 }),
                         )
                         .await
                         .unwrap();
@@ -2771,7 +2777,7 @@ mod tests {
         admin_proto::write_msg(&mut tls, &Request::GetMapVersion).await.unwrap();
         assert!(matches!(
             admin_proto::read_msg::<_, GetMapVersionResponse>(&mut tls).await.unwrap(),
-            GetMapVersionResponse::Ok { version: 1 }
+            GetMapVersionResponse::Ok(MapVersion { version: 1 })
         ));
     }
 
@@ -2949,7 +2955,7 @@ mod tests {
                         let _ = seen_tx.send("GetMap");
                         let _ = admin_proto::write_msg(
                             &mut tls,
-                            &GetMapResponse::Ok { map: hostile_map.clone() },
+                            &GetMapResponse::Ok(hostile_map.clone()),
                         )
                         .await;
                     }

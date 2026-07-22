@@ -1,5 +1,5 @@
 use crate::{
-    admin_proto::{AdminCredential, LoginResponse, LogoutResponse, Secret},
+    admin_proto::{AdminCredential, LoginOk, LoginResponse, LogoutResponse, Secret},
     ca_vault::{Authenticated, CAVault},
 };
 use base64::Engine;
@@ -84,13 +84,13 @@ impl SessionStore {
             self.sessions.remove(&oldest);
         }
         self.sessions.insert(hash, record);
-        LoginResponse::Ok {
+        LoginResponse::Ok(LoginOk {
             admin: authenticated.admin,
             token: Secret(token),
             issued_unix: issued,
             absolute_deadline_unix: absolute_deadline,
             idle_timeout_secs: settings.idle.as_secs(),
-        }
+        })
     }
 
     pub fn authenticate_session(
@@ -132,7 +132,7 @@ impl SessionStore {
             };
         };
         self.sessions.remove(&token_hash(token.as_str()));
-        LogoutResponse::Ok
+        LogoutResponse::Ok(())
     }
 
     #[cfg(test)]
@@ -173,7 +173,7 @@ mod tests {
     fn login(store: &mut SessionStore, vault: &CAVault) -> Secret {
         let authenticated = vault.authenticate("alice", "pw").unwrap();
         match store.login_authenticated(authenticated) {
-            LoginResponse::Ok { token, .. } => token,
+            LoginResponse::Ok(LoginOk { token, .. }) => token,
             LoginResponse::Err { reason } => panic!("{reason}"),
         }
     }
@@ -188,7 +188,7 @@ mod tests {
         let auth = store.authenticate_session(&vault, token).unwrap();
         assert_eq!(auth.admin, "alice");
         assert_eq!(auth.kind, SlotKind::Role);
-        assert!(matches!(store.logout(&credential), LogoutResponse::Ok));
+        assert!(matches!(store.logout(&credential), LogoutResponse::Ok(())));
         assert!(store.authenticate_session(&vault, token).is_err());
 
         let token = login(&mut store, &vault);

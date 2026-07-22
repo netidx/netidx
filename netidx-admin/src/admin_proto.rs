@@ -492,21 +492,26 @@ pub struct BackupRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum BackupResponse {
+pub enum RpcResult<T: 'static> {
     #[pack(tag(0))]
-    Ok {
-        target: String,
-        ca_fingerprint: String,
-        controller: AdminServerId,
-        map_version: u64,
-        highest_serial: u64,
-        files: u64,
-        bytes: u64,
-        manifest_sha256: String,
-    },
+    Ok(T),
     #[pack(tag(1))]
     Err { reason: String },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct BackupOk {
+    pub target: String,
+    pub ca_fingerprint: String,
+    pub controller: AdminServerId,
+    pub map_version: u64,
+    pub highest_serial: u64,
+    pub files: u64,
+    pub bytes: u64,
+    pub manifest_sha256: String,
+}
+
+pub type BackupResponse = RpcResult<BackupOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ExternalCaInstallRequest {
@@ -515,20 +520,19 @@ pub struct ExternalCaInstallRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ExternalCaCsrResponse {
-    #[pack(tag(0))]
-    Ok { common_name: String, csr_pem: String },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct ExternalCaCsrOk {
+    pub common_name: String,
+    pub csr_pem: String,
 }
 
+pub type ExternalCaCsrResponse = RpcResult<ExternalCaCsrOk>;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ExternalCaInstallResponse {
-    #[pack(tag(0))]
-    Ok { ca_fingerprint: String },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct ExternalCaInstallOk {
+    pub ca_fingerprint: String,
 }
+
+pub type ExternalCaInstallResponse = RpcResult<ExternalCaInstallOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct CaStatus {
@@ -539,13 +543,7 @@ pub struct CaStatus {
     pub pending: Option<(String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum CaStatusResponse {
-    #[pack(tag(0))]
-    Ok { status: CaStatus },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type CaStatusResponse = RpcResult<CaStatus>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ReconcileControllerRequest {
@@ -553,12 +551,12 @@ pub struct ReconcileControllerRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ReconcileControllerResponse {
-    #[pack(tag(0))]
-    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct PropagationOk {
+    pub operation_id: OperationId,
+    pub peers: Vec<PeerResult>,
 }
+
+pub type ReconcileControllerResponse = RpcResult<PropagationOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApplyControllerStateRequest {
@@ -569,13 +567,7 @@ pub struct ApplyControllerStateRequest {
     pub crl_pem: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApplyControllerStateResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApplyControllerStateResponse = RpcResult<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct LoginRequest {
@@ -583,31 +575,22 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum LoginResponse {
-    #[pack(tag(0))]
-    Ok {
-        admin: String,
-        token: Secret,
-        issued_unix: u64,
-        absolute_deadline_unix: u64,
-        idle_timeout_secs: u64,
-    },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct LoginOk {
+    pub admin: String,
+    pub token: Secret,
+    pub issued_unix: u64,
+    pub absolute_deadline_unix: u64,
+    pub idle_timeout_secs: u64,
 }
+
+pub type LoginResponse = RpcResult<LoginOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct LogoutRequest {
     pub credential: AdminCredential,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum LogoutResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type LogoutResponse = RpcResult<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct RevokeRequest {
@@ -619,27 +602,24 @@ pub struct RevokeRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum RevokeResponse {
-    #[pack(tag(0))]
-    Ok {
-        /// Non-fatal revocation/signing follow-ups.
-        #[serde(default)]
-        #[pack(default)]
-        warnings: Vec<String>,
-        /// The immediate CRL-distribution operation, when this response came
-        /// from a protocol-v6 controller.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[pack(default)]
-        operation_id: Option<OperationId>,
-        /// One deterministic result for every registered admin server that
-        /// should enforce the new CRL.
-        #[serde(default)]
-        #[pack(default)]
-        peers: Vec<PeerResult>,
-    },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct RevokeOk {
+    /// Non-fatal revocation/signing follow-ups.
+    #[serde(default)]
+    #[pack(default)]
+    pub warnings: Vec<String>,
+    /// The immediate CRL-distribution operation, when this response came
+    /// from a protocol-v6 controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[pack(default)]
+    pub operation_id: Option<OperationId>,
+    /// One deterministic result for every registered admin server that
+    /// should enforce the new CRL.
+    #[serde(default)]
+    #[pack(default)]
+    pub peers: Vec<PeerResult>,
 }
+
+pub type RevokeResponse = RpcResult<RevokeOk>;
 
 /// Controller → node immediate CRL distribution. The controller certificate
 /// is the authorization gate; the CRL itself is independently signature
@@ -650,13 +630,7 @@ pub struct ApplyCrlRequest {
     pub crl_pem: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApplyCrlResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApplyCrlResponse = RpcResult<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ListIssuedRequest {
@@ -776,31 +750,28 @@ pub struct EnrollmentRequest {
 
 /// Response to both [`Request::Sign`] and [`Request::Enroll`].
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum SignResponse {
-    #[pack(tag(0))]
-    Ok {
-        signed_cert_pem: String,
-        /// The full set of trusted CA certs the joining node should
-        /// install as its trust anchor — a PEM bundle that always
-        /// includes the issuing CA and may include additional
-        /// (e.g. federated) CAs. The client installs this verbatim, so
-        /// a join needs no manual file copying at all.
-        trusted_pem: String,
-        /// Non-fatal follow-up failures (e.g. an id-map host that
-        /// couldn't be reached for identity registration). The cert in
-        /// this response is valid regardless; the client shows these to
-        /// the operator.
-        #[serde(default)]
-        #[pack(default)]
-        warnings: Vec<String>,
-        /// Present when issuance triggered an id-map fanout.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[pack(default)]
-        operation_id: Option<OperationId>,
-    },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct SignOk {
+    pub signed_cert_pem: String,
+    /// The full set of trusted CA certs the joining node should
+    /// install as its trust anchor — a PEM bundle that always
+    /// includes the issuing CA and may include additional
+    /// (e.g. federated) CAs. The client installs this verbatim, so
+    /// a join needs no manual file copying at all.
+    pub trusted_pem: String,
+    /// Non-fatal follow-up failures (e.g. an id-map host that
+    /// couldn't be reached for identity registration). The cert in
+    /// this response is valid regardless; the client shows these to
+    /// the operator.
+    #[serde(default)]
+    #[pack(default)]
+    pub warnings: Vec<String>,
+    /// Present when issuance triggered an id-map fanout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[pack(default)]
+    pub operation_id: Option<OperationId>,
 }
+
+pub type SignResponse = RpcResult<SignOk>;
 
 /// Register `san` on the receiving host's id-map. The uid is allocated
 /// locally by the receiver — id-map perms are keyed on *names*; uids
@@ -817,12 +788,11 @@ pub struct AddIdentityRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum AddIdentityResponse {
-    #[pack(tag(0))]
-    Ok { uid: u32 },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct AddIdentityOk {
+    pub uid: u32,
 }
+
+pub type AddIdentityResponse = RpcResult<AddIdentityOk>;
 
 /// Queue a CSR for asynchronous admin approval. Carries no
 /// credentials — the requester proves nothing here; trust is
@@ -855,12 +825,11 @@ pub struct EnqueueRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum EnqueueResponse {
-    #[pack(tag(0))]
-    Ok { request_id: String },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct QueuedOk {
+    pub request_id: String,
 }
+
+pub type EnqueueResponse = RpcResult<QueuedOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct PollRequest {
@@ -874,16 +843,7 @@ pub enum PollResponse {
     Pending,
     /// Approved and signed — same payload a synchronous sign returns.
     #[pack(tag(1))]
-    Signed {
-        signed_cert_pem: String,
-        trusted_pem: String,
-        #[serde(default)]
-        #[pack(default)]
-        warnings: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[pack(default)]
-        operation_id: Option<OperationId>,
-    },
+    Signed(SignOk),
     #[pack(tag(2))]
     Denied { reason: String },
     /// Never seen, expired, or already cleaned up.
@@ -941,13 +901,7 @@ pub struct QueueEntry {
     pub replaces_serial: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ListQueueResponse {
-    #[pack(tag(0))]
-    Ok { requests: Vec<QueueEntry> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ListQueueResponse = RpcResult<Vec<QueueEntry>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApproveRequest {
@@ -960,19 +914,16 @@ pub struct ApproveRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApproveResponse {
-    #[pack(tag(0))]
-    Ok {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[pack(default)]
-        operation_id: Option<OperationId>,
-        #[serde(default)]
-        #[pack(default)]
-        warnings: Vec<String>,
-    },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct ApproveOk {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[pack(default)]
+    pub operation_id: Option<OperationId>,
+    #[serde(default)]
+    #[pack(default)]
+    pub warnings: Vec<String>,
 }
+
+pub type ApproveResponse = RpcResult<ApproveOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct DenyRequest {
@@ -982,13 +933,7 @@ pub struct DenyRequest {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum DenyResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type DenyResponse = RpcResult<()>;
 
 // -- resolver hierarchy delegation -------------------------------------------
 
@@ -1004,13 +949,7 @@ pub struct DelegationRequest {
     pub child_servers: Vec<AdminServerId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum DelegationResponse {
-    #[pack(tag(0))]
-    Ok { request_id: String },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type DelegationResponse = RpcResult<QueuedOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum DelegationPollResponse {
@@ -1057,13 +996,7 @@ pub struct DelegationEntry {
     pub peer: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ListDelegationsResponse {
-    #[pack(tag(0))]
-    Ok { requests: Vec<DelegationEntry> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ListDelegationsResponse = RpcResult<Vec<DelegationEntry>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApproveDelegationRequest {
@@ -1082,13 +1015,7 @@ pub struct PeerResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApproveDelegationResponse {
-    #[pack(tag(0))]
-    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApproveDelegationResponse = RpcResult<PropagationOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct DenyDelegationRequest {
@@ -1097,13 +1024,7 @@ pub struct DenyDelegationRequest {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum DenyDelegationResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type DenyDelegationResponse = RpcResult<()>;
 
 /// A referral edit pushed server-to-server for cluster-wide consistency.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1128,13 +1049,7 @@ pub struct ApplyReferralEditRequest {
     pub edit: ReferralEdit,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApplyReferralEditResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApplyReferralEditResponse = RpcResult<()>;
 
 /// How clients authenticate to a resolver — the data-plane auth, as
 /// opposed to the admin plane, which is always TLS rooted at the CA.
@@ -1279,28 +1194,14 @@ pub struct RegisterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum RegisterResponse {
-    #[pack(tag(0))]
-    Ok { version: u64 },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct MapVersion {
+    pub version: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum GetMapVersionResponse {
-    #[pack(tag(0))]
-    Ok { version: u64 },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type RegisterResponse = RpcResult<MapVersion>;
+pub type GetMapVersionResponse = RpcResult<MapVersion>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum GetMapResponse {
-    #[pack(tag(0))]
-    Ok { map: NetworkMap },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type GetMapResponse = RpcResult<NetworkMap>;
 
 /// Admin-authenticated permanent removal of one immutable dead-server identity.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1310,43 +1211,34 @@ pub struct RemoveServerRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum RemoveServerResponse {
-    #[pack(tag(0))]
-    Ok {
-        version: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[pack(default)]
-        operation_id: Option<OperationId>,
-        #[serde(default)]
-        #[pack(default)]
-        revoked: u64,
-        #[serde(default)]
-        #[pack(default)]
-        removed: bool,
-        #[serde(default)]
-        #[pack(default)]
-        affected_clusters: Vec<String>,
-        #[serde(default)]
-        #[pack(default)]
-        peers: Vec<PeerResult>,
-        /// Immediate CRL-distribution results. Separate from `peers`, which
-        /// reports referral-topology reconciliation for the same operation.
-        #[serde(default)]
-        #[pack(default)]
-        crl_peers: Vec<PeerResult>,
-    },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct RemoveServerOk {
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[pack(default)]
+    pub operation_id: Option<OperationId>,
+    #[serde(default)]
+    #[pack(default)]
+    pub revoked: u64,
+    #[serde(default)]
+    #[pack(default)]
+    pub removed: bool,
+    #[serde(default)]
+    #[pack(default)]
+    pub affected_clusters: Vec<String>,
+    #[serde(default)]
+    #[pack(default)]
+    pub peers: Vec<PeerResult>,
+    /// Immediate CRL-distribution results. Separate from `peers`, which
+    /// reports referral-topology reconciliation for the same operation.
+    #[serde(default)]
+    #[pack(default)]
+    pub crl_peers: Vec<PeerResult>,
 }
 
+pub type RemoveServerResponse = RpcResult<RemoveServerOk>;
+
 /// This host's permissions file, serialized (a resolver `PMap` as JSON).
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum GetPermsResponse {
-    #[pack(tag(0))]
-    Ok { perms_json: String },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type GetPermsResponse = RpcResult<String>;
 
 /// Admin → controller: read the permissions of the cluster mounted exactly at
 /// `target_path`.
@@ -1357,12 +1249,13 @@ pub struct ReadPermsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ReadPermsResponse {
-    #[pack(tag(0))]
-    Ok { server: AdminServerId, addr: SocketAddr, perms_json: String },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct ReadPermsOk {
+    pub server: AdminServerId,
+    pub addr: SocketAddr,
+    pub perms_json: String,
 }
+
+pub type ReadPermsResponse = RpcResult<ReadPermsOk>;
 
 /// Admin → CA: replace the `target_path` cluster's permissions with
 /// `perms_json` (a serialized resolver `PMap`).
@@ -1374,13 +1267,7 @@ pub struct EditPermsRequest {
     pub perms_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum EditPermsResponse {
-    #[pack(tag(0))]
-    Ok { operation_id: OperationId, peers: Vec<PeerResult> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type EditPermsResponse = RpcResult<PropagationOk>;
 
 /// Server → server: apply a permissions edit to the local resolver perms.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1389,13 +1276,7 @@ pub struct ApplyPermsEditRequest {
     pub perms_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApplyPermsEditResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApplyPermsEditResponse = RpcResult<()>;
 
 // -- remote admin management (over the admin plane) ----------------------------
 
@@ -1438,23 +1319,11 @@ pub struct ListAdminsRequest {
 /// Response to add/set/remove admin ops. These are CA-local (no cluster
 /// propagation), so there is no peer-result list — just success or a safe
 /// reason.
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum AdminMgmtResponse {
-    #[pack(tag(0))]
-    Ok,
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type AdminMgmtResponse = RpcResult<()>;
 
 /// Response to [`Request::ListAdmins`]: the roster (each entry carries the
 /// admin's name, tier, and full policy — including `may_manage_admins`).
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum AdminListResponse {
-    #[pack(tag(0))]
-    Ok { admins: Vec<crate::ca_policy::AdminInfo> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type AdminListResponse = RpcResult<Vec<crate::ca_policy::AdminInfo>>;
 
 // -- remote service control (over the admin plane) -----------------------------
 
@@ -1474,12 +1343,12 @@ pub struct ControlServiceRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ControlServiceResponse {
-    #[pack(tag(0))]
-    Ok { operation_id: OperationId, units: Vec<ServiceUnit> },
-    #[pack(tag(1))]
-    Err { reason: String },
+pub struct ControlServiceOk {
+    pub operation_id: OperationId,
+    pub units: Vec<ServiceUnit>,
 }
+
+pub type ControlServiceResponse = RpcResult<ControlServiceOk>;
 
 /// Server → server: apply a service-control op to this host's local
 /// activation supervisor. `units` are the resolved unit names for THIS host.
@@ -1490,13 +1359,7 @@ pub struct ApplyServiceControlRequest {
     pub op: netidx_activation::control::ControlOp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum ApplyServiceControlResponse {
-    #[pack(tag(0))]
-    Ok { units: Vec<ServiceUnit> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type ApplyServiceControlResponse = RpcResult<Vec<ServiceUnit>>;
 
 /// A cluster member's unit as reported to the service panel: its live run
 /// state plus, when a definition file exists on that member, the display
@@ -1527,24 +1390,12 @@ pub struct ServiceUnitDef {
 /// password, in grouped display form (shown to the operator once, never
 /// stored). On the wire it is a [`Secret`] so it is redacted in logs and
 /// zeroized after use.
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum RotateRecoveryResponse {
-    #[pack(tag(0))]
-    Ok { recovery_password: Secret },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type RotateRecoveryResponse = RpcResult<Secret>;
 
 /// Response to [`Request::RotateAutorenew`]: success, optionally with a
 /// warning (e.g. the keytab was resealed in plaintext because the existing
 /// one was), or a safe failure reason.
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub enum RotateAutorenewResponse {
-    #[pack(tag(0))]
-    Ok { warning: Option<String> },
-    #[pack(tag(1))]
-    Err { reason: String },
-}
+pub type RotateAutorenewResponse = RpcResult<Option<String>>;
 
 /// Write one length-prefixed Pack message without flushing.
 pub(crate) async fn write_msg_unflushed<S, T>(stream: &mut S, msg: &T) -> Result<()>
@@ -1845,14 +1696,14 @@ mod tests {
         assert_eq!(got.id_map_groups, vec!["users".to_string()]);
 
         let server = AdminServerId::new();
-        let response = ReadPermsResponse::Ok {
+        let response = ReadPermsResponse::Ok(ReadPermsOk {
             server,
             addr: "127.0.0.1:4565".parse().unwrap(),
             perms_json: "{}".to_string(),
-        };
+        });
         write_msg(&mut a, &response).await.unwrap();
         match read_msg::<_, ReadPermsResponse>(&mut b).await.unwrap() {
-            ReadPermsResponse::Ok { server: got, addr, perms_json } => {
+            ReadPermsResponse::Ok(ReadPermsOk { server: got, addr, perms_json }) => {
                 assert_eq!(got, server);
                 assert_eq!(addr, "127.0.0.1:4565".parse().unwrap());
                 assert_eq!(perms_json, "{}");
@@ -2059,7 +1910,9 @@ mod tests {
         // `#[serde(default)]`.
         let json = r#"{"Ok":{"signed_cert_pem":"CERT","trusted_pem":"CA"}}"#;
         let resp: SignResponse = serde_json::from_str(json).unwrap();
-        let SignResponse::Ok { warnings, .. } = resp else { panic!("expected Ok") };
+        let SignResponse::Ok(SignOk { warnings, .. }) = resp else {
+            panic!("expected Ok")
+        };
         assert!(warnings.is_empty());
     }
 
@@ -2091,24 +1944,22 @@ mod tests {
         assert_eq!(got.resolver.unwrap().base, "/eu");
 
         let controller = AdminServerId::new();
-        let resp = GetMapResponse::Ok {
-            map: NetworkMap {
-                version: 7,
-                controller,
-                servers: vec![ServerEntry {
-                    id: controller,
-                    addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: Role::Ca | Role::Resolver,
-                    resolver: None,
-                    cluster: None,
-                    state: ServerState::Registered,
-                }],
-                clusters: vec![],
-            },
-        };
+        let resp = GetMapResponse::Ok(NetworkMap {
+            version: 7,
+            controller,
+            servers: vec![ServerEntry {
+                id: controller,
+                addr: "10.0.0.1:4565".parse().unwrap(),
+                roles: Role::Ca | Role::Resolver,
+                resolver: None,
+                cluster: None,
+                state: ServerState::Registered,
+            }],
+            clusters: vec![],
+        });
         write_msg(&mut a, &resp).await.unwrap();
         match read_msg::<_, GetMapResponse>(&mut b).await.unwrap() {
-            GetMapResponse::Ok { map } => {
+            GetMapResponse::Ok(map) => {
                 assert_eq!(map.version, 7);
                 assert_eq!(map.servers.len(), 1);
                 assert_eq!(map.servers[0].roles, Role::Ca | Role::Resolver);
@@ -2118,7 +1969,7 @@ mod tests {
 
         let operation_id = OperationId::new();
         let server = AdminServerId::new();
-        let removal = RemoveServerResponse::Ok {
+        let removal = RemoveServerResponse::Ok(RemoveServerOk {
             version: 8,
             operation_id: Some(operation_id),
             revoked: 2,
@@ -2130,10 +1981,10 @@ mod tests {
                 error: Some("offline".to_string()),
             }],
             crl_peers: vec![],
-        };
+        });
         write_msg(&mut a, &removal).await.unwrap();
         match read_msg::<_, RemoveServerResponse>(&mut b).await.unwrap() {
-            RemoveServerResponse::Ok {
+            RemoveServerResponse::Ok(RemoveServerOk {
                 version,
                 operation_id: got_operation,
                 revoked,
@@ -2141,7 +1992,7 @@ mod tests {
                 affected_clusters,
                 peers,
                 crl_peers,
-            } => {
+            }) => {
                 assert_eq!(version, 8);
                 assert_eq!(got_operation, Some(operation_id));
                 assert_eq!(revoked, 2);
@@ -2157,14 +2008,14 @@ mod tests {
         let operation_id = OperationId::new();
         let peer =
             PeerResult { server, addr: "10.0.0.2:4565".parse().unwrap(), error: None };
-        let response = RevokeResponse::Ok {
+        let response = RevokeResponse::Ok(RevokeOk {
             warnings: vec![],
             operation_id: Some(operation_id),
             peers: vec![peer],
-        };
+        });
         write_msg(&mut a, &response).await.unwrap();
         match read_msg::<_, RevokeResponse>(&mut b).await.unwrap() {
-            RevokeResponse::Ok { operation_id: got, peers, .. } => {
+            RevokeResponse::Ok(RevokeOk { operation_id: got, peers, .. }) => {
                 assert_eq!(got, Some(operation_id));
                 assert_eq!(peers[0].server, server);
             }
