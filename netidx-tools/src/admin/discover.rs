@@ -42,8 +42,8 @@ pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
     Ok(())
 }
 
-fn role_str(r: &Role) -> &'static str {
-    match r {
+fn role_str(role: Role) -> &'static str {
+    match role {
         Role::Ca => "ca",
         Role::Resolver => "resolver",
         Role::IdMap => "id-map",
@@ -65,7 +65,7 @@ fn print_human(networks: &[DiscoveredNetworkReport], identicon: bool) {
                 let roles = if id.roles.is_empty() {
                     "none".to_string()
                 } else {
-                    id.roles.iter().map(role_str).collect::<Vec<_>>().join(", ")
+                    id.roles.into_iter().map(role_str).collect::<Vec<_>>().join(", ")
                 };
                 println!("  roles:           {roles}");
                 println!("  glyph:           {}", id.fingerprint.text());
@@ -96,7 +96,9 @@ fn print_json(networks: &[DiscoveredNetworkReport]) {
                     obj.insert("reachable".into(), Value::from(true));
                     obj.insert(
                         "roles".into(),
-                        Value::from(id.roles.iter().map(role_str).collect::<Vec<_>>()),
+                        Value::from(
+                            id.roles.into_iter().map(role_str).collect::<Vec<_>>(),
+                        ),
                     );
                     obj.insert("glyph".into(), Value::from(id.fingerprint.text()));
                 }

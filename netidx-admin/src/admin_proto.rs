@@ -35,6 +35,7 @@
 //! servers, clients, and renewal daemons together.
 
 use anyhow::{Context, Result, bail};
+use enumflags2::{BitFlags, bitflags};
 use netidx_core::pack::Pack;
 use netidx_derive::Pack;
 use serde_derive::{Deserialize, Serialize};
@@ -161,19 +162,21 @@ pub enum NodeKind {
 /// TLS-protected [`ServerHello`], so it's trustworthy once the chain is
 /// pinned to the confirmed CA — unlike the mDNS beacon, which carries
 /// the same list purely as a display hint.
+#[bitflags]
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Pack, PartialEq, Eq)]
 pub enum Role {
     /// Holds the CA vault; answers [`Request::Sign`] and
     /// [`Request::Enroll`].
     #[pack(tag(0))]
-    Ca,
+    Ca = 1 << 0,
     /// A resolver server runs on this host.
     #[pack(tag(1))]
-    Resolver,
+    Resolver = 1 << 1,
     /// An id-map daemon runs on this host; answers
     /// [`Request::AddIdentity`].
     #[pack(tag(2))]
-    IdMap,
+    IdMap = 1 << 2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -188,7 +191,7 @@ pub struct ServerHello {
     /// The TLS domain this network is rooted at (e.g. `ryu-oh.org`).
     pub domain: String,
     /// What this host does — see [`Role`].
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     pub server_id: AdminServerId,
     pub controller: bool,
 }
@@ -731,7 +734,7 @@ pub struct EnrollRequest {
     /// own peer list (admin-authorized, so trusted), which makes the CA
     /// host the well-known starting point for peer walks.
     pub listen: SocketAddr,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     /// The resolver endpoint owned by this admin-server identity. It must be
     /// one of this host's locally configured `resolver_members`; stable
     /// ownership lets the CA form and split clusters without treating those
@@ -762,7 +765,7 @@ pub enum ClusterPlacement {
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
 pub struct EnrollmentRequest {
     pub listen: SocketAddr,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     pub resolver_member: Option<ResolverAddr>,
     pub resolver_members: Vec<ResolverAddr>,
     pub cluster: ClusterPlacement,
@@ -1216,7 +1219,7 @@ pub enum ClusterState {
 pub struct ServerEntry {
     pub id: AdminServerId,
     pub addr: SocketAddr,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     /// Resolver endpoint owned by this identity. `None` only for a server
     /// without the Resolver role.
     #[serde(default)]
@@ -1642,7 +1645,7 @@ mod tests {
     #[derive(netidx_derive::Pack)]
     struct EnrollmentBeforeReplacement {
         listen: SocketAddr,
-        roles: Vec<Role>,
+        roles: BitFlags<Role>,
         resolver_member: Option<ResolverAddr>,
         resolver_members: Vec<ResolverAddr>,
         cluster: ClusterPlacement,
@@ -1653,7 +1656,7 @@ mod tests {
         credential: AdminCredential,
         csr_pem: String,
         listen: SocketAddr,
-        roles: Vec<Role>,
+        roles: BitFlags<Role>,
         resolver_member: Option<ResolverAddr>,
         resolver_members: Vec<ResolverAddr>,
         cluster: ClusterPlacement,
@@ -1712,7 +1715,7 @@ mod tests {
 
         let old = encode(&EnrollmentBeforeReplacement {
             listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
             cluster: ClusterPlacement::Create { base: "/".into() },
@@ -1724,7 +1727,7 @@ mod tests {
             credential: AdminCredential::password("admin", "pw"),
             csr_pem: "CSR".into(),
             listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
             cluster: ClusterPlacement::Create { base: "/".into() },
@@ -2022,14 +2025,14 @@ mod tests {
         let hello = ServerHello {
             protocol_version: PROTOCOL_VERSION,
             domain: "ryu-oh.org".to_string(),
-            roles: vec![Role::Ca, Role::Resolver, Role::IdMap],
+            roles: Role::Ca | Role::Resolver | Role::IdMap,
             server_id: AdminServerId::new(),
             controller: true,
         };
         write_msg(&mut a, &hello).await.unwrap();
         let got: ServerHello = read_msg(&mut b).await.unwrap();
         assert_eq!(got.domain, "ryu-oh.org");
-        assert_eq!(got.roles, vec![Role::Ca, Role::Resolver, Role::IdMap]);
+        assert_eq!(got.roles, Role::Ca | Role::Resolver | Role::IdMap);
         let info = GetInfoResponse {
             domain: "ryu-oh.org".to_string(),
             ca_addr: Some("192.168.0.1:4565".parse().unwrap()),
@@ -2095,7 +2098,7 @@ mod tests {
                 servers: vec![ServerEntry {
                     id: controller,
                     addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: vec![Role::Ca, Role::Resolver],
+                    roles: Role::Ca | Role::Resolver,
                     resolver: None,
                     cluster: None,
                     state: ServerState::Registered,
@@ -2108,7 +2111,7 @@ mod tests {
             GetMapResponse::Ok { map } => {
                 assert_eq!(map.version, 7);
                 assert_eq!(map.servers.len(), 1);
-                assert_eq!(map.servers[0].roles, vec![Role::Ca, Role::Resolver]);
+                assert_eq!(map.servers[0].roles, Role::Ca | Role::Resolver);
             }
             GetMapResponse::Err { reason } => panic!("err: {reason}"),
         }

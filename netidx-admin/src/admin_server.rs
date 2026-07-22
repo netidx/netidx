@@ -48,6 +48,7 @@ use crate::{
     delegation_store, discovery, id_map, netmap,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use enumflags2::BitFlags;
 use futures::{StreamExt, stream};
 use globset::Glob;
 use log::{debug, error, info, warn};
@@ -643,7 +644,7 @@ impl Server {
         .await
     }
 
-    async fn roles(&self) -> Vec<Role> {
+    async fn roles(&self) -> BitFlags<Role> {
         self.read(move |state| roles_of(&state.cfg)).await
     }
 
@@ -714,7 +715,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let _advert = if mdns {
         let domain = state.read(move |state| state.cfg.domain.clone()).await;
         let fp_short = ca_fingerprint_short(&state.serving_cert_pem)?;
-        match discovery::advertise(listen, &domain, &state.roles().await, &fp_short) {
+        match discovery::advertise(listen, &domain, state.roles().await, &fp_short) {
             Ok(ad) => Some(ad),
             Err(e) => {
                 warn!("admin-server: mDNS advertisement failed (continuing): {e:#}");
@@ -1450,7 +1451,7 @@ where
                     Some(_) => {
                         let enrollment = admin_proto::EnrollmentRequest {
                             listen: req.listen,
-                            roles: req.roles.clone(),
+                            roles: req.roles,
                             resolver_member: req.resolver_member.clone(),
                             resolver_members: req.resolver_members.clone(),
                             cluster: req.cluster.clone(),
@@ -2621,7 +2622,7 @@ async fn push_registrations(
                 .servers
                 .iter()
                 .filter(|s| {
-                    s.roles.contains(&Role::IdMap)
+                    s.roles.contains(Role::IdMap)
                         && s.state == admin_proto::ServerState::Registered
                 })
                 .map(|s| (s.id, s.addr))
@@ -3529,7 +3530,7 @@ async fn try_enroll(
         };
         let enrollment = admin_proto::EnrollmentRequest {
             listen: req.listen,
-            roles: req.roles.clone(),
+            roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
@@ -3549,7 +3550,7 @@ async fn try_enroll(
         None,
         Some(admin_proto::EnrollmentRequest {
             listen: req.listen,
-            roles: req.roles.clone(),
+            roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
@@ -3569,7 +3570,7 @@ async fn try_enroll(
     if !local {
         let enrollment = admin_proto::EnrollmentRequest {
             listen: req.listen,
-            roles: req.roles.clone(),
+            roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
             cluster: req.cluster.clone(),
@@ -4260,7 +4261,7 @@ async fn handle_apply_controller_state(
     if controller.id != req.controller
         || controller.addr != req.addr
         || controller.state != admin_proto::ServerState::Registered
-        || !controller.roles.contains(&Role::Ca)
+        || !controller.roles.contains(Role::Ca)
     {
         return err("authoritative map does not bind the claimed registered CA controller address"
             .to_string());
@@ -5469,16 +5470,16 @@ async fn handle_apply_referral_edit(
 }
 
 /// The role list a admin-server config implies.
-fn roles_of(cfg: &AdminServerConfig) -> Vec<Role> {
-    let mut out = Vec::new();
+fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
+    let mut out = BitFlags::empty();
     if cfg.roles.ca.is_some() {
-        out.push(Role::Ca);
+        out.insert(Role::Ca);
     }
     if cfg.roles.resolver.is_some() {
-        out.push(Role::Resolver);
+        out.insert(Role::Resolver);
     }
     if cfg.roles.id_map.is_some() {
-        out.push(Role::IdMap);
+        out.insert(Role::IdMap);
     }
     out
 }
@@ -5623,7 +5624,7 @@ async fn handle_register(
                     format!("server {server_id} has no approved enrollment grant")
                 })?;
             let reconcile = current.state == admin_proto::ServerState::Enrolled
-                && current.roles.contains(&Role::IdMap);
+                && current.roles.contains(Role::IdMap);
             let mut staged = state.map.clone();
             netmap::register(
                 &mut staged,
@@ -6270,20 +6271,16 @@ fn authorize_enrollment(
     enrollment: &admin_proto::EnrollmentRequest,
     map: Option<&NetworkMap>,
 ) -> std::result::Result<(), String> {
-    if enrollment.roles.contains(&Role::Ca) {
+    if enrollment.roles.contains(Role::Ca) {
         return Err("an enrollee may never request the Ca role".to_string());
     }
-    if !enrollment.roles.contains(&Role::Resolver) {
+    if !enrollment.roles.contains(Role::Resolver) {
         return Err("every non-controller enrollment must include Resolver".to_string());
     }
     if matches!(authd.kind, ca_vault::SlotKind::Signing) {
         return Ok(());
     }
-    if enrollment
-        .roles
-        .iter()
-        .any(|role| !authd.policy.server_enroll_roles.contains(role))
-    {
+    if !authd.policy.server_enroll_roles.contains(enrollment.roles) {
         return Err(format!(
             "requested roles {:?} exceed admin {}'s allowed enrollment roles {:?}",
             enrollment.roles, authd.admin, authd.policy.server_enroll_roles
@@ -6758,12 +6755,11 @@ fn policy_within(
             ));
         }
     }
-    for role in &granted.server_enroll_roles {
-        if !caller.server_enroll_roles.contains(role) {
-            return Err(format!(
-                "cannot grant server enrollment role {role:?} — you do not have it"
-            ));
-        }
+    if !caller.server_enroll_roles.contains(granted.server_enroll_roles) {
+        return Err(format!(
+            "cannot grant server enrollment roles {:?} — yours are {:?}",
+            granted.server_enroll_roles, caller.server_enroll_roles
+        ));
     }
     if granted.may_manage_admins && !caller.may_manage_admins {
         return Err("cannot grant may_manage_admins — you do not have it".to_string());
@@ -7729,7 +7725,7 @@ mod v6_tests {
                 ServerEntry {
                     id: controller,
                     addr: "10.1.0.1:4565".parse().unwrap(),
-                    roles: vec![Role::Ca, Role::Resolver],
+                    roles: Role::Ca | Role::Resolver,
                     resolver: Some(root_member.clone()),
                     cluster: Some(root),
                     state: admin_proto::ServerState::Registered,
@@ -7737,7 +7733,7 @@ mod v6_tests {
                 ServerEntry {
                     id: satellite,
                     addr: "10.2.0.1:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(child_member.clone()),
                     cluster: Some(child),
                     state: admin_proto::ServerState::Registered,
@@ -7795,7 +7791,7 @@ mod v6_tests {
         let server = |id, admin_addr: &str, member: ResolverAddr, cluster| ServerEntry {
             id,
             addr: admin_addr.parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver: Some(member),
             cluster: Some(cluster),
             state: admin_proto::ServerState::Registered,
@@ -7921,7 +7917,7 @@ mod v6_tests {
         map.servers.push(ServerEntry {
             id: controller,
             addr: "127.0.0.1:4565".parse().unwrap(),
-            roles: vec![Role::Ca],
+            roles: Role::Ca.into(),
             resolver: None,
             cluster: None,
             state: admin_proto::ServerState::Registered,
@@ -8061,7 +8057,7 @@ mod v6_tests {
                 max_validity: Duration::from_secs(60),
                 id_map_groups: vec![],
                 server_enroll_scopes: vec![],
-                server_enroll_roles: vec![],
+                server_enroll_roles: BitFlags::empty(),
                 perms_edit_scopes: vec!["/eu".into()],
                 may_manage_admins: false,
                 service_control_scopes: vec![],
@@ -8090,7 +8086,7 @@ mod v6_tests {
         let entry = |id, addr| ServerEntry {
             id,
             addr,
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver: None,
             cluster: None,
             state: admin_proto::ServerState::Registered,
@@ -8188,7 +8184,7 @@ mod v6_tests {
         };
         let initial = admin_proto::EnrollmentRequest {
             listen: "10.0.0.10:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver_member: Some(member.clone()),
             resolver_members: vec![member.clone()],
             cluster: admin_proto::ClusterPlacement::Create { base: "/eu".into() },
@@ -8221,31 +8217,32 @@ mod v6_tests {
                 max_validity: Duration::from_secs(60),
                 id_map_groups: vec![],
                 server_enroll_scopes: vec!["/eu".into()],
-                server_enroll_roles: vec![Role::Resolver],
+                server_enroll_roles: Role::Resolver.into(),
                 perms_edit_scopes: vec![],
                 may_manage_admins: false,
                 service_control_scopes: vec![],
             },
             kind: ca_vault::SlotKind::Role,
         };
-        let request = |base: &str, roles: Vec<Role>| admin_proto::EnrollmentRequest {
-            listen: "127.0.0.1:4565".parse().unwrap(),
-            roles,
-            resolver_member: Some(ResolverAddr {
-                addr: "127.0.0.1:4564".parse().unwrap(),
-                auth: InfoAuth::Anonymous,
-            }),
-            resolver_members: vec![ResolverAddr {
-                addr: "127.0.0.1:4564".parse().unwrap(),
-                auth: InfoAuth::Anonymous,
-            }],
-            cluster: admin_proto::ClusterPlacement::Create { base: base.into() },
-            replaces: None,
-        };
+        let request =
+            |base: &str, roles: BitFlags<Role>| admin_proto::EnrollmentRequest {
+                listen: "127.0.0.1:4565".parse().unwrap(),
+                roles,
+                resolver_member: Some(ResolverAddr {
+                    addr: "127.0.0.1:4564".parse().unwrap(),
+                    auth: InfoAuth::Anonymous,
+                }),
+                resolver_members: vec![ResolverAddr {
+                    addr: "127.0.0.1:4564".parse().unwrap(),
+                    auth: InfoAuth::Anonymous,
+                }],
+                cluster: admin_proto::ClusterPlacement::Create { base: base.into() },
+                replaces: None,
+            };
         assert!(
             authorize_enrollment(
                 &role_admin,
-                &request("/eu/one", vec![Role::Resolver]),
+                &request("/eu/one", Role::Resolver.into()),
                 None,
             )
             .is_ok()
@@ -8253,7 +8250,7 @@ mod v6_tests {
         assert!(
             authorize_enrollment(
                 &role_admin,
-                &request("/us", vec![Role::Resolver]),
+                &request("/us", Role::Resolver.into()),
                 None,
             )
             .is_err()
@@ -8261,7 +8258,7 @@ mod v6_tests {
         assert!(
             authorize_enrollment(
                 &role_admin,
-                &request("/eu", vec![Role::Resolver, Role::IdMap]),
+                &request("/eu", Role::Resolver | Role::IdMap),
                 None,
             )
             .is_err()
@@ -8272,12 +8269,15 @@ mod v6_tests {
         assert!(
             authorize_enrollment(
                 &signing,
-                &request("/", vec![Role::Ca, Role::Resolver]),
+                &request("/", Role::Ca | Role::Resolver),
                 None,
             )
             .is_err()
         );
-        assert!(authorize_enrollment(&signing, &request("/", vec![]), None).is_err());
+        assert!(
+            authorize_enrollment(&signing, &request("/", BitFlags::empty()), None)
+                .is_err()
+        );
     }
 
     async fn signed_empty_crl(dir: &Path, name: &str) -> (String, Vec<u8>) {
@@ -8394,8 +8394,8 @@ mod v6_tests {
         };
         let mut old_map = NetworkMap::empty(controller);
         old_map.version = 4;
-        old_map.servers.push(entry(controller, old_addr, vec![Role::Ca]));
-        old_map.servers.push(entry(node, cfg.listen, vec![Role::Resolver]));
+        old_map.servers.push(entry(controller, old_addr, Role::Ca.into()));
+        old_map.servers.push(entry(node, cfg.listen, Role::Resolver.into()));
         let mut new_map = old_map.clone();
         new_map.version = 5;
         new_map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = new_addr;

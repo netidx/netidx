@@ -1133,7 +1133,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
             let mut cand = Vec::new();
             for server in map.servers.iter().filter(|s| {
                 s.state == ServerState::Registered
-                    && s.roles.contains(&netidx_admin::admin_proto::Role::Resolver)
+                    && s.roles.contains(netidx_admin::admin_proto::Role::Resolver)
                     && Some(s.id) != local_server.map(|local| local.id)
             }) {
                 let (Some(cluster_id), Some(resolver)) =

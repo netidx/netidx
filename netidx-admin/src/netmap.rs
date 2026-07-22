@@ -85,7 +85,7 @@ pub fn upsert_controller(
     mut entry: ServerEntry,
     cluster: Option<ClusterFacts>,
 ) -> Result<bool> {
-    if entry.id != map.controller || !entry.roles.contains(&Role::Ca) {
+    if entry.id != map.controller || !entry.roles.contains(Role::Ca) {
         bail!("controller entry must use the map controller id and carry the Ca role");
     }
     entry.state = ServerState::Registered;
@@ -139,7 +139,7 @@ pub fn relocate_resolver(
         .iter()
         .find(|server| server.id == server_id)
         .with_context(|| format!("admin server {server_id} does not exist"))?;
-    if !server.roles.contains(&Role::Resolver) {
+    if !server.roles.contains(Role::Resolver) {
         bail!("admin server {server_id} has no Resolver grant");
     }
     let old = server.resolver.clone().with_context(|| {
@@ -202,10 +202,10 @@ pub fn enroll(
     if map.servers.iter().any(|s| s.id == server_id) {
         bail!("server identity {server_id} is already enrolled");
     }
-    if request.roles.contains(&Role::Ca) {
+    if request.roles.contains(Role::Ca) {
         bail!("an enrollee may never request the Ca role");
     }
-    if !request.roles.contains(&Role::Resolver) {
+    if !request.roles.contains(Role::Resolver) {
         bail!("every non-controller admin server must have the Resolver role");
     }
     let resolver_member = request
@@ -272,7 +272,7 @@ pub fn enroll(
     map.servers.push(ServerEntry {
         id: server_id,
         addr: request.listen,
-        roles: request.roles.clone(),
+        roles: request.roles,
         resolver: Some(resolver_member.clone()),
         cluster: Some(cluster),
         state: ServerState::Enrolled,
@@ -300,7 +300,7 @@ fn server_set(
         if require_registered && server.state != ServerState::Registered {
             bail!("parent admin server {id} is not registered");
         }
-        if !server.roles.contains(&Role::Resolver) {
+        if !server.roles.contains(Role::Resolver) {
             bail!("admin server {id} has no Resolver grant");
         }
         let id_cluster = server
@@ -323,7 +323,7 @@ fn assigned_servers(map: &NetworkMap, cluster: ResolverClusterId) -> Vec<AdminSe
     let mut ids: Vec<_> = map
         .servers
         .iter()
-        .filter(|s| s.cluster == Some(cluster) && s.roles.contains(&Role::Resolver))
+        .filter(|s| s.cluster == Some(cluster) && s.roles.contains(Role::Resolver))
         .map(|s| s.id)
         .collect();
     ids.sort();
@@ -747,7 +747,7 @@ mod tests {
         let member = addr(member);
         EnrollmentRequest {
             listen: "10.0.0.10:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver_member: Some(member.clone()),
             resolver_members: vec![member],
             cluster: ClusterPlacement::Create { base: base.into() },
@@ -768,7 +768,7 @@ mod tests {
         let controller_entry = ServerEntry {
             id: controller,
             addr: "10.0.0.1:4565".parse().unwrap(),
-            roles: vec![Role::Ca, Role::Resolver],
+            roles: Role::Ca | Role::Resolver,
             resolver: Some(old.clone()),
             cluster: Some(cluster),
             state: ServerState::Registered,
@@ -776,7 +776,7 @@ mod tests {
         let peer_entry = ServerEntry {
             id: peer,
             addr: "10.0.0.2:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver: Some(peer_addr.clone()),
             cluster: Some(cluster),
             state: ServerState::Registered,
@@ -833,7 +833,7 @@ mod tests {
                 ServerEntry {
                     id: controller,
                     addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: vec![Role::Ca, Role::Resolver],
+                    roles: Role::Ca | Role::Resolver,
                     resolver: Some(old.clone()),
                     cluster: Some(cluster),
                     state: ServerState::Registered,
@@ -841,7 +841,7 @@ mod tests {
                 ServerEntry {
                     id: peer,
                     addr: "10.0.0.2:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(peer_addr.clone()),
                     cluster: Some(cluster),
                     state: ServerState::Registered,
@@ -895,7 +895,7 @@ mod tests {
         );
         assert_eq!(map.servers[0].id, server);
         assert_eq!(map.servers[0].cluster, Some(cluster));
-        assert_eq!(map.servers[0].roles, vec![Role::Resolver]);
+        assert_eq!(map.servers[0].roles, Role::Resolver);
         assert_eq!(map.servers[0].addr, "10.0.0.20:4565".parse().unwrap());
         assert_eq!(map.clusters[0].state, ClusterState::Pending);
         let mut drift = facts.clone();
@@ -942,7 +942,7 @@ mod tests {
         let controller_entry = ServerEntry {
             id: controller,
             addr: "10.0.0.1:4565".parse().unwrap(),
-            roles: vec![Role::Ca, Role::Resolver],
+            roles: Role::Ca | Role::Resolver,
             resolver: Some(addr("10.0.0.1:4564")),
             cluster: Some(root),
             state: ServerState::Registered,
@@ -994,7 +994,7 @@ mod tests {
         let controller_entry = ServerEntry {
             id: controller,
             addr: "10.0.60.1:4565".parse().unwrap(),
-            roles: vec![Role::Ca, Role::Resolver],
+            roles: Role::Ca | Role::Resolver,
             resolver: Some(addr("10.0.60.1:4564")),
             cluster: Some(child),
             state: ServerState::Registered,
@@ -1015,7 +1015,7 @@ mod tests {
                 ServerEntry {
                     id: root_server,
                     addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(addr("10.0.0.1:4564")),
                     cluster: Some(root),
                     state: ServerState::Registered,
@@ -1068,7 +1068,7 @@ mod tests {
         expanded_members.push(second_member.clone());
         let join = EnrollmentRequest {
             listen: "10.0.0.11:4565".parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver_member: Some(second_member.clone()),
             resolver_members: vec![second_member],
             cluster: ClusterPlacement::Join { cluster: child },
@@ -1148,9 +1148,9 @@ mod tests {
                 id: *id,
                 addr: admin.parse().unwrap(),
                 roles: if *ca {
-                    vec![Role::Ca, Role::Resolver]
+                    Role::Ca | Role::Resolver
                 } else {
-                    vec![Role::Resolver]
+                    Role::Resolver.into()
                 },
                 resolver: Some(addr(member)),
                 cluster: Some(root),
@@ -1229,7 +1229,7 @@ mod tests {
             .map(|(id, admin, member)| ServerEntry {
                 id,
                 addr: admin.parse().unwrap(),
-                roles: vec![Role::Resolver],
+                roles: Role::Resolver.into(),
                 resolver: Some(addr(member)),
                 cluster: Some(cluster),
                 state: ServerState::Registered,

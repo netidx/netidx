@@ -11,6 +11,7 @@
 
 use crate::admin_proto::Role;
 use anyhow::{Context, Result};
+use enumflags2::BitFlags;
 use log::{debug, warn};
 use mdns_sd::{Receiver, ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::{
@@ -42,13 +43,13 @@ fn role_from_str(s: &str) -> Option<Role> {
 }
 
 /// Encode roles for the TXT record: `"ca,resolver,id-map"`.
-fn roles_to_txt(roles: &[Role]) -> String {
+fn roles_to_txt(roles: BitFlags<Role>) -> String {
     let mut out = String::new();
-    for r in roles {
+    for role in roles {
         if !out.is_empty() {
             out.push(',');
         }
-        out.push_str(role_to_str(*r));
+        out.push_str(role_to_str(role));
     }
     out
 }
@@ -56,7 +57,7 @@ fn roles_to_txt(roles: &[Role]) -> String {
 /// Decode a TXT roles value. Unknown role names are skipped — a newer
 /// server advertising a role we don't know about shouldn't make the
 /// whole record unreadable.
-fn roles_from_txt(s: &str) -> Vec<Role> {
+fn roles_from_txt(s: &str) -> BitFlags<Role> {
     s.split(',').filter_map(|r| role_from_str(r.trim())).collect()
 }
 
@@ -84,7 +85,7 @@ impl Drop for Advertisement {
 pub fn advertise(
     listen: SocketAddr,
     domain: &str,
-    roles: &[Role],
+    roles: BitFlags<Role>,
     fp_short: &str,
 ) -> Result<Advertisement> {
     let daemon = ServiceDaemon::new().context("starting mDNS responder")?;
@@ -142,7 +143,7 @@ pub struct Discovered {
     pub addrs: Vec<IpAddr>,
     pub port: u16,
     pub domain: String,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     pub fp_short: String,
 }
 
@@ -289,15 +290,15 @@ mod tests {
 
     #[test]
     fn roles_round_trip_txt() {
-        let all = [Role::Ca, Role::Resolver, Role::IdMap];
-        let txt = roles_to_txt(&all);
+        let all = Role::Ca | Role::Resolver | Role::IdMap;
+        let txt = roles_to_txt(all);
         assert_eq!(txt, "ca,resolver,id-map");
-        assert_eq!(roles_from_txt(&txt), all.to_vec());
-        assert_eq!(roles_from_txt(""), Vec::<Role>::new());
+        assert_eq!(roles_from_txt(&txt), all);
+        assert_eq!(roles_from_txt(""), BitFlags::empty());
         // Unknown roles from a newer version are skipped, not fatal.
-        assert_eq!(roles_from_txt("ca,flux-capacitor"), vec![Role::Ca]);
+        assert_eq!(roles_from_txt("ca,flux-capacitor"), Role::Ca);
         // Whitespace tolerance.
-        assert_eq!(roles_from_txt("ca, resolver"), vec![Role::Ca, Role::Resolver]);
+        assert_eq!(roles_from_txt("ca, resolver"), Role::Ca | Role::Resolver);
     }
 
     /// Live loopback advertise/browse. Ignored by default: multicast is
@@ -308,19 +309,15 @@ mod tests {
     #[ignore]
     fn advertise_and_browse_loopback() {
         let listen: SocketAddr = "0.0.0.0:14565".parse().unwrap();
-        let _ad = advertise(
-            listen,
-            "test.example.com",
-            &[Role::Ca, Role::Resolver],
-            "ABCDEFGH",
-        )
-        .unwrap();
+        let _ad =
+            advertise(listen, "test.example.com", Role::Ca | Role::Resolver, "ABCDEFGH")
+                .unwrap();
         let found = browse_blocking(Duration::from_secs(3)).unwrap();
         let ours: Vec<_> =
             found.iter().filter(|d| d.domain == "test.example.com").collect();
         assert!(!ours.is_empty(), "did not find our own advertisement");
         assert_eq!(ours[0].port, 14565);
-        assert_eq!(ours[0].roles, vec![Role::Ca, Role::Resolver]);
+        assert_eq!(ours[0].roles, Role::Ca | Role::Resolver);
         assert_eq!(ours[0].fp_short, "ABCDEFGH");
     }
 }

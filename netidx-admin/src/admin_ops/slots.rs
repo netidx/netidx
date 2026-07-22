@@ -547,7 +547,7 @@ async fn recover_controller_with_password_and_lock(
         .controller_entry()
         .cloned()
         .context("the restored authoritative map has no controller entry")?;
-    if !controller.roles.contains(&crate::admin_proto::Role::Ca) {
+    if !controller.roles.contains(crate::admin_proto::Role::Ca) {
         bail!("the restored map's controller entry does not carry the CA role");
     }
     let listen = listen.unwrap_or(cfg.listen);
@@ -1097,7 +1097,7 @@ mod tests {
         map.servers.push(ServerEntry {
             id: server_id,
             addr: listen,
-            roles: vec![Role::Ca, Role::Resolver],
+            roles: Role::Ca | Role::Resolver,
             resolver: None,
             cluster: Some(cluster),
             state: ServerState::Registered,

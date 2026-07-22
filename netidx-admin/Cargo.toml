@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }
 dirs = { workspace = true }
+enumflags2 = { workspace = true }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-core = { path = "../netidx-core", version = "0.32.0" }
 netidx-derive = { path = "../netidx-derive", version = "0.32.0" }

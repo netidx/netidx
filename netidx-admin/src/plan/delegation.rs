@@ -60,7 +60,7 @@ fn selected_server_sets(
                 format!("selected parent resolver {addr} is not CA-owned")
             })?;
         if server.state != crate::admin_proto::ServerState::Registered
-            || !server.roles.contains(&Role::Resolver)
+            || !server.roles.contains(Role::Resolver)
         {
             bail!("selected parent resolver {addr} is not a registered routing target");
         }
@@ -86,7 +86,7 @@ fn selected_server_sets(
         .iter()
         .filter(|server| {
             server.cluster == Some(local_cluster)
-                && server.roles.contains(&Role::Resolver)
+                && server.roles.contains(Role::Resolver)
                 && (parent_cluster != local_cluster || !parent.contains(&server.id))
         })
         .map(|server| server.id)
@@ -100,7 +100,7 @@ fn selected_server_sets(
             .iter()
             .filter(|server| {
                 server.cluster == Some(parent_cluster)
-                    && server.roles.contains(&Role::Resolver)
+                    && server.roles.contains(Role::Resolver)
             })
             .map(|server| server.id)
             .collect();
@@ -188,7 +188,7 @@ pub async fn delegate_under_parent(
                     .iter()
                     .filter(|s| {
                         s.cluster == Some(parent_id)
-                            && s.roles.contains(&Role::Resolver)
+                            && s.roles.contains(Role::Resolver)
                             && s.state == crate::admin_proto::ServerState::Registered
                     })
                     .map(|s| s.id)
@@ -197,7 +197,7 @@ pub async fn delegate_under_parent(
                     .servers
                     .iter()
                     .filter(|s| {
-                        s.cluster == Some(child_id) && s.roles.contains(&Role::Resolver)
+                        s.cluster == Some(child_id) && s.roles.contains(Role::Resolver)
                     })
                     .map(|s| s.id)
                     .collect(),
@@ -277,7 +277,7 @@ mod tests {
         ServerEntry {
             id,
             addr: admin.parse().unwrap(),
-            roles: vec![Role::Resolver],
+            roles: Role::Resolver.into(),
             resolver: Some(resolver(resolver_addr)),
             cluster: Some(cluster),
             state: ServerState::Registered,

@@ -177,7 +177,7 @@ pub async fn run_resolver(
         && input.parent_admin_server.is_none()
         && input.delegate_subtree.is_none()
         && let Some(net) = probe.have()
-        && net.identity.roles.contains(&Role::Resolver)
+        && net.identity.roles.contains(Role::Resolver)
         && let Some(parent_addr) = net.info.reached.first().copied()
     {
         if let Some(subtree) = ans
@@ -1361,9 +1361,9 @@ pub async fn enroll_admin_server(
         .cloned()
         .context("the local resolver listen address is absent from resolver members")?;
     let roles = if id_map.is_some() {
-        vec![Role::Resolver, Role::IdMap]
+        Role::Resolver | Role::IdMap
     } else {
-        vec![Role::Resolver]
+        Role::Resolver.into()
     };
     let map = admin_client::get_map_pinned(ca_addr, NodeKind::AdminServer, &net.identity)
         .await
@@ -1377,7 +1377,7 @@ pub async fn enroll_admin_server(
         .unwrap_or(crate::admin_proto::ClusterPlacement::Create { base: base.clone() });
     let enrollment = crate::admin_proto::EnrollmentRequest {
         listen,
-        roles: roles.clone(),
+        roles,
         resolver_member: Some(resolver_member.clone()),
         resolver_members: resolver_members.clone(),
         cluster: cluster.clone(),

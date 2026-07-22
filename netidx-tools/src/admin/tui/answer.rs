@@ -1143,7 +1143,7 @@ mod tests {
             max_validity: ca::DEFAULT_LEAF_VALIDITY,
             id_map_groups: vec!["users".into()],
             server_enroll_scopes: vec!["/".into()],
-            server_enroll_roles: vec![Role::Resolver, Role::IdMap],
+            server_enroll_roles: Role::Resolver | Role::IdMap,
             insecure_no_tpm: true,
             setup_server: Some(false),
             listen: None,

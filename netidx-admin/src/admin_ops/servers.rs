@@ -10,13 +10,14 @@ use crate::{
     answer::Answerer,
 };
 use anyhow::{Context, Result, bail};
+use enumflags2::BitFlags;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
     pub id: AdminServerId,
     pub addr: SocketAddr,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     pub state: ServerState,
     pub resolver: Option<ResolverAddr>,
     pub cluster: Option<ResolverClusterId>,
@@ -49,7 +50,7 @@ pub async fn list_servers(
             ServerInfo {
                 id: entry.id,
                 addr: entry.addr,
-                roles: entry.roles.clone(),
+                roles: entry.roles,
                 state: entry.state,
                 resolver: entry.resolver.clone(),
                 cluster: entry.cluster,

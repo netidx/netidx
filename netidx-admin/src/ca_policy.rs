@@ -5,6 +5,7 @@
 //! the types must be cross-platform even though the vault is `#[cfg(unix)]`.
 
 use crate::admin_proto::Role;
+use enumflags2::BitFlags;
 use netidx_derive::Pack;
 use serde_derive::{Deserialize, Serialize};
 use std::time::Duration;
@@ -47,7 +48,7 @@ pub struct Policy {
     pub server_enroll_scopes: Vec<String>,
     #[serde(default)]
     #[pack(default)]
-    pub server_enroll_roles: Vec<Role>,
+    pub server_enroll_roles: BitFlags<Role>,
     /// Netidx hierarchy paths under which this admin may edit permissions
     /// (the remote perms edit). A target path is in scope when it equals
     /// or descends from one of these (`/` ⇒ the whole tree). Empty ⇒ no
@@ -120,7 +121,7 @@ pub fn autorenew_policy() -> Policy {
         max_validity: SIGNING_SLOT_MAX_VALIDITY,
         id_map_groups: vec![],
         server_enroll_scopes: vec![],
-        server_enroll_roles: vec![],
+        server_enroll_roles: BitFlags::empty(),
         perms_edit_scopes: vec![],
         may_manage_admins: false,
         service_control_scopes: vec![],
@@ -145,7 +146,7 @@ pub fn superuser_policy() -> Policy {
         max_validity: SIGNING_SLOT_MAX_VALIDITY,
         id_map_groups: vec![],
         server_enroll_scopes: vec!["/".to_string()],
-        server_enroll_roles: vec![Role::Resolver, Role::IdMap],
+        server_enroll_roles: Role::Resolver | Role::IdMap,
         perms_edit_scopes: vec!["/".to_string()],
         may_manage_admins: true,
         service_control_scopes: vec!["/".to_string()],

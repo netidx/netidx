@@ -427,19 +427,19 @@ pub(super) fn show_network_identity(
         "The admin server at {addr} serves network {:?} (roles: {}) and presented \
          this identity:",
         identity.domain,
-        describe_roles(&identity.roles),
+        describe_roles(identity.roles),
     );
     println!("  SHA256  {}", identity.fingerprint.text());
     println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
 }
 
-fn describe_roles(roles: &[Role]) -> String {
+fn describe_roles(roles: enumflags2::BitFlags<Role>) -> String {
     if roles.is_empty() {
         return "none".to_string();
     }
     roles
-        .iter()
-        .map(|r| match r {
+        .into_iter()
+        .map(|role| match role {
             Role::Ca => "ca",
             Role::Resolver => "resolver",
             Role::IdMap => "id-map",

@@ -58,6 +58,7 @@ use crate::{
     tls_tofu::TofuVerifier,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use enumflags2::BitFlags;
 use log::warn;
 use parking_lot::Mutex;
 use rustls::{ClientConfig, client::Resumption, crypto::CryptoProvider};
@@ -239,7 +240,7 @@ pub struct CaIdentity {
     /// The network's TLS domain, as claimed in the server hello.
     pub domain: String,
     /// The roles the contacted host claimed in the server hello.
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
     pub server_id: admin_proto::AdminServerId,
     pub controller: bool,
     /// The CA cert the fingerprint is of, kept so later connections can
@@ -1301,7 +1302,7 @@ pub async fn enroll(
     admin: &str,
     password: Zeroizing<String>,
     listen: SocketAddr,
-    roles: Vec<Role>,
+    roles: BitFlags<Role>,
     resolver_member: ResolverAddr,
     resolver_members: Vec<ResolverAddr>,
     cluster: admin_proto::ClusterPlacement,
@@ -1916,7 +1917,7 @@ pub async fn push_identity(
         }),
     )
     .await?;
-    if !hello.roles.contains(&Role::IdMap) {
+    if !hello.roles.contains(Role::IdMap) {
         return Ok(None);
     }
     admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
@@ -2742,7 +2743,7 @@ mod tests {
                     &ServerHello {
                         protocol_version: PROTOCOL_VERSION,
                         domain: "resumption.test".into(),
-                        roles: Vec::new(),
+                        roles: BitFlags::empty(),
                         server_id,
                         controller: false,
                     },
@@ -2907,7 +2908,7 @@ mod tests {
                 addr,
                 // These are untrusted map claims. The serving certificate has
                 // no controller role URI, which must win.
-                roles: vec![Role::Ca, Role::Resolver],
+                roles: Role::Ca | Role::Resolver,
                 resolver: None,
                 cluster: None,
                 state: ServerState::Registered,
@@ -2928,7 +2929,7 @@ mod tests {
                     &ServerHello {
                         protocol_version: PROTOCOL_VERSION,
                         domain: "hostile.test".into(),
-                        roles: vec![Role::Resolver],
+                        roles: Role::Resolver.into(),
                         server_id,
                         controller: false,
                     },
@@ -3037,7 +3038,7 @@ mod tests {
                 ServerEntry {
                     id: controller,
                     addr: "192.168.50.11:4565".parse().unwrap(),
-                    roles: vec![Role::Ca],
+                    roles: Role::Ca.into(),
                     resolver: None,
                     cluster: None,
                     state: ServerState::Registered,
@@ -3045,7 +3046,7 @@ mod tests {
                 ServerEntry {
                     id: root_server,
                     addr: "192.168.50.10:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(root.clone()),
                     cluster: Some(root_cluster),
                     state: ServerState::Registered,
@@ -3053,7 +3054,7 @@ mod tests {
                 ServerEntry {
                     id: waiting,
                     addr: "192.168.50.12:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(waiting_root.clone()),
                     cluster: Some(root_cluster),
                     state: ServerState::Enrolled,
@@ -3061,7 +3062,7 @@ mod tests {
                 ServerEntry {
                     id: satellite,
                     addr: "192.168.60.15:4565".parse().unwrap(),
-                    roles: vec![Role::Resolver],
+                    roles: Role::Resolver.into(),
                     resolver: Some(child.clone()),
                     cluster: Some(child_cluster),
                     state: ServerState::Registered,

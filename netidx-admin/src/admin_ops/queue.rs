@@ -24,6 +24,7 @@ use crate::{
     plan::enroll::{default_id_map_groups, prompt_id_map_groups},
 };
 use anyhow::Result;
+use enumflags2::BitFlags;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 /// A pending enrollment-queue entry, keyed by its **code** — the CSR public-key
@@ -52,7 +53,7 @@ pub struct QueueItem {
     /// `Some` ⇒ a admin-server enrollment (approval signs the reserved serving
     /// name and registers a peer); id-map groups are forced empty.
     pub enroll_listen: Option<SocketAddr>,
-    pub requested_roles: Vec<crate::admin_proto::Role>,
+    pub requested_roles: BitFlags<crate::admin_proto::Role>,
     pub resolver_members: Vec<crate::admin_proto::ResolverAddr>,
     pub cluster: Option<crate::admin_proto::ClusterPlacement>,
     pub cluster_base: Option<String>,
@@ -72,7 +73,7 @@ fn to_item(e: QueueEntry) -> QueueItem {
         peer: e.peer,
         verified_renewal: e.verified_renewal,
         enroll_listen: enrollment.as_ref().map(|e| e.listen),
-        requested_roles: enrollment.as_ref().map(|e| e.roles.clone()).unwrap_or_default(),
+        requested_roles: enrollment.as_ref().map(|e| e.roles).unwrap_or_default(),
         resolver_members: enrollment
             .as_ref()
             .map(|e| e.resolver_members.clone())

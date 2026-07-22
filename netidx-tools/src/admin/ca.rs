@@ -398,7 +398,7 @@ impl PolicyFlags {
             max_validity: self.max_validity,
             id_map_groups: &self.id_map_groups,
             server_enroll_scopes: &self.server_enroll_scopes,
-            server_enroll_roles: &self.server_enroll_roles,
+            server_enroll_roles: self.server_enroll_roles.iter().copied().collect(),
             may_manage_admins: self.may_manage_admins,
             perms_scope: &self.perms_scope,
             service_scope: &self.service_scope,
@@ -1033,8 +1033,7 @@ fn servers(f: ServersArgs) -> Result<()> {
                 _ => println!("no resolver cluster"),
             }
         }
-        let roles =
-            row.roles.iter().copied().map(role_name).collect::<Vec<_>>().join(",");
+        let roles = row.roles.iter().map(role_name).collect::<Vec<_>>().join(",");
         println!(
             "  {}  {}  [{:?}]{}",
             row.id,
@@ -1447,7 +1446,7 @@ fn init(p: InitParams) -> Result<()> {
         max_validity: p.max_validity,
         id_map_groups: p.id_map_groups,
         server_enroll_scopes: p.server_enroll_scopes,
-        server_enroll_roles: p.server_enroll_roles,
+        server_enroll_roles: p.server_enroll_roles.into_iter().collect(),
         insecure_no_tpm: p.insecure_no_tpm,
         setup_server,
         listen: p.listen,
@@ -2640,10 +2639,8 @@ mod tests {
                     max_validity: Duration::from_secs(730 * 86400),
                     id_map_groups: vec!["users".into()],
                     server_enroll_scopes: vec!["/".into()],
-                    server_enroll_roles: vec![
-                        admin_proto::Role::Resolver,
-                        admin_proto::Role::IdMap,
-                    ],
+                    server_enroll_roles: admin_proto::Role::Resolver
+                        | admin_proto::Role::IdMap,
                     insecure_no_tpm: true,
                     setup_server: Some(false),
                     listen: None,

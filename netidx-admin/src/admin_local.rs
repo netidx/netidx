@@ -207,7 +207,7 @@ pub async fn enroll(
             credential: crate::admin_proto::AdminCredential::Password { admin, password },
             csr_pem: csr_pem.to_string(),
             listen,
-            roles: vec![crate::admin_proto::Role::Resolver],
+            roles: crate::admin_proto::Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
             cluster: crate::admin_proto::ClusterPlacement::Create {

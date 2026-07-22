@@ -15,6 +15,7 @@ use crate::{
     answer::Answerer,
 };
 use anyhow::Result;
+use enumflags2::BitFlags;
 use netidx_activation::control::ControlOp;
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -26,7 +27,7 @@ pub struct ServiceServer {
     pub id: crate::admin_proto::AdminServerId,
     pub addr: SocketAddr,
     pub base: String,
-    pub roles: Vec<Role>,
+    pub roles: BitFlags<Role>,
 }
 
 /// Every admin server that runs a resolver, read from the CA network map — the
@@ -41,7 +42,7 @@ pub async fn list_service_servers(
     let mut out: Vec<_> = servers
         .into_iter()
         .filter_map(|s| {
-            if s.state != ServerState::Registered || !s.roles.contains(&Role::Resolver) {
+            if s.state != ServerState::Registered || !s.roles.contains(Role::Resolver) {
                 return None;
             }
             Some(ServiceServer {

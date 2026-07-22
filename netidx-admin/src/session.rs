@@ -155,7 +155,7 @@ mod tests {
             max_validity: Duration::from_secs(60),
             id_map_groups: vec![],
             server_enroll_scopes: vec![scope.into()],
-            server_enroll_roles: vec![Role::Resolver],
+            server_enroll_roles: Role::Resolver.into(),
             perms_edit_scopes: vec![scope.into()],
             may_manage_admins: false,
             service_control_scopes: vec![],

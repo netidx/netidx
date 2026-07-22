@@ -11,7 +11,7 @@
 
 use crate::{
     admin_ops::slots::ExternalPending,
-    admin_proto::{NodeKind, Secret},
+    admin_proto::{NodeKind, Role, Secret},
     admin_server::AUTORENEW_ADMIN,
     answer::{Answerer, Field},
     atomic,
@@ -25,6 +25,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
+use enumflags2::BitFlags;
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -131,7 +132,7 @@ pub struct NewCaOpts {
     /// Cluster-base scopes under which the superuser may enroll servers.
     pub server_enroll_scopes: Vec<String>,
     /// Non-CA roles the superuser may grant to enrolled servers.
-    pub server_enroll_roles: Vec<crate::admin_proto::Role>,
+    pub server_enroll_roles: BitFlags<Role>,
     /// Proceed without a TPM / Secure Enclave (autorenew keytab written
     /// in plaintext). A loud warning is printed; test CAs only.
     pub insecure_no_tpm: bool,
@@ -597,10 +598,7 @@ pub fn founding_ca_opts(
         max_validity: ca::DEFAULT_LEAF_VALIDITY,
         id_map_groups: vec!["users".to_string()],
         server_enroll_scopes: vec!["/".to_string()],
-        server_enroll_roles: vec![
-            crate::admin_proto::Role::Resolver,
-            crate::admin_proto::Role::IdMap,
-        ],
+        server_enroll_roles: Role::Resolver | Role::IdMap,
         insecure_no_tpm,
         setup_server,
         listen: None,
@@ -747,7 +745,7 @@ pub async fn setup_superuser(
             max_validity: opts.max_validity,
             id_map_groups: &opts.id_map_groups,
             server_enroll_scopes: &opts.server_enroll_scopes,
-            server_enroll_roles: &opts.server_enroll_roles,
+            server_enroll_roles: opts.server_enroll_roles,
             // The superuser always manages admins — pass it so gather_policy
             // doesn't ask (rather than forcing it after the fact).
             may_manage_admins: Some(true),
@@ -835,7 +833,7 @@ pub struct PolicyInputs<'a> {
     /// Cluster-base scopes under which this admin may enroll servers.
     pub server_enroll_scopes: &'a [String],
     /// Non-CA roles this admin may grant to enrolled servers.
-    pub server_enroll_roles: &'a [crate::admin_proto::Role],
+    pub server_enroll_roles: BitFlags<Role>,
     /// Whether this admin may manage the roster (add / rescope / remove admins).
     pub may_manage_admins: Option<bool>,
     /// Netidx paths this admin may edit perms under.
@@ -908,9 +906,9 @@ pub async fn gather_policy(
             trim(inputs.server_enroll_scopes)
         },
         server_enroll_roles: if inputs.server_enroll_roles.is_empty() && enroll_default {
-            vec![crate::admin_proto::Role::Resolver, crate::admin_proto::Role::IdMap]
+            Role::Resolver | Role::IdMap
         } else {
-            inputs.server_enroll_roles.to_vec()
+            inputs.server_enroll_roles
         },
         perms_edit_scopes: trim(inputs.perms_scope),
         may_manage_admins,

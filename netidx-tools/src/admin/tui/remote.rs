@@ -1398,7 +1398,7 @@ fn policy_template() -> netidx_admin::ca_vault::Policy {
         max_validity: std::time::Duration::from_secs(730 * 86400),
         id_map_groups: vec![],
         server_enroll_scopes: vec![],
-        server_enroll_roles: vec![],
+        server_enroll_roles: enumflags2::BitFlags::empty(),
         perms_edit_scopes: vec![],
         may_manage_admins: false,
         service_control_scopes: vec![],
