@@ -189,10 +189,12 @@ pub fn installed_files_in(dest_dir: &Path) -> [PathBuf; 3] {
 
 /// Where this identity lives by convention: `${user_tls_dir}/<cn>`.
 pub fn identity_dir(cn: &str) -> Result<PathBuf> {
+    identity_dir_in(&paths::user_tls_dir()?, cn)
+}
+
+pub(crate) fn identity_dir_in(tls_dir: &Path, cn: &str) -> Result<PathBuf> {
     ensure_valid_cn(cn)?;
-    let mut p = paths::user_tls_dir()?;
-    p.push(cn);
-    Ok(p)
+    Ok(tls_dir.join(cn))
 }
 
 /// Convenience: same as [`install_identity`] but resolves the

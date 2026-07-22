@@ -484,7 +484,9 @@ async fn auto_approve(
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
-    use netidx_admin::admin_ops::slots::{AutoApproveOutcome, auto_approve};
+    use netidx_admin::admin_ops::slots::{
+        AutoApproveOutcome, AutorenewWiring, auto_approve,
+    };
     let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
     let out = auto_approve(ans, &access, ca_dir, rotate, false).await?;
     let lines = match out {
@@ -497,16 +499,20 @@ async fn auto_approve(
             l.extend(warning);
             l
         }
-        AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error } => {
+        AutoApproveOutcome::Offline { rotate, keytab, wiring } => {
             let verb = if rotate { "rotated" } else { "enabled" };
             let mut l =
                 vec![format!("Auto-approve {verb}. Keytab: {}", keytab.display())];
-            match (cfg_path, cfg_error) {
-                (Some(p), _) => l.push(format!("Config updated: {}", p.display())),
-                (None, Some(e)) => {
+            match wiring {
+                AutorenewWiring::Updated(p) => {
+                    l.push(format!("Config updated: {}", p.display()))
+                }
+                AutorenewWiring::NoControllerConfig => {
+                    l.push("No controller config owns this CA.".to_string())
+                }
+                AutorenewWiring::Failed(e) => {
                     l.push(format!("Config update failed (non-fatal): {e}"))
                 }
-                (None, None) => {}
             }
             l
         }
@@ -856,7 +862,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
             role.map = root.join("id-map.json");
         }
         cfg.save(&config_lock, &cfg_path)?;
-        manifest.install.save_async(&root.join("install.json")).await?;
+        manifest.install.save_async(&config_lock, &root.join("install.json")).await?;
     }
     #[cfg(not(unix))]
     if controller {
@@ -1051,9 +1057,10 @@ async fn update(
         ));
     }
     let mut lines: Vec<String> = plan.describe().lines().map(str::to_string).collect();
+    let restart_hint = super::lifecycle::restart_hint_for_plan(role, &plan).to_string();
     plan.apply(&config_lock)?;
     lines.push(String::new());
-    lines.push(super::lifecycle::restart_hint_for_plan(role, &plan).to_string());
+    lines.push(restart_hint);
     Ok(Outcome {
         title: "Updated".to_string(),
         lines,
@@ -1071,8 +1078,14 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     use netidx_admin::plan::install::workstation::{
         WorkstationJoinInput, run_workstation_join,
     };
-    let input =
-        WorkstationJoinInput { dry_run, key_protection: None, admin_server: None };
+    let mode = if dry_run {
+        InstallMode::DryRun
+    } else {
+        InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire_async(paths::user_config_root()?).await?,
+        }
+    };
+    let input = WorkstationJoinInput { mode, key_protection: None, admin_server: None };
     run_workstation_join(ans, input).await?;
     let (title, lines) = if dry_run {
         ("Join preview", vec!["Preview only — nothing was written.".to_string()])

@@ -48,6 +48,7 @@ pub(crate) async fn ca_access(
     let config = matching_controller_config(ca_dir, config).await;
     if let Some(config) = config.as_ref()
         && admin_local::daemon_running(config).await
+        && config_owns_ca(config, ca_dir).await
     {
         return Ok(slots_ops::CaAccess::Running { config: config.clone() });
     }
@@ -63,6 +64,15 @@ pub(crate) async fn ca_access(
         }
         None => (ConfigDirLock::acquire_for_ca_dir(ca_dir).await?, None),
     };
+    if let Some(config) = config.as_ref()
+        && !config_owns_ca(config, ca_dir).await
+    {
+        bail!(
+            "admin-server config {} changed while its configuration locks were being \
+             acquired; no changes were made. Re-run the command",
+            config.display()
+        );
+    }
     Ok(slots_ops::CaAccess::Offline { config, lock, ca_alias_lock })
 }
 
@@ -948,26 +958,21 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
                 eprintln!("WARNING: {w}");
             }
         }
-        slots_ops::AutoApproveOutcome::Offline {
-            rotate,
-            keytab,
-            cfg_path,
-            cfg_error,
-        } => {
+        slots_ops::AutoApproveOutcome::Offline { rotate, keytab, wiring } => {
+            use slots_ops::AutorenewWiring;
             println!("auto-approve {}:", if rotate { "rotated" } else { "enabled" });
             println!("  slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)");
             println!("  keytab: {} (0600 — do NOT back this file up)", keytab.display());
-            match (cfg_path, cfg_error) {
-                (Some(cfg_path), _) => {
+            match wiring {
+                AutorenewWiring::Updated(cfg_path) => {
                     println!("  config: {} (roles.ca.autorenew)", cfg_path.display());
                     println!("  restart the admin server to pick up the keytab.");
                 }
-                (None, err) => {
-                    if let Some(e) = err {
-                        println!(
-                            "  note: could not update the admin-server config ({e})."
-                        );
-                    }
+                AutorenewWiring::NoControllerConfig => {
+                    println!("  config: no controller config owns this CA");
+                }
+                AutorenewWiring::Failed(e) => {
+                    println!("  note: could not update the admin-server config ({e}).");
                     println!("        set roles.ca.autorenew to the keytab path and");
                     println!("        restart the admin server.");
                 }

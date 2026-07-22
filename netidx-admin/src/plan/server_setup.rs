@@ -266,23 +266,45 @@ pub async fn update_roles(
 /// feature, and the keytab path is all the daemon needs to read the slot.
 pub async fn set_ca_autorenew(
     config_lock: &ConfigDirLock,
+    ca_dir: &Path,
+    keytab: &Path,
+) -> Result<PathBuf> {
+    let cfg_path = paths::discover_admin_server_config_async().await?;
+    set_ca_autorenew_at(config_lock, &cfg_path, ca_dir, keytab).await
+}
+
+pub async fn set_ca_autorenew_at(
+    config_lock: &ConfigDirLock,
+    cfg_path: &Path,
+    ca_dir: &Path,
     keytab: &Path,
 ) -> Result<PathBuf> {
     let keytab = config_lock.require_contained(keytab)?;
-    let cfg_path = paths::discover_admin_server_config_async().await?;
-    anyhow::ensure!(
-        config_lock.contains(&cfg_path)?,
-        "admin-server config {} is outside locked config directory {}",
-        cfg_path.display(),
-        config_lock.root().display()
-    );
-    let mut cfg = AdminServerConfig::load_async(&cfg_path).await?;
-    let ca = cfg.roles.ca.as_mut().ok_or_else(|| {
+    let cfg_path = config_lock.require_contained(cfg_path)?;
+    let mut cfg = AdminServerConfig::load_for_recovery_async(&cfg_path).await?;
+    let ca = cfg.roles.ca.as_ref().ok_or_else(|| {
         anyhow!("admin-server config {} has no CA role", cfg_path.display())
     })?;
+    let configured_dir = tokio::fs::canonicalize(&ca.dir)
+        .await
+        .with_context(|| format!("canonicalizing {}", ca.dir.display()))?;
+    let requested_dir = tokio::fs::canonicalize(ca_dir)
+        .await
+        .with_context(|| format!("canonicalizing {}", ca_dir.display()))?;
+    anyhow::ensure!(
+        configured_dir == requested_dir,
+        "admin-server config {} belongs to CA {}, not {}",
+        cfg_path.display(),
+        configured_dir.display(),
+        requested_dir.display()
+    );
+    cfg.validate_async()
+        .await
+        .with_context(|| format!("invalid admin-server config {}", cfg_path.display()))?;
+    let ca = cfg.roles.ca.as_mut().expect("CA role checked above");
     ca.autorenew = Some(keytab);
     cfg.save_async(config_lock, &cfg_path).await?;
-    Ok(cfg_path)
+    Ok(cfg_path.to_path_buf())
 }
 
 /// IP to suggest for the admin server's listen address: the resolver
@@ -310,4 +332,52 @@ async fn existing_resolver_listen_ip() -> Option<IpAddr> {
         .await
         .ok()
         .and_then(|c| c.0.member_servers.first().map(|m| m.addr.ip()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn autorenew_refuses_a_config_for_another_ca() {
+        let root = tempfile::tempdir().unwrap();
+        let configured_ca = root.path().join("configured-ca");
+        let requested_ca = root.path().join("requested-ca");
+        std::fs::create_dir(&configured_ca).unwrap();
+        std::fs::create_dir(&requested_ca).unwrap();
+        let cfg_path = root.path().join("admin-server.json");
+        let keytab = root.path().join("autorenew.keytab");
+        let cfg = AdminServerConfig {
+            domain: "example.com".to_string(),
+            server_id: AdminServerId::new(),
+            home_ca_fingerprint: "unused-by-this-check".to_string(),
+            listen: "127.0.0.1:4565".parse().unwrap(),
+            serving_cert: root.path().join("serving-cert.pem"),
+            serving_key: root.path().join("serving-key.pem"),
+            trusted: root.path().join("trusted.pem"),
+            roles: Roles {
+                ca: Some(CaRole {
+                    dir: configured_ca,
+                    autorenew: None,
+                    session_absolute_lifetime: None,
+                    session_idle_timeout: None,
+                }),
+                resolver: None,
+                id_map: None,
+            },
+            ca_addr: None,
+            peers: vec![],
+            mdns: false,
+            activation_units_dir: None,
+        };
+        std::fs::write(&cfg_path, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        let before = std::fs::read(&cfg_path).unwrap();
+
+        let lock = ConfigDirLock::acquire(root.path()).unwrap();
+        let err = set_ca_autorenew_at(&lock, &cfg_path, &requested_ca, &keytab)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("belongs to CA"));
+        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
+    }
 }

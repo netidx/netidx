@@ -146,7 +146,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: None,
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Anonymous));
         assert!(matches!(c.0.addrs[0].1, cfile::Auth::Anonymous));
@@ -166,7 +166,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: None,
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Local));
         assert!(matches!(c.0.addrs[0].1, cfile::Auth::Local(_)));
@@ -186,7 +186,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: None,
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Krb5));
         assert!(matches!(c.0.addrs[0].1, cfile::Auth::Krb5(_)));
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(tls.default_identity.as_deref(), Some("example.com"));
 
         // apply() exercises install-before-validate ordering.
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(out.path().join("installed-tls/certificate.pem").exists());
     }
 
@@ -333,7 +333,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: None,
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         assert!(matches!(c.0.default_auth, DefaultAuthMech::Krb5));
     }
@@ -352,7 +352,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: Some("10.0.0.5/32".to_string()),
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         // Round-trip through the file representation.
         assert_eq!(c.0.default_bind_config.as_deref(), Some("10.0.0.5/32"));
@@ -374,7 +374,7 @@ mod tests {
             config_path: Some(cfg_path(&out)),
             default_bind_config: None,
         };
-        publisher(&p).unwrap().apply().unwrap();
+        publisher(&p).unwrap().apply_test(out.path()).unwrap();
         let c = client::ClientConfig::load(cfg_path(&out)).unwrap();
         assert_eq!(c.0.addrs.len(), 2);
     }

@@ -138,7 +138,7 @@ pub async fn delegate_under_parent(
     ans: &mut dyn Answerer,
     parent_conf_addr: SocketAddr,
     proposed_path: &str,
-    child: Vec<ResolverAddr>,
+    child: &[ResolverAddr],
     selected: Option<DelegationSelection>,
     confirmed: Option<&CaIdentity>,
 ) -> Result<Vec<ResolverAddr>> {

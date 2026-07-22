@@ -10,7 +10,7 @@
 //! `update` safe rather than an MITM foothold — a rogue admin server with
 //! a different CA fingerprint is refused before anything is changed.
 
-use crate::{atomic, fingerprint::Fingerprint, paths};
+use crate::{atomic, config_lock::ConfigDirLock, fingerprint::Fingerprint, paths};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -164,21 +164,27 @@ impl InstallRecord {
     }
 
     /// Atomically write the record (mode 0644) to `path`.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        atomic::write_atomic_pretty_json(path, self)
+    pub fn save(&self, config_lock: &ConfigDirLock, path: &Path) -> Result<()> {
+        let path = config_lock.require_contained(path)?;
+        atomic::write_atomic_pretty_json(&path, self)
     }
 
-    pub async fn save_async(&self, path: &Path) -> Result<()> {
-        atomic::write_atomic_pretty_json_async(path, self).await
+    pub async fn save_async(
+        &self,
+        config_lock: &ConfigDirLock,
+        path: &Path,
+    ) -> Result<()> {
+        let path = config_lock.require_contained(path)?;
+        atomic::write_atomic_pretty_json_async(&path, self).await
     }
 
     /// Write the record to the user-default path.
-    pub fn save_default(&self) -> Result<()> {
-        self.save(&paths::user_install_record()?)
+    pub fn save_default(&self, config_lock: &ConfigDirLock) -> Result<()> {
+        self.save(config_lock, &paths::user_install_record()?)
     }
 
-    pub async fn save_default_async(&self) -> Result<()> {
-        self.save_async(&paths::user_install_record()?).await
+    pub async fn save_default_async(&self, config_lock: &ConfigDirLock) -> Result<()> {
+        self.save_async(config_lock, &paths::user_install_record()?).await
     }
 }
 
@@ -198,7 +204,8 @@ mod tests {
             Some(NetworkIdentity::new("ryu-oh.org", &fp)),
             Some("192.168.50.11:4564".parse().unwrap()),
         );
-        rec.save(&path).unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        rec.save(&lock, &path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
         assert_eq!(rec, back);
         // The pinned identity round-trips through the stored text form
@@ -215,7 +222,8 @@ mod tests {
         let path = dir.path().join("install.json");
         let rec =
             InstallRecord::new(InstallRole::Workstation, "/local", "local", None, None);
-        rec.save(&path).unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        rec.save(&lock, &path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
         assert!(back.network.is_none());
         assert!(back.admin_server.is_none());
@@ -227,7 +235,8 @@ mod tests {
         let path = dir.path().join("install.json");
         let rec =
             InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
-        rec.save(&path).unwrap();
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        rec.save(&lock, &path).unwrap();
         assert_eq!(InstallRecord::load(&path).unwrap().role, InstallRole::Controller);
         assert_eq!(InstallRole::Controller.as_str(), "controller");
     }

@@ -406,7 +406,7 @@ mod tests {
     fn container_unit_is_emitted_by_default() {
         let out = tempfile::tempdir().unwrap();
         let rt = workstation(&base_params(&out)).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         let unit_path = out.path().join("activation/container.unit");
         assert!(unit_path.exists(), "container unit missing at {unit_path:?}");
         // The unit must point at the workstation's binary and pass
@@ -428,7 +428,7 @@ mod tests {
         let mut p = base_params(&out);
         p.with_container = false;
         let rt = workstation(&p).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         // Resolver is still emitted; container is not.
         assert!(out.path().join("activation/resolver.unit").exists());
         assert!(!out.path().join("activation/container.unit").exists());
@@ -440,7 +440,7 @@ mod tests {
         let mut p = base_params(&out);
         p.base = ArcStr::from("/sites/east");
         let rt = workstation(&p).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         let bytes = std::fs::read(out.path().join("activation/container.unit")).unwrap();
         let unit: netidx_activation::file::Unit = serde_json::from_slice(&bytes).unwrap();
         let args = unit.process.args;
@@ -481,7 +481,7 @@ mod tests {
         // the resolver config validator — catches dynamic-entry
         // shape drift (`$[user]` rules) and any tls / referral
         // cross-checks Config::load performs.
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         netidx::resolver_server::config::Config::load(out.path().join("resolver.json"))
             .expect("workstation with auto-seeded perms must validate");
     }
@@ -512,7 +512,7 @@ mod tests {
         p.units_dir = None;
         let rt = workstation(&p).unwrap();
         assert!(rt.units_dir.is_none());
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         // The canonical user activation dir should not have been
         // touched. We only assert the in-tempdir path because the
         // user-home dir is shared global state in CI.
@@ -523,7 +523,7 @@ mod tests {
     fn local_only_no_parent() {
         let out = tempfile::tempdir().unwrap();
         let rt = workstation(&base_params(&out)).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
 
         let r = ResolverConfig::load(out.path().join("resolver.json")).unwrap();
         assert!(r.0.parent.is_none());
@@ -545,7 +545,7 @@ mod tests {
             addrs: vec![(parent_addr(), ReferralAuth::Anonymous)],
         });
         let rt = workstation(&p).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
 
         let c = client::ClientConfig::load(out.path().join("client.json")).unwrap();
         // default_auth is derived from the parent's auth, so a
@@ -573,7 +573,7 @@ mod tests {
             )],
         });
         let rt = workstation(&p).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
 
         let c = client::ClientConfig::load(out.path().join("client.json")).unwrap();
         // default_auth is derived from the parent's auth: Krb5
@@ -660,7 +660,7 @@ mod tests {
         // Exercises the apply() ordering: TLS install must happen
         // before config validation, since validation opens the cert
         // paths from disk.
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(install_dest.join("certificate.pem").exists());
         assert!(install_dest.join("private.key").exists());
         assert!(install_dest.join("trusted.pem").exists());

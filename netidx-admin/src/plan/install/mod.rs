@@ -354,10 +354,11 @@ async fn finish_with_record_path(
                 None => paths::user_install_record()
                     .context("resolving the install-record destination")?,
             };
+            let record_path = config_lock.require_contained(record_path)?;
             record.set_managed_paths(rt.managed_paths());
-            rt.apply().context("applying template")?;
+            rt.apply(config_lock).context("applying template")?;
             record
-                .save_async(&record_path)
+                .save_async(config_lock, &record_path)
                 .await
                 .context("writing the install record")?;
             ans.note("ok");
@@ -745,7 +746,7 @@ mod tests {
             private_key_src: missing_key,
             trusted_src,
         });
-        assert!(rt.apply().is_err());
+        assert!(rt.apply_test(dir.path()).is_err());
         assert!(!dest.exists(), "preflight failure must precede destination writes");
     }
 
@@ -770,10 +771,24 @@ mod tests {
         rt.resolver_config = Some((resolver_path.clone(), resolver.into()));
         rt.perms_file = Some((perms_path.clone(), crate::perms::default_seed("/eu")));
 
-        let err = rt.apply().unwrap_err();
+        let err = rt.apply_test(dir.path()).unwrap_err();
         assert!(format!("{err:#}").contains("permission entry for child: /eu"));
         assert!(!perms_path.exists(), "preflight failure must precede perms write");
         assert!(!resolver_path.exists(), "preflight failure must precede config write");
+    }
+
+    #[test]
+    fn apply_rejects_a_managed_path_outside_the_locked_directory() {
+        let locked = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let perms_path = outside.path().join("perms.json");
+        let mut rt = empty_rt();
+        rt.perms_file = Some((perms_path.clone(), crate::perms::empty()));
+
+        let config_lock = ConfigDirLock::acquire(locked.path()).unwrap();
+        let err = rt.apply(&config_lock).unwrap_err();
+        assert!(format!("{err:#}").contains("outside config directory"));
+        assert!(!perms_path.exists());
     }
 
     #[tokio::test]

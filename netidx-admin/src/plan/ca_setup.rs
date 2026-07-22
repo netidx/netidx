@@ -437,7 +437,8 @@ pub async fn create_vaulted_ca(
         // --insecure-no-tpm, which the gate above already warned about).
         let keytab =
             setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm).await?;
-        let cfg_path = server_setup::set_ca_autorenew(config_lock, &keytab).await?;
+        let cfg_path =
+            server_setup::set_ca_autorenew(config_lock, &opts.dir, &keytab).await?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
              \x20 slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)\n\

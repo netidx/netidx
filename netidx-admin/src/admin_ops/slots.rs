@@ -61,11 +61,14 @@ pub enum AutoApproveOutcome {
         /// True when framed as a rotation (`--rotate`) vs first enable.
         rotate: bool,
         keytab: PathBuf,
-        /// `Some` ⇒ the admin-server config was pointed at the keytab;
-        /// `None` with `cfg_error` ⇒ that update failed (non-fatal).
-        cfg_path: Option<PathBuf>,
-        cfg_error: Option<String>,
+        wiring: AutorenewWiring,
     },
+}
+
+pub enum AutorenewWiring {
+    Updated(PathBuf),
+    NoControllerConfig,
+    Failed(String),
 }
 
 /// Set up (or `--rotate`) the autorenew slot so the admin server approves
@@ -84,7 +87,7 @@ pub async fn auto_approve(
             let warning = admin_local::rotate_autorenew(config).await?;
             Ok(AutoApproveOutcome::HotSwapped { warning })
         }
-        CaAccess::Offline { lock, .. } => {
+        CaAccess::Offline { config, lock, .. } => {
             let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
             let typed = ans.secret(Field::RecoveryPassword, None).await?;
             let recovery = ca_vault::normalize_recovery_password(typed.as_str());
@@ -99,12 +102,21 @@ pub async fn auto_approve(
             )
             .await?;
             let config_lock = cadir.config_lock();
-            let (cfg_path, cfg_error) =
-                match server_setup::set_ca_autorenew(&config_lock, &keytab).await {
-                    Ok(p) => (Some(p), None),
-                    Err(e) => (None, Some(format!("{e:#}"))),
-                };
-            Ok(AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error })
+            let wiring = match config {
+                Some(path) => match server_setup::set_ca_autorenew_at(
+                    &config_lock,
+                    path,
+                    &ca_dir,
+                    &keytab,
+                )
+                .await
+                {
+                    Ok(path) => AutorenewWiring::Updated(path),
+                    Err(e) => AutorenewWiring::Failed(format!("{e:#}")),
+                },
+                None => AutorenewWiring::NoControllerConfig,
+            };
+            Ok(AutoApproveOutcome::Offline { rotate, keytab, wiring })
         }
     }
 }
@@ -774,6 +786,7 @@ pub async fn external_install_cert(
         .await?;
         let cfg_path = server_setup::set_ca_autorenew(
             &config_lock,
+            &ca_dir,
             &offline_ca::autorenew_keytab_path()?,
         )
         .await?;
@@ -789,7 +802,7 @@ pub async fn external_install_cert(
             )),
             Some(cfg.listen),
         )
-        .save_default_async()
+        .save_default_async(&config_lock)
         .await
         .context("recording the controller install")?;
         return Ok(ExternalInstallOutcome::FirstInstall { need, cfg_path });
@@ -798,7 +811,7 @@ pub async fn external_install_cert(
     let keytab = offline_ca::autorenew_keytab_path()?;
     if tokio::fs::try_exists(&keytab).await.unwrap_or(false) {
         let config_lock = cadir.config_lock();
-        let _ = server_setup::set_ca_autorenew(&config_lock, &keytab).await;
+        let _ = server_setup::set_ca_autorenew(&config_lock, &ca_dir, &keytab).await;
     }
     Ok(ExternalInstallOutcome::Renewal)
 }

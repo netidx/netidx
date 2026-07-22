@@ -160,7 +160,10 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     }
     let bind_addr = p.bind.unwrap_or(p.listen.ip());
 
-    let tls_job = resolver_tls_copy_job(&p.auth)?;
+    let config_dir = resolver_cfg_path
+        .parent()
+        .context("resolver config path has no parent directory")?;
+    let tls_job = resolver_tls_copy_job(&p.auth, config_dir)?;
     let tls_dest = tls_job
         .as_ref()
         .map(|j| j.dest_dir.clone())
@@ -362,7 +365,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
             Some(p) => p.clone(),
             None => paths::user_client_config()?,
         };
-        let cfg = build_local_client_config(p)?;
+        let cfg = build_local_client_config(p, &tls_dest)?;
         Some((path, cfg))
     } else {
         None
@@ -385,7 +388,10 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
 /// through from `p.auth`; for TLS the client identity is the same
 /// cert the resolver itself presents (so mTLS validates as the
 /// resolver's own name).
-fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
+fn build_local_client_config(
+    p: &ResolverParams,
+    tls_dest: &Path,
+) -> Result<ClientConfig> {
     let base = if p.base.is_empty() { "/" } else { p.base.as_str() };
     let mut ccfg = cfile::ConfigBuilder::default();
     ccfg.addrs(vec![(p.listen, auth_choice_to_cfile_auth(&p.auth))])
@@ -401,11 +407,9 @@ fn build_local_client_config(p: &ResolverParams) -> Result<ClientConfig> {
     }
     if let AuthChoice::Tls { name, askpass, .. } = &p.auth {
         // Reuse the resolver's installed identity. The cert is
-        // installed at `identity_dir(<resolver-tls-name>)` by the
-        // tls_install copy job; we just point the client section at
+        // installed by the tls_install copy job; we just point the client section at
         // those installed paths — no second copy job is needed.
-        let dest = tlsmod::identity_dir(name.as_str())?;
-        let [certificate, private_key, trusted] = tlsmod::installed_files_in(&dest);
+        let [certificate, private_key, trusted] = tlsmod::installed_files_in(tls_dest);
         let identity = cfile::TlsIdentity {
             trusted: trusted.to_string_lossy().into_owned(),
             certificate: certificate.to_string_lossy().into_owned(),
@@ -545,7 +549,7 @@ mod tests {
     fn anonymous_resolver_validates() {
         let out = tempfile::tempdir().unwrap();
         let rt = resolver(&anon_params(&out)).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(out.path().join("resolver.json").exists());
         assert!(out.path().join("activation/resolver.unit").exists());
     }
@@ -590,7 +594,7 @@ mod tests {
         // Loopback listen → no default_bind_config override needed
         // (the publisher's BindCfg::Local default already matches).
         assert!(c.0.default_bind_config.is_none());
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(client_path.exists());
     }
 
@@ -788,7 +792,7 @@ mod tests {
         assert_eq!(collect(seeded), collect(&crate::perms::default_seed("/")));
         // Validate the on-disk shape after apply — must parse back
         // into the same map.
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         let loaded = crate::perms::load_perms(out.path().join("perms.json")).unwrap();
         assert_eq!(collect(&loaded), collect(&crate::perms::default_seed("/")));
         // And the round-trip-through-resolver-validation step
@@ -821,7 +825,7 @@ mod tests {
             "perms_path was not wired into include_permissions: {:?}",
             r.0.include_permissions,
         );
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(out.path().join("perms.json").exists());
 
         let loaded = perms::load_perms(out.path().join("perms.json")).unwrap();
@@ -962,7 +966,7 @@ mod tests {
         // TLS *with* the id-mapper is the coherent profile — no warning.
         assert!(rt.warnings.is_empty());
 
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         // Starter is on disk, both unit files dropped.
         assert!(id_map_path.exists());
         assert!(out.path().join("activation/id-map.unit").exists());
@@ -1016,7 +1020,7 @@ mod tests {
         p.id_map_path = Some(id_map_path.clone());
 
         // Apply once — starter on disk.
-        resolver(&p).unwrap().apply().unwrap();
+        resolver(&p).unwrap().apply_test(out.path()).unwrap();
 
         // Operator populates the map.
         let mut populated = id_map_engine::empty();
@@ -1032,7 +1036,7 @@ mod tests {
         id_map_engine::save(&id_map_path, &populated).unwrap();
 
         // Apply again — populated state must survive.
-        resolver(&p).unwrap().apply().unwrap();
+        resolver(&p).unwrap().apply_test(out.path()).unwrap();
         let after = id_map_engine::load(&id_map_path).unwrap();
         assert!(after.lookup_by_name("resolver.example.com").is_some());
         assert!(after.groups.contains_key("users"));
@@ -1090,7 +1094,7 @@ mod tests {
         assert_eq!(file_path, &id_map_path);
         assert!(starter.identities.is_empty());
 
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(id_map_path.exists());
         assert!(out.path().join("activation/id-map.unit").exists());
         assert!(out.path().join("activation/resolver.unit").exists());
@@ -1151,7 +1155,7 @@ mod tests {
         // Round-trips through Config validation (the $[user] template
         // entry from the default seed can trip up PMap::from_file if
         // the file shape is wrong).
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         netidx::resolver_server::config::Config::load(out.path().join("resolver.json"))
             .expect("resolver config including krb5-SPN perms must validate");
     }
@@ -1175,7 +1179,7 @@ mod tests {
             r.0.include_permissions,
         );
         // Nothing lands on disk after apply either.
-        rt.apply().unwrap();
+        rt.apply_test(out.path()).unwrap();
         assert!(!out.path().join("perms.json").exists());
     }
 

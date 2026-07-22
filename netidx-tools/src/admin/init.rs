@@ -416,8 +416,15 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     )?;
     let admin_server =
         f.admin_server.as_deref().map(resolve_admin_server_addr).transpose()?;
+    let mode = if f.dry_run {
+        netidx_admin::plan::install::InstallMode::DryRun
+    } else {
+        netidx_admin::plan::install::InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
+        }
+    };
     let input = netidx_admin::plan::install::workstation::WorkstationJoinInput {
-        dry_run: f.dry_run,
+        mode,
         key_protection: lib_kp(f.key_protection),
         admin_server,
     };

@@ -6,7 +6,7 @@
 //! local-only workstation onto a network without a reinstall.
 
 use super::{
-    InstallCommon, finish_with, install_renew_unit, network_provenance,
+    InstallCommon, InstallMode, finish_with, install_renew_unit, network_provenance,
     prompt_ip_or_addr, prompt_resolver_tls_name, resolve_netidx_binary,
     resolve_units_dir, suggest_client_san,
 };
@@ -110,8 +110,7 @@ impl WorkstationInput {
 
 /// Typed inputs for [`run_workstation_join`].
 pub struct WorkstationJoinInput {
-    /// Show the join plan without writing anything.
-    pub dry_run: bool,
+    pub mode: InstallMode,
     /// Private-key protection for an enrolled client cert (TLS networks).
     pub key_protection: Option<KeyProtArg>,
     /// The network's admin server, named explicitly (`--admin-server`) —
@@ -269,6 +268,7 @@ pub async fn run_workstation_join(
     ans: &mut dyn Answerer,
     input: WorkstationJoinInput,
 ) -> Result<()> {
+    let WorkstationJoinInput { mode, key_protection, admin_server } = input;
     let mut rec = InstallRecord::load_default_async().await?.context(
         "no install record found — `workstation join` operates on an existing \
          workstation install",
@@ -295,7 +295,7 @@ pub async fn run_workstation_join(
     // An explicit `--admin-server` names the network directly (and glyph-confirms
     // it via `--accept-glyph`); otherwise discover it (interactive only — the
     // strict answerer disables discovery, so strict `join` needs `--admin-server`).
-    let probe = match input.admin_server {
+    let probe = match admin_server {
         Some(addr) => {
             enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?
         }
@@ -312,8 +312,8 @@ pub async fn run_workstation_join(
         net,
         NodeKind::Workstation,
         false,
-        input.dry_run,
-        input.key_protection,
+        mode.is_dry_run(),
+        key_protection,
         &mut tls_identities,
         &mut tls_staging,
     )
@@ -325,14 +325,17 @@ pub async fn run_workstation_join(
     let admin_server = net.info.reached.first().copied();
     let rt = template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
     ans.note(&rt.describe());
-    if input.dry_run {
+    let Some(config_lock) = mode.config_lock() else {
         return Ok(());
-    }
-    rt.apply().context("applying the join")?;
+    };
+    let record_path = config_lock.require_contained(paths::user_install_record()?)?;
+    rt.apply(config_lock).context("applying the join")?;
     ans.note("ok");
     rec.network = Some(network);
     rec.admin_server = admin_server;
-    rec.save_default_async().await.context("updating the install record")?;
+    rec.save_async(config_lock, &record_path)
+        .await
+        .context("updating the install record")?;
     ans.note(&format_compact!(
         "joined network {:?} — restart the local resolver to use it",
         rec.network.as_ref().expect("just set").domain,

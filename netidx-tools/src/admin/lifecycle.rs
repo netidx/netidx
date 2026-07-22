@@ -340,7 +340,7 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
     if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
         plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
     }
-    let hint = if plan.resolver_edit.is_some() {
+    let hint = if plan.changes_resolver_config() {
         "no service was restarted. Restart this resolver manually at its place in the \
          cluster's rolling sequence; re-run client processes if their resolver addresses \
          changed"

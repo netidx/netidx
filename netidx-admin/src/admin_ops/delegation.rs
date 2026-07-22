@@ -236,6 +236,7 @@ pub enum AddParentCompletion {
 
 pub struct PendingParentReferral {
     resolver_config: PathBuf,
+    expected_child: Vec<ResolverAddr>,
     parent_ref: ParentRef,
     outcome: AddParentOutcome,
 }
@@ -246,8 +247,38 @@ impl PendingParentReferral {
         config_lock: &ConfigDirLock,
         ans: &mut dyn Answerer,
     ) -> Result<AddParentOutcome> {
-        let Self { resolver_config, parent_ref, outcome } = self;
-        apply_parent_referral(config_lock, ans, &resolver_config, parent_ref)?;
+        self.apply_with_note(config_lock, |message| ans.note(message))
+    }
+
+    fn apply_with_note(
+        self,
+        config_lock: &ConfigDirLock,
+        mut note: impl FnMut(&str),
+    ) -> Result<AddParentOutcome> {
+        let Self { resolver_config, expected_child, parent_ref, outcome } = self;
+        let resolver_config = config_lock.require_contained(resolver_config)?;
+        let current = ResolverConfig::load(&resolver_config)?;
+        if template::parent_referral_matches_config(&current, &parent_ref) {
+            note("the controller already wrote this resolver's approved topology");
+            return Ok(outcome);
+        }
+        if current.as_file().parent.is_some() {
+            bail!(
+                "the resolver's parent changed while delegation approval was pending; \
+                 no local changes were written. Re-run add-parent against the current \
+                 configuration"
+            );
+        }
+        if current.resolver_addrs() != expected_child {
+            bail!(
+                "the resolver's advertised addresses or authentication changed while \
+                 delegation approval was pending; no local changes were written. \
+                 Re-run add-parent so the approval covers the current configuration"
+            );
+        }
+        let rt = template::set_parent_referral_on(&resolver_config, current, parent_ref)?;
+        note(&rt.describe());
+        rt.apply(config_lock).context("writing the parent referral")?;
         Ok(outcome)
     }
 }
@@ -305,7 +336,7 @@ pub async fn prepare_add_parent(
     // approval is authoritative; the returned members are the exact parent
     // cluster produced by the CA-owned split/attach transaction.
     let approved =
-        delegate_under_parent(ans, parent_server, proposed_path, child, selection, None)
+        delegate_under_parent(ans, parent_server, proposed_path, &child, selection, None)
             .await?;
     let parent = approved;
     let parent_ref = ParentRef {
@@ -331,27 +362,65 @@ pub async fn prepare_add_parent(
     } else {
         Ok(AddParentCompletion::LocalWrite(PendingParentReferral {
             resolver_config: resolver_config.to_path_buf(),
+            expected_child: child,
             parent_ref,
             outcome,
         }))
     }
 }
 
-fn apply_parent_referral(
-    config_lock: &ConfigDirLock,
-    ans: &mut dyn Answerer,
-    resolver_config: &Path,
-    parent_ref: ParentRef,
-) -> Result<()> {
-    let resolver_config = config_lock.require_contained(resolver_config)?;
-    let rt = template::set_parent_referral(&resolver_config, parent_ref)?;
-    ans.note(&rt.describe());
-    rt.apply().context("writing the parent referral")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::validate_existing_parent;
+    use super::*;
+
+    fn write_resolver(dir: &Path, parent: &str) -> PathBuf {
+        let path = dir.join("resolver.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "children": [],
+                    "parent": {parent},
+                    "member_servers": [{{
+                        "addr": "127.0.0.1:4654",
+                        "bind_addr": "127.0.0.1",
+                        "auth": "Anonymous",
+                        "hello_timeout": 10,
+                        "max_connections": 768,
+                        "pid_file": "",
+                        "reader_ttl": 60,
+                        "writer_ttl": 120,
+                        "id_map_command": null,
+                        "id_map_type": "DoNotMap",
+                        "id_map_timeout": 3600
+                    }}],
+                    "perms": {{}},
+                    "include_permissions": []
+                }}"#
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn pending(resolver_config: PathBuf) -> PendingParentReferral {
+        PendingParentReferral {
+            resolver_config,
+            expected_child: vec![ResolverAddr {
+                addr: "127.0.0.1:4654".parse().unwrap(),
+                auth: InfoAuth::Anonymous,
+            }],
+            parent_ref: ParentRef {
+                path: ArcStr::from("/eu"),
+                ttl: None,
+                addrs: vec![("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous)],
+            },
+            outcome: AddParentOutcome {
+                proposed_path: "/eu".to_string(),
+                propagation: ClusterPropagation::ControllerManaged,
+            },
+        }
+    }
 
     #[test]
     fn existing_parent_allows_only_membership_bound_same_path_refresh() {
@@ -359,5 +428,59 @@ mod tests {
         validate_existing_parent(Some("/eu"), "/eu", true).unwrap();
         assert!(validate_existing_parent(Some("/eu"), "/ap", true).is_err());
         assert!(validate_existing_parent(Some("/eu"), "/eu", false).is_err());
+    }
+
+    #[test]
+    fn add_parent_preserves_an_unrelated_concurrent_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(dir.path(), "null");
+        let pending = pending(path.clone());
+
+        let mut concurrent = ResolverConfig::load(&path).unwrap();
+        concurrent.as_file_mut().member_servers[0].reader_ttl = 777;
+        concurrent.save(&path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        pending.apply_with_note(&lock, |_| {}).unwrap();
+        let current = ResolverConfig::load(&path).unwrap();
+        assert_eq!(current.as_file().member_servers[0].reader_ttl, 777);
+        assert_eq!(current.as_file().parent.as_ref().unwrap().path.as_str(), "/eu");
+    }
+
+    #[test]
+    fn add_parent_rejects_a_changed_child_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(dir.path(), "null");
+        let pending = pending(path.clone());
+
+        let mut concurrent = ResolverConfig::load(&path).unwrap();
+        concurrent.as_file_mut().member_servers[0].addr =
+            "127.0.0.1:4655".parse().unwrap();
+        concurrent.save(&path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        let err = pending.apply_with_note(&lock, |_| {}).err().unwrap();
+        assert!(
+            format!("{err:#}").contains("advertised addresses or authentication changed")
+        );
+        assert!(ResolverConfig::load(&path).unwrap().as_file().parent.is_none());
+    }
+
+    #[test]
+    fn add_parent_accepts_the_exact_controller_written_topology() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(
+            dir.path(),
+            r#"{"path":"/eu","ttl":null,"addrs":[["10.0.0.1:4564","Anonymous"]]}"#,
+        );
+        let pending = pending(path);
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        let mut noted = false;
+        pending
+            .apply_with_note(&lock, |message| {
+                noted = message.contains("controller already wrote")
+            })
+            .unwrap();
+        assert!(noted);
     }
 }

@@ -149,7 +149,7 @@ pub async fn run_controller(
         ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
         let record =
             InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
-        record.save_default_async().await?;
+        record.save_default_async(config_lock).await?;
         ans.note(
             "controller key and recovery material installed; the controller remains \
              pending until the external PKI returns and you install its certificate",
@@ -183,7 +183,7 @@ pub async fn run_controller(
         Some(identity),
         Some(cfg.listen),
     )
-    .save_default_async()
+    .save_default_async(config_lock)
     .await?;
     offer(
         ans,

@@ -695,7 +695,10 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             role.map = root.join("id-map.json");
         }
         cfgv.save(config_lock.as_ref().expect("restore lock held"), &cfg)?;
-        manifest.install.save(&root.join("install.json"))?;
+        manifest.install.save(
+            config_lock.as_ref().expect("restore lock held"),
+            &root.join("install.json"),
+        )?;
     }
     #[cfg(not(unix))]
     if has_controller {

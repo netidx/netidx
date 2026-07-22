@@ -19,8 +19,8 @@
 //! is documented in design/netidx-admin-future.md.
 
 use crate::{
-    activation, client, id_map as id_map_engine, perms, resolver as resolver_engine,
-    tls as tlsmod,
+    activation, client, config_lock::ConfigDirLock, id_map as id_map_engine, perms,
+    resolver as resolver_engine, tls as tlsmod,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -226,17 +226,32 @@ pub struct RenderedTemplate {
 }
 
 impl RenderedTemplate {
+    fn managed_path_refs(&self) -> impl Iterator<Item = &Path> {
+        let Self {
+            client_config,
+            resolver_config,
+            perms_file,
+            id_map_file,
+            units: _,
+            units_dir,
+            tls_install,
+            warnings: _,
+        } = self;
+        client_config
+            .iter()
+            .map(|(path, _)| path.as_path())
+            .chain(resolver_config.iter().map(|(path, _)| path.as_path()))
+            .chain(perms_file.iter().map(|(path, _)| path.as_path()))
+            .chain(id_map_file.iter().map(|(path, _)| path.as_path()))
+            .chain(units_dir.iter().map(PathBuf::as_path))
+            .chain(tls_install.iter().map(|job| job.dest_dir.as_path()))
+    }
+
     /// Destinations this role template owns. Stored in install provenance so a
     /// later role-level backup can prove it did not silently omit a custom
     /// path outside the normal config root.
     pub fn managed_paths(&self) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        paths.extend(self.client_config.as_ref().map(|(path, _)| path.clone()));
-        paths.extend(self.resolver_config.as_ref().map(|(path, _)| path.clone()));
-        paths.extend(self.perms_file.as_ref().map(|(path, _)| path.clone()));
-        paths.extend(self.id_map_file.as_ref().map(|(path, _)| path.clone()));
-        paths.extend(self.units_dir.iter().cloned());
-        paths.extend(self.tls_install.iter().map(|job| job.dest_dir.clone()));
+        let mut paths: Vec<_> = self.managed_path_refs().map(Path::to_path_buf).collect();
         paths.sort();
         paths.dedup();
         paths
@@ -333,7 +348,10 @@ impl RenderedTemplate {
     /// write. There is intentionally no multi-file journal: the atomic
     /// primitives keep each file consistent, while interruption between files
     /// may leave a partial but parseable bundle.
-    pub fn apply(&self) -> Result<()> {
+    pub fn apply(&self, config_lock: &ConfigDirLock) -> Result<()> {
+        for path in self.managed_path_refs() {
+            config_lock.require_contained(path)?;
+        }
         self.preflight()?;
 
         // 1) Install TLS identities first so validators can find them.
@@ -385,6 +403,12 @@ impl RenderedTemplate {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_test(&self, root: &Path) -> Result<()> {
+        let config_lock = ConfigDirLock::acquire(root)?;
+        self.apply(&config_lock)
     }
 
     /// Human-readable summary suitable for `--dry-run`.
@@ -514,10 +538,17 @@ pub fn set_parent_referral(
     resolver_config_path: &Path,
     parent: ParentRef,
 ) -> Result<RenderedTemplate> {
-    let mut rcfg = resolver_engine::ResolverConfig::load(resolver_config_path)
-        .with_context(|| {
-            format!("loading resolver config {}", resolver_config_path.display())
-        })?;
+    let rcfg = resolver_engine::ResolverConfig::load(resolver_config_path).with_context(
+        || format!("loading resolver config {}", resolver_config_path.display()),
+    )?;
+    set_parent_referral_on(resolver_config_path, rcfg, parent)
+}
+
+pub(crate) fn set_parent_referral_on(
+    resolver_config_path: &Path,
+    mut rcfg: resolver_engine::ResolverConfig,
+    parent: ParentRef,
+) -> Result<RenderedTemplate> {
     if rcfg.as_file().parent.is_some() {
         bail!(
             "this resolver already has a parent referral — it's already attached \
@@ -548,16 +579,23 @@ pub fn parent_referral_matches(
     let rcfg = resolver_engine::ResolverConfig::load(resolver_config_path).with_context(
         || format!("loading resolver config {}", resolver_config_path.display()),
     )?;
+    Ok(parent_referral_matches_config(&rcfg, expected))
+}
+
+pub(crate) fn parent_referral_matches_config(
+    rcfg: &resolver_engine::ResolverConfig,
+    expected: &ParentRef,
+) -> bool {
     let Some(actual) = rcfg.as_file().parent.as_ref() else {
-        return Ok(false);
+        return false;
     };
     if actual.path != expected.path
         || actual.ttl != expected.ttl
         || actual.addrs.len() != expected.addrs.len()
     {
-        return Ok(false);
+        return false;
     }
-    Ok(expected.addrs.iter().all(|(addr, auth)| {
+    expected.addrs.iter().all(|(addr, auth)| {
         actual.addrs.iter().any(|(got_addr, got_auth)| {
             got_addr == addr
                 && matches!(
@@ -575,7 +613,7 @@ pub fn parent_referral_matches(
                     _ => false,
                 }
         })
-    }))
+    })
 }
 
 /// One-line description of a client-side resolver auth, for the
@@ -709,12 +747,15 @@ pub(crate) fn client_tls_section_from(
 /// `standalone_resolver` when its `auth` is `AuthChoice::Tls`). Same
 /// as the resolver's `Auth::Tls { ... }` but the install job is
 /// produced separately.
-pub(crate) fn resolver_tls_copy_job(choice: &AuthChoice) -> Result<Option<TlsCopyJob>> {
+pub(crate) fn resolver_tls_copy_job(
+    choice: &AuthChoice,
+    config_dir: &Path,
+) -> Result<Option<TlsCopyJob>> {
     let AuthChoice::Tls { name, certificate, private_key, trusted, askpass: _ } = choice
     else {
         return Ok(None);
     };
-    let dest = tlsmod::identity_dir(name.as_str())?;
+    let dest = tlsmod::identity_dir_in(&config_dir.join("tls"), name.as_str())?;
     Ok(Some(TlsCopyJob {
         cn: name.to_string(),
         dest_dir: dest,
@@ -816,7 +857,7 @@ mod tests {
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
 
         let rt = attach_to_network(&rpath, &cpath, anon_parent(), vec![]).unwrap();
-        rt.apply().unwrap();
+        rt.apply_test(dir.path()).unwrap();
 
         // The resolver gained the parent referral...
         let rcfg = resolver_engine::ResolverConfig::load(&rpath).unwrap();

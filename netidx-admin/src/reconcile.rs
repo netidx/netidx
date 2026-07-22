@@ -22,7 +22,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
-use netidx::resolver_server::config::file as rfile;
+use netidx::{config::file as cfile, resolver_server::config::file as rfile};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -59,16 +59,34 @@ impl std::fmt::Display for Change {
 /// ([`is_empty`](Self::is_empty)) is the "already in sync" result.
 #[derive(Debug, Default)]
 pub struct EditPlan {
-    pub resolver_edit: Option<(PathBuf, ResolverConfig)>,
-    pub client_edit: Option<(PathBuf, ClientConfig)>,
+    resolver_edit: Option<ResolverPeerEdit>,
+    client_edit: Option<ClientPeerEdit>,
     /// One change per edit — the `--dry-run`/`status` body.
     pub changes: Vec<Change>,
     pub warnings: Vec<ArcStr>,
 }
 
+#[derive(Debug)]
+struct ResolverPeerEdit {
+    path: PathBuf,
+    expected: rfile::Referral,
+    replacement: Vec<(SocketAddr, rfile::RefAuth)>,
+}
+
+#[derive(Debug)]
+struct ClientPeerEdit {
+    path: PathBuf,
+    expected: Vec<(SocketAddr, cfile::Auth)>,
+    replacement: Vec<(SocketAddr, cfile::Auth)>,
+}
+
 impl EditPlan {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
+    }
+
+    pub fn changes_resolver_config(&self) -> bool {
+        self.resolver_edit.is_some()
     }
 
     /// Human-readable preview of the edits.
@@ -92,27 +110,63 @@ impl EditPlan {
     /// `save` re-validates (the resolver via `validate_for_path`), so an
     /// edit that would yield an invalid config fails here, before any
     /// write touches disk.
-    pub fn apply(&self, config_lock: &ConfigDirLock) -> Result<()> {
-        let resolver_path = self
-            .resolver_edit
-            .as_ref()
-            .map(|(path, _)| config_lock.require_contained(path))
-            .transpose()?;
-        let client_path = self
-            .client_edit
-            .as_ref()
-            .map(|(path, _)| config_lock.require_contained(path))
-            .transpose()?;
-        if let Some((path, cfg)) =
-            resolver_path.as_ref().zip(self.resolver_edit.as_ref().map(|(_, cfg)| cfg))
-        {
-            cfg.save(path)
+    pub fn apply(self, config_lock: &ConfigDirLock) -> Result<()> {
+        let Self { resolver_edit, client_edit, changes: _, warnings: _ } = self;
+        let mut resolver = match resolver_edit {
+            Some(ResolverPeerEdit { path, expected, replacement }) => {
+                let path = config_lock.require_contained(path)?;
+                let mut current = ResolverConfig::load(&path)?;
+                let parent = current.as_file_mut().parent.as_mut().with_context(|| {
+                    format!(
+                        "resolver config {} lost its parent while the update was pending; \
+                         no changes were written. Re-run the update",
+                        path.display()
+                    )
+                })?;
+                if !referral_eq(parent, &expected) {
+                    bail!(
+                        "resolver config {} changed its parent referral while the update \
+                         was pending; no changes were written. Re-run the update",
+                        path.display()
+                    );
+                }
+                parent.addrs = replacement;
+                Some((path, current))
+            }
+            None => None,
+        };
+        let mut client = match client_edit {
+            Some(ClientPeerEdit { path, expected, replacement }) => {
+                let path = config_lock.require_contained(path)?;
+                let mut current = ClientConfig::load(&path)?;
+                if !client_addrs_eq(&current.as_file().addrs, &expected) {
+                    bail!(
+                        "client config {} changed its resolver list while the update was \
+                         pending; no changes were written. Re-run the update",
+                        path.display()
+                    );
+                }
+                current.as_file_mut().addrs = replacement;
+                Some((path, current))
+            }
+            None => None,
+        };
+        if let Some((path, cfg)) = resolver.as_ref() {
+            cfg.validate_for_path(path).with_context(|| {
+                format!("validating resolver config {}", path.display())
+            })?;
+        }
+        if let Some((path, cfg)) = client.as_ref() {
+            cfg.validate().with_context(|| {
+                format!("validating client config {}", path.display())
+            })?;
+        }
+        if let Some((path, cfg)) = resolver.take() {
+            cfg.save(&path)
                 .with_context(|| format!("saving resolver config {}", path.display()))?;
         }
-        if let Some((path, cfg)) =
-            client_path.as_ref().zip(self.client_edit.as_ref().map(|(_, cfg)| cfg))
-        {
-            cfg.save(path)
+        if let Some((path, cfg)) = client.take() {
+            cfg.save(&path)
                 .with_context(|| format!("saving client config {}", path.display()))?;
         }
         Ok(())
@@ -131,6 +185,82 @@ impl EditPlan {
         self.warnings.extend(other.warnings);
         self
     }
+}
+
+fn client_auth_eq(a: &cfile::Auth, b: &cfile::Auth) -> bool {
+    match a {
+        cfile::Auth::Anonymous => match b {
+            cfile::Auth::Anonymous => true,
+            cfile::Auth::Krb5(_) | cfile::Auth::Local(_) | cfile::Auth::Tls(_) => false,
+        },
+        cfile::Auth::Krb5(a) => match b {
+            cfile::Auth::Krb5(b) => a == b,
+            cfile::Auth::Anonymous | cfile::Auth::Local(_) | cfile::Auth::Tls(_) => false,
+        },
+        cfile::Auth::Local(a) => match b {
+            cfile::Auth::Local(b) => a == b,
+            cfile::Auth::Anonymous | cfile::Auth::Krb5(_) | cfile::Auth::Tls(_) => false,
+        },
+        cfile::Auth::Tls(a) => match b {
+            cfile::Auth::Tls(b) => a == b,
+            cfile::Auth::Anonymous | cfile::Auth::Krb5(_) | cfile::Auth::Local(_) => {
+                false
+            }
+        },
+    }
+}
+
+fn ref_auth_eq(a: &rfile::RefAuth, b: &rfile::RefAuth) -> bool {
+    match a {
+        rfile::RefAuth::Anonymous => match b {
+            rfile::RefAuth::Anonymous => true,
+            rfile::RefAuth::Krb5(_)
+            | rfile::RefAuth::Local(_)
+            | rfile::RefAuth::Tls(_) => false,
+        },
+        rfile::RefAuth::Krb5(a) => match b {
+            rfile::RefAuth::Krb5(b) => a == b,
+            rfile::RefAuth::Anonymous
+            | rfile::RefAuth::Local(_)
+            | rfile::RefAuth::Tls(_) => false,
+        },
+        rfile::RefAuth::Local(a) => match b {
+            rfile::RefAuth::Local(b) => a == b,
+            rfile::RefAuth::Anonymous
+            | rfile::RefAuth::Krb5(_)
+            | rfile::RefAuth::Tls(_) => false,
+        },
+        rfile::RefAuth::Tls(a) => match b {
+            rfile::RefAuth::Tls(b) => a == b,
+            rfile::RefAuth::Anonymous
+            | rfile::RefAuth::Krb5(_)
+            | rfile::RefAuth::Local(_) => false,
+        },
+    }
+}
+
+fn client_addrs_eq(
+    a: &[(SocketAddr, cfile::Auth)],
+    b: &[(SocketAddr, cfile::Auth)],
+) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|((aa, aauth), (ba, bauth))| aa == ba && client_auth_eq(aauth, bauth))
+}
+
+fn ref_addrs_eq(
+    a: &[(SocketAddr, rfile::RefAuth)],
+    b: &[(SocketAddr, rfile::RefAuth)],
+) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|((aa, aauth), (ba, bauth))| aa == ba && ref_auth_eq(aauth, bauth))
+}
+
+fn referral_eq(a: &rfile::Referral, b: &rfile::Referral) -> bool {
+    a.path == b.path && a.ttl == b.ttl && ref_addrs_eq(&a.addrs, &b.addrs)
 }
 
 /// Map a network-reported data-plane auth (from a admin server's
@@ -167,32 +297,34 @@ fn describe_info_auth(a: &InfoAuth) -> &'static str {
 /// Idempotent: a config already carrying every network peer yields an
 /// empty plan.
 pub fn reconcile_resolver_peers(path: &Path, net: &NetworkInfo) -> Result<EditPlan> {
-    let mut cfg = ResolverConfig::load(path)
+    let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
+    let expected = cfg.as_file().parent.clone().context(
+        "this resolver has no parent referral to reconcile — it isn't \
+         attached to a network (run `join` to attach one)",
+    )?;
+    let mut replacement = expected.addrs.clone();
     let mut changes = Vec::new();
-    {
-        let file = cfg.as_file_mut();
-        let parent = file.parent.as_mut().context(
-            "this resolver has no parent referral to reconcile — it isn't \
-             attached to a network (run `join` to attach one)",
-        )?;
-        for r in &net.resolvers {
-            if parent.addrs.iter().any(|(a, _)| *a == r.addr) {
-                continue;
-            }
-            parent.addrs.push((r.addr, info_auth_to_ref(&r.auth)));
-            changes.push(Change::Add(format!(
-                "resolver peer {} ({})",
-                r.addr,
-                describe_info_auth(&r.auth),
-            )));
+    for r in &net.resolvers {
+        if replacement.iter().any(|(a, _)| *a == r.addr) {
+            continue;
         }
+        replacement.push((r.addr, info_auth_to_ref(&r.auth)));
+        changes.push(Change::Add(format!(
+            "resolver peer {} ({})",
+            r.addr,
+            describe_info_auth(&r.auth),
+        )));
     }
     if changes.is_empty() {
         return Ok(EditPlan::default());
     }
     Ok(EditPlan {
-        resolver_edit: Some((path.to_path_buf(), cfg)),
+        resolver_edit: Some(ResolverPeerEdit {
+            path: path.to_path_buf(),
+            expected,
+            replacement,
+        }),
         client_edit: None,
         changes,
         warnings: Vec::new(),
@@ -314,9 +446,10 @@ fn reconcile_peer_list<A: Clone>(
 /// (the cluster its current addrs belong to) from the network map. Add +
 /// auto-remove; a config matching no cluster is left untouched (warned).
 pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
-    let mut cfg = ClientConfig::load(path)
+    let cfg = ClientConfig::load(path)
         .with_context(|| format!("loading client config {}", path.display()))?;
-    let cur: Vec<SocketAddr> = cfg.as_file().addrs.iter().map(|(a, _)| *a).collect();
+    let expected = cfg.as_file().addrs.clone();
+    let cur: Vec<SocketAddr> = expected.iter().map(|(a, _)| *a).collect();
     let cls = clusters(map);
     let (cluster, warn) = match_cluster(&cls, &cur);
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
@@ -328,8 +461,9 @@ pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     };
     let members = cluster.members.clone();
+    let mut replacement = expected.clone();
     let changes = reconcile_peer_list(
-        &mut cfg.as_file_mut().addrs,
+        &mut replacement,
         &members,
         info_auth_to_client,
         |a| matches!(a, netidx::config::file::Auth::Local(_)),
@@ -340,7 +474,11 @@ pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     }
     Ok(EditPlan {
-        client_edit: Some((path.to_path_buf(), cfg)),
+        client_edit: Some(ClientPeerEdit {
+            path: path.to_path_buf(),
+            expected,
+            replacement,
+        }),
         changes,
         warnings,
         ..EditPlan::default()
@@ -351,15 +489,13 @@ pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
 /// cluster the referral already points at) from the network map. Add +
 /// auto-remove. Errors if the resolver has no parent referral.
 pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
-    let mut cfg = ResolverConfig::load(path)
+    let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
-    let cur: Vec<SocketAddr> = {
-        let parent = cfg.as_file().parent.as_ref().context(
-            "this resolver has no parent referral to reconcile — it isn't \
-             attached to a network",
-        )?;
-        parent.addrs.iter().map(|(a, _)| *a).collect()
-    };
+    let expected = cfg.as_file().parent.clone().context(
+        "this resolver has no parent referral to reconcile — it isn't \
+         attached to a network",
+    )?;
+    let cur: Vec<SocketAddr> = expected.addrs.iter().map(|(a, _)| *a).collect();
     let cls = clusters(map);
     let (cluster, warn) = match_cluster(&cls, &cur);
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
@@ -371,13 +507,9 @@ pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     };
     let members = cluster.members.clone();
-    let parent = cfg
-        .as_file_mut()
-        .parent
-        .as_mut()
-        .expect("parent referral present — checked above");
+    let mut replacement = expected.addrs.clone();
     let changes = reconcile_peer_list(
-        &mut parent.addrs,
+        &mut replacement,
         &members,
         info_auth_to_ref,
         |a| matches!(a, rfile::RefAuth::Local(_)),
@@ -388,7 +520,11 @@ pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     }
     Ok(EditPlan {
-        resolver_edit: Some((path.to_path_buf(), cfg)),
+        resolver_edit: Some(ResolverPeerEdit {
+            path: path.to_path_buf(),
+            expected,
+            replacement,
+        }),
         changes,
         warnings,
         ..EditPlan::default()
@@ -683,5 +819,114 @@ mod tests {
         assert!(addrs.contains(&addr("10.0.0.12:4564")));
         assert!(!addrs.contains(&addr("10.0.0.99:4564")));
         assert!(reconcile_parent_peers(&path, &m).unwrap().is_empty(), "idempotent");
+    }
+
+    #[test]
+    fn resolver_reconcile_preserves_unrelated_concurrent_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(
+            dir.path(),
+            r#"["10.0.0.11:4564", "Anonymous"], ["10.0.0.99:4564", "Anonymous"]"#,
+        );
+        let map = map_of(vec![srv(
+            "10.0.0.11:4565",
+            "/",
+            &["10.0.0.11:4564", "10.0.0.12:4564"],
+        )]);
+        let plan = reconcile_parent_peers(&path, &map).unwrap();
+
+        let mut concurrent = ResolverConfig::load(&path).unwrap();
+        concurrent.as_file_mut().member_servers[0].reader_ttl = 777;
+        concurrent.save(&path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
+        let current = ResolverConfig::load(&path).unwrap();
+        assert_eq!(current.as_file().member_servers[0].reader_ttl, 777);
+        let parent = current.as_file().parent.as_ref().unwrap();
+        assert!(parent.addrs.iter().any(|(a, _)| *a == addr("10.0.0.12:4564")));
+        assert!(!parent.addrs.iter().any(|(a, _)| *a == addr("10.0.0.99:4564")));
+    }
+
+    #[test]
+    fn client_reconcile_preserves_unrelated_concurrent_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_client(dir.path(), &["10.0.0.15:4564", "10.0.0.99:4564"]);
+        let map = map_of(vec![srv(
+            "10.0.0.15:4565",
+            "/eu",
+            &["10.0.0.15:4564", "10.0.0.16:4564"],
+        )]);
+        let plan = reconcile_client_peers(&path, &map).unwrap();
+
+        let mut concurrent = ClientConfig::load(&path).unwrap();
+        concurrent.as_file_mut().base = "/operator".to_string();
+        concurrent.save(&path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        plan.apply(&lock).unwrap();
+        let current = ClientConfig::load(&path).unwrap();
+        assert_eq!(current.as_file().base.as_str(), "/operator");
+        assert!(
+            current.as_file().addrs.iter().any(|(a, _)| *a == addr("10.0.0.16:4564"))
+        );
+    }
+
+    #[test]
+    fn reconcile_rejects_a_concurrent_relevant_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_resolver(dir.path(), r#"["10.0.0.11:4564", "Anonymous"]"#);
+        let map = map_of(vec![srv(
+            "10.0.0.11:4565",
+            "/",
+            &["10.0.0.11:4564", "10.0.0.12:4564"],
+        )]);
+        let plan = reconcile_parent_peers(&path, &map).unwrap();
+
+        let mut concurrent = ResolverConfig::load(&path).unwrap();
+        concurrent
+            .as_file_mut()
+            .parent
+            .as_mut()
+            .unwrap()
+            .addrs
+            .push((addr("10.0.0.13:4564"), rfile::RefAuth::Anonymous));
+        concurrent.save(&path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        let err = plan.apply(&lock).unwrap_err();
+        assert!(format!("{err:#}").contains("changed its parent referral"));
+        let current = ResolverConfig::load(&path).unwrap();
+        let parent = current.as_file().parent.as_ref().unwrap();
+        assert!(parent.addrs.iter().any(|(a, _)| *a == addr("10.0.0.13:4564")));
+        assert!(!parent.addrs.iter().any(|(a, _)| *a == addr("10.0.0.12:4564")));
+    }
+
+    #[test]
+    fn merged_reconcile_validates_every_target_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver_path =
+            write_resolver(dir.path(), r#"["10.0.0.11:4564", "Anonymous"]"#);
+        let client_path = write_client(dir.path(), &["10.0.0.11:4564"]);
+        let map = map_of(vec![srv(
+            "10.0.0.11:4565",
+            "/",
+            &["10.0.0.11:4564", "10.0.0.12:4564"],
+        )]);
+        let plan = reconcile_parent_peers(&resolver_path, &map)
+            .unwrap()
+            .merge(reconcile_client_peers(&client_path, &map).unwrap());
+
+        let mut concurrent = ClientConfig::load(&client_path).unwrap();
+        concurrent
+            .as_file_mut()
+            .addrs
+            .push((addr("10.0.0.13:4564"), cfile::Auth::Anonymous));
+        concurrent.save(&client_path).unwrap();
+        let resolver_before = std::fs::read(&resolver_path).unwrap();
+
+        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
+        assert!(plan.apply(&lock).is_err());
+        assert_eq!(std::fs::read(&resolver_path).unwrap(), resolver_before);
     }
 }

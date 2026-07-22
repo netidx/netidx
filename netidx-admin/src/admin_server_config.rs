@@ -154,13 +154,18 @@ impl AdminServerConfig {
 
     pub async fn load_async(path: &Path) -> Result<Self> {
         let cfg = Self::load_for_recovery_async(path).await?;
-        cfg.validate_structure()?;
-        let pem = tokio::fs::read(&cfg.serving_cert).await.with_context(|| {
-            format!("reading serving certificate {}", cfg.serving_cert.display())
-        })?;
-        cfg.validate_with_serving_cert(&pem)
+        cfg.validate_async()
+            .await
             .with_context(|| format!("invalid admin-server config {}", path.display()))?;
         Ok(cfg)
+    }
+
+    pub async fn validate_async(&self) -> Result<()> {
+        self.validate_structure()?;
+        let pem = tokio::fs::read(&self.serving_cert).await.with_context(|| {
+            format!("reading serving certificate {}", self.serving_cert.display())
+        })?;
+        self.validate_with_serving_cert(&pem)
     }
 
     /// A non-CA admin server must know its CA: without `ca_addr` it can

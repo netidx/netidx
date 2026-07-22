@@ -86,7 +86,7 @@ pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'sta
         InstallRole::Workstation => {
             "No service was restarted. Restart the local resolver to serve the new peers."
         }
-        InstallRole::Resolver if plan.resolver_edit.is_some() => {
+        InstallRole::Resolver if plan.changes_resolver_config() => {
             "No service was restarted. Restart this resolver manually at its place in the \
              cluster's rolling sequence; re-run client processes if their resolver addresses \
              changed."

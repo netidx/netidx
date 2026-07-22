@@ -632,7 +632,7 @@ pub async fn run_resolver(
                     ans,
                     parent_conf,
                     &subtree,
-                    child,
+                    &child,
                     None,
                     confirmed.as_ref(),
                 )
@@ -648,7 +648,9 @@ pub async fn run_resolver(
                 let update =
                     template::set_parent_referral(&resolver_config_actual, parent_ref)?;
                 ans.note(&update.describe());
-                update.apply().context("writing the approved parent referral")?;
+                update
+                    .apply(config_lock)
+                    .context("writing the approved parent referral")?;
             }
             #[cfg(not(unix))]
             {
