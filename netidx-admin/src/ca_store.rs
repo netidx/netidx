@@ -8,7 +8,7 @@
 //!   - `queue/<id>.json`  — Pending requests (the active queue).
 //!   - `issued/<id>.json` — Signed records: the queue outcome **and** the
 //!     issuance index **and** the id-map groups **and** the revocation/push
-//!     state, all in one record. The permanent history.
+//!     state, all in one record. Expired terminal records are compacted.
 //!   - `denied/<id>.json` — Denied requests, pruned with the queue by TTL.
 //!
 //! A terminal transition *moves* the record out of `queue/` (write the
@@ -29,13 +29,14 @@ use crate::{
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
 
-/// Pending/denied records older than this are pruned. Generous — the
-/// admin may be at lunch — but bounded. `issued/` is never pruned.
+/// Pending/denied records older than this are pruned. Signed outcomes are kept
+/// for at least this long even when their certificate has already expired.
 pub const TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// Cap on pending requests — a bound on unauthenticated disk writes,
@@ -330,12 +331,39 @@ pub struct CAStore {
     serial_counter: u64,
 }
 
+pub(crate) struct IssuedRecords {
+    entries: Option<tokio::fs::ReadDir>,
+}
+
+impl IssuedRecords {
+    pub(crate) async fn next(&mut self) -> Result<Option<IssuedRecord>> {
+        let Some(entries) = self.entries.as_mut() else { return Ok(None) };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if !valid_id(id) {
+                continue;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else { continue };
+            let Ok(record) = serde_json::from_slice::<IssuedRecord>(&bytes) else {
+                continue;
+            };
+            if record.req.id == id {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl CAStore {
     /// Open the store rooted at `dir`, seeding the in-memory serial counter
     /// from disk.
     async fn open(dir: PathBuf) -> Result<Self> {
         let mut s = CAStore { dir, serial_counter: 0 };
         s.serial_counter = s.next_serial().await?;
+        s.prune().await?;
+        s.compact_issued(now_unix()).await?;
         Ok(s)
     }
 
@@ -409,29 +437,26 @@ impl CAStore {
         })
     }
 
-    /// All issued records (a scan of `issued/`). Unparseable files are
-    /// skipped (an operator might hand-edit in an emergency).
-    async fn all_issued(&self) -> Result<Vec<IssuedRecord>> {
+    /// Start an incremental scan of `issued/`. Unparseable files are skipped
+    /// (an operator might hand-edit in an emergency).
+    pub(crate) async fn issued_records(&self) -> Result<IssuedRecords> {
         let dir = self.issued_dir();
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        let entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => Some(entries),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 return Err(e).with_context(|| format!("listing {}", dir.display()));
             }
         };
+        Ok(IssuedRecords { entries })
+    }
+
+    /// All issued records (a scan of `issued/`).
+    async fn all_issued(&self) -> Result<Vec<IssuedRecord>> {
+        let mut entries = self.issued_records().await?;
         let mut out = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            if !valid_id(id) {
-                continue;
-            }
-            let Ok(bytes) = tokio::fs::read(&path).await else { continue };
-            let Ok(rec) = serde_json::from_slice::<IssuedRecord>(&bytes) else {
-                continue;
-            };
-            out.push(rec);
+        while let Some(record) = entries.next().await? {
+            out.push(record);
         }
         Ok(out)
     }
@@ -581,7 +606,7 @@ impl CAStore {
     pub async fn revoke(&mut self, serial: u64, rev: Revocation) -> Result<bool> {
         for mut rec in self.all_issued().await? {
             if rec.serial == serial {
-                if rec.revoked.is_some() {
+                if !rec.live(now_unix()) {
                     return Ok(false);
                 }
                 rec.revoked = Some(rev);
@@ -674,8 +699,8 @@ impl CAStore {
         self.commit_signed(&record).await
     }
 
-    /// Remove expired `queue/`/`denied/` entries (and any `queue/` entry
-    /// already shadowed by a terminal record). Never touches `issued/`.
+    /// Remove expired `queue/`/`denied/` entries and any queue entry shadowed
+    /// by a terminal record.
     pub async fn prune(&mut self) -> Result<()> {
         let now = now_unix();
         if let Ok(mut entries) = tokio::fs::read_dir(self.queue_dir()).await {
@@ -721,6 +746,50 @@ impl CAStore {
                 };
                 if expired {
                     let _ = tokio::fs::remove_file(&path).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn compact_issued(&mut self, now: u64) -> Result<()> {
+        let records = self.all_issued().await?;
+        let Some(max_serial) = records.iter().map(|record| record.serial).max() else {
+            return Ok(());
+        };
+        let mut live_names = HashSet::new();
+        let mut latest_group_serial = HashMap::new();
+        for record in &records {
+            let name = record.name.to_ascii_lowercase();
+            if record.live(now) {
+                live_names.insert(name.clone());
+            }
+            if !record.groups.is_empty() {
+                latest_group_serial
+                    .entry(name)
+                    .and_modify(|serial: &mut u64| *serial = (*serial).max(record.serial))
+                    .or_insert(record.serial);
+            }
+        }
+        for record in records {
+            if record.not_after_unix > now
+                || now.saturating_sub(record.issued_unix) <= TTL.as_secs()
+                || record.serial == max_serial
+            {
+                continue;
+            }
+            let name = record.name.to_ascii_lowercase();
+            let holds_live_groups = live_names.contains(&name)
+                && latest_group_serial.get(&name) == Some(&record.serial);
+            if !holds_live_groups {
+                match tokio::fs::remove_file(self.issued_path(&record.req.id)).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("removing expired issued record {}", record.req.id)
+                        });
+                    }
                 }
             }
         }
@@ -986,6 +1055,15 @@ mod tests {
         assert_eq!(ca.store.live_for_name("ERIC.RYU-OH.ORG").await.unwrap().len(), 1);
         assert!(ca.store.live_for_name("old.ryu-oh.org").await.unwrap().is_empty());
         assert!(ca.store.revoked_unexpired().await.unwrap().is_empty());
+        assert!(
+            !ca.store
+                .revoke(
+                    4,
+                    Revocation { serial: 4, revoked_unix: now, reason: "x".into() }
+                )
+                .await
+                .unwrap()
+        );
 
         assert!(
             ca.store
@@ -1096,6 +1174,46 @@ mod tests {
         ca.store.prune().await.unwrap();
         assert!(!ca.store.queue_path(&stale.id).exists());
         assert!(ca.store.issued_path(&live.id).exists());
+    }
+
+    #[tokio::test]
+    async fn compaction_preserves_only_live_state_recent_outcomes_and_serial_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ca = open(dir.path()).await;
+        let now = now_unix();
+        let old = now.saturating_sub(TTL.as_secs() + 10);
+
+        let commit = |serial, name: &str, groups: &[&str], expires, issued_at| {
+            let mut record = issued(req(name), serial, name, expires);
+            record.groups = groups.iter().map(|group| (*group).to_string()).collect();
+            record.issued_unix = issued_at;
+            record
+        };
+        let obsolete = commit(1, "old.example", &[], now - 1, old);
+        let old_groups = commit(2, "alice.example", &["old"], now - 1, old);
+        let current_groups = commit(3, "ALICE.example", &["users"], now - 1, old);
+        let renewal = commit(4, "alice.example", &[], now + 1000, old);
+        let recent = commit(5, "recent.example", &[], now - 1, now);
+        let watermark = commit(6, "watermark.example", &[], now - 1, old);
+        for record in
+            [&obsolete, &old_groups, &current_groups, &renewal, &recent, &watermark]
+        {
+            ca.store.commit_signed(record).await.unwrap();
+        }
+
+        ca.store.compact_issued(now).await.unwrap();
+        assert!(!ca.store.issued_path(&obsolete.req.id).exists());
+        assert!(!ca.store.issued_path(&old_groups.req.id).exists());
+        assert!(ca.store.issued_path(&current_groups.req.id).exists());
+        assert!(ca.store.issued_path(&renewal.req.id).exists());
+        assert!(ca.store.issued_path(&recent.req.id).exists());
+        assert!(ca.store.issued_path(&watermark.req.id).exists());
+
+        ca.store.compact_issued(now + TTL.as_secs() + 2000).await.unwrap();
+        let records = ca.store.list_signed().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].serial, 6);
+        assert_eq!(ca.store.next_serial().await.unwrap(), 7);
     }
 
     #[tokio::test]

@@ -1828,9 +1828,8 @@ pub async fn push_referral_edit(
     }
 }
 
-/// List every issued certificate the daemon holds (admin-authenticated) —
-/// live and revoked, with the metadata the revoke UI needs. The daemon
-/// owns the index; this is the only way to read it.
+/// List every unexpired issued certificate the daemon holds
+/// (admin-authenticated), including revoked certificates.
 pub async fn list_issued(
     addr: SocketAddr,
     credential: admin_proto::AdminCredential,
@@ -1842,10 +1841,19 @@ pub async fn list_issued(
         &Request::ListIssued(ListIssuedRequest { credential: credential.clone() }),
     )
     .await?;
-    match admin_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
-        ListIssuedResponse::Ok { entries } => Ok(entries),
-        ListIssuedResponse::Err { reason } => {
-            Err(admin_refusal(expected, &credential, "admin server refused", reason))
+    let mut entries = Vec::new();
+    loop {
+        match admin_proto::read_msg::<_, ListIssuedResponse>(&mut tls).await? {
+            ListIssuedResponse::Entry { entry } => entries.push(entry),
+            ListIssuedResponse::End => return Ok(entries),
+            ListIssuedResponse::Err { reason } => {
+                return Err(admin_refusal(
+                    expected,
+                    &credential,
+                    "admin server refused",
+                    reason,
+                ));
+            }
         }
     }
 }

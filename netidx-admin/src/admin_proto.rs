@@ -42,7 +42,7 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -675,8 +675,10 @@ pub struct IssuedEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum ListIssuedResponse {
     #[pack(tag(0))]
-    Ok { entries: Vec<IssuedEntry> },
+    Entry { entry: IssuedEntry },
     #[pack(tag(1))]
+    End,
+    #[pack(tag(2))]
     Err { reason: String },
 }
 
@@ -1541,8 +1543,8 @@ pub enum RotateAutorenewResponse {
     Err { reason: String },
 }
 
-/// Write one length-prefixed Pack message and flush.
-pub async fn write_msg<S, T>(stream: &mut S, msg: &T) -> Result<()>
+/// Write one length-prefixed Pack message without flushing.
+pub(crate) async fn write_msg_unflushed<S, T>(stream: &mut S, msg: &T) -> Result<()>
 where
     S: AsyncWrite + Unpin,
     T: Pack,
@@ -1563,6 +1565,16 @@ where
         .await
         .context("writing length prefix")?;
     stream.write_all(&body).await.context("writing message body")?;
+    Ok(())
+}
+
+/// Write one length-prefixed Pack message and flush.
+pub async fn write_msg<S, T>(stream: &mut S, msg: &T) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+    T: Pack,
+{
+    write_msg_unflushed(stream, msg).await?;
     stream.flush().await.context("flushing message")?;
     Ok(())
 }
@@ -1729,7 +1741,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 6, 2, 2]
+            vec![7, 0, 0, 0, 7, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -1844,6 +1856,78 @@ mod tests {
             }
             ReadPermsResponse::Err { reason } => panic!("unexpected error: {reason}"),
         }
+    }
+
+    #[tokio::test]
+    async fn issued_entries_are_independent_frames_with_an_explicit_end() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        for serial in [41, 42] {
+            write_msg_unflushed(
+                &mut writer,
+                &ListIssuedResponse::Entry {
+                    entry: IssuedEntry {
+                        serial,
+                        name: format!("node-{serial}.example"),
+                        spki_fp: format!("fp-{serial}"),
+                        not_after_unix: 1234,
+                        revoked: false,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        }
+        write_msg(&mut writer, &ListIssuedResponse::End).await.unwrap();
+
+        for serial in [41, 42] {
+            let ListIssuedResponse::Entry { entry } =
+                read_msg::<_, ListIssuedResponse>(&mut reader).await.unwrap()
+            else {
+                panic!("expected issued entry")
+            };
+            assert_eq!(entry.serial, serial);
+        }
+        assert!(matches!(
+            read_msg::<_, ListIssuedResponse>(&mut reader).await.unwrap(),
+            ListIssuedResponse::End
+        ));
+    }
+
+    #[tokio::test]
+    async fn issued_stream_can_exceed_the_single_frame_limit() {
+        let response = ListIssuedResponse::Entry {
+            entry: IssuedEntry {
+                serial: 1,
+                name: "n".repeat(1024),
+                spki_fp: "fp".to_string(),
+                not_after_unix: 1234,
+                revoked: false,
+            },
+        };
+        let frame_len = response.encoded_len() + 4;
+        let count = MAX_MSG as usize / frame_len + 2;
+        assert!(frame_len * count > MAX_MSG as usize);
+        let (mut writer, mut reader) = tokio::io::duplex(8192);
+
+        let send = async {
+            for _ in 0..count {
+                write_msg_unflushed(&mut writer, &response).await.unwrap();
+            }
+            write_msg(&mut writer, &ListIssuedResponse::End).await.unwrap();
+        };
+        let receive = async {
+            for _ in 0..count {
+                assert!(matches!(
+                    read_msg::<_, ListIssuedResponse>(&mut reader).await.unwrap(),
+                    ListIssuedResponse::Entry { .. }
+                ));
+            }
+            assert!(matches!(
+                read_msg::<_, ListIssuedResponse>(&mut reader).await.unwrap(),
+                ListIssuedResponse::End
+            ));
+        };
+        tokio::join!(send, receive);
     }
 
     #[tokio::test]

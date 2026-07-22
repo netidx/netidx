@@ -1752,25 +1752,64 @@ where
                     .context("writing RevokeResponse")
             }
             Request::ListIssued(req) => {
-                let resp = match ca_dir(state).await {
-                    None => ListIssuedResponse::Err {
-                        reason: "this host does not hold the CA".to_string(),
-                    },
-                    Some(_) => {
-                        state
-                            .write_async(async move |state| {
-                                handle_list_issued(
-                                    state.ca.as_mut().expect("CA role held"),
-                                    &req,
-                                )
-                                .await
-                            })
-                            .await
+                let mut records = match state
+                    .write_async(async move |state| {
+                        let Some(ca) = state.ca.as_mut() else {
+                            return Err("this host does not hold the CA".to_string());
+                        };
+                        start_list_issued(ca, &req).await
+                    })
+                    .await
+                {
+                    Ok(records) => records,
+                    Err(reason) => {
+                        return admin_proto::write_msg(
+                            &mut tls,
+                            &ListIssuedResponse::Err { reason },
+                        )
+                        .await
+                        .context("writing ListIssuedResponse");
                     }
                 };
-                admin_proto::write_msg(&mut tls, &resp)
-                    .await
-                    .context("writing ListIssuedResponse")
+                let now = ca_store::now_unix();
+                loop {
+                    match records.next().await {
+                        Ok(Some(record)) if record.not_after_unix > now => {
+                            let entry = IssuedEntry {
+                                serial: record.serial,
+                                name: record.name,
+                                spki_fp: record.spki_fp,
+                                not_after_unix: record.not_after_unix,
+                                revoked: record.revoked.is_some(),
+                            };
+                            admin_proto::write_msg_unflushed(
+                                &mut tls,
+                                &ListIssuedResponse::Entry { entry },
+                            )
+                            .await
+                            .context("writing ListIssuedResponse entry")?;
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            break admin_proto::write_msg(
+                                &mut tls,
+                                &ListIssuedResponse::End,
+                            )
+                            .await
+                            .context("writing ListIssuedResponse end");
+                        }
+                        Err(e) => {
+                            break admin_proto::write_msg(
+                                &mut tls,
+                                &ListIssuedResponse::Err {
+                                    reason: format!("listing issued certs: {e:#}"),
+                                },
+                            )
+                            .await
+                            .context("writing ListIssuedResponse error");
+                        }
+                    }
+                }
             }
             Request::RequestDelegation(req) => {
                 let resp = match ca_dir(state).await {
@@ -4609,32 +4648,16 @@ async fn handle_revoke(state: &Arc<Server>, req: &RevokeRequest) -> RevokeRespon
     RevokeResponse::Ok { warnings, operation_id: Some(operation_id), peers }
 }
 
-/// List every issued certificate (admin-authenticated) — the revoke UI
-/// and inspection. The daemon owns the index.
-async fn handle_list_issued(
+async fn start_list_issued(
     ca: &mut ca_store::CaDir,
     req: &ListIssuedRequest,
-) -> ListIssuedResponse {
-    if let Err(reason) = authenticate(ca, &req.credential) {
-        return ListIssuedResponse::Err { reason };
-    }
-    match ca.store.list_signed().await {
-        Ok(records) => ListIssuedResponse::Ok {
-            entries: records
-                .into_iter()
-                .map(|r| IssuedEntry {
-                    serial: r.serial,
-                    name: r.name,
-                    spki_fp: r.spki_fp,
-                    not_after_unix: r.not_after_unix,
-                    revoked: r.revoked.is_some(),
-                })
-                .collect(),
-        },
-        Err(e) => {
-            ListIssuedResponse::Err { reason: format!("listing issued certs: {e:#}") }
-        }
-    }
+) -> std::result::Result<ca_store::IssuedRecords, String> {
+    authenticate(ca, &req.credential)?;
+    ca.store
+        .compact_issued(ca_store::now_unix())
+        .await
+        .map_err(|e| format!("compacting issued certs: {e:#}"))?;
+    ca.store.issued_records().await.map_err(|e| format!("listing issued certs: {e:#}"))
 }
 
 /// A successful [`handle_approve`]: the signed outcome plus what the
