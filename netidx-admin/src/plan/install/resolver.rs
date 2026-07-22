@@ -45,6 +45,7 @@ use crate::{
     admin_proto::{ResolverAddr, Role},
     admin_server_config::{AdminServerConfig, IdMapRole, ResolverRole, Roles},
     atomic,
+    config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
     offline_ca,
     plan::{
@@ -141,7 +142,7 @@ pub async fn run_resolver(
     // operator has said "no admin server", nothing downstream offers a
     // network join again.
     let probe = if let Some(parent) = input.parent_admin_server {
-        if input.common.dry_run {
+        if input.common.mode.is_dry_run() {
             // dry-run can't run the live confirm; the parent match below
             // bails on dry-run with a clear message.
             AdminServers::NotProbed
@@ -153,7 +154,7 @@ pub async fn run_resolver(
             // shares the one trust domain, it never mints its own.
             enroll::confirm_network_at(ans, parent, NodeKind::Resolver).await?
         }
-    } else if input.auth.is_none() && !input.common.dry_run {
+    } else if input.auth.is_none() && !input.common.mode.is_dry_run() {
         enroll::discover_network(ans, NodeKind::Resolver).await?
     } else {
         AdminServers::NotProbed
@@ -209,7 +210,7 @@ pub async fn run_resolver(
     #[cfg(unix)]
     let founding_new_cluster = probe.have().is_none()
         && input.parent_admin_server.is_none()
-        && !input.common.dry_run
+        && !input.common.mode.is_dry_run()
         && !ca_setup::default_ca_present().await;
     // Frame the whole "new cluster" install up front, before any machine or CA
     // questions, so they have context: administering netidx is always
@@ -291,6 +292,11 @@ pub async fn run_resolver(
         // server (the `--no-admin-server` escape is handled by the gate above).
         let (_ca, _need, identity) = super::controller::create_self_signed_controller(
             ans,
+            input
+                .common
+                .mode
+                .config_lock()
+                .context("resolver apply mode has no config-directory lock")?,
             domain.clone(),
             None,
             machine_ip,
@@ -484,7 +490,7 @@ pub async fn run_resolver(
         Some(parent_conf) if delegated_child => {
             #[cfg(unix)]
             {
-                if input.common.dry_run {
+                if input.common.mode.is_dry_run() {
                     // delegate_under_parent runs the real ceremony — it
                     // enqueues a request on the parent and blocks until a
                     // remote admin approves (which mutates the parent
@@ -598,7 +604,7 @@ pub async fn run_resolver(
         // Then the renewal daemon, on any host with certificates our CA can
         // renew (a netidx-CA-issued resolver identity, or a admin-server
         // serving cert).
-        async move |ans| {
+        async move |ans, config_lock| {
             #[cfg(unix)]
             let admin_server_ready = post_apply_admin_server(
                 ans,
@@ -611,6 +617,7 @@ pub async fn run_resolver(
                 post_apply_units_dir.as_deref(),
                 resolver_config_actual.clone(),
                 id_map_actual,
+                config_lock,
             )
             .await?;
             #[cfg(unix)]
@@ -872,7 +879,7 @@ async fn resolver_tls_generate(
     // Whether this asks anything is decided by `probe`. The issued files are
     // written to a staging tempdir; we hand it back so the caller can hold it
     // across the template install.
-    if !input.common.dry_run
+    if !input.common.mode.is_dry_run()
         && let Some((j, staging)) = enroll::maybe_join_ca_server(
             ans,
             probe,
@@ -895,7 +902,7 @@ async fn resolver_tls_generate(
     // itself writes to the staging dir below.
     let identity_dir = tls::identity_dir(name)?;
 
-    if input.common.dry_run {
+    if input.common.mode.is_dry_run() {
         if ca_setup::default_ca_present().await {
             ans.note(&format_compact!(
                 "[dry-run] would issue a resolver certificate {name:?} from the \
@@ -922,9 +929,14 @@ async fn resolver_tls_generate(
         });
     }
 
-    let (ca, config_lock) = if ca_setup::default_ca_present().await {
+    let config_lock = input
+        .common
+        .mode
+        .config_lock()
+        .context("resolver apply mode has no config-directory lock")?;
+    let ca = if ca_setup::default_ca_present().await {
         ans.note(&format_compact!("issuing from the local CA at {}", ca_dir.display()));
-        offline_ca::open_default_ca(ans).await?
+        offline_ca::open_default_ca(ans, config_lock).await?
     } else {
         // No CA — this is the first resolver of a new TLS network, so the CA
         // is created right here: it signs the data plane *and* anchors the
@@ -965,6 +977,7 @@ async fn resolver_tls_generate(
         // dropped: this install always ends with a single system-service offer.
         let (created, _need) = ca_setup::create_vaulted_ca(
             ans,
+            config_lock,
             ca_setup::founding_ca_opts(
                 ca_dir.clone(),
                 domain,
@@ -975,9 +988,7 @@ async fn resolver_tls_generate(
             ),
         )
         .await?;
-        let config_lock =
-            crate::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?;
-        (created, config_lock)
+        created
     };
     // Local-CA-issue path: choose how the leaf key is protected at rest. The
     // askpass goes into the emitted client config as the password case's
@@ -992,7 +1003,7 @@ async fn resolver_tls_generate(
         "issuing resolver certificate {name:?} (this may take a moment)…"
     ));
     let issued = ca_setup::issue_identity(
-        &config_lock,
+        config_lock,
         &ca,
         name,
         staging.path().to_path_buf(),
@@ -1189,6 +1200,7 @@ async fn post_apply_admin_server(
     units_dir: Option<&Path>,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
+    config_lock: &ConfigDirLock,
 ) -> Result<bool> {
     match discovered {
         // A "discovered" network whose CA this host already holds is our OWN
@@ -1203,7 +1215,8 @@ async fn post_apply_admin_server(
                 // keeps running here (it's the CA).
                 AdminPlane::Skip => Ok(false),
                 _ => {
-                    merge_resolver_roles(ans, resolver_config, id_map).await?;
+                    merge_resolver_roles(ans, resolver_config, id_map, config_lock)
+                        .await?;
                     Ok(paths::discover_admin_server_config_async().await.is_ok())
                 }
             }
@@ -1222,11 +1235,12 @@ async fn post_apply_admin_server(
                 id_map,
                 None,
                 None,
+                config_lock,
             )
             .await
         }
         None => {
-            merge_resolver_roles(ans, resolver_config, id_map).await?;
+            merge_resolver_roles(ans, resolver_config, id_map, config_lock).await?;
             Ok(paths::discover_admin_server_config_async().await.is_ok())
         }
     }
@@ -1258,11 +1272,12 @@ async fn merge_resolver_roles(
     ans: &mut dyn Answerer,
     resolver_config: PathBuf,
     id_map: Option<PathBuf>,
+    config_lock: &ConfigDirLock,
 ) -> Result<()> {
     if paths::discover_admin_server_config_async().await.is_err() {
         return Ok(());
     }
-    let path = server_setup::update_roles(|roles| {
+    let path = server_setup::update_roles(config_lock, |roles| {
         roles.resolver = Some(ResolverRole { config: resolver_config });
         if let Some(map) = id_map {
             roles.id_map = Some(IdMapRole { map });
@@ -1297,6 +1312,7 @@ pub async fn enroll_admin_server(
     id_map: Option<PathBuf>,
     listen_override: Option<SocketAddr>,
     replaces: Option<crate::admin_proto::AdminServerId>,
+    config_lock: &ConfigDirLock,
 ) -> Result<bool> {
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
@@ -1465,8 +1481,7 @@ pub async fn enroll_admin_server(
     // the CA cert at the end of the chain, exactly like the CA host's own admin
     // server.
     let cfg_path = paths::user_admin_server_config()?;
-    let config_lock =
-        crate::config_lock::ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
+    config_lock.require_contained(&cfg_path)?;
     let dir = paths::user_config_root()?.join("admin-server");
     config_lock.require_contained(&dir)?;
     tokio::fs::create_dir_all(&dir)
@@ -1515,7 +1530,7 @@ pub async fn enroll_admin_server(
         mdns: true,
         activation_units_dir: None,
     };
-    cfg.save_async(&config_lock, &cfg_path).await?;
+    cfg.save_async(config_lock, &cfg_path).await?;
     ans.note(&format_compact!(
         "admin server configured:\n\
          \x20 config:   {}\n\

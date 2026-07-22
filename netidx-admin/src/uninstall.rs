@@ -26,7 +26,7 @@ use crate::{
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Inputs for [`uninstall`].
+/// Inputs for [`preview`] and [`prepare`].
 #[derive(Debug, Clone)]
 pub struct UninstallParams {
     /// Scope to tear down. The config root and the OS service are
@@ -46,9 +46,6 @@ pub struct UninstallParams {
     /// Also delete `<config_root>/ca/`. **DANGEROUS** — loss of the
     /// CA private key is permanent. Default `false`.
     pub remove_ca: bool,
-    /// Report what would happen without doing it. No filesystem
-    /// writes, no `systemctl`/`launchctl` calls.
-    pub dry_run: bool,
 }
 
 /// Why a path was kept rather than removed.
@@ -67,8 +64,7 @@ impl KeepReason {
     }
 }
 
-/// What [`uninstall`] did (or, under [`UninstallParams::dry_run`],
-/// what it would have done).
+/// What an uninstall did, or what [`preview`] reports it would do.
 #[derive(Debug, Default)]
 pub struct UninstallReport {
     /// Whether the OS service was found installed and we attempted
@@ -84,27 +80,76 @@ pub struct UninstallReport {
 
 impl UninstallReport {
     /// True if both the service and the config root were already
-    /// gone — `uninstall` had nothing to do.
+    /// gone — the uninstall had nothing to do.
     pub fn is_empty(&self) -> bool {
         !self.service_was_installed && self.removed.is_empty() && self.kept.is_empty()
     }
 }
 
-/// Tear down a netidx install. See module docs for scope.
-pub fn uninstall(p: &UninstallParams) -> Result<UninstallReport> {
-    uninstall_with_service(p, service::status, service::uninstall)
+pub enum PreparedUninstall {
+    Complete(UninstallReport),
+    RemoveConfig(ConfigRemoval),
 }
 
-fn uninstall_with_service(
+pub struct ConfigRemoval {
+    params: UninstallParams,
+    root: PathBuf,
+    report: UninstallReport,
+}
+
+impl ConfigRemoval {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn finish(self, config_lock: &ConfigDirLock) -> Result<UninstallReport> {
+        config_lock.require_contained(&self.root)?;
+        cleanup(&self.params, &self.root, self.report, CleanupMode::Apply(config_lock))
+    }
+}
+
+pub fn preview(p: &UninstallParams) -> Result<UninstallReport> {
+    preview_with_service(p, service::status)
+}
+
+pub fn prepare(p: &UninstallParams) -> Result<PreparedUninstall> {
+    prepare_with_service(p, service::status, service::uninstall)
+}
+
+fn preview_with_service(
+    p: &UninstallParams,
+    status: impl FnOnce(&ServiceParams) -> Result<ServiceStatus>,
+) -> Result<UninstallReport> {
+    let (root, report) = service_state(p, status)?;
+    if !root.exists() {
+        return Ok(report);
+    }
+    cleanup(p, &root, report, CleanupMode::Preview)
+}
+
+fn prepare_with_service(
     p: &UninstallParams,
     status: impl FnOnce(&ServiceParams) -> Result<ServiceStatus>,
     remove_service: impl FnOnce(&ServiceParams) -> Result<()>,
-) -> Result<UninstallReport> {
-    let mut report = UninstallReport::default();
+) -> Result<PreparedUninstall> {
+    let (root, report) = service_state(p, status)?;
+    if report.service_was_installed {
+        remove_service(&service_params(p)).context(
+            "service teardown was not verified; configuration has been preserved",
+        )?;
+    }
+    if root.exists() {
+        Ok(PreparedUninstall::RemoveConfig(ConfigRemoval {
+            params: p.clone(),
+            root,
+            report,
+        }))
+    } else {
+        Ok(PreparedUninstall::Complete(report))
+    }
+}
 
-    // 1. Service teardown. service::status checks file existence to
-    //    decide "installed" — we trust it to be cheap and side-effect
-    //    free, so we can call it under dry-run too.
+fn service_params(p: &UninstallParams) -> ServiceParams {
     let sparams = ServiceParams {
         scope: p.scope,
         for_user: p.for_user.clone(),
@@ -113,16 +158,20 @@ fn uninstall_with_service(
         service_name: p.service_name.clone(),
         activation_dir: None,
     };
+    sparams
+}
+
+fn service_state(
+    p: &UninstallParams,
+    status: impl FnOnce(&ServiceParams) -> Result<ServiceStatus>,
+) -> Result<(PathBuf, UninstallReport)> {
+    let sparams = service_params(p);
     let pre = status(&sparams)
         .context("could not determine service state; refusing to remove configuration")?;
-    report.service_was_installed = pre != ServiceStatus::NotInstalled;
-    if !p.dry_run && report.service_was_installed {
-        remove_service(&sparams).context(
-            "service teardown was not verified; configuration has been preserved",
-        )?;
-    }
-
-    // 2. Config-root cleanup.
+    let report = UninstallReport {
+        service_was_installed: pre != ServiceStatus::NotInstalled,
+        ..UninstallReport::default()
+    };
     let root = match &p.config_dir {
         Some(d) => d.clone(),
         None => match p.scope {
@@ -130,10 +179,24 @@ fn uninstall_with_service(
             ServiceScope::System => paths::system_config_root(),
         },
     };
-    if !root.exists() {
-        return Ok(report);
+    Ok((root, report))
+}
+
+#[derive(Clone, Copy)]
+enum CleanupMode<'a> {
+    Preview,
+    Apply(&'a ConfigDirLock),
+}
+
+fn cleanup(
+    p: &UninstallParams,
+    root: &Path,
+    mut report: UninstallReport,
+    mode: CleanupMode<'_>,
+) -> Result<UninstallReport> {
+    if let CleanupMode::Apply(config_lock) = mode {
+        config_lock.require_contained(root)?;
     }
-    let _lock = if p.dry_run { None } else { Some(ConfigDirLock::acquire(&root)?) };
 
     // Snapshot entries first so an error mid-walk doesn't leave us in
     // a half-known state — and so the report ordering is stable.
@@ -150,7 +213,7 @@ fn uninstall_with_service(
             report.kept.push((path, KeepReason::CaPreserved));
             continue;
         }
-        if !p.dry_run {
+        if matches!(mode, CleanupMode::Apply(_)) {
             remove_any(&path)?;
         }
         report.removed.push(path);
@@ -160,7 +223,7 @@ fn uninstall_with_service(
     //    so a `ls ~/.config | grep netidx` post-uninstall returns
     //    nothing.
     if report.kept.is_empty() {
-        if !p.dry_run {
+        if matches!(mode, CleanupMode::Apply(_)) {
             match std::fs::remove_dir(&root) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -170,7 +233,7 @@ fn uninstall_with_service(
                 }
             }
         }
-        report.removed.push(root);
+        report.removed.push(root.to_path_buf());
     }
 
     Ok(report)
@@ -232,7 +295,16 @@ mod tests {
             for_user: None,
             config_dir: Some(config_dir),
             remove_ca: false,
-            dry_run: false,
+        }
+    }
+
+    fn apply(p: &UninstallParams) -> Result<UninstallReport> {
+        match prepare(p)? {
+            PreparedUninstall::Complete(report) => Ok(report),
+            PreparedUninstall::RemoveConfig(removal) => {
+                let lock = ConfigDirLock::acquire(removal.root())?;
+                removal.finish(&lock)
+            }
         }
     }
 
@@ -240,7 +312,7 @@ mod tests {
     fn nothing_to_do_when_root_missing() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("never-existed");
-        let r = uninstall(&params(root.clone())).unwrap();
+        let r = apply(&params(root.clone())).unwrap();
         assert!(!r.service_was_installed);
         assert!(r.removed.is_empty());
         assert!(r.kept.is_empty());
@@ -253,7 +325,7 @@ mod tests {
         let root = dir.path().join("netidx");
         populate_root(&root);
 
-        let r = uninstall(&params(root.clone())).unwrap();
+        let r = apply(&params(root.clone())).unwrap();
 
         // CA dir survives + root survives (because something was kept).
         assert!(root.join("ca").exists());
@@ -283,7 +355,7 @@ mod tests {
 
         let mut p = params(root.clone());
         p.remove_ca = true;
-        let r = uninstall(&p).unwrap();
+        let r = apply(&p).unwrap();
 
         assert!(!root.join("ca").exists());
         // With nothing kept, the root itself is removed.
@@ -298,9 +370,8 @@ mod tests {
         let root = dir.path().join("netidx");
         populate_root(&root);
 
-        let mut p = params(root.clone());
-        p.dry_run = true;
-        let r = uninstall(&p).unwrap();
+        let p = params(root.clone());
+        let r = preview(&p).unwrap();
 
         // All files still on disk.
         assert!(root.join("resolver.json").exists());
@@ -318,9 +389,8 @@ mod tests {
         populate_root(&root);
 
         let mut p = params(root.clone());
-        p.dry_run = true;
         p.remove_ca = true;
-        let r = uninstall(&p).unwrap();
+        let r = preview(&p).unwrap();
 
         // Nothing actually deleted ...
         assert!(root.join("ca").join("private.key").exists());
@@ -346,7 +416,7 @@ mod tests {
         // A symlink inside the config root pointing at it.
         std::os::unix::fs::symlink(&outside, root.join("link-out")).unwrap();
 
-        let r = uninstall(&params(root.clone())).unwrap();
+        let r = apply(&params(root.clone())).unwrap();
 
         // Symlink is gone, target is untouched.
         assert!(!root.join("link-out").exists());
@@ -362,9 +432,9 @@ mod tests {
         let mut p = params(root.clone());
         p.remove_ca = true;
 
-        let r1 = uninstall(&p).unwrap();
+        let r1 = apply(&p).unwrap();
         assert!(!r1.is_empty());
-        let r2 = uninstall(&p).unwrap();
+        let r2 = apply(&p).unwrap();
         assert!(r2.is_empty());
     }
 
@@ -376,11 +446,8 @@ mod tests {
         let mut p = params(root.clone());
         p.remove_ca = true;
 
-        let result = uninstall_with_service(
-            &p,
-            |_| anyhow::bail!("service manager unavailable"),
-            |_| Ok(()),
-        );
+        let result =
+            preview_with_service(&p, |_| anyhow::bail!("service manager unavailable"));
         assert!(result.is_err());
         assert!(root.join("resolver.json").exists());
         assert!(root.join("ca/private.key").exists());
@@ -394,7 +461,7 @@ mod tests {
         let mut p = params(root.clone());
         p.remove_ca = true;
 
-        let result = uninstall_with_service(
+        let result = prepare_with_service(
             &p,
             |_| Ok(ServiceStatus::Active),
             |_| anyhow::bail!("unit is still active"),

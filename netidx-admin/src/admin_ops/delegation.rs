@@ -229,6 +229,29 @@ pub struct AddParentOutcome {
     pub propagation: ClusterPropagation,
 }
 
+pub enum AddParentCompletion {
+    Complete(AddParentOutcome),
+    LocalWrite(PendingParentReferral),
+}
+
+pub struct PendingParentReferral {
+    resolver_config: PathBuf,
+    parent_ref: ParentRef,
+    outcome: AddParentOutcome,
+}
+
+impl PendingParentReferral {
+    pub fn apply(
+        self,
+        config_lock: &ConfigDirLock,
+        ans: &mut dyn Answerer,
+    ) -> Result<AddParentOutcome> {
+        let Self { resolver_config, parent_ref, outcome } = self;
+        apply_parent_referral(config_lock, ans, &resolver_config, parent_ref)?;
+        Ok(outcome)
+    }
+}
+
 fn validate_existing_parent(
     existing_path: Option<&str>,
     proposed_path: &str,
@@ -257,13 +280,13 @@ fn validate_existing_parent(
 /// parent by delegation, then write this installer's local `parent` referral.
 /// All remote parent/child propagation is owned by the CA controller. The
 /// parent glyph confirm + queue + poll runs through [`delegate_under_parent`].
-pub async fn add_parent(
+pub async fn prepare_add_parent(
     ans: &mut dyn Answerer,
     resolver_config: &Path,
     parent_server: SocketAddr,
     proposed_path: &str,
     selection: Option<crate::plan::delegation::DelegationSelection>,
-) -> Result<AddParentOutcome> {
+) -> Result<AddParentCompletion> {
     let existing_cluster_change = selection.is_some();
     let rcfg = ResolverConfig::load(resolver_config)?;
     validate_existing_parent(
@@ -294,18 +317,24 @@ pub async fn add_parent(
     // requestor is polling, so its full topology may already be on disk. Treat
     // that exact state as successful completion; a different pre-existing
     // parent still fails in `set_parent_referral` as a real reparent attempt.
+    let outcome = AddParentOutcome {
+        proposed_path: proposed_path.to_string(),
+        propagation: ClusterPropagation::ControllerManaged,
+    };
     if template::parent_referral_matches(resolver_config, &parent_ref)? {
         ans.note("the controller already wrote this resolver's approved topology");
+        Ok(AddParentCompletion::Complete(outcome))
     } else if existing_cluster_change {
         bail!(
             "the delegation was approved, but the controller did not write this resolver's complete topology; do not apply a parent-only edit. Re-approve the delegation to reconcile the failed target"
         );
     } else {
-        let config_lock = ConfigDirLock::acquire_for_file_async(resolver_config).await?;
-        apply_parent_referral(&config_lock, ans, resolver_config, parent_ref)?;
+        Ok(AddParentCompletion::LocalWrite(PendingParentReferral {
+            resolver_config: resolver_config.to_path_buf(),
+            parent_ref,
+            outcome,
+        }))
     }
-    let propagation = ClusterPropagation::ControllerManaged;
-    Ok(AddParentOutcome { proposed_path: proposed_path.to_string(), propagation })
 }
 
 fn apply_parent_referral(

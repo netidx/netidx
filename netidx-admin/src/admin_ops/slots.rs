@@ -1,10 +1,10 @@
 //! Local CA slot & external-PKI management behind the Answerer seam.
 //!
-//! These are the **local** admin ops — no admin server, no glyph. Each picks
-//! one of two paths internally: when the daemon is up it hot-swaps in-process
-//! over the control socket (SO_PEERCRED superuser, no secret); when it is down
-//! the op takes the installation guard and unlocks with the box's autorenew keytab
-//! or, failing that, the operator's recovery password (via the Answerer, always
+//! These are the **local** admin ops — no remote admin server, no glyph. Their
+//! caller supplies either a running-daemon endpoint or an already-held offline
+//! installation guard. The live path hot-swaps over the control socket
+//! (SO_PEERCRED superuser, no secret); the offline path unlocks with the box's
+//! autorenew keytab or, failing that, the operator's recovery password (via the Answerer, always
 //! folded to canonical form by [`offline_ca::unlock_held`] — which is the fix for
 //! the external path's former raw-password unlock). The only secrets are the
 //! recovery password ([`Field::RecoveryPassword`]) and a freshly minted one to
@@ -16,7 +16,7 @@
 
 use crate::{
     admin_client, admin_local,
-    admin_proto::{AdminServerId, CONTROLLER_ROLE_URI, CaStatus, NodeKind, SERVING_SAN},
+    admin_proto::{AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN},
     admin_server::read_autorenew_password_async,
     admin_server_config::AdminServerConfig,
     answer::{Answerer, Field},
@@ -39,6 +39,17 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+pub enum CaAccess {
+    Running {
+        config: PathBuf,
+    },
+    Offline {
+        config: Option<PathBuf>,
+        lock: ConfigDirLock,
+        ca_alias_lock: Option<ConfigDirLock>,
+    },
+}
+
 // -- ca auto-approve ---------------------------------------------------------
 
 /// The outcome of [`auto_approve`], for the CLI to narrate.
@@ -59,49 +70,43 @@ pub enum AutoApproveOutcome {
 
 /// Set up (or `--rotate`) the autorenew slot so the admin server approves
 /// verified renewals in-process. Hot-swaps on the running daemon; otherwise
-/// takes the installation guard, TPM-gates, unlocks with the recovery password (folded to
-/// canonical form), (re-)mints the slot + keytab, and points the config at it.
+/// uses the supplied installation guard, TPM-gates, unlocks with the recovery
+/// password, (re-)mints the slot + keytab, and points the config at it.
 pub async fn auto_approve(
     ans: &mut dyn Answerer,
+    access: &CaAccess,
     ca_dir: PathBuf,
-    cfg: Option<PathBuf>,
     rotate: bool,
     insecure_no_tpm: bool,
 ) -> Result<AutoApproveOutcome> {
-    // Hot-swap path: the running daemon owns the CA and re-wraps the slot,
-    // swaps the live key, and rewrites the keytab without an operator secret.
-    if let Some(cfg) = &cfg
-        && admin_local::daemon_running(cfg).await
-    {
-        let warning = admin_local::rotate_autorenew(cfg).await?;
-        return Ok(AutoApproveOutcome::HotSwapped { warning });
-    }
-    // Offline / first-time setup: same TPM gate as init (a plaintext keytab is
-    // a CA-key-equivalent credential, so refuse without a TPM unless opted in).
-    // Effective decision (flag or interactive confirm), used for the re-seal below.
-    let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
-    // Re-minting autorenew removes the old slot first, so the recovery password
-    // (not the old keytab) authorizes it — and after a TPM clear the old keytab
-    // is unsealable anyway, so recovery is the only way in.
-    let typed = ans.secret(Field::RecoveryPassword, None).await?;
-    let recovery = ca_vault::normalize_recovery_password(typed.as_str());
-    let lock = match cfg.as_deref() {
-        Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
-        None => ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?,
-    };
-    let mut cadir = CaDir::open(lock, &ca_dir).await.context(
-        "setting up autorenew needs exclusive access; the admin server must be stopped",
-    )?;
-    let keytab =
-        ca_setup::setup_autorenew_slot(ans, &mut cadir, &recovery, insecure_no_tpm)
+    match access {
+        CaAccess::Running { config } => {
+            let warning = admin_local::rotate_autorenew(config).await?;
+            Ok(AutoApproveOutcome::HotSwapped { warning })
+        }
+        CaAccess::Offline { lock, .. } => {
+            let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
+            let typed = ans.secret(Field::RecoveryPassword, None).await?;
+            let recovery = ca_vault::normalize_recovery_password(typed.as_str());
+            let mut cadir = CaDir::open(lock.clone(), &ca_dir).await.context(
+                "setting up autorenew needs exclusive access; the admin server must be stopped",
+            )?;
+            let keytab = ca_setup::setup_autorenew_slot(
+                ans,
+                &mut cadir,
+                &recovery,
+                insecure_no_tpm,
+            )
             .await?;
-    let config_lock = cadir.config_lock();
-    let (cfg_path, cfg_error) =
-        match server_setup::set_ca_autorenew(&config_lock, &keytab).await {
-            Ok(p) => (Some(p), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
-        };
-    Ok(AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error })
+            let config_lock = cadir.config_lock();
+            let (cfg_path, cfg_error) =
+                match server_setup::set_ca_autorenew(&config_lock, &keytab).await {
+                    Ok(p) => (Some(p), None),
+                    Err(e) => (None, Some(format!("{e:#}"))),
+                };
+            Ok(AutoApproveOutcome::Offline { rotate, keytab, cfg_path, cfg_error })
+        }
+    }
 }
 
 /// A read-only report of the autorenew credential's state.
@@ -112,103 +117,6 @@ pub struct AutorenewStatus {
     pub keytab_sealed: bool,
     /// The daemon config points `roles.ca.autorenew` at the keytab.
     pub wired_in_config: bool,
-}
-
-async fn config_for_ca(ca_dir: &Path) -> Option<PathBuf> {
-    let requested = tokio::fs::canonicalize(ca_dir).await.ok()?;
-    let user = paths::user_admin_server_config().ok();
-    let system = paths::system_admin_server_config();
-    for path in user.into_iter().chain(std::iter::once(system)) {
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            continue;
-        }
-        let Ok(cfg) = AdminServerConfig::load_for_recovery_async(&path).await else {
-            continue;
-        };
-        let Some(role) = cfg.roles.ca else {
-            continue;
-        };
-        let Ok(configured) = tokio::fs::canonicalize(role.dir).await else {
-            continue;
-        };
-        if requested == configured {
-            return Some(path);
-        }
-    }
-    None
-}
-
-async fn live_ca_status(ca_dir: &Path, cfg: Option<&Path>) -> Result<Option<CaStatus>> {
-    let cfg = match cfg {
-        Some(cfg) => Some(cfg.to_path_buf()),
-        None => config_for_ca(ca_dir).await,
-    };
-    let Some(cfg) = cfg else { return Ok(None) };
-    let configured = AdminServerConfig::load_for_recovery_async(&cfg)
-        .await
-        .ok()
-        .and_then(|cfg| cfg.roles.ca.map(|role| role.dir));
-    let configured = match configured {
-        Some(dir) => tokio::fs::canonicalize(dir).await.ok(),
-        None => None,
-    };
-    if configured != tokio::fs::canonicalize(ca_dir).await.ok() {
-        return Ok(None);
-    }
-    if !admin_local::daemon_running(&cfg).await {
-        return Ok(None);
-    }
-    admin_local::ca_status(&cfg).await.map(Some)
-}
-
-/// Report the autorenew credential's state through the live daemon or under the
-/// offline guard: whether the slot exists, whether
-/// the keytab is present and sealed, and whether the config wires it in.
-pub async fn auto_approve_status(
-    ca_dir: &Path,
-    cfg: Option<&Path>,
-) -> Result<AutorenewStatus> {
-    let keytab = offline_ca::autorenew_keytab_path()?;
-    let keytab_present = tokio::fs::try_exists(&keytab).await.unwrap_or(false);
-    let keytab_sealed = keytab_present
-        && tokio::fs::read(&keytab)
-            .await
-            .ok()
-            .map(|b| netidx_tpm::is_sealed(&b))
-            .unwrap_or(false);
-    let slot_present = match live_ca_status(ca_dir, cfg).await? {
-        Some(status) => status.autorenew_slot_present,
-        None => {
-            let lock = match cfg {
-                Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
-                None => ConfigDirLock::acquire_for_ca_dir(ca_dir).await?,
-            };
-            CAVault::exists_async(ca_dir).await
-                && CaDir::open(lock, ca_dir)
-                    .await?
-                    .vault
-                    .signing_slot_names()
-                    .map(|names| {
-                        names.iter().any(|n| n == crate::admin_server::AUTORENEW_ADMIN)
-                    })
-                    .unwrap_or(false)
-        }
-    };
-    let wired_in_config = match cfg {
-        Some(path) => AdminServerConfig::load_async(path)
-            .await
-            .ok()
-            .and_then(|cfg| cfg.roles.ca.map(|ca| ca.autorenew.is_some()))
-            .unwrap_or(false),
-        None => false,
-    };
-    Ok(AutorenewStatus {
-        slot_present,
-        keytab,
-        keytab_present,
-        keytab_sealed,
-        wired_in_config,
-    })
 }
 
 // -- ca recovery -------------------------------------------------------------
@@ -226,63 +134,54 @@ pub enum RecoveryRotateOutcome {
 /// is shown exactly once via [`ca_setup::show_recovery_password`].
 pub async fn recovery_rotate(
     ans: &mut dyn Answerer,
+    access: &CaAccess,
     ca_dir: PathBuf,
-    cfg: Option<PathBuf>,
 ) -> Result<RecoveryRotateOutcome> {
-    if let Some(cfg) = &cfg
-        && admin_local::daemon_running(cfg).await
-    {
-        let new_pw = admin_local::rotate_recovery(cfg).await?;
-        ca_setup::show_recovery_password(ans, &new_pw).await?;
-        return Ok(RecoveryRotateOutcome::HotSwapped);
+    match access {
+        CaAccess::Running { config } => {
+            let new_pw = admin_local::rotate_recovery(config).await?;
+            ca_setup::show_recovery_password(ans, &new_pw).await?;
+            Ok(RecoveryRotateOutcome::HotSwapped)
+        }
+        CaAccess::Offline { lock, .. } => {
+            if !CAVault::exists_async(&ca_dir).await {
+                bail!("no vault-protected CA at {}", ca_dir.display());
+            }
+            let keytab = offline_ca::autorenew_keytab_path()?;
+            let autorenew_pw =
+                read_autorenew_password_async(&keytab).await.with_context(|| {
+                    format!(
+                        "rotating the recovery password needs the autorenew keytab ({}); it \
+                         authorizes the re-mint on the CA box. (Set one up with \
+                         `netidx admin ca auto-approve`.)",
+                        keytab.display()
+                    )
+                })?;
+            let mut cadir = CaDir::open(lock.clone(), &ca_dir).await.context(
+                "rotating recovery needs exclusive access; stop the admin server first",
+            )?;
+            cadir.vault.unlock_async(&autorenew_pw).await.with_context(|| {
+                format!(
+                    "the autorenew keytab ({}) did not unlock this CA — its credential is \
+                     stale. Re-mint it with `netidx admin ca auto-approve --rotate` (needs \
+                     the recovery password) and try again.",
+                    keytab.display()
+                )
+            })?;
+            let new_pw = ca_vault::gen_recovery_password();
+            cadir
+                .vault
+                .replace_signing_slot(
+                    &autorenew_pw,
+                    ca_vault::RECOVERY_ADMIN,
+                    &new_pw,
+                    recovery_policy(),
+                )
+                .await?;
+            ca_setup::show_recovery_password(ans, &new_pw).await?;
+            Ok(RecoveryRotateOutcome::Offline { ca_dir })
+        }
     }
-    if !CAVault::exists_async(&ca_dir).await {
-        bail!("no vault-protected CA at {}", ca_dir.display());
-    }
-    let keytab = offline_ca::autorenew_keytab_path()?;
-    let autorenew_pw =
-        read_autorenew_password_async(&keytab).await.with_context(|| {
-            format!(
-                "rotating the recovery password needs the autorenew keytab ({}); it \
-             authorizes the re-mint on the CA box. (Set one up with \
-             `netidx admin ca auto-approve`.)",
-                keytab.display()
-            )
-        })?;
-    let lock = match cfg.as_deref() {
-        Some(path) => ConfigDirLock::acquire_for_file_async(path).await?,
-        None => ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?,
-    };
-    let mut cadir = CaDir::open(lock, &ca_dir).await.context(
-        "rotating recovery needs exclusive access; stop the admin server first",
-    )?;
-    // Confirm the keytab credential unlocks this CA BEFORE removing the old
-    // recovery slot — a stale keytab must not leave the CA with no recovery
-    // slot. (The recovered key is dropped/zeroized immediately.)
-    cadir.vault.unlock_async(&autorenew_pw).await.with_context(|| {
-        format!(
-            "the autorenew keytab ({}) did not unlock this CA — its credential is \
-             stale. Re-mint it with `netidx admin ca auto-approve --rotate` (needs \
-             the recovery password) and try again.",
-            keytab.display()
-        )
-    })?;
-    // Atomic re-key: the old recovery slot is dropped and the new one added in a
-    // single vault write, authorized by the box's autorenew credential. A failed
-    // write leaves the old recovery slot intact — the CA is never momentarily
-    // left with no recovery credential (the former remove-then-add window).
-    let new_pw = ca_vault::gen_recovery_password();
-    cadir
-        .vault
-        .replace_signing_slot(
-            &autorenew_pw,
-            ca_vault::RECOVERY_ADMIN,
-            &new_pw,
-            recovery_policy(),
-        )
-        .await?;
-    ca_setup::show_recovery_password(ans, &new_pw).await?;
-    Ok(RecoveryRotateOutcome::Offline { ca_dir })
 }
 
 /// A read-only report of the recovery slot's state (never the password).
@@ -290,29 +189,6 @@ pub struct RecoveryStatus {
     pub slot_present: bool,
     /// Whether the box's autorenew keytab (the offline re-mint authority) exists.
     pub keytab_present: bool,
-}
-
-/// Report whether the CA has a recovery slot and whether the on-box authority
-/// (the autorenew keytab) needed to rotate it offline is present.
-pub async fn recovery_status(ca_dir: &Path) -> Result<RecoveryStatus> {
-    let slot_present = match live_ca_status(ca_dir, None).await? {
-        Some(status) => status.recovery_slot_present,
-        None => {
-            let lock = ConfigDirLock::acquire_for_ca_dir(ca_dir).await?;
-            CAVault::exists_async(ca_dir).await
-                && CaDir::open(lock, ca_dir)
-                    .await?
-                    .vault
-                    .signing_slot_names()
-                    .map(|names| names.iter().any(|n| n == ca_vault::RECOVERY_ADMIN))
-                    .unwrap_or(false)
-        }
-    };
-    let keytab_present = match offline_ca::autorenew_keytab_path() {
-        Ok(path) => tokio::fs::try_exists(path).await.unwrap_or(false),
-        Err(_) => false,
-    };
-    Ok(RecoveryStatus { slot_present, keytab_present })
 }
 
 // -- controller disaster recovery -------------------------------------------
@@ -335,27 +211,6 @@ pub struct RecoverControllerOutcome {
 /// TPM-sealed serving/autorenew material is ignored and replaced.
 pub async fn recover_controller(
     ans: &mut dyn Answerer,
-    ca_dir: PathBuf,
-    config_path: PathBuf,
-    listen: Option<SocketAddr>,
-    resolver_listen: Option<SocketAddr>,
-    insecure_no_tpm: bool,
-) -> Result<RecoverControllerOutcome> {
-    let lock = ConfigDirLock::acquire_for_file_async(&config_path).await?;
-    recover_controller_with_lock(
-        ans,
-        &lock,
-        ca_dir,
-        config_path,
-        listen,
-        resolver_listen,
-        insecure_no_tpm,
-    )
-    .await
-}
-
-pub async fn recover_controller_with_lock(
-    ans: &mut dyn Answerer,
     lock: &ConfigDirLock,
     ca_dir: PathBuf,
     config_path: PathBuf,
@@ -377,7 +232,7 @@ pub async fn recover_controller_with_lock(
         &recovery,
         insecure_no_tpm,
         &autorenew_keytab,
-        Some(lock.clone()),
+        lock.clone(),
     )
     .await
 }
@@ -465,6 +320,7 @@ async fn recover_controller_with_password(
     insecure_no_tpm: bool,
     autorenew_keytab: &Path,
 ) -> Result<RecoverControllerOutcome> {
+    let lock = ConfigDirLock::acquire_for_file(config_path)?;
     recover_controller_with_password_and_lock(
         ca_dir,
         config_path,
@@ -473,7 +329,7 @@ async fn recover_controller_with_password(
         recovery_password,
         insecure_no_tpm,
         autorenew_keytab,
-        None,
+        lock,
     )
     .await
 }
@@ -486,12 +342,8 @@ async fn recover_controller_with_password_and_lock(
     recovery_password: &str,
     insecure_no_tpm: bool,
     autorenew_keytab: &Path,
-    lock: Option<ConfigDirLock>,
+    lock: ConfigDirLock,
 ) -> Result<RecoverControllerOutcome> {
-    let lock = match lock {
-        Some(lock) => lock,
-        None => ConfigDirLock::acquire_for_file_async(config_path).await?,
-    };
     lock.require_descendant(ca_dir)?;
     lock.require_contained(config_path)?;
     if !CAVault::exists_async(ca_dir).await {
@@ -778,14 +630,6 @@ impl ExternalPending {
 /// canonical form, so the grouped displayed form now works (it did not before).
 async fn external_ca_key(
     ans: &mut dyn Answerer,
-    dir: &Path,
-) -> Result<(Zeroizing<Vec<u8>>, CaDir)> {
-    let lock = ConfigDirLock::acquire_for_ca_dir(dir).await?;
-    external_ca_key_with_lock(ans, lock, dir).await
-}
-
-async fn external_ca_key_with_lock(
-    ans: &mut dyn Answerer,
     lock: ConfigDirLock,
     dir: &Path,
 ) -> Result<(Zeroizing<Vec<u8>>, CaDir)> {
@@ -800,9 +644,10 @@ async fn external_ca_key_with_lock(
 /// externally-signed CA cert (same key ⇒ glyph unchanged). Returns the CSR path.
 pub async fn external_emit_csr(
     ans: &mut dyn Answerer,
+    lock: &ConfigDirLock,
     ca_dir: PathBuf,
 ) -> Result<PathBuf> {
-    let (key, _cadir) = external_ca_key(ans, &ca_dir).await?;
+    let (key, _cadir) = external_ca_key(ans, lock.clone(), &ca_dir).await?;
     let (common_name, csr) = external_csr_with_key(&ca_dir, &key).await?;
     let csr_path = offline_ca::default_csr_filename(&common_name);
     atomic::write_atomic_async(&csr_path, &csr, 0o644)
@@ -862,16 +707,6 @@ pub enum ExternalInstallOutcome {
 /// that phase 1 could not do without the cert, returning its [`ServiceNeed`].
 pub async fn external_install_cert(
     ans: &mut dyn Answerer,
-    ca_dir: PathBuf,
-    signed: &Path,
-    root: Option<&Path>,
-) -> Result<ExternalInstallOutcome> {
-    let lock = ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?;
-    external_install_cert_with_lock(ans, &lock, ca_dir, signed, root).await
-}
-
-pub async fn external_install_cert_with_lock(
-    ans: &mut dyn Answerer,
     lock: &ConfigDirLock,
     ca_dir: PathBuf,
     signed: &Path,
@@ -890,7 +725,7 @@ pub async fn external_install_cert_with_lock(
         ),
         None => None,
     };
-    let (key, mut cadir) = external_ca_key_with_lock(ans, lock.clone(), &ca_dir).await?;
+    let (key, mut cadir) = external_ca_key(ans, lock.clone(), &ca_dir).await?;
     let (intermediate_pem, external_root_pem) =
         ca::validate_external_ca_cert(&signed_pem, root_pem.as_deref(), &key)?;
     // certificate.pem is the intermediate ALONE (the network glyph is its key);
@@ -977,32 +812,96 @@ pub struct ExternalStatus {
     pub pending: Option<(String, String)>,
 }
 
-/// Report whether this CA is externally signed, whether its cert is installed,
-/// and whether a bootstrap is awaiting a signed certificate.
-pub async fn external_status(ca_dir: &Path) -> Result<ExternalStatus> {
-    if let Some(status) = live_ca_status(ca_dir, None).await? {
-        return Ok(ExternalStatus {
-            externally_signed: status.externally_signed,
-            cert_installed: status.cert_installed,
-            pending: status.pending,
-        });
-    }
-    let _lock = ConfigDirLock::acquire_for_ca_dir(ca_dir).await?;
-    let externally_signed = CaLifetimes::load_async(ca_dir)
-        .await
-        .map(|l| l.externally_signed)
-        .unwrap_or(false);
-    let cert_installed =
-        tokio::fs::try_exists(ca_dir.join("certificate.pem")).await.unwrap_or(false);
-    // The bootstrap marker persists past install (a served external CA reads its
-    // `setup_server`/domain/listen on every re-install / renewal), so "awaiting a
-    // signed cert" is specifically the init→install gap: a marker with no cert yet.
-    let pending = if cert_installed {
-        None
-    } else {
-        ExternalPending::load_async(ca_dir).await.ok().map(|m| (m.cn, m.domain))
+pub struct LocalCaStatus {
+    pub auto_approve: AutorenewStatus,
+    pub recovery: RecoveryStatus,
+    pub external: ExternalStatus,
+}
+
+pub async fn local_ca_status(access: &CaAccess, ca_dir: &Path) -> Result<LocalCaStatus> {
+    let keytab = offline_ca::autorenew_keytab_path()?;
+    let keytab_present = tokio::fs::try_exists(&keytab).await.unwrap_or(false);
+    let keytab_sealed = keytab_present
+        && tokio::fs::read(&keytab)
+            .await
+            .ok()
+            .map(|bytes| netidx_tpm::is_sealed(&bytes))
+            .unwrap_or(false);
+    let (
+        autorenew_slot_present,
+        recovery_slot_present,
+        externally_signed,
+        cert_installed,
+        pending,
+        config,
+    ) = match access {
+        CaAccess::Running { config } => {
+            let status = admin_local::ca_status(config).await?;
+            (
+                status.autorenew_slot_present,
+                status.recovery_slot_present,
+                status.externally_signed,
+                status.cert_installed,
+                status.pending,
+                Some(config.as_path()),
+            )
+        }
+        CaAccess::Offline { config, lock, .. } => {
+            lock.require_contained(ca_dir)?;
+            let (autorenew, recovery) = if CAVault::exists_async(ca_dir).await {
+                let ca = CaDir::open(lock.clone(), ca_dir).await?;
+                let names = ca.vault.signing_slot_names()?;
+                (
+                    names.iter().any(|name| name == crate::admin_server::AUTORENEW_ADMIN),
+                    names.iter().any(|name| name == ca_vault::RECOVERY_ADMIN),
+                )
+            } else {
+                (false, false)
+            };
+            let externally_signed = CaLifetimes::load_async(ca_dir)
+                .await
+                .map(|lifetimes| lifetimes.externally_signed)
+                .unwrap_or(false);
+            let cert_installed = tokio::fs::try_exists(ca_dir.join("certificate.pem"))
+                .await
+                .unwrap_or(false);
+            let pending = if cert_installed {
+                None
+            } else {
+                ExternalPending::load_async(ca_dir)
+                    .await
+                    .ok()
+                    .map(|pending| (pending.cn, pending.domain))
+            };
+            (
+                autorenew,
+                recovery,
+                externally_signed,
+                cert_installed,
+                pending,
+                config.as_deref(),
+            )
+        }
     };
-    Ok(ExternalStatus { externally_signed, cert_installed, pending })
+    let wired_in_config = match config {
+        Some(path) => AdminServerConfig::load_async(path)
+            .await
+            .ok()
+            .and_then(|config| config.roles.ca.map(|ca| ca.autorenew.is_some()))
+            .unwrap_or(false),
+        None => false,
+    };
+    Ok(LocalCaStatus {
+        auto_approve: AutorenewStatus {
+            slot_present: autorenew_slot_present,
+            keytab: keytab.clone(),
+            keytab_present,
+            keytab_sealed,
+            wired_in_config,
+        },
+        recovery: RecoveryStatus { slot_present: recovery_slot_present, keytab_present },
+        external: ExternalStatus { externally_signed, cert_installed, pending },
+    })
 }
 
 #[cfg(test)]
@@ -1205,13 +1104,24 @@ mod tests {
             .unwrap();
     }
 
+    async fn offline_status(ca_dir: &Path) -> LocalCaStatus {
+        let lock = ConfigDirLock::acquire_for_ca_dir(ca_dir).await.unwrap();
+        local_ca_status(
+            &CaAccess::Offline { config: None, lock, ca_alias_lock: None },
+            ca_dir,
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn recovery_and_autorenew_slots_are_reported_present() {
         let dir = tempfile::tempdir().unwrap();
         vaulted_ca(dir.path()).await;
-        assert!(recovery_status(dir.path()).await.unwrap().slot_present);
+        let status = offline_status(dir.path()).await;
+        assert!(status.recovery.slot_present);
         // No cfg ⇒ wired_in_config is false, but the slot is read from the vault.
-        let a = auto_approve_status(dir.path(), None).await.unwrap();
+        let a = status.auto_approve;
         assert!(a.slot_present);
         assert!(!a.wired_in_config);
     }
@@ -1718,7 +1628,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         vaulted_ca(dir.path()).await;
         // A plain vaulted CA: self-signed, cert on disk, nothing pending.
-        let s = external_status(dir.path()).await.unwrap();
+        let s = offline_status(dir.path()).await.external;
         assert!(!s.externally_signed);
         assert!(s.cert_installed);
         assert!(s.pending.is_none());
@@ -1741,12 +1651,12 @@ mod tests {
         drop(lock);
         // With the cert still on disk, the CA is installed — NOT pending — even
         // though the marker persists for future renewals.
-        assert!(external_status(dir.path()).await.unwrap().pending.is_none());
+        assert!(offline_status(dir.path()).await.external.pending.is_none());
         // Simulate the true pre-install state (`ca init --external-sign` leaves a
         // key + CSR + marker but no cert yet): remove the cert, and now it is
         // pending its signed certificate.
         std::fs::remove_file(dir.path().join("certificate.pem")).unwrap();
-        let s = external_status(dir.path()).await.unwrap();
+        let s = offline_status(dir.path()).await.external;
         assert!(!s.cert_installed);
         assert_eq!(s.pending.as_ref().map(|(cn, _)| cn.as_str()), Some("ca.example.com"));
     }

@@ -8,6 +8,7 @@
 use crate::{
     activation,
     answer::{Answerer, Field},
+    config_lock::ConfigDirLock,
     paths,
     plan::{
         enroll::{self, AdminServers},
@@ -185,10 +186,29 @@ pub fn resolve_netidx_binary(provided: Option<PathBuf>) -> Result<PathBuf> {
 
 /// The install-wide flags every role's `install` shares, lifted off its clap
 /// struct into a plain input the library acts on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub enum InstallMode {
+    DryRun,
+    Apply { config_lock: ConfigDirLock },
+}
+
+impl InstallMode {
+    pub fn is_dry_run(&self) -> bool {
+        matches!(self, Self::DryRun)
+    }
+
+    pub fn config_lock(&self) -> Option<&ConfigDirLock> {
+        match self {
+            Self::DryRun => None,
+            Self::Apply { config_lock } => Some(config_lock),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct InstallCommon {
     /// Print the plan and change nothing.
-    pub dry_run: bool,
+    pub mode: InstallMode,
     /// Overwrite existing config files instead of refusing.
     pub force: bool,
     /// Don't drop activation unit files.
@@ -302,17 +322,15 @@ pub fn install_renew_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()
 /// end-of-install OS-service decision. Returns the scope the frontend should
 /// install a service at, or `None`.
 ///
-/// `post_apply` receives the `Answerer` because its steps (standing up this
-/// host's admin server, dropping the renew unit) themselves report to the
-/// operator; it is an `AsyncFnOnce` because standing up the admin server is
-/// network I/O.
+/// `post_apply` receives the `Answerer` and install-wide config lock. It is an
+/// `AsyncFnOnce` because standing up the admin server is network I/O.
 pub async fn finish_with(
     ans: &mut dyn Answerer,
     rt: RenderedTemplate,
     common: &InstallCommon,
     need: ServiceNeed,
     record: InstallRecord,
-    post_apply: impl AsyncFnOnce(&mut dyn Answerer) -> Result<()>,
+    post_apply: impl AsyncFnOnce(&mut dyn Answerer, &ConfigDirLock) -> Result<()>,
 ) -> Result<Option<ServiceScope>> {
     finish_with_record_path(ans, rt, common, need, record, None, post_apply).await
 }
@@ -324,41 +342,40 @@ async fn finish_with_record_path(
     need: ServiceNeed,
     mut record: InstallRecord,
     record_path_override: Option<&Path>,
-    post_apply: impl AsyncFnOnce(&mut dyn Answerer) -> Result<()>,
+    post_apply: impl AsyncFnOnce(&mut dyn Answerer, &ConfigDirLock) -> Result<()>,
 ) -> Result<Option<ServiceScope>> {
     ans.note(&rt.describe());
-    if !common.dry_run {
-        check_no_overwrite(&rt, common.force)?;
-        // Resolve the provenance destination before touching the template. A
-        // missing platform config directory is a preflight error, not something
-        // to discover after a usable install has been written.
-        let record_path = match record_path_override {
-            Some(path) => path.to_path_buf(),
-            None => paths::user_install_record()
-                .context("resolving the install-record destination")?,
-        };
-        record.set_managed_paths(rt.managed_paths());
-        rt.apply().context("applying template")?;
-        // The local role is now a real, usable install. Record it before the
-        // network/admin completion tail: connectivity loss while enrolling a
-        // local admin server or requesting delegation must not turn this into
-        // an unrecorded install that a retry mistakes for foreign files.
-        record.save_async(&record_path).await.context("writing the install record")?;
-        ans.note("ok");
-        post_apply(ans).await.with_context(|| {
-            format!(
-                "the {} core install completed and is recorded at {}, but its \
-                 post-install setup did not finish",
-                record.role.as_str(),
-                record_path.display()
-            )
-        })?;
+    match &common.mode {
+        InstallMode::DryRun => {}
+        InstallMode::Apply { config_lock } => {
+            check_no_overwrite(&rt, common.force)?;
+            let record_path = match record_path_override {
+                Some(path) => path.to_path_buf(),
+                None => paths::user_install_record()
+                    .context("resolving the install-record destination")?,
+            };
+            record.set_managed_paths(rt.managed_paths());
+            rt.apply().context("applying template")?;
+            record
+                .save_async(&record_path)
+                .await
+                .context("writing the install record")?;
+            ans.note("ok");
+            post_apply(ans, config_lock).await.with_context(|| {
+                format!(
+                    "the {} core install completed and is recorded at {}, but its \
+                     post-install setup did not finish",
+                    record.role.as_str(),
+                    record_path.display()
+                )
+            })?;
+        }
     }
     offer(
         ans,
         need,
         ServiceGate {
-            dry_run: common.dry_run,
+            dry_run: common.mode.is_dry_run(),
             no_service: common.no_service,
             with_service: common.with_service,
         },
@@ -773,11 +790,12 @@ mod tests {
         let check_record = record_path.clone();
         let check_perms = perms_path.clone();
         let mut ans = TestAnswerer;
+        let config_lock = ConfigDirLock::acquire(dir.path()).unwrap();
         let err = finish_with_record_path(
             &mut ans,
             rt,
             &InstallCommon {
-                dry_run: false,
+                mode: InstallMode::Apply { config_lock },
                 force: false,
                 no_units: true,
                 with_service: false,
@@ -786,7 +804,7 @@ mod tests {
             ServiceNeed::NONE,
             record.clone(),
             Some(&record_path),
-            async move |_ans| {
+            async move |_ans, _config_lock| {
                 assert!(check_record.exists());
                 assert!(check_perms.exists());
                 bail!("simulated network failure")

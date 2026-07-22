@@ -19,9 +19,10 @@ use netidx_admin::plan::install::controller::{ControllerInput, run_controller};
 use netidx_admin::{admin_local, atomic, offline_ca};
 use netidx_admin::{
     answer::{Answerer, Field, Progress, Stage},
+    config_lock::ConfigDirLock,
     install_bundle, paths,
     plan::install::{
-        InstallCommon,
+        InstallCommon, InstallMode,
         publisher::{PublisherInput, run_publisher},
         resolver::{ResolverInput, run_resolver},
     },
@@ -484,7 +485,8 @@ async fn auto_approve(
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
     use netidx_admin::admin_ops::slots::{AutoApproveOutcome, auto_approve};
-    let out = auto_approve(ans, ca_dir, cfg, rotate, false).await?;
+    let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+    let out = auto_approve(ans, &access, ca_dir, rotate, false).await?;
     let lines = match out {
         AutoApproveOutcome::HotSwapped { warning } => {
             let mut l = vec![
@@ -521,7 +523,8 @@ async fn recovery_rotate(
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
     use netidx_admin::admin_ops::slots::{RecoveryRotateOutcome, recovery_rotate};
-    let out = recovery_rotate(ans, ca_dir, cfg).await?;
+    let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+    let out = recovery_rotate(ans, &access, ca_dir).await?;
     let lines = match out {
         RecoveryRotateOutcome::HotSwapped => vec![
             "The running admin server minted a new recovery password (shown above) in \
@@ -644,10 +647,18 @@ async fn finish_identities(
     )
     .await?;
     #[cfg(unix)]
-    super::super::backup_restore::reenroll_satellite_admin(
-        ans, root, manifest, &net, None,
-    )
-    .await?;
+    if !manifest.components.contains(&install_bundle::Component::Controller) {
+        let config_lock = ConfigDirLock::acquire_async(root).await?;
+        super::super::backup_restore::reenroll_satellite_admin(
+            ans,
+            &config_lock,
+            root,
+            manifest,
+            &net,
+            None,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -814,7 +825,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                     .await?
                     .context("the renewed external-CA certificate is required")?;
                 let root = ans.text(Field::ExternalRoot, None, None, false).await?;
-                netidx_admin::admin_ops::slots::external_install_cert_with_lock(
+                netidx_admin::admin_ops::slots::external_install_cert(
                     ans,
                     &config_lock,
                     ca_dir.clone(),
@@ -823,7 +834,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                 )
                 .await?;
             }
-            netidx_admin::admin_ops::slots::recover_controller_with_lock(
+            netidx_admin::admin_ops::slots::recover_controller(
                 ans,
                 &config_lock,
                 ca_dir,
@@ -931,7 +942,10 @@ async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Out
                 .with_context(|| format!("writing CSR to {}", csr.display()))?;
             csr
         }
-        Err(_) => netidx_admin::admin_ops::slots::external_emit_csr(ans, ca_dir).await?,
+        Err(_) => {
+            let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
+            netidx_admin::admin_ops::slots::external_emit_csr(ans, &lock, ca_dir).await?
+        }
     };
     let csr = std::fs::canonicalize(&csr).unwrap_or(csr);
     Ok(Outcome::plain(
@@ -981,8 +995,10 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             use netidx_admin::admin_ops::slots::{
                 ExternalInstallOutcome, external_install_cert,
             };
+            let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
             match external_install_cert(
                 ans,
+                &lock,
                 ca_dir,
                 PathBuf::from(&signed).as_path(),
                 root.as_deref().map(std::path::Path::new),
@@ -1100,7 +1116,9 @@ async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
 async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outcome> {
     use super::answer::{ParentRow, ParentSelection};
     use netidx_admin::{
-        admin_ops::delegation::{ClusterPropagation, add_parent as do_add_parent},
+        admin_ops::delegation::{
+            AddParentCompletion, ClusterPropagation, prepare_add_parent,
+        },
         admin_proto::{ResolverAddr, ResolverClusterId, ServerState},
         paths,
         plan::delegation::DelegationSelection,
@@ -1198,7 +1216,15 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     };
     let path =
         ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
-    let out = do_add_parent(ans, &rpath, parent, &path, selection).await?;
+    let out = match prepare_add_parent(ans, &rpath, parent, &path, selection).await? {
+        AddParentCompletion::Complete(outcome) => outcome,
+        AddParentCompletion::LocalWrite(pending) => {
+            let lock =
+                netidx_admin::config_lock::ConfigDirLock::acquire_async(&config_root)
+                    .await?;
+            pending.apply(&lock, ans)?
+        }
+    };
     let mut lines =
         vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
     match out.propagation {
@@ -1239,8 +1265,15 @@ async fn install(
     role: InstallRole,
     dry_run: bool,
 ) -> Result<Outcome> {
+    let mode = if dry_run {
+        InstallMode::DryRun
+    } else {
+        InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire_async(paths::user_config_root()?).await?,
+        }
+    };
     let common = InstallCommon {
-        dry_run,
+        mode,
         force: false,
         no_units: false,
         with_service: false,
@@ -1258,26 +1291,26 @@ async fn install(
         InstallRole::Workstation => run_workstation(ans, common).await?,
     };
     #[cfg(unix)]
-    if !dry_run
-        && matches!(role, InstallRole::Controller)
-        && scope.is_none()
-        && let Ok(ca_dir) = paths::user_ca_dir()
-        && let Ok(status) = netidx_admin::admin_ops::slots::external_status(&ca_dir).await
-        && let Some((common_name, _)) = status.pending
-    {
-        let relative = offline_ca::default_csr_filename(&common_name);
-        let csr = std::env::current_dir()?.join(relative);
-        return Ok(Outcome::plain(
-            "Controller awaiting external signature",
-            vec![
-                "The controller is not running yet; no OS service was registered."
-                    .into(),
-                format!("Subordinate-CA CSR: {}", csr.display()),
-                "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."
-                    .into(),
-            ],
-            true,
-        ));
+    if !dry_run && matches!(role, InstallRole::Controller) && scope.is_none() {
+        let ca_dir = paths::user_ca_dir()?;
+        let access = super::super::ca::ca_access(&ca_dir, None).await?;
+        let status =
+            netidx_admin::admin_ops::slots::local_ca_status(&access, &ca_dir).await?;
+        if let Some((common_name, _)) = status.external.pending {
+            let relative = offline_ca::default_csr_filename(&common_name);
+            let csr = std::env::current_dir()?.join(relative);
+            return Ok(Outcome::plain(
+                "Controller awaiting external signature",
+                vec![
+                    "The controller is not running yet; no OS service was registered."
+                        .into(),
+                    format!("Subordinate-CA CSR: {}", csr.display()),
+                    "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."
+                        .into(),
+                ],
+                true,
+            ));
+        }
     }
     Ok(install_outcome(role, dry_run, scope))
 }
@@ -1395,7 +1428,7 @@ mod tests {
     #[test]
     fn guided_workstation_uses_shared_safe_defaults() {
         let input = guided_workstation_input(InstallCommon {
-            dry_run: true,
+            mode: InstallMode::DryRun,
             force: false,
             no_units: false,
             with_service: false,

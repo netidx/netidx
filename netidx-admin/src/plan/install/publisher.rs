@@ -152,7 +152,7 @@ pub async fn run_publisher(
                 net,
                 NodeKind::Publisher,
                 have_identity,
-                common.dry_run,
+                common.mode.is_dry_run(),
                 key_protection,
                 &mut tls_identities,
                 &mut tls_staging,
@@ -203,7 +203,7 @@ pub async fn run_publisher(
                     suggested.as_deref(),
                     key_protection,
                     &probe,
-                    common.dry_run,
+                    common.mode.is_dry_run(),
                 )
                 .await?;
                 tls_identities.push(si.spec);
@@ -289,9 +289,11 @@ pub async fn run_publisher(
         default_bind_config,
     };
     let rt = template::publisher(&params)?;
-    finish_with(ans, rt, &common, need, record, async move |ans| match &units_dir {
-        Some(d) => install_renew_unit(ans, d),
-        None => Ok(()),
+    finish_with(ans, rt, &common, need, record, async move |ans, _config_lock| {
+        match &units_dir {
+            Some(d) => install_renew_unit(ans, d),
+            None => Ok(()),
+        }
     })
     .await
 }

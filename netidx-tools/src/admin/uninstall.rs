@@ -9,12 +9,23 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin::{
+    config_lock::ConfigDirLock,
     paths,
     provenance::InstallRecord,
     service::ServiceScope,
     uninstall::{self, UninstallParams, UninstallReport},
 };
 use std::path::PathBuf;
+
+fn apply(p: &UninstallParams) -> Result<UninstallReport> {
+    match uninstall::prepare(p)? {
+        uninstall::PreparedUninstall::Complete(report) => Ok(report),
+        uninstall::PreparedUninstall::RemoveConfig(removal) => {
+            let lock = ConfigDirLock::acquire(removal.root())?;
+            removal.finish(&lock)
+        }
+    }
+}
 
 use super::service::{self as svc_cli, ScopeArg};
 // Only the unix sudo re-exec path builds commands or adds error
@@ -121,9 +132,8 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
         for_user: p.for_user.clone(),
         config_dir: p.config_dir.clone(),
         remove_ca: p.with_ca,
-        dry_run: true,
     };
-    let plan = uninstall::uninstall(&base)?;
+    let plan = uninstall::preview(&base)?;
     print_report(&plan, false);
     let root = config_root(p, scope);
     if p.dry_run {
@@ -154,7 +164,7 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     if let Some(root) = &root {
         deregister_admin_server(root, false);
     }
-    let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
+    let report = apply(&base)?;
     print_report(&report, true);
     Ok(())
 }
@@ -176,9 +186,8 @@ fn offer_system_scope(p: &Params) -> Result<()> {
         // user-scope --config-dir override (it was for the user dir).
         config_dir: None,
         remove_ca: p.with_ca,
-        dry_run: true,
     };
-    let plan = uninstall::uninstall(&probe).context(
+    let plan = uninstall::preview(&probe).context(
         "could not verify the system-scope service; refusing to remove user configuration",
     )?;
     if plan.is_empty() {
@@ -242,9 +251,8 @@ fn remove_system_scope_if_present(p: &Params) -> Result<()> {
         // override was for the user dir, not this.
         config_dir: None,
         remove_ca: p.with_ca,
-        dry_run: true,
     };
-    let plan = uninstall::uninstall(&base).context(
+    let plan = uninstall::preview(&base).context(
         "could not verify the system-scope service; refusing to remove user configuration",
     )?;
     if plan.is_empty() {
@@ -267,7 +275,7 @@ fn remove_system_scope_if_present(p: &Params) -> Result<()> {
         );
         return Ok(());
     }
-    let report = uninstall::uninstall(&UninstallParams { dry_run: false, ..base })?;
+    let report = apply(&base)?;
     print_report(&report, true);
     Ok(())
 }

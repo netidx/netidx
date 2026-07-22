@@ -107,6 +107,11 @@ impl ConfigDirLock {
         &self.0.root
     }
 
+    pub fn ca_alias_root(&self, ca_dir: impl AsRef<Path>) -> Result<Option<PathBuf>> {
+        let root = Self::root_for_ca_dir(ca_dir)?;
+        Ok((root != self.0.root).then_some(root))
+    }
+
     pub fn contains(&self, path: impl AsRef<Path>) -> Result<bool> {
         Ok(normalize(path.as_ref())?.starts_with(&self.0.root))
     }

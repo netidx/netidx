@@ -8,8 +8,9 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin::{
-    admin_ops::delegation::{self as ops, ClusterPropagation},
+    admin_ops::delegation::{self as ops, AddParentCompletion, ClusterPropagation},
     admin_proto::{PeerResult, ResolverAddr},
+    config_lock::ConfigDirLock,
     paths,
     plan::delegation::DelegationSelection,
 };
@@ -86,8 +87,17 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
         super::answer_cli::make_flag_answerer(None, false, f.accept_glyph.as_deref())?;
     let selection = (!f.parent_resolver.is_empty())
         .then_some(DelegationSelection { parent_resolvers: f.parent_resolver });
-    let out = runtime()?
-        .block_on(ops::add_parent(&mut ans, &rpath, server, &f.path, selection))?;
+    let out = runtime()?.block_on(async {
+        match ops::prepare_add_parent(&mut ans, &rpath, server, &f.path, selection)
+            .await?
+        {
+            AddParentCompletion::Complete(outcome) => Ok(outcome),
+            AddParentCompletion::LocalWrite(pending) => {
+                let lock = ConfigDirLock::acquire_for_file_async(&rpath).await?;
+                pending.apply(&lock, &mut ans)
+            }
+        }
+    })?;
     match out.propagation {
         ClusterPropagation::ControllerManaged => {}
     }

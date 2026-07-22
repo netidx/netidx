@@ -179,7 +179,7 @@ pub async fn run_workstation(
                         net,
                         NodeKind::Workstation,
                         have_identity,
-                        common.dry_run,
+                        common.mode.is_dry_run(),
                         key_protection,
                         &mut tls_identities,
                         &mut tls_staging,
@@ -197,7 +197,7 @@ pub async fn run_workstation(
                         &base,
                         key_protection,
                         &probe,
-                        common.dry_run,
+                        common.mode.is_dry_run(),
                     )
                     .await?
                     {
@@ -253,7 +253,7 @@ pub async fn run_workstation(
         ServiceNeed::at(ServiceScope::User),
         record,
         // TLS identities expire: install the renewal daemon alongside.
-        async move |ans| match (&post_apply_units_dir, has_tls) {
+        async move |ans, _config_lock| match (&post_apply_units_dir, has_tls) {
             (Some(d), true) => install_renew_unit(ans, d),
             _ => Ok(()),
         },
@@ -418,7 +418,7 @@ mod input_tests {
 
     fn common() -> InstallCommon {
         InstallCommon {
-            dry_run: true,
+            mode: crate::plan::install::InstallMode::DryRun,
             force: false,
             no_units: false,
             with_service: false,

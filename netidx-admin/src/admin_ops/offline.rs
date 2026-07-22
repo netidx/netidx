@@ -35,14 +35,14 @@ pub enum SignSan {
 }
 
 /// What to do about registering the newly signed identity in the local id-map.
-pub enum IdMapAction {
+pub enum IdMapAction<'a> {
     /// `--no-id-map`: never register.
     Skip,
     /// `--id-map-group`: register with these groups (and `--uid`) non-interactively.
-    Register { groups: Vec<String>, uid: Option<u32> },
+    Register { config_lock: &'a ConfigDirLock, groups: Vec<String>, uid: Option<u32> },
     /// Neither flag: prompt interactively when a map exists; strict CLI skips
     /// (matching the old non-TTY behaviour — scripts register explicitly).
-    Ask,
+    Ask { config_lock: &'a ConfigDirLock },
 }
 
 /// The prior id-map record an [`IdMapResult::Registered`] replaced, if any.
@@ -95,12 +95,13 @@ pub struct SignOutcome {
 /// `./<csr-cn>.pem` (`./certificate.pem` for a CN-less CSR).
 pub async fn ca_sign(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     ca_dir: PathBuf,
     csr_pem: Vec<u8>,
     san: SignSan,
     validity: Duration,
     out: Option<PathBuf>,
-    id_map: IdMapAction,
+    id_map: IdMapAction<'_>,
 ) -> Result<SignOutcome> {
     let summary = tokio::task::spawn_blocking({
         let csr_pem = csr_pem.clone();
@@ -117,21 +118,9 @@ pub async fn ca_sign(
     let name = offline_ca::first_dns_san(&san)
         .or_else(|| summary.common_name.clone())
         .unwrap_or_default();
-    let (ca, config_lock) = offline_ca::open_ca(ans, &ca_dir).await?;
-    let id_map_lock = match &id_map {
-        IdMapAction::Skip => config_lock.clone(),
-        IdMapAction::Ask if !ans.interactive() => config_lock.clone(),
-        IdMapAction::Ask | IdMapAction::Register { .. } => {
-            let map_path = id_map::user_id_map_path()?;
-            if config_lock.contains(&map_path)? {
-                config_lock.clone()
-            } else {
-                ConfigDirLock::acquire_for_file_async(map_path).await?
-            }
-        }
-    };
+    let ca = offline_ca::open_ca(ans, config_lock, &ca_dir).await?;
     let cert_pem = offline_ca::sign_and_record(
-        &config_lock,
+        config_lock,
         &ca,
         NodeKind::Client,
         &csr_pem,
@@ -143,7 +132,7 @@ pub async fn ca_sign(
     atomic::write_atomic_async(&out, &cert_pem, 0o644)
         .await
         .with_context(|| format!("writing certificate to {}", out.display()))?;
-    let id_map = register_id_map(&id_map_lock, ans, &summary, &san, id_map).await?;
+    let id_map = register_id_map(ans, &summary, &san, id_map).await?;
     Ok(SignOutcome { summary, san, name, out, id_map })
 }
 
@@ -190,22 +179,23 @@ async fn resolve_san(
 /// prompts (groups then uid) for `Ask` under an interactive frontend. Group and
 /// uid validity is enforced by [`id_map::upsert_identity`].
 async fn register_id_map(
-    config_lock: &ConfigDirLock,
     ans: &mut dyn Answerer,
     summary: &CsrSummary,
     san: &[SanEntry],
-    action: IdMapAction,
+    action: IdMapAction<'_>,
 ) -> Result<IdMapResult> {
     // `groups`/`uid` are `Some` when supplied by flags; `None` means "prompt"
     // (interactive) — `Ask` under a strict answerer has already returned above.
-    let (flag_groups, flag_uid) = match action {
+    let (config_lock, flag_groups, flag_uid) = match action {
         IdMapAction::Skip => return Ok(IdMapResult::NotRequested),
-        IdMapAction::Register { groups, uid } => (Some(groups), uid),
-        IdMapAction::Ask => {
+        IdMapAction::Register { config_lock, groups, uid } => {
+            (config_lock, Some(groups), uid)
+        }
+        IdMapAction::Ask { config_lock } => {
             if !ans.interactive() {
                 return Ok(IdMapResult::NotRequested);
             }
-            (None, None)
+            (config_lock, None, None)
         }
     };
     // The id-map identity name is what the resolver sees on the wire: the
@@ -296,6 +286,7 @@ pub struct IssueOutcome {
 /// process finds the passphrase, is the encrypted-leaf path).
 pub async fn ca_issue(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     ca_dir: PathBuf,
     subject: Subject,
     san: Vec<SanEntry>,
@@ -306,9 +297,9 @@ pub async fn ca_issue(
 ) -> Result<IssueOutcome> {
     offline_ca::ensure_san_not_reserved(&san)?;
     let cn = subject.common_name.clone();
-    let (ca, config_lock) = offline_ca::open_ca(ans, &ca_dir).await?;
+    let ca = offline_ca::open_ca(ans, config_lock, &ca_dir).await?;
     let issued = offline_ca::issue_and_record(
-        &config_lock,
+        config_lock,
         &ca,
         NodeKind::Client,
         IssueParams {

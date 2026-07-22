@@ -110,7 +110,12 @@ mod state_tests {
         let root = tempfile::tempdir().unwrap();
         let ca_dir = root.path().join("ca");
         let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
-        let alias = acquire_ca_alias_lock(&config_lock, Some(&ca_dir)).unwrap();
+        let alias = config_lock
+            .ca_alias_root(&ca_dir)
+            .unwrap()
+            .map(ConfigDirLock::acquire)
+            .transpose()
+            .unwrap();
         assert!(alias.is_some());
         assert!(ConfigDirLock::acquire(&ca_dir).is_err());
     }
@@ -274,19 +279,6 @@ fn outbound_identity_digest(cert_pem: &[u8], key_pem: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn acquire_ca_alias_lock(
-    config_lock: &ConfigDirLock,
-    ca_dir: Option<&Path>,
-) -> Result<Option<ConfigDirLock>> {
-    let Some(ca_dir) = ca_dir else { return Ok(None) };
-    let root = ConfigDirLock::root_for_ca_dir(ca_dir)?;
-    if root == config_lock.root() {
-        Ok(None)
-    } else {
-        ConfigDirLock::acquire(root).map(Some)
-    }
-}
-
 struct Server {
     state: RwLock<MutableState>,
     config_lock: ConfigDirLock,
@@ -310,6 +302,7 @@ struct Server {
 impl Server {
     async fn new(
         config_lock: ConfigDirLock,
+        ca_alias_lock: Option<ConfigDirLock>,
         cfg: AdminServerConfig,
         cfg_path: Option<PathBuf>,
         serving_cert_pem: Vec<u8>,
@@ -340,7 +333,6 @@ impl Server {
         // The installation guard was acquired before parsing the config. If we
         // hold the CA, it must be nested below that guarded root.
         let ca_dir = cfg.roles.ca.as_ref().map(|r| r.dir.clone());
-        let ca_alias_lock = acquire_ca_alias_lock(&config_lock, ca_dir.as_deref())?;
         // The server's signing credential: the box-held autorenew password,
         // read + unsealed once. In the server-only model this is the only key
         // to the CA. Without it the CA authenticates + serves read-only but

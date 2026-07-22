@@ -329,8 +329,12 @@ pub async fn load_ca_from_unlocked(dir: &Path, unlocked: &Unlocked) -> Result<Ca
 /// that signs offline (`ca issue` / `ca sign`, the resolver's local-CA
 /// issuance, `ca external`) goes through it, so they all transparently handle
 /// both vault formats.
-pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<(Ca, ConfigDirLock)> {
-    let config_lock = ConfigDirLock::acquire_for_ca_dir(dir).await?;
+pub async fn open_ca(
+    ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
+    dir: &Path,
+) -> Result<Ca> {
+    config_lock.require_contained(dir)?;
     if CAVault::exists_async(dir).await {
         // Scope the CA view to the unlock: it drops when `unlocked` is bound,
         // before `load_ca_from_unlocked` (which only reads the public cert) and
@@ -341,7 +345,7 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<(Ca, ConfigDi
             )?;
             unlock_held(ans, &cadir, dir).await?
         };
-        Ok((load_ca_from_unlocked(dir, &unlocked).await?, config_lock))
+        load_ca_from_unlocked(dir, &unlocked).await
     } else {
         // Legacy single-key CA — prompt for the key passphrase only if the
         // on-disk key turns out to be encrypted.
@@ -350,19 +354,16 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<(Ca, ConfigDi
             .await
             .context("legacy CA loading task panicked")?
         {
-            Ok(ca) => Ok((ca, config_lock)),
+            Ok(ca) => Ok(ca),
             Err(e) if format!("{e:#}").contains("encrypted") => {
                 let pw = ans.secret(Field::KeyPassword, None).await?;
                 let directory = dir.to_path_buf();
-                Ok((
-                    tokio::task::spawn_blocking(move || {
-                        Ca::open(directory, Some(pw.as_str()))
-                    })
-                    .await
-                    .context("encrypted CA loading task panicked")?
-                    .with_context(|| format!("opening CA at {}", dir.display()))?,
-                    config_lock,
-                ))
+                Ok(tokio::task::spawn_blocking(move || {
+                    Ca::open(directory, Some(pw.as_str()))
+                })
+                .await
+                .context("encrypted CA loading task panicked")?
+                .with_context(|| format!("opening CA at {}", dir.display()))?)
             }
             Err(e) => Err(e).with_context(|| format!("opening CA at {}", dir.display())),
         }
@@ -370,8 +371,11 @@ pub async fn open_ca(ans: &mut dyn Answerer, dir: &Path) -> Result<(Ca, ConfigDi
 }
 
 /// [`open_ca`] at the conventional `${basedir}/ca/` location.
-pub async fn open_default_ca(ans: &mut dyn Answerer) -> Result<(Ca, ConfigDirLock)> {
-    open_ca(ans, &paths::user_ca_dir()?).await
+pub async fn open_default_ca(
+    ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
+) -> Result<Ca> {
+    open_ca(ans, config_lock, &paths::user_ca_dir()?).await
 }
 
 /// Unlock the vault at `cadir` while the caller holds the installation guard: try the box's

@@ -1281,10 +1281,11 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ans = TuiAnswerer::new(tx);
         let opts = offline_ca_opts(ca_dir.clone());
-        let create =
-            tokio::spawn(
-                async move { ca_setup::create_vaulted_ca(&mut ans, opts).await },
-            );
+        let config_lock =
+            netidx_admin::config_lock::ConfigDirLock::acquire(scratch.path()).unwrap();
+        let create = tokio::spawn(async move {
+            ca_setup::create_vaulted_ca(&mut ans, &config_lock, opts).await
+        });
 
         let mut cancelled = false;
         while let Some(req) = rx.recv().await {

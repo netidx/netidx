@@ -3,6 +3,7 @@
 use super::{DEFAULT_TLS_DOMAIN, InstallCommon, resolve_units_dir};
 use crate::{
     answer::{Answerer, Field},
+    config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
     paths,
     plan::{
@@ -23,6 +24,7 @@ use std::{
 /// install and by the first resolver when the roles are co-located.
 pub async fn create_self_signed_controller(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     domain: String,
     listen: Option<SocketAddr>,
     listen_hint: Option<IpAddr>,
@@ -39,7 +41,7 @@ pub async fn create_self_signed_controller(
         units_dir,
     );
     opts.listen = listen;
-    let (ca, need) = ca_setup::create_vaulted_ca(ans, opts).await?;
+    let (ca, need) = ca_setup::create_vaulted_ca(ans, config_lock, opts).await?;
     let identity =
         NetworkIdentity::new(domain, &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?);
     Ok((ca, need, identity))
@@ -75,7 +77,7 @@ pub async fn run_controller(
     input: ControllerInput,
 ) -> Result<Option<ServiceScope>> {
     let record_path = paths::user_install_record()?;
-    if !input.common.dry_run && tokio::fs::try_exists(&record_path).await? {
+    if !input.common.mode.is_dry_run() && tokio::fs::try_exists(&record_path).await? {
         let existing = InstallRecord::load_async(&record_path)
             .await
             .map(|r| r.role.as_str().to_string())
@@ -100,7 +102,7 @@ pub async fn run_controller(
          certificate authority. It does not need to run a resolver.",
     )
     .await?;
-    if input.common.dry_run {
+    if input.common.mode.is_dry_run() {
         ans.note(&format_compact!(
             "would create the controller CA for domain {domain:?} at {}{}",
             paths::user_ca_dir()?.display(),
@@ -129,6 +131,11 @@ pub async fn run_controller(
         .await;
     }
     if external_sign {
+        let config_lock = input
+            .common
+            .mode
+            .config_lock()
+            .context("controller apply mode has no config-directory lock")?;
         ca_setup::announce_founding_policy(ans, &domain);
         let mut opts = ca_setup::founding_ca_opts(
             paths::user_ca_dir()?,
@@ -139,7 +146,7 @@ pub async fn run_controller(
             units_dir,
         );
         opts.listen = input.listen;
-        ca_setup::create_vaulted_external_ca(ans, opts).await?;
+        ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
         let record =
             InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
         record.save_default_async().await?;
@@ -149,8 +156,14 @@ pub async fn run_controller(
         );
         return Ok(None);
     }
+    let config_lock = input
+        .common
+        .mode
+        .config_lock()
+        .context("controller apply mode has no config-directory lock")?;
     let (_ca, need, identity) = create_self_signed_controller(
         ans,
+        config_lock,
         domain,
         input.listen,
         input.listen.map(|a| a.ip()),
@@ -191,7 +204,7 @@ mod tests {
     #[test]
     fn guided_controller_install_asks_about_external_signing() {
         let input = ControllerInput::defaults(InstallCommon {
-            dry_run: true,
+            mode: crate::plan::install::InstallMode::DryRun,
             force: false,
             no_units: false,
             with_service: false,

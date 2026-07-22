@@ -9,7 +9,9 @@ use clap::Args;
 use netidx_admin::{
     admin_client,
     admin_proto::{NodeKind, Role},
+    config_lock::ConfigDirLock,
     fingerprint::ColorMode,
+    paths,
     plan::AuthKind,
     template::{ParentRef, ReferralAuth},
 };
@@ -191,14 +193,22 @@ struct CommonFlags {
 
 impl CommonFlags {
     /// The install-wide flags the library planner acts on.
-    fn install_common(&self) -> netidx_admin::plan::install::InstallCommon {
-        netidx_admin::plan::install::InstallCommon {
-            dry_run: self.dry_run,
+    fn install_common(&self) -> Result<netidx_admin::plan::install::InstallCommon> {
+        use netidx_admin::plan::install::{InstallCommon, InstallMode};
+        let mode = if self.dry_run {
+            InstallMode::DryRun
+        } else {
+            InstallMode::Apply {
+                config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
+            }
+        };
+        Ok(InstallCommon {
+            mode,
             force: self.force,
             no_units: self.no_units,
             with_service: self.with_service,
             no_service: self.no_service,
-        }
+        })
     }
 }
 
@@ -343,7 +353,7 @@ fn workstation_input(
     use netidx_admin::plan::install::workstation::WorkstationInput;
     let explicit_parent =
         if f.parent.any_set() { f.parent.to_parent_ref(&f.base)? } else { None };
-    let mut input = WorkstationInput::defaults(f.common.install_common());
+    let mut input = WorkstationInput::defaults(f.common.install_common()?);
     input.explicit_parent = explicit_parent;
     input.admin_server = f.admin_server;
     input.default_auth = f.default_auth;
@@ -660,7 +670,7 @@ fn resolver_input(
     let explicit_parent =
         if f.parent.any_set() { f.parent.to_parent_ref(&f.base)? } else { None };
     Ok(ResolverInput {
-        common: f.common.install_common(),
+        common: f.common.install_common()?,
         auth: f.auth,
         spn: f.spn,
         tls_name: f.tls_name,
@@ -749,15 +759,15 @@ pub(crate) struct PublisherFlags {
 
 pub(crate) fn run_publisher(f: PublisherFlags) -> Result<()> {
     let mut ans = build_answerer(&f.common)?;
-    let input = publisher_input(f);
+    let input = publisher_input(f)?;
     finish_install(netidx_admin::plan::install::publisher::run_publisher(&mut ans, input))
 }
 
 fn publisher_input(
     f: PublisherFlags,
-) -> netidx_admin::plan::install::publisher::PublisherInput {
-    netidx_admin::plan::install::publisher::PublisherInput {
-        common: f.common.install_common(),
+) -> Result<netidx_admin::plan::install::publisher::PublisherInput> {
+    Ok(netidx_admin::plan::install::publisher::PublisherInput {
+        common: f.common.install_common()?,
         addrs: f.addrs,
         auth: f.auth,
         admin_server: f.admin_server,
@@ -770,5 +780,5 @@ fn publisher_input(
         bind: f.bind,
         units_dir: f.units_dir,
         key_protection: lib_kp(f.key_protection),
-    }
+    })
 }

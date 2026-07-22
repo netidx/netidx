@@ -11,6 +11,7 @@ use netidx_admin::{
     atomic,
     ca::{self, SanEntry, Subject},
     ca_vault,
+    config_lock::ConfigDirLock,
     fingerprint::{ColorMode, Fingerprint},
     offline_ca::{default_csr_filename, parse_san_one, parse_sans},
     paths,
@@ -34,6 +35,76 @@ use super::{
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
+}
+
+pub(crate) async fn acquire_ca_lock(ca_dir: &Path) -> Result<ConfigDirLock> {
+    ConfigDirLock::acquire_for_ca_dir(ca_dir).await
+}
+
+pub(crate) async fn ca_access(
+    ca_dir: &Path,
+    config: Option<PathBuf>,
+) -> Result<slots_ops::CaAccess> {
+    let config = matching_controller_config(ca_dir, config).await;
+    if let Some(config) = config.as_ref()
+        && admin_local::daemon_running(config).await
+    {
+        return Ok(slots_ops::CaAccess::Running { config: config.clone() });
+    }
+    let (lock, ca_alias_lock) = match config.as_ref() {
+        Some(path) => {
+            let lock = ConfigDirLock::acquire_for_file_async(path).await?;
+            lock.require_contained(ca_dir)?;
+            let alias = match lock.ca_alias_root(ca_dir)? {
+                Some(root) => Some(ConfigDirLock::acquire_async(root).await?),
+                None => None,
+            };
+            (lock, alias)
+        }
+        None => (ConfigDirLock::acquire_for_ca_dir(ca_dir).await?, None),
+    };
+    Ok(slots_ops::CaAccess::Offline { config, lock, ca_alias_lock })
+}
+
+async fn matching_controller_config(
+    ca_dir: &Path,
+    supplied: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = supplied.as_ref()
+        && config_owns_ca(path, ca_dir).await
+    {
+        return supplied;
+    }
+    if let Ok(path) = paths::user_admin_server_config()
+        && supplied.as_ref() != Some(&path)
+        && config_owns_ca(&path, ca_dir).await
+    {
+        return Some(path);
+    }
+    let path = paths::system_admin_server_config();
+    if supplied.as_ref() != Some(&path) && config_owns_ca(&path, ca_dir).await {
+        return Some(path);
+    }
+    None
+}
+
+async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
+    let Ok(config) =
+        netidx_admin::admin_server_config::AdminServerConfig::load_for_recovery_async(
+            config,
+        )
+        .await
+    else {
+        return false;
+    };
+    let Some(role) = config.roles.ca else {
+        return false;
+    };
+    match (tokio::fs::canonicalize(role.dir).await, tokio::fs::canonicalize(ca_dir).await)
+    {
+        (Ok(configured), Ok(requested)) => configured == requested,
+        _ => false,
+    }
 }
 
 fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, String> {
@@ -787,8 +858,15 @@ fn install_controller(p: ControllerInstallArgs) -> Result<()> {
         false,
         None,
     )?;
+    let mode = if p.dry_run {
+        plan::install::InstallMode::DryRun
+    } else {
+        plan::install::InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
+        }
+    };
     let common = plan::install::InstallCommon {
-        dry_run: p.dry_run,
+        mode,
         force: false,
         no_units: p.no_units,
         with_service: p.with_service,
@@ -833,8 +911,12 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     let dir = ca_dir_for(None)?;
     let cfg = paths::discover_admin_server_config().ok();
     if p.status {
-        let s =
-            runtime()?.block_on(slots_ops::auto_approve_status(&dir, cfg.as_deref()))?;
+        let s = runtime()?.block_on(async {
+            let access = ca_access(&dir, cfg).await?;
+            Ok::<_, anyhow::Error>(
+                slots_ops::local_ca_status(&access, &dir).await?.auto_approve,
+            )
+        })?;
         println!("auto-approve status:");
         println!(
             "  autorenew slot: {}",
@@ -852,13 +934,10 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
         return Ok(());
     }
     let mut ans = p.recovery.answerer()?;
-    let out = runtime()?.block_on(slots_ops::auto_approve(
-        &mut ans,
-        dir,
-        cfg,
-        p.rotate,
-        p.insecure_no_tpm,
-    ))?;
+    let out = runtime()?.block_on(async {
+        let access = ca_access(&dir, cfg).await?;
+        slots_ops::auto_approve(&mut ans, &access, dir, p.rotate, p.insecure_no_tpm).await
+    })?;
     match out {
         slots_ops::AutoApproveOutcome::HotSwapped { warning } => {
             println!(
@@ -1180,7 +1259,13 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
         RecoveryCmd::Rotate(a) => recovery_rotate(a),
         RecoveryCmd::Status(a) => {
             let dir = ca_dir_for(a.ca_dir)?;
-            let s = runtime()?.block_on(slots_ops::recovery_status(&dir))?;
+            let cfg = paths::discover_admin_server_config().ok();
+            let s = runtime()?.block_on(async {
+                let access = ca_access(&dir, cfg).await?;
+                Ok::<_, anyhow::Error>(
+                    slots_ops::local_ca_status(&access, &dir).await?.recovery,
+                )
+            })?;
             println!("recovery status:");
             println!(
                 "  recovery slot:  {}",
@@ -1203,7 +1288,10 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     // the autorenew keytab, not a typed recovery password, so a bare
     // FlagAnswerer (no secret) is all the CLI needs.
     let mut ans = make_offline_answerer(None, false)?;
-    let out = runtime()?.block_on(slots_ops::recovery_rotate(&mut ans, dir, cfg))?;
+    let out = runtime()?.block_on(async {
+        let access = ca_access(&dir, cfg).await?;
+        slots_ops::recovery_rotate(&mut ans, &access, dir).await
+    })?;
     match out {
         slots_ops::RecoveryRotateOutcome::HotSwapped => {
             println!("rotated the recovery password (via the running admin server)")
@@ -1253,7 +1341,10 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
         path
     } else {
         let mut ans = a.recovery.answerer()?;
-        runtime()?.block_on(slots_ops::external_emit_csr(&mut ans, dir))?
+        runtime()?.block_on(async {
+            let lock = acquire_ca_lock(&dir).await?;
+            slots_ops::external_emit_csr(&mut ans, &lock, dir).await
+        })?
     };
     println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
     println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
@@ -1291,8 +1382,10 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
     };
     let rt = runtime()?;
     let scope = rt.block_on(async {
+        let lock = acquire_ca_lock(&dir).await?;
         let out = slots_ops::external_install_cert(
             &mut ans,
+            &lock,
             dir,
             &a.signed_cert,
             a.root.as_deref(),
@@ -1361,7 +1454,11 @@ async fn report_external_install(
 
 fn external_status(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    let s = runtime()?.block_on(slots_ops::external_status(&dir))?;
+    let cfg = paths::discover_admin_server_config().ok();
+    let s = runtime()?.block_on(async {
+        let access = ca_access(&dir, cfg).await?;
+        Ok::<_, anyhow::Error>(slots_ops::local_ca_status(&access, &dir).await?.external)
+    })?;
     println!("external CA status:");
     println!("  externally signed: {}", if s.externally_signed { "yes" } else { "no" });
     println!(
@@ -1403,9 +1500,10 @@ fn external_renew(a: ExternalRenewArgs) -> Result<()> {
 /// `ServiceNeed`: the server is stood up in phase 2, once the cert exists.
 async fn external_bootstrap(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     opts: ca_setup::NewCaOpts,
 ) -> Result<service::ServiceNeed> {
-    ca_setup::create_vaulted_external_ca(ans, opts).await?;
+    ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
     Ok(service::ServiceNeed::NONE)
 }
 
@@ -1470,13 +1568,14 @@ fn init(p: InitParams) -> Result<()> {
     };
     let rt = runtime()?;
     let scope = rt.block_on(async {
+        let config_lock = ConfigDirLock::acquire_for_ca_dir(&opts.dir).await?;
         // `--external-sign` runs the CA as an intermediate: phase 1 makes the
         // key + a CSR and stops; `ca external install <signed-cert>` installs
         // the signed cert. Otherwise this is the normal self-signed CA.
         let need = if p.external_sign {
-            external_bootstrap(&mut ans, opts).await?
+            external_bootstrap(&mut ans, &config_lock, opts).await?
         } else {
-            ca_setup::create_vaulted_ca(&mut ans, opts).await?.1
+            ca_setup::create_vaulted_ca(&mut ans, &config_lock, opts).await?.1
         };
         // Single end-of-process hook — the same decision the `admin install`
         // templates make; the privileged install stays in this frontend.
@@ -1817,9 +1916,14 @@ fn issue(p: IssueArgs) -> Result<()> {
     // emitted client config. The bare `ca issue` CLI deliberately stays
     // unencrypted: callers here are doing manual cert issuance and don't
     // necessarily have a netidx config to receive the askpass.
-    let out = runtime()?.block_on(offline_ops::ca_issue(
-        &mut ans, directory, subject, san, p.key_bits, p.validity, out_dir, None,
-    ))?;
+    let out = runtime()?.block_on(async {
+        let lock = acquire_ca_lock(&directory).await?;
+        offline_ops::ca_issue(
+            &mut ans, &lock, directory, subject, san, p.key_bits, p.validity, out_dir,
+            None,
+        )
+        .await
+    })?;
     println!("issued cert:");
     println!("  cn:          {}", out.cn);
     println!("  private key: {}", out.private_key.display());
@@ -1891,15 +1995,46 @@ fn sign(mut p: SignArgs) -> Result<()> {
     let san = sign_san_choice(&p)?;
     let id_map = id_map_choice(&p);
     let mut ans = p.recovery.answerer()?;
-    let out = runtime()?.block_on(offline_ops::ca_sign(
-        &mut ans,
-        directory,
-        csr_pem,
-        san,
-        p.validity,
-        p.out.take(),
-        id_map,
-    ))?;
+    let out = runtime()?.block_on(async {
+        let ca_lock = acquire_ca_lock(&directory).await?;
+        let id_map_lock = match &id_map {
+            IdMapChoice::Skip => None,
+            IdMapChoice::Ask if !ans.interactive() => None,
+            IdMapChoice::Register { .. } | IdMapChoice::Ask => {
+                let path = netidx_admin::id_map::user_id_map_path()?;
+                Some(if ca_lock.contains(&path)? {
+                    ca_lock.clone()
+                } else {
+                    ConfigDirLock::acquire_for_file_async(&path).await?
+                })
+            }
+        };
+        let id_map = match (id_map, id_map_lock.as_ref()) {
+            (IdMapChoice::Skip, _) | (IdMapChoice::Ask, None) => {
+                offline_ops::IdMapAction::Skip
+            }
+            (IdMapChoice::Register { groups, uid }, Some(config_lock)) => {
+                offline_ops::IdMapAction::Register { config_lock, groups, uid }
+            }
+            (IdMapChoice::Ask, Some(config_lock)) => {
+                offline_ops::IdMapAction::Ask { config_lock }
+            }
+            (IdMapChoice::Register { .. }, None) => {
+                unreachable!("registering an id-map entry selects its lock")
+            }
+        };
+        offline_ops::ca_sign(
+            &mut ans,
+            &ca_lock,
+            directory,
+            csr_pem,
+            san,
+            p.validity,
+            p.out.take(),
+            id_map,
+        )
+        .await
+    })?;
     print_sign_outcome(&csr_path, &out);
     Ok(())
 }
@@ -1923,13 +2058,19 @@ fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
 
 /// Build the post-sign id-map action from `--no-id-map` / `--id-map-group` /
 /// `--uid` (`--uid` requires `--id-map-group`, enforced by clap).
-fn id_map_choice(p: &SignArgs) -> offline_ops::IdMapAction {
+enum IdMapChoice {
+    Skip,
+    Register { groups: Vec<String>, uid: Option<u32> },
+    Ask,
+}
+
+fn id_map_choice(p: &SignArgs) -> IdMapChoice {
     if p.no_id_map {
-        offline_ops::IdMapAction::Skip
+        IdMapChoice::Skip
     } else if !p.id_map_group.is_empty() {
-        offline_ops::IdMapAction::Register { groups: p.id_map_group.clone(), uid: p.uid }
+        IdMapChoice::Register { groups: p.id_map_group.clone(), uid: p.uid }
     } else {
-        offline_ops::IdMapAction::Ask
+        IdMapChoice::Ask
     }
 }
 
@@ -2617,10 +2758,12 @@ mod tests {
         // so no superuser password or glyph is asked for.
         let mut ans =
             crate::admin::answer_cli::make_flag_answerer(None, false, None).unwrap();
+        let config_lock = ConfigDirLock::acquire(scratch.path()).unwrap();
         let (_ca, _need) = runtime()
             .unwrap()
             .block_on(ca_setup::create_vaulted_ca(
                 &mut ans,
+                &config_lock,
                 ca_setup::NewCaOpts {
                     dir: dir.clone(),
                     common_name: Some("ca.example.com".into()),

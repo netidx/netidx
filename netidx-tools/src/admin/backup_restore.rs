@@ -446,6 +446,7 @@ pub(super) async fn reenroll_data_identities(
 #[cfg(unix)]
 pub(super) async fn reenroll_satellite_admin(
     ans: &mut dyn netidx_admin::answer::Answerer,
+    config_lock: &ConfigDirLock,
     root: &Path,
     manifest: &install_bundle::Manifest,
     net: &DiscoveredNetwork,
@@ -515,6 +516,7 @@ pub(super) async fn reenroll_satellite_admin(
         id_map,
         listen_override.or(manifest.admin_listen),
         manifest.previous_admin_server,
+        config_lock,
     )
     .await?
     {
@@ -661,7 +663,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                     bail!("--external-cert was supplied for a self-signed netidx CA");
                 }
                 runtime.block_on(
-                    netidx_admin::admin_ops::slots::external_install_cert_with_lock(
+                    netidx_admin::admin_ops::slots::external_install_cert(
                         &mut recovery,
                         config_lock.as_ref().expect("restore lock held"),
                         ca_dir.clone(),
@@ -670,17 +672,15 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                     ),
                 )?;
             }
-            runtime.block_on(
-                netidx_admin::admin_ops::slots::recover_controller_with_lock(
-                    &mut recovery,
-                    config_lock.as_ref().expect("restore lock held"),
-                    ca_dir,
-                    cfg.clone(),
-                    manifest.admin_listen,
-                    addresses.resolver.map(|resolver| resolver.listen),
-                    a.insecure_no_tpm,
-                ),
-            )?;
+            runtime.block_on(netidx_admin::admin_ops::slots::recover_controller(
+                &mut recovery,
+                config_lock.as_ref().expect("restore lock held"),
+                ca_dir,
+                cfg.clone(),
+                manifest.admin_listen,
+                addresses.resolver.map(|resolver| resolver.listen),
+                a.insecure_no_tpm,
+            ))?;
         }
         // The inner controller snapshot uses portable recovered-* role paths;
         // reconnect it to the complete role configs restored by the outer bundle.
@@ -745,9 +745,16 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             init::lib_kp(a.key_protection),
         ))?;
         #[cfg(unix)]
-        rt.block_on(reenroll_satellite_admin(
-            &mut ans, &root, &manifest, &net, a.listen,
-        ))?;
+        if !has_controller {
+            rt.block_on(reenroll_satellite_admin(
+                &mut ans,
+                config_lock.as_ref().context("restore lock not held")?,
+                &root,
+                &manifest,
+                &net,
+                a.listen,
+            ))?;
+        }
         if has_controller && service.is_some() {
             rt.block_on(start_restored_units(&root))?;
         }

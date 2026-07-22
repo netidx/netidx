@@ -490,6 +490,15 @@ async fn handle_conn(
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let config_lock = ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
     let cfg = AdminServerConfig::load_async(&cfg_path).await?;
+    let ca_alias_lock = cfg
+        .roles
+        .ca
+        .as_ref()
+        .map(|role| config_lock.ca_alias_root(&role.dir))
+        .transpose()?
+        .flatten()
+        .map(ConfigDirLock::acquire)
+        .transpose()?;
     // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
     // this machine; `load_serving_keypair` unseals + decrypts in memory.
     // Failure is a hard error (a admin server silently down means no discovery
@@ -498,9 +507,15 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         load_serving_keypair(&cfg.serving_cert, &cfg.serving_key).await?;
     let listen = cfg.listen;
     let mdns = cfg.mdns;
-    let state =
-        Server::new(config_lock, cfg, Some(cfg_path), serving_cert_pem, serving_key_pem)
-            .await?;
+    let state = Server::new(
+        config_lock,
+        ca_alias_lock,
+        cfg,
+        Some(cfg_path),
+        serving_cert_pem,
+        serving_key_pem,
+    )
+    .await?;
     let acceptor =
         build_serving_acceptor(&state, &state.serving_cert_pem, &state.serving_key_pem)
             .await?;

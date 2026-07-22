@@ -298,9 +298,10 @@ async fn staged_ca_lock(
 /// its own and offer once.
 pub async fn create_vaulted_ca(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     opts: NewCaOpts,
 ) -> Result<(Ca, ServiceNeed)> {
-    let config_lock = ConfigDirLock::acquire_for_ca_dir(&opts.dir).await?;
+    config_lock.require_contained(&opts.dir)?;
     // No "a CA will be created" announce here: the caller already framed it
     // (the resolver install's opening "new admin cluster" dialog, or the
     // explicit `ca init` command), and the CA's creation + identity are
@@ -339,7 +340,7 @@ pub async fn create_vaulted_ca(
     // state.
     let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
-    let stage_lock = staged_ca_lock(&config_lock, &stage_dir).await?;
+    let stage_lock = staged_ca_lock(config_lock, &stage_dir).await?;
 
     // Generate the CA (its key is returned, never written to disk in
     // plaintext) and seal it into the vault under the `recovery` slot —
@@ -436,7 +437,7 @@ pub async fn create_vaulted_ca(
         // --insecure-no-tpm, which the gate above already warned about).
         let keytab =
             setup_autorenew_slot(ans, &mut cadir, &recovery_pw, insecure_no_tpm).await?;
-        let cfg_path = server_setup::set_ca_autorenew(&config_lock, &keytab).await?;
+        let cfg_path = server_setup::set_ca_autorenew(config_lock, &keytab).await?;
         ans.note(&format_compact!(
             "automatic renewal approval enabled:\n\
              \x20 slot:   {AUTORENEW_ADMIN:?} (empty issuance scope)\n\
@@ -467,9 +468,10 @@ pub async fn create_vaulted_ca(
 /// installs the returned certificate.
 pub async fn create_vaulted_external_ca(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     opts: NewCaOpts,
 ) -> Result<PathBuf> {
-    let config_lock = ConfigDirLock::acquire_for_ca_dir(&opts.dir).await?;
+    config_lock.require_contained(&opts.dir)?;
     let common_name =
         resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref()).await?;
     let domain = match &opts.domain {
@@ -490,7 +492,7 @@ pub async fn create_vaulted_external_ca(
     let san = offline_ca::parse_sans(&opts.san, &common_name)?;
     let stage = StagedCaDir::new(opts.dir.clone()).await?;
     let stage_dir = stage.path().to_path_buf();
-    let stage_lock = staged_ca_lock(&config_lock, &stage_dir).await?;
+    let stage_lock = staged_ca_lock(config_lock, &stage_dir).await?;
     let params = CaParams {
         directory: stage_dir.clone(),
         subject: Subject {
@@ -536,7 +538,7 @@ pub async fn create_vaulted_external_ca(
     show_recovery_password(ans, &recovery_pw).await?;
     drop(cadir);
     stage.commit().await?;
-    let mut cadir = ca_store::CaDir::open(config_lock, &opts.dir)
+    let mut cadir = ca_store::CaDir::open(config_lock.clone(), &opts.dir)
         .await
         .context("opening the newly committed external CA directory")?;
     let csr_path = offline_ca::default_csr_filename(&common_name);

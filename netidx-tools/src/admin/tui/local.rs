@@ -163,14 +163,10 @@ fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
         return None;
     }
     let cfg = paths::discover_admin_server_config().ok();
-    let (aa, recovery, ext) = {
+    let status = {
         let probe = async {
-            let (aa, recovery, ext) = tokio::join!(
-                slots::auto_approve_status(&ca_dir, cfg.as_deref()),
-                slots::recovery_status(&ca_dir),
-                slots::external_status(&ca_dir),
-            );
-            (aa.ok(), recovery.ok(), ext.ok())
+            let access = super::super::ca::ca_access(&ca_dir, cfg.clone()).await.ok()?;
+            slots::local_ca_status(&access, &ca_dir).await.ok()
         };
         match tokio::runtime::Handle::try_current() {
             Ok(handle)
@@ -179,17 +175,30 @@ fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
             {
                 tokio::task::block_in_place(|| handle.block_on(probe))
             }
-            Ok(_) => (None, None, None),
+            Ok(_) => None,
             Err(_) => tokio::runtime::Runtime::new().ok()?.block_on(probe),
         }
     };
-    let recovery_present = recovery.map(|s| s.slot_present).unwrap_or(false);
+    let recovery_present =
+        status.as_ref().map(|status| status.recovery.slot_present).unwrap_or(false);
     Some(LocalCa {
-        auto_approve_present: aa.as_ref().map(|s| s.slot_present).unwrap_or(false),
-        auto_approve_wired: aa.as_ref().map(|s| s.wired_in_config).unwrap_or(false),
+        auto_approve_present: status
+            .as_ref()
+            .map(|status| status.auto_approve.slot_present)
+            .unwrap_or(false),
+        auto_approve_wired: status
+            .as_ref()
+            .map(|status| status.auto_approve.wired_in_config)
+            .unwrap_or(false),
         recovery_present,
-        external_signed: ext.as_ref().map(|s| s.externally_signed).unwrap_or(false),
-        external_installed: ext.as_ref().map(|s| s.cert_installed).unwrap_or(false),
+        external_signed: status
+            .as_ref()
+            .map(|status| status.external.externally_signed)
+            .unwrap_or(false),
+        external_installed: status
+            .as_ref()
+            .map(|status| status.external.cert_installed)
+            .unwrap_or(false),
         ca_dir,
         cfg,
     })

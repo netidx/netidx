@@ -248,12 +248,15 @@ pub async fn install_unit(
 /// install flows call this after standing up the resolver / id-map so
 /// the daemon advertises what actually runs here. A missing config is
 /// an error: roles only make sense on a host that has one.
-pub async fn update_roles(update: impl FnOnce(&mut Roles)) -> Result<PathBuf> {
+pub async fn update_roles(
+    config_lock: &ConfigDirLock,
+    update: impl FnOnce(&mut Roles),
+) -> Result<PathBuf> {
     let cfg_path = paths::discover_admin_server_config_async().await?;
-    let lock = ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
+    config_lock.require_contained(&cfg_path)?;
     let mut cfg = AdminServerConfig::load_async(&cfg_path).await?;
     update(&mut cfg.roles);
-    cfg.save_async(&lock, &cfg_path).await?;
+    cfg.save_async(config_lock, &cfg_path).await?;
     Ok(cfg_path)
 }
 
