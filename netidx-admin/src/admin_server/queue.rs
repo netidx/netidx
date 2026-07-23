@@ -7,8 +7,8 @@ use super::{
     ca_dir,
     enrollment::{authorize_enrollment, finish_enrollment, stage_enrollment},
     issuance::{
-        PushPlan, handle_sign_request_op, issue_serialized, one_live_name,
-        propagate_issuance, push_registrations, restore_kind_matches,
+        Issuance, IssuanceMode, PushPlan, handle_sign_request_op, issue_serialized,
+        one_live_name, propagate_issuance, push_registrations, restore_kind_matches,
     },
     request::PeerIdent,
 };
@@ -321,17 +321,20 @@ async fn approve_serialized(
         let signed = issue_serialized(
             ca,
             &signing,
-            &authd.admin,
-            &queued,
-            SERVING_SAN,
-            ca.lifetimes.leaf_validity,
-            Vec::new(),
-            false,
-            None,
-            None,
-            Some(crate::tls::AdminCertIdentity { server_id, controller: false }),
-            "enroll",
-            Some(&req.request_id),
+            Issuance {
+                audit_admin: &authd.admin,
+                audit_op: "enroll",
+                record_req: &queued,
+                name: SERVING_SAN,
+                validity: ca.lifetimes.leaf_validity,
+                mode: IssuanceMode::Enrollment {
+                    identity: crate::tls::AdminCertIdentity {
+                        server_id,
+                        controller: false,
+                    },
+                },
+                pending_request: Some(&req.request_id),
+            },
         )
         .await
         .map_err(|e| format!("internal error: {e:#}"))?;
@@ -361,17 +364,15 @@ async fn approve_serialized(
         let signed = issue_serialized(
             ca,
             &signing,
-            &authd.admin,
-            &queued,
-            &queued.requested_name,
-            validity,
-            Vec::new(),
-            false,
-            Some(orig_serial),
-            None,
-            None,
-            "renew",
-            Some(&req.request_id),
+            Issuance {
+                audit_admin: &authd.admin,
+                audit_op: "renew",
+                record_req: &queued,
+                name: &queued.requested_name,
+                validity,
+                mode: IssuanceMode::Renewal { serial: orig_serial },
+                pending_request: Some(&req.request_id),
+            },
         )
         .await
         .map_err(|e| format!("internal error: {e:#}"))?;

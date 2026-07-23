@@ -374,62 +374,65 @@ async fn try_handle(
     };
     // The one-live-cert check, serial allocation, sign, and atomic record
     // commit are one write transaction.
+    let mode = match req.replaces_serial {
+        Some(serial) => IssuanceMode::Replacement { serial, groups },
+        None => IssuanceMode::Fresh { groups },
+    };
     issue_serialized(
         ca,
         &signing,
-        &authd.admin,
-        record_req,
-        name,
-        validity,
-        groups,
-        one_live_name(record_req.kind),
-        None,
-        req.replaces_serial,
-        None,
-        op,
-        recheck_id,
+        Issuance {
+            audit_admin: &authd.admin,
+            audit_op: op,
+            record_req,
+            name,
+            validity,
+            mode,
+            pending_request: recheck_id,
+        },
     )
     .await
+}
+
+pub(super) enum IssuanceMode {
+    Fresh { groups: Vec<String> },
+    Enrollment { identity: crate::tls::AdminCertIdentity },
+    Renewal { serial: u64 },
+    Replacement { serial: u64, groups: Vec<String> },
+}
+
+pub(super) struct Issuance<'a> {
+    pub audit_admin: &'a str,
+    pub audit_op: &'a str,
+    pub record_req: &'a ca_store::QueuedReq,
+    pub name: &'a str,
+    pub validity: Duration,
+    pub mode: IssuanceMode,
+    pub pending_request: Option<&'a str>,
 }
 
 /// The serialized issuance core, shared by sign / approve / enroll / renewal.
 /// The state write lock keeps exclusive access across the one-live scan, serial
 /// allocation, sign, and the single atomic `commit_signed` — so the
 /// one-live invariant holds and the issuance is committed by one write.
-/// `one_live` is false for serving certs / verified renewals, where
-/// multiple live certs for a name are legitimate.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn issue_serialized(
     ca: &mut ca_store::CaDir,
-    // The SERVER's autorenew-unlocked key (does the crypto)…
     signing: &ca_vault::Unlocked,
-    // …vs the REQUESTING admin (named in the audit trail). They differ now:
-    // the server signs, the human authorized.
-    audit_admin: &str,
-    record_req: &ca_store::QueuedReq,
-    name: &str,
-    validity: Duration,
-    groups: Vec<String>,
-    one_live: bool,
-    // For a verified renewal: the serial of the cert being renewed. It was
-    // proven live (and key-matched) at enqueue, but a revocation can land
-    // between then and now — so we re-check it is still live in this
-    // write transaction, and refuse the renewal if it isn't. `None` for any
-    // non-renewal issuance.
-    renewal_of: Option<u64>,
-    // Restore replacement approved for this exact old serial.
-    replacement_of: Option<u64>,
-    serving_identity: Option<crate::tls::AdminCertIdentity>,
-    audit_op: &str,
-    // For the approve path: re-check the queue entry is still Pending
-    // in the same write transaction, so two approvals (or an approve racing a deny) can't
-    // both transition it. `None` for direct (non-queued) issuance.
-    recheck_id: Option<&str>,
+    issuance: Issuance<'_>,
 ) -> Result<Signed> {
+    let Issuance {
+        audit_admin,
+        audit_op,
+        record_req,
+        name,
+        validity,
+        mode,
+        pending_request,
+    } = issuance;
     let dir = ca.dir().to_path_buf();
     let config_lock = ca.config_lock();
     let store = &mut ca.store;
-    if let Some(id) = recheck_id {
+    if let Some(id) = pending_request {
         match store.status(id).await {
             Ok(ca_store::Status::Pending(_)) => {}
             Ok(ca_store::Status::Signed(_)) => {
@@ -463,53 +466,62 @@ pub(super) async fn issue_serialized(
             Err(e) => return Err(e).context("re-checking the queue before issuance"),
         }
     }
-    let replacement_record = if let Some(serial) = replacement_of {
-        let records = store.list_signed().await.context("checking replacement serial")?;
-        match records.into_iter().find(|record| record.serial == serial) {
-            Some(record)
-                if record.name.eq_ignore_ascii_case(name)
-                    && restore_kind_matches(record.req.kind, record_req.kind)
-                    && record.live(ca_store::now_unix()) =>
-            {
+    let replacement_record = match &mode {
+        IssuanceMode::Replacement { serial, .. } => {
+            let records =
+                store.list_signed().await.context("checking replacement serial")?;
+            match records.into_iter().find(|record| record.serial == *serial) {
                 Some(record)
-            }
-            Some(record)
-                if record.name.eq_ignore_ascii_case(name)
-                    && restore_kind_matches(record.req.kind, record_req.kind) =>
-            {
-                // An interrupted/manual recovery may already have revoked or
-                // outlived the exact old cert. Issuing is now an ordinary
-                // one-live-checked enrollment, so there is nothing left to
-                // revoke a second time.
-                None
-            }
-            Some(record) => {
-                return Ok(Signed {
-                    resp: reject(&format!(
-                        "replacement serial {serial} belongs to {:?} {:?}, not {:?} {:?}",
-                        record.req.kind, record.name, record_req.kind, name
-                    )),
-                    push: None,
-                    replacement_crl: None,
-                });
-            }
-            None => {
-                return Ok(Signed {
-                    resp: reject(&format!(
-                        "replacement serial {serial} is not a live certificate for {name:?}"
-                    )),
-                    push: None,
-                    replacement_crl: None,
-                });
+                    if record.name.eq_ignore_ascii_case(name)
+                        && restore_kind_matches(record.req.kind, record_req.kind)
+                        && record.live(ca_store::now_unix()) =>
+                {
+                    Some(record)
+                }
+                Some(record)
+                    if record.name.eq_ignore_ascii_case(name)
+                        && restore_kind_matches(record.req.kind, record_req.kind) =>
+                {
+                    None
+                }
+                Some(record) => {
+                    return Ok(Signed {
+                        resp: reject(&format!(
+                            "replacement serial {serial} belongs to {:?} {:?}, not {:?} {:?}",
+                            record.req.kind, record.name, record_req.kind, name
+                        )),
+                        push: None,
+                        replacement_crl: None,
+                    });
+                }
+                None => {
+                    return Ok(Signed {
+                        resp: reject(&format!(
+                            "replacement serial {serial} is not a live certificate for {name:?}"
+                        )),
+                        push: None,
+                        replacement_crl: None,
+                    });
+                }
             }
         }
-    } else {
-        None
+        IssuanceMode::Fresh { .. }
+        | IssuanceMode::Enrollment { .. }
+        | IssuanceMode::Renewal { .. } => None,
     };
-    if one_live {
+    let require_unique_name =
+        matches!(&mode, IssuanceMode::Fresh { .. } | IssuanceMode::Replacement { .. })
+            && one_live_name(record_req.kind);
+    if require_unique_name {
         let live =
             store.live_for_name(name).await.context("checking the issuance index")?;
-        if live.iter().any(|record| Some(record.serial) != replacement_of) {
+        let replacement_serial = match &mode {
+            IssuanceMode::Replacement { serial, .. } => Some(*serial),
+            IssuanceMode::Fresh { .. }
+            | IssuanceMode::Enrollment { .. }
+            | IssuanceMode::Renewal { .. } => None,
+        };
+        if live.iter().any(|record| Some(record.serial) != replacement_serial) {
             return Ok(Signed {
                 resp: reject(&one_live_refusal(name, &live)),
                 push: None,
@@ -524,10 +536,10 @@ pub(super) async fn issue_serialized(
     // outrun by an in-flight renewal (worst case re-minting the serving
     // SAN). Refusing here also covers the auto-renew sweep, which signs
     // through this same path.
-    if let Some(serial) = renewal_of {
+    if let IssuanceMode::Renewal { serial } = &mode {
         let live =
             store.live_for_name(name).await.context("checking the issuance index")?;
-        if !live.iter().any(|r| r.serial == serial) {
+        if !live.iter().any(|r| r.serial == *serial) {
             return Ok(Signed {
                 resp: reject(&format!(
                     "the certificate being renewed (serial {serial} for {name:?}) is no \
@@ -587,19 +599,24 @@ pub(super) async fn issue_serialized(
         }
     }
     let serial = store.alloc_serial();
-    let serving_identity = match (serving_identity, renewal_of) {
-        (Some(identity), _) => Some(identity),
-        (None, Some(serial)) if name.eq_ignore_ascii_case(SERVING_SAN) => store
-            .live_for_name(name)
-            .await
-            .ok()
-            .and_then(|records| records.into_iter().find(|r| r.serial == serial))
-            .and_then(|record| {
-                crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes()).ok()
-            }),
-        (None, _) => None,
+    let serving_identity = match &mode {
+        IssuanceMode::Enrollment { identity } => Some(*identity),
+        IssuanceMode::Renewal { serial } if name.eq_ignore_ascii_case(SERVING_SAN) => {
+            store
+                .live_for_name(name)
+                .await
+                .ok()
+                .and_then(|records| records.into_iter().find(|r| r.serial == *serial))
+                .and_then(|record| {
+                    crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
+                        .ok()
+                })
+        }
+        IssuanceMode::Fresh { .. }
+        | IssuanceMode::Renewal { .. }
+        | IssuanceMode::Replacement { .. } => None,
     };
-    if renewal_of.is_some()
+    if matches!(&mode, IssuanceMode::Renewal { .. })
         && name.eq_ignore_ascii_case(SERVING_SAN)
         && serving_identity.is_none()
     {
@@ -611,6 +628,12 @@ pub(super) async fn issue_serialized(
             replacement_crl: None,
         });
     }
+    let groups = match mode {
+        IssuanceMode::Fresh { groups } | IssuanceMode::Replacement { groups, .. } => {
+            groups
+        }
+        IssuanceMode::Enrollment { .. } | IssuanceMode::Renewal { .. } => Vec::new(),
+    };
     let mut san = vec![SanEntry::Dns(name.to_string())];
     if let Some(identity) = serving_identity {
         san.push(SanEntry::Uri(identity.server_id.uri()));

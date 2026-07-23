@@ -9,7 +9,7 @@ use super::{
         reject, safe_auth_failure, scope_covers, server_unlock,
     },
     ca_dir,
-    issuance::issue_serialized,
+    issuance::{Issuance, IssuanceMode, issue_serialized},
     revocation::revoke_server_certificates,
 };
 use crate::{
@@ -370,17 +370,15 @@ async fn try_enroll(
     let signed = issue_serialized(
         ca,
         &signing,
-        &authd.admin,
-        &record_req,
-        SERVING_SAN,
-        ca.lifetimes.leaf_validity,
-        Vec::new(),
-        false,
-        None,
-        None,
-        Some(identity),
-        "enroll",
-        None,
+        Issuance {
+            audit_admin: &authd.admin,
+            audit_op: "enroll",
+            record_req: &record_req,
+            name: SERVING_SAN,
+            validity: ca.lifetimes.leaf_validity,
+            mode: IssuanceMode::Enrollment { identity },
+            pending_request: None,
+        },
     )
     .await?;
     Ok(signed.resp)
