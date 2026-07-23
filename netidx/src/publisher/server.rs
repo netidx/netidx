@@ -274,13 +274,19 @@ const HB: Duration = Duration::from_secs(1);
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
-enum BlockedWrite {
-    Wrote,
-    Reply(publisher::From),
-}
+/// The maximum number of unanswered write_with_recipt writes we will
+/// accept from a client connection before we stop reading from it.
+/// Distinct from blocked_sends, which gates reading whenever the
+/// application stops draining its writes channel: a pending receipt's
+/// write was already delivered to the application, so waiting for the
+/// reply before reading anything else would serialize the connection
+/// on the application's reply latency (and deadlock if a later write
+/// is a dependency of an earlier reply).
+const MAX_PENDING_RECEIPTS: usize = 10_000;
 
-type BlockedWriteFut =
-    Pin<Box<dyn Future<Output = BlockedWrite> + Send + Sync + 'static>>;
+type BlockedSendFut = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
+
+type ReceiptFut = Pin<Box<dyn Future<Output = publisher::From> + Send + Sync + 'static>>;
 
 struct ClientCtx {
     desired_auth: DesiredAuth,
@@ -290,7 +296,8 @@ struct ClientCtx {
     batch: Vec<publisher::To>,
     write_batches:
         IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>,
-    blocked_writes: FuturesUnordered<BlockedWriteFut>,
+    blocked_sends: FuturesUnordered<BlockedSendFut>,
+    pending_receipts: FuturesUnordered<ReceiptFut>,
     flushing_updates: Option<Instant>,
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
@@ -319,7 +326,8 @@ impl ClientCtx {
             secrets,
             batch: Vec::new(),
             write_batches: HashMap::default(),
-            blocked_writes: FuturesUnordered::new(),
+            blocked_sends: FuturesUnordered::new(),
+            pending_receipts: FuturesUnordered::new(),
             flushing_updates: None,
             flush_timeout: None,
             deferred_subs,
@@ -576,26 +584,23 @@ impl ClientCtx {
     fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::From;
         self.handle_batch_inner(con)?;
-        if self.write_batches.len() > 0 || self.wait_write_res.len() > 0 {
-            self.blocked_writes.extend(self.write_batches.drain().map(
-                |(_, (batch, mut sender))| {
-                    Box::pin(async move {
-                        let _ = sender.send(batch).await;
-                        BlockedWrite::Wrote
-                    }) as BlockedWriteFut
-                },
-            ));
-            self.blocked_writes.extend(self.wait_write_res.drain(..).map(
-                |(id, wid, rx)| {
-                    Box::pin(async move {
-                        BlockedWrite::Reply(match rx.await {
-                            Ok(v) => From::WriteResult(id, v, wid),
-                            Err(_) => From::WriteResult(id, Value::Null, wid),
-                        })
-                    }) as BlockedWriteFut
-                },
-            ));
-        }
+        self.blocked_sends.extend(self.write_batches.drain().map(
+            |(_, (batch, mut sender))| {
+                Box::pin(async move {
+                    let _ = sender.send(batch).await;
+                }) as BlockedSendFut
+            },
+        ));
+        self.pending_receipts.extend(self.wait_write_res.drain(..).map(
+            |(id, wid, rx)| {
+                Box::pin(async move {
+                    match rx.await {
+                        Ok(v) => From::WriteResult(id, v, wid),
+                        Err(_) => From::WriteResult(id, Value::Null, wid),
+                    }
+                }) as ReceiptFut
+            },
+        ));
         Ok(())
     }
 
@@ -643,26 +648,33 @@ impl ClientCtx {
         async fn read_from_subscriber(
             con: &mut ReadChannel,
             batch: &mut Vec<publisher::To>,
-            blocked: &mut FuturesUnordered<BlockedWriteFut>,
-        ) -> Result<Option<publisher::From>> {
+            blocked: &mut FuturesUnordered<BlockedSendFut>,
+            receipts_full: bool,
+        ) -> Result<()> {
             loop {
-                if blocked.len() == 0 {
-                    con.receive_batch(batch).await?;
-                    break Ok(None);
+                if blocked.len() > 0 {
+                    blocked.next().await;
+                } else if receipts_full {
+                    future::pending::<()>().await;
                 } else {
-                    if let Some(w) = blocked.next().await {
-                        match w {
-                            BlockedWrite::Wrote => (),
-                            BlockedWrite::Reply(m) => break Ok(Some(m)),
-                        }
-                    }
+                    con.receive_batch(batch).await?;
+                    break Ok(());
                 }
+            }
+        }
+        async fn next_receipt(
+            pending: &mut FuturesUnordered<ReceiptFut>,
+        ) -> publisher::From {
+            match pending.next().await {
+                Some(m) => m,
+                None => future::pending().await,
             }
         }
         let mut hb = time::interval(HB);
         let (mut read_con, mut write_con) =
             time::timeout(HELLO_TIMEOUT, self.hello(con)).await??.split();
         loop {
+            let receipts_full = self.pending_receipts.len() >= MAX_PENDING_RECEIPTS;
             select_biased! {
                 r = flush(&mut write_con).fuse() => {
                     r?;
@@ -682,17 +694,18 @@ impl ClientCtx {
                 },
                 s = self.deferred_subs.next() =>
                     self.handle_deferred_sub(&mut write_con, s)?,
+                m = next_receipt(&mut self.pending_receipts).fuse() => {
+                    write_con.queue_send(&m)?;
+                    self.msg_sent = true;
+                },
                 r = read_from_subscriber(
                     &mut read_con,
                     &mut self.batch,
-                    &mut self.blocked_writes
+                    &mut self.blocked_sends,
+                    receipts_full
                 ).fuse() => match r {
                     Err(e) => return Err(Error::from(e)),
-                    Ok(None) => self.handle_batch(&mut write_con)?,
-                    Ok(Some(m)) => {
-                        write_con.queue_send(&m)?;
-                        self.msg_sent = true;
-                    },
+                    Ok(()) => self.handle_batch(&mut write_con)?,
                 },
                 u = read_updates(self.flushing_updates.is_some(), &mut updates).fuse() => {
                     match u {
