@@ -4,12 +4,11 @@ use netidx::path::Path as NetidxPath;
 use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus,
 };
-use netidx_admin::{
+use netidx_admin_client::{
     activation::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
         UnitBuilder,
     },
-    admin_proto::AdminServerId,
     client::ClientConfig,
     id_map as id_map_engine,
     template::services::{
@@ -17,10 +16,11 @@ use netidx_admin::{
         id_map::{self as id_map_template, IdMapServiceParams},
     },
 };
+use netidx_admin_proto::AdminServerId;
 // Remote, admin-plane control is unix-only (it needs the CA/openssl modules);
 // the local control path below is cross-platform.
 #[cfg(unix)]
-use netidx_admin::admin_ops;
+use netidx_admin_client::ops;
 
 use super::answer_cli::RemoteAuthFlags;
 use clap::{Args, Subcommand};
@@ -218,7 +218,7 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
             )?;
             let mut ans = a.auth.answerer()?;
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-            let units = rt.block_on(admin_ops::service::control_remote(
+            let units = rt.block_on(ops::service::control_remote(
                 &mut ans,
                 server,
                 a.auth.ca_dir.clone(),
@@ -275,7 +275,7 @@ fn print_unit_statuses(units: &[UnitStatus]) {
 }
 
 #[cfg(unix)]
-fn print_service_units(units: &[netidx_admin::admin_proto::ServiceUnit]) {
+fn print_service_units(units: &[netidx_admin_proto::ServiceUnit]) {
     if units.is_empty() {
         println!("  (no units)");
     }
@@ -452,7 +452,7 @@ fn add_id_map(a: IdMapAddArgs) -> Result<()> {
 fn install_unit(
     dir: Option<PathBuf>,
     name: &str,
-    unit: netidx_admin::activation::Unit,
+    unit: netidx_admin_client::activation::Unit,
 ) -> Result<()> {
     let ad = ActivationDir::open(dir.as_deref())?;
     let mut units = ad.list()?;
@@ -594,7 +594,8 @@ mod tests {
         let path = dir.path().join("id-map.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin_client::activation::Unit =
+            serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         // `-f` is mandatory under the activation supervisor; see the
         // regression note on `template::services::id_map::unit`.
@@ -634,7 +635,8 @@ mod tests {
         let path = dir.path().join("container.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin_client::activation::Unit =
+            serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         assert_eq!(
             u.process.args,

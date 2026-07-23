@@ -3,7 +3,7 @@
 //!
 //! It talks **directly** to the local activation supervisor
 //! ([`netidx_activation::control`]) and unit directory
-//! ([`netidx_admin::activation::ActivationDir`]) — never through an admin
+//! ([`netidx_admin_client::activation::ActivationDir`]) — never through an admin
 //! server. That is deliberate and load-bearing: a unit is an arbitrary command
 //! line, so defining one is equivalent to running code on the box. **Unit
 //! definition (create / edit / delete) is therefore local-only** — this module
@@ -21,7 +21,7 @@ use crossterm::event::KeyCode;
 use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, control,
 };
-use netidx_admin::activation::{
+use netidx_admin_client::activation::{
     ActivationDir, ProcessCfgBuilder, Unit, UnitBuilder, validate,
 };
 use ratatui::{
@@ -58,9 +58,7 @@ impl ServiceRow {
     /// tab's remote services panel). The member pre-formats the definition
     /// fields, so this is a pure mapping — no `ActivationDir` access, which
     /// stays local-only.
-    pub(super) fn from_service_unit(
-        su: &netidx_admin::admin_proto::ServiceUnit,
-    ) -> ServiceRow {
+    pub(super) fn from_service_unit(su: &netidx_admin_proto::ServiceUnit) -> ServiceRow {
         let (exe, args, trigger, restart) = match &su.definition {
             Some(d) => {
                 (d.exe.clone(), d.args.clone(), d.trigger.clone(), d.restart.clone())

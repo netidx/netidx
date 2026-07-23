@@ -10,9 +10,8 @@
 //! masquerade as a cluster you trusted elsewhere.
 
 use futures::future::join_all;
-use netidx_admin::{
-    admin_client::fetch_identity, admin_proto::NodeKind, fingerprint::Fingerprint, paths,
-};
+use netidx_admin_client::{paths, transport::fetch_identity};
+use netidx_admin_proto::{NodeKind, fingerprint::Fingerprint};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -130,7 +129,7 @@ pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
     // host enrolled against, recorded at join (a workstation / publisher runs no
     // admin server of its own). Either reaches the same CA; the on-entry poll
     // verifies the fingerprint live.
-    let Some(addr) = netidx_admin::admin_ops::local_admin_server_listen().or(recorded)
+    let Some(addr) = netidx_admin_client::ops::local_admin_server_listen().or(recorded)
     else {
         return false;
     };
@@ -142,7 +141,7 @@ pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
 /// any) — from its install record: the user-scope record, else the system one.
 #[cfg(unix)]
 fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
-    use netidx_admin::provenance::InstallRecord;
+    use netidx_admin_client::provenance::InstallRecord;
     let sys = paths::system_install_record();
     let records = [
         InstallRecord::load_default().ok().flatten(),

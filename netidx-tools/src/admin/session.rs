@@ -1,14 +1,13 @@
 use super::answer_cli::{FlagAnswerer, RemoteAuthFlags, parse_glyph};
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use netidx_admin::{
-    admin_client,
-    admin_proto::{NodeKind, ServerState},
+use netidx_admin_client::{
     answer::Answerer,
-    fingerprint::Fingerprint,
     paths,
     session_cache::{self, CachedSession},
+    transport,
 };
+use netidx_admin_proto::{NodeKind, ServerState, fingerprint::Fingerprint};
 use std::{net::SocketAddr, path::Path};
 use zeroize::Zeroizing;
 
@@ -16,9 +15,7 @@ fn local_admin_server() -> Option<SocketAddr> {
     #[cfg(unix)]
     {
         let path = paths::discover_admin_server_config().ok()?;
-        netidx_admin::admin_server_config::AdminServerConfig::load(&path)
-            .ok()
-            .map(|cfg| cfg.listen)
+        netidx_admin_client::admin_server_config::load(&path).ok().map(|cfg| cfg.listen)
     }
     #[cfg(not(unix))]
     {
@@ -30,8 +27,8 @@ async fn resolve_controller(
     answerer: &mut FlagAnswerer,
     bootstrap: SocketAddr,
     ca_dir: Option<&Path>,
-) -> Result<(SocketAddr, admin_client::CaIdentity)> {
-    let identity = admin_client::fetch_identity(bootstrap, NodeKind::Client)
+) -> Result<(SocketAddr, transport::CaIdentity)> {
+    let identity = transport::fetch_identity(bootstrap, NodeKind::Client)
         .await
         .with_context(|| format!("contacting admin server {bootstrap}"))?;
     let local_fp = ca_dir
@@ -48,15 +45,14 @@ async fn resolve_controller(
         }
         _ => {}
     }
-    let map =
-        admin_client::get_map_pinned(bootstrap, NodeKind::Client, &identity).await?;
+    let map = transport::get_map_pinned(bootstrap, NodeKind::Client, &identity).await?;
     let controller = map
         .controller_entry()
         .filter(|s| s.state == ServerState::Registered)
         .context("the authoritative map has no registered controller")?;
     let controller_addr = controller.addr;
     let controller_identity =
-        admin_client::fetch_identity(controller_addr, NodeKind::Client).await?;
+        transport::fetch_identity(controller_addr, NodeKind::Client).await?;
     if controller_identity.fingerprint != identity.fingerprint
         || !controller_identity.controller
         || controller_identity.server_id != map.controller
@@ -89,7 +85,7 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
         None => Zeroizing::new(rpassword::prompt_password("Administrator password: ")?),
     };
     let logged =
-        runtime.block_on(admin_client::login(server, &identity, &admin, &password))?;
+        runtime.block_on(transport::login(server, &identity, &admin, &password))?;
     let fingerprint = identity.fingerprint.text();
     session_cache::store(CachedSession {
         ca_fingerprint: fingerprint.clone(),
@@ -123,7 +119,7 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
         sessions
     } else if let Some(glyph) = args.accept_glyph {
         let normalized =
-            netidx_admin::fingerprint::Fingerprint::parse_text(&glyph)?.text();
+            netidx_admin_proto::fingerprint::Fingerprint::parse_text(&glyph)?.text();
         sessions.into_iter().filter(|s| s.ca_fingerprint == normalized).collect()
     } else {
         if sessions.len() > 1 {
@@ -136,15 +132,15 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     for cached in selected {
         let revoke = runtime.block_on(async {
-            let identity = admin_client::fetch_identity(
+            let identity = transport::fetch_identity(
                 cached.bootstrap,
-                netidx_admin::admin_proto::NodeKind::Client,
+                netidx_admin_proto::NodeKind::Client,
             )
             .await?;
             if identity.fingerprint.text() != cached.ca_fingerprint {
                 bail!("cached bootstrap now presents a different CA");
             }
-            admin_client::logout(cached.bootstrap, &identity, cached.token.as_str()).await
+            transport::logout(cached.bootstrap, &identity, cached.token.as_str()).await
         });
         if let Err(e) = revoke {
             eprintln!(

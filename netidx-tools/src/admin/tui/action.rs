@@ -13,22 +13,26 @@
 use super::answer::TuiAnswerer;
 use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(unix)]
-use netidx_admin::plan::install::controller::{ControllerInput, run_controller};
-#[cfg(unix)]
-use netidx_admin::{admin_local, atomic, offline_ca};
-use netidx_admin::{
+use netidx_admin_client::{
     answer::{Answerer, Field, Progress, Stage},
     config_lock::ConfigDirLock,
-    install_bundle, paths,
+    paths,
     plan::install::{
         InstallCommon, InstallMode,
         publisher::{PublisherInput, run_publisher},
-        resolver::{ResolverInput, run_resolver},
     },
     provenance::InstallRole,
     renewd,
     service::ServiceScope,
+};
+#[cfg(unix)]
+use netidx_admin_client::{atomic, local};
+#[cfg(unix)]
+use netidx_admin_server::plan::install::controller::{ControllerInput, run_controller};
+#[cfg(unix)]
+use netidx_admin_server::{
+    install_bundle, offline_ca,
+    plan::install::resolver::{ResolverInput, run_resolver},
 };
 use std::{
     net::{IpAddr, SocketAddr},
@@ -68,7 +72,7 @@ impl ServiceInstall {
     fn defaults(scope: ServiceScope) -> Self {
         Self {
             scope,
-            name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
+            name: netidx_admin_client::service::ServiceParams::DEFAULT_NAME.to_string(),
             for_user: None,
         }
     }
@@ -359,7 +363,9 @@ impl Action {
 
     /// The pre-confirmed CA fingerprint the answerer should auto-accept (remote
     /// panel ops after connect), or `None` to prompt.
-    pub(super) fn accept_glyph(&self) -> Option<netidx_admin::fingerprint::Fingerprint> {
+    pub(super) fn accept_glyph(
+        &self,
+    ) -> Option<netidx_admin_proto::fingerprint::Fingerprint> {
         match self {
             Action::Remote(ra) => ra.glyph(),
             _ => None,
@@ -413,7 +419,9 @@ impl Action {
     /// The request glyph to show alongside a confirmation (the approve dialogs),
     /// so the admin verifies the identicon against the screenshot. `None` for
     /// confirmations with no associated glyph.
-    pub(super) fn confirm_glyph(&self) -> Option<netidx_admin::fingerprint::Fingerprint> {
+    pub(super) fn confirm_glyph(
+        &self,
+    ) -> Option<netidx_admin_proto::fingerprint::Fingerprint> {
         match self {
             Action::Remote(ra) => ra.confirm_glyph(),
             _ => None,
@@ -457,7 +465,7 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
 }
 
 /// Dispatch a local (no-auth, control-socket) CA op. These drive
-/// `netidx_admin::admin_ops::slots`, which is unix-only.
+/// `netidx_admin_server::ops::slots`, which is unix-only.
 #[cfg(unix)]
 async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
     match action {
@@ -484,7 +492,7 @@ async fn auto_approve(
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
-    use netidx_admin::admin_ops::slots::{
+    use netidx_admin_server::ops::slots::{
         AutoApproveOutcome, AutorenewWiring, auto_approve,
     };
     let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
@@ -528,7 +536,7 @@ async fn recovery_rotate(
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
-    use netidx_admin::admin_ops::slots::{RecoveryRotateOutcome, recovery_rotate};
+    use netidx_admin_server::ops::slots::{RecoveryRotateOutcome, recovery_rotate};
     let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
     let out = recovery_rotate(ans, &access, ca_dir).await?;
     let lines = match out {
@@ -556,8 +564,9 @@ async fn backup(
     let target = PathBuf::from(target);
     let target =
         if target.is_absolute() { target } else { std::env::current_dir()?.join(target) };
-    let record =
-        netidx_admin::provenance::InstallRecord::load(&config_root.join("install.json"))?;
+    let record = netidx_admin_client::provenance::InstallRecord::load(
+        &config_root.join("install.json"),
+    )?;
     let service_scope = match record.role {
         InstallRole::Workstation => ServiceScope::User,
         _ => ServiceScope::System,
@@ -566,21 +575,24 @@ async fn backup(
         ServiceScope::User => None,
         ServiceScope::System => Some(super::super::service::resolve_for_user(None)?),
     };
-    let service = netidx_admin::service::status(&netidx_admin::service::ServiceParams {
-        scope: service_scope,
-        for_user: for_user.clone(),
-        binary: PathBuf::new(),
-        service_name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
-        activation_dir: None,
-    })?;
+    let service = netidx_admin_client::service::status(
+        &netidx_admin_client::service::ServiceParams {
+            scope: service_scope,
+            for_user: for_user.clone(),
+            binary: PathBuf::new(),
+            service_name: netidx_admin_client::service::ServiceParams::DEFAULT_NAME
+                .to_string(),
+            activation_dir: None,
+        },
+    )?;
     let intent = install_bundle::ServiceIntent {
         scope: match service_scope {
             ServiceScope::User => install_bundle::BundleScope::User,
             ServiceScope::System => install_bundle::BundleScope::System,
         },
-        name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
+        name: netidx_admin_client::service::ServiceParams::DEFAULT_NAME.to_string(),
         for_user,
-        installed: service != netidx_admin::service::ServiceStatus::NotInstalled,
+        installed: service != netidx_admin_client::service::ServiceStatus::NotInstalled,
     };
     #[cfg(unix)]
     let controller_tmp = tempfile::tempdir()?;
@@ -588,7 +600,7 @@ async fn backup(
         #[cfg(unix)]
         {
             let inner = controller_tmp.path().join("controller");
-            admin_local::backup(&config_root.join("admin-server.json"), &inner).await?;
+            local::backup(&config_root.join("admin-server.json"), &inner).await?;
             Some(inner)
         }
         #[cfg(not(unix))]
@@ -691,8 +703,8 @@ async fn restore_addresses(
 ) -> Result<install_bundle::RestoreAddresses> {
     let controller = manifest.components.contains(&install_bundle::Component::Controller);
     let shape = if controller || manifest.resolver_endpoint.is_some() {
-        let shape = netidx_admin::plan::install::detect_resolver_shape().await;
-        netidx_admin::plan::install::warn_incomplete_resolver_address(ans, &shape);
+        let shape = netidx_admin_client::plan::install::detect_resolver_shape().await;
+        netidx_admin_client::plan::install::warn_incomplete_resolver_address(ans, &shape);
         Some(shape)
     } else {
         None
@@ -801,7 +813,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
     }
     let root = restore_root(&preflight)?;
     let config_lock =
-        netidx_admin::config_lock::ConfigDirLock::acquire_async(&root).await?;
+        netidx_admin_client::config_lock::ConfigDirLock::acquire_async(&root).await?;
     config_lock.require_contained(&root)?;
     let manifest =
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
@@ -812,16 +824,16 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         if !install_bundle::controller_recovered(&bundle, &cfg_path)? {
             if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg_path)?
             {
-                netidx_admin::backup::restore(
+                netidx_admin_server::backup::restore(
                     &config_lock,
                     &bundle.join(install_bundle::CONTROLLER_DIR),
                     &ca_dir,
                     &cfg_path,
                 )?;
             }
-            let lifetimes = netidx_admin::ca::CaLifetimes::load(&ca_dir)?;
+            let lifetimes = netidx_admin_server::ca::CaLifetimes::load(&ca_dir)?;
             if lifetimes.externally_signed
-                && netidx_admin::ca::ca_cert_needs_renewal(
+                && netidx_admin_server::ca::ca_cert_needs_renewal(
                     &ca_dir,
                     std::time::Duration::ZERO,
                 )
@@ -831,7 +843,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                     .await?
                     .context("the renewed external-CA certificate is required")?;
                 let root = ans.text(Field::ExternalRoot, None, None, false).await?;
-                netidx_admin::admin_ops::slots::external_install_cert(
+                netidx_admin_server::ops::slots::external_install_cert(
                     ans,
                     &config_lock,
                     ca_dir.clone(),
@@ -840,7 +852,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                 )
                 .await?;
             }
-            netidx_admin::admin_ops::slots::recover_controller(
+            netidx_admin_server::ops::slots::recover_controller(
                 ans,
                 &config_lock,
                 ca_dir,
@@ -852,16 +864,14 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
             .await?;
         }
         let mut cfg =
-            netidx_admin::admin_server_config::AdminServerConfig::load_for_recovery(
-                &cfg_path,
-            )?;
+            netidx_admin_client::admin_server_config::load_for_recovery(&cfg_path)?;
         if let Some(role) = cfg.roles.resolver.as_mut() {
             role.config = root.join("resolver.json");
         }
         if let Some(role) = cfg.roles.id_map.as_mut() {
             role.map = root.join("id-map.json");
         }
-        cfg.save(&config_lock, &cfg_path)?;
+        netidx_admin_client::admin_server_config::save(&config_lock, &cfg_path, &cfg)?;
         manifest.install.save_async(&config_lock, &root.join("install.json")).await?;
     }
     #[cfg(not(unix))]
@@ -942,7 +952,7 @@ async fn finish_restore(
 async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
     let csr = match paths::discover_admin_server_config() {
         Ok(cfg) => {
-            let (common_name, csr_pem) = admin_local::external_ca_csr(&cfg).await?;
+            let (common_name, csr_pem) = local::external_ca_csr(&cfg).await?;
             let csr = offline_ca::default_csr_filename(&common_name);
             atomic::write_atomic(&csr, csr_pem.as_bytes(), 0o644)
                 .with_context(|| format!("writing CSR to {}", csr.display()))?;
@@ -950,7 +960,7 @@ async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Out
         }
         Err(_) => {
             let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
-            netidx_admin::admin_ops::slots::external_emit_csr(ans, &lock, ca_dir).await?
+            netidx_admin_server::ops::slots::external_emit_csr(ans, &lock, ca_dir).await?
         }
     };
     let csr = std::fs::canonicalize(&csr).unwrap_or(csr);
@@ -986,7 +996,7 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
                 .transpose()
                 .context("reading the external root certificate")?;
             let fingerprint =
-                admin_local::external_ca_install(&cfg, signed_pem, root_pem).await?;
+                local::external_ca_install(&cfg, signed_pem, root_pem).await?;
             Ok(Outcome::plain(
                 "Certificate renewed",
                 vec![
@@ -998,7 +1008,7 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             ))
         }
         Err(_) => {
-            use netidx_admin::admin_ops::slots::{
+            use netidx_admin_server::ops::slots::{
                 ExternalInstallOutcome, external_install_cert,
             };
             let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
@@ -1047,7 +1057,8 @@ async fn update(
 ) -> Result<Outcome> {
     ans.progress(Progress::new(Stage::Discovering, "checking the cluster for changes…"));
     let config_lock =
-        netidx_admin::config_lock::ConfigDirLock::acquire_async(&config_root).await?;
+        netidx_admin_client::config_lock::ConfigDirLock::acquire_async(&config_root)
+            .await?;
     let plan = super::lifecycle::update_plan(&config_root, role).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
@@ -1075,7 +1086,7 @@ async fn update(
 
 /// Graduate a local-only workstation onto a network.
 async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
-    use netidx_admin::plan::install::workstation::{
+    use netidx_admin_client::plan::install::workstation::{
         WorkstationJoinInput, run_workstation_join,
     };
     let mode = if dry_run {
@@ -1111,7 +1122,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
 /// parent isn't in this host's network map).
 #[cfg(unix)]
 async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
-    use netidx_admin::plan::resolve_admin_server_addr;
+    use netidx_admin_client::plan::resolve_admin_server_addr;
     loop {
         let s = ans.text(Field::ParentAddr, None, None, true).await?.unwrap_or_default();
         match resolve_admin_server_addr(&s) {
@@ -1128,15 +1139,13 @@ async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
 #[cfg(unix)]
 async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outcome> {
     use super::answer::{ParentRow, ParentSelection};
-    use netidx_admin::{
-        admin_ops::delegation::{
-            AddParentCompletion, ClusterPropagation, prepare_add_parent,
-        },
-        admin_proto::{ResolverAddr, ResolverClusterId, ServerState},
+    use netidx_admin_client::{
+        ops::delegation::{AddParentCompletion, ClusterPropagation, prepare_add_parent},
         paths,
         plan::delegation::DelegationSelection,
         resolver::ResolverConfig,
     };
+    use netidx_admin_proto::{ResolverAddr, ResolverClusterId, ServerState};
     let rpath = paths::discover_resolver_config()?;
 
     // Candidate parents come from the network map (each resolver + its level),
@@ -1164,7 +1173,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
             let mut cand = Vec::new();
             for server in map.servers.iter().filter(|s| {
                 s.state == ServerState::Registered
-                    && s.roles.contains(netidx_admin::admin_proto::Role::Resolver)
+                    && s.roles.contains(netidx_admin_proto::Role::Resolver)
                     && Some(s.id) != local_server.map(|local| local.id)
             }) {
                 let (Some(cluster_id), Some(resolver)) =
@@ -1232,9 +1241,10 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     let out = match prepare_add_parent(ans, &rpath, parent, &path, selection).await? {
         AddParentCompletion::Complete(outcome) => outcome,
         AddParentCompletion::LocalWrite(pending) => {
-            let lock =
-                netidx_admin::config_lock::ConfigDirLock::acquire_async(&config_root)
-                    .await?;
+            let lock = netidx_admin_client::config_lock::ConfigDirLock::acquire_async(
+                &config_root,
+            )
+            .await?;
             pending.apply(&lock, ans)?
         }
     };
@@ -1308,7 +1318,7 @@ async fn install(
         let ca_dir = paths::user_ca_dir()?;
         let access = super::super::ca::ca_access(&ca_dir, None).await?;
         let status =
-            netidx_admin::admin_ops::slots::local_ca_status(&access, &ca_dir).await?;
+            netidx_admin_server::ops::slots::local_ca_status(&access, &ca_dir).await?;
         if let Some((common_name, _)) = status.external.pending {
             let relative = offline_ca::default_csr_filename(&common_name);
             let csr = std::env::current_dir()?.join(relative);
@@ -1333,15 +1343,15 @@ async fn run_workstation(
     ans: &mut TuiAnswerer,
     common: InstallCommon,
 ) -> Result<Option<ServiceScope>> {
-    use netidx_admin::plan::install::workstation::run_workstation;
+    use netidx_admin_client::plan::install::workstation::run_workstation;
     run_workstation(ans, guided_workstation_input(common)).await
 }
 
 #[cfg(any(unix, windows))]
 fn guided_workstation_input(
     common: InstallCommon,
-) -> netidx_admin::plan::install::workstation::WorkstationInput {
-    netidx_admin::plan::install::workstation::WorkstationInput::defaults(common)
+) -> netidx_admin_client::plan::install::workstation::WorkstationInput {
+    netidx_admin_client::plan::install::workstation::WorkstationInput::defaults(common)
 }
 
 #[cfg(not(any(unix, windows)))]

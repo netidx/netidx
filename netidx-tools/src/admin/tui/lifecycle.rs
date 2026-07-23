@@ -3,18 +3,18 @@
 //! The tools `lifecycle.rs` builds its own `tokio::runtime::Runtime` per call and
 //! prints results, so it can't be reused from inside the TUI's runtime (a nested
 //! runtime panics). These are the same operations rewritten as plain `async fn`s
-//! over the library's `admin_client` / `reconcile` / `discovery` pieces (none of
+//! over the library's `transport` / `reconcile` / `discovery` pieces (none of
 //! which are cfg-gated), returning the plan for the UI to render + apply.
 
 use anyhow::{Context, Result, bail};
-use netidx_admin::{
-    admin_client::{self, NetworkInfo},
-    admin_proto::{NetworkMap, NodeKind},
+use netidx_admin_client::{
     discovery, paths,
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     reconcile::{self, EditPlan},
     resolver::ResolverConfig,
+    transport::{self, NetworkInfo},
 };
+use netidx_admin_proto::{NetworkMap, NodeKind};
 use std::{net::SocketAddr, path::Path, time::Duration};
 
 pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -122,12 +122,12 @@ async fn fetch_network_pinned(
 ) -> Result<NetworkInfo> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
-        let id = match admin_client::fetch_identity(addr, kind).await {
+        let id = match transport::fetch_identity(addr, kind).await {
             Ok(id) => id,
             Err(_) => continue,
         };
         if net_id.matches(&id.fingerprint)? {
-            return admin_client::aggregate(&[addr], kind, &id)
+            return transport::aggregate(&[addr], kind, &id)
                 .await
                 .context("mapping the network (GetInfo)");
         }
@@ -145,12 +145,12 @@ async fn fetch_map_pinned(
 ) -> Result<NetworkMap> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
-        let id = match admin_client::fetch_identity(addr, kind).await {
+        let id = match transport::fetch_identity(addr, kind).await {
             Ok(id) => id,
             Err(_) => continue,
         };
         if net_id.matches(&id.fingerprint)? {
-            return admin_client::get_map_pinned(addr, kind, &id)
+            return transport::get_map_pinned(addr, kind, &id)
                 .await
                 .context("fetching the network map");
         }

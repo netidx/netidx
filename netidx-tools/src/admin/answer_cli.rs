@@ -5,12 +5,11 @@
 //! the operator obtained out of band.
 
 use anyhow::{Context, Result, bail};
-use netidx_admin::{
-    admin_client::CaIdentity,
-    admin_proto::Secret,
+use netidx_admin_client::{
     answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress},
-    fingerprint::Fingerprint,
+    transport::CaIdentity,
 };
+use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
 use std::{
     io::Write,
     net::SocketAddr,

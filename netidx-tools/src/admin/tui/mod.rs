@@ -1,7 +1,7 @@
 //! The interactive `netidx admin` TUI.
 //!
 //! Bare `netidx admin` (no subcommand) lands here. Where the strict CLI is a
-//! thin non-interactive shell over `netidx_admin::{plan, admin_ops}` driven by
+//! thin non-interactive shell over `netidx_admin_client::{plan, ops}` driven by
 //! a [`FlagAnswerer`](super::answer_cli::FlagAnswerer), the TUI drives the same
 //! library functions through a widget-backed [`TuiAnswerer`](answer::TuiAnswerer):
 //! one code path, two frontends. It owns the process's only tokio runtime and
@@ -36,10 +36,8 @@ use answer::{Modal, TuiAnswerer, UiRequest};
 use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::{StreamExt, stream::Fuse};
-use netidx_admin::{
-    answer::{Progress, Stage},
-    fingerprint::Fingerprint,
-};
+use netidx_admin_client::answer::{Progress, Stage};
+use netidx_admin_proto::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin, Rect},
@@ -1112,7 +1110,7 @@ mod render_tests {
     use super::*;
     use answer::UiRequest;
     use crossterm::event::KeyCode;
-    use netidx_admin::answer::{Field, Progress, Stage};
+    use netidx_admin_client::answer::{Field, Progress, Stage};
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::sync::oneshot;
 

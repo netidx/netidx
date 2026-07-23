@@ -30,9 +30,12 @@ pub async fn run(
         .await
         .context("creating publisher")?;
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
+    let net_config = NetConfig::Ready { publisher, subscriber };
     ShellBuilder::<NoExt>::default()
         .mode(Mode::Script(Source::Internal(literal!(include_str!("browser.gx")))))
-        .net_config(NetConfig::Ready { publisher, subscriber })
+        .setup_context(Box::new(move |ctx| {
+            ctx.libstate.set(net_config);
+        }))
         .no_init(true)
         .build()?
         .run(mt)

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use daemonize::Daemonize;
 use log::info;
-use netidx_admin::id_map as id_map_engine;
+use netidx_admin_client::id_map as id_map_engine;
 use netidx_id_map::runtime::{Server, ServerParams};
 use std::path::PathBuf;
 use tokio::signal::unix::{SignalKind, signal};

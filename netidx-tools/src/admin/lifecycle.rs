@@ -10,16 +10,16 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin::{
-    admin_client::{self, NetworkInfo},
-    admin_proto::{NetworkMap, NodeKind},
+use netidx_admin_client::{
     config_lock::ConfigDirLock,
     discovery, paths,
     provenance::{InstallRecord, InstallRole, NetworkIdentity},
     reconcile,
     resolver::ResolverConfig,
     template::{describe_member_auth, describe_ref_auth},
+    transport::{self, NetworkInfo},
 };
+use netidx_admin_proto::{NetworkMap, NodeKind};
 use std::{net::SocketAddr, time::Duration};
 
 /// How long to browse mDNS for the install's admin server when the
@@ -76,7 +76,7 @@ fn fetch_network_pinned(
     candidates.dedup();
     let mut saw_mismatch = false;
     for addr in &candidates {
-        let id = match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
+        let id = match rt.block_on(transport::fetch_identity(*addr, kind)) {
             Ok(id) => id,
             // Unreachable / not a admin server — try the next candidate.
             Err(_) => continue,
@@ -84,7 +84,7 @@ fn fetch_network_pinned(
         // Fail closed on a malformed stored fingerprint (corrupt record).
         if net_id.matches(&id.fingerprint)? {
             return rt
-                .block_on(admin_client::aggregate(&[*addr], kind, &id))
+                .block_on(transport::aggregate(&[*addr], kind, &id))
                 .context("mapping the network (GetInfo)");
         }
         saw_mismatch = true;
@@ -214,13 +214,13 @@ fn fetch_map_pinned(
     candidates.dedup();
     let mut saw_mismatch = false;
     for addr in &candidates {
-        let id = match rt.block_on(admin_client::fetch_identity(*addr, kind)) {
+        let id = match rt.block_on(transport::fetch_identity(*addr, kind)) {
             Ok(id) => id,
             Err(_) => continue,
         };
         if net_id.matches(&id.fingerprint)? {
             return rt
-                .block_on(admin_client::get_map_pinned(*addr, kind, &id))
+                .block_on(transport::get_map_pinned(*addr, kind, &id))
                 .context("fetching the network map");
         }
         saw_mismatch = true;

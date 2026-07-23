@@ -6,11 +6,8 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin::{
-    admin_proto::{NodeKind, Role},
-    fingerprint::ColorMode,
-    plan::enroll::{self, DiscoveredNetworkReport},
-};
+use netidx_admin_client::plan::enroll::{self, DiscoveredNetworkReport};
+use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
 use std::time::Duration;
 
 #[derive(Args, Debug)]

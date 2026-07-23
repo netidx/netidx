@@ -1,19 +1,19 @@
 //! `netidx admin resolver {add-parent, list-delegations, approve-delegation,
 //! deny-delegation}` — thin CLI adapters over
-//! [`netidx_admin::admin_ops::delegation`]. The parent-admin review is a
+//! [`netidx_admin_client::ops::delegation`]. The parent-admin review is a
 //! query + action (code-as-id) split: `list-delegations` shows each pending
 //! request by its code; `approve-delegation <code>` / `deny-delegation <code>`
 //! act on the one whose recomputed code matches.
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin::{
-    admin_ops::delegation::{self as ops, AddParentCompletion, ClusterPropagation},
-    admin_proto::{PeerResult, ResolverAddr},
+use netidx_admin_client::{
     config_lock::ConfigDirLock,
+    ops::delegation::{self as ops, AddParentCompletion, ClusterPropagation},
     paths,
     plan::delegation::DelegationSelection,
 };
+use netidx_admin_proto::{PeerResult, ResolverAddr};
 
 use super::{answer_cli::RemoteAuthFlags, ca::fmt_age, init};
 
@@ -25,7 +25,7 @@ fn describe_child(child: &[ResolverAddr]) -> String {
     child.iter().map(|r| r.addr.to_string()).collect::<Vec<_>>().join(", ")
 }
 
-fn describe_ids(ids: &[netidx_admin::admin_proto::AdminServerId]) -> String {
+fn describe_ids(ids: &[netidx_admin_proto::AdminServerId]) -> String {
     ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 

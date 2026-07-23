@@ -1,11 +1,11 @@
 //! The certificate renewal daemon CLI, surfaced as `netidx admin component tls
 //! auto-renew …` (see the `tls` module). The engine lives in
-//! `netidx_admin::renewd`; templates install the `run` form as an
+//! `netidx_admin_client::renewd`; templates install the `run` form as an
 //! activation unit on every TLS host.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin::renewd;
+use netidx_admin_client::renewd;
 use std::{net::SocketAddr, time::Duration};
 
 #[derive(Subcommand, Debug)]

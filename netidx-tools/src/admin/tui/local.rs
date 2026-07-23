@@ -6,12 +6,12 @@
 
 use super::{action::Action, theme, widgets};
 use netidx_activation::runtime::default_units_dir;
-use netidx_admin::{
-    fingerprint::Fingerprint,
+use netidx_admin_client::{
     paths,
     provenance::{InstallRecord, InstallRole},
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
 };
+use netidx_admin_proto::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -157,7 +157,7 @@ impl Detected {
 /// the `slots` ops drive the `SO_PEERCRED` control socket).
 #[cfg(unix)]
 fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
-    use netidx_admin::admin_ops::slots;
+    use netidx_admin_server::ops::slots;
     let ca_dir = config_dir.join("ca");
     if !ca_dir.is_dir() {
         return None;
@@ -1115,7 +1115,7 @@ fn fmt_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netidx_admin::provenance::NetworkIdentity;
+    use netidx_admin_client::provenance::NetworkIdentity;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]

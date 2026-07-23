@@ -19,7 +19,7 @@ entry point, `create_vaulted_ca` (§15), so creating a CA is identical
 either way — vault, identicon, and the "set up the CA server?" prompt.
 
 Built and tested:
-- **Engine** (`netidx-admin`, real-TLS e2e): `fingerprint` (identicon),
+- **Engine** (`netidx-admin-server`, real-TLS e2e): `fingerprint` (identicon),
   `ca_vault` (LUKS keyslots), `ca_proto`, `ca_join` (TOFU client + CSR),
   `ca_server` (policy + sign + TLS serve), plus `Ca::from_pem` /
   `Ca::init_vaulted` and an algorithm-aware CSR strength check. The
@@ -470,17 +470,17 @@ prompt arrives with this daemon.)
 
 ## 10. Crate layout & new dependencies
 
-Engine code in `netidx-admin` (where `ca.rs`/`tls.rs` already live):
+The current implementation separates shared wire data, cross-platform client
+code, and Unix authority code:
 
 ```
-netidx-admin/src/
-  ca.rs            existing signer; add `Ca::from_pem(key, cert)` (in-memory, no file read)
-  ca/vault.rs      NEW — keyslot vault: init / unlock / add_slot / remove_slot / migrate
-  ca/server.rs     NEW — the daemon: TLS accept loop, policy check, audit log (unix-only)
-  ca/client.rs     NEW — the join client: rcgen CSR, TOFU connect, fingerprint-confirm, request (cross-platform)
-  fingerprint.rs   NEW — sha2 + identicon, openssl-free (used by both sides + the CLI)
-  template/…       add the `ca.unit` emitter alongside resolver/id-map
+netidx-admin-proto/   Pack wire model, policy, identity, fingerprint, config DTOs
+netidx-admin-client/  rustls client transport, discovery, remote ops, config tooling
+netidx-admin-server/  daemon, OpenSSL CA, vault, stores, authority provisioning
 ```
+
+The dependency direction is protocol ← client ← server. Windows builds only
+the first two crates and therefore do not depend on OpenSSL.
 
 CLI glue in `netidx-tools/src/admin/ca.rs` (subcommands) and
 `init.rs` (the `ca-server` branch of the TLS cascade).

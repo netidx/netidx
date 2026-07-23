@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::{client::ClientConfig, paths};
+use netidx_admin_client::{client::ClientConfig, paths};
 use std::path::PathBuf;
 
 use super::editor;

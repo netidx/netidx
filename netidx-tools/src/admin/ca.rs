@@ -1,22 +1,27 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use netidx_admin::{
-    admin_client, admin_local,
-    admin_ops::{
-        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops,
-        roster as roster_ops, servers as server_ops, slots as slots_ops,
-    },
-    admin_proto::{self, NodeKind},
+use netidx_admin_client::{
     answer::{Answerer, Field},
     atomic,
+    config_lock::ConfigDirLock,
+    local,
+    ops::{
+        self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
+        servers as server_ops,
+    },
+    paths, plan, tls, transport,
+};
+use netidx_admin_proto::{
+    self as admin_proto, NodeKind,
+    fingerprint::{ColorMode, Fingerprint},
+    policy::{AdminInfo, SlotKind},
+};
+use netidx_admin_server::{
     ca::{self, SanEntry, Subject},
     ca_vault,
-    config_lock::ConfigDirLock,
-    fingerprint::{ColorMode, Fingerprint},
     offline_ca::{default_csr_filename, parse_san_one, parse_sans},
-    paths,
-    plan::{self, ca_setup},
-    tls,
+    ops::{offline as offline_ops, slots as slots_ops},
+    plan::ca_setup,
 };
 use std::{
     net::SocketAddr,
@@ -26,7 +31,7 @@ use std::{
 use zeroize::Zeroizing;
 
 #[cfg(test)]
-use netidx_admin::ca::{Ca, CaParams};
+use netidx_admin_server::ca::{Ca, CaParams};
 
 use super::{
     answer_cli::{RemoteAuthFlags, make_offline_answerer},
@@ -47,7 +52,7 @@ pub(crate) async fn ca_access(
 ) -> Result<slots_ops::CaAccess> {
     let config = matching_controller_config(ca_dir, config).await;
     if let Some(config) = config.as_ref()
-        && admin_local::daemon_running(config).await
+        && local::daemon_running(config).await
         && config_owns_ca(config, ca_dir).await
     {
         return Ok(slots_ops::CaAccess::Running { config: config.clone() });
@@ -100,10 +105,7 @@ async fn matching_controller_config(
 
 async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
     let Ok(config) =
-        netidx_admin::admin_server_config::AdminServerConfig::load_for_recovery_async(
-            config,
-        )
-        .await
+        netidx_admin_client::admin_server_config::load_for_recovery_async(config).await
     else {
         return false;
     };
@@ -882,7 +884,7 @@ fn install_controller(p: ControllerInstallArgs) -> Result<()> {
         with_service: p.with_service,
         no_service: p.no_service,
     };
-    let input = plan::install::controller::ControllerInput {
+    let input = netidx_admin_server::plan::install::controller::ControllerInput {
         domain: p.domain,
         listen: p.listen,
         units_dir: None,
@@ -890,8 +892,9 @@ fn install_controller(p: ControllerInstallArgs) -> Result<()> {
         insecure_no_tpm: p.insecure_no_tpm,
         common,
     };
-    let scope = runtime()?
-        .block_on(plan::install::controller::run_controller(&mut ans, input))?;
+    let scope = runtime()?.block_on(
+        netidx_admin_server::plan::install::controller::run_controller(&mut ans, input),
+    )?;
     if let Some(scope) = scope {
         service::install_with_defaults(scope.into())?;
     }
@@ -907,7 +910,7 @@ fn install_controller(p: ControllerInstallArgs) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
-pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::admin_server::AUTORENEW_ADMIN;
+pub(super) const AUTORENEW_ADMIN: &str = netidx_admin_server::AUTORENEW_ADMIN;
 
 /// Set up (or rotate) the autorenew slot and point this host's
 /// admin-server config at its keytab. Approval itself is the running
@@ -1338,8 +1341,7 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     let marker = slots_ops::ExternalPending::load(&dir)?;
     let csr_path = if marker.setup_server && dir.join("certificate.pem").is_file() {
         let cfg = external_controller_config(&dir)?;
-        let (common_name, csr) =
-            runtime()?.block_on(admin_local::external_ca_csr(&cfg))?;
+        let (common_name, csr) = runtime()?.block_on(local::external_ca_csr(&cfg))?;
         let path = default_csr_filename(&common_name);
         atomic::write_atomic(&path, csr.as_bytes(), 0o644)
             .with_context(|| format!("writing CSR to {}", path.display()))?;
@@ -1373,7 +1375,7 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
             })
             .transpose()?;
         let fingerprint =
-            runtime()?.block_on(admin_local::external_ca_install(&cfg, signed, root))?;
+            runtime()?.block_on(local::external_ca_install(&cfg, signed, root))?;
         println!(
             "renewed the externally-signed controller CA without stopping it\n  identity: {fingerprint}"
         );
@@ -1408,7 +1410,7 @@ fn external_controller_config(ca_dir: &Path) -> Result<PathBuf> {
     let cfg_path = paths::discover_admin_server_config().context(
         "this externally-signed CA is configured as a controller, but no local admin-server config was found",
     )?;
-    let cfg = netidx_admin::admin_server_config::AdminServerConfig::load(&cfg_path)?;
+    let cfg = netidx_admin_client::admin_server_config::load(&cfg_path)?;
     let configured = cfg
         .roles
         .ca
@@ -1427,7 +1429,7 @@ async fn report_external_install(
     ans: &mut dyn Answerer,
     out: slots_ops::ExternalInstallOutcome,
     gate: plan::service::ServiceGate,
-) -> Result<Option<netidx_admin::service::ServiceScope>> {
+) -> Result<Option<netidx_admin_client::service::ServiceScope>> {
     use slots_ops::ExternalInstallOutcome;
     match out {
         ExternalInstallOutcome::OfflineCa => {
@@ -1597,14 +1599,14 @@ fn init(p: InitParams) -> Result<()> {
 /// Print the admin roster (local `list` and remote `list --server` share
 /// this), one line per admin: name, tier, and full policy incl.
 /// `may_manage_admins`.
-fn print_admin_list(admins: &[ca_vault::AdminInfo]) {
+fn print_admin_list(admins: &[AdminInfo]) {
     if admins.is_empty() {
         println!("(no admins — this CA is not vault-protected)");
     }
     for info in admins {
         let tier = match info.kind {
-            ca_vault::SlotKind::Signing => "signing",
-            ca_vault::SlotKind::Role => "role",
+            SlotKind::Signing => "signing",
+            SlotKind::Role => "role",
         };
         let pol = &info.policy;
         println!(
@@ -1637,15 +1639,15 @@ fn read_new_password(path: &Path) -> Result<admin_proto::Secret> {
 /// reports its domain in the pinned identity; a local CA is read off its own
 /// certificate.
 fn policy_context(
-    target: &admin_ops::AdminTarget,
+    target: &ops::AdminTarget,
     ca_dir: Option<&Path>,
 ) -> (String, Option<String>) {
     match target {
-        admin_ops::AdminTarget::Remote { session } => {
+        ops::AdminTarget::Remote { session } => {
             let domain = session.identity.domain.to_string();
             (ca_setup::default_ca_cn(&domain), Some(domain))
         }
-        admin_ops::AdminTarget::Local { .. } => {
+        ops::AdminTarget::Local { .. } => {
             let dir = ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
             let cn = dir.map(|d| existing_ca_cn(&d)).unwrap_or_default();
             (cn, None)
@@ -1681,7 +1683,7 @@ fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
     let mut ans = a.auth.answerer()?;
     let server = a.auth.server_addr()?;
     let rt = runtime()?;
-    let target = rt.block_on(admin_ops::resolve_admin_target(
+    let target = rt.block_on(ops::resolve_admin_target(
         &mut ans,
         server,
         a.auth.ca_dir.clone(),
@@ -1709,7 +1711,7 @@ fn admin_set_policy(a: AdminSetPolicyArgs) -> Result<()> {
     let mut ans = a.auth.answerer()?;
     let server = a.auth.server_addr()?;
     let rt = runtime()?;
-    let target = rt.block_on(admin_ops::resolve_admin_target(
+    let target = rt.block_on(ops::resolve_admin_target(
         &mut ans,
         server,
         a.auth.ca_dir.clone(),
@@ -1735,7 +1737,7 @@ fn admin_remove(a: AdminRemoveArgs) -> Result<()> {
     let mut ans = a.auth.answerer()?;
     let server = a.auth.server_addr()?;
     let rt = runtime()?;
-    let target = rt.block_on(admin_ops::resolve_admin_target(
+    let target = rt.block_on(ops::resolve_admin_target(
         &mut ans,
         server,
         a.auth.ca_dir.clone(),
@@ -1752,7 +1754,7 @@ fn admin_list(a: AdminScopeArgs) -> Result<()> {
     let mut ans = a.auth.answerer()?;
     let server = a.auth.server_addr()?;
     let rt = runtime()?;
-    let target = rt.block_on(admin_ops::resolve_admin_target(
+    let target = rt.block_on(ops::resolve_admin_target(
         &mut ans,
         server,
         a.auth.ca_dir.clone(),
@@ -1765,12 +1767,12 @@ fn admin_list(a: AdminScopeArgs) -> Result<()> {
 }
 
 /// Report a roster mutation, naming which CA it hit.
-fn report_admin_target(what: &str, name: &str, target: &admin_ops::AdminTarget) {
+fn report_admin_target(what: &str, name: &str, target: &ops::AdminTarget) {
     match target {
-        admin_ops::AdminTarget::Remote { session } => {
+        ops::AdminTarget::Remote { session } => {
             println!("{what} {name:?} on the CA at {}", session.server)
         }
-        admin_ops::AdminTarget::Local { .. } => {
+        ops::AdminTarget::Local { .. } => {
             println!("{what} {name:?} (via the local admin server)")
         }
     }
@@ -1785,7 +1787,7 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
         Some(addr) => {
             let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
             let identity = rt
-                .block_on(admin_client::fetch_identity(addr, NodeKind::Client))
+                .block_on(transport::fetch_identity(addr, NodeKind::Client))
                 .with_context(|| format!("contacting admin server {addr}"))?;
             init::show_network_identity(addr, &identity);
             Ok(())
@@ -1817,7 +1819,7 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
     let server = p.server.context(
         "--server <ip:port> is required (network discovery is interactive only)",
     )?;
-    let identity = admin_client::fetch_identity(server, NodeKind::Client)
+    let identity = transport::fetch_identity(server, NodeKind::Client)
         .await
         .with_context(|| format!("contacting admin server {server}"))?;
     init::show_network_identity(server, &identity);
@@ -1847,7 +1849,7 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
             .filter(|s| !s.is_empty())
             .collect()
     };
-    let issued = admin_client::request_cert(
+    let issued = transport::request_cert(
         server,
         NodeKind::Client,
         &name,
@@ -1896,7 +1898,7 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
 /// `admin set-policy`). Empty if it can't be read — the prompt then has
 /// no domain to suggest.
 fn existing_ca_cn(dir: &Path) -> String {
-    netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
+    netidx_admin_client::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
         .unwrap_or_default()
 }
 
@@ -2006,7 +2008,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
             IdMapChoice::Skip => None,
             IdMapChoice::Ask if !ans.interactive() => None,
             IdMapChoice::Register { .. } | IdMapChoice::Ask => {
-                let path = netidx_admin::id_map::user_id_map_path()?;
+                let path = netidx_admin_client::id_map::user_id_map_path()?;
                 Some(if ca_lock.contains(&path)? {
                     ca_lock.clone()
                 } else {
@@ -2371,9 +2373,9 @@ fn list() -> Result<()> {
         let cfg_path = paths::discover_admin_server_config().ok();
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
         match &cfg_path {
-            Some(p) if rt.block_on(admin_local::daemon_running(p)) => {
+            Some(p) if rt.block_on(local::daemon_running(p)) => {
                 let admins = rt
-                    .block_on(admin_local::list_admins(p))
+                    .block_on(local::list_admins(p))
                     .map(|a| a.into_iter().map(|i| i.admin).collect::<Vec<_>>())
                     .unwrap_or_default();
                 if admins.is_empty() {
@@ -2394,9 +2396,9 @@ fn list() -> Result<()> {
         println!("  key:    MISSING — CA cannot sign");
     }
     // Admin server.
-    let cfg = paths::discover_admin_server_config().ok().and_then(|p| {
-        netidx_admin::admin_server_config::AdminServerConfig::load(&p).ok()
-    });
+    let cfg = paths::discover_admin_server_config()
+        .ok()
+        .and_then(|p| netidx_admin_client::admin_server_config::load(&p).ok());
     match cfg {
         Some(c) => println!("  server: configured (listen {})", c.listen),
         None => println!("  server: not configured"),
@@ -2718,11 +2720,12 @@ mod tests {
         let issued = runtime()
             .unwrap()
             .block_on(async {
-                let lock = netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(
-                    ca_dir.path(),
-                )
-                .await?;
-                netidx_admin::plan::ca_setup::issue_identity_into(
+                let lock =
+                    netidx_admin_client::config_lock::ConfigDirLock::acquire_for_ca_dir(
+                        ca_dir.path(),
+                    )
+                    .await?;
+                netidx_admin_server::plan::ca_setup::issue_identity_into(
                     &lock,
                     &ca,
                     "resolver.example.com",
@@ -2803,19 +2806,21 @@ mod tests {
             .unwrap()
             .block_on(async {
                 let lock =
-                    netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&dir)
-                        .await?;
-                netidx_admin::ca_store::CaDir::open(lock, &dir).await
+                    netidx_admin_client::config_lock::ConfigDirLock::acquire_for_ca_dir(
+                        &dir,
+                    )
+                    .await?;
+                netidx_admin_server::ca_store::CaDir::open(lock, &dir).await
             })
             .unwrap();
         assert_eq!(
             cadir.vault.signing_slot_names().unwrap(),
-            vec![ca_vault::RECOVERY_ADMIN.to_string()]
+            vec![RECOVERY_ADMIN.to_string()]
         );
         let admins = cadir.vault.list_admins().unwrap();
         assert_eq!(admins.len(), 1, "offline CA has only the recovery slot");
-        assert_eq!(admins[0].admin, ca_vault::RECOVERY_ADMIN);
-        assert_eq!(admins[0].kind, ca_vault::SlotKind::Signing);
+        assert_eq!(admins[0].admin, RECOVERY_ADMIN);
+        assert_eq!(admins[0].kind, SlotKind::Signing);
     }
 
     /// `ca admin add` is gone — it must error and point the operator at

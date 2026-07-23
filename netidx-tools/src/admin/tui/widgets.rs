@@ -1,7 +1,7 @@
 //! Small shared rendering helpers for the admin TUI.
 
 use super::theme;
-use netidx_admin::fingerprint::Fingerprint;
+use netidx_admin_proto::fingerprint::Fingerprint;
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},

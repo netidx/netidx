@@ -9,6 +9,18 @@ the admin server rather than a separate daemon. The vault, signing
 engine, and join trust model from the CA-server design are unchanged
 and remain documented there.
 
+The implementation is split by where code runs:
+
+- `netidx-admin-proto` owns the wire types, framing, policies, identities,
+  fingerprints, and the shared `admin-server.json` data model.
+- `netidx-admin-client` owns cross-platform transport, discovery, remote
+  operations, enrollment, configuration tooling, and service installation.
+- `netidx-admin-server` owns the Unix daemon, CA vault and stores, authority
+  operations, and controller/resolver authority provisioning.
+
+Dependencies point one way: protocol ← client ← server. `netidx-tools` is the
+composition root that selects client-only or Unix authority operations.
+
 ## Why
 
 Interactive Q&A doesn't scale to a distributed system: every setup
@@ -53,12 +65,15 @@ pair.
    no cert yet); requests that mutate host state (`AddIdentity`)
    require a verified reserved-SAN client cert.
 
-## Protocol (`netidx-admin/src/conf_proto.rs`)
+## Protocol (`netidx-admin-proto/src/lib.rs`)
 
-Length-prefixed JSON over TLS, port 4565. A connection is: TLS accept,
+Length-prefixed Pack values over TLS, port 4565. A connection is: TLS accept,
 `ClientHello`/`ServerHello` exchange, then exactly **one** `Request`
-and its response — human think-time never holds a connection (the
-server bounds each connection's lifetime at 30s).
+and its response — human think-time never holds a connection (the server
+bounds each connection's lifetime at 30s). List responses may contain a
+sequence of individually length-prefixed records followed by an explicit end
+record; this keeps each allocation bounded without adding another request or
+connection.
 
 ```text
 ServerHello { protocol_version, domain, roles: [ca|resolver|id-map] }
@@ -428,7 +443,7 @@ machine credentials in plaintext.
   impersonate the network), so it defaults on only for the founding
   admin and off for added admins.
 
-## Discovery (`netidx-admin/src/discovery.rs`)
+## Discovery (`netidx-admin-client/src/discovery.rs`)
 
 mDNS/DNS-SD via the pure-Rust `mdns-sd` crate (no avahi/Bonjour
 dependency; a Windows workstation browses with the same stack).

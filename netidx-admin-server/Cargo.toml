@@ -1,0 +1,61 @@
+[package]
+name = "netidx-admin-server"
+version = "0.32.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "netidx administrative server and certificate authority"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+documentation = "https://docs.rs/netidx-admin-server"
+keywords = ["networking", "distributed", "configuration"]
+categories = ["network-programming"]
+
+[dependencies]
+aes-gcm = { workspace = true }
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+argon2 = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+enumflags2 = { workspace = true }
+futures = { workspace = true }
+globset = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+log = { workspace = true }
+netidx = { path = "../netidx", version = "0.32.0", default-features = false }
+netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
+netidx-admin-client = { path = "../netidx-admin-client", version = "0.32.0" }
+netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }
+netidx-core = { path = "../netidx-core", version = "0.32.0" }
+netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
+netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
+nix = { workspace = true, features = ["user"] }
+openssl = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true, features = ["x509-parser"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }
+x509-parser = { workspace = true, features = ["verify"] }
+zeroize = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
