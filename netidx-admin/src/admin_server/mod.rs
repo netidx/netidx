@@ -355,7 +355,7 @@ fn outbound_identity_digest(cert_pem: &[u8], key_pem: &[u8]) -> [u8; 32] {
 struct Server {
     state: RwLock<MutableState>,
     config_lock: ConfigDirLock,
-    _ca_alias_lock: Option<ConfigDirLock>,
+    _offline_ca_lock_guard: Option<ConfigDirLock>,
     /// Where to persist peer updates. `None` (tests) keeps them
     /// in-memory only.
     cfg_path: Option<PathBuf>,
@@ -376,7 +376,7 @@ struct Server {
 impl Server {
     async fn new(
         config_lock: ConfigDirLock,
-        ca_alias_lock: Option<ConfigDirLock>,
+        offline_ca_lock_guard: Option<ConfigDirLock>,
         cfg: AdminServerConfig,
         cfg_path: Option<PathBuf>,
         serving_cert_pem: Vec<u8>,
@@ -487,7 +487,7 @@ impl Server {
         };
         Server::from_state(
             config_lock,
-            ca_alias_lock,
+            offline_ca_lock_guard,
             MutableState { cfg, map, ca, password_limiter: PasswordLimiter::default() },
             cfg_path,
             serving_cert_pem,
@@ -499,7 +499,7 @@ impl Server {
 
     fn from_state(
         config_lock: ConfigDirLock,
-        ca_alias_lock: Option<ConfigDirLock>,
+        offline_ca_lock_guard: Option<ConfigDirLock>,
         state: MutableState,
         cfg_path: Option<PathBuf>,
         serving_cert_pem: Vec<u8>,
@@ -523,7 +523,7 @@ impl Server {
         Ok(Arc::new(Server {
             state: RwLock::new(state),
             config_lock,
-            _ca_alias_lock: ca_alias_lock,
+            _offline_ca_lock_guard: offline_ca_lock_guard,
             cfg_path,
             serving_cert_pem,
             serving_key_pem,

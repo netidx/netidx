@@ -493,7 +493,7 @@ async fn handle_conn(
 pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let config_lock = ConfigDirLock::acquire_for_file_async(&cfg_path).await?;
     let cfg = AdminServerConfig::load_async(&cfg_path).await?;
-    let ca_alias_lock = cfg
+    let offline_ca_lock_guard = cfg
         .roles
         .ca
         .as_ref()
@@ -512,7 +512,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     let mdns = cfg.mdns;
     let state = Server::new(
         config_lock,
-        ca_alias_lock,
+        offline_ca_lock_guard,
         cfg,
         Some(cfg_path),
         serving_cert_pem,
