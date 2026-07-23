@@ -1,5 +1,23 @@
 set +e
 echo "== $(hostname) reset =="
+for user in root eric; do
+    id "$user" >/dev/null 2>&1 || continue
+    uid=$(id -u "$user")
+    home=$(getent passwd "$user" | cut -d: -f6)
+    runtime="/run/user/$uid"
+    if [ -d "$runtime" ]; then
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
+            systemctl --user disable --now netidx.service >/dev/null 2>&1
+    fi
+    rm -f "$home/.config/systemd/user/netidx.service"
+    rm -f "$home/.config/systemd/user/default.target.wants/netidx.service"
+    if [ -d "$runtime" ]; then
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
+            systemctl --user daemon-reload >/dev/null 2>&1
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$runtime" \
+            systemctl --user reset-failed >/dev/null 2>&1
+    fi
+done
 # Match the executable name exactly. The deployed process may appear in argv as
 # either `/usr/local/bin/netidx` or just `netidx`; path-only `pkill -f` misses
 # the latter and can leave an orphan controller holding the CA lock.

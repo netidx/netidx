@@ -5,8 +5,8 @@ mod tests;
 use super::{
     MutableState, PUSH_TIMEOUT, Server, audit,
     auth::{
-        admin_authority_over, authenticate, safe_auth_failure, scope_covers,
-        server_unlock,
+        PreparedAdminAuthentication, PreparedServerUnlock, admin_authority_over,
+        authenticate, safe_auth_failure, scope_covers, server_unlock,
     },
     ca_dir,
 };
@@ -36,8 +36,11 @@ pub(super) async fn revoke_server_certificates(
     ca: &mut ca_store::CaDir,
     server_id: admin_proto::AdminServerId,
     admin: &str,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<usize> {
-    let signing = server_unlock(ca).await.map_err(|reason| anyhow!(reason))?;
+    let signing = server_unlock(ca, prepared_server_unlock)
+        .await
+        .map_err(|reason| anyhow!(reason))?;
     let now = ca_store::now_unix();
     let store = &mut ca.store;
     let serials: Vec<_> = store
@@ -108,12 +111,21 @@ struct PreparedRevoke {
 async fn prepare_revoke(
     state: &Server,
     req: &RevokeRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<PreparedRevoke, String> {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            prepare_revoke_inner(state, &req, operation_id).await
+            prepare_revoke_inner(
+                state,
+                &req,
+                authentication,
+                prepared_server_unlock,
+                operation_id,
+            )
+            .await
         })
         .await
 }
@@ -121,11 +133,13 @@ async fn prepare_revoke(
 async fn prepare_revoke_inner(
     state: &mut MutableState,
     req: &RevokeRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<PreparedRevoke, String> {
     let MutableState { map, ca, .. } = state;
     let ca = ca.as_mut().expect("CA role held");
-    let authd = match authenticate(ca, &req.credential) {
+    let authd = match authenticate(ca, &req.credential, authentication) {
         Ok(a) => a,
         Err(reason) => {
             return Err(safe_auth_failure(&req.credential, reason));
@@ -239,7 +253,7 @@ async fn prepare_revoke_inner(
         }
     }
     // Re-sign the CRL with the server's own key (the autorenew credential).
-    let crl_pem = match server_unlock(ca).await {
+    let crl_pem = match server_unlock(ca, prepared_server_unlock).await {
         Ok(signing) => {
             let path = {
                 let store = &mut ca.store;
@@ -509,9 +523,13 @@ pub(super) async fn push_crl_to_peers(
 pub(super) async fn handle_revoke(
     state: &Arc<Server>,
     req: &RevokeRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> RevokeResponse {
     let operation_id = admin_proto::OperationId::new();
-    let prepared = prepare_revoke(state, req, operation_id).await;
+    let prepared =
+        prepare_revoke(state, req, authentication, prepared_server_unlock, operation_id)
+            .await;
     let PreparedRevoke { admin, mut warnings, crl_pem } = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => return RevokeResponse::Err { reason },

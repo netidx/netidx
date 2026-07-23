@@ -4,7 +4,10 @@ mod tests;
 
 use super::{
     PUSH_TIMEOUT, Server, audit,
-    auth::{authenticate, local_superuser, safe_auth_failure, scope_covers},
+    auth::{
+        PreparedAdminAuthentication, authenticate, local_superuser, safe_auth_failure,
+        scope_covers,
+    },
     topology::own_base,
 };
 use crate::{
@@ -72,6 +75,7 @@ pub(super) async fn handle_get_perms(state: &Server) -> GetPermsResponse {
 async fn authenticate_perms_caller(
     state: &Arc<Server>,
     credential: &admin_proto::AdminCredential,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
     if local {
@@ -81,7 +85,11 @@ async fn authenticate_perms_caller(
     let failure_credential = credential.clone();
     match state
         .write(move |state| {
-            authenticate(state.ca.as_mut().expect("CA role held"), &auth_credential)
+            authenticate(
+                state.ca.as_mut().expect("CA role held"),
+                &auth_credential,
+                authentication,
+            )
         })
         .await
     {
@@ -136,16 +144,20 @@ async fn confine_local_perms(
 pub(super) async fn handle_read_perms(
     state: &Arc<Server>,
     req: &ReadPermsRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> ReadPermsResponse {
     let err = |reason: String| ReadPermsResponse::Err { reason };
     if !local && !state.has_ca().await {
         return err("a remote perms read must be sent to the CA controller".to_string());
     }
-    let authd = match authenticate_perms_caller(state, &req.credential, local).await {
-        Ok(authd) => authd,
-        Err(reason) => return err(reason),
-    };
+    let authd =
+        match authenticate_perms_caller(state, &req.credential, authentication, local)
+            .await
+        {
+            Ok(authd) => authd,
+            Err(reason) => return err(reason),
+        };
     if local && let Err(e) = confine_local_perms(state, &req.target_path, "read").await {
         return err(format!("{e:#}"));
     }
@@ -362,16 +374,20 @@ async fn push_perms_edit_to_peers(
 pub(super) async fn handle_edit_perms(
     state: &Arc<Server>,
     req: &EditPermsRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> EditPermsResponse {
     let err = |reason: String| EditPermsResponse::Err { reason };
     if !state.has_ca().await {
         return err("a perms edit must be sent to the CA host".to_string());
     }
-    let authd = match authenticate_perms_caller(state, &req.credential, local).await {
-        Ok(authd) => authd,
-        Err(reason) => return err(reason),
-    };
+    let authd =
+        match authenticate_perms_caller(state, &req.credential, authentication, local)
+            .await
+        {
+            Ok(authd) => authd,
+            Err(reason) => return err(reason),
+        };
     if local && let Err(e) = confine_local_perms(state, &req.target_path, "edit").await {
         return err(format!("{e:#}"));
     }

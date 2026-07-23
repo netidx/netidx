@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv6Addr},
@@ -21,8 +20,13 @@ pub(super) struct PasswordLimiter {
     entries: HashMap<IpAddr, Entry>,
 }
 
+pub(super) enum Reservation {
+    Ready(Duration),
+    InFlight,
+}
+
 impl PasswordLimiter {
-    pub(super) fn reserve(&mut self, source: IpAddr) -> Result<Duration> {
+    pub(super) fn reserve(&mut self, source: IpAddr) -> Reservation {
         self.reserve_at(source, Instant::now())
     }
 
@@ -30,7 +34,7 @@ impl PasswordLimiter {
         self.complete_at(source, success, Instant::now())
     }
 
-    fn reserve_at(&mut self, source: IpAddr, now: Instant) -> Result<Duration> {
+    fn reserve_at(&mut self, source: IpAddr, now: Instant) -> Reservation {
         let source = source_key(source);
         let entries = &mut self.entries;
         if entries.len() >= MAX_SOURCES && !entries.contains_key(&source) {
@@ -55,7 +59,7 @@ impl PasswordLimiter {
         });
         prune(entry, now);
         if entry.in_flight {
-            bail!("another password attempt from this source is already in progress");
+            return Reservation::InFlight;
         }
         let delay = entry
             .failures
@@ -71,7 +75,7 @@ impl PasswordLimiter {
             .unwrap_or(Duration::ZERO);
         entry.in_flight = true;
         entry.last_seen = now;
-        Ok(delay)
+        Reservation::Ready(delay)
     }
 
     fn complete_at(&mut self, source: IpAddr, success: Option<bool>, now: Instant) {
@@ -116,30 +120,39 @@ mod tests {
         let source: IpAddr = "192.0.2.10".parse().unwrap();
         let start = Instant::now();
 
-        assert_eq!(limiter.reserve_at(source, start).unwrap(), Duration::ZERO);
-        assert!(limiter.reserve_at(source, start).is_err(), "only one KDF per IP");
+        assert!(matches!(
+            limiter.reserve_at(source, start),
+            Reservation::Ready(Duration::ZERO)
+        ));
+        assert!(matches!(limiter.reserve_at(source, start), Reservation::InFlight));
         limiter.complete_at(source, Some(false), start);
 
-        assert_eq!(limiter.reserve_at(source, start).unwrap(), Duration::from_secs(1));
+        assert!(matches!(
+            limiter.reserve_at(source, start),
+            Reservation::Ready(delay) if delay == Duration::from_secs(1)
+        ));
         limiter.complete_at(source, Some(false), start + Duration::from_secs(1));
-        assert_eq!(
-            limiter.reserve_at(source, start + Duration::from_secs(1)).unwrap(),
-            Duration::from_secs(2)
-        );
+        assert!(matches!(
+            limiter.reserve_at(source, start + Duration::from_secs(1)),
+            Reservation::Ready(delay) if delay == Duration::from_secs(2)
+        ));
         limiter.complete_at(source, Some(true), start + Duration::from_secs(3));
-        assert_eq!(
-            limiter.reserve_at(source, start + Duration::from_secs(3)).unwrap(),
-            Duration::ZERO
-        );
+        assert!(matches!(
+            limiter.reserve_at(source, start + Duration::from_secs(3)),
+            Reservation::Ready(Duration::ZERO)
+        ));
         limiter.complete_at(source, Some(false), start + Duration::from_secs(3));
-        assert_eq!(
-            limiter.reserve_at(source, start + Duration::from_secs(3)).unwrap(),
-            Duration::from_secs(3)
-        );
+        assert!(matches!(
+            limiter.reserve_at(source, start + Duration::from_secs(3)),
+            Reservation::Ready(delay) if delay == Duration::from_secs(3)
+        ));
         limiter.complete_at(source, Some(true), start + Duration::from_secs(6));
 
         let expired = start + FAILURE_WINDOW + Duration::from_secs(4);
-        assert_eq!(limiter.reserve_at(source, expired).unwrap(), Duration::ZERO);
+        assert!(matches!(
+            limiter.reserve_at(source, expired),
+            Reservation::Ready(Duration::ZERO)
+        ));
         limiter.complete_at(source, Some(true), expired);
     }
 
@@ -151,9 +164,15 @@ mod tests {
         let same_64: IpAddr = "2001:db8:1234:5678:ffff::2".parse().unwrap();
         let other_64: IpAddr = "2001:db8:1234:5679::1".parse().unwrap();
 
-        limiter.reserve_at(first, start).unwrap();
-        assert!(limiter.reserve_at(same_64, start).is_err());
-        assert_eq!(limiter.reserve_at(other_64, start).unwrap(), Duration::ZERO);
+        assert!(matches!(
+            limiter.reserve_at(first, start),
+            Reservation::Ready(Duration::ZERO)
+        ));
+        assert!(matches!(limiter.reserve_at(same_64, start), Reservation::InFlight));
+        assert!(matches!(
+            limiter.reserve_at(other_64, start),
+            Reservation::Ready(Duration::ZERO)
+        ));
         limiter.complete_at(first, Some(true), start);
         limiter.complete_at(other_64, Some(true), start);
     }
@@ -163,9 +182,15 @@ mod tests {
         let mut limiter = PasswordLimiter::default();
         let source: IpAddr = "198.51.100.7".parse().unwrap();
         let now = Instant::now();
-        limiter.reserve_at(source, now).unwrap();
+        assert!(matches!(
+            limiter.reserve_at(source, now),
+            Reservation::Ready(Duration::ZERO)
+        ));
         limiter.complete_at(source, None, now);
-        assert_eq!(limiter.reserve_at(source, now).unwrap(), Duration::ZERO);
+        assert!(matches!(
+            limiter.reserve_at(source, now),
+            Reservation::Ready(Duration::ZERO)
+        ));
         limiter.complete_at(source, Some(true), now);
     }
 }

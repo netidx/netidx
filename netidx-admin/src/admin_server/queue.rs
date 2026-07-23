@@ -1,6 +1,9 @@
 use super::{
     AUTORENEW_ADMIN, MutableState, Server, audit,
-    auth::{admin_authority_over, authenticate, one_live_refusal, server_unlock},
+    auth::{
+        PreparedAdminAuthentication, PreparedServerUnlock, admin_authority_over,
+        authenticate, one_live_refusal, server_unlock,
+    },
     ca_dir,
     enrollment::{authorize_enrollment, finish_enrollment, stage_enrollment},
     issuance::{
@@ -28,6 +31,7 @@ pub(super) async fn handle_list_issued<S>(
     stream: &mut S,
     state: &Arc<Server>,
     req: &ListIssuedRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -37,7 +41,7 @@ where
             let Some(ca) = state.ca.as_mut() else {
                 return Err("this host does not hold the CA".to_string());
             };
-            start_list_issued(ca, req).await
+            start_list_issued(ca, req, authentication).await
         })
         .await
     {
@@ -89,6 +93,8 @@ where
 pub(super) async fn handle_approve_request(
     state: &Arc<Server>,
     req: &ApproveRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> ApproveResponse {
     if ca_dir(state).await.is_none() {
         return ApproveResponse::Err {
@@ -98,8 +104,14 @@ pub(super) async fn handle_approve_request(
     let approved = state
         .write_async(async move |state| {
             let map = state.map.clone();
-            handle_approve(state.ca.as_mut().expect("CA role held"), req, Some(&map))
-                .await
+            handle_approve(
+                state.ca.as_mut().expect("CA role held"),
+                req,
+                authentication,
+                prepared_server_unlock,
+                Some(&map),
+            )
+            .await
         })
         .await;
     let Approved { resp, push, enrollment, replacement_crl } = match approved {
@@ -118,7 +130,8 @@ pub(super) async fn handle_approve_request(
     let operation_id =
         propagate_issuance(state, &mut warnings, push, replacement_crl).await;
     if let Some((server_id, enrollment)) = enrollment
-        && let Err(e) = finish_enrollment(state, server_id, &enrollment).await
+        && let Err(e) =
+            finish_enrollment(state, server_id, &enrollment, prepared_server_unlock).await
     {
         warnings.push(format!("recording enrollment grant: {e:#}"));
     }
@@ -176,7 +189,12 @@ pub(super) async fn handle_poll(state: &Arc<Server>, req: &PollRequest) -> PollR
     resp
 }
 
-pub(super) async fn autorenew_sweep(ca: &mut ca_store::CaDir, password: &str) -> usize {
+pub(super) async fn autorenew_sweep(
+    ca: &mut ca_store::CaDir,
+    password: &str,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
+) -> usize {
     let pending = match ca.store.pending().await {
         Ok(p) => p,
         Err(e) => {
@@ -191,7 +209,8 @@ pub(super) async fn autorenew_sweep(ca: &mut ca_store::CaDir, password: &str) ->
             request_id: q.id.clone(),
             id_map_groups: Vec::new(),
         };
-        let result = handle_approve(ca, &req, None).await;
+        let result =
+            handle_approve(ca, &req, authentication, prepared_server_unlock, None).await;
         match result {
             Ok(Approved { resp: SignResponse::Ok(_), .. }) => {
                 approved += 1;
@@ -222,8 +241,9 @@ pub(super) async fn autorenew_sweep(ca: &mut ca_store::CaDir, password: &str) ->
 async fn start_list_issued(
     ca: &mut ca_store::CaDir,
     req: &ListIssuedRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> std::result::Result<ca_store::IssuedRecords, String> {
-    authenticate(ca, &req.credential)?;
+    authenticate(ca, &req.credential, authentication)?;
     ca.store
         .compact_issued(ca_store::now_unix())
         .await
@@ -250,6 +270,8 @@ struct Approved {
 async fn handle_approve(
     ca: &mut ca_store::CaDir,
     req: &ApproveRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     map: Option<&NetworkMap>,
 ) -> std::result::Result<Approved, String> {
     // This cheap precheck (no auth) rejects an already-terminal request;
@@ -267,7 +289,7 @@ async fn handle_approve(
         }
         Err(e) => return Err(format!("reading the queue: {e:#}")),
     };
-    approve_serialized(ca, req, queued, map).await
+    approve_serialized(ca, req, authentication, prepared_server_unlock, queued, map).await
 }
 
 /// Sign a queued request through the same checks a synchronous Sign goes
@@ -278,6 +300,8 @@ async fn handle_approve(
 async fn approve_serialized(
     ca: &mut ca_store::CaDir,
     req: &ApproveRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     queued: ca_store::QueuedReq,
     map: Option<&NetworkMap>,
 ) -> std::result::Result<Approved, String> {
@@ -285,7 +309,7 @@ async fn approve_serialized(
     // scoped enrollment authority; signs the reserved serving SAN; no one-live
     // check and no id-map groups (a admin server isn't a user).
     if let Some(enrollment) = queued.enrollment.clone() {
-        let authd = authenticate(ca, &req.credential)?;
+        let authd = authenticate(ca, &req.credential, authentication)?;
         authorize_enrollment(&authd, &enrollment, map)?;
         let server_id = admin_proto::AdminServerId::new();
         let mut staged = map
@@ -293,7 +317,7 @@ async fn approve_serialized(
             .ok_or_else(|| "the CA-owned network map is unavailable".to_string())?;
         stage_enrollment(&mut staged, server_id, &enrollment)
             .map_err(|e| format!("invalid enrollment grant: {e:#}"))?;
-        let signing = server_unlock(ca).await?;
+        let signing = server_unlock(ca, prepared_server_unlock).await?;
         let signed = issue_serialized(
             ca,
             &signing,
@@ -328,12 +352,12 @@ async fn approve_serialized(
     // `issue_serialized` re-checks the renewed serial is still live before
     // commit, so a revocation since enqueue refuses the renewal.
     if let Some(orig_serial) = queued.renewal_of {
-        let authd = authenticate(ca, &req.credential)?;
+        let authd = authenticate(ca, &req.credential, authentication)?;
         let validity = queued
             .requested_validity
             .min(authd.policy.max_validity)
             .max(Duration::from_secs(1));
-        let signing = server_unlock(ca).await?;
+        let signing = server_unlock(ca, prepared_server_unlock).await?;
         let signed = issue_serialized(
             ca,
             &signing,
@@ -370,9 +394,16 @@ async fn approve_serialized(
         id_map_groups: req.id_map_groups.clone(),
         replaces_serial: queued.replaces_serial,
     };
-    let signed =
-        handle_sign_request_op(ca, &sign_req, "approve", &queued, Some(&req.request_id))
-            .await;
+    let signed = handle_sign_request_op(
+        ca,
+        &sign_req,
+        authentication,
+        prepared_server_unlock,
+        "approve",
+        &queued,
+        Some(&req.request_id),
+    )
+    .await;
     Ok(Approved {
         resp: signed.resp,
         push: signed.push,
@@ -579,18 +610,24 @@ pub(super) async fn handle_enqueue(
 pub(super) async fn handle_list_queue(
     state: &Server,
     req: &ListQueueRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ListQueueResponse {
     let req = req.clone();
-    state.write_async(async move |state| handle_list_queue_inner(state, &req).await).await
+    state
+        .write_async(async move |state| {
+            handle_list_queue_inner(state, &req, authentication).await
+        })
+        .await
 }
 
 async fn handle_list_queue_inner(
     state: &mut MutableState,
     req: &ListQueueRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ListQueueResponse {
     let MutableState { map, ca, .. } = state;
     let ca = ca.as_mut().expect("CA role held");
-    if let Err(reason) = authenticate(ca, &req.credential) {
+    if let Err(reason) = authenticate(ca, &req.credential, authentication) {
         return ListQueueResponse::Err { reason };
     }
     match ca.store.pending().await {
@@ -631,6 +668,7 @@ async fn handle_list_queue_inner(
 pub(super) async fn handle_deny(
     ca: &mut ca_store::CaDir,
     req: &DenyRequest,
+    authentication: &PreparedAdminAuthentication,
     map: Option<&NetworkMap>,
 ) -> DenyResponse {
     // Cheap precheck (no auth) for an already-terminal/unknown request.
@@ -655,7 +693,7 @@ pub(super) async fn handle_deny(
             return DenyResponse::Err { reason: format!("reading the queue: {e:#}") };
         }
     };
-    let authd = match authenticate(ca, &req.credential) {
+    let authd = match authenticate(ca, &req.credential, authentication) {
         Ok(a) => a,
         Err(reason) => return DenyResponse::Err { reason },
     };

@@ -4,7 +4,7 @@ mod tests;
 
 use super::{
     PUSH_TIMEOUT, Server, audit,
-    auth::{authenticate, safe_auth_failure, scope_covers},
+    auth::{PreparedAdminAuthentication, authenticate, safe_auth_failure, scope_covers},
 };
 use crate::{
     admin_client,
@@ -59,6 +59,7 @@ fn registered_server_addr(
 pub(super) async fn handle_control_service(
     state: &Arc<Server>,
     req: &ControlServiceRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ControlServiceResponse {
     let err = |reason: String| ControlServiceResponse::Err { reason };
     if !state.has_ca().await {
@@ -68,7 +69,11 @@ pub(super) async fn handle_control_service(
         let credential = req.credential.clone();
         state
             .write(move |state| {
-                authenticate(state.ca.as_mut().expect("CA role held"), &credential)
+                authenticate(
+                    state.ca.as_mut().expect("CA role held"),
+                    &credential,
+                    authentication,
+                )
             })
             .await
     };

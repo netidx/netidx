@@ -55,7 +55,7 @@ use anyhow::{Context, Result, bail};
 use enumflags2::BitFlags;
 use log::{error, warn};
 use parking_lot::Mutex;
-use password_limiter::PasswordLimiter;
+use password_limiter::{PasswordLimiter, Reservation};
 use rustls::RootCertStore;
 use rustls_pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
@@ -65,7 +65,10 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{io::AsyncWriteExt, sync::RwLock};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Notify, RwLock},
+};
 
 /// Max simultaneous connections. These are cheap (a TLS handshake and a
 /// few small messages), so this can be generous — it just bounds socket
@@ -102,7 +105,9 @@ const AUTORENEW_POLL: Duration = Duration::from_secs(60);
 
 #[cfg(test)]
 mod state_tests {
-    use super::auth::{REQUEST_AUTHENTICATION, authenticate};
+    use super::auth::{
+        PreparedAdminAuthentication, PreparedServerUnlock, authenticate, server_unlock,
+    };
     use super::*;
 
     #[test]
@@ -163,28 +168,24 @@ mod state_tests {
     }
 
     #[tokio::test]
-    async fn dropping_a_request_does_not_release_an_attempt_still_owned_by_argon() {
+    async fn concurrent_password_attempt_waits_for_the_argon_owner() {
         let state = limiter_server();
         let source = "203.0.113.10".parse().unwrap();
-        let (request_attempt, delay) =
-            state.begin_password_attempt(source).await.unwrap();
+        let (request_attempt, delay) = state.begin_password_attempt(source).await;
         assert_eq!(delay, Duration::ZERO);
         let argon_attempt = request_attempt.clone();
         drop(request_attempt);
-        assert!(state.begin_password_attempt(source).await.is_err());
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move { state.begin_password_attempt(source).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
 
         argon_attempt.finish(false);
         drop(argon_attempt);
-        let (next, delay) = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let Ok(attempt) = state.begin_password_attempt(source).await {
-                    break attempt;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        let (next, delay) =
+            tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap();
         assert!(
             delay > Duration::from_millis(800) && delay <= Duration::from_secs(1),
             "the completed Argon2 attempt must record its failure: {delay:?}"
@@ -225,14 +226,11 @@ mod state_tests {
             .unwrap();
         let authenticated = snapshot.authenticate("alice", "old").unwrap();
         let credential = admin_proto::AdminCredential::password("alice", "old");
-        let first = REQUEST_AUTHENTICATION
-            .scope(
-                Some(Ok(authenticated.clone())),
-                state.write({
-                    let credential = credential.clone();
-                    move |state| authenticate(state.ca.as_mut().unwrap(), &credential)
-                }),
-            )
+        let prepared = PreparedAdminAuthentication::Password(Ok(authenticated.clone()));
+        let first = state
+            .write(|state| {
+                authenticate(state.ca.as_mut().unwrap(), &credential, &prepared)
+            })
             .await;
         assert_eq!(first.unwrap().admin, "alice");
 
@@ -246,13 +244,88 @@ mod state_tests {
                     .unwrap();
             })
             .await;
-        let stale = REQUEST_AUTHENTICATION
-            .scope(
-                Some(Ok(authenticated)),
-                state.write(move |state| {
-                    authenticate(state.ca.as_mut().unwrap(), &credential)
-                }),
+        let prepared = PreparedAdminAuthentication::Password(Ok(authenticated));
+        let stale = state
+            .write(|state| {
+                authenticate(state.ca.as_mut().unwrap(), &credential, &prepared)
+            })
+            .await;
+        assert!(stale.is_err());
+    }
+
+    #[tokio::test]
+    async fn prepared_authentication_must_match_the_credential_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        ca.vault
+            .create(b"mock-ca-key", "alice", "pw", crate::ca_policy::recovery_policy())
+            .await
+            .unwrap();
+        let authenticated = ca.vault.authenticate("alice", "pw").unwrap();
+        let password = admin_proto::AdminCredential::password("alice", "pw");
+        let session = admin_proto::AdminCredential::Session {
+            token: admin_proto::Secret("not-a-session".into()),
+        };
+
+        assert!(
+            authenticate(&mut ca, &password, &PreparedAdminAuthentication::Session)
+                .is_err()
+        );
+        assert!(
+            authenticate(
+                &mut ca,
+                &session,
+                &PreparedAdminAuthentication::Password(Ok(authenticated)),
             )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rwlock_state_revalidates_worker_server_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        ca.vault
+            .create(
+                b"mock-ca-key",
+                "recovery",
+                "rpw",
+                crate::ca_policy::recovery_policy(),
+            )
+            .await
+            .unwrap();
+        ca.vault
+            .add_signing_slot(
+                "rpw",
+                AUTORENEW_ADMIN,
+                "apw",
+                crate::ca_policy::autorenew_policy(),
+            )
+            .await
+            .unwrap();
+        let unlocked = ca.vault.snapshot().unwrap().unlock("apw").unwrap();
+        let prepared =
+            PreparedServerUnlock::from_result(Ok(triomphe::Arc::new(unlocked)));
+        let state = test_server(Some(ca));
+
+        state
+            .write_async(async move |state| {
+                state
+                    .ca
+                    .as_mut()
+                    .unwrap()
+                    .vault
+                    .remove_slot(AUTORENEW_ADMIN, false)
+                    .await
+                    .unwrap();
+            })
+            .await;
+        let stale = state
+            .write_async(async |state| {
+                server_unlock(state.ca.as_mut().unwrap(), &prepared).await
+            })
             .await;
         assert!(stale.is_err());
     }
@@ -294,6 +367,7 @@ struct Server {
     roots: RootCertStore,
     pki_client: admin_client::PkiClient,
     outbound_tls: Mutex<Option<CachedOutboundClient>>,
+    password_attempt_completed: Notify,
     /// The one home CA for application-level admin authorization. Other
     /// certificates in `trusted.pem` remain data-plane federation anchors.
     home_ca_der: CertificateDer<'static>,
@@ -456,6 +530,7 @@ impl Server {
             roots,
             pki_client,
             outbound_tls: Mutex::new(outbound_tls),
+            password_attempt_completed: Notify::new(),
             home_ca_der,
         }))
     }
@@ -503,10 +578,18 @@ impl Server {
     async fn begin_password_attempt(
         self: &Arc<Self>,
         source: IpAddr,
-    ) -> Result<(PasswordAttempt, Duration)> {
-        let delay =
-            self.write(move |state| state.password_limiter.reserve(source)).await?;
-        Ok((PasswordAttempt::new(self, source), delay))
+    ) -> (PasswordAttempt, Duration) {
+        loop {
+            let completed = self.password_attempt_completed.notified();
+            tokio::pin!(completed);
+            completed.as_mut().enable();
+            match self.write(move |state| state.password_limiter.reserve(source)).await {
+                Reservation::Ready(delay) => {
+                    return (PasswordAttempt::new(self, source), delay);
+                }
+                Reservation::InFlight => completed.await,
+            }
+        }
     }
 
     async fn add_identity(&self, req: &AddIdentityRequest) -> AddIdentityResponse {

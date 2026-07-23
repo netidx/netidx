@@ -1,6 +1,6 @@
 use super::{
     MutableState, Server, audit,
-    auth::{authenticate, local_superuser, prepared_authentication, scope_covers},
+    auth::{PreparedAdminAuthentication, authenticate, local_superuser, scope_covers},
 };
 use crate::{
     admin_proto::{
@@ -15,6 +15,7 @@ use std::time::Duration;
 pub(super) async fn handle_login(
     state: &Server,
     req: &admin_proto::LoginRequest,
+    prepared: &PreparedAdminAuthentication,
 ) -> admin_proto::LoginResponse {
     if !state.has_ca().await {
         return admin_proto::LoginResponse::Err {
@@ -26,11 +27,11 @@ pub(super) async fn handle_login(
             let ca = state.ca.as_mut().expect("CA role held");
             match &req.credential {
                 admin_proto::AdminCredential::Password { .. } => {
-                    match prepared_authentication(ca) {
-                        Some(Ok(authenticated)) => {
+                    match authenticate(ca, &req.credential, prepared) {
+                        Ok(authenticated) => {
                             ca.sessions.login_authenticated(authenticated)
                         }
-                        Some(Err(_)) | None => admin_proto::LoginResponse::Err {
+                        Err(_) => admin_proto::LoginResponse::Err {
                             reason: "authentication failed".into(),
                         },
                     }
@@ -63,12 +64,13 @@ pub(super) async fn handle_logout(
 fn authorize_admin_mgmt(
     ca: &mut ca_store::CaDir,
     credential: &admin_proto::AdminCredential,
+    prepared: &PreparedAdminAuthentication,
     local: bool,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
     if local {
         return Ok(local_superuser());
     }
-    let authd = authenticate(ca, credential)?;
+    let authd = authenticate(ca, credential, prepared)?;
     if matches!(authd.kind, ca_vault::SlotKind::Signing) || authd.policy.may_manage_admins
     {
         Ok(authd)
@@ -188,13 +190,15 @@ fn last_role_manager(vault: &ca_vault::CAVault, target: &str) -> Result<bool> {
 pub(super) async fn handle_add_role_admin_prepared(
     state: &Server,
     req: &AddRoleAdminRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
     prepared: std::result::Result<ca_vault::PreparedRoleSlot, String>,
 ) -> AdminMgmtResponse {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            handle_add_role_admin_inner(state, &req, local, prepared).await
+            handle_add_role_admin_inner(state, &req, authentication, local, prepared)
+                .await
         })
         .await
 }
@@ -202,6 +206,7 @@ pub(super) async fn handle_add_role_admin_prepared(
 async fn handle_add_role_admin_inner(
     state: &mut MutableState,
     req: &AddRoleAdminRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
     prepared: std::result::Result<ca_vault::PreparedRoleSlot, String>,
 ) -> AdminMgmtResponse {
@@ -209,7 +214,7 @@ async fn handle_add_role_admin_inner(
     let Some(ca) = state.ca.as_mut() else {
         return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(ca, &req.credential, local) {
+    let authd = match authorize_admin_mgmt(ca, &req.credential, authentication, local) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -248,12 +253,13 @@ async fn handle_add_role_admin_inner(
 pub(super) async fn handle_set_admin_policy(
     state: &Server,
     req: &SetAdminPolicyRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminMgmtResponse {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            handle_set_admin_policy_inner(state, &req, local).await
+            handle_set_admin_policy_inner(state, &req, authentication, local).await
         })
         .await
 }
@@ -261,13 +267,14 @@ pub(super) async fn handle_set_admin_policy(
 async fn handle_set_admin_policy_inner(
     state: &mut MutableState,
     req: &SetAdminPolicyRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
     let Some(ca) = state.ca.as_mut() else {
         return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(ca, &req.credential, local) {
+    let authd = match authorize_admin_mgmt(ca, &req.credential, authentication, local) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -322,12 +329,13 @@ async fn handle_set_admin_policy_inner(
 pub(super) async fn handle_remove_admin(
     state: &Server,
     req: &RemoveAdminRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminMgmtResponse {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            handle_remove_admin_inner(state, &req, local).await
+            handle_remove_admin_inner(state, &req, authentication, local).await
         })
         .await
 }
@@ -335,13 +343,14 @@ pub(super) async fn handle_remove_admin(
 async fn handle_remove_admin_inner(
     state: &mut MutableState,
     req: &RemoveAdminRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminMgmtResponse {
     let err = |reason: String| AdminMgmtResponse::Err { reason };
     let Some(ca) = state.ca.as_mut() else {
         return err("admin management must be sent to the CA host".to_string());
     };
-    let authd = match authorize_admin_mgmt(ca, &req.credential, local) {
+    let authd = match authorize_admin_mgmt(ca, &req.credential, authentication, local) {
         Ok(a) => a,
         Err(reason) => return err(reason),
     };
@@ -390,22 +399,27 @@ async fn handle_remove_admin_inner(
 pub(super) async fn handle_list_admins(
     state: &Server,
     req: &ListAdminsRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminListResponse {
     let req = req.clone();
-    state.write(move |state| handle_list_admins_inner(state, &req, local)).await
+    state
+        .write(move |state| handle_list_admins_inner(state, &req, authentication, local))
+        .await
 }
 
 fn handle_list_admins_inner(
     state: &mut MutableState,
     req: &ListAdminsRequest,
+    authentication: &PreparedAdminAuthentication,
     local: bool,
 ) -> AdminListResponse {
     let err = |reason: String| AdminListResponse::Err { reason };
     let Some(ca) = state.ca.as_mut() else {
         return err("admin management must be sent to the CA host".to_string());
     };
-    if let Err(reason) = authorize_admin_mgmt(ca, &req.credential, local) {
+    if let Err(reason) = authorize_admin_mgmt(ca, &req.credential, authentication, local)
+    {
         return err(reason);
     }
     match ca.vault.list_admins() {

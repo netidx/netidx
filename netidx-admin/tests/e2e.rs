@@ -38,20 +38,22 @@ use netidx::{
     resolver_server::{self, config as cfg_resolver},
     subscriber::{Event, SubscriberBuilder},
 };
-// `ca` + `tls_install` (TLS test only) depend on openssl → unix-only.
-// `id_map_engine` + the id-map daemon are used only by the TLS test
-// today, so gate them too rather than warn about unused imports on
-// Windows.
+// `ca` (TLS test only) depends on openssl → unix-only. `id_map_engine` +
+// the id-map daemon are used only by the TLS test today, so gate them too
+// rather than warn about unused imports on Windows.
 #[cfg(unix)]
-use netidx_admin::{ca, id_map as id_map_engine, tls as tls_install};
+use netidx_admin::{ca, id_map as id_map_engine};
 // `WorkstationParams` is referenced only by the Local-auth workstation
 // test (also unix-only).
 #[cfg(unix)]
 use netidx_admin::template::workstation::WorkstationParams;
-use netidx_admin::template::{
-    self, AuthChoice, ReferralAuth,
-    publisher::PublisherParams,
-    resolver::{IdMapMode, ResolverParams},
+use netidx_admin::{
+    config_lock::ConfigDirLock,
+    template::{
+        self, AuthChoice, ReferralAuth,
+        publisher::PublisherParams,
+        resolver::{IdMapMode, ResolverParams},
+    },
 };
 #[cfg(unix)]
 use netidx_id_map::runtime::{Server as IdMapServer, ServerParams as IdMapParams};
@@ -96,6 +98,21 @@ fn ensure_xdg_redirect() {
         }
         td
     });
+}
+
+fn test_config_lock() -> &'static ConfigDirLock {
+    static LOCK: OnceLock<ConfigDirLock> = OnceLock::new();
+    ensure_xdg_redirect();
+    LOCK.get_or_init(|| {
+        let root = netidx_admin::paths::user_config_root().expect("test config root");
+        let lock = ConfigDirLock::acquire(root).expect("test config lock");
+        std::fs::create_dir_all(lock.root()).expect("create test config root");
+        lock
+    })
+}
+
+fn test_dir() -> Result<TempDir> {
+    Ok(TempDir::new_in(test_config_lock().root())?)
 }
 
 /// Pick a likely-free local TCP port by binding to `127.0.0.1:0` and
@@ -199,11 +216,11 @@ fn anon_params(dir: &TempDir, port: u16) -> ResolverParams {
 async fn resolver_template_anonymous_round_trip() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
     let port = pick_port();
 
     let rt = template::resolver::resolver(&anon_params(&dir, port))?;
-    rt.apply()?;
+    rt.apply(test_config_lock())?;
 
     // Load both configs the same way a real binary does.
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
@@ -224,7 +241,7 @@ async fn resolver_template_anonymous_round_trip() -> Result<()> {
 async fn resolver_template_anonymous_skips_perms_file() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
     let port = pick_port();
     let mut params = anon_params(&dir, port);
     params.with_perms_file = true;
@@ -232,7 +249,7 @@ async fn resolver_template_anonymous_skips_perms_file() -> Result<()> {
 
     let rt = template::resolver::resolver(&params)?;
     assert!(rt.perms_file.is_none(), "anonymous must not emit a perms file");
-    rt.apply()?;
+    rt.apply(test_config_lock())?;
     assert!(
         !dir.path().join("perms.json").exists(),
         "anonymous must not write a perms file to disk",
@@ -268,7 +285,7 @@ async fn resolver_template_anonymous_skips_perms_file() -> Result<()> {
 async fn workstation_template_local_round_trip() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
     let port = pick_port();
     // The test process IS the Local-auth principal — peer creds give
     // the resolver our actual uid, which it then maps to a username
@@ -296,7 +313,7 @@ async fn workstation_template_local_round_trip() -> Result<()> {
         perms_path: Some(dir.path().join("perms.json")),
     };
     let rt = template::workstation::workstation(&params)?;
-    rt.apply()?;
+    rt.apply(test_config_lock())?;
 
     let resolver_cfg = cfg_resolver::Config::load(dir.path().join("resolver.json"))?;
     let _server = resolver_server::Server::new(resolver_cfg, false, 0).await?;
@@ -334,7 +351,7 @@ async fn workstation_template_local_round_trip() -> Result<()> {
 async fn resolver_template_tls_round_trip() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
     let port = pick_port();
 
     let ca_dir = dir.path().join("ca");
@@ -386,14 +403,12 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     params.id_map_socket = Some(id_map_sock.clone());
     params.id_map_path = Some(id_map_json.clone());
     let rt = template::resolver::resolver(&params)?;
-    rt.apply()?;
+    let resolver_tls_dir = rt.tls_install[0].dest_dir.clone();
+    rt.apply(test_config_lock())?;
 
-    // Sanity check: the install actually placed the resolver's cert
-    // at the canonical (XDG-redirected) location.
-    let resolver_tls_dir = tls_install::identity_dir("resolver.example.com")?;
     assert!(
         resolver_tls_dir.join("certificate.pem").exists(),
-        "resolver identity not installed at canonical location ({})",
+        "resolver identity not installed at its rendered location ({})",
         resolver_tls_dir.display(),
     );
 
@@ -450,7 +465,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     use netidx_admin::ca_store;
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
     let port = pick_port();
 
     let ca_dir = dir.path().join("ca");
@@ -495,7 +510,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     params.id_map_socket = Some(id_map_sock.clone());
     params.id_map_path = Some(id_map_json.clone());
     let rt = template::resolver::resolver(&params)?;
-    rt.apply()?;
+    rt.apply(test_config_lock())?;
 
     let mut map = id_map_engine::empty();
     id_map_engine::upsert_identity(
@@ -524,8 +539,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     //    acceptor watches. The resolver keeps running throughout.
     let cert_pem = std::fs::read_to_string(&resolver_issued.certificate)?;
     let now = ca_store::now_unix();
-    let lock =
-        netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir).await?;
+    let lock = test_config_lock().clone();
     let mut cadir = ca_store::CaDir::open(lock, ca_dir.clone()).await?;
     cadir
         .store
@@ -611,7 +625,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
 async fn publisher_template_anonymous_round_trip() -> Result<()> {
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
-    let dir = TempDir::new()?;
+    let dir = test_dir()?;
 
     // Bare anonymous resolver bound to 127.0.0.1:0 (OS picks the
     // port; we read it back via `local_addr`). Same pattern netidx's
@@ -647,7 +661,7 @@ async fn publisher_template_anonymous_round_trip() -> Result<()> {
         default_bind_config: Some("local".to_string()),
     };
     let rt = template::publisher::publisher(&params)?;
-    rt.apply()?;
+    rt.apply(test_config_lock())?;
 
     let client_cfg = cfg_client::Config::load(dir.path().join("client.json"))?;
     round_trip(client_cfg, "/e2e/publisher-anon", Value::U64(123)).await?;

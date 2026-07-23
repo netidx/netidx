@@ -5,8 +5,8 @@ mod tests;
 use super::{
     MutableState, Server,
     auth::{
-        authenticate, local_superuser, reject, safe_auth_failure, scope_covers,
-        server_unlock,
+        PreparedAdminAuthentication, PreparedServerUnlock, authenticate, local_superuser,
+        reject, safe_auth_failure, scope_covers, server_unlock,
     },
     ca_dir,
     issuance::issue_serialized,
@@ -49,8 +49,9 @@ pub(super) async fn finish_enrollment(
     state: &Arc<Server>,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<()> {
-    grant_enrollment(state, server_id, enrollment).await?;
+    grant_enrollment(state, server_id, enrollment, prepared_server_unlock).await?;
     record_peer(state, enrollment.listen).await;
     Ok(())
 }
@@ -58,6 +59,8 @@ pub(super) async fn finish_enrollment(
 pub(super) async fn handle_enroll(
     state: &Arc<Server>,
     req: &EnrollRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> SignResponse {
     if ca_dir(state).await.is_none() {
@@ -77,6 +80,8 @@ pub(super) async fn handle_enroll(
             handle_enroll_request(
                 state.ca.as_mut().expect("CA role held"),
                 req,
+                authentication,
+                prepared_server_unlock,
                 local,
                 Some(&map),
             )
@@ -89,7 +94,13 @@ pub(super) async fn handle_enroll(
         let result =
             match crate::tls::admin_cert_identity_from_pem(signed_cert_pem.as_bytes()) {
                 Ok(identity) => {
-                    finish_enrollment(state, identity.server_id, &enrollment).await
+                    finish_enrollment(
+                        state,
+                        identity.server_id,
+                        &enrollment,
+                        prepared_server_unlock,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             };
@@ -106,6 +117,7 @@ async fn grant_enrollment(
     state: &Server,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<admin_proto::ResolverClusterId> {
     let cfg_path = state.cfg_path.clone();
     let config_lock = state.config_lock.clone();
@@ -124,9 +136,14 @@ async fn grant_enrollment(
             let mut staged = map.clone();
             let cluster = stage_enrollment(&mut staged, server_id, &enrollment)?;
             if let Some(old) = enrollment.replaces {
-                revoke_server_certificates(ca, old, "approved restore")
-                    .await
-                    .context("revoking the replaced server identity")?;
+                revoke_server_certificates(
+                    ca,
+                    old,
+                    "approved restore",
+                    prepared_server_unlock,
+                )
+                .await
+                .context("revoking the replaced server identity")?;
             }
             netmap::save_async(&config_lock, &ca_dir, &staged)
                 .await
@@ -238,10 +255,12 @@ pub(super) fn authorize_enrollment(
 pub(super) async fn handle_enroll_request(
     ca: &mut ca_store::CaDir,
     req: &EnrollRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
     map: Option<&NetworkMap>,
 ) -> SignResponse {
-    match try_enroll(ca, req, local, map).await {
+    match try_enroll(ca, req, authentication, prepared_server_unlock, local, map).await {
         Ok(resp) => resp,
         Err(e) => SignResponse::Err { reason: format!("internal error: {e:#}") },
     }
@@ -272,6 +291,8 @@ fn enrollment_cert_identity(
 async fn try_enroll(
     ca: &mut ca_store::CaDir,
     req: &EnrollRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
     map: Option<&NetworkMap>,
 ) -> Result<SignResponse> {
@@ -284,7 +305,7 @@ async fn try_enroll(
     let authd = if local {
         local_superuser()
     } else {
-        let authd = match authenticate(ca, &req.credential) {
+        let authd = match authenticate(ca, &req.credential, authentication) {
             Ok(a) => a,
             Err(reason) => {
                 return Ok(reject(&safe_auth_failure(&req.credential, reason)));
@@ -319,7 +340,7 @@ async fn try_enroll(
             replaces: req.replaces,
         }),
     );
-    let signing = match server_unlock(ca).await {
+    let signing = match server_unlock(ca, prepared_server_unlock).await {
         Ok(u) => u,
         Err(reason) => return Ok(reject(&reason)),
     };

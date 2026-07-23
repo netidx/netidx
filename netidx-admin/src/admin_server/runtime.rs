@@ -1,7 +1,7 @@
 use super::{
     AUTORENEW_ADMIN, AUTORENEW_POLL, CONN_TIMEOUT, MAX_CONCURRENT_SIGNS, MAX_CONNECTIONS,
     Server,
-    auth::{REQUEST_AUTHENTICATION, REQUEST_SERVER_UNLOCK, run_signing},
+    auth::{PreparedAdminAuthentication, PreparedServerUnlock, run_signing},
     issuance::{PushPlan, leaf_serial, push_registrations},
     queue::autorenew_sweep,
     request::{PeerIdent, cert_signed_by, serve_request},
@@ -196,18 +196,21 @@ async fn spawn_autorenew(state: &Arc<Server>, signs: Arc<Semaphore>) {
             .await;
             match proofs {
                 Ok(Ok((authenticated, unlocked))) => {
-                    let sweep = REQUEST_SERVER_UNLOCK.scope(Some(Ok(unlocked)), async {
-                        state
-                            .write_async(async move |state| {
-                                autorenew_sweep(
-                                    state.ca.as_mut().expect("CA role held"),
-                                    &pw,
-                                )
-                                .await;
-                            })
+                    let authentication =
+                        PreparedAdminAuthentication::Password(Ok(authenticated));
+                    let prepared_server_unlock =
+                        PreparedServerUnlock::from_result(Ok(unlocked));
+                    state
+                        .write_async(async move |state| {
+                            autorenew_sweep(
+                                state.ca.as_mut().expect("CA role held"),
+                                &pw,
+                                &authentication,
+                                &prepared_server_unlock,
+                            )
                             .await;
-                    });
-                    REQUEST_AUTHENTICATION.scope(Some(Ok(authenticated)), sweep).await;
+                        })
+                        .await;
                 }
                 Ok(Err(e)) => warn!("autorenew: preparing sweep credentials: {e:#}"),
                 Err(e) => warn!("autorenew: credential task panicked: {e:#}"),
@@ -538,15 +541,19 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     } else {
         None
     };
+    let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
     // Reconcile the current CRL on every controller start. This is especially
     // important after offline disaster recovery: the superseded controller
     // certificate was revoked before the replacement daemon existed to do the
     // ordinary immediate fanout. Startup is the first safe moment to push it.
     if state.has_ca().await {
         let state = state.clone();
-        tokio::spawn(async move { reconcile_controller_state_on_start(state).await });
+        let signs = signs.clone();
+        tokio::spawn(
+            async move { reconcile_controller_state_on_start(state, signs).await },
+        );
     }
-    serve_on(listener, acceptor, state).await
+    serve_on(listener, acceptor, state, signs).await
 }
 
 /// Short fingerprint of the CA cert at the end of the serving chain —
@@ -568,6 +575,7 @@ async fn serve_on(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     state: Arc<Server>,
+    signs: Arc<Semaphore>,
 ) -> Result<()> {
     // If we hold the CA, re-run any id-map pushes that committed an
     // issuance but never confirmed the registration (a crash between the
@@ -595,7 +603,6 @@ async fn serve_on(
     // in-process from here on (a no-op when it doesn't).
     spawn_map_refresh(&state).await;
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
     spawn_autorenew(&state, signs.clone()).await;
     spawn_local_control(&state, signs.clone()).await;
     let (acceptor_tx, mut acceptor_rx) = tokio_mpsc::unbounded_channel();

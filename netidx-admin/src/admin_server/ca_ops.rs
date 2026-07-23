@@ -1,6 +1,6 @@
 use super::{
     AUTORENEW_ADMIN, MutableState, Server, audit,
-    auth::{run_signing, server_unlock},
+    auth::{PreparedServerUnlock, run_signing, server_unlock},
 };
 use crate::{
     admin_client,
@@ -68,6 +68,7 @@ pub(crate) async fn read_autorenew_password_async(
 pub(super) async fn handle_backup(
     state: &Arc<Server>,
     req: &admin_proto::BackupRequest,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> BackupResponse {
     if !state.has_ca().await {
         return BackupResponse::Err {
@@ -83,7 +84,11 @@ pub(super) async fn handle_backup(
     let target = PathBuf::from(&req.target);
     let unlocked = match state
         .write_async(async move |state| {
-            server_unlock(state.ca.as_mut().expect("CA role held")).await
+            server_unlock(
+                state.ca.as_mut().expect("CA role held"),
+                prepared_server_unlock,
+            )
+            .await
         })
         .await
     {
@@ -229,15 +234,19 @@ pub(super) async fn handle_ca_status(
 
 pub(super) async fn handle_external_ca_csr(
     state: &Server,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> ExternalCaCsrResponse {
     state
-        .write_async(async move |state| handle_external_ca_csr_inner(state, local).await)
+        .write_async(async move |state| {
+            handle_external_ca_csr_inner(state, prepared_server_unlock, local).await
+        })
         .await
 }
 
 async fn handle_external_ca_csr_inner(
     state: &mut MutableState,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> ExternalCaCsrResponse {
     let err = |reason: String| ExternalCaCsrResponse::Err { reason };
@@ -248,7 +257,7 @@ async fn handle_external_ca_csr_inner(
         return err("this host is not the controller CA".to_string());
     };
     let dir = ca.dir().to_path_buf();
-    let signing = match server_unlock(ca).await {
+    let signing = match server_unlock(ca, prepared_server_unlock).await {
         Ok(s) => s,
         Err(e) => return err(e),
     };
@@ -269,13 +278,21 @@ async fn handle_external_ca_csr_inner(
 pub(super) async fn handle_external_ca_install(
     state: &Server,
     req: &ExternalCaInstallRequest,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> ExternalCaInstallResponse {
     let req = req.clone();
     let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
-            handle_external_ca_install_inner(&config_lock, state, &req, local).await
+            handle_external_ca_install_inner(
+                &config_lock,
+                state,
+                &req,
+                prepared_server_unlock,
+                local,
+            )
+            .await
         })
         .await
 }
@@ -284,6 +301,7 @@ async fn handle_external_ca_install_inner(
     config_lock: &ConfigDirLock,
     state: &mut MutableState,
     req: &ExternalCaInstallRequest,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> ExternalCaInstallResponse {
     let err = |reason: String| ExternalCaInstallResponse::Err { reason };
@@ -302,7 +320,7 @@ async fn handle_external_ca_install_inner(
         Ok(_) => return err("this controller CA is not externally signed".into()),
         Err(e) => return err(format!("reading CA lifetime policy: {e:#}")),
     }
-    let signing = match server_unlock(ca).await {
+    let signing = match server_unlock(ca, prepared_server_unlock).await {
         Ok(s) => s,
         Err(e) => return err(e),
     };

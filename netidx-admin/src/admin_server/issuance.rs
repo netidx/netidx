@@ -5,8 +5,8 @@ mod tests;
 use super::{
     PUSH_TIMEOUT, Server, audit,
     auth::{
-        authenticate, name_permitted, one_live_refusal, reject, safe_auth_failure,
-        server_unlock,
+        PreparedAdminAuthentication, PreparedServerUnlock, authenticate, name_permitted,
+        one_live_refusal, reject, safe_auth_failure, server_unlock,
     },
     ca_dir,
     revocation::push_crl_to_peers,
@@ -71,13 +71,24 @@ pub(super) async fn propagate_issuance(
     operation_id
 }
 
-pub(super) async fn handle_sign(state: &Arc<Server>, req: &SignRequest) -> SignResponse {
+pub(super) async fn handle_sign(
+    state: &Arc<Server>,
+    req: &SignRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
+) -> SignResponse {
     if ca_dir(state).await.is_none() {
         return reject("this host does not hold the CA");
     }
     let Signed { resp, push, replacement_crl } = state
         .write_async(async move |state| {
-            handle_sign_request(state.ca.as_mut().expect("CA role held"), req).await
+            handle_sign_request(
+                state.ca.as_mut().expect("CA role held"),
+                req,
+                authentication,
+                prepared_server_unlock,
+            )
+            .await
         })
         .await;
     match resp {
@@ -228,6 +239,8 @@ pub(super) struct PushPlan {
 pub(super) async fn handle_sign_request(
     ca: &mut ca_store::CaDir,
     req: &SignRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> Signed {
     // A direct Sign has no queue entry; synthesize a request to carry in
     // the issued record (its fresh id keys the `issued/` file).
@@ -240,7 +253,16 @@ pub(super) async fn handle_sign_request(
         None,
         None,
     );
-    handle_sign_request_op(ca, req, "sign", &record_req, None).await
+    handle_sign_request_op(
+        ca,
+        req,
+        authentication,
+        prepared_server_unlock,
+        "sign",
+        &record_req,
+        None,
+    )
+    .await
 }
 
 /// [`handle_sign_request`] with the audit-log operation name, the
@@ -251,11 +273,23 @@ pub(super) async fn handle_sign_request(
 pub(super) async fn handle_sign_request_op(
     ca: &mut ca_store::CaDir,
     req: &SignRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     op: &str,
     record_req: &ca_store::QueuedReq,
     recheck_id: Option<&str>,
 ) -> Signed {
-    match try_handle(ca, req, op, record_req, recheck_id).await {
+    match try_handle(
+        ca,
+        req,
+        authentication,
+        prepared_server_unlock,
+        op,
+        record_req,
+        recheck_id,
+    )
+    .await
+    {
         Ok(signed) => signed,
         Err(e) => Signed {
             resp: SignResponse::Err { reason: format!("internal error: {e:#}") },
@@ -268,6 +302,8 @@ pub(super) async fn handle_sign_request_op(
 async fn try_handle(
     ca: &mut ca_store::CaDir,
     req: &SignRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     op: &str,
     record_req: &ca_store::QueuedReq,
     recheck_id: Option<&str>,
@@ -275,7 +311,7 @@ async fn try_handle(
     let failed = |resp: SignResponse| Signed { resp, push: None, replacement_crl: None };
     // 1. Authenticate the REQUESTING admin — no CA key (a role admin is a
     //    first-class issuer here; the server, not the admin, holds the key).
-    let authd = match authenticate(ca, &req.credential) {
+    let authd = match authenticate(ca, &req.credential, authentication) {
         Ok(a) => a,
         Err(reason) => {
             return Ok(failed(reject(&safe_auth_failure(&req.credential, reason))));
@@ -332,7 +368,7 @@ async fn try_handle(
         }
     }
     // 3. The server signs with its OWN credential; the requester is audited.
-    let signing = match server_unlock(ca).await {
+    let signing = match server_unlock(ca, prepared_server_unlock).await {
         Ok(u) => u,
         Err(reason) => return Ok(failed(reject(&reason))),
     };

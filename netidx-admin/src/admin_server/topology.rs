@@ -4,7 +4,10 @@ mod tests;
 
 use super::{
     MutableState, PUSH_TIMEOUT, Server, audit,
-    auth::{authenticate, delegation_authority, scope_covers, server_unlock},
+    auth::{
+        PreparedAdminAuthentication, PreparedServerUnlock, authenticate,
+        delegation_authority, prepare_server_unlock, scope_covers, server_unlock,
+    },
     issuance::reconcile_identities_to_target,
     revocation::{
         apply_crl_to_destinations, collect_peer_results, local_crl_destinations,
@@ -37,9 +40,11 @@ use log::{info, warn};
 use std::{
     collections::BTreeSet, net::SocketAddr, path::Path, sync::Arc, time::Duration,
 };
+use tokio::sync::Semaphore;
 
 async fn push_controller_state_to_peers(
     state: &Arc<Server>,
+    crl_pem: String,
     operation_id: admin_proto::OperationId,
 ) -> Result<Vec<PeerResult>> {
     let (map, my_id) =
@@ -49,27 +54,6 @@ async fn push_controller_state_to_peers(
         .filter(|entry| entry.state == admin_proto::ServerState::Registered)
         .cloned()
         .context("the authoritative map has no registered controller")?;
-    let crl_pem = state
-        .write_async(async move |state| {
-            let ca = state
-                .ca
-                .as_mut()
-                .context("controller reconciliation requires the CA role")?;
-            let crl_path = ca.store.crl_path();
-            match tokio::fs::read_to_string(&crl_path).await {
-                Ok(crl_pem) => Ok(crl_pem),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    server_unlock(ca).await.map_err(|reason| anyhow!(reason))?;
-                    tokio::fs::read_to_string(&crl_path).await.with_context(|| {
-                        format!("reading newly initialized CRL {}", crl_path.display())
-                    })
-                }
-                Err(e) => Err(e).with_context(|| {
-                    format!("reading current CRL {}", crl_path.display())
-                }),
-            }
-        })
-        .await?;
     let request = ApplyControllerStateRequest {
         operation_id,
         controller: controller.id,
@@ -120,7 +104,58 @@ async fn push_controller_state_to_peers(
     Ok(results)
 }
 
-pub(super) async fn reconcile_controller_state_on_start(state: Arc<Server>) {
+async fn read_controller_crl(state: &Server) -> Result<Option<String>> {
+    let crl_path = state
+        .read(|state| {
+            state
+                .ca
+                .as_ref()
+                .context("controller reconciliation requires the CA role")
+                .map(|ca| ca.store.crl_path())
+        })
+        .await?;
+    match tokio::fs::read_to_string(&crl_path).await {
+        Ok(crl_pem) => Ok(Some(crl_pem)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            Err(e).with_context(|| format!("reading current CRL {}", crl_path.display()))
+        }
+    }
+}
+
+async fn initialize_controller_crl(
+    state: &Server,
+    prepared_server_unlock: &PreparedServerUnlock,
+) -> Result<String> {
+    state
+        .write_async(async move |state| {
+            let ca = state
+                .ca
+                .as_mut()
+                .context("controller reconciliation requires the CA role")?;
+            let crl_path = ca.store.crl_path();
+            match tokio::fs::read_to_string(&crl_path).await {
+                Ok(crl_pem) => Ok(crl_pem),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    server_unlock(ca, prepared_server_unlock)
+                        .await
+                        .map_err(|reason| anyhow!(reason))?;
+                    tokio::fs::read_to_string(&crl_path).await.with_context(|| {
+                        format!("reading newly initialized CRL {}", crl_path.display())
+                    })
+                }
+                Err(e) => Err(e).with_context(|| {
+                    format!("reading current CRL {}", crl_path.display())
+                }),
+            }
+        })
+        .await
+}
+
+pub(super) async fn reconcile_controller_state_on_start(
+    state: Arc<Server>,
+    signs: Arc<Semaphore>,
+) {
     let operation_id = admin_proto::OperationId::new();
     let Some(ca_dir) = state.ca_dir().await else { return };
     audit(
@@ -131,7 +166,26 @@ pub(super) async fn reconcile_controller_state_on_start(state: Arc<Server>) {
         Duration::ZERO,
     )
     .await;
-    match push_controller_state_to_peers(&state, operation_id).await {
+    let crl_pem = match read_controller_crl(&state).await {
+        Ok(Some(crl_pem)) => crl_pem,
+        Ok(None) => {
+            let prepared_server_unlock = prepare_server_unlock(&state, &signs).await;
+            match initialize_controller_crl(&state, &prepared_server_unlock).await {
+                Ok(crl_pem) => crl_pem,
+                Err(e) => {
+                    warn!(
+                        "admin-server: startup controller reconciliation failed: {e:#}"
+                    );
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            warn!("admin-server: startup controller reconciliation failed: {e:#}");
+            return;
+        }
+    };
+    match push_controller_state_to_peers(&state, crl_pem, operation_id).await {
         Ok(results) => {
             for result in results {
                 if let Some(error) = result.error {
@@ -149,6 +203,8 @@ pub(super) async fn reconcile_controller_state_on_start(state: Arc<Server>) {
 pub(super) async fn handle_reconcile_controller(
     state: &Arc<Server>,
     req: &admin_proto::ReconcileControllerRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
 ) -> ReconcileControllerResponse {
     let Some(ca_dir) = state.ca_dir().await else {
@@ -163,8 +219,12 @@ pub(super) async fn handle_reconcile_controller(
         let credential = req.credential.clone();
         match state
             .write(move |state| {
-                authenticate(state.ca.as_mut().expect("CA role held"), &credential)
-                    .map(|authd| authd.admin)
+                authenticate(
+                    state.ca.as_mut().expect("CA role held"),
+                    &credential,
+                    authentication,
+                )
+                .map(|authd| authd.admin)
             })
             .await
         {
@@ -181,12 +241,27 @@ pub(super) async fn handle_reconcile_controller(
         Duration::ZERO,
     )
     .await;
-    let mut peers = match push_controller_state_to_peers(state, operation_id).await {
-        Ok(peers) => peers,
+    let crl_pem = match read_controller_crl(state).await {
+        Ok(Some(crl_pem)) => crl_pem,
+        Ok(None) => {
+            match initialize_controller_crl(state, prepared_server_unlock).await {
+                Ok(crl_pem) => crl_pem,
+                Err(e) => {
+                    return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
+                }
+            }
+        }
         Err(e) => {
             return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
         }
     };
+    let mut peers =
+        match push_controller_state_to_peers(state, crl_pem, operation_id).await {
+            Ok(peers) => peers,
+            Err(e) => {
+                return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
+            }
+        };
     let topology = {
         let map = state.read(move |state| state.map.clone()).await;
         topology_fanout(&map, map.clusters.iter())
@@ -424,16 +499,20 @@ pub(super) async fn handle_poll_delegation(
 pub(super) async fn handle_list_delegations(
     state: &Server,
     req: &ListDelegationsRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ListDelegationsResponse {
     let req = req.clone();
     state
-        .write_async(async move |state| handle_list_delegations_inner(state, &req).await)
+        .write_async(async move |state| {
+            handle_list_delegations_inner(state, &req, authentication).await
+        })
         .await
 }
 
 async fn handle_list_delegations_inner(
     state: &mut MutableState,
     req: &ListDelegationsRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ListDelegationsResponse {
     let MutableState { map, ca, .. } = state;
     let Some(ca) = ca.as_mut() else {
@@ -441,7 +520,7 @@ async fn handle_list_delegations_inner(
             reason: "this host is not the controller".into(),
         };
     };
-    if let Err(reason) = authenticate(ca, &req.credential) {
+    if let Err(reason) = authenticate(ca, &req.credential, authentication) {
         return ListDelegationsResponse::Err { reason };
     }
     let dir = ca.dir().to_path_buf();
@@ -499,16 +578,20 @@ async fn handle_list_delegations_inner(
 pub(super) async fn handle_deny_delegation(
     state: &Server,
     req: &DenyDelegationRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> DenyDelegationResponse {
     let req = req.clone();
     state
-        .write_async(async move |state| handle_deny_delegation_inner(state, &req).await)
+        .write_async(async move |state| {
+            handle_deny_delegation_inner(state, &req, authentication).await
+        })
         .await
 }
 
 async fn handle_deny_delegation_inner(
     state: &mut MutableState,
     req: &DenyDelegationRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> DenyDelegationResponse {
     let Some(ca) = state.ca.as_mut() else {
         return DenyDelegationResponse::Err {
@@ -517,7 +600,7 @@ async fn handle_deny_delegation_inner(
     };
     let ca_dir = ca.dir().to_path_buf();
     let config_lock = ca.config_lock();
-    let authd = match authenticate(ca, &req.credential) {
+    let authd = match authenticate(ca, &req.credential, authentication) {
         Ok(a) => a,
         Err(reason) => return DenyDelegationResponse::Err { reason },
     };
@@ -834,12 +917,21 @@ struct RemoveServerPrepare {
 async fn remove_server_prepare(
     state: &Server,
     req: &RemoveServerRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<RemoveServerPrepare, RemoveServerResponse> {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            remove_server_prepare_inner(state, &req, operation_id).await
+            remove_server_prepare_inner(
+                state,
+                &req,
+                authentication,
+                prepared_server_unlock,
+                operation_id,
+            )
+            .await
         })
         .await
 }
@@ -847,6 +939,8 @@ async fn remove_server_prepare(
 async fn remove_server_prepare_inner(
     state: &mut MutableState,
     req: &RemoveServerRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<RemoveServerPrepare, RemoveServerResponse> {
     let err = |reason: String| RemoveServerResponse::Err { reason };
@@ -856,7 +950,7 @@ async fn remove_server_prepare_inner(
         None => return Err(err("this host does not hold the CA".to_string())),
     };
     let ca_dir = ca.dir().to_path_buf();
-    let authd = match authenticate(ca, &req.credential) {
+    let authd = match authenticate(ca, &req.credential, authentication) {
         Ok(a) => a,
         Err(reason) => return Err(err(reason)),
     };
@@ -953,10 +1047,16 @@ async fn remove_server_prepare_inner(
         }
         let mut revoked = 0;
         if removed {
-            revoked =
-                revoke_server_certificates(ca, req.server, &authd.admin).await.map_err(
-                    |e| err(format!("revoking the server's serving certificates: {e:#}")),
-                )?;
+            revoked = revoke_server_certificates(
+                ca,
+                req.server,
+                &authd.admin,
+                prepared_server_unlock,
+            )
+            .await
+            .map_err(|e| {
+                err(format!("revoking the server's serving certificates: {e:#}"))
+            })?;
             let config_lock = ca.config_lock();
             if let Err(e) = netmap::save_async(&config_lock, &ca_dir, &next).await {
                 return Err(err(format!("persisting the network map: {e:#}")));
@@ -1031,9 +1131,18 @@ async fn remove_server_prepare_inner(
 pub(super) async fn handle_remove_server(
     state: &Arc<Server>,
     req: RemoveServerRequest,
+    authentication: &PreparedAdminAuthentication,
+    prepared_server_unlock: &PreparedServerUnlock,
 ) -> RemoveServerResponse {
     let operation_id = admin_proto::OperationId::new();
-    let prepared = remove_server_prepare(state, &req, operation_id).await;
+    let prepared = remove_server_prepare(
+        state,
+        &req,
+        authentication,
+        prepared_server_unlock,
+        operation_id,
+    )
+    .await;
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(response) => return response,
@@ -1059,12 +1168,14 @@ pub(super) async fn handle_remove_server(
 async fn approve_delegation_prepare(
     state: &Server,
     req: &ApproveDelegationRequest,
+    authentication: &PreparedAdminAuthentication,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<TopologyFanout, ApproveDelegationResponse> {
     let req = req.clone();
     state
         .write_async(async move |state| {
-            approve_delegation_prepare_inner(state, &req, operation_id).await
+            approve_delegation_prepare_inner(state, &req, authentication, operation_id)
+                .await
         })
         .await
 }
@@ -1072,6 +1183,7 @@ async fn approve_delegation_prepare(
 async fn approve_delegation_prepare_inner(
     state: &mut MutableState,
     req: &ApproveDelegationRequest,
+    authentication: &PreparedAdminAuthentication,
     operation_id: admin_proto::OperationId,
 ) -> std::result::Result<TopologyFanout, ApproveDelegationResponse> {
     let err = |reason: String| ApproveDelegationResponse::Err { reason };
@@ -1079,7 +1191,7 @@ async fn approve_delegation_prepare_inner(
     let ca =
         ca.as_mut().ok_or_else(|| err("this host does not hold the CA".to_string()))?;
     let ca_dir = ca.dir().to_path_buf();
-    let authd = authenticate(ca, &req.credential).map_err(err)?;
+    let authd = authenticate(ca, &req.credential, authentication).map_err(err)?;
     {
         // Pending ⇒ approve + commit; Approved ⇒ re-sync (re-apply + re-push,
         // already committed); else an error.
@@ -1289,9 +1401,11 @@ async fn push_topology(
 pub(super) async fn handle_approve_delegation(
     state: &Arc<Server>,
     req: ApproveDelegationRequest,
+    authentication: &PreparedAdminAuthentication,
 ) -> ApproveDelegationResponse {
     let operation_id = admin_proto::OperationId::new();
-    let prepared = approve_delegation_prepare(state, &req, operation_id).await;
+    let prepared =
+        approve_delegation_prepare(state, &req, authentication, operation_id).await;
     let fanout = match prepared {
         Ok(fanout) => fanout,
         Err(response) => return response,

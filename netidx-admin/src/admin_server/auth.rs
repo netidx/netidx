@@ -42,13 +42,32 @@ pub(super) fn local_superuser() -> ca_vault::Authenticated {
 pub(super) fn authenticate(
     ca: &mut ca_store::CaDir,
     credential: &admin_proto::AdminCredential,
+    prepared: &PreparedAdminAuthentication,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
-    match credential {
-        admin_proto::AdminCredential::Password { .. } => prepared_authentication(ca)
-            .unwrap_or_else(|| Err("authentication failed".to_string())),
-        admin_proto::AdminCredential::Session { token } => {
-            ca.sessions.authenticate_session(&ca.vault, token)
-        }
+    match (credential, prepared) {
+        (
+            admin_proto::AdminCredential::Password { .. },
+            PreparedAdminAuthentication::Password(result),
+        ) => result.as_ref().map_err(Clone::clone).and_then(|authenticated| {
+            ca.vault
+                .resolve_session_slot(
+                    authenticated.slot_id,
+                    authenticated.credential_revision,
+                )
+                .map_err(|_| "authentication failed".to_string())
+        }),
+        (
+            admin_proto::AdminCredential::Session { token },
+            PreparedAdminAuthentication::Session,
+        ) => ca.sessions.authenticate_session(&ca.vault, token),
+        (
+            admin_proto::AdminCredential::Password { .. },
+            PreparedAdminAuthentication::Session,
+        )
+        | (
+            admin_proto::AdminCredential::Session { .. },
+            PreparedAdminAuthentication::Password(_),
+        ) => Err("authentication failed".to_string()),
     }
 }
 
@@ -76,12 +95,9 @@ pub(super) fn safe_auth_failure(
 /// function revalidates the slot revision against the live vault.
 pub(super) async fn server_unlock(
     ca: &mut ca_store::CaDir,
+    prepared: &PreparedServerUnlock,
 ) -> std::result::Result<TArc<ca_vault::Unlocked>, String> {
-    let result = REQUEST_SERVER_UNLOCK
-        .try_with(Clone::clone)
-        .unwrap_or(None)
-        .ok_or_else(|| "the CA key was not prepared for this operation".to_string())?;
-    let unlocked = result?;
+    let unlocked = prepared.0.as_ref().map_err(Clone::clone)?.clone();
     let current = ca
         .vault
         .resolve_session_slot(unlocked.slot_id, unlocked.credential_revision)
@@ -120,15 +136,53 @@ where
     .context("CA signing task panicked")
 }
 
-pub(super) async fn prepare_password_authentication(
+pub(super) enum PreparedAdminAuthentication {
+    Password(std::result::Result<ca_vault::Authenticated, String>),
+    Session,
+}
+
+impl PreparedAdminAuthentication {
+    pub(super) fn password_failed(&self) -> bool {
+        matches!(self, Self::Password(Err(_)))
+    }
+
+    pub(super) fn password_failure(&self) -> Option<String> {
+        match self {
+            Self::Password(Err(reason)) => Some(reason.clone()),
+            Self::Password(Ok(_)) | Self::Session => None,
+        }
+    }
+}
+
+pub(super) struct PreparedServerUnlock(
+    std::result::Result<TArc<ca_vault::Unlocked>, String>,
+);
+
+impl PreparedServerUnlock {
+    pub(super) fn from_result(
+        result: std::result::Result<TArc<ca_vault::Unlocked>, String>,
+    ) -> Self {
+        Self(result)
+    }
+
+    pub(super) fn failed(reason: impl Into<String>) -> Self {
+        Self(Err(reason.into()))
+    }
+}
+
+pub(super) async fn prepare_admin_authentication(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,
-    credential: Option<admin_proto::AdminCredential>,
+    credential: &admin_proto::AdminCredential,
     attempt: Option<PasswordAttempt>,
-) -> Option<std::result::Result<ca_vault::Authenticated, String>> {
-    let Some(admin_proto::AdminCredential::Password { admin, password }) = credential
-    else {
-        return None;
+) -> PreparedAdminAuthentication {
+    let (admin, password) = match credential {
+        admin_proto::AdminCredential::Password { admin, password } => {
+            (admin.clone(), password.clone())
+        }
+        admin_proto::AdminCredential::Session { .. } => {
+            return PreparedAdminAuthentication::Session;
+        }
     };
     let snapshot = match state
         .read(move |state| {
@@ -137,9 +191,13 @@ pub(super) async fn prepare_password_authentication(
         .await
     {
         Ok(snapshot) => snapshot,
-        Err(e) => return Some(Err(format!("authentication failed: {e:#}"))),
+        Err(e) => {
+            return PreparedAdminAuthentication::Password(Err(format!(
+                "authentication failed: {e:#}"
+            )));
+        }
     };
-    Some(
+    PreparedAdminAuthentication::Password(
         run_signing(signs, move || {
             let result = snapshot
                 .authenticate(&admin, password.as_str())
@@ -157,11 +215,7 @@ pub(super) async fn prepare_password_authentication(
 pub(super) async fn prepare_server_unlock(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,
-    needed: bool,
-) -> Option<std::result::Result<TArc<ca_vault::Unlocked>, String>> {
-    if !needed {
-        return None;
-    }
+) -> PreparedServerUnlock {
     let captured = state
         .read(move |state| {
             let ca = state.ca.as_ref().context("this host does not hold the CA")?;
@@ -174,9 +228,9 @@ pub(super) async fn prepare_server_unlock(
         .await;
     let (snapshot, password) = match captured {
         Ok(captured) => captured,
-        Err(e) => return Some(Err(format!("{e:#}"))),
+        Err(e) => return PreparedServerUnlock::failed(format!("{e:#}")),
     };
-    Some(
+    PreparedServerUnlock::from_result(
         run_signing(signs, move || {
             snapshot.unlock(&password).map(TArc::new).map_err(|e| {
                 format!("the CA's autorenew credential failed to unlock the key: {e:#}")
@@ -261,35 +315,10 @@ impl Drop for PasswordAttemptInner {
                 state
                     .write(move |state| state.password_limiter.complete(source, result))
                     .await;
+                state.password_attempt_completed.notify_waiters();
             });
         }
     }
-}
-
-tokio::task_local! {
-    pub(super) static REQUEST_AUTHENTICATION: Option<std::result::Result<
-        ca_vault::Authenticated,
-        String,
-    >>;
-    pub(super) static REQUEST_SERVER_UNLOCK: Option<std::result::Result<
-        TArc<ca_vault::Unlocked>,
-        String,
-    >>;
-}
-
-pub(super) fn prepared_authentication(
-    ca: &ca_store::CaDir,
-) -> Option<std::result::Result<ca_vault::Authenticated, String>> {
-    REQUEST_AUTHENTICATION.try_with(Clone::clone).unwrap_or(None).map(|result| {
-        result.and_then(|authenticated| {
-            ca.vault
-                .resolve_session_slot(
-                    authenticated.slot_id,
-                    authenticated.credential_revision,
-                )
-                .map_err(|_| "authentication failed".to_string())
-        })
-    })
 }
 
 /// True if `name` matches any of the administrator's allowed glob patterns.
