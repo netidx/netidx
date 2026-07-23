@@ -2,6 +2,7 @@ use crate::publisher;
 use anyhow::{Context, Result};
 use arcstr::literal;
 use graphix_compiler::expr::Source;
+use graphix_package_core::NetConfig;
 use graphix_rt::NoExt;
 use graphix_shell::{Mode, ShellBuilder};
 use netidx::{
@@ -31,8 +32,7 @@ pub async fn run(
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
     ShellBuilder::<NoExt>::default()
         .mode(Mode::Script(Source::Internal(literal!(include_str!("browser.gx")))))
-        .publisher(publisher)
-        .subscriber(subscriber)
+        .net_config(NetConfig::Ready { publisher, subscriber })
         .no_init(true)
         .build()?
         .run(mt)
