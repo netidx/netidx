@@ -584,24 +584,11 @@ impl ClientCtx {
     fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::From;
         self.handle_batch_inner(con)?;
-        // try_send only when no send is already blocked: a pending
-        // batch for the same channel must drain first or writes would
-        // be reordered.
-        let fast_path = self.blocked_sends.is_empty();
-        self.blocked_sends.extend(self.write_batches.drain().filter_map(
+        self.blocked_sends.extend(self.write_batches.drain().map(
             |(_, (batch, mut sender))| {
-                let batch = if fast_path {
-                    match sender.try_send(batch) {
-                        Ok(()) => return None,
-                        Err(e) if e.is_full() => e.into_inner(),
-                        Err(_) => return None,
-                    }
-                } else {
-                    batch
-                };
-                Some(Box::pin(async move {
+                Box::pin(async move {
                     let _ = sender.send(batch).await;
-                }) as BlockedSendFut)
+                }) as BlockedSendFut
             },
         ));
         self.pending_receipts.extend(self.wait_write_res.drain(..).map(
