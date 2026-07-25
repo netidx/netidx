@@ -46,10 +46,6 @@ pub fn load_roots(trusted_pem: &[u8]) -> Result<RootCertStore> {
     Ok(roots)
 }
 
-/// `ApproveDelegation` (admin-authenticated): the blocking prepare (auth,
-/// validate, local edit, commit) followed by the async cluster-wide push.
-/// Requires both the ca role (admin auth) and the resolver role.
-
 const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// On a non-CA admin server, keep the cached network map current and keep

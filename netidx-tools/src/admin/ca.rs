@@ -14,7 +14,7 @@ use netidx_admin_client::{
 use netidx_admin_proto::{
     self as admin_proto, NodeKind,
     fingerprint::{ColorMode, Fingerprint},
-    policy::{AdminInfo, SlotKind},
+    policy::{AdminInfo, Policy, SlotKind},
 };
 use netidx_admin_server::{
     ca::{self, SanEntry, Subject},
@@ -1608,21 +1608,28 @@ fn print_admin_list(admins: &[AdminInfo]) {
             SlotKind::Signing => "signing",
             SlotKind::Role => "role",
         };
-        let pol = &info.policy;
+        // Destructured with no `..`, so a new capability can't be added to
+        // Policy without an operator ever being shown it.
+        let Policy {
+            allowed_san,
+            max_validity,
+            id_map_groups,
+            server_enroll_scopes,
+            server_enroll_roles,
+            perms_edit_scopes,
+            may_manage_admins,
+            service_control_scopes,
+        } = &info.policy;
         println!(
-            "{} [{tier}]: allowed_san={:?} max_validity={} id_map_groups={:?} \
-             server_enroll_scopes={:?} server_enroll_roles={:?} \
-             may_manage_admins={} perms_edit_scopes={:?} \
-             service_control_scopes={:?}",
+            "{} [{tier}]: allowed_san={allowed_san:?} max_validity={} \
+             id_map_groups={id_map_groups:?} \
+             server_enroll_scopes={server_enroll_scopes:?} \
+             server_enroll_roles={server_enroll_roles:?} \
+             may_manage_admins={may_manage_admins} \
+             perms_edit_scopes={perms_edit_scopes:?} \
+             service_control_scopes={service_control_scopes:?}",
             info.admin,
-            pol.allowed_san,
-            humantime::format_duration(pol.max_validity),
-            pol.id_map_groups,
-            pol.server_enroll_scopes,
-            pol.server_enroll_roles,
-            pol.may_manage_admins,
-            pol.perms_edit_scopes,
-            pol.service_control_scopes
+            humantime::format_duration(*max_validity),
         );
     }
 }

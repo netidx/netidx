@@ -30,15 +30,10 @@ pub(super) fn local_superuser() -> ca_vault::Authenticated {
     }
 }
 
-/// Whether the caller's issuance glob `caller` covers the granted glob
-/// `granted` — i.e. every name `granted` could match is also matched by
-/// `caller`. Decidable and **sound** for the realistic DNS patterns (`*`,
-/// `*.<suffix>`, and literal names): it never reports coverage that does not
-/// hold, so it can't permit an escalation. Patterns it can't prove
-/// containment for (a mid-string `*`, a `?`) are conservatively *not* covered
-/// — grant those on-box with `ca admin add-role`, which carries no subset
-/// check.
-
+/// Resolve a caller's credential to its live vault slot. Both credential kinds
+/// are validated during the prepare phase (see
+/// [`prepare_admin_authentication`]); this revalidates the prepared result
+/// against the live vault, so a slot removed or rotated in between is refused.
 pub(super) fn authenticate(
     ca: &mut ca_store::CaDir,
     credential: &admin_proto::AdminCredential,
@@ -124,11 +119,6 @@ pub(super) async fn server_unlock(
     }
     Ok(unlocked)
 }
-
-/// Handle a sign request against the CA rooted at `ca_dir`. Auth and
-/// policy failures become a `SignResponse::Err` carrying a safe reason
-/// for the client; only an internal fault (e.g. the CA cert can't be
-/// read) maps to a generic error response — never a panic.
 
 pub(super) async fn run_signing<T, F>(signs: &Arc<Semaphore>, f: F) -> Result<T>
 where
@@ -371,12 +361,20 @@ pub(super) fn name_permitted(name: &str, allowed: &[String]) -> Result<bool> {
 ///   that authorizes minting it.
 /// - Any other name must fall within the admin's issuance scope
 ///   (`allowed_san`).
-/// An admin whose authority is not scope-bound: an on-box signing slot (it
-/// holds the key outright) or a `may_manage_admins` superuser (it can mint
-/// itself any credential, so confining it elsewhere would be theatre).
-pub(super) fn broad_admin(authd: &ca_vault::Authenticated) -> bool {
+/// A signing-tier credential: the on-box recovery / autorenew slots, which
+/// wrap the master key and so hold the CA key outright. Distinct from
+/// [`broad_admin`] on purpose — the no-escalation bypass is signing-only,
+/// because a `may_manage_admins` role admin is still bound by the subset rule
+/// when granting.
+pub(super) fn signing_slot(authd: &ca_vault::Authenticated) -> bool {
     matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins
+}
+
+/// An admin whose authority is not scope-bound: a signing slot, or a
+/// `may_manage_admins` superuser (it can mint itself any credential, so
+/// confining it elsewhere would be theatre).
+pub(super) fn broad_admin(authd: &ca_vault::Authenticated) -> bool {
+    signing_slot(authd) || authd.policy.may_manage_admins
 }
 
 pub(super) fn admin_authority_over(

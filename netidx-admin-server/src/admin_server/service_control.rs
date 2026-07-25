@@ -4,7 +4,10 @@ mod tests;
 
 use super::{
     PUSH_TIMEOUT, Server, audit,
-    auth::{PreparedAdminAuthentication, authenticate, safe_auth_failure, scope_covers},
+    auth::{
+        PreparedAdminAuthentication, authenticate, safe_auth_failure, scope_covers,
+        signing_slot,
+    },
 };
 use crate::{
     admin_proto::{
@@ -20,8 +23,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 /// Whether `authd` may control services on an admin server whose cluster base
 /// is `base`.
 fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> bool {
-    matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || scope_covers(&authd.policy.service_control_scopes, base)
+    signing_slot(authd) || scope_covers(&authd.policy.service_control_scopes, base)
 }
 
 /// The cluster base of the admin server whose listen address is `addr`, from
@@ -87,7 +89,7 @@ pub(super) async fn handle_control_service(
     let base = state.read(move |state| base_for_server(&state.map, target_server)).await;
     let authorized = match &base {
         Some(base) => service_control_authority(&authd, base),
-        None => matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing),
+        None => signing_slot(&authd),
     };
     if !authorized {
         return err(format!(

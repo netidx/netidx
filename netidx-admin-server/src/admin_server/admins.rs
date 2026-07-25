@@ -1,6 +1,9 @@
 use super::{
     MutableState, Server, audit,
-    auth::{PreparedAdminAuthentication, authenticate, local_superuser, scope_covers},
+    auth::{
+        PreparedAdminAuthentication, authenticate, broad_admin, local_superuser,
+        scope_covers, signing_slot,
+    },
 };
 use crate::{
     admin_proto::{
@@ -71,9 +74,7 @@ fn authorize_admin_mgmt(
         return Ok(local_superuser());
     }
     let authd = authenticate(ca, credential, prepared)?;
-    if matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins
-    {
+    if broad_admin(&authd) {
         Ok(authd)
     } else {
         Err(format!(
@@ -83,18 +84,23 @@ fn authorize_admin_mgmt(
     }
 }
 
-/// The synthetic identity for a request over the local control socket: a
-/// signing-tier superuser. The signing tier is what every admin-management
-/// gate ([`authorize_admin_mgmt`], the `kind == Signing` no-escalation
-/// bypass) checks, so this authorizes exactly the way a real recovery /
-/// autorenew signing slot does — without a password. Reaching the socket is
-/// the authorization (`0600` + `SO_PEERCRED`, root / the daemon's own uid).
+/// Whether the caller's issuance glob `caller` covers the granted glob
+/// `granted` — i.e. every name `granted` could match is also matched by
+/// `caller`. Decidable and **sound** for the realistic DNS patterns (`*`,
+/// `*.<suffix>`, and literal names): it never reports coverage that does not
+/// hold, so it can't permit an escalation. Patterns it can't prove
+/// containment for (a mid-string `*`, a `?`) are conservatively *not* covered
+/// — grant those on-box with `ca admin add-role`, which carries no subset
+/// check.
 fn glob_covers(caller: &str, granted: &str) -> bool {
     if caller == granted {
         return true; // identical pattern
     }
     if caller == "*" {
-        return true; // matches every (slash-free) name
+        // globset's `literal_separator` is off by default (see
+        // `glob_star_matches_every_name`), so `*` matches EVERY name, `/`
+        // included. This is only sound while that holds.
+        return true;
     }
     if let Some(suffix) = caller.strip_prefix("*.") {
         // `*.<suffix>` matches exactly the names ending in `.<suffix>`. The
@@ -110,63 +116,87 @@ fn glob_covers(caller: &str, granted: &str) -> bool {
 /// capabilities that are a subset of its own. Returns the first violated
 /// field as a safe reason, or `Ok(())`. The founding signing slots bypass
 /// this entirely (they hold the key — the caller checks `kind` first).
+/// Both policies are destructured, with no `..`, so that adding a capability
+/// to [`Policy`] fails to compile here instead of silently becoming grantable
+/// without a subset check. This is the privilege boundary; the compiler, not
+/// code review, is what keeps it complete.
 fn policy_within(
     caller: &netidx_admin_proto::policy::Policy,
     granted: &netidx_admin_proto::policy::Policy,
 ) -> std::result::Result<(), String> {
-    for g in &granted.allowed_san {
-        if !caller.allowed_san.iter().any(|c| glob_covers(c, g)) {
+    use netidx_admin_proto::policy::Policy;
+    let Policy {
+        allowed_san: caller_allowed_san,
+        max_validity: caller_max_validity,
+        id_map_groups: caller_id_map_groups,
+        server_enroll_scopes: caller_server_enroll_scopes,
+        server_enroll_roles: caller_server_enroll_roles,
+        perms_edit_scopes: caller_perms_edit_scopes,
+        may_manage_admins: caller_may_manage_admins,
+        service_control_scopes: caller_service_control_scopes,
+    } = caller;
+    let Policy {
+        allowed_san,
+        max_validity,
+        id_map_groups,
+        server_enroll_scopes,
+        server_enroll_roles,
+        perms_edit_scopes,
+        may_manage_admins,
+        service_control_scopes,
+    } = granted;
+    for g in allowed_san {
+        if !caller_allowed_san.iter().any(|c| glob_covers(c, g)) {
             return Err(format!(
-                "cannot grant issuance scope {g:?}: it is not within your own scope {:?}",
-                caller.allowed_san
+                "cannot grant issuance scope {g:?}: it is not within your own scope \
+                 {caller_allowed_san:?}"
             ));
         }
     }
-    if granted.max_validity > caller.max_validity {
+    if max_validity > caller_max_validity {
         return Err(format!(
             "cannot grant max_validity {} — yours is {}",
-            humantime::format_duration(granted.max_validity),
-            humantime::format_duration(caller.max_validity)
+            humantime::format_duration(*max_validity),
+            humantime::format_duration(*caller_max_validity)
         ));
     }
-    for g in &granted.id_map_groups {
-        if !caller.id_map_groups.contains(g) {
+    for g in id_map_groups {
+        if !caller_id_map_groups.contains(g) {
             return Err(format!(
-                "cannot grant id-map group {g:?}: it is not in your own set {:?}",
-                caller.id_map_groups
+                "cannot grant id-map group {g:?}: it is not in your own set \
+                 {caller_id_map_groups:?}"
             ));
         }
     }
-    for scope in &granted.server_enroll_scopes {
-        if !scope_covers(&caller.server_enroll_scopes, scope) {
+    for scope in server_enroll_scopes {
+        if !scope_covers(caller_server_enroll_scopes, scope) {
             return Err(format!(
                 "cannot grant server enrollment scope {scope:?} — it is outside your scopes"
             ));
         }
     }
-    if !caller.server_enroll_roles.contains(granted.server_enroll_roles) {
+    if !caller_server_enroll_roles.contains(*server_enroll_roles) {
         return Err(format!(
-            "cannot grant server enrollment roles {:?} — yours are {:?}",
-            granted.server_enroll_roles, caller.server_enroll_roles
+            "cannot grant server enrollment roles {server_enroll_roles:?} — yours are \
+             {caller_server_enroll_roles:?}"
         ));
     }
-    if granted.may_manage_admins && !caller.may_manage_admins {
+    if *may_manage_admins && !caller_may_manage_admins {
         return Err("cannot grant may_manage_admins — you do not have it".to_string());
     }
-    for s in &granted.perms_edit_scopes {
-        if !scope_covers(&caller.perms_edit_scopes, s) {
+    for s in perms_edit_scopes {
+        if !scope_covers(caller_perms_edit_scopes, s) {
             return Err(format!(
-                "cannot grant perms scope {s:?}: it is not within your own scopes {:?}",
-                caller.perms_edit_scopes
+                "cannot grant perms scope {s:?}: it is not within your own scopes \
+                 {caller_perms_edit_scopes:?}"
             ));
         }
     }
-    for s in &granted.service_control_scopes {
-        if !scope_covers(&caller.service_control_scopes, s) {
+    for s in service_control_scopes {
+        if !scope_covers(caller_service_control_scopes, s) {
             return Err(format!(
                 "cannot grant service-control scope {s:?}: it is not within your own \
-                 scopes {:?}",
-                caller.service_control_scopes
+                 scopes {caller_service_control_scopes:?}"
             ));
         }
     }
@@ -228,7 +258,7 @@ async fn handle_add_role_admin_inner(
         ));
     }
     // No escalation — the founding signing credentials are exempt.
-    if !matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
+    if !signing_slot(&authd)
         && let Err(reason) = policy_within(&authd.policy, &req.policy)
     {
         return err(reason);
@@ -282,7 +312,7 @@ async fn handle_set_admin_policy_inner(
     if netidx_admin_proto::policy::is_reserved_admin(&req.target) {
         return err(format!("{:?} is a system-managed signing slot", req.target));
     }
-    if !matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
+    if !signing_slot(&authd)
         && let Err(reason) = policy_within(&authd.policy, &req.policy)
     {
         return err(reason);
@@ -426,5 +456,159 @@ fn handle_list_admins_inner(
     match ca.vault.list_admins() {
         Ok(admins) => AdminListResponse::Ok(admins),
         Err(e) => err(format!("listing admins: {e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use globset::Glob;
+    use netidx_admin_proto::policy::Policy;
+
+    /// `glob_covers` returns true for a caller pattern of `*` against ANY
+    /// granted pattern, which is only sound because globset leaves
+    /// `literal_separator` off — `*` really does match every name, `/`
+    /// included. Pin that: if a future globset default (or a switch to
+    /// `GlobBuilder`) turned it on, `*` would stop matching `a/b` and the
+    /// coverage claim would silently start permitting escalations.
+    #[test]
+    fn glob_star_matches_every_name() {
+        let star = Glob::new("*").unwrap().compile_matcher();
+        assert!(star.is_match("host.example.com"));
+        assert!(star.is_match("a/b"));
+        assert!(star.is_match(""));
+        // The `*.<suffix>` branch relies on the same property.
+        let suffix = Glob::new("*.eu.example").unwrap().compile_matcher();
+        assert!(suffix.is_match("a/b.eu.example"));
+    }
+
+    fn pol() -> Policy {
+        Policy {
+            allowed_san: vec![],
+            max_validity: Duration::from_secs(86400),
+            id_map_groups: vec![],
+            server_enroll_scopes: vec![],
+            server_enroll_roles: Default::default(),
+            perms_edit_scopes: vec![],
+            may_manage_admins: false,
+            service_control_scopes: vec![],
+        }
+    }
+
+    /// The no-escalation rule, one capability at a time. Every field of
+    /// `Policy` is exercised, and `policy_within` destructures both sides
+    /// with no `..` so a new field can't be added without landing here.
+    #[test]
+    fn a_role_admin_can_only_grant_a_subset_of_itself() {
+        let scoped = |f: fn(&mut Policy)| {
+            let mut p = pol();
+            f(&mut p);
+            p
+        };
+        // allowed_san
+        let caller = scoped(|p| p.allowed_san = vec!["*.eu.example".into()]);
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.allowed_san = vec!["a.eu.example".into()])
+            )
+            .is_ok()
+        );
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.allowed_san = vec!["a.ap.example".into()])
+            )
+            .is_err()
+        );
+        // max_validity
+        let caller = scoped(|p| p.max_validity = Duration::from_secs(3600));
+        assert!(
+            policy_within(&caller, &scoped(|p| p.max_validity = Duration::from_secs(60)))
+                .is_ok()
+        );
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.max_validity = Duration::from_secs(7200))
+            )
+            .is_err()
+        );
+        // id_map_groups
+        let caller = scoped(|p| p.id_map_groups = vec!["users".into()]);
+        assert!(
+            policy_within(&caller, &scoped(|p| p.id_map_groups = vec!["users".into()]))
+                .is_ok()
+        );
+        assert!(
+            policy_within(&caller, &scoped(|p| p.id_map_groups = vec!["wheel".into()]))
+                .is_err()
+        );
+        // server_enroll_scopes
+        let caller = scoped(|p| p.server_enroll_scopes = vec!["/eu".into()]);
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.server_enroll_scopes = vec!["/eu/x".into()])
+            )
+            .is_ok()
+        );
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.server_enroll_scopes = vec!["/".into()])
+            )
+            .is_err()
+        );
+        // server_enroll_roles
+        let caller =
+            scoped(|p| p.server_enroll_roles = admin_proto::Role::Resolver.into());
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.server_enroll_roles = admin_proto::Role::Resolver.into())
+            )
+            .is_ok()
+        );
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.server_enroll_roles = admin_proto::Role::Ca.into())
+            )
+            .is_err()
+        );
+        // may_manage_admins
+        assert!(policy_within(&pol(), &scoped(|p| p.may_manage_admins = true)).is_err());
+        let caller = scoped(|p| p.may_manage_admins = true);
+        assert!(policy_within(&caller, &scoped(|p| p.may_manage_admins = true)).is_ok());
+        // perms_edit_scopes
+        let caller = scoped(|p| p.perms_edit_scopes = vec!["/eu".into()]);
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.perms_edit_scopes = vec!["/eu/x".into()])
+            )
+            .is_ok()
+        );
+        assert!(
+            policy_within(&caller, &scoped(|p| p.perms_edit_scopes = vec!["/".into()]))
+                .is_err()
+        );
+        // service_control_scopes
+        let caller = scoped(|p| p.service_control_scopes = vec!["/eu".into()]);
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.service_control_scopes = vec!["/eu/x".into()])
+            )
+            .is_ok()
+        );
+        assert!(
+            policy_within(
+                &caller,
+                &scoped(|p| p.service_control_scopes = vec!["/".into()])
+            )
+            .is_err()
+        );
     }
 }

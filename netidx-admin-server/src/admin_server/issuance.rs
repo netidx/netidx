@@ -40,8 +40,6 @@ pub(super) fn restore_kind_matches(old: NodeKind, new: NodeKind) -> bool {
         )
 }
 
-/// List the pending queue for an authenticated admin.
-
 pub(super) async fn propagate_issuance(
     state: &Arc<Server>,
     warnings: &mut Vec<String>,

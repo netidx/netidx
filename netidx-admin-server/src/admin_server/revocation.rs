@@ -95,10 +95,6 @@ pub(super) async fn handle_get_crl(state: &Arc<Server>) -> GetCrlResponse {
     }
 }
 
-/// Who the TLS peer is, derived from its presented (already root-validated)
-/// client cert: the first DNS SAN, the serial, and the SPKI fingerprint of
-/// the leaf's public key.
-
 struct PreparedRevoke {
     admin: String,
     warnings: Vec<String>,

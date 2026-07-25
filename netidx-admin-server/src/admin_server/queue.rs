@@ -6,7 +6,7 @@ use super::{
     AUTORENEW_ADMIN, MutableState, Server, audit,
     auth::{
         PreparedAdminAuthentication, PreparedServerUnlock, admin_authority_over,
-        authenticate, one_live_refusal, server_unlock,
+        authenticate, one_live_refusal, server_unlock, signing_slot,
     },
     ca_dir,
     enrollment::{authorize_enrollment, finish_enrollment, stage_enrollment},
@@ -725,7 +725,7 @@ pub(super) async fn handle_deny(
     // scope-bound: an admin may deny only a request for a name it could have
     // signed (a serving-cert enrollment needs scoped enrollment authority).
     let authority = if let Some(enrollment) = &queued.enrollment {
-        if matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing) {
+        if signing_slot(&authd) {
             Ok(true)
         } else {
             authorize_enrollment(&authd, enrollment, map).map(|()| true)

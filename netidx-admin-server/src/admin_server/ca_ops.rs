@@ -55,16 +55,6 @@ pub(crate) async fn read_autorenew_password_async(
         .context("autorenew keytab task panicked")?
 }
 
-/// One autorenew pass: approve every pending **verified renewal** as the
-/// [`AUTORENEW_ADMIN`] slot, returning the count approved. Only verified
-/// renewals — continuations of an identity an admin already approved once,
-/// proven by possession of the live key at enqueue — are auto-approved;
-/// new enrollments always wait for a human (and the slot's empty policy
-/// would refuse them anyway). Uses proofs prepared on the bounded blocking
-/// pool and commits through the same [`handle_approve`] path as the wire, so it is
-/// audited as `op=renew` by the `autorenew` admin (the verified-renewal
-/// continuation gate) — exactly the trail the separate daemon left.
-
 pub(super) async fn handle_backup(
     state: &Arc<Server>,
     req: &admin_proto::BackupRequest,

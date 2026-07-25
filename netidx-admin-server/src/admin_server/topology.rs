@@ -5,7 +5,7 @@ mod tests;
 use super::{
     MutableState, PUSH_TIMEOUT, Server, audit,
     auth::{
-        PreparedAdminAuthentication, PreparedServerUnlock, authenticate,
+        PreparedAdminAuthentication, PreparedServerUnlock, authenticate, broad_admin,
         delegation_authority, prepare_server_unlock, scope_covers, server_unlock,
     },
     issuance::reconcile_identities_to_target,
@@ -989,8 +989,7 @@ async fn remove_server_prepare_inner(
     // resolver-cluster facts out of the map — a privileged, network-affecting
     // edit. Gate it on the admin-server lifecycle capability (the same bit
     // that authorizes enrolling one) or a broad admin.
-    let broad = matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins;
+    let broad = broad_admin(&authd);
     // Validate the authoritative-map transition on a copy first. Certificate
     // revocation is irreversible, so do not begin it for an invalid removal
     // (notably, removal of the active controller).

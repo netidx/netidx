@@ -6,7 +6,7 @@ use super::{
     MutableState, Server,
     auth::{
         PreparedAdminAuthentication, PreparedServerUnlock, authenticate, local_superuser,
-        reject, safe_auth_failure, scope_covers, server_unlock,
+        reject, safe_auth_failure, scope_covers, server_unlock, signing_slot,
     },
     ca_dir,
     issuance::{Issuance, IssuanceMode, issue_serialized},
@@ -41,10 +41,6 @@ async fn record_peer(state: &Server, peer: SocketAddr) {
         })
         .await;
 }
-
-/// Local facts + known peers. Cheap and network-free: the resolver
-/// address/auth is read fresh from the resolver config so config edits
-/// show up without a daemon restart; everything else is our own config.
 
 pub(super) async fn finish_enrollment(
     state: &Arc<Server>,
@@ -222,7 +218,7 @@ pub(super) fn authorize_enrollment(
     if !enrollment.roles.contains(Role::Resolver) {
         return Err("every non-controller enrollment must include Resolver".to_string());
     }
-    if matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing) {
+    if signing_slot(authd) {
         return Ok(());
     }
     if !authd.policy.server_enroll_roles.contains(enrollment.roles) {

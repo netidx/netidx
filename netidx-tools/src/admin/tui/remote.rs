@@ -1374,22 +1374,33 @@ fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, Stri
             ),
         ];
     }
-    let p = &a.policy;
+    // Destructured with no `..`, so a new capability can't be added to Policy
+    // without an operator ever being shown it.
+    let netidx_admin_proto::policy::Policy {
+        allowed_san,
+        max_validity,
+        id_map_groups,
+        server_enroll_scopes,
+        server_enroll_roles,
+        perms_edit_scopes,
+        may_manage_admins,
+        service_control_scopes,
+    } = &a.policy;
     let scope =
         |v: &[String]| if v.is_empty() { "(none)".to_string() } else { v.join(", ") };
     let yesno = |b: bool| if b { "yes".to_string() } else { "no".to_string() };
     vec![
-        ("May issue certs for (SAN)".to_string(), scope(&p.allowed_san)),
+        ("May issue certs for (SAN)".to_string(), scope(allowed_san)),
         (
             "Max validity it may grant".to_string(),
-            format!("{} days", p.max_validity.as_secs() / 86400),
+            format!("{} days", max_validity.as_secs() / 86400),
         ),
-        ("Id-map groups it may grant".to_string(), scope(&p.id_map_groups)),
-        ("Enroll servers under".to_string(), scope(&p.server_enroll_scopes)),
-        ("Enrollment roles".to_string(), format!("{:?}", p.server_enroll_roles)),
-        ("Manage other admins".to_string(), yesno(p.may_manage_admins)),
-        ("Edit permissions under".to_string(), scope(&p.perms_edit_scopes)),
-        ("Control services under".to_string(), scope(&p.service_control_scopes)),
+        ("Id-map groups it may grant".to_string(), scope(id_map_groups)),
+        ("Enroll servers under".to_string(), scope(server_enroll_scopes)),
+        ("Enrollment roles".to_string(), format!("{server_enroll_roles:?}")),
+        ("Manage other admins".to_string(), yesno(*may_manage_admins)),
+        ("Edit permissions under".to_string(), scope(perms_edit_scopes)),
+        ("Control services under".to_string(), scope(service_control_scopes)),
     ]
 }
 
