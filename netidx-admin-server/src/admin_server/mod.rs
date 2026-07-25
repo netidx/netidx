@@ -281,8 +281,12 @@ mod state_tests {
         };
 
         assert!(
-            authenticate(&mut ca, &password, &PreparedAdminAuthentication::Session)
-                .is_err()
+            authenticate(
+                &mut ca,
+                &password,
+                &PreparedAdminAuthentication::Session(Ok(authenticated.clone())),
+            )
+            .is_err()
         );
         assert!(
             authenticate(
@@ -340,6 +344,94 @@ mod state_tests {
             })
             .await;
         assert!(stale.is_err());
+    }
+
+    /// A request that needs the server's own key must reject an unauthenticated
+    /// credential BEFORE unlocking it. The unlock is a 64 MiB Argon2id on the
+    /// bounded blocking pool, so if a bogus session token can reach it, any
+    /// client can exhaust that pool over cheap connections. Session tokens are
+    /// validated by a hashmap lookup and so must be checked first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejected_session_never_reaches_the_server_key() {
+        use super::request::serve_request;
+        use admin_proto::{
+            AdminCredential, ClientHello, NodeKind, PROTOCOL_VERSION, Request, Secret,
+            ServerHello, SignRequest, SignResponse,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        ca.vault
+            .create(
+                b"mock-ca-key",
+                "recovery",
+                "rpw",
+                netidx_admin_proto::policy::recovery_policy(),
+            )
+            .await
+            .unwrap();
+        ca.vault
+            .add_signing_slot(
+                "rpw",
+                AUTORENEW_ADMIN,
+                "apw",
+                netidx_admin_proto::policy::autorenew_policy(),
+            )
+            .await
+            .unwrap();
+        ca.autorenew_pw = Some(zeroize::Zeroizing::new("apw".to_string()));
+        let state = test_server(Some(ca));
+        // Take the only KDF permit: anything that tries to derive a key now
+        // blocks until this test ends.
+        let signs = Arc::new(tokio::sync::Semaphore::new(1));
+        let _held = signs.clone().acquire_owned().await.unwrap();
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let state = state.clone();
+            async move {
+                serve_request(
+                    server,
+                    "203.0.113.7:1234".parse().unwrap(),
+                    None,
+                    false,
+                    &state,
+                    signs,
+                )
+                .await
+            }
+        });
+        admin_proto::write_msg(
+            &mut client,
+            &ClientHello { protocol_version: PROTOCOL_VERSION, kind: NodeKind::Client },
+        )
+        .await
+        .unwrap();
+        let _: ServerHello = admin_proto::read_msg(&mut client).await.unwrap();
+        admin_proto::write_msg(
+            &mut client,
+            &Request::Sign(SignRequest {
+                kind: NodeKind::Client,
+                credential: AdminCredential::Session {
+                    token: Secret("not-a-session".into()),
+                },
+                csr_pem: String::new(),
+                requested_name: "victim.example.com".to_string(),
+                requested_validity: Duration::from_secs(3600),
+                id_map_groups: Vec::new(),
+                replaces_serial: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let resp: SignResponse = tokio::time::timeout(
+            Duration::from_secs(5),
+            admin_proto::read_msg(&mut client),
+        )
+        .await
+        .expect("a bogus session must be refused without waiting for a KDF permit")
+        .unwrap();
+        assert!(matches!(resp, SignResponse::Err { .. }), "{resp:?}");
+        served.await.unwrap().unwrap();
     }
 }
 

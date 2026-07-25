@@ -125,11 +125,14 @@ where
         ),
         None => None,
     };
+    // Unlocking the server's own key is a full Argon2id (64 MiB) on the bounded
+    // blocking pool. Never do it for a credential we already know is bad, or an
+    // unauthenticated client gets to spend it at will.
     let server_unlock = if requirements.needs_server_unlock() {
         Some(
             if authentication
                 .as_ref()
-                .is_some_and(PreparedAdminAuthentication::password_failed)
+                .is_some_and(PreparedAdminAuthentication::credential_failed)
             {
                 PreparedServerUnlock::failed("authentication failed")
             } else {
@@ -475,7 +478,7 @@ where
         }
         Request::AddRoleAdmin(req) => {
             let authentication = request_authentication();
-            let prepared = match authentication.password_failure() {
+            let prepared = match authentication.credential_failure() {
                 Some(reason) => Err(reason),
                 None => prepare_role_slot(state, &signs, &req).await,
             };

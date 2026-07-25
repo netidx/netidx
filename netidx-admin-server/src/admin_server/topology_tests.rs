@@ -341,3 +341,93 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
         Some(new_addr)
     );
 }
+
+/// Deciding a delegation needs authority over the parent cluster's base, not
+/// just over the proposed child path. `netmap::delegate` only requires the
+/// child to sit under the parent's base, so without this check an admin scoped
+/// to `/eu` could approve a delegation of `/eu/x` parented at the ROOT cluster
+/// and rewrite the root resolvers' referrals.
+#[test]
+fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
+    use netidx_admin_proto::policy::SlotKind;
+    let root_srv = admin_proto::AdminServerId::new();
+    let eu_srv = admin_proto::AdminServerId::new();
+    let root = admin_proto::ResolverClusterId::new();
+    let eu = admin_proto::ResolverClusterId::new();
+    let resolver = |addr: &str| ResolverAddr {
+        addr: addr.parse().unwrap(),
+        auth: InfoAuth::Anonymous,
+    };
+    let root_member = resolver("10.1.0.1:4564");
+    let eu_member = resolver("10.2.0.1:4564");
+    let server = |id, addr: &str, member: &ResolverAddr, cluster| ServerEntry {
+        id,
+        addr: addr.parse().unwrap(),
+        roles: Role::Resolver.into(),
+        resolver: Some(member.clone()),
+        cluster: Some(cluster),
+        state: admin_proto::ServerState::Registered,
+    };
+    let map = NetworkMap {
+        version: 1,
+        controller: root_srv,
+        servers: vec![
+            server(root_srv, "10.1.0.1:4565", &root_member, root),
+            server(eu_srv, "10.2.0.1:4565", &eu_member, eu),
+        ],
+        clusters: vec![
+            admin_proto::ClusterEntry {
+                id: root,
+                base: "/".into(),
+                state: admin_proto::ClusterState::Active,
+                members: vec![root_member],
+                parent: None,
+                children: vec![eu],
+            },
+            admin_proto::ClusterEntry {
+                id: eu,
+                base: "/eu".into(),
+                state: admin_proto::ClusterState::Active,
+                members: vec![eu_member],
+                parent: Some(root),
+                children: vec![],
+            },
+        ],
+    };
+    let scoped = |scope: &str| crate::ca_vault::Authenticated {
+        slot_id: uuid::Uuid::new_v4(),
+        credential_revision: 0,
+        admin: "eu-ops".to_string(),
+        policy: netidx_admin_proto::policy::Policy {
+            allowed_san: vec![],
+            max_validity: Duration::from_secs(86400),
+            id_map_groups: vec![],
+            server_enroll_scopes: vec![],
+            server_enroll_roles: Default::default(),
+            perms_edit_scopes: vec![scope.to_string()],
+            may_manage_admins: false,
+            service_control_scopes: vec![],
+        },
+        kind: SlotKind::Role,
+    };
+    let child_srv = admin_proto::AdminServerId::new();
+    let under_root = delegation_store::PendingDelegation::new(
+        "/eu/x".to_string(),
+        vec![root_srv],
+        vec![child_srv],
+        "peer".to_string(),
+    );
+    let under_eu = delegation_store::PendingDelegation::new(
+        "/eu/x".to_string(),
+        vec![eu_srv],
+        vec![child_srv],
+        "peer".to_string(),
+    );
+
+    // The child path is inside /eu either way; only the parent differs.
+    assert!(decide_delegation_authority(&scoped("/eu"), &map, &under_root).is_err());
+    assert!(decide_delegation_authority(&scoped("/eu"), &map, &under_eu).is_ok());
+    // The root admin may decide both.
+    assert!(decide_delegation_authority(&scoped("/"), &map, &under_root).is_ok());
+    assert!(decide_delegation_authority(&scoped("/"), &map, &under_eu).is_ok());
+}

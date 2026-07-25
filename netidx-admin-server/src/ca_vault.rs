@@ -787,11 +787,19 @@ fn unlock(vault: &VaultFile, password: &str) -> Result<Unlocked> {
     })
 }
 
+/// Verify `password` against the slot named `admin`. Costs exactly one KDF
+/// whether or not a slot of that name exists: an early return on a
+/// name miss is a timing oracle that enumerates the admin roster. The dummy
+/// derivation is affordable only because password attempts are rate-limited
+/// per source and run under the bounded signing semaphore — do not call this
+/// from a path that isn't.
 fn authenticate(vault: &VaultFile, admin: &str, password: &str) -> Result<Authenticated> {
+    let mut named = false;
     for slot in &vault.slots {
         if slot.admin != admin {
             continue;
         }
+        named = true;
         let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
         let kek = derive_kek(
             password.as_bytes(),
@@ -810,8 +818,17 @@ fn authenticate(vault: &VaultFile, admin: &str, password: &str) -> Result<Authen
             });
         }
     }
+    if !named {
+        let (m, t, p) = KDF_COST;
+        let _ = derive_kek(password.as_bytes(), &DUMMY_SALT, m, t, p)?;
+    }
     bail!("authentication failed")
 }
+
+/// Salt for the no-such-admin derivation in [`authenticate`]. A constant is
+/// fine: its only job is to make the work happen, and nothing is compared
+/// against the result.
+const DUMMY_SALT: [u8; 16] = [0x6e; 16];
 
 /// Try every **signing** slot; return the index of the slot `password`
 /// unlocks plus the recovered master key. Role slots are skipped — their
@@ -877,6 +894,19 @@ fn make_slot(
     })
 }
 
+// Counts key derivations so tests can assert the *work* an operation does,
+// not just its result — the property that closes a timing oracle. Per-thread
+// so tests running in parallel don't see each other's derivations.
+#[cfg(test)]
+thread_local! {
+    static KDF_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn kdf_calls() -> usize {
+    KDF_CALLS.with(std::cell::Cell::get)
+}
+
 fn derive_kek(
     password: &[u8],
     salt: &[u8],
@@ -884,6 +914,8 @@ fn derive_kek(
     t: u32,
     p: u32,
 ) -> Result<Zeroizing<[u8; 32]>> {
+    #[cfg(test)]
+    KDF_CALLS.with(|calls| calls.set(calls.get() + 1));
     let params = Params::new(m, t, p, Some(32))
         .map_err(|e| anyhow!("argon2 params (m={m}, t={t}, p={p}): {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -1004,6 +1036,31 @@ mod tests {
         // And it doesn't leak the key on failure (nothing to assert
         // beyond the error, but exercise the path).
         assert!(v.unlock("").is_err());
+    }
+
+    /// An unknown admin name must cost the same key derivation a wrong
+    /// password does. Returning early on a name miss answers in microseconds
+    /// while a real attempt spends a full Argon2 — a free oracle for
+    /// enumerating the admin roster. Asserted on work done, not wall clock.
+    #[tokio::test]
+    async fn authentication_costs_one_kdf_whether_or_not_the_admin_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "alice", "hunter2", pol("*.a")).await.unwrap();
+
+        let before = kdf_calls();
+        assert!(v.authenticate("alice", "wrong").is_err());
+        let wrong_password = kdf_calls() - before;
+
+        let before = kdf_calls();
+        assert!(v.authenticate("nobody", "wrong").is_err());
+        let unknown_admin = kdf_calls() - before;
+
+        assert_eq!(wrong_password, 1);
+        assert_eq!(
+            unknown_admin, wrong_password,
+            "an unknown admin name must not be cheaper to test than a wrong password"
+        );
     }
 
     #[tokio::test]

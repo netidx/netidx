@@ -319,6 +319,21 @@ fn server_set(
     Ok((cluster.expect("nonempty ids"), members))
 }
 
+/// The namespace base of the cluster `parent_servers` belong to — the subtree
+/// a delegation under them would restructure. Authorization needs this before
+/// [`delegate`] runs, because `delegate` only checks that the proposed child
+/// path lies *under* this base, which says nothing about who owns the base.
+pub fn parent_base(map: &NetworkMap, parent_servers: &[AdminServerId]) -> Result<String> {
+    let (cluster, _) = server_set(map, &canonical_ids(parent_servers), true)?;
+    Ok(map
+        .clusters
+        .iter()
+        .find(|entry| entry.id == cluster)
+        .context("parent cluster does not exist")?
+        .base
+        .clone())
+}
+
 fn assigned_servers(map: &NetworkMap, cluster: ResolverClusterId) -> Vec<AdminServerId> {
     let mut ids: Vec<_> = map
         .servers

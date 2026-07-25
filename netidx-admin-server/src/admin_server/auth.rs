@@ -57,12 +57,19 @@ pub(super) fn authenticate(
                 .map_err(|_| "authentication failed".to_string())
         }),
         (
-            admin_proto::AdminCredential::Session { token },
-            PreparedAdminAuthentication::Session,
-        ) => ca.sessions.authenticate_session(&ca.vault, token),
+            admin_proto::AdminCredential::Session { .. },
+            PreparedAdminAuthentication::Session(result),
+        ) => result.as_ref().map_err(Clone::clone).and_then(|authenticated| {
+            ca.vault
+                .resolve_session_slot(
+                    authenticated.slot_id,
+                    authenticated.credential_revision,
+                )
+                .map_err(|_| "login required: session is no longer valid".to_string())
+        }),
         (
             admin_proto::AdminCredential::Password { .. },
-            PreparedAdminAuthentication::Session,
+            PreparedAdminAuthentication::Session(_),
         )
         | (
             admin_proto::AdminCredential::Session { .. },
@@ -140,18 +147,25 @@ where
 
 pub(super) enum PreparedAdminAuthentication {
     Password(std::result::Result<ca_vault::Authenticated, String>),
-    Session,
+    Session(std::result::Result<ca_vault::Authenticated, String>),
 }
 
 impl PreparedAdminAuthentication {
-    pub(super) fn password_failed(&self) -> bool {
-        matches!(self, Self::Password(Err(_)))
+    /// The credential is already known bad, so no further expensive work
+    /// (the server's own Argon2 unlock, a new slot's KDF) may be done on its
+    /// behalf. Both credential kinds must answer here: a session token is
+    /// validated by a hashmap lookup, so letting an unauthenticated one
+    /// through would hand any client a free 64 MiB KDF.
+    pub(super) fn credential_failed(&self) -> bool {
+        self.credential_failure().is_some()
     }
 
-    pub(super) fn password_failure(&self) -> Option<String> {
+    pub(super) fn credential_failure(&self) -> Option<String> {
         match self {
-            Self::Password(Err(reason)) => Some(reason.clone()),
-            Self::Password(Ok(_)) | Self::Session => None,
+            Self::Password(Err(reason)) | Self::Session(Err(reason)) => {
+                Some(reason.clone())
+            }
+            Self::Password(Ok(_)) | Self::Session(Ok(_)) => None,
         }
     }
 }
@@ -182,8 +196,19 @@ pub(super) async fn prepare_admin_authentication(
         admin_proto::AdminCredential::Password { admin, password } => {
             (admin.clone(), password.clone())
         }
-        admin_proto::AdminCredential::Session { .. } => {
-            return PreparedAdminAuthentication::Session;
+        // Validating a session token is a hashmap lookup plus a slot-revision
+        // check — cheap, and it must happen here so a bogus token never
+        // reaches the KDF-bearing preparation steps below.
+        admin_proto::AdminCredential::Session { token } => {
+            let token = token.clone();
+            return PreparedAdminAuthentication::Session(
+                state
+                    .write(move |state| match state.ca.as_mut() {
+                        Some(ca) => ca.sessions.authenticate_session(&ca.vault, &token),
+                        None => Err("this host does not hold the CA".to_string()),
+                    })
+                    .await,
+            );
         }
     };
     let snapshot = match state
@@ -346,13 +371,19 @@ pub(super) fn name_permitted(name: &str, allowed: &[String]) -> Result<bool> {
 ///   that authorizes minting it.
 /// - Any other name must fall within the admin's issuance scope
 ///   (`allowed_san`).
+/// An admin whose authority is not scope-bound: an on-box signing slot (it
+/// holds the key outright) or a `may_manage_admins` superuser (it can mint
+/// itself any credential, so confining it elsewhere would be theatre).
+pub(super) fn broad_admin(authd: &ca_vault::Authenticated) -> bool {
+    matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
+        || authd.policy.may_manage_admins
+}
+
 pub(super) fn admin_authority_over(
     authd: &ca_vault::Authenticated,
     name: &str,
 ) -> Result<bool> {
-    if matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins
-    {
+    if broad_admin(authd) {
         return Ok(true);
     }
     if name.eq_ignore_ascii_case(SERVING_SAN) {
@@ -367,9 +398,7 @@ pub(super) fn admin_authority_over(
 /// over that subtree: a broad admin (signing slot / `may_manage_admins`) or a
 /// `perms_edit_scopes` entry covering the path.
 pub(super) fn delegation_authority(authd: &ca_vault::Authenticated, path: &str) -> bool {
-    matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins
-        || scope_covers(&authd.policy.perms_edit_scopes, path)
+    broad_admin(authd) || scope_covers(&authd.policy.perms_edit_scopes, path)
 }
 
 pub(super) fn reject(reason: &str) -> SignResponse {

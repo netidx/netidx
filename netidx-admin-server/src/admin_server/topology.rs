@@ -576,6 +576,40 @@ async fn handle_list_delegations_inner(
     }
 }
 
+/// Whether `authd` may approve or deny `pending`.
+///
+/// A delegation restructures the hierarchy on **both** sides of the split: it
+/// mounts the child subtree, and it rewrites the *parent* cluster's referrals.
+/// So it needs authority over the parent cluster's base as well as over the
+/// proposed child path — an admin scoped to `/eu` must not be able to decide a
+/// delegation whose parent is the root cluster just because the child lands
+/// under `/eu`. [`netmap::delegate`] only enforces that the child path is
+/// under the parent base, and only after authorization has already run.
+///
+/// Deny is held to the same rule as approve, per [`admin_authority_over`]:
+/// authority to destroy must mirror authority to create.
+fn decide_delegation_authority(
+    authd: &crate::ca_vault::Authenticated,
+    map: &NetworkMap,
+    pending: &delegation_store::PendingDelegation,
+) -> std::result::Result<(), String> {
+    if !delegation_authority(authd, &pending.proposed_path) {
+        return Err(format!(
+            "admin {} is not authorized to decide delegations at {:?}",
+            authd.admin, pending.proposed_path
+        ));
+    }
+    let base = netmap::parent_base(map, &pending.parent_servers)
+        .map_err(|e| format!("resolving the delegation's parent cluster: {e:#}"))?;
+    if !delegation_authority(authd, &base) {
+        return Err(format!(
+            "admin {} is not authorized to restructure the parent cluster at {base:?}",
+            authd.admin
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn handle_deny_delegation(
     state: &Server,
     req: &DenyDelegationRequest,
@@ -594,7 +628,8 @@ async fn handle_deny_delegation_inner(
     req: &DenyDelegationRequest,
     authentication: &PreparedAdminAuthentication,
 ) -> DenyDelegationResponse {
-    let Some(ca) = state.ca.as_mut() else {
+    let MutableState { map, ca, .. } = state;
+    let Some(ca) = ca.as_mut() else {
         return DenyDelegationResponse::Err {
             reason: "this host does not hold the CA".to_string(),
         };
@@ -607,13 +642,8 @@ async fn handle_deny_delegation_inner(
     };
     match delegation_store::read_pending(&ca_dir, &req.request_id).await {
         Ok(Some(pending)) => {
-            if !delegation_authority(&authd, &pending.proposed_path) {
-                return DenyDelegationResponse::Err {
-                    reason: format!(
-                        "admin {} is not authorized to decide delegations at {:?}",
-                        authd.admin, pending.proposed_path
-                    ),
-                };
+            if let Err(reason) = decide_delegation_authority(&authd, map, &pending) {
+                return DenyDelegationResponse::Err { reason };
             }
             match delegation_store::deny(&config_lock, &ca_dir, &pending, &req.reason)
                 .await
@@ -1217,12 +1247,7 @@ async fn approve_delegation_prepare_inner(
             }
             Err(e) => return Err(err(format!("{e:#}"))),
         };
-        if !delegation_authority(&authd, &pending.proposed_path) {
-            return Err(err(format!(
-                "admin {} is not authorized to decide delegations at {:?}",
-                authd.admin, pending.proposed_path
-            )));
-        }
+        decide_delegation_authority(&authd, map, &pending).map_err(err)?;
         // Persist a staged snapshot before publishing it in memory. A failed disk
         // write must not leave the live controller map ahead of its durable map.
         let mut staged = map.clone();

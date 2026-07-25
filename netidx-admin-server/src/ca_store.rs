@@ -43,6 +43,18 @@ pub const TTL: Duration = Duration::from_secs(24 * 3600);
 /// far above any real enrollment burst.
 pub const MAX_PENDING: usize = 64;
 
+// Counts full scans of `issued/` so tests can assert the *work* an operation
+// does. Per-thread so tests running in parallel don't see each other's scans.
+#[cfg(test)]
+thread_local! {
+    static ISSUED_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn issued_scans() -> usize {
+    ISSUED_SCANS.with(std::cell::Cell::get)
+}
+
 pub fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -439,7 +451,13 @@ impl CAStore {
 
     /// Start an incremental scan of `issued/`. Unparseable files are skipped
     /// (an operator might hand-edit in an emergency).
+    ///
+    /// This is the one entry point to a full-index scan — every caller reads
+    /// and parses every record — so it is where tests count scans to assert
+    /// that a cheap refusal happens before an expensive one.
     pub(crate) async fn issued_records(&self) -> Result<IssuedRecords> {
+        #[cfg(test)]
+        ISSUED_SCANS.with(|scans| scans.set(scans.get() + 1));
         let dir = self.issued_dir();
         let entries = match tokio::fs::read_dir(&dir).await {
             Ok(entries) => Some(entries),
@@ -459,6 +477,18 @@ impl CAStore {
             out.push(record);
         }
         Ok(out)
+    }
+
+    /// Whether the queue has room for another request. Prunes first, then
+    /// counts — this touches only `queue/` and `denied/`, both bounded by
+    /// [`MAX_PENDING`], so it is cheap enough to gate an *unauthenticated*
+    /// enqueue on before doing anything that scans `issued/`.
+    ///
+    /// [`enqueue`](Self::enqueue) re-checks under the state write lock; that
+    /// remains the authoritative decision.
+    pub async fn has_queue_capacity(&mut self) -> Result<bool> {
+        self.prune().await?;
+        Ok(self.pending().await?.len() < MAX_PENDING)
     }
 
     /// Add a request to the active queue. Prunes first; refuses at
@@ -604,20 +634,40 @@ impl CAStore {
     /// Returns true if it was live and is now revoked, false if not found or
     /// already revoked.
     pub async fn revoke(&mut self, serial: u64, rev: Revocation) -> Result<bool> {
-        for mut rec in self.all_issued().await? {
-            if rec.serial == serial {
-                if !rec.live(now_unix()) {
-                    return Ok(false);
-                }
-                rec.revoked = Some(rev);
-                let bytes = serde_json::to_vec_pretty(&rec)
-                    .context("serializing issued record")?;
-                atomic::write_atomic_async(&self.issued_path(&rec.req.id), &bytes, 0o644)
-                    .await?;
-                return Ok(true);
-            }
+        Ok(self.revoke_many(&[(serial, rev)]).await?[0].1)
+    }
+
+    /// Revoke a batch of serials with a single scan of `issued/`, returning
+    /// each serial's outcome in the order given (see [`revoke`](Self::revoke)
+    /// for what the flag means). Revoking N serials one at a time costs N full
+    /// scans, which is the whole index re-read and re-parsed per certificate.
+    pub async fn revoke_many(
+        &mut self,
+        revocations: &[(u64, Revocation)],
+    ) -> Result<Vec<(u64, bool)>> {
+        let mut outcomes: Vec<(u64, bool)> =
+            revocations.iter().map(|(serial, _)| (*serial, false)).collect();
+        if revocations.is_empty() {
+            return Ok(outcomes);
         }
-        Ok(false)
+        let now = now_unix();
+        for mut rec in self.all_issued().await? {
+            let Some(index) =
+                revocations.iter().position(|(serial, _)| *serial == rec.serial)
+            else {
+                continue;
+            };
+            if !rec.live(now) {
+                continue;
+            }
+            rec.revoked = Some(revocations[index].1.clone());
+            let bytes =
+                serde_json::to_vec_pretty(&rec).context("serializing issued record")?;
+            atomic::write_atomic_async(&self.issued_path(&rec.req.id), &bytes, 0o644)
+                .await?;
+            outcomes[index].1 = true;
+        }
+        Ok(outcomes)
     }
 
     /// Record that the id-map registration for this issuance has been

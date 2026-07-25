@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "queue_tests.rs"]
+mod tests;
+
 use super::{
     AUTORENEW_ADMIN, MutableState, Server, audit,
     auth::{
@@ -436,6 +440,26 @@ pub(super) async fn handle_enqueue(
         };
     }
     let store = &mut ca.store;
+    // Enqueue is unauthenticated, and the checks below scan and parse every
+    // record in `issued/`. Refuse a full queue first — that costs only the
+    // bounded `queue/` and `denied/` directories — so a flood can't turn cheap
+    // connections into an unbounded amount of the CA's disk I/O.
+    match store.has_queue_capacity().await {
+        Ok(true) => (),
+        Ok(false) => {
+            return EnqueueResponse::Err {
+                reason: format!(
+                    "the signing queue is full ({} pending requests)",
+                    ca_store::MAX_PENDING
+                ),
+            };
+        }
+        Err(e) => {
+            return EnqueueResponse::Err {
+                reason: format!("checking the signing queue: {e:#}"),
+            };
+        }
+    }
     // Admin-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
     // reserved-name refusal (this is the sanctioned way to request it)

@@ -6,7 +6,7 @@ use super::{
     MutableState, PUSH_TIMEOUT, Server, audit,
     auth::{
         PreparedAdminAuthentication, PreparedServerUnlock, admin_authority_over,
-        authenticate, safe_auth_failure, scope_covers, server_unlock,
+        authenticate, broad_admin, safe_auth_failure, scope_covers, server_unlock,
     },
     ca_dir,
 };
@@ -130,6 +130,61 @@ async fn prepare_revoke(
         .await
 }
 
+/// Whether `authd` may revoke the certificate with this `serial`, given its
+/// `record` from the issuance index (`None` ⇒ this CA has no such serial).
+///
+/// Deny is the default. Revocation is destructive — revoking serving certs or
+/// another region's leaves is a denial of service — so it is scope-bound
+/// exactly like issuance: an admin may revoke only what it could have signed
+/// (see [`admin_authority_over`]). A serial we cannot resolve to a record is a
+/// serial whose scope we cannot evaluate, so there is nothing to authorize
+/// against and it is refused rather than passed through.
+///
+/// `Err` carries the operator-facing reason it was skipped.
+fn revoke_authority(
+    authd: &crate::ca_vault::Authenticated,
+    map: &admin_proto::NetworkMap,
+    serial: u64,
+    record: Option<&ca_store::IssuedRecord>,
+) -> std::result::Result<(), String> {
+    if broad_admin(authd) {
+        return Ok(());
+    }
+    let Some(record) = record else {
+        return Err(format!(
+            "serial {serial} is not in this CA's issuance index; skipped"
+        ));
+    };
+    let authorized = if record.name.eq_ignore_ascii_case(SERVING_SAN) {
+        // A serving cert's scope is its admin server's cluster, which only the
+        // certificate's embedded identity can tell us.
+        crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
+            .ok()
+            .and_then(|identity| {
+                let cluster = map
+                    .servers
+                    .iter()
+                    .find(|server| server.id == identity.server_id)?
+                    .cluster?;
+                map.clusters.iter().find(|entry| entry.id == cluster).map(|entry| {
+                    scope_covers(&authd.policy.server_enroll_scopes, &entry.base)
+                })
+            })
+            .unwrap_or(false)
+    } else {
+        admin_authority_over(authd, &record.name)
+            .map_err(|e| format!("evaluating authority for serial {serial}: {e:#}"))?
+    };
+    if authorized {
+        Ok(())
+    } else {
+        Err(format!(
+            "serial {serial} ({:?}) is outside admin {}'s authority; skipped",
+            record.name, authd.admin
+        ))
+    }
+}
+
 async fn prepare_revoke_inner(
     state: &mut MutableState,
     req: &RevokeRequest,
@@ -150,9 +205,7 @@ async fn prepare_revoke_inner(
     // like issuance: an admin may revoke only what it could have signed.
     // Reject up front any admin with no issuance/management authority at all;
     // the per-serial check below confines the rest to their own scope.
-    let broad = matches!(authd.kind, netidx_admin_proto::policy::SlotKind::Signing)
-        || authd.policy.may_manage_admins;
-    if !broad
+    if !broad_admin(&authd)
         && authd.policy.allowed_san.is_empty()
         && authd.policy.server_enroll_scopes.is_empty()
     {
@@ -180,76 +233,50 @@ async fn prepare_revoke_inner(
     // Scope-check before mutating any records.
     let mut serials = Vec::new();
     for serial in &req.serials {
-        let mut authorized = true;
-        if !broad && let Some(record) = records.get(serial) {
-            authorized = if record.name.eq_ignore_ascii_case(SERVING_SAN) {
-                crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
-                    .ok()
-                    .and_then(|identity| {
-                        let cluster = map
-                            .servers
-                            .iter()
-                            .find(|server| server.id == identity.server_id)?
-                            .cluster?;
-                        map.clusters.iter().find(|entry| entry.id == cluster).map(
-                            |entry| {
-                                scope_covers(
-                                    &authd.policy.server_enroll_scopes,
-                                    &entry.base,
-                                )
-                            },
-                        )
-                    })
-                    .unwrap_or(false)
-            } else {
-                match admin_authority_over(&authd, &record.name) {
-                    Ok(authorized) => authorized,
-                    Err(e) => {
-                        warnings.push(format!(
-                            "evaluating authority for serial {serial}: {e:#}"
-                        ));
-                        false
-                    }
-                }
-            };
-            if !authorized {
-                warnings.push(format!(
-                    "serial {serial} ({:?}) is outside admin {}'s authority; skipped",
-                    record.name, authd.admin
-                ));
-            }
-        }
-        if authorized {
-            serials.push(*serial);
+        match revoke_authority(&authd, map, *serial, records.get(serial)) {
+            Ok(()) => serials.push(*serial),
+            Err(reason) => warnings.push(reason),
         }
     }
-    // Each revocation is a read-modify-write of an `issued/<id>` record. The
-    // state write lock keeps the whole loop serialized with `set_push_done`.
+    // Each revocation is a read-modify-write of an `issued/<id>` record; the
+    // batch shares one scan of the index. The state write lock keeps the whole
+    // thing serialized with `set_push_done`.
     {
         let ca_dir = ca.dir().to_path_buf();
         let store = &mut ca.store;
-        for serial in serials {
-            let rev = ca_store::Revocation {
-                serial,
-                revoked_unix: now,
-                reason: req.reason.clone(),
-            };
-            match store.revoke(serial, rev).await {
-                Ok(true) => {
-                    audit(
-                        &ca_dir,
-                        &authd.admin,
-                        "revoke",
-                        &format!("operation {operation_id}: serial {serial}"),
-                        Duration::ZERO,
-                    )
-                    .await
+        let revocations: Vec<_> = serials
+            .into_iter()
+            .map(|serial| {
+                (
+                    serial,
+                    ca_store::Revocation {
+                        serial,
+                        revoked_unix: now,
+                        reason: req.reason.clone(),
+                    },
+                )
+            })
+            .collect();
+        match store.revoke_many(&revocations).await {
+            Ok(outcomes) => {
+                for (serial, revoked) in outcomes {
+                    if revoked {
+                        audit(
+                            &ca_dir,
+                            &authd.admin,
+                            "revoke",
+                            &format!("operation {operation_id}: serial {serial}"),
+                            Duration::ZERO,
+                        )
+                        .await
+                    } else {
+                        warnings.push(format!(
+                            "serial {serial} was not live (unknown or already revoked)"
+                        ))
+                    }
                 }
-                Ok(false) => warnings.push(format!(
-                    "serial {serial} was not live (unknown or already revoked)"
-                )),
-                Err(e) => warnings.push(format!("revoking serial {serial}: {e:#}")),
             }
+            Err(e) => warnings.push(format!("revoking certificates: {e:#}")),
         }
     }
     // Re-sign the CRL with the server's own key (the autorenew credential).
