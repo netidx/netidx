@@ -4,12 +4,10 @@
 use anyhow::Result;
 use arcstr::ArcStr;
 use graphix_package_core::testing;
-use graphix_rt::NoExt;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, Value};
 
-const TEST_REGISTER: &[testing::RegisterFn] =
-    &[<graphix_package_core::P as graphix_package::Package<NoExt>>::register];
+const TEST_REGISTER: &[testing::PackageRef] = &[&graphix_package_core::P];
 
 /// Check that a Rust value's IntoValue representation matches the graphix
 /// evaluation of `graphix_expr`, and that FromValue round-trips back to the

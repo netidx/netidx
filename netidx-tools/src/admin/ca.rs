@@ -2423,6 +2423,7 @@ fn list() -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use netidx_admin_proto::policy::RECOVERY_ADMIN;
 
     #[derive(Debug, Parser)]
     struct TestCaCli {

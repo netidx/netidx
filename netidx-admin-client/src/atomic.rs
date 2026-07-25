@@ -3,9 +3,11 @@
 //! itself is durable. The temp file is created in the same directory
 //! as the destination so the rename is atomic on the same filesystem.
 //!
-//! Unix file modes are applied via `std::os::unix::fs::PermissionsExt`
-//! before the rename, so the file is never observable with the wrong
-//! mode by another process.
+//! Unix file modes are applied at creation, before any payload is
+//! written, and reasserted before the rename — `open(2)` narrows the
+//! creation mode by the umask, it can never widen it. So the temp file
+//! is never observable with a wider mode than requested, and secrets
+//! (vault, keytabs, keys) are never briefly world-readable.
 //!
 //! On Windows the mode argument is ignored, and the directory fsync
 //! step is a no-op (NTFS rename atomicity does not require it; there
@@ -66,15 +68,21 @@ pub async fn write_atomic_async(path: &Path, bytes: &[u8], mode: u32) -> Result<
         .with_context(|| format!("creating parent dir {dir:?}"))?;
     let tmp = dir.join(format_compact!(".tmp-netidx-{}", uuid::Uuid::new_v4()).as_str());
     let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        // The mode must be set at creation: a chmod after the write leaves the
+        // payload readable at the umask default for the whole write.
+        #[cfg(unix)]
+        options.mode(mode);
+        let mut file = options
             .open(&tmp)
             .await
             .with_context(|| format!("creating temp file in {dir:?}"))?;
         file.write_all(bytes)
             .await
             .with_context(|| format!("writing temp file for {path:?}"))?;
+        // The creation mode above is masked by the umask, which can only clear
+        // bits; reassert the exact mode the caller asked for.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -244,5 +252,60 @@ mod tests {
         write_atomic_async(&path, b"one", 0o600).await.unwrap();
         write_atomic_async(&path, b"two", 0o600).await.unwrap();
         assert_eq!(tokio::fs::read(path).await.unwrap(), b"two");
+    }
+
+    /// The temp file must never be observable with a wider mode than the
+    /// caller asked for — not even for the duration of the write. A secret
+    /// (the CA vault, an autorenew keytab) written at the umask default and
+    /// chmodded afterwards is readable by every local user while it lands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_temp_file_is_never_wider_than_requested() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = std::thread::spawn({
+            let dir = dir.path().to_path_buf();
+            let done = Arc::clone(&done);
+            move || {
+                let mut seen: Vec<u32> = Vec::new();
+                while !done.load(Ordering::Acquire) {
+                    let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        if !name.to_string_lossy().starts_with(".tmp-netidx-") {
+                            continue;
+                        }
+                        if let Ok(md) = entry.metadata() {
+                            seen.push(md.permissions().mode() & 0o777);
+                        }
+                    }
+                }
+                seen
+            }
+        });
+        // Big enough that the write itself spans many watcher passes.
+        let payload = vec![b'x'; 16 * 1024 * 1024];
+        write_atomic_async(&path, &payload, 0o600).await.unwrap();
+        done.store(true, Ordering::Release);
+        let seen = watcher.join().unwrap();
+        assert!(
+            !seen.is_empty(),
+            "watcher never caught the temp file — the test proves nothing"
+        );
+        let wide: Vec<String> =
+            seen.iter().filter(|m| **m & !0o600 != 0).map(|m| format!("{m:o}")).collect();
+        assert!(wide.is_empty(), "temp file was observable at modes {wide:?}");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
