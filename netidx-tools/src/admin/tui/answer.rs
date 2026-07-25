@@ -419,7 +419,16 @@ impl Modal {
             UiRequest::Recovery { password, reply } => {
                 Some(Modal::Recovery { password, reply: Some(reply) })
             }
-            _ => None,
+            // Non-blocking requests: they carry no reply channel, so there is
+            // nothing to put on screen and nothing to answer. Every BLOCKING
+            // variant must be handled above — one that reached here would
+            // never get its reply, and the running op would hang forever.
+            UiRequest::Editor { .. }
+            | UiRequest::VerificationCode { .. }
+            | UiRequest::ClearVerificationCode
+            | UiRequest::Note(_)
+            | UiRequest::Warn(_)
+            | UiRequest::Progress(_) => None,
         }
     }
 

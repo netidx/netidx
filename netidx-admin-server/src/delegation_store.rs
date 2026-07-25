@@ -216,7 +216,7 @@ pub async fn status(ca_dir: &Path, id: &str) -> Result<Status> {
 pub async fn read_pending(ca_dir: &Path, id: &str) -> Result<Option<PendingDelegation>> {
     match status(ca_dir, id).await? {
         Status::Pending(req) => Ok(Some(req)),
-        _ => Ok(None),
+        Status::Approved { .. } | Status::Denied { .. } | Status::Unknown => Ok(None),
     }
 }
 

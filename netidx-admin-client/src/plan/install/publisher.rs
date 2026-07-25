@@ -196,7 +196,9 @@ pub async fn run_publisher(
                 // the resolver's TLS name.
                 let suggested = match &per_addr_auth {
                     ReferralAuth::Tls(san) => suggest_client_san(san),
-                    _ => None,
+                    ReferralAuth::Anonymous
+                    | ReferralAuth::Local(_)
+                    | ReferralAuth::Krb5(_) => None,
                 };
                 let si = enroll::prompt_tls_client_identity(
                     ans,

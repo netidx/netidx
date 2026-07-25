@@ -569,7 +569,9 @@ async fn backup(
     )?;
     let service_scope = match record.role {
         InstallRole::Workstation => ServiceScope::User,
-        _ => ServiceScope::System,
+        InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher => {
+            ServiceScope::System
+        }
     };
     let for_user = match service_scope {
         ServiceScope::User => None,

@@ -1124,7 +1124,7 @@ async fn resolver_auth_from_network(
         AuthKind::Krb5 => {
             if let Some(example) = net.info.resolvers.iter().find_map(|r| match &r.auth {
                 InfoAuth::Krb5 { spn } => Some(spn.as_str()),
-                _ => None,
+                InfoAuth::Anonymous | InfoAuth::Tls { .. } => None,
             }) {
                 ans.note(&format_compact!(
                     "note: an existing resolver on this cluster uses SPN {example:?}"
@@ -1217,7 +1217,7 @@ async fn post_apply_admin_server(
                 // advertise this resolver — even though the admin server itself
                 // keeps running here (it's the CA).
                 AdminPlane::Skip => Ok(false),
-                _ => {
+                AdminPlane::Mandatory | AdminPlane::Ask => {
                     merge_resolver_roles(ans, resolver_config, id_map, config_lock)
                         .await?;
                     Ok(paths::discover_admin_server_config_async().await.is_ok())

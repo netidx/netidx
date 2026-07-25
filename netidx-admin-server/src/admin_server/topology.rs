@@ -1232,7 +1232,12 @@ async fn approve_delegation_prepare_inner(
             Ok(delegation_store::Status::Approved { .. }) => {
                 match delegation_store::read_approved(&ca_dir, &req.request_id).await {
                     Ok(Some(rec)) => (rec.req, false),
-                    _ => return Err(err("the approved record vanished".to_string())),
+                    Ok(None) => {
+                        return Err(err("the approved record vanished".to_string()));
+                    }
+                    Err(e) => {
+                        return Err(err(format!("reading the approved record: {e:#}")));
+                    }
                 }
             }
             Ok(delegation_store::Status::Denied { .. }) => {

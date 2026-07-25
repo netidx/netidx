@@ -188,7 +188,10 @@ impl NetShape {
     pub fn resolver_bind_override(&self) -> Option<Ipv4Addr> {
         match self {
             NetShape::CloudElastic { private, .. } => Some(*private),
-            _ => None,
+            NetShape::Public { .. }
+            | NetShape::ContainerPrivate { .. }
+            | NetShape::Private { .. }
+            | NetShape::Loopback => None,
         }
     }
 

@@ -215,9 +215,6 @@ async fn spawn_autorenew(state: &Arc<Server>, signs: Arc<Semaphore>) {
     });
 }
 
-/// Deny a queued request (any authenticated admin). The state write lock keeps the
-/// status re-check and denial write serialized with approval.
-
 fn build_server_config(
     cert_pem: &[u8],
     key_pem: &[u8],
@@ -429,9 +426,6 @@ async fn spawn_serving_reload(
     });
 }
 
-/// A sign outcome: the wire response plus, on success, what the id-map
-/// push fan-out needs.
-
 async fn handle_conn(
     acceptor: &TlsAcceptor,
     tcp: TcpStream,
@@ -468,20 +462,6 @@ async fn handle_conn(
     };
     serve_request(tls, peer, peer_ident, false, state, signs).await
 }
-
-/// The transport-agnostic body of a admin-plane connection: the hello
-/// exchange and the single request/response, dispatched against the same
-/// handlers regardless of how the bytes arrived. Shared by the TLS listener
-/// ([`handle_conn`]) and the local control socket ([`handle_local_conn`]).
-///
-/// `local` marks a request that arrived over the trusted on-box control
-/// socket. Reaching that socket already proves on-box authority (it is
-/// `0600` + `SO_PEERCRED`-gated), so a local request authorizes
-/// admin-management ops as a superuser — no password, the way a signing slot
-/// does. `peer_ident` is the TLS peer's cert identity and is always `None`
-/// for a local connection: there is no certificate, and a local caller is
-/// deliberately *not* treated as a admin-server peer, so the peer-cert-gated
-/// server-to-server requests stay refused locally.
 
 /// Run the admin server described by the config at `cfg_path` until the
 /// process is killed.

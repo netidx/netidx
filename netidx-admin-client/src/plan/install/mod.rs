@@ -122,7 +122,10 @@ pub async fn detect_resolver_shape() -> ResolverShape {
             bind_override: s.resolver_bind_override().map(IpAddr::V4),
             elastic_local_client_bind: match &s {
                 NetShape::CloudElastic { .. } => Some(s.publisher_bind_suggestion()),
-                _ => None,
+                NetShape::Public { .. }
+                | NetShape::ContainerPrivate { .. }
+                | NetShape::Private { .. }
+                | NetShape::Loopback => None,
             },
         }
     })

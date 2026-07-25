@@ -203,10 +203,6 @@ pub(super) fn stage_enrollment(
     Ok(cluster)
 }
 
-/// CA-side: register/update a admin server's facts in the authoritative
-/// map and persist it. Peer-cert-gated at the dispatch. The CA is the
-/// map's only writer, so a non-CA host refuses.
-
 pub(super) fn authorize_enrollment(
     authd: &ca_vault::Authenticated,
     enrollment: &admin_proto::EnrollmentRequest,
@@ -244,10 +240,6 @@ pub(super) fn authorize_enrollment(
     }
     Ok(())
 }
-
-/// The resolver member addresses of the cluster whose base path is
-/// `target_path`, from the map. `None` if no such cluster. Used by the
-/// (correctly) path-scoped perms-edit fanout.
 
 pub(super) async fn handle_enroll_request(
     ca: &mut ca_store::CaDir,

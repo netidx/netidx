@@ -293,6 +293,7 @@ struct PasswordAttemptInner {
 
 impl PasswordAttemptInner {
     fn result(&self) -> Option<bool> {
+        // Matching a u8 used as a tri-state; only this impl ever writes it.
         match self.result.load(Ordering::Acquire) {
             0 => None,
             1 => Some(true),

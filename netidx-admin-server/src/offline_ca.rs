@@ -33,7 +33,7 @@ use std::{
 pub fn first_dns_san(san: &[SanEntry]) -> Option<String> {
     san.iter().find_map(|s| match s {
         SanEntry::Dns(d) => Some(d.clone()),
-        _ => None,
+        SanEntry::Ip(_) | SanEntry::Uri(_) | SanEntry::Email(_) => None,
     })
 }
 

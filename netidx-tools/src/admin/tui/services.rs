@@ -107,7 +107,7 @@ impl ServicesAction {
                 ControlOp::Start => "Starting service",
                 ControlOp::Stop => "Stopping service",
                 ControlOp::Restart => "Restarting service",
-                _ => "Services",
+                ControlOp::Status | ControlOp::Reload => "Services",
             },
             ServicesAction::Create { .. } => "Creating unit",
             ServicesAction::Edit { .. } => "Editing unit",
@@ -129,7 +129,18 @@ impl ServicesAction {
                 "Delete unit {name:?}? This removes its definition file and reloads \
                  the supervisor."
             )),
-            _ => None,
+            // Everything else is non-destructive and runs without a prompt.
+            ServicesAction::Control {
+                op:
+                    ControlOp::Start
+                    | ControlOp::Restart
+                    | ControlOp::Status
+                    | ControlOp::Reload,
+                ..
+            }
+            | ServicesAction::Refresh { .. }
+            | ServicesAction::Create { .. }
+            | ServicesAction::Edit { .. } => None,
         }
     }
 }
@@ -154,7 +165,7 @@ pub(super) async fn run(
                 ControlOp::Start => "Service started",
                 ControlOp::Stop => "Service stopped",
                 ControlOp::Restart => "Service restarted",
-                _ => "Services",
+                ControlOp::Status | ControlOp::Reload => "Services",
             };
             Ok(Outcome::services_after(title, Vec::new(), svc_rows(&units_dir).await?))
         }

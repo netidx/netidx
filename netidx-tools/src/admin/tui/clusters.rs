@@ -178,7 +178,7 @@ impl PollState {
     pub(super) fn present_addr(&self) -> Option<SocketAddr> {
         match self {
             PollState::Present { addr } => Some(*addr),
-            _ => None,
+            PollState::Unpolled | PollState::Polling | PollState::Absent => None,
         }
     }
 }

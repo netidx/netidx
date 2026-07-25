@@ -193,21 +193,6 @@ pub(super) fn leaf_serial(der: &[u8]) -> Option<u64> {
     cert.tbs_certificate.serial.to_string().parse().ok()
 }
 
-/// Queue a signing request for later admin approval. Unauthenticated
-/// by design — the requester has no credentials yet; trust is
-/// established when the admin matches the request's CSR-key
-/// fingerprint before approving. Only cheap structural checks happen
-/// here (the policy checks run at approval, under the approving
-/// admin's slot).
-///
-/// The exception is a **verified renewal**: the connection presented a
-/// valid client cert whose SAN is exactly the requested name and whose
-/// serial is live in our own index. That's cryptographic continuation
-/// of an identity the admin already approved once — it bypasses the
-/// reserved-name and one-live-cert rules (a renewal's name *does* have
-/// a live cert; that's the point) and is flagged for glyph-free,
-/// batchable (or automatic) approval.
-
 pub(super) struct Signed {
     pub(super) resp: SignResponse,
     /// `Some` only when the sign succeeded *and* the request asked for

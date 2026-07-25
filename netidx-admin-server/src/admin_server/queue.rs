@@ -156,7 +156,18 @@ pub(super) async fn handle_poll(state: &Arc<Server>, req: &PollRequest) -> PollR
                         Ok(Some(r)) if !r.groups.is_empty() && !r.push_done => {
                             Some(PushPlan { id, name: r.name, groups: r.groups })
                         }
-                        _ => None,
+                        // Nothing to re-push, or it already went out.
+                        Ok(Some(_)) | Ok(None) => None,
+                        // The record we just reported as Signed won't read
+                        // back. Say so — silently skipping the id-map push
+                        // leaves an identity the network can't authorize.
+                        Err(e) => {
+                            warn!(
+                                "admin-server: reading issued record {id} for id-map \
+                                 re-push failed: {e:#}"
+                            );
+                            None
+                        }
                     };
                     let resp = PollResponse::Signed(SignOk {
                         signed_cert_pem: s.signed_cert_pem,
@@ -235,11 +246,6 @@ pub(super) async fn autorenew_sweep(
     }
     approved
 }
-
-/// How often a non-CA admin server re-asserts its own facts to the CA and
-/// refreshes its cached map (a cheap version probe; a full pull only when
-/// it changed). Short enough that `update` sees recent changes, infrequent
-/// enough to be free on a control plane.
 
 async fn start_list_issued(
     ca: &mut ca_store::CaDir,
@@ -416,12 +422,6 @@ async fn approve_serialized(
     })
 }
 
-/// Read the autorenew slot's password from its keytab, unsealing if this
-/// host sealed it to its TPM (the install path seals when it can). A
-/// sealed keytab that won't unseal is a hard error here — but the caller
-/// only logs it and skips spawning the approver, so the rest of the
-/// daemon serves regardless; renewals just fall back to human approval.
-
 pub(super) async fn handle_enqueue(
     ca: &mut ca_store::CaDir,
     req: &EnqueueRequest,
@@ -525,7 +525,9 @@ pub(super) async fn handle_enqueue(
                 }
             }
         }
-        _ => None,
+        // Not a renewal: no peer cert, or one whose SAN/serial/key don't
+        // match the name being requested.
+        Some(_) | None => None,
     };
     let verified_renewal = renewal_of.is_some();
     let replacement_of = if verified_renewal {

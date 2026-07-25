@@ -316,7 +316,7 @@ pub fn identity_recipes(root: &Path, role: InstallRole) -> Result<Vec<IdentityRe
             let kind = match role {
                 InstallRole::Workstation => IdentityKind::Workstation,
                 InstallRole::Publisher => IdentityKind::Publisher,
-                _ => IdentityKind::Client,
+                InstallRole::Controller | InstallRole::Resolver => IdentityKind::Client,
             };
             for (_, id) in tls.identities {
                 push_identity(

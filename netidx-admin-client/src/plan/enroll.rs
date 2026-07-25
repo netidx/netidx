@@ -537,7 +537,10 @@ pub async fn discover_network(
             "Use an existing controller / CA",
             "Create a new administrative network (creates a CA)",
         ),
-        _ => {
+        NodeKind::Publisher
+        | NodeKind::Client
+        | NodeKind::Workstation
+        | NodeKind::AdminServer => {
             (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster")
         }
     };
@@ -718,7 +721,10 @@ pub async fn network_addrs_and_identity(
         // (`alice.<domain>`). The domain is the TLS-attested one.
         let base = match kind {
             NodeKind::Publisher => current_hostname(),
-            _ => current_username(),
+            NodeKind::Resolver
+            | NodeKind::Client
+            | NodeKind::Workstation
+            | NodeKind::AdminServer => current_username(),
         };
         let suggested = base.map(|n| format!("{n}.{}", net.identity.domain));
         if dry_run {

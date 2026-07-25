@@ -166,10 +166,6 @@ pub(super) async fn handle_backup(
     })
 }
 
-/// Append a freshly enrolled admin server to our peer list (and persist
-/// it when we have a config path). The CA host thereby becomes the
-/// well-known starting point for peer walks.
-
 pub(super) async fn handle_ca_status(
     state: &Server,
     local: bool,
@@ -419,17 +415,6 @@ async fn handle_external_ca_install_inner(
     audit(&dir, "local", "external-ca-install", &new_fp.text(), Duration::ZERO).await;
     ExternalCaInstallResponse::Ok(ExternalCaInstallOk { ca_fingerprint: new_fp.text() })
 }
-
-/// Run an Argon2-bound vault operation on `spawn_blocking`, bounded by
-/// the sign semaphore.
-///
-/// The permit is moved *into* the blocking task and held for its whole
-/// duration. A `spawn_blocking` task can't be cancelled, so if the
-/// connection times out, the `JoinHandle` await below is dropped while
-/// the task keeps running — releasing the permit there (not in the
-/// cancellable future) is what keeps `MAX_CONCURRENT_SIGNS` honest:
-/// otherwise a timeout would free the permit while the 64 MiB Argon2 is
-/// still live, and repeated timeouts would exceed the bound.
 
 /// `RotateRecovery` (local control socket ONLY): mint a fresh recovery
 /// (off-box break-glass) password using the box's own autorenew credential

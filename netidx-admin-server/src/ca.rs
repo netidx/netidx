@@ -236,7 +236,7 @@ fn check_pubkey_strength(pubkey: &PKey<Public>) -> Result<()> {
 fn check_san_for_netidx(san: &[SanEntry]) -> Result<()> {
     let mut dns_entries = san.iter().filter_map(|s| match s {
         SanEntry::Dns(d) => Some(d.as_str()),
-        _ => None,
+        SanEntry::Ip(_) | SanEntry::Uri(_) | SanEntry::Email(_) => None,
     });
     let only = match (dns_entries.next(), dns_entries.next()) {
         (None, _) => {
@@ -841,6 +841,7 @@ fn san_from_csr_via_shim(
 }
 
 fn parse_ip_octets(b: &[u8]) -> Option<IpAddr> {
+    // Matching a length: any value but 4 and 16 is not an IP address.
     match b.len() {
         4 => Some(IpAddr::V4(std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3]))),
         16 => {

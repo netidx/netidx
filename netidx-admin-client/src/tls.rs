@@ -290,6 +290,8 @@ pub fn first_dns_san_from_der(der: &[u8]) -> Option<String> {
     use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
     let (_, cert) = X509Certificate::from_der(der).ok()?;
     let ext = cert.subject_alternative_name().ok().flatten()?;
+    // x509_parser's GeneralName covers the whole X.509 name space; netidx
+    // identities are always a DNS SAN.
     ext.value.general_names.iter().find_map(|gn| match gn {
         GeneralName::DNSName(dns) => Some(dns.to_string()),
         _ => None,

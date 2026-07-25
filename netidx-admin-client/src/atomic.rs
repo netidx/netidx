@@ -154,6 +154,8 @@ pub async fn publish_dir_async(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn final_commit(f: impl FnOnce() -> Result<()>) -> Result<()> {
+    // tokio's RuntimeFlavor is non_exhaustive; only MultiThread permits (and
+    // needs) block_in_place.
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
         _ => f(),
@@ -303,9 +305,6 @@ mod tests {
         let wide: Vec<String> =
             seen.iter().filter(|m| **m & !0o600 != 0).map(|m| format!("{m:o}")).collect();
         assert!(wide.is_empty(), "temp file was observable at modes {wide:?}");
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }

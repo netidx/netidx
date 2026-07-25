@@ -368,7 +368,22 @@ impl RemoteAction {
                 server.id,
                 server.addr,
             )),
-            _ => None,
+            // Everything else runs without a prompt. Adding a destructive
+            // action means adding it above, not here.
+            RemoteAction::Connect { .. }
+            | RemoteAction::Logout { .. }
+            | RemoteAction::Discover
+            | RemoteAction::Refresh { .. }
+            | RemoteAction::ApproveRenewals { .. }
+            | RemoteAction::Deny { .. }
+            | RemoteAction::DenyDelegation { .. }
+            | RemoteAction::AddAdmin { .. }
+            | RemoteAction::SetPolicy { .. }
+            | RemoteAction::ReconcileController { .. }
+            | RemoteAction::ListLevels { .. }
+            | RemoteAction::EditPerms { .. }
+            | RemoteAction::ListServiceServers { .. }
+            | RemoteAction::ServiceControl { .. } => None,
         }
     }
 
@@ -381,7 +396,23 @@ impl RemoteAction {
             | RemoteAction::ApproveDelegation { code, .. } => {
                 Fingerprint::parse_text(code).ok()
             }
-            _ => None,
+            RemoteAction::Connect { .. }
+            | RemoteAction::Logout { .. }
+            | RemoteAction::Discover
+            | RemoteAction::Refresh { .. }
+            | RemoteAction::ApproveRenewals { .. }
+            | RemoteAction::Deny { .. }
+            | RemoteAction::DenyDelegation { .. }
+            | RemoteAction::Revoke { .. }
+            | RemoteAction::AddAdmin { .. }
+            | RemoteAction::SetPolicy { .. }
+            | RemoteAction::RemoveAdmin { .. }
+            | RemoteAction::RemoveServer { .. }
+            | RemoteAction::ReconcileController { .. }
+            | RemoteAction::ListLevels { .. }
+            | RemoteAction::EditPerms { .. }
+            | RemoteAction::ListServiceServers { .. }
+            | RemoteAction::ServiceControl { .. } => None,
         }
     }
 
@@ -1997,7 +2028,9 @@ impl RemoteState {
             // disconnects.
             Screen::Menu => match self.target {
                 Some(PanelTarget::Local { .. }) => "↑/↓ · Enter open · Esc back",
-                _ => "↑/↓ · Enter open · L logout · Esc disconnect",
+                Some(PanelTarget::Remote(_)) | None => {
+                    "↑/↓ · Enter open · L logout · Esc disconnect"
+                }
             },
             Screen::LevelPick { .. } => "↑/↓ · Enter open · Esc back",
             Screen::ServerPick { .. } => "↑/↓ · Enter open · Esc back",
@@ -2823,7 +2856,7 @@ impl RemoteState {
         let glyph = row.and_then(|r| match &r.key {
             RowKey::Code(code) => Fingerprint::parse_text(code).ok(),
             RowKey::Cert { glyph, .. } => glyph.clone(),
-            _ => None,
+            RowKey::None | RowKey::Name(_) | RowKey::Server { .. } => None,
         });
         let cols = Layout::horizontal([
             Constraint::Length(widgets::IDENTICON_WIDTH),

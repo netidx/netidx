@@ -20,6 +20,8 @@ pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
         .value
         .general_names
         .iter()
+        // x509_parser's GeneralName covers the whole X.509 name space; we
+        // only ever care about the two kinds netidx puts in a cert.
         .filter_map(|n| match n {
             GeneralName::DNSName(s) => Some(*s),
             _ => None,
