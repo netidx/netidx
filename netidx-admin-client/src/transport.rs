@@ -63,6 +63,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use enumflags2::BitFlags;
 use log::warn;
 use parking_lot::Mutex;
+use poolshark::local::LPooled;
 use rustls::{ClientConfig, client::Resumption, crypto::CryptoProvider};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::{
@@ -293,6 +294,57 @@ pub fn issuing_ca_pem(bundle: &str, leaf_pem: &str) -> Result<String> {
         }
     }
     bail!("no certificate in the bundle signed this leaf")
+}
+
+/// Verify `crl_pem` is exactly one CRL, signed by one of `cas_der`.
+///
+/// A CRL that arrives over the network must be verified before it is
+/// installed. The resolver's TLS acceptor rebuilds from the `crl.pem` beside
+/// its trust bundle, and rustls refuses to build a config from a CRL it can't
+/// use — so writing an unverified payload turns any peer that can answer
+/// `GetCrl` into an authentication outage for the host that pulled it.
+///
+/// Unparseable entries in `cas_der` are skipped, not fatal: a federated bundle
+/// is only as good as its worst entry, and one bad anchor must not stop a
+/// legitimate CRL from being verified against a good one.
+pub fn validate_crl_signed_by_any<'a>(
+    crl_pem: &str,
+    cas_der: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<()> {
+    use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
+    let crls = rustls_pemfile::crls(&mut std::io::Cursor::new(crl_pem.as_bytes()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("parsing CRL PEM")?;
+    let [der] = crls.as_slice() else {
+        bail!("expected exactly one CRL, got {}", crls.len());
+    };
+    let (remaining, crl) = CertificateRevocationList::from_der(der.as_ref())
+        .map_err(|e| anyhow!("parsing CRL DER: {e}"))?;
+    if !remaining.is_empty() {
+        bail!("CRL DER contains trailing bytes");
+    }
+    let mut tried = 0;
+    for ca_der in cas_der {
+        let Ok((remaining, ca)) = X509Certificate::from_der(ca_der) else { continue };
+        if !remaining.is_empty() {
+            continue;
+        }
+        tried += 1;
+        if crl.verify_signature(ca.public_key()).is_ok() {
+            return Ok(());
+        }
+    }
+    bail!("the CRL is not signed by any of the {tried} trusted certificate authorities")
+}
+
+/// [`validate_crl_signed_by_any`] against every CA in an installed trust
+/// bundle — the rule [`verify_issued`] uses for leaves, applied to CRLs.
+pub fn validate_crl_against_bundle(crl_pem: &str, bundle_pem: &str) -> Result<()> {
+    let cas: LPooled<Vec<_>> =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(bundle_pem.as_bytes()))
+            .flatten()
+            .collect();
+    validate_crl_signed_by_any(crl_pem, cas.iter().map(|der| der.as_ref()))
 }
 
 /// TOFU-handshake to the admin server at `addr`; return the live TLS
@@ -3129,6 +3181,65 @@ mod tests {
         assert!(child_children.is_empty());
         assert_eq!(child_by_base.parent.unwrap().path, "/eu");
         assert!(child_by_base.children.is_empty());
+    }
+
+    /// A CA that can sign CRLs, plus an empty CRL signed by it.
+    fn ca_with_crl(name: &str) -> (String, String) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertificateRevocationListParams, IsCa,
+            Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
+        };
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![name.to_string()]).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let cert = params.self_signed(&key).unwrap();
+        let issuer = Issuer::from_params(&params, &key);
+        let now = std::time::SystemTime::now();
+        let crl = CertificateRevocationListParams {
+            this_update: now.into(),
+            next_update: (now + Duration::from_secs(86400)).into(),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![],
+            key_identifier_method: KeyIdMethod::Sha256,
+        }
+        .signed_by(&issuer)
+        .unwrap();
+        (cert.pem(), crl.pem().unwrap())
+    }
+
+    /// A CRL pulled from the network is only installable if one of the CAs we
+    /// already trust signed it. Without this the renewd distribution path will
+    /// write whatever any peer that answers GetCrl hands it, straight into the
+    /// file the resolver's TLS acceptor rebuilds from.
+    #[test]
+    fn a_crl_must_be_signed_by_a_ca_in_the_installed_bundle() {
+        let (home_pem, home_crl) = ca_with_crl("home-ca");
+        let (foreign_pem, foreign_crl) = ca_with_crl("foreign-ca");
+        let unrelated = self_signed("unrelated", &rcgen::KeyPair::generate().unwrap());
+
+        validate_crl_against_bundle(&home_crl, &home_pem).unwrap();
+        assert!(validate_crl_against_bundle(&foreign_crl, &home_pem).is_err());
+        // A federated bundle accepts a CRL from any of its anchors.
+        let federated = format!("{home_pem}{foreign_pem}");
+        validate_crl_against_bundle(&home_crl, &federated).unwrap();
+        validate_crl_against_bundle(&foreign_crl, &federated).unwrap();
+        // An unparseable anchor is skipped, not fatal.
+        let with_junk = format!("{unrelated}{home_pem}");
+        validate_crl_against_bundle(&home_crl, &with_junk).unwrap();
+        // Garbage and empty bundles are refused.
+        assert!(validate_crl_against_bundle("not a crl", &home_pem).is_err());
+        assert!(validate_crl_against_bundle(&home_crl, "").is_err());
+        // Two CRLs in one payload is ambiguous; refuse it.
+        assert!(
+            validate_crl_against_bundle(&format!("{home_crl}{foreign_crl}"), &federated)
+                .is_err()
+        );
     }
 
     fn self_signed(name: &str, key: &rcgen::KeyPair) -> String {

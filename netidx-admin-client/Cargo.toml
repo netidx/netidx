@@ -32,6 +32,7 @@ netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
 netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }
 parking_lot = { workspace = true }
+poolshark = { workspace = true }
 rustls-pemfile = { workspace = true }
 x509-parser = { workspace = true, features = ["verify"] }
 log = { workspace = true }

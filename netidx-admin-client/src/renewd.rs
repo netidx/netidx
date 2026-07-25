@@ -637,6 +637,18 @@ async fn distribute_crl(
             Some(pem) => pem,
             None => continue, // nothing ever revoked
         };
+        // Never install a CRL we haven't verified. `find_ca_addr` accepts any
+        // peer that validates against our bundle and claims to hold the CA, so
+        // without this a compromised peer could feed arbitrary bytes to every
+        // renewing host and break its resolver's TLS config rebuild. Same rule
+        // the server-to-server apply path uses, and the same
+        // signed-by-some-CA-in-our-bundle rule `verify_issued` uses for leaves.
+        let installed = std::fs::read_to_string(&id.trusted)
+            .with_context(|| format!("reading trust bundle {}", id.trusted.display()))?;
+        if let Err(e) = transport::validate_crl_against_bundle(&crl, &installed) {
+            warn!("renewd: refusing the CRL offered for {}: {e:#}", id.trusted.display());
+            continue;
+        }
         let dest = id.trusted.with_file_name("crl.pem");
         let current = std::fs::read(&dest).unwrap_or_default();
         if current != crl.as_bytes() {

@@ -323,24 +323,7 @@ async fn prepare_revoke_inner(
 /// this signature check prevents a corrupted payload from replacing working
 /// revocation state.
 pub(super) fn validate_home_crl(crl_pem: &str, home_ca_der: &[u8]) -> Result<()> {
-    use x509_parser::prelude::{CertificateRevocationList, FromDer, X509Certificate};
-    let crls = rustls_pemfile::crls(&mut std::io::Cursor::new(crl_pem.as_bytes()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parsing CRL PEM")?;
-    let [der] = crls.as_slice() else {
-        bail!("expected exactly one CRL, got {}", crls.len());
-    };
-    let (remaining, crl) = CertificateRevocationList::from_der(der.as_ref())
-        .map_err(|e| anyhow!("parsing CRL DER: {e}"))?;
-    if !remaining.is_empty() {
-        bail!("CRL DER contains trailing bytes");
-    }
-    let (remaining, ca) = X509Certificate::from_der(home_ca_der)
-        .map_err(|e| anyhow!("parsing home CA certificate: {e}"))?;
-    if !remaining.is_empty() {
-        bail!("home CA certificate contains trailing bytes");
-    }
-    crl.verify_signature(ca.public_key())
+    transport::validate_crl_signed_by_any(crl_pem, [home_ca_der])
         .context("CRL signature does not verify against the home CA")
 }
 
