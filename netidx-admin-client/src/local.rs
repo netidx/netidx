@@ -11,7 +11,7 @@
 //! fields the admin-management requests carry are sent empty and ignored by
 //! the daemon on this socket.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use netidx_admin_proto::{
     self, AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse, BackupOk,
     BackupRequest, BackupResponse, CaStatus, CaStatusResponse, ClientHello,
@@ -26,6 +26,7 @@ use netidx_admin_proto::{
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
@@ -46,13 +47,30 @@ fn local_socket_path(cfg_path: &Path) -> PathBuf {
     cfg_path.parent().unwrap_or_else(|| Path::new(".")).join("admin.sock")
 }
 
+/// Bound on connect + hello. Connecting to a bound unix socket succeeds into
+/// the listen backlog whether or not anyone is accepting, so without this a
+/// wedged daemon hangs the caller forever — including the TUI, which probes
+/// this socket. Deliberately covers only the handshake: the request and its
+/// response are unbounded, because `Backup` legitimately takes a while.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Connect to the daemon's local control socket (beside the admin-server
 /// config) and complete the hello exchange, returning the stream positioned
 /// to send one request. A connect failure almost always means the daemon
 /// isn't running on this host — say so.
 async fn connect(cfg_path: &Path) -> Result<UnixStream> {
     let path = local_socket_path(cfg_path);
-    let mut stream = UnixStream::connect(&path).await.with_context(|| {
+    tokio::time::timeout(CONNECT_TIMEOUT, connect_inner(&path)).await.map_err(|_| {
+        anyhow!(
+            "the admin daemon's control socket at {} accepted no connection within \
+             {CONNECT_TIMEOUT:?} — the daemon is running but not responding",
+            path.display()
+        )
+    })?
+}
+
+async fn connect_inner(path: &Path) -> Result<UnixStream> {
+    let mut stream = UnixStream::connect(path).await.with_context(|| {
         format!(
             "connecting to the admin daemon's control socket at {} — start the admin \
              server on this host (the daemon owns the CA; the CLI talks to it)",
@@ -394,5 +412,25 @@ pub async fn rotate_autorenew(cfg_path: &Path) -> Result<Option<String>> {
     match netidx_admin_proto::read_msg::<_, RotateAutorenewResponse>(&mut s).await? {
         RotateAutorenewResponse::Ok(warning) => Ok(warning),
         RotateAutorenewResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Connecting to a bound unix socket succeeds into the listen backlog even
+    /// when nobody is accepting, so a wedged daemon used to hang the caller
+    /// forever in the ServerHello read — including the TUI, which probes this
+    /// socket on startup and after every install.
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_that_never_accepts_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("admin-server.json");
+        // Bind but never accept: exactly a daemon stuck before its accept loop.
+        let _listener =
+            tokio::net::UnixListener::bind(local_socket_path(&cfg_path)).unwrap();
+        let e = ca_status(&cfg_path).await.unwrap_err();
+        assert!(format!("{e:#}").contains("not responding"), "{e:#}");
     }
 }

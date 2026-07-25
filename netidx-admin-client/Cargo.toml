@@ -65,5 +65,5 @@ nix = { workspace = true, features = ["user"] }
 windows = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 env_logger = { workspace = true }

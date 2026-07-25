@@ -880,6 +880,11 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     // never sets `busy`, so the cluster list renders instantly and fills in.
     type ClusterFuture = Pin<Box<dyn Future<Output = Vec<(usize, clusters::PollState)>>>>;
     let mut cluster_op: Option<ClusterFuture> = None;
+    // The Local tab's CA credential probe. It drives the daemon's local control
+    // socket, which can block on a wedged daemon, so it never runs on the UI
+    // task — same background slot idea as `sync_op`.
+    type CaProbeFuture = Pin<Box<dyn Future<Output = Vec<(usize, local::CaProbe)>>>>;
+    let mut ca_probe_op: Option<CaProbeFuture> = None;
     // The crossterm reader. `None` only during a terminal-suspend, so its
     // background thread can't fight the child (editor / sudo) for stdin.
     let mut events: Option<Fuse<EventStream>> = Some(EventStream::new().fuse());
@@ -901,6 +906,14 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             let pending = app.local.take_pending_checks();
             if !pending.is_empty() {
                 sync_op = Some(Box::pin(local::check_sync(pending)));
+            }
+        }
+        // Same, for the CA credential state. `take_pending_ca_probes` marks
+        // them `Probing`, so this launches exactly one probe per install.
+        if app.tab == Tab::Local && ca_probe_op.is_none() {
+            let pending = app.local.take_pending_ca_probes();
+            if !pending.is_empty() {
+                ca_probe_op = Some(Box::pin(local::probe_local_cas(pending)));
             }
         }
         // Kick off the cluster poll when the Cluster tab is focused and has
@@ -977,6 +990,17 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             } => {
                 cluster_op = None;
                 app.remote.apply_poll(polled);
+            }
+            // Lowest priority: a finished CA probe fills in the Local tab's
+            // credential state and its dependent actions — no overlay, no `busy`.
+            probed = async {
+                match ca_probe_op.as_mut() {
+                    Some(f) => f.await,
+                    None => future::pending().await,
+                }
+            } => {
+                ca_probe_op = None;
+                app.local.apply_ca_probes(probed);
             }
             // Lowest priority: advance the animation frame while a progress
             // modal is up so the bar/marquee redraws; inert otherwise.

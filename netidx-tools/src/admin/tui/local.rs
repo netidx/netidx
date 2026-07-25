@@ -117,12 +117,36 @@ struct Detected {
 }
 
 /// The local (no-auth, control-socket) admin-server CA tooling available on an
-/// install that owns a CA — the paths its ops need plus a snapshot of the
-/// credential state, computed once at detection (the `slots` status calls are
-/// pure but touch the vault, so we don't repeat them every render frame).
+/// install that owns a CA — the paths its ops need, plus the credential state
+/// once a background probe has answered. The paths are derived from local
+/// files; the state is not, so it is filled in asynchronously (see
+/// [`CaProbe`]).
 struct LocalCa {
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
+    probe: CaProbe,
+}
+
+/// The credential-state half of [`LocalCa`], filled in by a background probe.
+///
+/// Reading it drives the daemon's local control socket, and that is a network
+/// round trip in all but name: connecting to a bound unix socket succeeds into
+/// the backlog whether or not the daemon is accepting. Doing it inline on the
+/// UI task froze the whole TUI behind a wedged daemon, so it lives here on the
+/// same background-fill pattern as [`SyncState`].
+#[derive(Clone)]
+pub(super) enum CaProbe {
+    /// Not yet probed; the event loop launches one.
+    Unprobed,
+    /// A probe is in flight.
+    Probing,
+    Ready(CaCredentials),
+    /// The probe couldn't reach the CA tooling; carries the reason.
+    Failed(String),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CaCredentials {
     /// The auto-approve (autorenew) credential slot exists.
     auto_approve_present: bool,
     /// The daemon config wires the autorenew keytab in.
@@ -133,6 +157,15 @@ struct LocalCa {
     external_signed: bool,
     /// The externally-signed cert is installed (vs awaiting a signature).
     external_installed: bool,
+}
+
+impl LocalCa {
+    fn credentials(&self) -> Option<&CaCredentials> {
+        match &self.probe {
+            CaProbe::Ready(credentials) => Some(credentials),
+            CaProbe::Unprobed | CaProbe::Probing | CaProbe::Failed(_) => None,
+        }
+    }
 }
 
 impl Detected {
@@ -148,65 +181,70 @@ impl Detected {
             .as_ref()
             .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok());
         let service = probe_service(&record);
-        let local_ca = probe_local_ca(&config_dir);
+        let local_ca = local_ca_paths(&config_dir);
         Detected { record, service, scope, config_dir, ca, local_ca }
     }
 }
 
-/// Probe the local admin-server CA credential state for an install (unix-only —
-/// the `slots` ops drive the `SO_PEERCRED` control socket).
+/// Whether this install owns a CA, and where its tooling lives. Local files
+/// only — cheap enough for the UI task. The credential state it can't answer
+/// from disk is left [`CaProbe::Unprobed`] for [`probe_local_cas`].
 #[cfg(unix)]
-fn probe_local_ca(config_dir: &Path) -> Option<LocalCa> {
-    use netidx_admin_server::ops::slots;
+fn local_ca_paths(config_dir: &Path) -> Option<LocalCa> {
     let ca_dir = config_dir.join("ca");
     if !ca_dir.is_dir() {
         return None;
     }
-    let cfg = paths::discover_admin_server_config().ok();
-    let status = {
-        let probe = async {
-            let access = super::super::ca::ca_access(&ca_dir, cfg.clone()).await.ok()?;
-            slots::local_ca_status(&access, &ca_dir).await.ok()
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle)
-                if handle.runtime_flavor()
-                    == tokio::runtime::RuntimeFlavor::MultiThread =>
-            {
-                tokio::task::block_in_place(|| handle.block_on(probe))
-            }
-            Ok(_) => None,
-            Err(_) => tokio::runtime::Runtime::new().ok()?.block_on(probe),
-        }
-    };
-    let recovery_present =
-        status.as_ref().map(|status| status.recovery.slot_present).unwrap_or(false);
     Some(LocalCa {
-        auto_approve_present: status
-            .as_ref()
-            .map(|status| status.auto_approve.slot_present)
-            .unwrap_or(false),
-        auto_approve_wired: status
-            .as_ref()
-            .map(|status| status.auto_approve.wired_in_config)
-            .unwrap_or(false),
-        recovery_present,
-        external_signed: status
-            .as_ref()
-            .map(|status| status.external.externally_signed)
-            .unwrap_or(false),
-        external_installed: status
-            .as_ref()
-            .map(|status| status.external.cert_installed)
-            .unwrap_or(false),
         ca_dir,
-        cfg,
+        cfg: paths::discover_admin_server_config().ok(),
+        probe: CaProbe::Unprobed,
     })
 }
 
 #[cfg(not(unix))]
-fn probe_local_ca(_config_dir: &Path) -> Option<LocalCa> {
+fn local_ca_paths(_config_dir: &Path) -> Option<LocalCa> {
     None
+}
+
+/// Read the CA credential state for each `(index, ca_dir, cfg)` — the
+/// background half of [`local_ca_paths`]. Self-contained (owns its inputs,
+/// borrows no UI state) so the event loop can hold it as a plain future,
+/// exactly like [`check_sync`].
+#[cfg(unix)]
+pub(super) async fn probe_local_cas(
+    targets: Vec<(usize, PathBuf, Option<PathBuf>)>,
+) -> Vec<(usize, CaProbe)> {
+    use netidx_admin_server::ops::slots;
+    let mut out = Vec::with_capacity(targets.len());
+    for (index, ca_dir, cfg) in targets {
+        let probed = async {
+            let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+            slots::local_ca_status(&access, &ca_dir).await
+        }
+        .await;
+        out.push(match probed {
+            Ok(status) => (
+                index,
+                CaProbe::Ready(CaCredentials {
+                    auto_approve_present: status.auto_approve.slot_present,
+                    auto_approve_wired: status.auto_approve.wired_in_config,
+                    recovery_present: status.recovery.slot_present,
+                    external_signed: status.external.externally_signed,
+                    external_installed: status.external.cert_installed,
+                }),
+            ),
+            Err(e) => (index, CaProbe::Failed(format!("{e:#}"))),
+        });
+    }
+    out
+}
+
+#[cfg(not(unix))]
+pub(super) async fn probe_local_cas(
+    _targets: Vec<(usize, PathBuf, Option<PathBuf>)>,
+) -> Vec<(usize, CaProbe)> {
+    Vec::new()
 }
 
 /// Network-sync state for a detected install, filled in asynchronously by a
@@ -440,6 +478,40 @@ impl LocalState {
             if let Some(slot) = self.sync.get_mut(i) {
                 *slot = st;
             }
+        }
+    }
+
+    /// Installs owning a CA whose credential state hasn't been read yet; marks
+    /// each `Probing` so the event loop launches exactly one probe per install.
+    pub(super) fn take_pending_ca_probes(
+        &mut self,
+    ) -> Vec<(usize, PathBuf, Option<PathBuf>)> {
+        let mut out = Vec::new();
+        for (i, install) in self.installs.iter_mut().enumerate() {
+            if let Some(local_ca) = install.local_ca.as_mut()
+                && matches!(local_ca.probe, CaProbe::Unprobed)
+            {
+                local_ca.probe = CaProbe::Probing;
+                out.push((i, local_ca.ca_dir.clone(), local_ca.cfg.clone()));
+            }
+        }
+        out
+    }
+
+    /// Fold in a finished CA probe. The action list gains entries when this
+    /// lands, so re-clamp the cursor rather than leaving it past the end.
+    pub(super) fn apply_ca_probes(&mut self, results: Vec<(usize, CaProbe)>) {
+        for (i, probe) in results {
+            if let Some(local_ca) =
+                self.installs.get_mut(i).and_then(|d| d.local_ca.as_mut())
+            {
+                local_ca.probe = probe;
+            }
+        }
+        if let Some(selected) = self.installs.get(self.selected) {
+            let len = action_items(selected).len();
+            let cursor = self.menu_state.selected().unwrap_or(0);
+            self.menu_state.select(Some(cursor.min(len.saturating_sub(1))));
         }
     }
 
@@ -849,7 +921,10 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 },
             ));
         }
-        if lca.auto_approve_present {
+        // The rest depend on credential state the background probe reads; they
+        // appear once it lands.
+        let Some(credentials) = lca.credentials() else { return items };
+        if credentials.auto_approve_present {
             items.push((
                 "Rotate Auto-Renew Credential".to_string(),
                 Action::AutoApprove {
@@ -868,7 +943,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 },
             ));
         }
-        if lca.recovery_present {
+        if credentials.recovery_present {
             items.push((
                 "Rotate Recovery Password".to_string(),
                 Action::RecoveryRotate {
@@ -877,8 +952,8 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 },
             ));
         }
-        if lca.external_signed {
-            let emit_label = if lca.external_installed {
+        if credentials.external_signed {
+            let emit_label = if credentials.external_installed {
                 "Emit Renewal CSR (External CA)"
             } else {
                 "Re-emit Signing CSR (External CA)"
@@ -887,7 +962,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 emit_label.to_string(),
                 Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
             ));
-            let label = if lca.external_installed {
+            let label = if credentials.external_installed {
                 "Install Renewed Certificate (External CA)"
             } else {
                 "Install Signed Certificate (External CA)"
@@ -979,29 +1054,43 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
         lines.push(kv("Admin server", addr.to_string()));
     }
     if let Some(lca) = &d.local_ca {
-        let (aa, aa_c) = if lca.auto_approve_present {
-            if lca.auto_approve_wired {
-                ("active", theme::OK)
-            } else {
-                ("present (not wired)", theme::WARN)
+        match &lca.probe {
+            CaProbe::Unprobed | CaProbe::Probing => {
+                lines.push(kv_status(
+                    "CA credentials",
+                    "checking…".to_string(),
+                    theme::HINT_FG,
+                ));
             }
-        } else {
-            ("not set up", theme::HINT_FG)
-        };
-        lines.push(kv_status("Auto-approve", aa.to_string(), aa_c));
-        let (rec, rec_c) = if lca.recovery_present {
-            ("set", theme::OK)
-        } else {
-            ("MISSING", theme::WARN)
-        };
-        lines.push(kv_status("Recovery slot", rec.to_string(), rec_c));
-        if lca.external_signed {
-            let (ext, ext_c) = if lca.external_installed {
-                ("installed", theme::OK)
-            } else {
-                ("awaiting signature", theme::WARN)
-            };
-            lines.push(kv_status("External CA", ext.to_string(), ext_c));
+            CaProbe::Failed(e) => {
+                lines.push(kv_status("CA credentials", e.clone(), theme::WARN));
+            }
+            CaProbe::Ready(credentials) => {
+                let (aa, aa_c) = if credentials.auto_approve_present {
+                    if credentials.auto_approve_wired {
+                        ("active", theme::OK)
+                    } else {
+                        ("present (not wired)", theme::WARN)
+                    }
+                } else {
+                    ("not set up", theme::HINT_FG)
+                };
+                lines.push(kv_status("Auto-approve", aa.to_string(), aa_c));
+                let (rec, rec_c) = if credentials.recovery_present {
+                    ("set", theme::OK)
+                } else {
+                    ("MISSING", theme::WARN)
+                };
+                lines.push(kv_status("Recovery slot", rec.to_string(), rec_c));
+                if credentials.external_signed {
+                    let (ext, ext_c) = if credentials.external_installed {
+                        ("installed", theme::OK)
+                    } else {
+                        ("awaiting signature", theme::WARN)
+                    };
+                    lines.push(kv_status("External CA", ext.to_string(), ext_c));
+                }
+            }
         }
     }
     lines.push(service_line(d.service));
@@ -1220,5 +1309,79 @@ mod tests {
             action,
             Action::AddParent { config_root: root } if root == &config_root
         )));
+    }
+
+    /// A CA install renders and offers its no-credential actions before the
+    /// background probe has answered — the probe drives the local control
+    /// socket, so the UI must never be waiting on it.
+    #[test]
+    fn a_ca_install_is_usable_before_its_credential_probe_lands() {
+        let fp = Fingerprint::of_der(b"controller CA");
+        let cfg = PathBuf::from("/etc/netidx/admin-server.json");
+        let detected = |probe: CaProbe| Detected {
+            record: InstallRecord::new(
+                InstallRole::Controller,
+                "/",
+                "tls",
+                Some(NetworkIdentity::new("example.com", &fp)),
+                Some("127.0.0.1:4565".parse().unwrap()),
+            ),
+            service: ServiceStatus::Active,
+            scope: ServiceScope::System,
+            config_dir: PathBuf::from("/etc/netidx"),
+            ca: Some(fp),
+            local_ca: Some(LocalCa {
+                ca_dir: PathBuf::from("/etc/netidx/ca"),
+                cfg: Some(cfg.clone()),
+                probe,
+            }),
+        };
+
+        // Unprobed: the socket-free actions are already there, the
+        // credential-dependent ones are not, and the status overlay says so.
+        let unprobed = detected(CaProbe::Unprobed);
+        let labels = |d: &Detected| -> Vec<String> {
+            action_items(d).into_iter().map(|(label, _)| label).collect()
+        };
+        assert!(labels(&unprobed).iter().any(|l| l == "Admins"));
+        assert!(!labels(&unprobed).iter().any(|l| l.contains("Auto-Renew")));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| render_status_overlay(f, f.area(), &unprobed, &SyncState::InSync))
+            .unwrap();
+        let rendered = terminal.backend().buffer().content().iter().fold(
+            String::new(),
+            |mut acc, cell| {
+                acc.push_str(cell.symbol());
+                acc
+            },
+        );
+        assert!(rendered.contains("checking"), "{rendered}");
+
+        // Probed: the credential-dependent actions appear.
+        let ready = detected(CaProbe::Ready(CaCredentials {
+            auto_approve_present: true,
+            auto_approve_wired: true,
+            recovery_present: true,
+            external_signed: false,
+            external_installed: false,
+        }));
+        assert!(labels(&ready).iter().any(|l| l == "Rotate Auto-Renew Credential"));
+        assert!(labels(&ready).iter().any(|l| l == "Rotate Recovery Password"));
+
+        // A failed probe surfaces the reason instead of silently hiding them.
+        let failed = detected(CaProbe::Failed("daemon not responding".to_string()));
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|f| render_status_overlay(f, f.area(), &failed, &SyncState::InSync))
+            .unwrap();
+        let rendered = terminal.backend().buffer().content().iter().fold(
+            String::new(),
+            |mut acc, cell| {
+                acc.push_str(cell.symbol());
+                acc
+            },
+        );
+        assert!(rendered.contains("not responding"), "{rendered}");
     }
 }
