@@ -1154,12 +1154,14 @@ mod publisher {
             config::Config::from_file(cfg)?
         };
         let _cfg = cfg.clone();
+        let (ready, is_ready) = oneshot::channel();
         let pb: JoinHandle<Result<()>> = task::spawn(async move {
             let publisher = PublisherBuilder::new(_cfg).build().await?;
             let v = publisher.publish(Path::from("/local/foo"), Value::from(0u64))?;
             let (tx, mut rx) = mpsc::channel(64);
             publisher.writes(v.id(), tx);
             publisher.flushed().await;
+            let _ = ready.send(());
             while let Some(mut batch) = rx.next().await {
                 for mut req in batch.drain(..) {
                     match req.send_result.take() {
@@ -1171,6 +1173,7 @@ mod publisher {
             Ok(())
         });
         let timeout = Duration::from_secs(30);
+        time::timeout(timeout, is_ready).await??;
         let subscriber = SubscriberBuilder::new(cfg).build()?;
         let s =
             subscriber.subscribe_nondurable_one(Path::from("/local/foo"), None).await?;
