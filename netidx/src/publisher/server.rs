@@ -288,6 +288,8 @@ type BlockedSendFut = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 
 type ReceiptFut = Pin<Box<dyn Future<Output = publisher::From> + Send + Sync + 'static>>;
 
+type PendingReceipts = Batched<FuturesUnordered<ReceiptFut>>;
+
 struct ClientCtx {
     desired_auth: DesiredAuth,
     client: ClId,
@@ -297,7 +299,7 @@ struct ClientCtx {
     write_batches:
         IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>,
     blocked_sends: FuturesUnordered<BlockedSendFut>,
-    pending_receipts: Batched<FuturesUnordered<ReceiptFut>>,
+    pending_receipts: PendingReceipts,
     flushing_updates: Option<Instant>,
     flush_timeout: Option<Duration>,
     deferred_subs: DeferredSubs,
@@ -319,6 +321,9 @@ impl ClientCtx {
         let mut deferred_subs: DeferredSubs =
             Batched::new(SelectAll::new(), MAX_DEFERRED);
         deferred_subs.inner_mut().push(Box::new(stream::pending()));
+        let mut pending_receipts: PendingReceipts =
+            Batched::new(FuturesUnordered::new(), MAX_PENDING_RECEIPTS);
+        pending_receipts.inner_mut().push(Box::pin(future::pending()));
         ClientCtx {
             desired_auth,
             client,
@@ -327,7 +332,7 @@ impl ClientCtx {
             batch: Vec::new(),
             write_batches: HashMap::default(),
             blocked_sends: FuturesUnordered::new(),
-            pending_receipts: Batched::new(FuturesUnordered::new(), 10_000),
+            pending_receipts,
             flushing_updates: None,
             flush_timeout: None,
             deferred_subs,
@@ -663,7 +668,7 @@ impl ClientCtx {
             }
         }
         async fn next_receipt(
-            pending: &mut Batched<FuturesUnordered<ReceiptFut>>,
+            pending: &mut PendingReceipts,
             receipts: &mut Vec<publisher::From>,
         ) {
             loop {

@@ -1126,6 +1126,69 @@ mod publisher {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_receipts() -> Result<()> {
+        let _ = env_logger::try_init();
+        let resolver = {
+            use crate::resolver_server::config::{self, file};
+            let cfg = file::ConfigBuilder::default()
+                .member_servers(vec![
+                    file::MemberServerBuilder::default()
+                        .auth(file::Auth::Anonymous)
+                        .addr("127.0.0.1:0".parse()?)
+                        .bind_addr("127.0.0.1".parse()?)
+                        .build()?,
+                ])
+                .build()?;
+            let cfg = config::Config::from_file(cfg)?;
+            crate::resolver_server::Server::new(cfg, false, 0).await?
+        };
+        let addr = *resolver.local_addr();
+        let cfg = {
+            use crate::config::{self, DefaultAuthMech, file};
+            let cfg = file::ConfigBuilder::default()
+                .addrs(vec![(addr, file::Auth::Anonymous)])
+                .default_auth(DefaultAuthMech::Anonymous)
+                .default_bind_config("local")
+                .build()?;
+            config::Config::from_file(cfg)?
+        };
+        let _cfg = cfg.clone();
+        let pb: JoinHandle<Result<()>> = task::spawn(async move {
+            let publisher = PublisherBuilder::new(_cfg).build().await?;
+            let v = publisher.publish(Path::from("/local/foo"), Value::from(0u64))?;
+            let (tx, mut rx) = mpsc::channel(64);
+            publisher.writes(v.id(), tx);
+            publisher.flushed().await;
+            while let Some(mut batch) = rx.next().await {
+                for mut req in batch.drain(..) {
+                    match req.send_result.take() {
+                        Some(r) => r.send(req.value),
+                        None => bail!("write receipt was not requested"),
+                    }
+                }
+            }
+            Ok(())
+        });
+        let timeout = Duration::from_secs(30);
+        let subscriber = SubscriberBuilder::new(cfg).build()?;
+        let s =
+            subscriber.subscribe_nondurable_one(Path::from("/local/foo"), None).await?;
+        for i in 0..10u64 {
+            let rx = s.write_with_recipt(Value::from(i));
+            assert_eq!(time::timeout(timeout, rx).await??, Value::from(i));
+        }
+        let receipts = (0..10_000u64)
+            .map(|i| s.write_with_recipt(Value::from(i)))
+            .collect::<Vec<_>>();
+        for (i, rx) in receipts.into_iter().enumerate() {
+            assert_eq!(time::timeout(timeout, rx).await??, Value::from(i as u64));
+        }
+        pb.abort();
+        drop(resolver);
+        Ok(())
+    }
+
     struct PTestPub(mpsc::UnboundedSender<(bool, oneshot::Sender<()>)>);
 
     impl PTestPub {
