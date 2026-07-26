@@ -296,7 +296,7 @@ struct ClientCtx {
     batch: Vec<publisher::To>,
     write_batches:
         IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>,
-    blocked_sends: Batched<FuturesUnordered<BlockedSendFut>>,
+    blocked_sends: FuturesUnordered<BlockedSendFut>,
     pending_receipts: Batched<FuturesUnordered<ReceiptFut>>,
     flushing_updates: Option<Instant>,
     flush_timeout: Option<Duration>,
@@ -326,7 +326,7 @@ impl ClientCtx {
             secrets,
             batch: Vec::new(),
             write_batches: HashMap::default(),
-            blocked_sends: Batched::new(FuturesUnordered::new(), 10_000),
+            blocked_sends: FuturesUnordered::new(),
             pending_receipts: Batched::new(FuturesUnordered::new(), 10_000),
             flushing_updates: None,
             flush_timeout: None,
@@ -584,7 +584,7 @@ impl ClientCtx {
     fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::From;
         self.handle_batch_inner(con)?;
-        self.blocked_sends.inner_mut().extend(self.write_batches.drain().map(
+        self.blocked_sends.extend(self.write_batches.drain().map(
             |(_, (batch, mut sender))| {
                 Box::pin(async move {
                     let _ = sender.send(batch).await;
@@ -648,12 +648,12 @@ impl ClientCtx {
         async fn read_from_subscriber(
             con: &mut ReadChannel,
             batch: &mut Vec<publisher::To>,
-            blocked: &mut Batched<FuturesUnordered<BlockedSendFut>>,
+            blocked: &mut FuturesUnordered<BlockedSendFut>,
             receipts_full: bool,
         ) -> Result<()> {
             loop {
-                if blocked.inner().len() > 0 {
-                    while let Some(BatchItem::InBatch(())) = blocked.next().await {}
+                if blocked.len() > 0 {
+                    blocked.next().await;
                 } else if receipts_full {
                     future::pending::<()>().await;
                 } else {
@@ -703,8 +703,8 @@ impl ClientCtx {
                 () = next_receipt(&mut self.pending_receipts, &mut receipts).fuse() => {
                     for m in receipts.drain(..) {
                         write_con.queue_send(&m)?;
+                        self.msg_sent = true;
                     }
-                    self.msg_sent = true;
                 },
                 r = read_from_subscriber(
                     &mut read_con,
