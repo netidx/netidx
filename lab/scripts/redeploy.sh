@@ -14,7 +14,10 @@ rsync -az --delete --exclude '/target/' --exclude '/.git/' \
 
 echo "[2/4] incremental build on devbox"
 t0=$(date +%s)
-$SSH root@$DEV 'cd /root/netidx && . $HOME/.cargo/env && CARGO_INCREMENTAL=0 cargo build -p netidx-tools --bin netidx'
+# The devbox root filesystem is 19G. A full debug build with debuginfo reaches
+# ~15G of target/ and the final link dies with a SIGBUS out of disk space.
+# Dropping debuginfo keeps it near 6G; backtraces are still symbolicated.
+$SSH root@$DEV 'cd /root/netidx && . $HOME/.cargo/env && CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build -p netidx-tools --bin netidx'
 echo "    build took $(( $(date +%s) - t0 ))s"
 
 echo "[3/4] strip"
