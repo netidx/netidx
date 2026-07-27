@@ -954,56 +954,60 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
                 },
             ));
         }
-        // The rest depend on credential state the background probe reads; they
-        // appear once it lands.
-        let Some(credentials) = lca.credentials() else { return items };
-        if credentials.auto_approve_present {
-            items.push((
-                "Rotate Auto-Renew Credential".to_string(),
-                Action::AutoApprove {
-                    rotate: true,
-                    ca_dir: lca.ca_dir.clone(),
-                    cfg: lca.cfg.clone(),
-                },
-            ));
-        } else {
-            items.push((
-                "Enable Auto-Renew".to_string(),
-                Action::AutoApprove {
-                    rotate: false,
-                    ca_dir: lca.ca_dir.clone(),
-                    cfg: lca.cfg.clone(),
-                },
-            ));
-        }
-        if credentials.recovery_present {
-            items.push((
-                "Rotate Recovery Password".to_string(),
-                Action::RecoveryRotate {
-                    ca_dir: lca.ca_dir.clone(),
-                    cfg: lca.cfg.clone(),
-                },
-            ));
-        }
-        if credentials.external_signed {
-            let emit_label = if credentials.external_installed {
-                "Emit Renewal CSR (External CA)"
+        // These depend on credential state the background probe reads, so they
+        // appear once it lands. Only these — an early return here would also
+        // drop the backup and uninstall entries below, which is precisely
+        // backwards: a probe fails when the daemon is unreachable, which is
+        // when an operator most needs the escape hatches.
+        if let Some(credentials) = lca.credentials() {
+            if credentials.auto_approve_present {
+                items.push((
+                    "Rotate Auto-Renew Credential".to_string(),
+                    Action::AutoApprove {
+                        rotate: true,
+                        ca_dir: lca.ca_dir.clone(),
+                        cfg: lca.cfg.clone(),
+                    },
+                ));
             } else {
-                "Re-emit Signing CSR (External CA)"
-            };
-            items.push((
-                emit_label.to_string(),
-                Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
-            ));
-            let label = if credentials.external_installed {
-                "Install Renewed Certificate (External CA)"
-            } else {
-                "Install Signed Certificate (External CA)"
-            };
-            items.push((
-                label.to_string(),
-                Action::ExternalInstall { ca_dir: lca.ca_dir.clone() },
-            ));
+                items.push((
+                    "Enable Auto-Renew".to_string(),
+                    Action::AutoApprove {
+                        rotate: false,
+                        ca_dir: lca.ca_dir.clone(),
+                        cfg: lca.cfg.clone(),
+                    },
+                ));
+            }
+            if credentials.recovery_present {
+                items.push((
+                    "Rotate Recovery Password".to_string(),
+                    Action::RecoveryRotate {
+                        ca_dir: lca.ca_dir.clone(),
+                        cfg: lca.cfg.clone(),
+                    },
+                ));
+            }
+            if credentials.external_signed {
+                let emit_label = if credentials.external_installed {
+                    "Emit Renewal CSR (External CA)"
+                } else {
+                    "Re-emit Signing CSR (External CA)"
+                };
+                items.push((
+                    emit_label.to_string(),
+                    Action::ExternalEmitCsr { ca_dir: lca.ca_dir.clone() },
+                ));
+                let label = if credentials.external_installed {
+                    "Install Renewed Certificate (External CA)"
+                } else {
+                    "Install Signed Certificate (External CA)"
+                };
+                items.push((
+                    label.to_string(),
+                    Action::ExternalInstall { ca_dir: lca.ca_dir.clone() },
+                ));
+            }
         }
     }
     items.push((
@@ -1477,6 +1481,11 @@ mod tests {
         };
         assert!(labels(&unprobed).iter().any(|l| l == "Admins"));
         assert!(!labels(&unprobed).iter().any(|l| l.contains("Auto-Renew")));
+        // Only the credential-dependent entries wait on the probe. Backup and
+        // uninstall sit after them in the list and must not be truncated away —
+        // a wedged daemon is exactly when they are wanted.
+        assert!(labels(&unprobed).iter().any(|l| l == "Back Up This Install"));
+        assert!(labels(&unprobed).iter().any(|l| l == "Uninstall"));
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal
             .draw(|f| render_status_overlay(f, f.area(), &unprobed, &SyncState::InSync))
@@ -1515,5 +1524,7 @@ mod tests {
             },
         );
         assert!(rendered.contains("not responding"), "{rendered}");
+        assert!(labels(&failed).iter().any(|l| l == "Back Up This Install"));
+        assert!(labels(&failed).iter().any(|l| l == "Uninstall"));
     }
 }
