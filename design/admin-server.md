@@ -26,16 +26,16 @@ composition root that selects client-only or Unix authority operations.
 Interactive Q&A doesn't scale to a distributed system: every setup
 improvement before this (resolver TLS-name probe, `user.domain` SAN
 suggestion, CA join with fingerprint confirm) was an ad-hoc special
-case of "ask the network instead of the human." The admin server is the
+case of "ask the trust domain instead of the human." The admin server is the
 generalization. The UX benchmark is syncthing; the trust model is
 better than syncthing's because netidx has a CA: the human confirms
-**one** fingerprint glyph per network, ever, instead of one per device
+**one** fingerprint glyph per trust domain, ever, instead of one per device
 pair.
 
 ## Trust model
 
 1. **The admin plane is always TLS, rooted at the CA — regardless of
-   data-plane auth.** On a Kerberos (or anonymous) network the CA's
+   data-plane auth.** On a Kerberos (or anonymous) trust domain the CA's
    scope shrinks to admin-server serving certs; the glyph confirm,
    server-to-server PKI, and pushes work identically everywhere.
 2. **mDNS beacons are hints, never trusted.** TXT carries the domain,
@@ -43,7 +43,7 @@ pair.
    display grouping. Nothing security-relevant is decided from a
    beacon; anyone on the LAN can broadcast anything and it buys them
    nothing.
-3. **One glyph per network.** The CA fingerprint confirm (text +
+3. **One glyph per trust domain.** The CA fingerprint confirm (text +
    identicon, `fingerprint.rs`) is the only human trust decision.
    Inspection is its own connection that sends nothing secret and
    closes before credentials are typed; everything after it pins the
@@ -52,7 +52,7 @@ pair.
    CA-issued cert whose single DNS SAN is `netidx-admin-server`
    (`conf_proto::SERVING_SAN`). The Sign path refuses that name
    unconditionally (even under a `*` policy glob); it is minted only by
-   the local setup path on the CA host or by the policy-gated network
+   the local setup path on the CA host or by the policy-gated trust domain
    **Enroll**.
 5. **Roles are claimed inside TLS.** The `ServerHello` carries the
    host's domain + roles; it's trustworthy because the serving chain
@@ -89,12 +89,12 @@ Request::Approve(…)              → ApproveResponse     (ca role, admin-authe
 Request::Deny(…)                 → DenyResponse        (ca role, admin-authenticated)
 ```
 
-- **GetInfo** returns *local facts + known peers*: the network domain,
+- **GetInfo** returns *local facts + known peers*: the trust domain's domain name,
   where the CA is, this host's resolver (address + data-plane auth:
   anonymous / krb5 `spn` / tls `name`), and the other admin servers this
   one knows of. Servers never fan out to answer it — the **client**
   walks `peers` (deduped, cycle-safe, every hop pinned) and aggregates.
-  One reachable admin server maps the whole network, so the manual
+  One reachable admin server maps the whole trust domain, so the manual
   fallback on mDNS-hostile networks is a single address.
 - **Sign** is the CA-server join, unchanged at its core (vault unlock,
   per-admin policy, audit). The request carries the id-map groups the
@@ -130,7 +130,7 @@ server timeout). This is also a security upgrade: the admin's CA
 password is never typed on a machine that isn't theirs.
 
 What replaces physical presence is the **mutual glyph**: the enrollee
-verifies the *network* by the CA fingerprint, and the admin verifies
+verifies the *trust domain* by the CA fingerprint, and the admin verifies
 the *enrollee* by the request code — the fingerprint of the CSR's
 public key, computed independently on both sides (never trusted from
 the wire), relayed over whatever channel the two humans already trust
@@ -188,7 +188,7 @@ index is what makes certificates manageable by *name*:
   CRL is (re-)signed at every revocation and *opportunistically in
   every authenticated admin session* (sign/approve/deny/list all
   refresh a CRL nearing its `nextUpdate` — 90d validity, 30d refresh
-  window). A network where literally nothing is signed for months gets
+  window). A trust domain where literally nothing is signed for months gets
   staleness warnings.
 - **Distribution**: `Request::GetCrl` (public — a CRL is a public
   document); the renewal daemon drops `crl.pem` beside each resolver's
@@ -235,7 +235,7 @@ anyway. The pieces:
   CA certificate reaches the fleet. The CA renews **itself, same key**,
   automatically during any admin session once its remaining life drops
   below a leaf validity + grace — same key + subject means existing
-  leaves still chain and the network glyph (a key hash) is unchanged.
+  leaves still chain and the trust domain glyph (a key hash) is unchanged.
   Leaf validity is clamped to the CA's remaining life, so nothing the
   CA signs ever outlives it.
 - **`ca sign` queue UI**: verified renewals list separately with a
@@ -361,7 +361,7 @@ netidx admin backup /srv/backups/netidx-2026-07-12
 ```
 
 The bundle records the installed components, current configuration and
-permissions, activation units, network pin, service intent, and the machine
+permissions, activation units, trust domain pin, service intent, and the machine
 credentials that must be re-enrolled. On a controller the daemon briefly
 blocks durable mutations while capturing the vault,
 certificate/trust chain, issuance and revocation records, CRL, authoritative
@@ -408,7 +408,7 @@ fingerprint and controller UUID against `netmap.json`, and then:
 
 A restored satellite receives a fresh server UUID during its approval
 ceremony. The request visibly names the failed UUID it replaces; approval
-atomically installs the new grant in the same stable cluster, removes the old
+atomically installs the new grant in the same stable resolver cluster, removes the old
 grant, and revokes every old serving certificate. The active controller can
 never be replaced through this path.
 
@@ -440,7 +440,7 @@ machine credentials in plaintext.
   admin's signs never register identities. Default suggestion: `users`.
 - `may_enroll_servers: bool` — whether this admin can grow the admin
   plane. More privileged than any SAN glob (a rogue admin server can
-  impersonate the network), so it defaults on only for the founding
+  impersonate the trust domain), so it defaults on only for the founding
   admin and off for added admins.
 
 ## Discovery (`netidx-admin-client/src/discovery.rs`)
@@ -482,51 +482,51 @@ Canonical locations: `${config}/netidx/admin-server.json`, then
 ## Install flows
 
 The probe outcome is a three-state value threaded through every
-sub-flow that could offer a network join: `Have(network)` (discovered
+sub-flow that could offer a trust domain join: `Have(trust domain)` (discovered
 and glyph-confirmed — use it, ask nothing), `DontHave` (probed and/or
 declined — never re-offer), `NotProbed` (CLI-flag path, non-TTY — a
 sub-flow that wants a admin server probes itself; this is also how
-`netidx admin component tls join` without `--server` finds the network). The
+`netidx admin component tls join` without `--server` finds the trust domain). The
 operator answers the admin-server question at most once per install.
 
 - **Workstation / publisher**: browse → pick the domain (asked only if
   more than one is found; manual address fallback when none) →
-  fetch + glyph-confirm the network identity → aggregate GetInfo across
+  fetch + glyph-confirm the trust domain identity → aggregate GetInfo across
   its admin servers → the parent referral gets **every** resolver with
   its per-address auth. Then:
-  - TLS network: one join (suggested SAN `user.<domain>`, id-map
+  - TLS trust domain: one join (suggested SAN `user.<domain>`, id-map
     groups for the new identity — default `users` — then admin +
     password); registration arrives via the CA push.
-  - Krb5 network: configs are written with per-address `Krb5 { spn }`;
+  - Krb5 trust domain: configs are written with per-address `Krb5 { spn }`;
     no CSR, no client cert, no id-map push (krb5 sites use the system
     IdM). The glyph confirm is the only human input.
 - **First resolver**: per-box single-member resolver config (the
   members list remains a hand-managed central-config convenience; the
   admin-server flows never produce multi-member configs, and peer
-  resolvers stay mutually unaware). The CA is created for TLS networks
+  resolvers stay mutually unaware). The CA is created for TLS trust domains
   without asking — it signs the data plane anyway — and for krb5
-  networks too, scoped to the admin plane. `setup_server` writes a
+  trust domains too, scoped to the admin plane. `setup_server` writes a
   ca-role `admin-server.json`; after the template applies, the install
   adds the resolver / id-map roles to it.
-- **Second resolver**: discovers the network, imports its settings
+- **Second resolver**: discovers the trust domain, imports its settings
   (auth scheme, domain), CA-joins for its resolver identity (suggested
-  `resolver.<domain>`), prompts for an SPN on krb5 networks, then
-  **enrolls** a admin server here: the network CA signs its reserved-SAN
+  `resolver.<domain>`), prompts for an SPN on krb5 trust domains, then
+  **enrolls** a admin server here: the trust domain CA signs its reserved-SAN
   serving cert over the wire, the host writes `admin-server.json` with
   its roles + the admin servers it found as peers, and drops the
   activation unit. Nothing is pushed to existing resolvers.
 
 ### Install profiles
 
-The installer asks for *intent* (what auth scheme, what network) and
+The installer asks for *intent* (what auth scheme, what trust domain) and
 derives the components; it never offers a choice whose "no" produces a
-broken network. The matrix is `conf_plane_decision` +
+broken trust domain. The matrix is `conf_plane_decision` +
 `resolve_id_map_choice` in `netidx-tools/src/admin/init.rs` (both
 exhaustively tested there); this table mirrors them — change all three
 together.
 
-The admin-server column applies to fresh networks and joins alike:
-enrolling on an existing network queues for remote approval (the
+The admin-server column applies to fresh trust domains and joins alike:
+enrolling on an existing trust domain queues for remote approval (the
 approving admin's `may_enroll_servers` is the gate), so no admin needs
 to be at the keyboard and the join side has no reason to differ.
 
@@ -543,7 +543,7 @@ Expert escapes, all warned about where they're used:
   nobody and perms deny everything; the template emits a render-time
   coherence warning (visible on `--dry-run` too).
 - `--no-admin-server` — skips the admin plane entirely; the host is
-  invisible to discovery, and a network with no admin server anywhere
+  invisible to discovery, and a trust domain with no admin server anywhere
   has no enrollment and no certificate renewal.
 - Bring-your-own data-plane certificates are **not** a wizard option: to
   run resolver/publisher/subscriber TLS with unrelated certificates,

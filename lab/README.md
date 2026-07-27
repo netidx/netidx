@@ -22,7 +22,7 @@ Everything is on the **system** libvirt instance, not the session one:
 export LIBVIRT_DEFAULT_URI=qemu:///system   # or: virsh -c qemu:///system ...
 ```
 
-The three lab networks (`netidx-test`, `netidx-eu`, `netidx-ap`) are persistent
+The three lab trust domains (`netidx-test`, `netidx-eu`, `netidx-ap`) are persistent
 + autostart and are **not** torn down between runs. Domain names contain spaces
 (`debian13 resolver0`), so quote them: `virsh start "debian13 resolver0"`.
 
@@ -49,16 +49,16 @@ loss/latency/partitions). HQ serves `/`, EU serves `/eu`, AP serves `/ap`.
 | `debian13 router`          | .50.2/.60.2/.70.2 | tri-homed netem WAN router; hosts `wan` at `/usr/local/bin/wan` |
 | `win11`                    | management: DHCP on `default` (currently 192.168.122.10); netidx: DHCP on `netidx-test` (currently 192.168.50.163) | Windows 11 workstation test VM; passwordless SSH as `eric` |
 
-Networks: `netidx-test` 192.168.50.0/24 (HQ, NAT), `netidx-eu` 192.168.60.0/24
+Trust domains: `netidx-test` 192.168.50.0/24 (HQ, NAT), `netidx-eu` 192.168.60.0/24
 (isolated — router is the only path off-subnet), `netidx-ap` 192.168.70.0/24
 (isolated). HQ guests get a route to 60/70 via .50.2; EU/AP guests get their
 default gw from DHCP (router .60.2/.70.2).
 
-The Windows VM has two NICs. The libvirt `default` NAT network is its stable
+The Windows VM has two NICs. The libvirt `default` NAT trust domain is its stable
 management/SSH path and may need `virsh net-start default` after a host reboot.
-The `netidx-test` NIC puts the workstation directly on the HQ network for
+The `netidx-test` NIC puts the workstation directly on the HQ trust domain for
 admin-plane and resolver testing; do not rely on the management NAT to route
-the 50/60/70 lab networks. Discover the management address with
+the 50/60/70 lab trust domains. Discover the management address with
 `virsh net-dhcp-leases default`, then connect without a password:
 
 ```sh
@@ -69,7 +69,7 @@ If an older `win11` definition has only the management NIC, attach the HQ NIC
 once (both live and persistent):
 
 ```sh
-virsh -c qemu:///system attach-interface win11 network netidx-test \
+virsh -c qemu:///system attach-interface win11 trust domain netidx-test \
   --model virtio --live --config
 ```
 
@@ -93,7 +93,7 @@ ssh root@<ip> 'bash -s' < scripts/teardown.sh        # lighter: only ~/.config/n
 ```
 
 Use `teardown2.sh` for a truly pristine box. The KDC on .11 (realm
-`NETIDX.TEST`) survives a reset. Networks are left alone — don't touch them.
+`NETIDX.TEST`) survives a reset. Trust domains are left alone — don't touch them.
 
 Kerberos fixture credentials: the ordinary test principal is
 `eric@NETIDX.TEST` with password `testpw12345`. Resolver and publisher service
@@ -134,8 +134,8 @@ netidx admin ca remove-server <exact-server-uuid> \
   --admin <name> --password-file <path>
 ```
 
-The TUI exposes the same operation under **Cluster → Admin Servers**: select a
-non-controller row and press `x`. It shows the UUID, last address, cluster, and
+The TUI exposes the same operation under **Trust Domain → Admin Servers**: select a
+non-controller row and press `x`. It shows the UUID, last address, resolver cluster, and
 an irreversible confirmation. The active controller is visible but protected.
 
 Removal revokes every live serving certificate for the UUID, deletes its
@@ -151,7 +151,7 @@ same removal UUID is the idempotent manual reconciliation path.
 ```sh
 # admin server (CA controller on .11, :4565), foreground:
 netidx admin component server run -c /root/.config/netidx/admin-server.json -f
-# resolver member (:4564), --id selects the cluster member index:
+# resolver member (:4564), --id selects the resolver cluster member index:
 netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f
 # cert auto-renewal puller (NOT run by default — lab installs decline it):
 netidx conf component tls auto-renew run
@@ -183,7 +183,7 @@ sleep 2
 tmux capture-pane -t tui -p          # snapshot the screen (pipe to a file/Read)
 
 tmux send-keys  -t tui Down Down Enter   # navigate: arrows / Enter
-tmux send-keys  -t tui Tab               # switch Local/Cluster tab
+tmux send-keys  -t tui Tab               # switch Local/Trust Domain tab
 tmux send-keys  -t tui -l 'sometext'     # literal text (-l) into a field
 tmux send-keys  -t tui Enter
 tmux send-keys  -t tui Escape            # back / dismiss a dialog

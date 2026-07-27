@@ -16,7 +16,7 @@
 **Real-time data sharing for distributed systems, without the message broker.**
 
 Netidx is a high-performance Rust middleware that lets you publish and
-subscribe to live data across your network using a simple,
+subscribe to live data across your trust domain using a simple,
 hierarchical namespace. Think of it as a distributed filesystem for
 streaming data, where values update in real-time and programs can both
 read and write.
@@ -31,7 +31,7 @@ read and write.
 **🔐 Secure by Default**
 - Built-in Kerberos v5 and TLS support with mutual authentication
 - Centralized authorization policies
-- Encryption for all network traffic
+- Encryption for all trust domain traffic
 
 **🎯 Simple Mental Model**
 - Everything is a path like `/sensors/temperature` or `/trading/prices/AAPL`
@@ -119,7 +119,7 @@ Netidx shines in scenarios where you need:
 - **Live dashboards** - Monitor systems in real-time without polling
 - **Distributed control systems** - Read sensor data, issue commands, all with the same simple API
 - **Trading systems** - Low-latency market data distribution (our original use case)
-- **IoT networks** - Hierarchically organized device data with discovery
+- **IoT trust domains** - Hierarchically organized device data with discovery
 - **Microservice coordination** - Share configuration, feature flags, and metrics
 - **Process monitoring** - Expose application internals for debugging and observability
 
@@ -207,7 +207,7 @@ fault tolerance, load, and site autonomy.
 - You need built-in security and authorization
 
 **Maybe not:**
-- You want complex event processing/filtering (the network is not a database)
+- You want complex event processing/filtering (the trust domain is not a database)
 - You need exactly-once processing guarantees (we provide reliable streaming with at-most-once or at-least-once depending on durability configuration)
 - You're looking for simple point-to-point RPC (just use gRPC)
 
@@ -236,7 +236,7 @@ them.
 
 Need to record and replay historical data? **netidx-archive** provides high-performance event logging with smart storage management:
 
-- **Network Event logging** - Capture all updates to subscribed paths to disk
+- **Trust domain Event logging** - Capture all updates to subscribed paths to disk
 - **Event logging at the source** - Use the netidx-archive crate directly in your publisher for the cleanest possible historical record
 - **On-demand replay** - Replay historical data for any time range
 - **Tail the stream** - Start where you left off after an interruption and continue following the event stream when you catch up

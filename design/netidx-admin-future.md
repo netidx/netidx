@@ -33,7 +33,7 @@ verbatim so the resulting certs continue to load through the existing
   by the CLI), but the key still has to land in memory plaintext when
   the CA signs. Hardware-token backing keeps the key off the host
   entirely.
-- **Remote-network CA operations.** v1 CA is local-machine only.
+- **Remote-trust domain CA operations.** v1 CA is local-machine only.
 - **`Ca::trust_into_*` config-wiring helpers.** v1 callers wire the
   CA's `certificate.pem` path into configs manually. A future tidy-up
   can add the convenience method.
@@ -363,7 +363,7 @@ written to disk.
 
 - **Bootstrap trust on first connect.** Admin-server's own cert is
   delivered via the discovery `Announce` (fingerprint). On a hostile
-  network the discovery channel can be spoofed; `--admin-server-pin
+  trust domain the discovery channel can be spoofed; `--admin-server-pin
   <sha256>` short-circuits this.
 - **Replay defenses.** SCRAM nonces handle authentication replay; CSR
   reuse is prevented by binding the cert's serial to the authenticated
@@ -372,7 +372,7 @@ written to disk.
 - **Admin-server clustering.** One per resolver-server machine,
   coordinating via the existing cluster protocol in `netidx-protocols`.
 - **Cross-subnet discovery.** Multicast only crosses subnets with an
-  explicit relay. Multi-subnet networks use explicit `--admin-server
+  explicit relay. Multi-subnet trust domains use explicit `--admin-server
   <addr>`.
 
 `init`-time discovery flags:
