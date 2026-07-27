@@ -277,7 +277,7 @@ impl Field {
             Membership => FieldInfo {
                 flag: "--server",
                 label: "stand-alone or join an admin domain",
-                help: "Join an existing netidx admin domain on your admin domain, or set \
+                help: "Join an existing netidx admin domain on your network, or set \
                        up this machine on its own.",
             },
             SelectAdminDomain => FieldInfo {
@@ -352,7 +352,7 @@ impl Field {
             AdminDomainName => FieldInfo {
                 flag: "--domain",
                 label: "admin domain name",
-                help: "The domain this admin domain is grouped under in discovery, \
+                help: "The domain name this admin domain is discovered under, \
                        e.g. ryu-oh.org.",
             },
             Domain => FieldInfo {

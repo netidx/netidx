@@ -971,18 +971,24 @@ impl Modal {
                 let roles = identity
                     .roles
                     .iter()
-                    .map(|r| format!("{r:?}"))
+                    .map(|r| match r {
+                        netidx_admin_proto::Role::Ca => "CA",
+                        netidx_admin_proto::Role::Resolver => "resolver",
+                        netidx_admin_proto::Role::IdMap => "id-map",
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let label = |s: &str| Span::styled(s.to_string(), theme::hint_style());
                 let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
+                    // These are fixed Lines, not a wrapped Paragraph, so each
+                    // must fit the dialog's 58-column interior on its own.
                     Line::from(Span::styled(
-                        "Verify this is the admin domain you intend to trust, out of band,",
+                        "Verify out of band that this is the admin domain you",
                         theme::panel_style(),
                     )),
                     Line::from(Span::styled(
-                        "then accept. Everything after is pinned to this fingerprint.",
+                        "intend to trust. Everything after pins to this glyph.",
                         theme::hint_style(),
                     )),
                     Line::from(""),
