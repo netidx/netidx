@@ -9,6 +9,7 @@ use netidx_activation::runtime::default_units_dir;
 use netidx_admin_client::{
     paths,
     provenance::{InstallRecord, InstallRole},
+    renewd,
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
 };
 use netidx_admin_proto::fingerprint::Fingerprint;
@@ -113,6 +114,10 @@ struct Detected {
     ca: Option<Fingerprint>,
     /// Local admin-server CA tooling, present only when this install owns a CA.
     local_ca: Option<LocalCa>,
+    /// Whether this host holds any TLS identity the CA could renew. False on a
+    /// krb5 or anonymous host that enrolled no certificate — it has joined an
+    /// admin domain, but there is nothing to renew.
+    renewable: bool,
 }
 
 /// The local (no-auth, control-socket) admin-server CA tooling available on an
@@ -172,6 +177,7 @@ impl Detected {
         record: InstallRecord,
         scope: ServiceScope,
         config_dir: PathBuf,
+        renewable: bool,
     ) -> Detected {
         // The CA glyph comes from the admin domain identity recorded at install — set
         // for both a founding host (its own admin domain) and a joining one.
@@ -181,7 +187,7 @@ impl Detected {
             .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok());
         let service = probe_service(&record);
         let local_ca = local_ca_paths(&config_dir);
-        Detected { record, service, scope, config_dir, ca, local_ca }
+        Detected { record, service, scope, config_dir, ca, local_ca, renewable }
     }
 }
 
@@ -288,10 +294,14 @@ fn probe_service(record: &InstallRecord) -> ServiceStatus {
 /// Detect every install recorded on this machine (user- and system-scope).
 fn detect() -> Vec<Detected> {
     let mut out = Vec::new();
+    // What the renew action would actually operate on: the identities renewd
+    // discovers across this host's configs. Scanned once — it is the same set
+    // for every install detected here.
+    let renewable = !renewd::host_identities().is_empty();
     let user_path = paths::user_install_record().ok();
     if let Ok(Some(record)) = InstallRecord::load_default() {
         let dir = paths::user_config_root().unwrap_or_default();
-        out.push(Detected::probe(record, ServiceScope::User, dir));
+        out.push(Detected::probe(record, ServiceScope::User, dir, renewable));
     }
     let sys_path = paths::system_install_record();
     // Skip the system record if it's the very same file we already read as the
@@ -302,6 +312,7 @@ fn detect() -> Vec<Detected> {
                 record,
                 ServiceScope::System,
                 paths::system_config_root(),
+                renewable,
             ));
         }
     }
@@ -615,7 +626,7 @@ impl LocalState {
             }
             Char('r') => {
                 let d = &self.installs[self.selected];
-                if d.record.admin_domain.is_some() {
+                if d.record.admin_domain.is_some() && d.renewable {
                     return Some(Action::Renew { server: d.record.admin_server });
                 }
             }
@@ -889,7 +900,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // it can't run over the local control socket. Review delegations from the
         // Admin domain tab (connect to this host's own admin server).
     }
-    if joined {
+    if joined && d.renewable {
         items.push((
             "Renew Certificates".to_string(),
             Action::Renew { server: d.record.admin_server },
@@ -1271,6 +1282,7 @@ mod tests {
             config_dir: PathBuf::from("/etc/netidx"),
             ca: Some(fp),
             local_ca: None,
+            renewable: true,
         };
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal
@@ -1280,6 +1292,46 @@ mod tests {
             widgets::rendered_identicon_rows(terminal.backend().buffer()),
             widgets::IDENTICON_HEIGHT as usize
         );
+    }
+
+    /// A krb5 host joins an admin domain without enrolling a certificate, so it
+    /// has nothing to renew — the offer must follow the identities renewd would
+    /// actually find, not admin domain membership.
+    #[test]
+    fn a_host_with_no_certificates_is_not_offered_renewal() {
+        let fp = Fingerprint::of_der(b"krb5 admin domain CA");
+        let detected = |auth: &str, renewable: bool| Detected {
+            record: InstallRecord::new(
+                InstallRole::Publisher,
+                "/",
+                auth,
+                Some(AdminDomainIdentity::new("example.com", &fp)),
+                Some("127.0.0.1:4565".parse().unwrap()),
+            ),
+            service: ServiceStatus::NotInstalled,
+            scope: ServiceScope::System,
+            config_dir: PathBuf::from("/etc/netidx"),
+            ca: Some(fp),
+            local_ca: None,
+            renewable,
+        };
+        let offers_renewal = |d: &Detected| {
+            action_items(d).iter().any(|(_, a)| matches!(a, Action::Renew { .. }))
+        };
+        assert!(!offers_renewal(&detected("krb5", false)));
+        assert!(offers_renewal(&detected("tls", true)));
+
+        // Nor may the `r` shortcut run what the menu doesn't offer.
+        let mut local = LocalState::new();
+        local.installs = vec![detected("krb5", false)];
+        local.sync = vec![SyncState::Unchecked];
+        local.selected = 0;
+        assert!(local.on_key(crossterm::event::KeyCode::Char('r')).is_none());
+        local.installs = vec![detected("tls", true)];
+        assert!(matches!(
+            local.on_key(crossterm::event::KeyCode::Char('r')),
+            Some(Action::Renew { .. })
+        ));
     }
 
     #[test]
@@ -1299,6 +1351,7 @@ mod tests {
             config_dir: config_root.clone(),
             ca: Some(fp),
             local_ca: None,
+            renewable: true,
         };
         let actions = action_items(&detected);
         assert!(actions.iter().any(|(_, action)| matches!(
@@ -1335,6 +1388,7 @@ mod tests {
                 cfg: Some(cfg.clone()),
                 probe,
             }),
+            renewable: true,
         };
 
         // Unprobed: the socket-free actions are already there, the
