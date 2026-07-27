@@ -224,8 +224,8 @@ pub async fn run_resolver(
     #[cfg(unix)]
     if founded_admin_plane {
         ans.announce(
-            "New admin cluster",
-            "Founding a new admin cluster requires a certificate authority. We \
+            "New trust domain",
+            "Founding a new trust domain requires a certificate authority. We \
              will set that up now.",
         )
         .await?;
@@ -310,7 +310,7 @@ pub async fn run_resolver(
         founding_identity = Some(identity);
         ans.announce(
             "Resolver server",
-            "Admin cluster setup complete, now installing the resolver server.",
+            "Trust domain setup complete, now installing the resolver server.",
         )
         .await?;
         Some(domain)
