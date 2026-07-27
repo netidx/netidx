@@ -23,7 +23,7 @@ use std::{
 
 pub const FORMAT_VERSION: u32 = 2;
 pub const MANIFEST_FILE: &str = "manifest.json";
-pub const CA_DIR: &str = "CA";
+pub const CA_DIR: &str = "ca";
 const FILES_DIR: &str = "files";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +377,7 @@ fn components(root: &Path, role: InstallRole) -> Vec<Component> {
         InstallRole::Publisher => out.push(Component::Publisher),
     }
     for component in [
-        root.join("CA").is_dir().then_some(Component::Ca),
+        root.join("ca").is_dir().then_some(Component::Ca),
         root.join("resolver.json").is_file().then_some(Component::Resolver),
         root.join("id-map.json").is_file().then_some(Component::IdMap),
     ]
@@ -410,7 +410,7 @@ fn capture_tree(
         if entry.file_name().to_string_lossy().starts_with(".tmp") {
             continue;
         }
-        if relative.components().next() == Some(PathComponent::Normal("CA".as_ref())) {
+        if relative.components().next() == Some(PathComponent::Normal("ca".as_ref())) {
             continue;
         }
         if meta.is_dir() {
@@ -493,7 +493,7 @@ fn ca_resolver_endpoint(
 ) -> Result<Option<ResolverEndpoint>> {
     let inner = crate::backup::verify(ca).context("verifying embedded CA backup")?;
     let map: netidx_admin_proto::AdminDomainMap =
-        serde_json::from_slice(&fs::read(ca.join("CA/admin-domain.json"))?)
+        serde_json::from_slice(&fs::read(ca.join("ca/admin-domain.json"))?)
             .context("parsing the CA backup's authoritative admin domain map")?;
     if map.ca != inner.ca {
         bail!("embedded CA map identity does not match its signed manifest");
@@ -897,8 +897,8 @@ pub fn ca_snapshot_prepared(bundle: &Path, ca_dir: &Path, config: &Path) -> Resu
     {
         return Ok(false);
     }
-    for file in inner.files.iter().filter(|file| file.path.starts_with("CA/")) {
-        let relative = Path::new(&file.path).strip_prefix("CA").unwrap();
+    for file in inner.files.iter().filter(|file| file.path.starts_with("ca/")) {
+        let relative = Path::new(&file.path).strip_prefix("ca").unwrap();
         if relative == Path::new("certificate.pem")
             || relative == Path::new("trusted.pem")
         {

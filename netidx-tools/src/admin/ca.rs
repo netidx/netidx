@@ -120,7 +120,7 @@ fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, Stri
     match value.to_ascii_lowercase().replace('_', "-").as_str() {
         "resolver" => Ok(admin_proto::Role::Resolver),
         "id-map" | "idmap" => Ok(admin_proto::Role::IdMap),
-        "CA" => Err("the CA role cannot be granted to an enrollee".to_string()),
+        "ca" => Err("the CA role cannot be granted to an enrollee".to_string()),
         _ => Err("expected resolver or id-map".to_string()),
     }
 }
@@ -2520,7 +2520,7 @@ mod tests {
         }
 
         // Admin side: stand up a tiny CA and sign the CSR.
-        let ca_dir = scratch.path().join("CA");
+        let ca_dir = scratch.path().join("ca");
         Ca::init(
             &CaParams {
                 directory: ca_dir.clone(),
@@ -2581,7 +2581,7 @@ mod tests {
             out_csr: Some(csr_path.clone()),
         })
         .unwrap();
-        let ca_dir = scratch.path().join("CA");
+        let ca_dir = scratch.path().join("ca");
         Ca::init(
             &CaParams {
                 directory: ca_dir.clone(),
@@ -2627,7 +2627,7 @@ mod tests {
         let kr = ca::generate_csr(&Subject::cn("no-san"), &[], 2048, None).unwrap();
         let csr_path = scratch.path().join("no-san.csr");
         std::fs::write(&csr_path, &kr.csr_pem).unwrap();
-        let ca_dir = scratch.path().join("CA");
+        let ca_dir = scratch.path().join("ca");
         Ca::init(
             &CaParams {
                 directory: ca_dir.clone(),
@@ -2676,7 +2676,7 @@ mod tests {
             out_csr: Some(csr_path.clone()),
         })
         .unwrap();
-        let ca_dir = scratch.path().join("CA");
+        let ca_dir = scratch.path().join("ca");
         Ca::init(
             &CaParams {
                 directory: ca_dir.clone(),
@@ -2768,7 +2768,7 @@ mod tests {
     #[test]
     fn offline_ca_init_makes_exactly_the_recovery_slot() {
         let scratch = tempfile::tempdir().unwrap();
-        let dir = scratch.path().join("CA");
+        let dir = scratch.path().join("ca");
         // Drive the library's create_vaulted_ca through the strict answerer —
         // the exact path `ca init` takes. Offline (setup_server: Some(false)),
         // so no superuser password or glyph is asked for.

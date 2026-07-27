@@ -112,7 +112,7 @@ mod state_tests {
     #[test]
     fn custom_config_root_retains_the_offline_ca_lock() {
         let root = tempfile::tempdir().unwrap();
-        let ca_dir = root.path().join("CA");
+        let ca_dir = root.path().join("ca");
         let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
         let alias = config_lock
             .ca_alias_root(&ca_dir)

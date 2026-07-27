@@ -73,7 +73,7 @@ impl StagedCaDir {
             .with_context(|| {
                 format!("creating CA staging directory in {}", parent.display())
             })?;
-        let staged = owner.path().join("CA");
+        let staged = owner.path().join("ca");
         Ok(Self { owner, staged, final_path })
     }
 

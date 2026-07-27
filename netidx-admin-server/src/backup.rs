@@ -189,7 +189,7 @@ fn capture_ca_tree(
         if meta.is_dir() {
             capture_ca_tree(files, ca_dir, &source)?;
         } else if meta.is_file() {
-            capture_file(files, &source, Path::new("CA").join(relative), None)?;
+            capture_file(files, &source, Path::new("ca").join(relative), None)?;
         } else {
             bail!("refusing special file in CA backup source: {}", source.display());
         }
@@ -352,7 +352,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     }
     let signature = fs::read(bundle.join(MANIFEST_SIGNATURE_FILE))
         .context("reading backup manifest signature")?;
-    let cert = fs::read(bundle.join("CA/certificate.pem"))?;
+    let cert = fs::read(bundle.join("ca/certificate.pem"))?;
     let cert = X509::from_pem(&cert).context("parsing backup CA certificate")?;
     let public_key = cert.public_key()?;
     let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key)?;
@@ -376,7 +376,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     }
     let mut highest_serial = 0;
     for file in manifest.files.iter().filter(|file| {
-        file.path.starts_with("CA/issued/") && file.path.ends_with(".json")
+        file.path.starts_with("ca/issued/") && file.path.ends_with(".json")
     }) {
         let record: crate::ca_store::IssuedRecord =
             serde_json::from_slice(&fs::read(bundle.join(&file.path))?)
@@ -390,7 +390,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
             manifest.highest_serial
         );
     }
-    let cert = fs::read(bundle.join("CA/certificate.pem"))?;
+    let cert = fs::read(bundle.join("ca/certificate.pem"))?;
     let fp = Fingerprint::of_cert_pem(&cert)?.text();
     if fp != manifest.ca_fingerprint {
         bail!("backup CA certificate does not match the manifest fingerprint");
@@ -402,7 +402,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
         bail!("backup admin-server identity does not match its manifest");
     }
     let map: crate::admin_proto::AdminDomainMap =
-        serde_json::from_slice(&fs::read(bundle.join("CA/admin-domain.json"))?)?;
+        serde_json::from_slice(&fs::read(bundle.join("ca/admin-domain.json"))?)?;
     if map.ca != manifest.ca || map.version != manifest.map_version {
         bail!("backup admin domain map does not match its manifest");
     }
@@ -451,9 +451,9 @@ pub fn restore(
         let complete = ca_dir.is_dir()
             && config_path.is_file()
             && roles_match
-            && manifest.files.iter().filter(|file| file.path.starts_with("CA/")).all(
+            && manifest.files.iter().filter(|file| file.path.starts_with("ca/")).all(
                 |file| {
-                    let relative = Path::new(&file.path).strip_prefix("CA").unwrap();
+                    let relative = Path::new(&file.path).strip_prefix("ca").unwrap();
                     fs::read(ca_dir.join(relative)).ok()
                         == fs::read(bundle.join(&file.path)).ok()
                 },
@@ -482,9 +482,9 @@ pub fn restore(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(stage.path(), fs::Permissions::from_mode(0o700))?;
     }
-    for file in manifest.files.iter().filter(|file| file.path.starts_with("CA/")) {
+    for file in manifest.files.iter().filter(|file| file.path.starts_with("ca/")) {
         let relative =
-            Path::new(&file.path).strip_prefix("CA").expect("filtered CA path");
+            Path::new(&file.path).strip_prefix("ca").expect("filtered CA path");
         let contents = fs::read(bundle.join(&file.path))?;
         atomic::write_atomic(&stage.path().join(relative), &contents, file.mode)?;
     }
@@ -565,7 +565,7 @@ mod tests {
     fn rejects_traversal_paths() {
         assert!(bundle_path(Path::new("../vault.json")).is_err());
         assert!(bundle_path(Path::new("/vault.json")).is_err());
-        assert!(bundle_path(Path::new("CA/vault.json")).is_ok());
+        assert!(bundle_path(Path::new("ca/vault.json")).is_ok());
     }
 
     #[test]

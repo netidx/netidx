@@ -300,7 +300,7 @@ fn load_install_record(p: &Params, scope: ServiceScope) -> Option<InstallRecord>
 }
 
 fn plan_contains_ca(r: &UninstallReport) -> bool {
-    r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("CA"))
+    r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
 }
 
 /// The scope to tear down when the operator passed no `--scope`: prefer a

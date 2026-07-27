@@ -208,7 +208,7 @@ fn cleanup(
         .collect::<Result<_>>()?;
 
     for path in entries {
-        let is_ca = path.file_name().and_then(|s| s.to_str()) == Some("CA");
+        let is_ca = path.file_name().and_then(|s| s.to_str()) == Some("ca");
         if is_ca && !p.remove_ca {
             report.kept.push((path, KeepReason::CaPreserved));
             continue;
@@ -275,9 +275,9 @@ mod tests {
         fs::create_dir_all(root.join("tls").join("resolver")).unwrap();
         fs::write(root.join("tls").join("resolver").join("certificate.pem"), b"cert")
             .unwrap();
-        fs::create_dir_all(root.join("CA")).unwrap();
-        fs::write(root.join("CA").join("certificate.pem"), b"CA cert").unwrap();
-        fs::write(root.join("CA").join("private.key"), b"CA key").unwrap();
+        fs::create_dir_all(root.join("ca")).unwrap();
+        fs::write(root.join("ca").join("certificate.pem"), b"CA cert").unwrap();
+        fs::write(root.join("ca").join("private.key"), b"CA key").unwrap();
     }
 
     /// Service name unlikely to clash with anything the developer has
@@ -328,8 +328,8 @@ mod tests {
         let r = apply(&params(root.clone())).unwrap();
 
         // CA dir survives + root survives (because something was kept).
-        assert!(root.join("CA").exists());
-        assert!(root.join("CA").join("private.key").exists());
+        assert!(root.join("ca").exists());
+        assert!(root.join("ca").join("private.key").exists());
         assert!(root.exists());
         // Everything else is gone.
         assert!(!root.join("resolver.json").exists());
@@ -341,7 +341,7 @@ mod tests {
 
         // Report matches.
         assert_eq!(r.kept.len(), 1);
-        assert_eq!(r.kept[0].0, root.join("CA"));
+        assert_eq!(r.kept[0].0, root.join("ca"));
         assert_eq!(r.kept[0].1, KeepReason::CaPreserved);
         // No root in `removed` because we kept CA/.
         assert!(!r.removed.contains(&root));
@@ -357,7 +357,7 @@ mod tests {
         p.remove_ca = true;
         let r = apply(&p).unwrap();
 
-        assert!(!root.join("CA").exists());
+        assert!(!root.join("ca").exists());
         // With nothing kept, the root itself is removed.
         assert!(!root.exists());
         assert!(r.kept.is_empty());
@@ -375,7 +375,7 @@ mod tests {
 
         // All files still on disk.
         assert!(root.join("resolver.json").exists());
-        assert!(root.join("CA").join("private.key").exists());
+        assert!(root.join("ca").join("private.key").exists());
         assert!(root.join("tls").join("resolver").join("certificate.pem").exists());
         // But the report reflects the intent.
         assert!(!r.removed.is_empty());
@@ -393,9 +393,9 @@ mod tests {
         let r = preview(&p).unwrap();
 
         // Nothing actually deleted ...
-        assert!(root.join("CA").join("private.key").exists());
+        assert!(root.join("ca").join("private.key").exists());
         // ... but CA/ AND the root itself appear in `removed`.
-        assert!(r.removed.contains(&root.join("CA")));
+        assert!(r.removed.contains(&root.join("ca")));
         assert!(r.removed.contains(&root));
         assert!(r.kept.is_empty());
     }
@@ -450,7 +450,7 @@ mod tests {
             preview_with_service(&p, |_| anyhow::bail!("service manager unavailable"));
         assert!(result.is_err());
         assert!(root.join("resolver.json").exists());
-        assert!(root.join("CA/private.key").exists());
+        assert!(root.join("ca/private.key").exists());
     }
 
     #[test]
@@ -468,6 +468,6 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(root.join("resolver.json").exists());
-        assert!(root.join("CA/private.key").exists());
+        assert!(root.join("ca/private.key").exists());
     }
 }

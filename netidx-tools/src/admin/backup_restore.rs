@@ -216,14 +216,14 @@ pub(crate) fn backup(a: BackupArgs) -> Result<()> {
         std::env::current_dir()?.join(&a.target)
     };
     let service = service_intent(&a, &record)?;
-    let has_ca = root.join("CA").is_dir();
+    let has_ca = root.join("ca").is_dir();
     #[cfg(unix)]
     let ca_tmp = tempfile::tempdir().context("creating ca-backup staging directory")?;
     let ca: Option<PathBuf> = if has_ca {
         #[cfg(unix)]
         {
             let cfg = root.join("admin-server.json");
-            let inner = ca_tmp.path().join("CA");
+            let inner = ca_tmp.path().join("ca");
             tokio::runtime::Runtime::new()?
                 .block_on(netidx_admin_client::local::backup(&cfg, &inner))?;
             Some(inner)
@@ -617,7 +617,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
 
     #[cfg(unix)]
     if has_ca {
-        let ca_dir = root.join("CA");
+        let ca_dir = root.join("ca");
         let cfg = root.join("admin-server.json");
         if !install_bundle::ca_recovered(&bundle, &cfg)? {
             if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg)? {

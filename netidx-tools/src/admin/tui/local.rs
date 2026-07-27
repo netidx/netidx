@@ -190,7 +190,7 @@ impl Detected {
 /// from disk is left [`CaProbe::Unprobed`] for [`probe_local_cas`].
 #[cfg(unix)]
 fn local_ca_paths(config_dir: &Path) -> Option<LocalCa> {
-    let ca_dir = config_dir.join("CA");
+    let ca_dir = config_dir.join("ca");
     if !ca_dir.is_dir() {
         return None;
     }
@@ -1045,8 +1045,10 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
     ];
     match &r.admin_domain {
         Some(net) => {
+            // The fingerprint is rendered in full beneath the glyph in the
+            // right-hand column; repeating it here only overflows the label
+            // column and wraps to column 0.
             lines.push(kv("Admin domain", net.domain.clone()));
-            lines.push(kv("CA fingerprint", net.ca_fingerprint.clone()));
         }
         None => lines.push(kv("Admin domain", "standalone (local-only)".to_string())),
     }
@@ -1102,7 +1104,7 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
 /// A `label: value` line with a muted label.
 fn kv(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:>16}: "), theme::hint_style()),
+        Span::styled(format!("{label:>17}: "), theme::hint_style()),
         Span::styled(value, theme::panel_style()),
     ])
 }
@@ -1110,7 +1112,7 @@ fn kv(label: &'static str, value: String) -> Line<'static> {
 /// A `label: value` line whose value carries a status colour.
 fn kv_status(label: &'static str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:>16}: "), theme::hint_style()),
+        Span::styled(format!("{label:>17}: "), theme::hint_style()),
         Span::styled(value, Style::default().bg(theme::PANEL_BG).fg(color)),
     ])
 }

@@ -1291,7 +1291,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_recovery_ack_rolls_back_new_ca() {
         let scratch = tempfile::tempdir().unwrap();
-        let ca_dir = scratch.path().join("CA");
+        let ca_dir = scratch.path().join("ca");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ans = TuiAnswerer::new(tx);
         let opts = offline_ca_opts(ca_dir.clone());

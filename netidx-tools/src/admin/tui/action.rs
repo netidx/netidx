@@ -601,10 +601,10 @@ async fn backup(
     };
     #[cfg(unix)]
     let ca_tmp = tempfile::tempdir()?;
-    let inner: Option<PathBuf> = if config_root.join("CA").is_dir() {
+    let inner: Option<PathBuf> = if config_root.join("ca").is_dir() {
         #[cfg(unix)]
         {
-            let inner = ca_tmp.path().join("CA");
+            let inner = ca_tmp.path().join("ca");
             local::backup(&config_root.join("admin-server.json"), &inner).await?;
             Some(inner)
         }
@@ -821,7 +821,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
     #[cfg(unix)]
     if ca {
-        let ca_dir = root.join("CA");
+        let ca_dir = root.join("ca");
         let cfg_path = root.join("admin-server.json");
         if !install_bundle::ca_recovered(&bundle, &cfg_path)? {
             if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg_path)? {

@@ -946,7 +946,7 @@ mod tests {
         };
 
         let root = tempfile::tempdir().unwrap();
-        let ca_dir = root.path().join("CA");
+        let ca_dir = root.path().join("ca");
         let params = CaParams {
             directory: ca_dir.clone(),
             subject: Subject::cn("backup-ca"),
@@ -1267,12 +1267,12 @@ mod tests {
         let manifest = crate::backup::verify(&bundle).unwrap();
         assert_eq!(manifest.highest_serial, highest_serial);
         assert!(
-            manifest.files.iter().all(|file| !file.path.starts_with("CA/server/")),
+            manifest.files.iter().all(|file| !file.path.starts_with("ca/server/")),
             "machine-bound serving material must not be backed up"
         );
 
         let restore = tempfile::tempdir().unwrap();
-        let ca = restore.path().join("CA");
+        let ca = restore.path().join("ca");
         let config = restore.path().join("admin-server.json");
         let restore_lock = ConfigDirLock::acquire(restore.path()).unwrap();
         crate::backup::restore(&restore_lock, &bundle, &ca, &config).unwrap();
@@ -1327,10 +1327,10 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let bundle = parent.path().join("backup");
         crate::backup::publish(snapshot, &bundle, fixture.ca_dir.as_path()).unwrap();
-        let original_map = std::fs::read(bundle.join("CA/admin-domain.json")).unwrap();
-        std::fs::write(bundle.join("CA/admin-domain.json"), b"tampered").unwrap();
+        let original_map = std::fs::read(bundle.join("ca/admin-domain.json")).unwrap();
+        std::fs::write(bundle.join("ca/admin-domain.json"), b"tampered").unwrap();
         assert!(crate::backup::verify(&bundle).is_err());
-        std::fs::write(bundle.join("CA/admin-domain.json"), original_map).unwrap();
+        std::fs::write(bundle.join("ca/admin-domain.json"), original_map).unwrap();
         let manifest_path = bundle.join(crate::backup::MANIFEST_FILE);
         let mut manifest: crate::backup::Manifest =
             serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
@@ -1683,7 +1683,7 @@ mod tests {
     async fn live_external_csr_preserves_the_ca_ca_key() {
         use openssl::{pkey::PKey, x509::X509Req};
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("CA");
+        let dir = root.path().join("ca");
         let lock = ConfigDirLock::acquire(root.path()).unwrap();
         let (key, _csr) = Ca::init_vaulted_external(&crate::ca::CaParams {
             directory: dir.clone(),

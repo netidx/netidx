@@ -106,7 +106,7 @@ pub fn user_ca_dir() -> Result<PathBuf> {
         anyhow!("user config dir could not be determined for this platform")
     })?;
     p.push("netidx");
-    p.push("CA");
+    p.push("ca");
     Ok(p)
 }
 

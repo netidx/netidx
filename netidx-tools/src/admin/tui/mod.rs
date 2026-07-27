@@ -408,7 +408,7 @@ impl App {
                 config_dir,
                 needs_root,
                 remove_ca: false,
-            } if config_dir.join("CA").is_dir() => {
+            } if config_dir.join("ca").is_dir() => {
                 let destroy = Action::Uninstall {
                     config_scope,
                     config_dir: config_dir.clone(),
