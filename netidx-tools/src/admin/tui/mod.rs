@@ -173,6 +173,11 @@ impl App {
         if self.tab == Tab::Remote {
             self.remote.on_focus();
         }
+        // Same for the Local tab's one-shot background fills: a probe that
+        // failed while the tab was away is retried rather than left stale.
+        if self.tab == Tab::Local {
+            self.local.on_focus();
+        }
     }
 
     /// Switch the UI into the activity view for a just-started action. The

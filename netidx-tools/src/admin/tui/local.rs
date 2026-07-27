@@ -443,6 +443,27 @@ impl LocalState {
         self.welcome_seen = self.welcome_seen && !self.installs.is_empty();
     }
 
+    /// Retry whatever failed last time this tab was up. Both background fills
+    /// are one-shot — the event loop only launches a probe for a state that has
+    /// never been tried — so a transient failure (an admin server briefly
+    /// unreachable, or the daemon's control socket not yet bound while it
+    /// starts) would otherwise persist for the whole session. Anything still in
+    /// flight is left alone.
+    pub(super) fn on_focus(&mut self) {
+        for state in &mut self.sync {
+            if matches!(state, SyncState::Failed(_)) {
+                *state = SyncState::Unchecked;
+            }
+        }
+        for install in &mut self.installs {
+            if let Some(local_ca) = install.local_ca.as_mut()
+                && matches!(local_ca.probe, CaProbe::Failed(_))
+            {
+                local_ca.probe = CaProbe::Unprobed;
+            }
+        }
+    }
+
     /// Whether the detailed-status overlay is open — the host routes keys here
     /// before its global shortcuts so any key dismisses it.
     pub(super) fn status_open(&self) -> bool {
@@ -1292,6 +1313,63 @@ mod tests {
             widgets::rendered_identicon_rows(terminal.backend().buffer()),
             widgets::IDENTICON_HEIGHT as usize
         );
+    }
+
+    /// Both background fills are one-shot, so a transient failure would stick
+    /// for the session. Returning to the tab must re-arm them — and must not
+    /// disturb a probe still in flight.
+    #[test]
+    fn returning_to_the_tab_retries_what_failed() {
+        let fp = Fingerprint::of_der(b"ca cert");
+        // A resolver that owns a CA — the founding-host shape, and the one that
+        // has both a sync check and a credential probe to retry. A pure CA
+        // install is never sync-checked at all.
+        let install = |probe: CaProbe| Detected {
+            record: InstallRecord::new(
+                InstallRole::Resolver,
+                "/",
+                "tls",
+                Some(AdminDomainIdentity::new("example.com", &fp)),
+                Some("127.0.0.1:4565".parse().unwrap()),
+            ),
+            service: ServiceStatus::Active,
+            scope: ServiceScope::System,
+            config_dir: PathBuf::from("/etc/netidx"),
+            ca: Some(fp),
+            local_ca: Some(LocalCa {
+                ca_dir: PathBuf::from("/etc/netidx/ca"),
+                cfg: Some(PathBuf::from("/etc/netidx/admin-server.json")),
+                probe,
+            }),
+            renewable: true,
+        };
+        let mut local = LocalState::new();
+        local.installs = vec![
+            install(CaProbe::Failed("daemon not responding".to_string())),
+            install(CaProbe::Probing),
+        ];
+        local.sync =
+            vec![SyncState::Failed("unreachable".to_string()), SyncState::Checking];
+
+        // Nothing is retried while the tab is away.
+        assert!(local.take_pending_ca_probes().is_empty());
+        assert!(local.take_pending_checks().is_empty());
+
+        local.on_focus();
+        // The failed pair is re-armed; the in-flight pair is untouched.
+        assert_eq!(local.take_pending_ca_probes().len(), 1);
+        assert_eq!(local.take_pending_checks().len(), 1);
+        assert!(matches!(local.sync[1], SyncState::Checking));
+        assert!(matches!(
+            local.installs[1].local_ca.as_ref().unwrap().probe,
+            CaProbe::Probing
+        ));
+
+        // Taking them marked both in flight, so a second focus is a no-op —
+        // one probe per failure, not one per keypress.
+        local.on_focus();
+        assert!(local.take_pending_ca_probes().is_empty());
+        assert!(local.take_pending_checks().is_empty());
     }
 
     /// A krb5 host joins an admin domain without enrolling a certificate, so it
