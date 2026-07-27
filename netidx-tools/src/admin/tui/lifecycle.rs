@@ -9,12 +9,12 @@
 use anyhow::{Context, Result, bail};
 use netidx_admin_client::{
     discovery, paths,
-    provenance::{InstallRecord, InstallRole, NetworkIdentity},
+    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
     reconcile::{self, EditPlan},
     resolver::ResolverConfig,
-    transport::{self, NetworkInfo},
+    transport::{self, TrustDomainInfo},
 };
-use netidx_admin_proto::{NetworkMap, NodeKind};
+use netidx_admin_proto::{NodeKind, TrustDomainMap};
 use std::{net::SocketAddr, path::Path, time::Duration};
 
 pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -40,7 +40,8 @@ pub(super) async fn update_plan(
         InstallRole::Workstation => {
             let rpath = paths::discover_resolver_config()?;
             let info =
-                fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client).await?;
+                fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client)
+                    .await?;
             reconcile::reconcile_resolver_peers(&rpath, &info)
         }
         InstallRole::Resolver => {
@@ -68,7 +69,7 @@ pub(super) async fn update_plan(
 /// Fetch the network map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
 /// part of a cluster or no admin server answers with the pinned identity.
-pub(super) async fn fetch_local_map(config_root: &Path) -> Result<NetworkMap> {
+pub(super) async fn fetch_local_map(config_root: &Path) -> Result<TrustDomainMap> {
     let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec
         .network
@@ -115,11 +116,11 @@ async fn candidates(admin_server: Option<SocketAddr>) -> Vec<SocketAddr> {
 /// Walk the network (GetInfo aggregate) via the first candidate whose CA matches
 /// the pinned identity. Fail-closed: a reachable server with a different CA is
 /// refused, never silently trusted.
-async fn fetch_network_pinned(
-    net_id: &NetworkIdentity,
+async fn fetch_trust_domain_pinned(
+    net_id: &TrustDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<NetworkInfo> {
+) -> Result<TrustDomainInfo> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
         let id = match transport::fetch_identity(addr, kind).await {
@@ -137,12 +138,12 @@ async fn fetch_network_pinned(
 }
 
 /// One-shot pinned network-map fetch, same fail-closed logic as
-/// [`fetch_network_pinned`].
+/// [`fetch_trust_domain_pinned`].
 async fn fetch_map_pinned(
-    net_id: &NetworkIdentity,
+    net_id: &TrustDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
         let id = match transport::fetch_identity(addr, kind).await {

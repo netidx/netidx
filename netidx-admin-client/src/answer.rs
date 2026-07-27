@@ -62,12 +62,12 @@ pub enum Field {
     AdminHere,
     /// Whether to found a new cluster here or connect to an existing one
     /// (resolver install — the role that can found a cluster).
-    ClusterMode,
+    TrustDomainMode,
     /// Whether to join an existing cluster or run this machine stand-alone,
     /// for a role that can't found a cluster (workstation, publisher).
     Membership,
     /// Which discovered cluster to connect to (or enter an address manually).
-    SelectNetwork,
+    SelectTrustDomain,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
     /// The owner principal a workstation grants admin over its subtree.
@@ -88,7 +88,7 @@ pub enum Field {
     /// The TLS domain a resolver's certificate name is under.
     TlsDomain,
     /// The network domain (groups the network in discovery).
-    NetworkDomain,
+    TrustDomainName,
     /// The CA / network domain (e.g. `ryu-oh.org`).
     Domain,
     /// A publisher's resolver-server address(es).
@@ -266,7 +266,7 @@ impl Field {
                 help: "Yes: a CA admin at this machine authorizes now with their \
                        password. No: queue the request for remote approval.",
             },
-            ClusterMode => FieldInfo {
+            TrustDomainMode => FieldInfo {
                 flag: "--server",
                 label: "choose an administrative network",
                 help: "Create a new administrative network and certificate \
@@ -280,7 +280,7 @@ impl Field {
                 help: "Join an existing netidx cluster on your network, or set \
                        up this machine on its own.",
             },
-            SelectNetwork => FieldInfo {
+            SelectTrustDomain => FieldInfo {
                 flag: "--admin-server",
                 label: "connect to a cluster",
                 help: "Choose a discovered netidx cluster by its glyph, or enter \
@@ -349,7 +349,7 @@ impl Field {
                 help: "The domain part of this resolver's certificate name, \
                        e.g. ryu-oh.org.",
             },
-            NetworkDomain => FieldInfo {
+            TrustDomainName => FieldInfo {
                 flag: "--domain",
                 label: "cluster domain",
                 help: "The domain this cluster is grouped under in discovery, \
@@ -653,18 +653,18 @@ impl Progress {
 }
 
 /// A netidx cluster discovered on the local network, offered to the operator by
-/// [`Answerer::select_network`]: the TLS domain that groups it in discovery and
+/// [`Answerer::select_trust_domain`]: the TLS domain that groups it in discovery and
 /// the CA identity (glyph + fingerprint) fetched from one of its reachable admin
 /// servers.
 #[derive(Clone)]
-pub struct NetworkOption {
+pub struct TrustDomainOption {
     pub domain: String,
     pub identity: CaIdentity,
 }
 
-/// The operator's pick from [`Answerer::select_network`].
+/// The operator's pick from [`Answerer::select_trust_domain`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NetworkChoice {
+pub enum TrustDomainChoice {
     /// The discovered network at this index in the offered slice.
     Discovered(usize),
     /// None of the above — enter an admin-server address manually instead.
@@ -713,10 +713,10 @@ pub trait Answerer: Send {
     /// with its CA glyph and fingerprint — plus a trailing "enter an address
     /// manually" option, and return which the operator picked. Interactive
     /// only: the strict answerer never discovers, so it errors.
-    async fn select_network(
+    async fn select_trust_domain(
         &mut self,
-        networks: &[NetworkOption],
-    ) -> Result<NetworkChoice>;
+        networks: &[TrustDomainOption],
+    ) -> Result<TrustDomainChoice>;
 
     /// Ask a yes/no question with the given default.
     async fn confirm(

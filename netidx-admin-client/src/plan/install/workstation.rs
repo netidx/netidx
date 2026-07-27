@@ -6,9 +6,9 @@
 //! local-only workstation onto a network without a reinstall.
 
 use super::{
-    InstallCommon, InstallMode, finish_with, install_renew_unit, network_provenance,
-    prompt_ip_or_addr, prompt_resolver_tls_name, resolve_netidx_binary,
-    resolve_units_dir, suggest_client_san,
+    InstallCommon, InstallMode, finish_with, install_renew_unit, prompt_ip_or_addr,
+    prompt_resolver_tls_name, resolve_netidx_binary, resolve_units_dir,
+    suggest_client_san, trust_domain_provenance,
 };
 use crate::{
     admin_proto::NodeKind,
@@ -19,7 +19,7 @@ use crate::{
         enroll::{self, AdminServers, KeyProtArg, StagedIdentity},
         service::ServiceNeed,
     },
-    provenance::{InstallRecord, InstallRole, NetworkIdentity},
+    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
     service::ServiceScope,
     template::{self, ParentRef, ReferralAuth, TlsIdentitySpec},
 };
@@ -154,7 +154,7 @@ pub async fn run_workstation(
     // `finish_with` (apply) call.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
     // Provenance for the install record: set when we join a discovered network.
-    let mut net_prov: (Option<NetworkIdentity>, Option<SocketAddr>) = (None, None);
+    let mut net_prov: (Option<TrustDomainIdentity>, Option<SocketAddr>) = (None, None);
     // `--parent-path` defaults to the workstation's own base.
     let parent = match explicit_parent {
         Some(p) => Some(p),
@@ -165,15 +165,16 @@ pub async fn run_workstation(
             // non-interactive path, where mDNS discovery is disabled).
             let probe = match admin_server {
                 Some(addr) => {
-                    enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?
+                    enroll::confirm_trust_domain_at(ans, addr, NodeKind::Workstation)
+                        .await?
                 }
-                None => enroll::discover_network(ans, NodeKind::Workstation).await?,
+                None => enroll::discover_trust_domain(ans, NodeKind::Workstation).await?,
             };
-            net_prov = network_provenance(&probe);
+            net_prov = trust_domain_provenance(&probe);
             match probe.have() {
                 Some(net) => {
                     let have_identity = !tls_identities.is_empty();
-                    let addrs = enroll::network_addrs_and_identity(
+                    let addrs = enroll::trust_domain_addrs_and_identity(
                         ans,
                         net,
                         NodeKind::Workstation,
@@ -297,9 +298,9 @@ pub async fn run_workstation_join(
     // strict answerer disables discovery, so strict `join` needs `--admin-server`).
     let probe = match admin_server {
         Some(addr) => {
-            enroll::confirm_network_at(ans, addr, NodeKind::Workstation).await?
+            enroll::confirm_trust_domain_at(ans, addr, NodeKind::Workstation).await?
         }
-        None => enroll::discover_network(ans, NodeKind::Workstation).await?,
+        None => enroll::discover_trust_domain(ans, NodeKind::Workstation).await?,
     };
     let net = probe.have().context(
         "no network was selected to join — pass --admin-server <addr> (with \
@@ -307,7 +308,7 @@ pub async fn run_workstation_join(
     )?;
     let mut tls_identities: Vec<TlsIdentitySpec> = Vec::new();
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
-    let addrs = enroll::network_addrs_and_identity(
+    let addrs = enroll::trust_domain_addrs_and_identity(
         ans,
         net,
         NodeKind::Workstation,
@@ -321,9 +322,9 @@ pub async fn run_workstation_join(
     let parent = ParentRef { path: ArcStr::from(rec.base.as_str()), ttl: None, addrs };
     // Capture the confirmed identity for the marker before applying.
     let network =
-        NetworkIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
+        TrustDomainIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
     let admin_server = net.info.reached.first().copied();
-    let rt = template::attach_to_network(&rpath, &cpath, parent, tls_identities)?;
+    let rt = template::attach_to_trust_domain(&rpath, &cpath, parent, tls_identities)?;
     ans.note(&rt.describe());
     let Some(config_lock) = mode.config_lock() else {
         return Ok(());

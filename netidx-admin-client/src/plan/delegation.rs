@@ -36,7 +36,7 @@ struct DelegationServers {
 }
 
 fn selected_server_sets(
-    map: &netidx_admin_proto::NetworkMap,
+    map: &netidx_admin_proto::TrustDomainMap,
     local_member: &ResolverAddr,
     selected: &DelegationSelection,
 ) -> Result<DelegationServers> {
@@ -51,7 +51,7 @@ fn selected_server_sets(
     let mut parent_cluster = None;
     for addr in selected_addrs {
         let server = map
-            .servers
+            .admin_servers
             .iter()
             .find(|server| {
                 server.resolver.as_ref().is_some_and(|resolver| resolver.addr == addr)
@@ -75,14 +75,14 @@ fn selected_server_sets(
     }
     let parent_cluster = parent_cluster.expect("nonempty selection");
     let local = map
-        .servers
+        .admin_servers
         .iter()
         .find(|server| server.resolver.as_ref() == Some(local_member))
         .context("this admin server's local resolver member is not in the CA map")?;
     let local_cluster =
         local.cluster.context("the local resolver has no CA-owned cluster")?;
     let mut child: Vec<_> = map
-        .servers
+        .admin_servers
         .iter()
         .filter(|server| {
             server.cluster == Some(local_cluster)
@@ -96,7 +96,7 @@ fn selected_server_sets(
     }
     if parent_cluster != local_cluster {
         let mut complete_parent: Vec<_> = map
-            .servers
+            .admin_servers
             .iter()
             .filter(|server| {
                 server.cluster == Some(parent_cluster)
@@ -162,7 +162,7 @@ pub async fn delegate_under_parent(
     let map =
         transport::get_map_pinned(parent_conf_addr, NodeKind::Client, &identity).await?;
     let parent_id = map
-        .servers
+        .admin_servers
         .iter()
         .find(|s| s.id == identity.server_id)
         .and_then(|s| s.cluster)
@@ -175,7 +175,7 @@ pub async fn delegate_under_parent(
         }
         None => {
             let child_id = map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|c| c.base == proposed_path && c.members == child)
                 .map(|c| c.id)
@@ -184,7 +184,7 @@ pub async fn delegate_under_parent(
                 )?;
             DelegationServers {
                 parent: map
-                    .servers
+                    .admin_servers
                     .iter()
                     .filter(|s| {
                         s.cluster == Some(parent_id)
@@ -194,7 +194,7 @@ pub async fn delegate_under_parent(
                     .map(|s| s.id)
                     .collect(),
                 child: map
-                    .servers
+                    .admin_servers
                     .iter()
                     .filter(|s| {
                         s.cluster == Some(child_id) && s.roles.contains(Role::Resolver)
@@ -257,8 +257,8 @@ pub async fn delegate_under_parent(
 mod tests {
     use super::*;
     use netidx_admin_proto::{
-        ClusterEntry, ClusterState, NetworkMap, ResolverClusterId, ServerEntry,
-        ServerState,
+        AdminServerEntry, ResolverClusterEntry, ResolverClusterId, ResolverClusterState,
+        ServerState, TrustDomainMap,
     };
 
     fn resolver(addr: &str) -> ResolverAddr {
@@ -270,8 +270,8 @@ mod tests {
         admin: &str,
         resolver_addr: &str,
         cluster: ResolverClusterId,
-    ) -> ServerEntry {
-        ServerEntry {
+    ) -> AdminServerEntry {
+        AdminServerEntry {
             id,
             addr: admin.parse().unwrap(),
             roles: Role::Resolver.into(),
@@ -288,24 +288,27 @@ mod tests {
         let ap1 = AdminServerId::new();
         let ap2 = AdminServerId::new();
         let root = ResolverClusterId::new();
-        let servers = vec![
+        let admin_servers = vec![
             server(us1, "10.0.0.1:4565", "10.0.0.1:4564", root),
             server(us2, "10.0.0.2:4565", "10.0.0.2:4564", root),
             server(ap1, "10.0.60.1:4565", "10.0.60.1:4564", root),
             server(ap2, "10.0.60.2:4565", "10.0.60.2:4564", root),
         ];
-        let map = NetworkMap {
+        let map = TrustDomainMap {
             version: 1,
             controller: us1,
-            clusters: vec![ClusterEntry {
+            resolver_clusters: vec![ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
-                state: ClusterState::Active,
-                members: servers.iter().filter_map(|s| s.resolver.clone()).collect(),
+                state: ResolverClusterState::Active,
+                members: admin_servers
+                    .iter()
+                    .filter_map(|s| s.resolver.clone())
+                    .collect(),
                 parent: None,
                 children: vec![],
             }],
-            servers,
+            admin_servers,
         };
         let sets = selected_server_sets(
             &map,
@@ -329,33 +332,33 @@ mod tests {
         let ap1 = AdminServerId::new();
         let root = ResolverClusterId::new();
         let ap = ResolverClusterId::new();
-        let servers = vec![
+        let admin_servers = vec![
             server(us1, "10.0.0.1:4565", "10.0.0.1:4564", root),
             server(us2, "10.0.0.2:4565", "10.0.0.2:4564", root),
             server(ap1, "10.0.60.1:4565", "10.0.60.1:4564", ap),
         ];
-        let map = NetworkMap {
+        let map = TrustDomainMap {
             version: 1,
             controller: us1,
-            clusters: vec![
-                ClusterEntry {
+            resolver_clusters: vec![
+                ResolverClusterEntry {
                     id: root,
                     base: "/".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: vec![resolver("10.0.0.1:4564"), resolver("10.0.0.2:4564")],
                     parent: None,
                     children: vec![],
                 },
-                ClusterEntry {
+                ResolverClusterEntry {
                     id: ap,
                     base: "/ap".into(),
-                    state: ClusterState::Pending,
+                    state: ResolverClusterState::Pending,
                     members: vec![resolver("10.0.60.1:4564")],
                     parent: None,
                     children: vec![],
                 },
             ],
-            servers,
+            admin_servers,
         };
         let err = selected_server_sets(
             &map,

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin_client::{
     config_lock::ConfigDirLock,
-    ops::delegation::{self as ops, AddParentCompletion, ClusterPropagation},
+    ops::delegation::{self as ops, AddParentCompletion, ResolverClusterPropagation},
     paths,
     plan::delegation::DelegationSelection,
 };
@@ -99,7 +99,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
         }
     })?;
     match out.propagation {
-        ClusterPropagation::ControllerManaged => {}
+        ResolverClusterPropagation::ControllerManaged => {}
     }
     println!(
         "ok — configuration for {:?} is written; no service was restarted",

@@ -1,9 +1,9 @@
 use super::*;
 use crate::admin_proto::{
-    AddIdentityRequest, ApplyControllerStateRequest, ApplyCrlRequest,
+    AddIdentityRequest, AdminServerEntry, ApplyControllerStateRequest, ApplyCrlRequest,
     ApplyPermsEditRequest, ApplyReferralEditRequest, ApplyServiceControlRequest,
-    ExternalCaInstallRequest, InfoAuth, LoginRequest, LogoutRequest, NetworkMap,
-    ReadPermsRequest, ReferralEdit, RegisterRequest, ResolverAddr, Role, ServerEntry,
+    ExternalCaInstallRequest, InfoAuth, LoginRequest, LogoutRequest, ReadPermsRequest,
+    ReferralEdit, RegisterRequest, ResolverAddr, Role, TrustDomainMap,
 };
 
 fn assert_public(req: &Request) {
@@ -69,8 +69,8 @@ fn centralized_requirements_protect_all_mutations() {
         crl_pem: "crl".into(),
     }));
     let controller = admin_proto::AdminServerId::new();
-    let mut map = NetworkMap::empty(controller);
-    map.servers.push(ServerEntry {
+    let mut map = TrustDomainMap::empty(controller);
+    map.admin_servers.push(AdminServerEntry {
         id: controller,
         addr: "127.0.0.1:4565".parse().unwrap(),
         roles: Role::Ca.into(),

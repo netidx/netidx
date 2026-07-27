@@ -6,7 +6,7 @@ use std::time::Duration;
 #[test]
 fn controller_identity_is_renewal_only_and_preserved() {
     let controller = admin_proto::AdminServerId::new();
-    let map = NetworkMap::empty(controller);
+    let map = TrustDomainMap::empty(controller);
     let identity = enrollment_cert_identity(true, Some(controller), Some(&map)).unwrap();
     assert_eq!(identity.server_id, controller);
     assert!(identity.controller);
@@ -30,7 +30,7 @@ fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
     let controller = admin_proto::AdminServerId::new();
     let old = admin_proto::AdminServerId::new();
     let fresh = admin_proto::AdminServerId::new();
-    let mut map = NetworkMap::empty(controller);
+    let mut map = TrustDomainMap::empty(controller);
     let member = ResolverAddr {
         addr: "10.0.0.10:4564".parse().unwrap(),
         auth: InfoAuth::Anonymous,
@@ -40,17 +40,17 @@ fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
         roles: Role::Resolver.into(),
         resolver_member: Some(member.clone()),
         resolver_members: vec![member.clone()],
-        cluster: admin_proto::ClusterPlacement::Create { base: "/eu".into() },
+        cluster: admin_proto::ResolverClusterPlacement::Create { base: "/eu".into() },
         replaces: None,
     };
     let cluster = stage_enrollment(&mut map, old, &initial).unwrap();
     let mut replacement = initial.clone();
-    replacement.cluster = admin_proto::ClusterPlacement::Join { cluster };
+    replacement.cluster = admin_proto::ResolverClusterPlacement::Join { cluster };
     replacement.replaces = Some(old);
     assert_eq!(stage_enrollment(&mut map, fresh, &replacement).unwrap(), cluster);
-    assert!(map.servers.iter().all(|server| server.id != old));
-    assert!(map.servers.iter().any(|server| server.id == fresh));
-    assert!(map.clusters.iter().any(|entry| entry.id == cluster));
+    assert!(map.admin_servers.iter().all(|server| server.id != old));
+    assert!(map.admin_servers.iter().any(|server| server.id == fresh));
+    assert!(map.resolver_clusters.iter().any(|entry| entry.id == cluster));
 
     replacement.replaces = Some(controller);
     assert!(
@@ -88,7 +88,7 @@ fn enrollment_policy_enforces_scope_roles_and_invariants() {
             addr: "127.0.0.1:4564".parse().unwrap(),
             auth: InfoAuth::Anonymous,
         }],
-        cluster: admin_proto::ClusterPlacement::Create { base: base.into() },
+        cluster: admin_proto::ResolverClusterPlacement::Create { base: base.into() },
         replaces: None,
     };
     assert!(

@@ -47,14 +47,14 @@ use crate::{
         EnrollRequest, GetInfoResponse, GetMapResponse, GetMapVersionResponse,
         GetPermsResponse, IssuedEntry, ListAdminsRequest, ListDelegationsRequest,
         ListDelegationsResponse, ListIssuedRequest, ListIssuedResponse, ListQueueRequest,
-        ListQueueResponse, LoginOk, MapVersion, NetworkMap, NodeKind, PROTOCOL_VERSION,
-        PeerResult, PollRequest, PollResponse, PropagationOk, QueueEntry, QueuedOk,
-        ReadPermsOk, ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
+        ListQueueResponse, LoginOk, MapVersion, NodeKind, PROTOCOL_VERSION, PeerResult,
+        PollRequest, PollResponse, PropagationOk, QueueEntry, QueuedOk, ReadPermsOk,
+        ReadPermsRequest, ReadPermsResponse, ReconcileControllerRequest,
         ReconcileControllerResponse, ReferralEdit, RegisterRequest, RegisterResponse,
         RemoveAdminRequest, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
         Request, ResolverAddr, RevokeOk, RevokeRequest, RevokeResponse, Role,
         SERVING_SAN, Secret, ServerHello, SetAdminPolicyRequest, SignOk, SignRequest,
-        SignResponse,
+        SignResponse, TrustDomainMap,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -632,7 +632,7 @@ pub async fn get_map_pinned(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     let hint = match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
@@ -1044,7 +1044,7 @@ pub async fn push_service_control(
 /// cluster, plus the admin servers reached while walking discovery hints.
 /// Everything in it was served over connections pinned to the
 /// operator-confirmed CA.
-pub struct NetworkInfo {
+pub struct TrustDomainInfo {
     pub domain: String,
     /// Where Sign/Enroll requests go. The first CA location seen wins;
     /// a well-formed network only has one.
@@ -1059,8 +1059,8 @@ pub struct NetworkInfo {
     pub resolver_base: Option<String>,
     /// Referral topology for that one cluster, derived from the authoritative
     /// map and restricted to active, registered routing targets.
-    pub resolver_parent: Option<admin_proto::ClusterEdge>,
-    pub resolver_children: Vec<admin_proto::ClusterEdge>,
+    pub resolver_parent: Option<admin_proto::ResolverClusterEdge>,
+    pub resolver_children: Vec<admin_proto::ResolverClusterEdge>,
     /// The admin servers actually reached.
     pub reached: Vec<SocketAddr>,
 }
@@ -1070,16 +1070,17 @@ pub struct NetworkInfo {
 const MAX_WALK: usize = 64;
 
 fn registered_members(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     cluster_id: admin_proto::ResolverClusterId,
 ) -> Vec<ResolverAddr> {
-    let Some(cluster) = map.clusters.iter().find(|cluster| {
-        cluster.id == cluster_id && cluster.state == admin_proto::ClusterState::Active
+    let Some(cluster) = map.resolver_clusters.iter().find(|cluster| {
+        cluster.id == cluster_id
+            && cluster.state == admin_proto::ResolverClusterState::Active
     }) else {
         return Vec::new();
     };
     let mut members: Vec<_> = map
-        .servers
+        .admin_servers
         .iter()
         .filter(|server| {
             server.cluster == Some(cluster_id)
@@ -1095,50 +1096,59 @@ fn registered_members(
 /// One active cluster's CA-authoritative resolver topology. This is also used
 /// by strict installers whose explicit bootstrap server belongs to a different
 /// level of the hierarchy than the cluster they are joining.
-pub struct ClusterTopology {
+pub struct ResolverClusterTopology {
     pub members: Vec<ResolverAddr>,
-    pub parent: Option<admin_proto::ClusterEdge>,
-    pub children: Vec<admin_proto::ClusterEdge>,
+    pub parent: Option<admin_proto::ResolverClusterEdge>,
+    pub children: Vec<admin_proto::ResolverClusterEdge>,
 }
 
 fn cluster_topology(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     cluster_id: admin_proto::ResolverClusterId,
-) -> Result<ClusterTopology> {
+) -> Result<ResolverClusterTopology> {
     let cluster = map
-        .clusters
+        .resolver_clusters
         .iter()
         .find(|c| c.id == cluster_id)
-        .filter(|c| c.state == admin_proto::ClusterState::Active)
+        .filter(|c| c.state == admin_proto::ResolverClusterState::Active)
         .context("resolver cluster is not active")?;
     let members = registered_members(map, cluster_id);
     let parent = cluster.parent.and_then(|parent_id| {
         let addrs = registered_members(map, parent_id);
-        (!addrs.is_empty())
-            .then(|| admin_proto::ClusterEdge { path: cluster.base.clone(), addrs })
+        (!addrs.is_empty()).then(|| admin_proto::ResolverClusterEdge {
+            path: cluster.base.clone(),
+            addrs,
+        })
     });
     let mut children: Vec<_> = cluster
         .children
         .iter()
         .filter_map(|child_id| {
-            let child = map.clusters.iter().find(|child| {
-                child.id == *child_id && child.state == admin_proto::ClusterState::Active
+            let child = map.resolver_clusters.iter().find(|child| {
+                child.id == *child_id
+                    && child.state == admin_proto::ResolverClusterState::Active
             })?;
             let addrs = registered_members(map, *child_id);
-            (!addrs.is_empty())
-                .then(|| admin_proto::ClusterEdge { path: child.base.clone(), addrs })
+            (!addrs.is_empty()).then(|| admin_proto::ResolverClusterEdge {
+                path: child.base.clone(),
+                addrs,
+            })
         })
         .collect();
     children.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(ClusterTopology { members, parent, children })
+    Ok(ResolverClusterTopology { members, parent, children })
 }
 
-pub fn cluster_topology_by_base(map: &NetworkMap, base: &str) -> Result<ClusterTopology> {
+pub fn cluster_topology_by_base(
+    map: &TrustDomainMap,
+    base: &str,
+) -> Result<ResolverClusterTopology> {
     let cluster = map
-        .clusters
+        .resolver_clusters
         .iter()
         .find(|cluster| {
-            cluster.base == base && cluster.state == admin_proto::ClusterState::Active
+            cluster.base == base
+                && cluster.state == admin_proto::ResolverClusterState::Active
         })
         .with_context(|| {
             format!("the authoritative map has no active cluster at {base}")
@@ -1153,11 +1163,11 @@ struct BootstrapSelection {
 
 struct ResolverSelection {
     base: String,
-    topology: ClusterTopology,
+    topology: ResolverClusterTopology,
 }
 
 fn bootstrap_cluster(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     server_id: admin_proto::AdminServerId,
 ) -> Result<BootstrapSelection> {
     let controller = map
@@ -1165,7 +1175,7 @@ fn bootstrap_cluster(
         .filter(|s| s.state == admin_proto::ServerState::Registered)
         .context("network map contains no registered controller")?;
     let bootstrap = map
-        .servers
+        .admin_servers
         .iter()
         .find(|s| s.id == server_id)
         .filter(|s| s.state == admin_proto::ServerState::Registered)
@@ -1177,10 +1187,10 @@ fn bootstrap_cluster(
     let bootstrap_cluster = bootstrap.cluster.or_else(|| {
         (bootstrap.id == map.controller)
             .then(|| {
-                map.clusters.iter().find(|cluster| {
+                map.resolver_clusters.iter().find(|cluster| {
                     cluster.base == "/"
                         && cluster.parent.is_none()
-                        && cluster.state == admin_proto::ClusterState::Active
+                        && cluster.state == admin_proto::ResolverClusterState::Active
                 })
             })
             .flatten()
@@ -1190,7 +1200,7 @@ fn bootstrap_cluster(
         None => None,
         Some(cluster_id) => {
             let cluster = map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|c| c.id == cluster_id)
                 .context("the bootstrap server's resolver cluster is absent")?;
@@ -1216,14 +1226,14 @@ pub async fn aggregate(
     seeds: &[SocketAddr],
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<NetworkInfo> {
+) -> Result<TrustDomainInfo> {
     // Preserve candidate order: `confirm_seeds` records the identity of the
-    // first reachable seed, and `NetworkInfo::reached[0]` becomes the durable
+    // first reachable seed, and `TrustDomainInfo::reached[0]` becomes the durable
     // bootstrap hint in the install record. A LIFO walk could silently record
     // a different same-CA satellite from the tail of an mDNS result.
     let mut queue: VecDeque<SocketAddr> = seeds.iter().copied().collect();
     let mut visited: Vec<SocketAddr> = Vec::new();
-    let mut info = NetworkInfo {
+    let mut info = TrustDomainInfo {
         domain: expected.domain.clone(),
         ca_addr: None,
         resolvers: Vec::new(),
@@ -1271,7 +1281,7 @@ pub async fn aggregate(
     info.ca_addr = Some(controller);
     if let Some(ResolverSelection {
         base,
-        topology: ClusterTopology { members, parent, children },
+        topology: ResolverClusterTopology { members, parent, children },
     }) = resolver
     {
         info.resolvers = members;
@@ -1359,7 +1369,7 @@ pub async fn enroll(
     roles: BitFlags<Role>,
     resolver_member: ResolverAddr,
     resolver_members: Vec<ResolverAddr>,
-    cluster: admin_proto::ClusterPlacement,
+    cluster: admin_proto::ResolverClusterPlacement,
     replaces: Option<admin_proto::AdminServerId>,
     expected: &CaIdentity,
 ) -> Result<Issued> {
@@ -2088,7 +2098,7 @@ pub async fn get_map(
     client: &PkiClient,
     addr: SocketAddr,
     kind: NodeKind,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
@@ -2102,7 +2112,7 @@ pub async fn get_map_from_controller(
     addr: SocketAddr,
     home_ca: CertificateDer<'static>,
     kind: NodeKind,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let (mut tls, _hello) = connect_pki_target(
         client,
         addr,
@@ -2950,7 +2960,7 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<&'static str>,
         tokio::task::JoinHandle<()>,
     ) {
-        use admin_proto::{ServerEntry, ServerState};
+        use admin_proto::{AdminServerEntry, ServerState};
         use tokio::net::TcpListener;
         use tokio_rustls::TlsAcceptor;
 
@@ -2958,10 +2968,10 @@ mod tests {
         let acceptor = TlsAcceptor::from(material.config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let hostile_map = NetworkMap {
+        let hostile_map = TrustDomainMap {
             version: 1,
             controller: server_id,
-            servers: vec![ServerEntry {
+            admin_servers: vec![AdminServerEntry {
                 id: server_id,
                 addr,
                 // These are untrusted map claims. The serving certificate has
@@ -2971,7 +2981,7 @@ mod tests {
                 cluster: None,
                 state: ServerState::Registered,
             }],
-            clusters: vec![],
+            resolver_clusters: vec![],
         };
         let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
@@ -3069,7 +3079,8 @@ mod tests {
     #[test]
     fn bootstrap_cluster_does_not_flatten_the_resolver_hierarchy() {
         use admin_proto::{
-            ClusterEntry, ClusterState, ResolverClusterId, Role, ServerEntry, ServerState,
+            AdminServerEntry, ResolverClusterEntry, ResolverClusterId,
+            ResolverClusterState, Role, ServerState,
         };
         let controller = admin_proto::AdminServerId::new();
         let root_server = admin_proto::AdminServerId::new();
@@ -3089,11 +3100,11 @@ mod tests {
             addr: "192.168.50.12:4564".parse().unwrap(),
             auth: admin_proto::InfoAuth::Tls { name: "root.example".into() },
         };
-        let map = NetworkMap {
+        let map = TrustDomainMap {
             version: 1,
             controller,
-            servers: vec![
-                ServerEntry {
+            admin_servers: vec![
+                AdminServerEntry {
                     id: controller,
                     addr: "192.168.50.11:4565".parse().unwrap(),
                     roles: Role::Ca.into(),
@@ -3101,7 +3112,7 @@ mod tests {
                     cluster: None,
                     state: ServerState::Registered,
                 },
-                ServerEntry {
+                AdminServerEntry {
                     id: root_server,
                     addr: "192.168.50.10:4565".parse().unwrap(),
                     roles: Role::Resolver.into(),
@@ -3109,7 +3120,7 @@ mod tests {
                     cluster: Some(root_cluster),
                     state: ServerState::Registered,
                 },
-                ServerEntry {
+                AdminServerEntry {
                     id: waiting,
                     addr: "192.168.50.12:4565".parse().unwrap(),
                     roles: Role::Resolver.into(),
@@ -3117,7 +3128,7 @@ mod tests {
                     cluster: Some(root_cluster),
                     state: ServerState::Enrolled,
                 },
-                ServerEntry {
+                AdminServerEntry {
                     id: satellite,
                     addr: "192.168.60.15:4565".parse().unwrap(),
                     roles: Role::Resolver.into(),
@@ -3126,19 +3137,19 @@ mod tests {
                     state: ServerState::Registered,
                 },
             ],
-            clusters: vec![
-                ClusterEntry {
+            resolver_clusters: vec![
+                ResolverClusterEntry {
                     id: root_cluster,
                     base: "/".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: vec![root.clone(), waiting_root],
                     parent: None,
                     children: vec![child_cluster],
                 },
-                ClusterEntry {
+                ResolverClusterEntry {
                     id: child_cluster,
                     base: "/eu".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: vec![child.clone()],
                     parent: Some(root_cluster),
                     children: vec![],
@@ -3153,7 +3164,7 @@ mod tests {
         let ResolverSelection {
             base: root_base,
             topology:
-                ClusterTopology {
+                ResolverClusterTopology {
                     members: root_members,
                     parent: root_parent,
                     children: root_children,
@@ -3162,7 +3173,7 @@ mod tests {
         let ResolverSelection {
             base: child_base,
             topology:
-                ClusterTopology {
+                ResolverClusterTopology {
                     members: child_members,
                     parent: child_parent,
                     children: child_children,

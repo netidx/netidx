@@ -41,13 +41,13 @@ pub use runtime::{load_roots, serve};
 
 use crate::{
     admin_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, ApplyReferralEditRequest,
-        ApplyReferralEditResponse, NetworkMap, Role, ServerEntry,
+        self, AddIdentityRequest, AddIdentityResponse, AdminServerEntry,
+        ApplyReferralEditRequest, ApplyReferralEditResponse, Role, TrustDomainMap,
     },
     admin_server_config::AdminServerConfig,
     ca_store,
     config_lock::ConfigDirLock,
-    netmap, transport,
+    transport, trust_domain,
 };
 use anyhow::{Context, Result, bail};
 use enumflags2::BitFlags;
@@ -148,7 +148,7 @@ mod state_tests {
                     mdns: false,
                     activation_units_dir: None,
                 },
-                map: NetworkMap::empty(id),
+                map: TrustDomainMap::empty(id),
                 ca,
                 password_limiter: PasswordLimiter::default(),
             },
@@ -437,7 +437,7 @@ mod state_tests {
 
 struct MutableState {
     cfg: AdminServerConfig,
-    map: NetworkMap,
+    map: TrustDomainMap,
     ca: Option<ca_store::CaDir>,
     password_limiter: PasswordLimiter,
 }
@@ -562,19 +562,19 @@ impl Server {
         // host starts with an empty cache the refresh loop fills.
         let map = match &ca_dir {
             Some(dir) => {
-                let mut m = netmap::load_async(dir, cfg.server_id).await?;
+                let mut m = trust_domain::load_async(dir, cfg.server_id).await?;
                 let (resolver, facts) = local_resolver_data(&cfg).await;
                 let existing_cluster = m
-                    .servers
+                    .admin_servers
                     .iter()
                     .find(|s| s.id == cfg.server_id)
                     .and_then(|s| s.cluster);
                 let cluster = facts.as_ref().map(|_| {
                     existing_cluster.unwrap_or_else(admin_proto::ResolverClusterId::new)
                 });
-                netmap::upsert_controller(
+                trust_domain::upsert_controller(
                     &mut m,
-                    ServerEntry {
+                    AdminServerEntry {
                         id: cfg.server_id,
                         addr: cfg.listen,
                         roles: roles_of(&cfg),
@@ -584,10 +584,10 @@ impl Server {
                     },
                     facts,
                 )?;
-                netmap::save_async(&config_lock, dir, &m).await?;
+                trust_domain::save_async(&config_lock, dir, &m).await?;
                 m
             }
-            None => NetworkMap::default(),
+            None => TrustDomainMap::default(),
         };
         Server::from_state(
             config_lock,

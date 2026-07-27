@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin_client::plan::enroll::{self, DiscoveredNetworkReport};
+use netidx_admin_client::plan::enroll::{self, DiscoveredTrustDomainReport};
 use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ pub(crate) struct DiscoverArgs {
 
 pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let networks = rt.block_on(enroll::discover_networks(
+    let networks = rt.block_on(enroll::discover_trust_domains(
         Duration::from_secs(a.timeout),
         NodeKind::Client,
         None,
@@ -47,7 +47,7 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn print_human(networks: &[DiscoveredNetworkReport], identicon: bool) {
+fn print_human(networks: &[DiscoveredTrustDomainReport], identicon: bool) {
     if networks.is_empty() {
         println!("no netidx networks discovered on the local network.");
         return;
@@ -75,7 +75,7 @@ fn print_human(networks: &[DiscoveredNetworkReport], identicon: bool) {
     }
 }
 
-fn print_json(networks: &[DiscoveredNetworkReport]) {
+fn print_json(networks: &[DiscoveredTrustDomainReport]) {
     use serde_json::{Map, Value};
     let arr = networks
         .iter()

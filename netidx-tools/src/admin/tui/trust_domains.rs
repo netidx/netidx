@@ -23,7 +23,7 @@ const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 /// admin-server addresses. Persisted as JSON; the fingerprint is stored in its
 /// grouped-base32 text form ([`Fingerprint`] has no serde derive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct KnownCluster {
+pub(super) struct KnownTrustDomain {
     pub(super) domain: String,
     /// The CA fingerprint text (the cluster's identity). Compared against a live
     /// fetch before the cluster is shown or connected to.
@@ -32,7 +32,7 @@ pub(super) struct KnownCluster {
     pub(super) addrs: Vec<SocketAddr>,
 }
 
-impl KnownCluster {
+impl KnownTrustDomain {
     /// The parsed CA fingerprint, or `None` if the stored text is corrupt.
     pub(super) fn fp(&self) -> Option<Fingerprint> {
         Fingerprint::parse_text(&self.fingerprint).ok()
@@ -41,23 +41,23 @@ impl KnownCluster {
 
 /// The persisted set of known clusters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(super) struct KnownClusters {
+pub(super) struct KnownTrustDomains {
     #[serde(default)]
-    pub(super) clusters: Vec<KnownCluster>,
+    pub(super) domains: Vec<KnownTrustDomain>,
 }
 
-impl KnownClusters {
+impl KnownTrustDomains {
     fn path() -> anyhow::Result<PathBuf> {
         Ok(paths::user_config_root()?.join("admin-clusters.json"))
     }
 
     /// Load the saved clusters, or an empty set if the file is missing or
     /// unreadable — a corrupt registry must never break the Cluster tab.
-    pub(super) fn load() -> KnownClusters {
-        let Ok(path) = Self::path() else { return KnownClusters::default() };
+    pub(super) fn load() -> KnownTrustDomains {
+        let Ok(path) = Self::path() else { return KnownTrustDomains::default() };
         match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => KnownClusters::default(),
+            Err(_) => KnownTrustDomains::default(),
         }
     }
 
@@ -89,7 +89,7 @@ impl KnownClusters {
         fp: Fingerprint,
     ) -> bool {
         let fp_text = fp.text();
-        match self.clusters.iter_mut().find(|c| c.fingerprint == fp_text) {
+        match self.domains.iter_mut().find(|c| c.fingerprint == fp_text) {
             Some(c) => {
                 let mut changed = false;
                 if !c.addrs.contains(&addr) {
@@ -103,7 +103,7 @@ impl KnownClusters {
                 changed
             }
             None => {
-                self.clusters.push(KnownCluster {
+                self.domains.push(KnownTrustDomain {
                     domain: domain.to_string(),
                     fingerprint: fp_text,
                     addrs: vec![addr],
@@ -122,7 +122,7 @@ impl KnownClusters {
 /// on-entry poll then verifies it live like any other saved cluster. Returns
 /// whether the saved set changed (worth saving).
 #[cfg(unix)]
-pub(super) fn seed_local_cluster(clusters: &mut KnownClusters) -> bool {
+pub(super) fn seed_local_cluster(clusters: &mut KnownTrustDomains) -> bool {
     let Some((domain, fp, recorded)) = local_cluster_identity() else { return false };
     // The address to reach this cluster's CA: this host's own admin-server listen
     // if it hosts a member (a CA / resolver), else the upstream admin server this
@@ -155,7 +155,7 @@ fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)>
 }
 
 #[cfg(not(unix))]
-pub(super) fn seed_local_cluster(_clusters: &mut KnownClusters) -> bool {
+pub(super) fn seed_local_cluster(_clusters: &mut KnownTrustDomains) -> bool {
     false
 }
 
@@ -189,7 +189,7 @@ impl PollState {
 /// cluster is only `Present` when its identity actually verifies. Self-contained
 /// (owns its inputs) so the event loop can poll it as a background future.
 pub(super) async fn poll_clusters(
-    pending: Vec<(usize, KnownCluster)>,
+    pending: Vec<(usize, KnownTrustDomain)>,
 ) -> Vec<(usize, PollState)> {
     join_all(pending.into_iter().map(|(i, cluster)| async move {
         let want = cluster.fp();
@@ -220,20 +220,20 @@ mod tests {
     fn upsert_dedups_by_fingerprint() {
         let a = Fingerprint::of_der(b"cluster a spki");
         let b = Fingerprint::of_der(b"cluster b spki");
-        let mut kc = KnownClusters::default();
+        let mut kc = KnownTrustDomains::default();
         let addr1: SocketAddr = "10.0.0.1:4565".parse().unwrap();
         let addr2: SocketAddr = "10.0.0.2:4565".parse().unwrap();
         // First sighting of cluster a.
         assert!(kc.upsert("hq.local", addr1, a));
-        assert_eq!(kc.clusters.len(), 1);
+        assert_eq!(kc.domains.len(), 1);
         // A second member of the *same* cluster merges its address in.
         assert!(kc.upsert("hq.local", addr2, a));
-        assert_eq!(kc.clusters.len(), 1);
-        assert_eq!(kc.clusters[0].addrs, vec![addr1, addr2]);
+        assert_eq!(kc.domains.len(), 1);
+        assert_eq!(kc.domains[0].addrs, vec![addr1, addr2]);
         // Re-seeing a known member is a no-op.
         assert!(!kc.upsert("hq.local", addr2, a));
         // A different CA identity is a distinct cluster, even at a shared address.
         assert!(kc.upsert("eu.local", addr1, b));
-        assert_eq!(kc.clusters.len(), 2);
+        assert_eq!(kc.domains.len(), 2);
     }
 }

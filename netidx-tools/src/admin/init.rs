@@ -437,7 +437,10 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 
 /// Print a confirmed-or-not network identity: domain, claimed roles,
 /// fingerprint text + identicon.
-pub(super) fn show_network_identity(addr: SocketAddr, identity: &transport::CaIdentity) {
+pub(super) fn show_trust_domain_identity(
+    addr: SocketAddr,
+    identity: &transport::CaIdentity,
+) {
     println!(
         "The admin server at {addr} serves network {:?} (roles: {}) and presented \
          this identity:",

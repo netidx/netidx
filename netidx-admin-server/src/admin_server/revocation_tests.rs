@@ -116,7 +116,7 @@ fn issued_for(serial: u64, name: &str) -> ca_store::IssuedRecord {
 /// the wrong shape even where the subsequent write happens to be a no-op.
 #[test]
 fn revoke_authority_denies_serials_it_cannot_evaluate() {
-    let map = admin_proto::NetworkMap::empty(admin_proto::AdminServerId::new());
+    let map = admin_proto::TrustDomainMap::empty(admin_proto::AdminServerId::new());
     let scoped = scoped_admin(SlotKind::Role, &["*.eu.example"]);
 
     assert!(revoke_authority(&scoped, &map, 7, None).is_err());

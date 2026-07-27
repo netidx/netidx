@@ -16,8 +16,9 @@
 use super::{
     action::Action,
     answer::TuiAnswerer,
-    clusters::{self, KnownCluster, KnownClusters, PollState},
-    theme, widgets,
+    theme,
+    trust_domains::{self, KnownTrustDomain, KnownTrustDomains, PollState},
+    widgets,
 };
 use anyhow::Result;
 #[cfg(unix)]
@@ -466,7 +467,7 @@ pub(super) enum RemoteUpdate {
         rows: Vec<PanelRow>,
     },
     /// The saved cluster registry after a discover pass — refreshes the list.
-    Clusters(Vec<KnownCluster>),
+    TrustDomains(Vec<KnownTrustDomain>),
     /// The cluster's permission levels — opens the level picker for a panel.
     Levels {
         panel: Panel,
@@ -611,7 +612,7 @@ async fn connect(
         admin,
     };
     // Remember this cluster (by its confirmed identity) for next time.
-    let mut known = KnownClusters::load();
+    let mut known = KnownTrustDomains::load();
     if known.upsert(&id.domain, server, id.fingerprint) {
         if let Err(e) = known.save() {
             ans.warn(&format!("could not save the cluster list: {e:#}"));
@@ -657,7 +658,7 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
 
 /// Discover admin clusters on the local network and refresh the Cluster tab's
 /// list — the same browse + per-network CA-identity fetch the install flow and
-/// `netidx admin discover` use (via [`enroll::discover_networks`]), not a private
+/// `netidx admin discover` use (via [`enroll::discover_trust_domains`]), not a private
 /// copy. Merges every reachable cluster into the saved registry, then hands the
 /// list back so the landing screen re-polls and shows the verified ones — no
 /// toast to dismiss, just the list, like discovery everywhere else.
@@ -672,8 +673,8 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     ans.progress(Progress::timed(Stage::Discovering, "browsing for clusters…", timeout));
     // `None` enumerates every cluster in the window — the tab may manage several,
     // unlike the install flow's early-exit-on-first-found.
-    let reports = enroll::discover_networks(timeout, NodeKind::Client, None).await;
-    let mut known = KnownClusters::load();
+    let reports = enroll::discover_trust_domains(timeout, NodeKind::Client, None).await;
+    let mut known = KnownTrustDomains::load();
     let mut verified = 0usize;
     let mut unverified: Vec<String> = Vec::new();
     for r in &reports {
@@ -718,10 +719,10 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
         return Ok(super::action::Outcome::remote_toast(
             "Discovery",
             lines,
-            RemoteUpdate::Clusters(known.clusters),
+            RemoteUpdate::TrustDomains(known.domains),
         ));
     }
-    Ok(super::action::Outcome::remote_clusters(known.clusters))
+    Ok(super::action::Outcome::remote_clusters(known.domains))
 }
 
 #[cfg(unix)]
@@ -799,11 +800,11 @@ fn queue_row(item: &netidx_admin_client::ops::queue::QueueItem) -> PanelRow {
     }
     if let Some(listen) = item.enroll_listen {
         let cluster = match &item.cluster {
-            Some(netidx_admin_proto::ClusterPlacement::Create { .. }) => format!(
+            Some(netidx_admin_proto::ResolverClusterPlacement::Create { .. }) => format!(
                 "create at {}",
                 item.cluster_base.as_deref().unwrap_or("(unknown base)")
             ),
-            Some(netidx_admin_proto::ClusterPlacement::Join { cluster }) => {
+            Some(netidx_admin_proto::ResolverClusterPlacement::Join { cluster }) => {
                 format!(
                     "{cluster} at {}",
                     item.cluster_base.as_deref().unwrap_or("(unknown base)")
@@ -1754,7 +1755,7 @@ async fn service_control(
 /// Which Tab-2 screen is showing.
 enum Screen {
     /// The known-cluster list — the Cluster tab's landing screen.
-    Clusters,
+    TrustDomains,
     /// Manually enter an admin-server host + port to connect to directly.
     Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
@@ -1765,7 +1766,7 @@ enum Screen {
     /// Pick one of the cluster's admin servers (from the map) before opening the
     /// services panel — service control is per-server, so you pick the one to
     /// manage.
-    ServerPick { servers: Vec<ServiceServerRow>, state: ListState },
+    ServerPick { admin_servers: Vec<ServiceServerRow>, state: ListState },
     /// A panel's rows.
     Panel(Panel),
 }
@@ -1791,13 +1792,14 @@ pub(super) struct RemoteState {
     /// (Cluster tab), or a `Local` control-socket target (Local tab).
     target: Option<PanelTarget>,
     screen: Screen,
-    /// The saved cluster registry (loaded from disk). The landing list shows the
-    /// subset whose CA identity currently verifies (`poll` == `Present`).
-    clusters: Vec<KnownCluster>,
-    /// Per-cluster poll state, parallel to `clusters`.
+    /// The saved trust-domain registry (loaded from disk). The landing list
+    /// shows the subset whose CA identity currently verifies (`poll` ==
+    /// `Present`).
+    domains: Vec<KnownTrustDomain>,
+    /// Per-trust-domain poll state, parallel to `domains`.
     poll: Vec<PollState>,
-    /// Cursor over the *visible* (Present) clusters on the landing screen.
-    cluster_list: ListState,
+    /// Cursor over the *visible* (Present) trust domains on the landing screen.
+    domain_list: ListState,
     error: Option<String>,
     /// The panel-menu cursor.
     menu: ListState,
@@ -1846,9 +1848,9 @@ fn local_own_base() -> String {
 /// Load the saved cluster registry, ensuring this host's own cluster (when it
 /// runs an admin server) is included so a locally-created cluster shows up
 /// without a manual discover, and persisting that addition.
-fn load_seeded_clusters() -> KnownClusters {
-    let mut known = KnownClusters::load();
-    if clusters::seed_local_cluster(&mut known) {
+fn load_seeded_clusters() -> KnownTrustDomains {
+    let mut known = KnownTrustDomains::load();
+    if trust_domains::seed_local_cluster(&mut known) {
         let _ = known.save();
     }
     known
@@ -1858,16 +1860,16 @@ impl RemoteState {
     pub(super) fn new() -> RemoteState {
         let mut menu = ListState::default();
         menu.select(Some(0));
-        let mut cluster_list = ListState::default();
-        cluster_list.select(Some(0));
+        let mut domain_list = ListState::default();
+        domain_list.select(Some(0));
         let known = load_seeded_clusters();
-        let poll = vec![PollState::Unpolled; known.clusters.len()];
+        let poll = vec![PollState::Unpolled; known.domains.len()];
         RemoteState {
             target: None,
-            screen: Screen::Clusters,
-            clusters: known.clusters,
+            screen: Screen::TrustDomains,
+            domains: known.domains,
             poll,
-            cluster_list,
+            domain_list,
             error: None,
             menu,
             rows: Vec::new(),
@@ -1902,7 +1904,7 @@ impl RemoteState {
     /// the saved registry — a cluster may have been saved this session — and
     /// re-poll it.
     pub(super) fn on_focus(&mut self) {
-        if matches!(self.screen, Screen::Clusters) {
+        if matches!(self.screen, Screen::TrustDomains) {
             self.reload_clusters();
         }
     }
@@ -1911,14 +1913,14 @@ impl RemoteState {
     /// event loop re-verifies it.
     fn reload_clusters(&mut self) {
         let known = load_seeded_clusters();
-        self.clusters = known.clusters;
-        self.poll = vec![PollState::Unpolled; self.clusters.len()];
+        self.domains = known.domains;
+        self.poll = vec![PollState::Unpolled; self.domains.len()];
     }
 
     /// The saved clusters currently verified `Present`, each with the address to
     /// connect to — exactly the rows the landing list shows.
     fn visible(&self) -> Vec<(usize, SocketAddr)> {
-        self.clusters
+        self.domains
             .iter()
             .enumerate()
             .filter_map(|(i, _)| {
@@ -1929,15 +1931,15 @@ impl RemoteState {
 
     /// Saved clusters not yet polled; marks each `Polling` so the event loop
     /// launches exactly one poll pass. Only polls on the landing screen.
-    pub(super) fn take_pending_poll(&mut self) -> Vec<(usize, KnownCluster)> {
-        if !matches!(self.screen, Screen::Clusters) {
+    pub(super) fn take_pending_poll(&mut self) -> Vec<(usize, KnownTrustDomain)> {
+        if !matches!(self.screen, Screen::TrustDomains) {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for i in 0..self.clusters.len() {
+        for i in 0..self.domains.len() {
             if matches!(self.poll[i], PollState::Unpolled) {
                 self.poll[i] = PollState::Polling;
-                out.push((i, self.clusters[i].clone()));
+                out.push((i, self.domains[i].clone()));
             }
         }
         out
@@ -1951,8 +1953,8 @@ impl RemoteState {
             }
         }
         let n = self.visible().len();
-        let sel = self.cluster_list.selected().unwrap_or(0);
-        self.cluster_list.select(Some(sel.min(n.saturating_sub(1))));
+        let sel = self.domain_list.selected().unwrap_or(0);
+        self.domain_list.select(Some(sel.min(n.saturating_sub(1))));
     }
 
     /// Apply a completed op's result.
@@ -1965,7 +1967,7 @@ impl RemoteState {
             }
             RemoteUpdate::LoggedOut => {
                 self.target = None;
-                self.screen = Screen::Clusters;
+                self.screen = Screen::TrustDomains;
                 self.error = None;
                 self.reload_clusters();
             }
@@ -1978,10 +1980,10 @@ impl RemoteState {
                 self.list.select(Some(sel.min(self.rows.len().saturating_sub(1))));
                 self.screen = Screen::Panel(panel);
             }
-            RemoteUpdate::Clusters(clusters) => {
-                self.clusters = clusters;
-                self.poll = vec![PollState::Unpolled; self.clusters.len()];
-                self.screen = Screen::Clusters;
+            RemoteUpdate::TrustDomains(clusters) => {
+                self.domains = clusters;
+                self.poll = vec![PollState::Unpolled; self.domains.len()];
+                self.screen = Screen::TrustDomains;
                 self.error = None;
             }
             RemoteUpdate::Levels { panel, levels } => {
@@ -1993,7 +1995,7 @@ impl RemoteState {
             RemoteUpdate::ServiceServers { servers } => {
                 let mut state = ListState::default();
                 state.select((!servers.is_empty()).then_some(0));
-                self.screen = Screen::ServerPick { servers, state };
+                self.screen = Screen::ServerPick { admin_servers: servers, state };
                 self.error = None;
             }
             RemoteUpdate::ServiceRows { rows } => {
@@ -2022,7 +2024,7 @@ impl RemoteState {
     /// (where the tab bar + global gutter show instead).
     pub(super) fn gutter(&self) -> Option<String> {
         let keys = match &self.screen {
-            Screen::Clusters => return None,
+            Screen::TrustDomains => return None,
             Screen::Manual { .. } => "Enter connect · Esc back",
             // A Local surface (Local tab) closes back to the tab; a Remote one
             // disconnects.
@@ -2044,7 +2046,7 @@ impl RemoteState {
             return None;
         }
         match &self.screen {
-            Screen::Clusters => self.on_key_clusters(code),
+            Screen::TrustDomains => self.on_key_clusters(code),
             Screen::Manual { .. } => self.on_key_manual(code),
             Screen::Menu => self.on_key_menu(code),
             Screen::LevelPick { .. } => self.on_key_level_pick(code),
@@ -2097,7 +2099,10 @@ impl RemoteState {
     /// Pick a cluster admin server from the map-derived list, then open the
     /// services panel scoped to that one server.
     fn on_key_server_pick(&mut self, code: KeyCode) -> Option<Action> {
-        let Screen::ServerPick { servers, state } = &mut self.screen else { return None };
+        let Screen::ServerPick { admin_servers: servers, state } = &mut self.screen
+        else {
+            return None;
+        };
         match code {
             KeyCode::Up | KeyCode::Char('k') => {
                 let i = state.selected().unwrap_or(0).saturating_sub(1);
@@ -2139,8 +2144,8 @@ impl RemoteState {
     /// directly by address.
     fn on_key_clusters(&mut self, code: KeyCode) -> Option<Action> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => self.cluster_list.select_previous(),
-            KeyCode::Down | KeyCode::Char('j') => self.cluster_list.select_next(),
+            KeyCode::Up | KeyCode::Char('k') => self.domain_list.select_previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.domain_list.select_next(),
             KeyCode::Char('d') => return Some(Action::Remote(RemoteAction::Discover)),
             KeyCode::Char('c') => {
                 self.error = None;
@@ -2156,12 +2161,11 @@ impl RemoteState {
                 if visible.is_empty() {
                     return None;
                 }
-                let sel =
-                    self.cluster_list.selected().unwrap_or(0).min(visible.len() - 1);
+                let sel = self.domain_list.selected().unwrap_or(0).min(visible.len() - 1);
                 let (ci, addr) = visible[sel];
                 return Some(Action::Remote(RemoteAction::Connect {
                     server: addr,
-                    expected_fp: self.clusters[ci].fp(),
+                    expected_fp: self.domains[ci].fp(),
                 }));
             }
             _ => {}
@@ -2194,13 +2198,13 @@ impl RemoteState {
             },
             KeyCode::Esc => {
                 self.error = None;
-                self.screen = Screen::Clusters;
+                self.screen = Screen::TrustDomains;
             }
             KeyCode::Enter => {
                 let spec = format!("{}:{}", host.trim(), port.trim());
                 match netidx_admin_client::plan::resolve_admin_server_addr(&spec) {
                     Ok(server) => {
-                        self.screen = Screen::Clusters;
+                        self.screen = Screen::TrustDomains;
                         self.error = None;
                         return Some(Action::Remote(RemoteAction::Connect {
                             server,
@@ -2225,7 +2229,7 @@ impl RemoteState {
                 // appears. (A Local surface is instead closed by its host, which
                 // intercepts Esc-at-menu.)
                 self.target = None;
-                self.screen = Screen::Clusters;
+                self.screen = Screen::TrustDomains;
                 self.reload_clusters();
             }
             KeyCode::Char('L') => {
@@ -2508,7 +2512,7 @@ impl RemoteState {
             return;
         }
         match &self.screen {
-            Screen::Clusters => self.render_clusters(f, area),
+            Screen::TrustDomains => self.render_clusters(f, area),
             Screen::Manual { host, port, focus } => {
                 self.render_manual(f, area, host, port, *focus)
             }
@@ -2516,7 +2520,7 @@ impl RemoteState {
             Screen::LevelPick { panel, levels, state } => {
                 self.render_level_pick(f, area, *panel, levels, &mut state.clone())
             }
-            Screen::ServerPick { servers, state } => {
+            Screen::ServerPick { admin_servers: servers, state } => {
                 self.render_server_pick(f, area, servers, &mut state.clone())
             }
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
@@ -2586,7 +2590,7 @@ impl RemoteState {
         let visible = self.visible();
         let hint = " Enter connect · d discover · c connect direct · r refresh ";
         let block = theme::panel_block()
-            .title(Span::styled(" Clusters ", theme::title_style()))
+            .title(Span::styled(" Trust Domains ", theme::title_style()))
             .title_bottom(Line::from(Span::styled(hint, theme::hint_style())));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -2595,7 +2599,7 @@ impl RemoteState {
                 .poll
                 .iter()
                 .any(|p| matches!(p, PollState::Unpolled | PollState::Polling));
-            let msg = if self.clusters.is_empty() {
+            let msg = if self.domains.is_empty() {
                 "No saved clusters yet. Press d to discover clusters on the local \
                  network, or c to connect to one by address."
             } else if checking {
@@ -2619,14 +2623,14 @@ impl RemoteState {
         let items: Vec<ListItem> = visible
             .iter()
             .map(|(ci, addr)| {
-                let c = &self.clusters[*ci];
+                let c = &self.domains[*ci];
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{} ", c.domain), theme::panel_style()),
                     Span::styled(format!("({addr})"), theme::hint_style()),
                 ]))
             })
             .collect();
-        let mut st = self.cluster_list;
+        let mut st = self.domain_list;
         let list = List::new(items)
             .style(theme::panel_style())
             .highlight_style(theme::selected_style())
@@ -2634,7 +2638,7 @@ impl RemoteState {
         f.render_stateful_widget(list, cols[0], &mut st);
         // The selected cluster's glyph.
         let sel = st.selected().unwrap_or(0).min(visible.len() - 1);
-        if let Some(fp) = self.clusters[visible[sel].0].fp() {
+        if let Some(fp) = self.domains[visible[sel].0].fp() {
             let mut lines =
                 vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
             lines.extend(widgets::identicon_lines(&fp));
@@ -3024,21 +3028,24 @@ mod tests {
             .collect()
     }
 
-    /// A `RemoteState` on the Clusters screen with injected clusters + poll state
+    /// A `RemoteState` on the TrustDomains screen with injected clusters + poll state
     /// (bypassing the on-disk registry so the test is deterministic).
-    fn clusters_state(clusters: Vec<KnownCluster>, poll: Vec<PollState>) -> RemoteState {
+    fn clusters_state(
+        clusters: Vec<KnownTrustDomain>,
+        poll: Vec<PollState>,
+    ) -> RemoteState {
         let mut s = RemoteState::new();
-        s.clusters = clusters;
+        s.domains = clusters;
         s.poll = poll;
-        s.screen = Screen::Clusters;
+        s.screen = Screen::TrustDomains;
         s
     }
 
-    fn cluster(domain: &str, addr: &str, seed: &[u8]) -> (KnownCluster, SocketAddr) {
+    fn cluster(domain: &str, addr: &str, seed: &[u8]) -> (KnownTrustDomain, SocketAddr) {
         let addr: SocketAddr = addr.parse().unwrap();
         let fp = Fingerprint::of_der(seed);
         (
-            KnownCluster {
+            KnownTrustDomain {
                 domain: domain.to_string(),
                 fingerprint: fp.text(),
                 addrs: vec![addr],
@@ -3274,7 +3281,7 @@ mod tests {
         let root = AdminServerId::new();
         let ap = AdminServerId::new();
         s.screen = Screen::ServerPick {
-            servers: vec![
+            admin_servers: vec![
                 ServiceServerRow {
                     target: ServiceTarget {
                         id: root,
@@ -3309,7 +3316,7 @@ mod tests {
         let id = AdminServerId::new();
         let selected = ServiceTarget { id, addr };
         s.screen = Screen::ServerPick {
-            servers: vec![ServiceServerRow {
+            admin_servers: vec![ServiceServerRow {
                 target: selected,
                 label: format!("10.0.60.11:4565  /ap {id}"),
             }],
@@ -3345,7 +3352,7 @@ mod tests {
         let mut state = ListState::default();
         state.select(Some(1));
         s.screen = Screen::ServerPick {
-            servers: vec![
+            admin_servers: vec![
                 ServiceServerRow {
                     target: first,
                     label: format!("{addr} /ap {}", first.id),

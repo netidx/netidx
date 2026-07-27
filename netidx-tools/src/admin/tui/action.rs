@@ -118,7 +118,7 @@ impl Outcome {
     /// return to the landing screen with no overlay — the list is the result, and
     /// the landing screen re-polls it to show the verified clusters.
     pub(super) fn remote_clusters(
-        clusters: Vec<super::clusters::KnownCluster>,
+        clusters: Vec<super::trust_domains::KnownTrustDomain>,
     ) -> Outcome {
         Outcome {
             title: String::new(),
@@ -126,7 +126,7 @@ impl Outcome {
             refresh_local: false,
             install_service: None,
             after_service: None,
-            remote: Some(super::remote::RemoteUpdate::Clusters(clusters)),
+            remote: Some(super::remote::RemoteUpdate::TrustDomains(clusters)),
             services: None,
             quiet: true,
         }
@@ -657,7 +657,7 @@ async fn finish_identities(
         return Ok(());
     }
     let (controller, net) =
-        super::super::backup_restore::network_for_restore(manifest, None)
+        super::super::backup_restore::trust_domain_for_restore(manifest, None)
             .await?
             .context(
                 "the backup contains TLS identities but no administrative network",
@@ -1142,7 +1142,9 @@ async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
 async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outcome> {
     use super::answer::{ParentRow, ParentSelection};
     use netidx_admin_client::{
-        ops::delegation::{AddParentCompletion, ClusterPropagation, prepare_add_parent},
+        ops::delegation::{
+            AddParentCompletion, ResolverClusterPropagation, prepare_add_parent,
+        },
         paths,
         plan::delegation::DelegationSelection,
         resolver::ResolverConfig,
@@ -1163,7 +1165,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
         .and_then(|c| c.resolver_addrs().into_iter().next());
     let local_server = map.as_ref().and_then(|map| {
         let local = local_member.as_ref()?;
-        map.servers.iter().find(|s| s.resolver.as_ref() == Some(local))
+        map.admin_servers.iter().find(|s| s.resolver.as_ref() == Some(local))
     });
     if map.is_some() && local_server.is_none() {
         bail!("this resolver's locally owned member is absent from the CA network map");
@@ -1173,7 +1175,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     let cand: Vec<(SocketAddr, ResolverAddr, ResolverClusterId, String)> = match &map {
         Some(map) => {
             let mut cand = Vec::new();
-            for server in map.servers.iter().filter(|s| {
+            for server in map.admin_servers.iter().filter(|s| {
                 s.state == ServerState::Registered
                     && s.roles.contains(netidx_admin_proto::Role::Resolver)
                     && Some(s.id) != local_server.map(|local| local.id)
@@ -1183,7 +1185,8 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
                 else {
                     continue;
                 };
-                let Some(cluster) = map.clusters.iter().find(|c| c.id == cluster_id)
+                let Some(cluster) =
+                    map.resolver_clusters.iter().find(|c| c.id == cluster_id)
                 else {
                     continue;
                 };
@@ -1253,7 +1256,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     let mut lines =
         vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
     match out.propagation {
-        ClusterPropagation::ControllerManaged => {}
+        ResolverClusterPropagation::ControllerManaged => {}
     }
     lines.push(
         "Configuration is written; do not restart the whole cluster at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."

@@ -241,7 +241,7 @@ pub async fn enroll(
             roles: netidx_admin_proto::Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
-            cluster: netidx_admin_proto::ClusterPlacement::Create {
+            cluster: netidx_admin_proto::ResolverClusterPlacement::Create {
                 base: "/".to_string(),
             },
             renew_identity: Some(cfg.server_id),

@@ -11,12 +11,12 @@
 use super::resolve_admin_server_seeds;
 use crate::{
     admin_proto::{InfoAuth, NodeKind},
-    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress, Stage},
+    answer::{Answerer, Field, Progress, Stage, TrustDomainChoice, TrustDomainOption},
     atomic,
     discovery::{self},
     template::{AuthChoice, ReferralAuth, TlsIdentitySpec},
     tls,
-    transport::{self, CaIdentity, NetworkInfo, PollOutcome},
+    transport::{self, CaIdentity, PollOutcome, TrustDomainInfo},
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
@@ -55,9 +55,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// A discovered-and-confirmed netidx network: the operator-confirmed
 /// admin-plane identity plus the aggregated picture of the network (every
 /// connection behind `info` was pinned to that identity).
-pub struct DiscoveredNetwork {
+pub struct DiscoveredTrustDomain {
     pub identity: CaIdentity,
-    pub info: NetworkInfo,
+    pub info: TrustDomainInfo,
 }
 
 /// What the calling flow knows about admin servers on this network. Threaded
@@ -67,7 +67,7 @@ pub struct DiscoveredNetwork {
 pub enum AdminServers {
     /// A network was discovered and its identity glyph-confirmed: use it, ask
     /// nothing further.
-    Have(DiscoveredNetwork),
+    Have(DiscoveredTrustDomain),
     /// We probed (and/or the operator declined): there is none. Never offer a
     /// network join again in this run.
     DontHave,
@@ -78,7 +78,7 @@ pub enum AdminServers {
 
 impl AdminServers {
     /// The confirmed network, if one was found and accepted.
-    pub fn have(&self) -> Option<&DiscoveredNetwork> {
+    pub fn have(&self) -> Option<&DiscoveredTrustDomain> {
         match self {
             AdminServers::Have(net) => Some(net),
             AdminServers::DontHave | AdminServers::NotProbed => None,
@@ -437,11 +437,11 @@ fn manual_seeds(answer: Option<String>) -> Result<Option<Vec<SocketAddr>>> {
     }
 }
 
-/// A network found by [`discover_networks`]: its TLS domain, the admin-server
+/// A network found by [`discover_trust_domains`]: its TLS domain, the admin-server
 /// address(es) that advertised it over mDNS, and — when one answered — the CA
 /// identity they present (whose `fingerprint` is the glyph a script passes to
 /// `--accept-glyph`), or the reason none did.
-pub struct DiscoveredNetworkReport {
+pub struct DiscoveredTrustDomainReport {
     pub domain: String,
     pub admin_servers: Vec<SocketAddr>,
     pub identity: Result<CaIdentity, String>,
@@ -449,7 +449,7 @@ pub struct DiscoveredNetworkReport {
 
 /// Browse mDNS for netidx admin servers and, for each distinct network, fetch
 /// the CA identity from the first reachable server. A pure read-only QUERY —
-/// no prompts, no decisions — so, unlike the interactive [`discover_network`]
+/// no prompts, no decisions — so, unlike the interactive [`discover_trust_domain`]
 /// cascade (which the strict CLI disables), it is valid in strict/scripted
 /// mode: a script runs it, reads a network's admin-server address + glyph, and
 /// feeds them to `--admin-server` / `--accept-glyph`.
@@ -458,11 +458,11 @@ pub struct DiscoveredNetworkReport {
 /// soon as a cluster is found (up to `timeout`) — the interactive join, where
 /// one cluster is expected. `None` browses the whole `timeout` to enumerate
 /// every network — the strict enumerator.
-pub async fn discover_networks(
+pub async fn discover_trust_domains(
     timeout: Duration,
     kind: NodeKind,
     early_exit: Option<Duration>,
-) -> Vec<DiscoveredNetworkReport> {
+) -> Vec<DiscoveredTrustDomainReport> {
     // The mDNS browse blocks for `timeout`; keep it off the async worker.
     // `early_exit = Some(settle)` waits at least `settle` then early-exits once a
     // cluster is found (the interactive join); `None` waits the full window to
@@ -506,7 +506,7 @@ pub async fn discover_networks(
                 }
             }
         }
-        out.push(DiscoveredNetworkReport { domain, admin_servers, identity });
+        out.push(DiscoveredTrustDomainReport { domain, admin_servers, identity });
     }
     out
 }
@@ -519,7 +519,7 @@ pub async fn discover_networks(
 /// [`AdminServers::DontHave`] ⇒ the operator concluded there is none (nothing
 /// found / declined); [`AdminServers::NotProbed`] is returned only for a
 /// non-interactive frontend — the strict CLI uses explicit flags instead.
-pub async fn discover_network(
+pub async fn discover_trust_domain(
     ans: &mut dyn Answerer,
     kind: NodeKind,
 ) -> Result<AdminServers> {
@@ -534,7 +534,7 @@ pub async fn discover_network(
     // stand-alone publisher is not a thing and it always joins.
     let membership = match kind {
         NodeKind::Resolver => Some((
-            Field::ClusterMode,
+            Field::TrustDomainMode,
             "Create a new administrative network (creates a CA)",
             "Use an existing controller / CA",
             "Create a new administrative network (creates a CA)",
@@ -559,18 +559,18 @@ pub async fn discover_network(
     // identity, so the operator can recognize the one they mean by its glyph. The
     // operator can browse again ("poll for more") to pick up a cluster that
     // answered late; new ones are appended, deduped by domain.
-    let mut options: Vec<NetworkOption> = Vec::new();
+    let mut options: Vec<TrustDomainOption> = Vec::new();
     let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
     discover_into(ans, kind, &mut options, &mut servers).await;
     // Pick a discovered cluster by its glyph, enter an admin-server address
     // manually, or poll again for more.
     let seeds: Vec<SocketAddr> = 'pick: loop {
-        match ans.select_network(&options).await? {
-            NetworkChoice::Discovered(i) => match servers.get(i) {
+        match ans.select_trust_domain(&options).await? {
+            TrustDomainChoice::Discovered(i) => match servers.get(i) {
                 Some(s) => break 'pick s.clone(),
                 None => return Ok(AdminServers::DontHave),
             },
-            NetworkChoice::Manual => loop {
+            TrustDomainChoice::Manual => loop {
                 let typed = ans.text(Field::AdminServerAddr, None, None, true).await?;
                 match manual_seeds(typed) {
                     Ok(Some(s)) => break 'pick s,
@@ -578,7 +578,7 @@ pub async fn discover_network(
                     Err(e) => ans.warn(&format_compact!("{e:#}")),
                 }
             },
-            NetworkChoice::PollMore => {
+            TrustDomainChoice::PollMore => {
                 match discover_into(ans, kind, &mut options, &mut servers).await {
                     0 => ans.note("no additional clusters found"),
                     n => ans.note(&format_compact!("found {n} more cluster(s)")),
@@ -597,7 +597,7 @@ pub async fn discover_network(
 async fn discover_into(
     ans: &mut dyn Answerer,
     kind: NodeKind,
-    options: &mut Vec<NetworkOption>,
+    options: &mut Vec<TrustDomainOption>,
     servers: &mut Vec<Vec<SocketAddr>>,
 ) -> usize {
     ans.progress(Progress::timed(
@@ -606,7 +606,7 @@ async fn discover_into(
         DISCOVERY_TIMEOUT,
     ));
     let reports =
-        discover_networks(DISCOVERY_TIMEOUT, kind, Some(DISCOVERY_SETTLE)).await;
+        discover_trust_domains(DISCOVERY_TIMEOUT, kind, Some(DISCOVERY_SETTLE)).await;
     let mut added = 0;
     for r in reports {
         if options.iter().any(|o| o.domain == r.domain) {
@@ -614,7 +614,7 @@ async fn discover_into(
         }
         match r.identity {
             Ok(identity) => {
-                options.push(NetworkOption { domain: r.domain, identity });
+                options.push(TrustDomainOption { domain: r.domain, identity });
                 servers.push(r.admin_servers);
                 added += 1;
             }
@@ -655,14 +655,14 @@ pub async fn confirm_seeds(
     let info = transport::aggregate(seeds, kind, &identity)
         .await
         .context("mapping the network (GetInfo peer walk)")?;
-    Ok(AdminServers::Have(DiscoveredNetwork { identity, info }))
+    Ok(AdminServers::Have(DiscoveredTrustDomain { identity, info }))
 }
 
 /// Confirm a network reachable at one explicit address — the WAN parent given
 /// via `--parent-admin-server`, where there is no mDNS. Resolving the parent
 /// into a `Have` BEFORE the create-vs-enroll decision is what makes a
 /// satellite enroll its cert from the existing CA and never mint its own.
-pub async fn confirm_network_at(
+pub async fn confirm_trust_domain_at(
     ans: &mut dyn Answerer,
     addr: SocketAddr,
     kind: NodeKind,
@@ -673,12 +673,12 @@ pub async fn confirm_network_at(
 /// Map a confirmed network's resolvers into per-address referral auth,
 /// obtaining a client TLS identity from the network's CA when the network runs
 /// TLS and the caller doesn't already have one (`have_identity`). The identity
-/// was already glyph-confirmed in [`discover_network`] — no second
+/// was already glyph-confirmed in [`discover_trust_domain`] — no second
 /// confirmation; the signing connection still pins to it.
 #[allow(clippy::too_many_arguments)]
-pub async fn network_addrs_and_identity(
+pub async fn trust_domain_addrs_and_identity(
     ans: &mut dyn Answerer,
-    net: &DiscoveredNetwork,
+    net: &DiscoveredTrustDomain,
     kind: NodeKind,
     have_identity: bool,
     dry_run: bool,
@@ -740,9 +740,15 @@ pub async fn network_addrs_and_identity(
             ));
             tls_identities.push(identity.spec);
         } else {
-            let (j, staging) =
-                join_network(ans, ca_addr, kind, suggested.as_deref(), kp, &net.identity)
-                    .await?;
+            let (j, staging) = join_trust_domain(
+                ans,
+                ca_addr,
+                kind,
+                suggested.as_deref(),
+                kp,
+                &net.identity,
+            )
+            .await?;
             tls_identities.push(joined_to_spec(j));
             tls_staging.push(staging);
         }
@@ -765,7 +771,8 @@ pub async fn maybe_join_ca_server(
     let Some((ca_addr, identity)) = selected_ca_server(ans, probe, kind).await? else {
         return Ok(None);
     };
-    let joined = join_network(ans, ca_addr, kind, suggested_name, kp, &identity).await?;
+    let joined =
+        join_trust_domain(ans, ca_addr, kind, suggested_name, kp, &identity).await?;
     Ok(Some(joined))
 }
 
@@ -778,7 +785,7 @@ async fn selected_ca_server(
     let net = match probe {
         AdminServers::DontHave => return Ok(None),
         AdminServers::Have(net) => net,
-        AdminServers::NotProbed => match discover_network(ans, kind).await? {
+        AdminServers::NotProbed => match discover_trust_domain(ans, kind).await? {
             AdminServers::Have(net) => {
                 probed_here = net;
                 &probed_here
@@ -858,7 +865,7 @@ pub async fn await_issuance(
 /// (the CSR key's fingerprint) the admin matches out of band. The synchronous
 /// path (an admin present at this machine types their password) remains one
 /// answer away; it's the only path where the id-map groups are chosen here.
-pub async fn join_network(
+pub async fn join_trust_domain(
     ans: &mut dyn Answerer,
     addr: SocketAddr,
     kind: NodeKind,
@@ -866,10 +873,10 @@ pub async fn join_network(
     kp: Option<KeyProtArg>,
     identity: &CaIdentity,
 ) -> Result<(JoinedIdentity, TempDir)> {
-    join_network_replacing(ans, addr, kind, suggested_name, kp, None, identity).await
+    join_trust_domain_replacing(ans, addr, kind, suggested_name, kp, None, identity).await
 }
 
-pub async fn join_network_replacing(
+pub async fn join_trust_domain_replacing(
     ans: &mut dyn Answerer,
     addr: SocketAddr,
     kind: NodeKind,

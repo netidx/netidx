@@ -14,9 +14,9 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, EnrollRequest, NetworkMap, Role, SERVING_SAN, SignOk, SignResponse,
+        self, EnrollRequest, Role, SERVING_SAN, SignOk, SignResponse, TrustDomainMap,
     },
-    ca_store, ca_vault, netmap,
+    ca_store, ca_vault, trust_domain,
 };
 use anyhow::{Context, Result};
 use log::warn;
@@ -125,7 +125,7 @@ async fn grant_enrollment(
             let ca = ca.as_mut().context("this host does not hold the CA")?;
             let ca_dir = ca.dir().to_path_buf();
             let replaced_addr = enrollment.replaces.and_then(|old| {
-                map.servers
+                map.admin_servers
                     .iter()
                     .find(|server| server.id == old)
                     .map(|server| server.addr)
@@ -142,7 +142,7 @@ async fn grant_enrollment(
                 .await
                 .context("revoking the replaced server identity")?;
             }
-            netmap::save_async(&config_lock, &ca_dir, &staged)
+            trust_domain::save_async(&config_lock, &ca_dir, &staged)
                 .await
                 .context("persisting the enrollment grant")?;
             *map = staged;
@@ -163,7 +163,7 @@ async fn grant_enrollment(
 /// satellite named by the bundle. Enroll first so replacing the sole member of
 /// a cluster cannot transiently delete that stable cluster ID.
 pub(super) fn stage_enrollment(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
 ) -> Result<admin_proto::ResolverClusterId> {
@@ -172,7 +172,7 @@ pub(super) fn stage_enrollment(
             bail!("the active controller cannot be replaced by satellite enrollment")
         }
         Some(old) => Some(
-            map.servers
+            map.admin_servers
                 .iter()
                 .find(|server| server.id == old)
                 .with_context(|| {
@@ -189,16 +189,17 @@ pub(super) fn stage_enrollment(
         // that ownership on the staged copy before enrolling the fresh ID;
         // the old server remains a cluster member until the new grant exists,
         // so the stable cluster itself can never disappear in between.
-        if let Some(server) = map.servers.iter_mut().find(|server| server.id == old) {
+        if let Some(server) = map.admin_servers.iter_mut().find(|server| server.id == old)
+        {
             server.resolver = None;
         }
     }
-    let cluster = netmap::enroll(map, server_id, enrollment)?;
+    let cluster = trust_domain::enroll(map, server_id, enrollment)?;
     if let Some(old) = enrollment.replaces {
         if replaced_cluster.flatten() != Some(cluster) {
             bail!("a restored server must rejoin the same resolver cluster it replaces");
         }
-        netmap::remove(map, old)?;
+        trust_domain::remove(map, old)?;
     }
     Ok(cluster)
 }
@@ -206,7 +207,7 @@ pub(super) fn stage_enrollment(
 pub(super) fn authorize_enrollment(
     authd: &ca_vault::Authenticated,
     enrollment: &admin_proto::EnrollmentRequest,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> std::result::Result<(), String> {
     if enrollment.roles.contains(Role::Ca) {
         return Err("an enrollee may never request the Ca role".to_string());
@@ -224,9 +225,9 @@ pub(super) fn authorize_enrollment(
         ));
     }
     let base = match enrollment.cluster {
-        admin_proto::ClusterPlacement::Create { ref base } => base.as_str(),
-        admin_proto::ClusterPlacement::Join { cluster } => map
-            .and_then(|m| m.clusters.iter().find(|c| c.id == cluster))
+        admin_proto::ResolverClusterPlacement::Create { ref base } => base.as_str(),
+        admin_proto::ResolverClusterPlacement::Join { cluster } => map
+            .and_then(|m| m.resolver_clusters.iter().find(|c| c.id == cluster))
             .map(|c| c.base.as_str())
             .ok_or_else(|| {
                 "the requested cluster is not in the authoritative map".to_string()
@@ -247,7 +248,7 @@ pub(super) async fn handle_enroll_request(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> SignResponse {
     match try_enroll(ca, req, authentication, prepared_server_unlock, local, map).await {
         Ok(resp) => resp,
@@ -258,7 +259,7 @@ pub(super) async fn handle_enroll_request(
 fn enrollment_cert_identity(
     local: bool,
     renew_identity: Option<admin_proto::AdminServerId>,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> std::result::Result<crate::tls::AdminCertIdentity, String> {
     if !local {
         return Ok(crate::tls::AdminCertIdentity {
@@ -283,7 +284,7 @@ async fn try_enroll(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> Result<SignResponse> {
     // A request over the local control socket is already authorized as a
     // signing-tier superuser (`SO_PEERCRED` root / the daemon's own uid),

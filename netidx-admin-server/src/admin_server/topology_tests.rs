@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    admin_proto::ServerEntry,
+    admin_proto::AdminServerEntry,
     admin_server::{password_limiter::PasswordLimiter, test_support::signed_empty_crl},
     fingerprint::Fingerprint,
 };
@@ -39,7 +39,7 @@ async fn topology_fanout_writes_the_split_config_without_service_control() {
     let edit = ReferralEdit::SetTopology {
         local_member: resolver("10.0.60.1:4564"),
         members: vec![resolver("10.0.60.2:4564"), resolver("10.0.60.1:4564")],
-        parent: Some(admin_proto::ClusterEdge {
+        parent: Some(admin_proto::ResolverClusterEdge {
             path: "/ap".into(),
             addrs: vec![resolver("10.0.0.1:4564"), resolver("10.0.0.2:4564")],
         }),
@@ -104,11 +104,11 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
     };
     let root_member = resolver("10.1.0.1:4564");
     let child_member = resolver("10.2.0.1:4564");
-    let map = NetworkMap {
+    let map = TrustDomainMap {
         version: 9,
         controller,
-        servers: vec![
-            ServerEntry {
+        admin_servers: vec![
+            AdminServerEntry {
                 id: controller,
                 addr: "10.1.0.1:4565".parse().unwrap(),
                 roles: Role::Ca | Role::Resolver,
@@ -116,7 +116,7 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
                 cluster: Some(root),
                 state: admin_proto::ServerState::Registered,
             },
-            ServerEntry {
+            AdminServerEntry {
                 id: satellite,
                 addr: "10.2.0.1:4565".parse().unwrap(),
                 roles: Role::Resolver.into(),
@@ -125,19 +125,19 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
                 state: admin_proto::ServerState::Registered,
             },
         ],
-        clusters: vec![
-            admin_proto::ClusterEntry {
+        resolver_clusters: vec![
+            admin_proto::ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![root_member.clone()],
                 parent: None,
                 children: vec![child],
             },
-            admin_proto::ClusterEntry {
+            admin_proto::ResolverClusterEntry {
                 id: child,
                 base: "/eu".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![child_member.clone()],
                 parent: Some(root),
                 children: vec![],
@@ -145,7 +145,7 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
         ],
     };
 
-    let fanout = topology_fanout(&map, map.clusters.iter());
+    let fanout = topology_fanout(&map, map.resolver_clusters.iter());
     assert_eq!(fanout.targets.len(), 2);
     let (_, _, ReferralEdit::SetTopology { parent, children, .. }) =
         fanout.targets.iter().find(|(server, _, _)| *server == controller).unwrap();
@@ -174,7 +174,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
         addr: addr.parse().unwrap(),
         auth: InfoAuth::Anonymous,
     };
-    let server = |id, admin_addr: &str, member: ResolverAddr, cluster| ServerEntry {
+    let server = |id, admin_addr: &str, member: ResolverAddr, cluster| AdminServerEntry {
         id,
         addr: admin_addr.parse().unwrap(),
         roles: Role::Resolver.into(),
@@ -187,10 +187,10 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
     let peer_member = resolver("10.2.0.2:4564");
     let grandchild_member = resolver("10.3.0.1:4564");
     let sibling_member = resolver("10.4.0.1:4564");
-    let map = NetworkMap {
+    let map = TrustDomainMap {
         version: 12,
         controller,
-        servers: vec![
+        admin_servers: vec![
             server(controller, "10.1.0.1:4565", root_member.clone(), root),
             server(joining, "10.2.0.1:4565", joining_member.clone(), child),
             server(peer, "10.2.0.2:4565", peer_member.clone(), child),
@@ -202,35 +202,35 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
             ),
             server(sibling_server, "10.4.0.1:4565", sibling_member.clone(), sibling),
         ],
-        clusters: vec![
-            admin_proto::ClusterEntry {
+        resolver_clusters: vec![
+            admin_proto::ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![root_member],
                 parent: None,
                 children: vec![child, sibling],
             },
-            admin_proto::ClusterEntry {
+            admin_proto::ResolverClusterEntry {
                 id: child,
                 base: "/eu".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![joining_member, peer_member],
                 parent: Some(root),
                 children: vec![grandchild],
             },
-            admin_proto::ClusterEntry {
+            admin_proto::ResolverClusterEntry {
                 id: grandchild,
                 base: "/eu/fr".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![grandchild_member],
                 parent: Some(child),
                 children: vec![],
             },
-            admin_proto::ClusterEntry {
+            admin_proto::ResolverClusterEntry {
                 id: sibling,
                 base: "/us".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![sibling_member],
                 parent: Some(root),
                 children: vec![],
@@ -281,7 +281,7 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
     let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
     crate::admin_server_config::save(&config_lock, &cfg_path, &cfg).unwrap();
     drop(config_lock);
-    let entry = |id, addr, roles| ServerEntry {
+    let entry = |id, addr, roles| AdminServerEntry {
         id,
         addr,
         roles,
@@ -289,13 +289,14 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
         cluster: None,
         state: admin_proto::ServerState::Registered,
     };
-    let mut old_map = NetworkMap::empty(controller);
+    let mut old_map = TrustDomainMap::empty(controller);
     old_map.version = 4;
-    old_map.servers.push(entry(controller, old_addr, Role::Ca.into()));
-    old_map.servers.push(entry(node, cfg.listen, Role::Resolver.into()));
+    old_map.admin_servers.push(entry(controller, old_addr, Role::Ca.into()));
+    old_map.admin_servers.push(entry(node, cfg.listen, Role::Resolver.into()));
     let mut new_map = old_map.clone();
     new_map.version = 5;
-    new_map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = new_addr;
+    new_map.admin_servers.iter_mut().find(|s| s.id == controller).unwrap().addr =
+        new_addr;
     let state = Server::from_state(
         ConfigDirLock::acquire(root.path()).unwrap(),
         None,
@@ -331,7 +332,8 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
     let mut stale = req.clone();
     stale.map.version = 3;
     stale.addr = old_addr;
-    stale.map.servers.iter_mut().find(|s| s.id == controller).unwrap().addr = old_addr;
+    stale.map.admin_servers.iter_mut().find(|s| s.id == controller).unwrap().addr =
+        old_addr;
     assert!(matches!(
         handle_apply_controller_state(&state, &stale).await,
         ApplyControllerStateResponse::Err { .. }
@@ -343,7 +345,7 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
 }
 
 /// Deciding a delegation needs authority over the parent cluster's base, not
-/// just over the proposed child path. `netmap::delegate` only requires the
+/// just over the proposed child path. `trust_domain::delegate` only requires the
 /// child to sit under the parent's base, so without this check an admin scoped
 /// to `/eu` could approve a delegation of `/eu/x` parented at the ROOT cluster
 /// and rewrite the root resolvers' referrals.
@@ -360,7 +362,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
     };
     let root_member = resolver("10.1.0.1:4564");
     let eu_member = resolver("10.2.0.1:4564");
-    let server = |id, addr: &str, member: &ResolverAddr, cluster| ServerEntry {
+    let server = |id, addr: &str, member: &ResolverAddr, cluster| AdminServerEntry {
         id,
         addr: addr.parse().unwrap(),
         roles: Role::Resolver.into(),
@@ -368,26 +370,26 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
     };
-    let map = NetworkMap {
+    let map = TrustDomainMap {
         version: 1,
         controller: root_srv,
-        servers: vec![
+        admin_servers: vec![
             server(root_srv, "10.1.0.1:4565", &root_member, root),
             server(eu_srv, "10.2.0.1:4565", &eu_member, eu),
         ],
-        clusters: vec![
-            admin_proto::ClusterEntry {
+        resolver_clusters: vec![
+            admin_proto::ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![root_member],
                 parent: None,
                 children: vec![eu],
             },
-            admin_proto::ClusterEntry {
+            admin_proto::ResolverClusterEntry {
                 id: eu,
                 base: "/eu".into(),
-                state: admin_proto::ClusterState::Active,
+                state: admin_proto::ResolverClusterState::Active,
                 members: vec![eu_member],
                 parent: Some(root),
                 children: vec![],

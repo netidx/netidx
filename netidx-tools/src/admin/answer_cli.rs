@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use netidx_admin_client::{
-    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress},
+    answer::{Answerer, Field, Progress, TrustDomainChoice, TrustDomainOption},
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -319,13 +319,13 @@ impl Answerer for FlagAnswerer {
         provided.ok_or_else(|| missing(field))
     }
 
-    async fn select_network(
+    async fn select_trust_domain(
         &mut self,
-        _networks: &[NetworkOption],
-    ) -> Result<NetworkChoice> {
+        _networks: &[TrustDomainOption],
+    ) -> Result<TrustDomainChoice> {
         // Discovery is interactive-only; the strict CLI takes an explicit
         // --admin-server instead and never reaches this.
-        Err(missing(Field::SelectNetwork))
+        Err(missing(Field::SelectTrustDomain))
     }
 
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret> {

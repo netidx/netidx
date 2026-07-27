@@ -2,7 +2,7 @@
 //! and `update` (additive reconcile against the network). Shared by the
 //! per-role command modules under [`super::roles`].
 //!
-//! The security-critical step is [`fetch_network_pinned`]: these ops
+//! The security-critical step is [`fetch_trust_domain_pinned`]: these ops
 //! trust a admin server's picture of the network, so they first re-pin to
 //! the **same** CA identity the operator glyph-confirmed at install
 //! (stored in the [`InstallRecord`]). A admin server whose CA fingerprint
@@ -13,13 +13,13 @@ use clap::Args;
 use netidx_admin_client::{
     config_lock::ConfigDirLock,
     discovery, paths,
-    provenance::{InstallRecord, InstallRole, NetworkIdentity},
+    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
     reconcile,
     resolver::ResolverConfig,
     template::{describe_member_auth, describe_ref_auth},
-    transport::{self, NetworkInfo},
+    transport::{self, TrustDomainInfo},
 };
-use netidx_admin_proto::{NetworkMap, NodeKind};
+use netidx_admin_proto::{NodeKind, TrustDomainMap};
 use std::{net::SocketAddr, time::Duration};
 
 /// How long to browse mDNS for the install's admin server when the
@@ -60,11 +60,11 @@ fn require_role(rec: &InstallRecord, want: InstallRole) -> Result<()> {
 /// the recorded address first, then mDNS; every candidate is verified
 /// against the pin before any info is trusted. Fails closed: a reachable
 /// but wrong-fingerprint server is refused, not used.
-fn fetch_network_pinned(
-    net_id: &NetworkIdentity,
+fn fetch_trust_domain_pinned(
+    net_id: &TrustDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<NetworkInfo> {
+) -> Result<TrustDomainInfo> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
     if let Some(a) = admin_server {
@@ -141,7 +141,7 @@ pub(crate) fn workstation_status() -> Result<()> {
         ),
         Some(net_id) => {
             println!("  network: {:?}", net_id.domain);
-            match fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client) {
+            match fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(info) => {
                     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
@@ -173,7 +173,7 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
          is nothing to update. Run `netidx admin workstation join` first.",
     )?;
     let rpath = resolver_config_path()?;
-    let info = fetch_network_pinned(net_id, rec.admin_server, NodeKind::Client)?;
+    let info = fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client)?;
     let mode = if flags.dry_run {
         UpdateMode::DryRun
     } else {
@@ -196,13 +196,13 @@ fn client_config_path() -> Result<std::path::PathBuf> {
         .context("no client config found at the standard locations")
 }
 
-/// Like [`fetch_network_pinned`] but returns the CA-authoritative network
+/// Like [`fetch_trust_domain_pinned`] but returns the CA-authoritative network
 /// map in one round trip (no client-side walk). Same fail-closed pinning.
 fn fetch_map_pinned(
-    net_id: &NetworkIdentity,
+    net_id: &TrustDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
     if let Some(a) = admin_server {

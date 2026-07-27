@@ -402,8 +402,8 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     {
         bail!("backup admin-server identity does not match its manifest");
     }
-    let map: crate::admin_proto::NetworkMap =
-        serde_json::from_slice(&fs::read(bundle.join("ca/netmap.json"))?)?;
+    let map: crate::admin_proto::TrustDomainMap =
+        serde_json::from_slice(&fs::read(bundle.join("ca/trust-domain.json"))?)?;
     if map.controller != manifest.controller || map.version != manifest.map_version {
         bail!("backup network map does not match its manifest");
     }

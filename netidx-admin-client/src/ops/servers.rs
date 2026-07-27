@@ -3,8 +3,8 @@
 use super::{open_admin_session, resolve_controller};
 use crate::{
     admin_proto::{
-        AdminServerId, ClusterState, NodeKind, ResolverAddr, ResolverClusterId, Role,
-        ServerState,
+        AdminServerId, NodeKind, ResolverAddr, ResolverClusterId, ResolverClusterState,
+        Role, ServerState,
     },
     answer::Answerer,
     transport,
@@ -22,7 +22,7 @@ pub struct ServerInfo {
     pub resolver: Option<ResolverAddr>,
     pub cluster: Option<ResolverClusterId>,
     pub cluster_base: Option<String>,
-    pub cluster_state: Option<ClusterState>,
+    pub cluster_state: Option<ResolverClusterState>,
     pub controller: bool,
 }
 
@@ -41,12 +41,12 @@ pub async fn list_servers(
         .await
         .context("fetching the authoritative server map")?;
     let mut rows: Vec<_> = map
-        .servers
+        .admin_servers
         .iter()
         .map(|entry| {
-            let cluster = entry
-                .cluster
-                .and_then(|id| map.clusters.iter().find(|cluster| cluster.id == id));
+            let cluster = entry.cluster.and_then(|id| {
+                map.resolver_clusters.iter().find(|cluster| cluster.id == id)
+            });
             ServerInfo {
                 id: entry.id,
                 addr: entry.addr,

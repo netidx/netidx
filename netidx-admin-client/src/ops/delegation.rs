@@ -207,7 +207,7 @@ pub async fn deny_delegation(
 
 /// Whether the child's freshly-written parent referral reached the rest of its
 /// cluster.
-pub enum ClusterPropagation {
+pub enum ResolverClusterPropagation {
     /// The CA controller updated every registered parent and child member.
     ControllerManaged,
 }
@@ -217,7 +217,7 @@ pub struct AddParentOutcome {
     /// The subtree this resolver now owns under the parent.
     pub proposed_path: String,
     /// Whether/how the referral propagated to the child's other cluster members.
-    pub propagation: ClusterPropagation,
+    pub propagation: ResolverClusterPropagation,
 }
 
 pub enum AddParentCompletion {
@@ -341,7 +341,7 @@ pub async fn prepare_add_parent(
     // parent still fails in `set_parent_referral` as a real reparent attempt.
     let outcome = AddParentOutcome {
         proposed_path: proposed_path.to_string(),
-        propagation: ClusterPropagation::ControllerManaged,
+        propagation: ResolverClusterPropagation::ControllerManaged,
     };
     if template::parent_referral_matches(resolver_config, &parent_ref)? {
         ans.note("the controller already wrote this resolver's approved topology");
@@ -408,7 +408,7 @@ mod tests {
             },
             outcome: AddParentOutcome {
                 proposed_path: "/eu".to_string(),
-                propagation: ClusterPropagation::ControllerManaged,
+                propagation: ResolverClusterPropagation::ControllerManaged,
             },
         }
     }

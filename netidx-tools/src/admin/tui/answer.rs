@@ -14,7 +14,7 @@ use super::{theme, widgets};
 use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyModifiers};
 use netidx_admin_client::{
-    answer::{Answerer, Field, NetworkChoice, NetworkOption, Progress},
+    answer::{Answerer, Field, Progress, TrustDomainChoice, TrustDomainOption},
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -71,9 +71,9 @@ pub(super) enum UiRequest {
     },
     /// Pick a discovered cluster (each shown with its CA glyph + fingerprint),
     /// or the trailing "enter an address manually" option.
-    SelectNetwork {
-        networks: Vec<NetworkOption>,
-        reply: oneshot::Sender<Result<NetworkChoice>>,
+    SelectTrustDomain {
+        networks: Vec<TrustDomainOption>,
+        reply: oneshot::Sender<Result<TrustDomainChoice>>,
     },
     /// Multi-select the parent's resolver servers (each with its level), or the
     /// trailing "enter an address manually" option.
@@ -219,12 +219,12 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Choice { field, choices, default, reply }).await
     }
 
-    async fn select_network(
+    async fn select_trust_domain(
         &mut self,
-        networks: &[NetworkOption],
-    ) -> Result<NetworkChoice> {
+        networks: &[TrustDomainOption],
+    ) -> Result<TrustDomainChoice> {
         let networks = networks.to_vec();
-        self.ask(|reply| UiRequest::SelectNetwork { networks, reply }).await
+        self.ask(|reply| UiRequest::SelectTrustDomain { networks, reply }).await
     }
 
     async fn confirm(
@@ -316,10 +316,10 @@ pub(super) enum Modal {
     /// Pick one of the discovered clusters (rendered with its glyph +
     /// fingerprint) or the trailing manual-entry row. Selection index
     /// `networks.len()` is the manual row.
-    SelectNetwork {
-        networks: Vec<NetworkOption>,
+    SelectTrustDomain {
+        networks: Vec<TrustDomainOption>,
         state: ListState,
-        reply: Option<oneshot::Sender<Result<NetworkChoice>>>,
+        reply: Option<oneshot::Sender<Result<TrustDomainChoice>>>,
     },
     /// Multi-select parent resolvers (checkbox per row) with a trailing
     /// manual-entry row. `checked` parallels `rows`; the cursor index
@@ -393,10 +393,10 @@ impl Modal {
                 state.select(Some(sel));
                 Some(Modal::Choice { field, choices, state, reply: Some(reply) })
             }
-            UiRequest::SelectNetwork { networks, reply } => {
+            UiRequest::SelectTrustDomain { networks, reply } => {
                 let mut state = ListState::default();
                 state.select(Some(0));
-                Some(Modal::SelectNetwork { networks, state, reply: Some(reply) })
+                Some(Modal::SelectTrustDomain { networks, state, reply: Some(reply) })
             }
             UiRequest::SelectParent { rows, reply } => {
                 let mut state = ListState::default();
@@ -439,7 +439,7 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
-            Modal::SelectNetwork { .. }
+            Modal::SelectTrustDomain { .. }
             | Modal::SelectParent { .. }
             | Modal::Identity { .. }
             | Modal::Announce { .. }
@@ -532,7 +532,7 @@ impl Modal {
             // The list is the discovered networks, then a "poll for more" row,
             // then a manual-entry row: indices `networks.len()` and
             // `networks.len() + 1` respectively.
-            Modal::SelectNetwork { networks, state, reply } => match code {
+            Modal::SelectTrustDomain { networks, state, reply } => match code {
                 KeyCode::Esc => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Err(anyhow!("cancelled")));
@@ -553,11 +553,11 @@ impl Modal {
                 KeyCode::Enter => {
                     let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
                     let choice = if sel == networks.len() {
-                        NetworkChoice::PollMore
+                        TrustDomainChoice::PollMore
                     } else if sel == networks.len() + 1 {
-                        NetworkChoice::Manual
+                        TrustDomainChoice::Manual
                     } else {
-                        NetworkChoice::Discovered(sel)
+                        TrustDomainChoice::Discovered(sel)
                     };
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(choice));
@@ -798,7 +798,7 @@ impl Modal {
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, rows[2], &mut st);
             }
-            Modal::SelectNetwork { networks, state, .. } => {
+            Modal::SelectTrustDomain { networks, state, .. } => {
                 const POLL_MORE: &str = "Search again for more clusters";
                 const MANUAL: &str = "Enter an address manually…";
                 let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
@@ -813,7 +813,7 @@ impl Modal {
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let block = theme::dialog_block(Field::SelectNetwork.label())
+                let block = theme::dialog_block(Field::SelectTrustDomain.label())
                     .title_bottom(Line::from(Span::styled(
                         " ↑/↓ move · Enter select · Esc cancel ",
                         theme::hint_style(),
@@ -1181,7 +1181,7 @@ mod tests {
     fn ctrl_u_clears_a_prefilled_text_field() {
         let (tx, mut rx) = oneshot::channel();
         let mut modal = Modal::from_request(UiRequest::Text {
-            field: Field::NetworkDomain,
+            field: Field::TrustDomainName,
             default: Some("local".into()),
             required: false,
             reply: tx,
@@ -1345,27 +1345,30 @@ mod tests {
         assert!(rx.try_recv().unwrap().is_err(), "Esc must send a cancel error");
     }
 
-    fn select_network_modal() -> (Modal, oneshot::Receiver<Result<NetworkChoice>>) {
+    fn select_trust_domain_modal() -> (Modal, oneshot::Receiver<Result<TrustDomainChoice>>)
+    {
         // Empty network list: index 0 is the poll-more row, index 1 the manual row.
         let (tx, rx) = oneshot::channel();
-        let modal =
-            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx })
-                .unwrap();
+        let modal = Modal::from_request(UiRequest::SelectTrustDomain {
+            networks: vec![],
+            reply: tx,
+        })
+        .unwrap();
         (modal, rx)
     }
 
     #[test]
-    fn select_network_enter_polls_more() {
-        let (mut modal, mut rx) = select_network_modal();
+    fn select_trust_domain_enter_polls_more() {
+        let (mut modal, mut rx) = select_trust_domain_modal();
         assert!(modal.on_key(KeyCode::Enter), "Enter must close the modal");
-        assert_eq!(rx.try_recv().unwrap().unwrap(), NetworkChoice::PollMore);
+        assert_eq!(rx.try_recv().unwrap().unwrap(), TrustDomainChoice::PollMore);
     }
 
     #[test]
-    fn select_network_manual_is_the_last_row() {
-        let (mut modal, mut rx) = select_network_modal();
+    fn select_trust_domain_manual_is_the_last_row() {
+        let (mut modal, mut rx) = select_trust_domain_modal();
         modal.on_key(KeyCode::Down); // past poll-more, onto manual
         assert!(modal.on_key(KeyCode::Enter));
-        assert_eq!(rx.try_recv().unwrap().unwrap(), NetworkChoice::Manual);
+        assert_eq!(rx.try_recv().unwrap().unwrap(), TrustDomainChoice::Manual);
     }
 }

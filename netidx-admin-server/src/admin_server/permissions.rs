@@ -13,8 +13,8 @@ use super::{
 use crate::{
     admin_proto::{
         self, ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest,
-        EditPermsResponse, GetPermsResponse, NetworkMap, PeerResult, PropagationOk,
-        ReadPermsOk, ReadPermsRequest, ReadPermsResponse,
+        EditPermsResponse, GetPermsResponse, PeerResult, PropagationOk, ReadPermsOk,
+        ReadPermsRequest, ReadPermsResponse, TrustDomainMap,
     },
     ca_vault, transport,
 };
@@ -294,14 +294,14 @@ pub(super) async fn handle_apply_perms_edit(
 /// from a scope (`/` covers the whole tree). The path-aware prefix test
 /// (`Path::is_parent`) won't let `/eu` match `/europe`.
 fn cluster_members_for(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     target_path: &str,
 ) -> Option<Vec<(admin_proto::AdminServerId, SocketAddr)>> {
-    let cluster = map.clusters.iter().find(|c| {
-        c.base == target_path && c.state == admin_proto::ClusterState::Active
+    let cluster = map.resolver_clusters.iter().find(|c| {
+        c.base == target_path && c.state == admin_proto::ResolverClusterState::Active
     })?;
     let mut members: Vec<_> = map
-        .servers
+        .admin_servers
         .iter()
         .filter(|s| {
             s.cluster == Some(cluster.id)

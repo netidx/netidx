@@ -1204,7 +1204,7 @@ fn fmt_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netidx_admin_client::provenance::NetworkIdentity;
+    use netidx_admin_client::provenance::TrustDomainIdentity;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -1263,7 +1263,7 @@ mod tests {
                 InstallRole::Resolver,
                 "/",
                 "tls",
-                Some(NetworkIdentity::new("example.com", &fp)),
+                Some(TrustDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,
@@ -1291,7 +1291,7 @@ mod tests {
                 InstallRole::Resolver,
                 "/",
                 "tls",
-                Some(NetworkIdentity::new("example.com", &fp)),
+                Some(TrustDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,
@@ -1323,7 +1323,7 @@ mod tests {
                 InstallRole::Controller,
                 "/",
                 "tls",
-                Some(NetworkIdentity::new("example.com", &fp)),
+                Some(TrustDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,

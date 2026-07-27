@@ -14,7 +14,7 @@ use crate::{
         enroll::{self, AdminServers},
         service::{ServiceGate, ServiceNeed, offer},
     },
-    provenance::{InstallRecord, NetworkIdentity},
+    provenance::{InstallRecord, TrustDomainIdentity},
     resolver_probe,
     service::ServiceScope,
     template::RenderedTemplate,
@@ -283,12 +283,12 @@ pub fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
 /// `(None, None)` when the install didn't join a *discovered* network (a
 /// CLI-flag parent, the manual prompt cascade, or no parent at all carry no
 /// confirmed identity).
-pub fn network_provenance(
+pub fn trust_domain_provenance(
     probe: &AdminServers,
-) -> (Option<NetworkIdentity>, Option<SocketAddr>) {
+) -> (Option<TrustDomainIdentity>, Option<SocketAddr>) {
     match probe.have() {
         Some(net) => {
-            let id = NetworkIdentity::new(
+            let id = TrustDomainIdentity::new(
                 net.identity.domain.clone(),
                 &net.identity.fingerprint,
             );
@@ -564,7 +564,7 @@ mod tests {
     use super::*;
     use crate::{
         admin_proto::Secret,
-        answer::{NetworkChoice, NetworkOption, Progress},
+        answer::{Progress, TrustDomainChoice, TrustDomainOption},
         fingerprint::Fingerprint,
         provenance::InstallRole,
         template::{RenderedTemplate, TlsCopyJob},
@@ -600,10 +600,10 @@ mod tests {
             unreachable!()
         }
 
-        async fn select_network(
+        async fn select_trust_domain(
             &mut self,
-            _networks: &[NetworkOption],
-        ) -> Result<NetworkChoice> {
+            _networks: &[TrustDomainOption],
+        ) -> Result<TrustDomainChoice> {
             unreachable!()
         }
 

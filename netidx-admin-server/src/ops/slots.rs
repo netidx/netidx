@@ -28,9 +28,9 @@ use crate::{
     ca_vault::{self, CAVault},
     config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
-    local, netmap, offline_ca, paths,
+    local, offline_ca, paths,
     plan::{ca_setup, server_setup, service::ServiceNeed},
-    tls, transport,
+    tls, transport, trust_domain,
 };
 use anyhow::{Context, Result, bail};
 use netidx_admin_proto::policy::recovery_policy;
@@ -401,7 +401,7 @@ async fn recover_controller_with_password_and_lock(
         );
     }
 
-    let mut map = netmap::load_async(ca_dir, cfg.server_id).await?;
+    let mut map = trust_domain::load_async(ca_dir, cfg.server_id).await?;
     if map.controller != cfg.server_id {
         bail!(
             "restored controller mismatch: config {}, map {}",
@@ -424,9 +424,9 @@ async fn recover_controller_with_password_and_lock(
         );
     }
     controller.addr = listen;
-    netmap::upsert_controller(&mut map, controller, None)?;
+    trust_domain::upsert_controller(&mut map, controller, None)?;
     if let Some(resolver_listen) = resolver_listen {
-        netmap::relocate_resolver(&mut map, cfg.server_id, resolver_listen)?;
+        trust_domain::relocate_resolver(&mut map, cfg.server_id, resolver_listen)?;
     }
 
     // Prepare both replacement secrets before touching the vault or issuance
@@ -539,7 +539,7 @@ async fn recover_controller_with_password_and_lock(
     atomic::write_atomic_async(&autorenew_keytab, &protected_autorenew.bytes, 0o600)
         .await?;
 
-    netmap::save_async(&config_lock, ca_dir, &map).await?;
+    trust_domain::save_async(&config_lock, ca_dir, &map).await?;
 
     cfg.listen = listen;
     cfg.home_ca_fingerprint = restored_fingerprint.text();
@@ -797,7 +797,7 @@ pub async fn external_install_cert(
             crate::provenance::InstallRole::Controller,
             "/",
             "admin-tls",
-            Some(crate::provenance::NetworkIdentity::new(
+            Some(crate::provenance::TrustDomainIdentity::new(
                 m.domain.clone(),
                 &netidx_admin_proto::fingerprint::Fingerprint::of_cert_pem(
                     &intermediate_pem,
@@ -944,8 +944,8 @@ mod tests {
     async fn recoverable_controller() -> ControllerFixture {
         use crate::admin_server_config::{CaRole, Roles};
         use netidx_admin_proto::{
-            ClusterEntry, ClusterState, NetworkMap, ResolverClusterId, Role, ServerEntry,
-            ServerState,
+            AdminServerEntry, ResolverClusterEntry, ResolverClusterId,
+            ResolverClusterState, Role, ServerState, TrustDomainMap,
         };
 
         let root = tempfile::tempdir().unwrap();
@@ -1015,8 +1015,8 @@ mod tests {
 
         let cluster = ResolverClusterId::new();
         let listen = "10.0.0.10:4565".parse().unwrap();
-        let mut map = NetworkMap::empty(server_id);
-        map.servers.push(ServerEntry {
+        let mut map = TrustDomainMap::empty(server_id);
+        map.admin_servers.push(AdminServerEntry {
             id: server_id,
             addr: listen,
             roles: Role::Ca | Role::Resolver,
@@ -1024,15 +1024,15 @@ mod tests {
             cluster: Some(cluster),
             state: ServerState::Registered,
         });
-        map.clusters.push(ClusterEntry {
+        map.resolver_clusters.push(ResolverClusterEntry {
             id: cluster,
             base: "/".to_string(),
-            state: ClusterState::Active,
+            state: ResolverClusterState::Active,
             members: vec![],
             parent: None,
             children: vec![],
         });
-        netmap::save(&config_lock, &ca_dir, &map).unwrap();
+        trust_domain::save(&config_lock, &ca_dir, &map).unwrap();
 
         let config = root.path().join("admin-server.json");
         let keytab = root.path().join("replacement-autorenew.keytab");
@@ -1165,11 +1165,12 @@ mod tests {
             },
         };
         let new_resolver: SocketAddr = "10.0.0.20:14564".parse().unwrap();
-        let mut map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
-        map.servers[0].resolver = Some(old_resolver.clone());
-        map.clusters[0].members = vec![old_resolver];
+        let mut map =
+            trust_domain::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
+        map.admin_servers[0].resolver = Some(old_resolver.clone());
+        map.resolver_clusters[0].members = vec![old_resolver];
         let lock = ConfigDirLock::acquire_for_ca_dir(&fixture.ca_dir).await.unwrap();
-        netmap::save(&lock, fixture.ca_dir.as_path(), &map).unwrap();
+        trust_domain::save(&lock, fixture.ca_dir.as_path(), &map).unwrap();
         drop(lock);
         let out = recover_controller_with_password(
             fixture.ca_dir.as_path(),
@@ -1198,15 +1199,17 @@ mod tests {
         let identity = tls::admin_cert_identity_from_pem(&leaf).unwrap();
         assert_eq!(identity.server_id, fixture.server_id);
         assert!(identity.controller);
-        let map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
+        let map =
+            trust_domain::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
         assert_eq!(
             map.controller_entry().unwrap().resolver.as_ref().unwrap().addr,
             new_resolver
         );
-        assert_eq!(map.clusters[0].members[0].addr, new_resolver);
+        assert_eq!(map.resolver_clusters[0].members[0].addr, new_resolver);
         netidx::tls::load_private_key(None, &cfg.serving_key.to_string_lossy()).unwrap();
 
-        let map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
+        let map =
+            trust_domain::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
         assert_eq!(map.controller_entry().unwrap().addr, new_listen);
 
         let lock = crate::config_lock::ConfigDirLock::acquire_for_ca_dir(
@@ -1241,7 +1244,8 @@ mod tests {
         let fixture = recoverable_controller().await;
         let cfg = admin_server_config::load_for_recovery(&fixture.config).unwrap();
         let (map_version, highest_serial, ca_key) = {
-            let map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
+            let map =
+                trust_domain::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
             let lock = crate::config_lock::ConfigDirLock::acquire_for_ca_dir(
                 fixture.ca_dir.as_path(),
             )
@@ -1305,7 +1309,8 @@ mod tests {
         let fixture = recoverable_controller().await;
         let cfg = admin_server_config::load_for_recovery(&fixture.config).unwrap();
         let (map_version, highest_serial, ca_key) = {
-            let map = netmap::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
+            let map =
+                trust_domain::load(fixture.ca_dir.as_path(), fixture.server_id).unwrap();
             let lock = crate::config_lock::ConfigDirLock::acquire_for_ca_dir(
                 fixture.ca_dir.as_path(),
             )
@@ -1328,10 +1333,10 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let bundle = parent.path().join("backup");
         crate::backup::publish(snapshot, &bundle, fixture.ca_dir.as_path()).unwrap();
-        let original_map = std::fs::read(bundle.join("ca/netmap.json")).unwrap();
-        std::fs::write(bundle.join("ca/netmap.json"), b"tampered").unwrap();
+        let original_map = std::fs::read(bundle.join("ca/trust-domain.json")).unwrap();
+        std::fs::write(bundle.join("ca/trust-domain.json"), b"tampered").unwrap();
         assert!(crate::backup::verify(&bundle).is_err());
-        std::fs::write(bundle.join("ca/netmap.json"), original_map).unwrap();
+        std::fs::write(bundle.join("ca/trust-domain.json"), original_map).unwrap();
         let manifest_path = bundle.join(crate::backup::MANIFEST_FILE);
         let mut manifest: crate::backup::Manifest =
             serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
@@ -1582,7 +1587,8 @@ mod tests {
         let vault_path = fixture.ca_dir.join(ca_vault::VAULT_FILE);
         let before_vault = std::fs::read(&vault_path).unwrap();
         let before_config = std::fs::read(&fixture.config).unwrap();
-        let before_map = std::fs::read(netmap::path(fixture.ca_dir.as_path())).unwrap();
+        let before_map =
+            std::fs::read(trust_domain::path(fixture.ca_dir.as_path())).unwrap();
         assert!(
             recover_controller_with_password(
                 fixture.ca_dir.as_path(),
@@ -1599,7 +1605,7 @@ mod tests {
         assert_eq!(std::fs::read(&vault_path).unwrap(), before_vault);
         assert_eq!(std::fs::read(&fixture.config).unwrap(), before_config);
         assert_eq!(
-            std::fs::read(netmap::path(fixture.ca_dir.as_path())).unwrap(),
+            std::fs::read(trust_domain::path(fixture.ca_dir.as_path())).unwrap(),
             before_map
         );
         assert!(!fixture.keytab.exists());
@@ -1645,7 +1651,7 @@ mod tests {
         assert_eq!(std::fs::read(&vault_path).unwrap(), before_vault);
         assert_eq!(std::fs::read(&fixture.config).unwrap(), after_tamper);
         assert_eq!(
-            std::fs::read(netmap::path(fixture.ca_dir.as_path())).unwrap(),
+            std::fs::read(trust_domain::path(fixture.ca_dir.as_path())).unwrap(),
             before_map
         );
         assert!(!fixture.keytab.exists());

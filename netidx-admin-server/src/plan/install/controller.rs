@@ -11,7 +11,7 @@ use crate::{
         ca_setup,
         service::{ServiceGate, ServiceNeed, offer},
     },
-    provenance::{InstallRecord, InstallRole, NetworkIdentity},
+    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
     service::ServiceScope,
 };
 use anyhow::{Context, Result, bail};
@@ -31,7 +31,7 @@ pub async fn create_self_signed_controller(
     listen_hint: Option<IpAddr>,
     units_dir: Option<PathBuf>,
     insecure_no_tpm: bool,
-) -> Result<(crate::ca::Ca, ServiceNeed, NetworkIdentity)> {
+) -> Result<(crate::ca::Ca, ServiceNeed, TrustDomainIdentity)> {
     ca_setup::announce_founding_policy(ans, &domain);
     let mut opts = ca_setup::founding_ca_opts(
         paths::user_ca_dir()?,
@@ -43,8 +43,10 @@ pub async fn create_self_signed_controller(
     );
     opts.listen = listen;
     let (ca, need) = ca_setup::create_vaulted_ca(ans, config_lock, opts).await?;
-    let identity =
-        NetworkIdentity::new(domain, &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?);
+    let identity = TrustDomainIdentity::new(
+        domain,
+        &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?,
+    );
     Ok((ca, need, identity))
 }
 
@@ -91,7 +93,7 @@ pub async fn run_controller(
         );
     }
     let domain = ans
-        .text(Field::NetworkDomain, input.domain, Some(DEFAULT_TLS_DOMAIN), false)
+        .text(Field::TrustDomainName, input.domain, Some(DEFAULT_TLS_DOMAIN), false)
         .await?
         .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
     let units_dir = resolve_units_dir(input.common.no_units, input.units_dir.as_deref())?;

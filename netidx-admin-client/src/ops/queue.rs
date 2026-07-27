@@ -55,7 +55,7 @@ pub struct QueueItem {
     pub enroll_listen: Option<SocketAddr>,
     pub requested_roles: BitFlags<netidx_admin_proto::Role>,
     pub resolver_members: Vec<netidx_admin_proto::ResolverAddr>,
-    pub cluster: Option<netidx_admin_proto::ClusterPlacement>,
+    pub cluster: Option<netidx_admin_proto::ResolverClusterPlacement>,
     pub cluster_base: Option<String>,
     pub replaces: Option<netidx_admin_proto::AdminServerId>,
     pub replaces_serial: Option<u64>,

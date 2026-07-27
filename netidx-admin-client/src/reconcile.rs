@@ -14,11 +14,11 @@
 //! the in-sync / idempotent result.
 
 use crate::{
-    admin_proto::{InfoAuth, NetworkMap, ResolverAddr},
+    admin_proto::{InfoAuth, ResolverAddr, TrustDomainMap},
     client::ClientConfig,
     config_lock::ConfigDirLock,
     resolver::ResolverConfig,
-    transport::NetworkInfo,
+    transport::TrustDomainInfo,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -296,7 +296,7 @@ fn describe_info_auth(a: &InfoAuth) -> &'static str {
 /// network peer the operator deleted; suppressing that is a later design.
 /// Idempotent: a config already carrying every network peer yields an
 /// empty plan.
-pub fn reconcile_resolver_peers(path: &Path, net: &NetworkInfo) -> Result<EditPlan> {
+pub fn reconcile_resolver_peers(path: &Path, net: &TrustDomainInfo) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
@@ -336,7 +336,7 @@ pub fn reconcile_resolver_peers(path: &Path, net: &NetworkInfo) -> Result<EditPl
 // These reconcile a host's config to exactly ONE level of the hierarchy —
 // the cluster its current addrs already belong to — from the CA-authoritative
 // network map. Unlike `reconcile_resolver_peers` above (additive-only, over
-// the flat legacy `NetworkInfo`), these both ADD missing cluster members and
+// the flat legacy `TrustDomainInfo`), these both ADD missing cluster members and
 // AUTO-REMOVE entries the cluster no longer lists, with no consent: the CA is
 // the source of truth, so an addr absent from its authoritative cluster is
 // authoritatively gone. Host-local entries are never removed.
@@ -353,18 +353,18 @@ fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
 
 /// One distinct resolver cluster in the network map: where it attaches and
 /// its full member roster.
-pub struct ClusterView {
+pub struct ResolverClusterView {
     pub base: String,
     pub members: Vec<ResolverAddr>,
 }
 
 /// The distinct resolver clusters in `map`, grouped by base path. A
 /// cluster's members each report the same roster; union them by address.
-pub fn clusters(map: &NetworkMap) -> Vec<ClusterView> {
-    map.clusters
+pub fn clusters(map: &TrustDomainMap) -> Vec<ResolverClusterView> {
+    map.resolver_clusters
         .iter()
-        .filter(|c| c.state == netidx_admin_proto::ClusterState::Active)
-        .map(|c| ClusterView { base: c.base.clone(), members: c.members.clone() })
+        .filter(|c| c.state == netidx_admin_proto::ResolverClusterState::Active)
+        .map(|c| ResolverClusterView { base: c.base.clone(), members: c.members.clone() })
         .collect()
 }
 
@@ -374,10 +374,10 @@ pub fn clusters(map: &NetworkMap) -> Vec<ClusterView> {
 /// a warning. `None` when nothing overlaps (the cluster may be transiently
 /// unreachable — the caller no-ops rather than wiping the config).
 pub fn match_cluster<'a>(
-    clusters: &'a [ClusterView],
+    clusters: &'a [ResolverClusterView],
     addrs: &[SocketAddr],
-) -> (Option<&'a ClusterView>, Option<ArcStr>) {
-    let mut best: Option<(&ClusterView, usize)> = None;
+) -> (Option<&'a ResolverClusterView>, Option<ArcStr>) {
+    let mut best: Option<(&ResolverClusterView, usize)> = None;
     let mut overlapping = 0usize;
     for c in clusters {
         let n = c.members.iter().filter(|m| addrs.contains(&m.addr)).count();
@@ -445,7 +445,7 @@ fn reconcile_peer_list<A: Clone>(
 /// Reconcile a host's **client config** addrs to its own resolver cluster
 /// (the cluster its current addrs belong to) from the network map. Add +
 /// auto-remove; a config matching no cluster is left untouched (warned).
-pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
+pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
     let cfg = ClientConfig::load(path)
         .with_context(|| format!("loading client config {}", path.display()))?;
     let expected = cfg.as_file().addrs.clone();
@@ -488,7 +488,7 @@ pub fn reconcile_client_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
 /// Reconcile a resolver's **parent referral** to the parent cluster (the
 /// cluster the referral already points at) from the network map. Add +
 /// auto-remove. Errors if the resolver has no parent referral.
-pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan> {
+pub fn reconcile_parent_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
@@ -535,7 +535,8 @@ pub fn reconcile_parent_peers(path: &Path, map: &NetworkMap) -> Result<EditPlan>
 mod tests {
     use super::*;
     use netidx_admin_proto::{
-        AdminServerId, ClusterEntry, ClusterState, ResolverAddr, ResolverClusterId,
+        AdminServerId, ResolverAddr, ResolverClusterEntry, ResolverClusterId,
+        ResolverClusterState,
     };
     use std::net::SocketAddr;
 
@@ -576,8 +577,8 @@ mod tests {
         path
     }
 
-    fn net(resolvers: Vec<ResolverAddr>) -> NetworkInfo {
-        NetworkInfo {
+    fn net(resolvers: Vec<ResolverAddr>) -> TrustDomainInfo {
+        TrustDomainInfo {
             domain: "local".into(),
             ca_addr: None,
             resolvers,
@@ -668,11 +669,11 @@ mod tests {
 
     // ---- map-driven reconcile (Phase B) ----
 
-    fn srv(_addr: &str, base: &str, members: &[&str]) -> ClusterEntry {
-        ClusterEntry {
+    fn srv(_addr: &str, base: &str, members: &[&str]) -> ResolverClusterEntry {
+        ResolverClusterEntry {
             id: ResolverClusterId::new(),
             base: base.to_string(),
-            state: ClusterState::Active,
+            state: ResolverClusterState::Active,
             members: members
                 .iter()
                 .map(|m| ResolverAddr {
@@ -685,12 +686,12 @@ mod tests {
         }
     }
 
-    fn map_of(clusters: Vec<ClusterEntry>) -> NetworkMap {
-        NetworkMap {
+    fn map_of(resolver_clusters: Vec<ResolverClusterEntry>) -> TrustDomainMap {
+        TrustDomainMap {
             version: 1,
             controller: AdminServerId::new(),
-            servers: vec![],
-            clusters,
+            admin_servers: vec![],
+            resolver_clusters,
         }
     }
 

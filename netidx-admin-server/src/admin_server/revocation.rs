@@ -139,7 +139,7 @@ async fn prepare_revoke(
 /// `Err` carries the operator-facing reason it was skipped.
 fn revoke_authority(
     authd: &crate::ca_vault::Authenticated,
-    map: &admin_proto::NetworkMap,
+    map: &admin_proto::TrustDomainMap,
     serial: u64,
     record: Option<&ca_store::IssuedRecord>,
 ) -> std::result::Result<(), String> {
@@ -158,13 +158,13 @@ fn revoke_authority(
             .ok()
             .and_then(|identity| {
                 let cluster = map
-                    .servers
+                    .admin_servers
                     .iter()
                     .find(|server| server.id == identity.server_id)?
                     .cluster?;
-                map.clusters.iter().find(|entry| entry.id == cluster).map(|entry| {
-                    scope_covers(&authd.policy.server_enroll_scopes, &entry.base)
-                })
+                map.resolver_clusters.iter().find(|entry| entry.id == cluster).map(
+                    |entry| scope_covers(&authd.policy.server_enroll_scopes, &entry.base),
+                )
             })
             .unwrap_or(false)
     } else {
@@ -423,7 +423,7 @@ pub(super) async fn registered_crl_targets(
         .read(move |state| {
             state
                 .map
-                .servers
+                .admin_servers
                 .iter()
                 .filter(|server| server.state == admin_proto::ServerState::Registered)
                 .map(|server| (server.id, server.addr))

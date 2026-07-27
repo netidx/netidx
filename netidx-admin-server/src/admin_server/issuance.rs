@@ -742,7 +742,7 @@ pub(super) async fn push_registrations(
         .read(move |state| {
             let mut targets: Vec<_> = state
                 .map
-                .servers
+                .admin_servers
                 .iter()
                 .filter(|s| {
                     s.roles.contains(Role::IdMap)

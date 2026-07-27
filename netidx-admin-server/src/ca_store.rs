@@ -238,7 +238,7 @@ pub struct CaDir {
     /// edits on restart.
     pub lifetimes: crate::ca::CaLifetimes,
     pub sessions: crate::session::SessionStore,
-    /// The CA directory path — a lockless accessor for the netmap, the CA
+    /// The CA directory path — a lockless accessor for the trust_domain, the CA
     /// cert, and other files that are neither the store nor the vault.
     dir: PathBuf,
     _config_lock: ConfigDirLock,
@@ -266,7 +266,7 @@ impl CaDir {
         })
     }
 
-    /// The CA directory path — for the netmap, the CA cert, and other
+    /// The CA directory path — for the trust_domain, the CA cert, and other
     /// files in the dir that are neither the request store nor the vault.
     pub fn dir(&self) -> &Path {
         &self.dir

@@ -10,21 +10,21 @@
 
 use super::{
     DEFAULT_RESOLVER_NAME, InstallCommon, detect_resolver_shape, finish_with,
-    install_renew_unit, network_provenance, prompt_ip_or_addr,
-    prompt_resolver_own_tls_name, resolve_netidx_binary, resolve_units_dir,
+    install_renew_unit, prompt_ip_or_addr, prompt_resolver_own_tls_name,
+    resolve_netidx_binary, resolve_units_dir, trust_domain_provenance,
     warn_incomplete_resolver_address,
 };
 
 use crate::{
-    admin_proto::{ClusterEdge, InfoAuth, NodeKind},
+    admin_proto::{InfoAuth, NodeKind, ResolverClusterEdge},
     answer::{Answerer, Field},
     paths,
     plan::{
         AuthKind,
-        enroll::{self, AdminServers, DiscoveredNetwork, KeyProtArg},
+        enroll::{self, AdminServers, DiscoveredTrustDomain, KeyProtArg},
         service::ServiceNeed,
     },
-    provenance::{InstallRecord, InstallRole, NetworkIdentity},
+    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
     service::ServiceScope,
     template::{self, AuthChoice, ParentRef, ReferralAuth, resolver::IdMapMode},
     transport,
@@ -153,10 +153,10 @@ pub async fn run_resolver(
             // ENROLLS this resolver's cert from the parent's CA and the
             // "create a local CA" branches become unreachable — a satellite
             // shares the one trust domain, it never mints its own.
-            enroll::confirm_network_at(ans, parent, NodeKind::Resolver).await?
+            enroll::confirm_trust_domain_at(ans, parent, NodeKind::Resolver).await?
         }
     } else if input.auth.is_none() && !input.common.mode.is_dry_run() {
-        enroll::discover_network(ans, NodeKind::Resolver).await?
+        enroll::discover_trust_domain(ans, NodeKind::Resolver).await?
     } else {
         AdminServers::NotProbed
     };
@@ -203,7 +203,7 @@ pub async fn run_resolver(
     let imported_auth = if input.parent_admin_server.is_some() {
         None
     } else {
-        probe.have().and_then(network_auth_kind)
+        probe.have().and_then(trust_domain_auth_kind)
     };
     // Founding a brand-new cluster stands up the control plane (CA + admin
     // server) up front — before the data-plane auth is chosen (see the control
@@ -266,9 +266,9 @@ pub async fn run_resolver(
     // The cluster this resolver belongs to, recorded in install.json so its
     // status view can show the cluster glyph: a founding resolver records the
     // cluster it just created (its own domain + CA fingerprint); a joining one
-    // pins the discovered network's identity via `network_provenance` below.
+    // pins the discovered network's identity via `trust_domain_provenance` below.
     #[allow(unused_mut)]
-    let mut founding_identity: Option<NetworkIdentity> = None;
+    let mut founding_identity: Option<TrustDomainIdentity> = None;
     #[cfg(unix)]
     let control_plane_domain: Option<String> = if founded_admin_plane {
         // The network domain — the CA's `ca.<domain>` CN, and the domain the
@@ -283,7 +283,7 @@ pub async fn run_resolver(
             .map(|d| d.to_string())
             .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
         let domain = ans
-            .text(Field::NetworkDomain, None, Some(&domain_default), false)
+            .text(Field::TrustDomainName, None, Some(&domain_default), false)
             .await?
             .unwrap_or(domain_default);
         // The founding controller/CA + this host's admin server + the superuser admin. The
@@ -347,7 +347,7 @@ pub async fn run_resolver(
     // cert/key survive until `apply()` copies them into place.
     let ResolvedAuth { choice: auth, staging: _tls_staging, netidx_ca } =
         match probe.have() {
-            Some(net) => resolver_auth_from_network(ans, &input, net, kind).await?,
+            Some(net) => resolver_auth_from_trust_domain(ans, &input, net, kind).await?,
             None => {
                 resolver_self_auth(
                     ans,
@@ -438,7 +438,7 @@ pub async fn run_resolver(
     // the discovered network's identity and a reachable admin-server address.
     let (network, admin_server) = match founding_identity {
         Some(id) => (Some(id), None),
-        None => network_provenance(&probe),
+        None => trust_domain_provenance(&probe),
     };
     let record = InstallRecord::new(
         InstallRole::Resolver,
@@ -945,7 +945,7 @@ async fn resolver_tls_generate(
         // is created right here: it signs the data plane *and* anchors the
         // admin plane. Belt-and-suspenders: a resolver told about a parent
         // admin server must enroll from that network's CA, never mint its own.
-        // The probe (confirm_network_at) already routes such installs to the
+        // The probe (confirm_trust_domain_at) already routes such installs to the
         // enroll path, so reaching here with a parent set would be a bug.
         if input.parent_admin_server.is_some() {
             bail!(
@@ -1056,7 +1056,7 @@ async fn resolver_tls_generate(
 /// The auth scheme a discovered network's resolvers use (the first resolver's).
 /// `None` when the network reported no resolvers; the caller falls back to
 /// prompting.
-fn network_auth_kind(net: &DiscoveredNetwork) -> Option<AuthKind> {
+fn trust_domain_auth_kind(net: &DiscoveredTrustDomain) -> Option<AuthKind> {
     net.info.resolvers.first().map(|r| match &r.auth {
         InfoAuth::Anonymous => AuthKind::Anonymous,
         InfoAuth::Krb5 { .. } => AuthKind::Krb5,
@@ -1072,7 +1072,7 @@ fn info_to_template_referral(auth: &InfoAuth) -> ReferralAuth {
     }
 }
 
-fn edge_to_parent_ref(edge: &ClusterEdge) -> ParentRef {
+fn edge_to_parent_ref(edge: &ResolverClusterEdge) -> ParentRef {
     ParentRef {
         path: ArcStr::from(edge.path.as_str()),
         ttl: None,
@@ -1084,7 +1084,9 @@ fn edge_to_parent_ref(edge: &ClusterEdge) -> ParentRef {
     }
 }
 
-fn edge_into_file(edge: ClusterEdge) -> netidx::resolver_server::config::file::Referral {
+fn edge_into_file(
+    edge: ResolverClusterEdge,
+) -> netidx::resolver_server::config::file::Referral {
     use netidx::resolver_server::config::file::{RefAuth, Referral};
     Referral {
         path: ArcStr::from(edge.path),
@@ -1109,10 +1111,10 @@ fn edge_into_file(edge: ClusterEdge) -> netidx::resolver_server::config::file::R
 /// `resolver.<domain>`, identity already glyph-confirmed); krb5 ⇒ prompt for
 /// this host's SPN (a peer's is shown as the shape to follow); anonymous ⇒
 /// anonymous.
-async fn resolver_auth_from_network(
+async fn resolver_auth_from_trust_domain(
     ans: &mut dyn Answerer,
     input: &ResolverInput,
-    net: &DiscoveredNetwork,
+    net: &DiscoveredTrustDomain,
     kind: AuthKind,
 ) -> Result<ResolvedAuth> {
     match kind {
@@ -1150,7 +1152,7 @@ async fn resolver_auth_from_network(
                 Some(n) => n.clone(),
                 None => format!("{DEFAULT_RESOLVER_NAME}.{}", net.identity.domain),
             };
-            let (j, staging) = enroll::join_network(
+            let (j, staging) = enroll::join_trust_domain(
                 ans,
                 ca_addr,
                 NodeKind::Resolver,
@@ -1194,7 +1196,7 @@ fn authchoice_to_info(a: &AuthChoice) -> Result<InfoAuth> {
 #[allow(clippy::too_many_arguments)]
 async fn post_apply_admin_server(
     ans: &mut dyn Answerer,
-    discovered: Option<&DiscoveredNetwork>,
+    discovered: Option<&DiscoveredTrustDomain>,
     kind: AuthKind,
     no_admin_server: bool,
     with_admin_server: bool,
@@ -1254,7 +1256,7 @@ async fn post_apply_admin_server(
 /// against the discovered identity so we only short-circuit for genuinely our
 /// own CA, never a different network that merely happens to be reachable.
 #[cfg(unix)]
-async fn host_holds_ca(net: &DiscoveredNetwork) -> bool {
+async fn host_holds_ca(net: &DiscoveredTrustDomain) -> bool {
     if !ca_setup::default_ca_present().await {
         return false;
     }
@@ -1304,7 +1306,7 @@ async fn merge_resolver_roles(
 #[allow(clippy::too_many_arguments)]
 pub async fn enroll_admin_server(
     ans: &mut dyn Answerer,
-    net: &DiscoveredNetwork,
+    net: &DiscoveredTrustDomain,
     kind: AuthKind,
     no_admin_server: bool,
     with_admin_server: bool,
@@ -1389,11 +1391,13 @@ pub async fn enroll_admin_server(
         .context("fetching the authoritative map for enrollment")?;
     let base = resolver_base;
     let cluster = map
-        .clusters
+        .resolver_clusters
         .iter()
         .find(|c| c.base == base)
-        .map(|c| netidx_admin_proto::ClusterPlacement::Join { cluster: c.id })
-        .unwrap_or(netidx_admin_proto::ClusterPlacement::Create { base: base.clone() });
+        .map(|c| netidx_admin_proto::ResolverClusterPlacement::Join { cluster: c.id })
+        .unwrap_or(netidx_admin_proto::ResolverClusterPlacement::Create {
+            base: base.clone(),
+        });
     let enrollment = netidx_admin_proto::EnrollmentRequest {
         listen,
         roles,
@@ -1403,10 +1407,10 @@ pub async fn enroll_admin_server(
         replaces,
     };
     let cluster_description = match &cluster {
-        netidx_admin_proto::ClusterPlacement::Create { base } => {
+        netidx_admin_proto::ResolverClusterPlacement::Create { base } => {
             format!("create pending cluster at {base}")
         }
-        netidx_admin_proto::ClusterPlacement::Join { cluster } => {
+        netidx_admin_proto::ResolverClusterPlacement::Join { cluster } => {
             format!("join cluster {cluster} at {base}")
         }
     };

@@ -22,13 +22,13 @@
 
 mod action;
 mod answer;
-mod clusters;
 mod lifecycle;
 mod local;
 mod privileged;
 mod remote;
 mod services;
 mod theme;
+mod trust_domains;
 mod widgets;
 
 use action::{Action, Outcome};
@@ -878,8 +878,9 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     // The Cluster tab's on-entry poll: verify each saved cluster's CA identity is
     // still reachable before showing it. Same background slot idea as `sync_op` —
     // never sets `busy`, so the cluster list renders instantly and fills in.
-    type ClusterFuture = Pin<Box<dyn Future<Output = Vec<(usize, clusters::PollState)>>>>;
-    let mut cluster_op: Option<ClusterFuture> = None;
+    type TrustDomainPollFuture =
+        Pin<Box<dyn Future<Output = Vec<(usize, trust_domains::PollState)>>>>;
+    let mut cluster_op: Option<TrustDomainPollFuture> = None;
     // The Local tab's CA credential probe. It drives the daemon's local control
     // socket, which can block on a wedged daemon, so it never runs on the UI
     // task — same background slot idea as `sync_op`.
@@ -922,7 +923,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         if app.tab == Tab::Remote && cluster_op.is_none() {
             let pending = app.remote.take_pending_poll();
             if !pending.is_empty() {
-                cluster_op = Some(Box::pin(clusters::poll_clusters(pending)));
+                cluster_op = Some(Box::pin(trust_domains::poll_clusters(pending)));
             }
         }
         tokio::select! {
@@ -1471,14 +1472,16 @@ mod render_tests {
     }
 
     #[test]
-    fn select_network_empty_shows_manual_option() {
+    fn select_trust_domain_empty_shows_manual_option() {
         // With nothing discovered the picker still appears (the flow is always
         // the same) — an empty-state header plus the trailing poll-more and
         // manual-entry rows.
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
-        app.modal =
-            Modal::from_request(UiRequest::SelectNetwork { networks: vec![], reply: tx });
+        app.modal = Modal::from_request(UiRequest::SelectTrustDomain {
+            networks: vec![],
+            reply: tx,
+        });
         let s = render(&mut app);
         assert!(s.contains("No clusters found"), "empty-state header missing: {s:?}");
         assert!(s.contains("Search again for more"), "poll-more row missing: {s:?}");
@@ -1493,7 +1496,7 @@ mod render_tests {
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
         app.modal = Modal::from_request(UiRequest::Choice {
-            field: Field::ClusterMode,
+            field: Field::TrustDomainMode,
             choices: vec![
                 "Create a new administrative network (creates a CA)".into(),
                 "Use an existing controller / CA".into(),

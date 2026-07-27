@@ -13,11 +13,11 @@ pub mod ca_store;
 pub mod ca_vault;
 pub mod delegation_store;
 pub mod install_bundle;
-pub mod netmap;
 pub mod offline_ca;
 pub mod ops;
 pub mod plan;
 pub mod session;
+pub mod trust_domain;
 
 pub use admin_server::{AUTORENEW_ADMIN, load_roots, serve};
 

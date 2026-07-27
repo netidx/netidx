@@ -12,8 +12,8 @@ use super::{
 use crate::{
     admin_proto::{
         self, ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceOk,
-        ControlServiceRequest, ControlServiceResponse, NetworkMap, ServiceUnit,
-        ServiceUnitDef,
+        ControlServiceRequest, ControlServiceResponse, ServiceUnit, ServiceUnitDef,
+        TrustDomainMap,
     },
     ca_vault, transport,
 };
@@ -29,22 +29,25 @@ fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> boo
 /// The cluster base of the admin server whose listen address is `addr`, from
 /// the map — the authorization scope for controlling that server's services.
 /// `None` if the server isn't in the map or runs no resolver cluster.
-fn base_for_server(map: &NetworkMap, id: admin_proto::AdminServerId) -> Option<String> {
+fn base_for_server(
+    map: &TrustDomainMap,
+    id: admin_proto::AdminServerId,
+) -> Option<String> {
     let cluster = map
-        .servers
+        .admin_servers
         .iter()
         .find(|s| s.id == id && s.state == admin_proto::ServerState::Registered)?
         .cluster?;
-    map.clusters.iter().find(|c| c.id == cluster).map(|c| c.base.clone())
+    map.resolver_clusters.iter().find(|c| c.id == cluster).map(|c| c.base.clone())
 }
 
 /// Resolve only an immutable registered identity to its current routing
 /// address. Addresses are deliberately never accepted as lookup keys here.
 fn registered_server_addr(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     id: admin_proto::AdminServerId,
 ) -> Option<SocketAddr> {
-    map.servers
+    map.admin_servers
         .iter()
         .find(|server| {
             server.id == id && server.state == admin_proto::ServerState::Registered

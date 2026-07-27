@@ -22,14 +22,14 @@ use crate::{
         ApproveDelegationResponse, DelegationEntry, DelegationPollResponse,
         DelegationRequest, DelegationResponse, DenyDelegationRequest,
         DenyDelegationResponse, GetInfoResponse, InfoAuth, ListDelegationsRequest,
-        ListDelegationsResponse, MapVersion, NetworkMap, PeerResult, PollRequest,
-        PropagationOk, QueuedOk, ReconcileControllerResponse, ReferralEdit,
-        RegisterRequest, RegisterResponse, RemoveServerOk, RemoveServerRequest,
-        RemoveServerResponse, ResolverAddr, Role,
+        ListDelegationsResponse, MapVersion, PeerResult, PollRequest, PropagationOk,
+        QueuedOk, ReconcileControllerResponse, ReferralEdit, RegisterRequest,
+        RegisterResponse, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
+        ResolverAddr, Role, TrustDomainMap,
     },
     admin_server_config::AdminServerConfig,
     config_lock::ConfigDirLock,
-    delegation_store, netmap, transport,
+    delegation_store, transport, trust_domain,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use enumflags2::BitFlags;
@@ -262,7 +262,7 @@ pub(super) async fn handle_reconcile_controller(
         };
     let topology = {
         let map = state.read(move |state| state.map.clone()).await;
-        topology_fanout(&map, map.clusters.iter())
+        topology_fanout(&map, map.resolver_clusters.iter())
     };
     merge_topology_results(
         &mut peers,
@@ -406,7 +406,7 @@ async fn resolver_info(config: &Path) -> Result<Option<ResolverAddr>> {
 
 pub(super) async fn local_resolver_data(
     cfg: &AdminServerConfig,
-) -> (Option<ResolverAddr>, Option<admin_proto::ClusterFacts>) {
+) -> (Option<ResolverAddr>, Option<admin_proto::ResolverClusterFacts>) {
     let Some(role) = cfg.roles.resolver.as_ref() else { return (None, None) };
     match crate::resolver::ResolverConfig::load_async(&role.config).await {
         Ok(config) => {
@@ -459,7 +459,7 @@ pub(super) async fn handle_request_delegation(
     state
         .write_async(async move |state| {
             let mut staged = state.map.clone();
-            if let Err(e) = netmap::delegate(
+            if let Err(e) = trust_domain::delegate(
                 &mut staged,
                 &pending.proposed_path,
                 pending.proposed_child,
@@ -546,7 +546,7 @@ async fn handle_list_delegations_inner(
             reqs.into_iter()
                 .filter_map(|(r, approved)| {
                     let mut staged = map.clone();
-                    let change = netmap::delegate(
+                    let change = trust_domain::delegate(
                         &mut staged,
                         &r.proposed_path,
                         r.proposed_child,
@@ -583,14 +583,14 @@ async fn handle_list_delegations_inner(
 /// So it needs authority over the parent cluster's base as well as over the
 /// proposed child path — an admin scoped to `/eu` must not be able to decide a
 /// delegation whose parent is the root cluster just because the child lands
-/// under `/eu`. [`netmap::delegate`] only enforces that the child path is
+/// under `/eu`. [`trust_domain::delegate`] only enforces that the child path is
 /// under the parent base, and only after authorization has already run.
 ///
 /// Deny is held to the same rule as approve, per [`admin_authority_over`]:
 /// authority to destroy must mirror authority to create.
 fn decide_delegation_authority(
     authd: &crate::ca_vault::Authenticated,
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     pending: &delegation_store::PendingDelegation,
 ) -> std::result::Result<(), String> {
     if !delegation_authority(authd, &pending.proposed_path) {
@@ -599,7 +599,7 @@ fn decide_delegation_authority(
             authd.admin, pending.proposed_path
         ));
     }
-    let base = netmap::parent_base(map, &pending.parent_servers)
+    let base = trust_domain::parent_base(map, &pending.parent_servers)
         .map_err(|e| format!("resolving the delegation's parent cluster: {e:#}"))?;
     if !delegation_authority(authd, &base) {
         return Err(format!(
@@ -782,7 +782,7 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
     out
 }
 
-/// This host's own [`ServerEntry`] for the network map: its listen
+/// This host's own [`AdminServerEntry`] for the network map: its listen
 /// address, its roles, and — if it runs a resolver — its cluster facts.
 /// This host's own resolver base (the single level a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
@@ -791,13 +791,13 @@ pub(super) async fn own_base(state: &Server) -> Option<String> {
         .read(move |state| {
             let cluster = state
                 .map
-                .servers
+                .admin_servers
                 .iter()
                 .find(|server| server.id == state.cfg.server_id)?
                 .cluster?;
             state
                 .map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|cluster_entry| cluster_entry.id == cluster)
                 .map(|cluster_entry| cluster_entry.base.clone())
@@ -825,7 +825,7 @@ pub(super) async fn handle_register(
         .read(move |state| {
             let current = state
                 .map
-                .servers
+                .admin_servers
                 .iter()
                 .find(|server| server.id == server_id)
                 .with_context(|| {
@@ -834,7 +834,7 @@ pub(super) async fn handle_register(
             let reconcile = current.state == admin_proto::ServerState::Enrolled
                 && current.roles.contains(Role::IdMap);
             let mut staged = state.map.clone();
-            netmap::register(
+            trust_domain::register(
                 &mut staged,
                 server_id,
                 validation_req.addr,
@@ -857,7 +857,7 @@ pub(super) async fn handle_register(
     let config_lock = state.config_lock.clone();
     let (response, fanout) = state
         .write_async(async move |state| {
-            let updated = match netmap::register(
+            let updated = match trust_domain::register(
                 &mut state.map,
                 server_id,
                 req.addr,
@@ -870,7 +870,7 @@ pub(super) async fn handle_register(
             };
             if updated
                 && let Err(e) =
-                    netmap::save_async(&config_lock, &ca_dir, &state.map).await
+                    trust_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
                 return (
                     RegisterResponse::Err {
@@ -915,13 +915,13 @@ pub(super) async fn handle_deregister(
     let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
-            let updated = match netmap::deregister(&mut state.map, server_id) {
+            let updated = match trust_domain::deregister(&mut state.map, server_id) {
                 Ok(updated) => updated,
                 Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
             };
             if updated
                 && let Err(e) =
-                    netmap::save_async(&config_lock, &ca_dir, &state.map).await
+                    trust_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
                 return RegisterResponse::Err {
                     reason: format!("persisting the network map: {e:#}"),
@@ -995,11 +995,13 @@ async fn remove_server_prepare_inner(
     // (notably, removal of the active controller).
     {
         let target_base = map
-            .servers
+            .admin_servers
             .iter()
             .find(|server| server.id == req.server)
             .and_then(|server| server.cluster)
-            .and_then(|cluster| map.clusters.iter().find(|entry| entry.id == cluster))
+            .and_then(|cluster| {
+                map.resolver_clusters.iter().find(|entry| entry.id == cluster)
+            })
             .map(|cluster| cluster.base.as_str());
         let scoped = match target_base {
             Some(base) => scope_covers(&authd.policy.server_enroll_scopes, base),
@@ -1017,26 +1019,26 @@ async fn remove_server_prepare_inner(
             )));
         }
         // Keep the removed cluster and each directly connected cluster in the
-        // reconciliation set. If the last member disappears, `netmap::remove`
+        // reconciliation set. If the last member disappears, `trust_domain::remove`
         // deletes that cluster and detaches its children; the surviving parent and
         // children still need fresh topology.
         let mut affected_ids = BTreeSet::new();
         if let Some(cluster_id) = map
-            .servers
+            .admin_servers
             .iter()
             .find(|server| server.id == req.server)
             .and_then(|server| server.cluster)
         {
             affected_ids.insert(cluster_id);
             if let Some(cluster) =
-                map.clusters.iter().find(|entry| entry.id == cluster_id)
+                map.resolver_clusters.iter().find(|entry| entry.id == cluster_id)
             {
                 affected_ids.extend(cluster.parent);
                 affected_ids.extend(cluster.children.iter().copied());
             }
         }
         let mut affected_clusters: Vec<_> = map
-            .clusters
+            .resolver_clusters
             .iter()
             .filter(|cluster| affected_ids.contains(&cluster.id))
             .map(|cluster| cluster.base.clone())
@@ -1044,7 +1046,7 @@ async fn remove_server_prepare_inner(
         affected_clusters.sort();
         affected_clusters.dedup();
         let mut next = map.clone();
-        let removed = match netmap::remove(&mut next, req.server) {
+        let removed = match trust_domain::remove(&mut next, req.server) {
             Ok(removed) => removed,
             Err(e) => return Err(err(format!("{e:#}"))),
         };
@@ -1055,7 +1057,7 @@ async fn remove_server_prepare_inner(
         // clusters their enrollment policy covers.
         if !removed {
             affected_ids.extend(
-                map.clusters
+                map.resolver_clusters
                     .iter()
                     .filter(|cluster| {
                         broad
@@ -1067,7 +1069,7 @@ async fn remove_server_prepare_inner(
                     .map(|cluster| cluster.id),
             );
             affected_clusters = map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .filter(|cluster| affected_ids.contains(&cluster.id))
                 .map(|cluster| cluster.base.clone())
@@ -1088,7 +1090,7 @@ async fn remove_server_prepare_inner(
                 err(format!("revoking the server's serving certificates: {e:#}"))
             })?;
             let config_lock = ca.config_lock();
-            if let Err(e) = netmap::save_async(&config_lock, &ca_dir, &next).await {
+            if let Err(e) = trust_domain::save_async(&config_lock, &ca_dir, &next).await {
                 return Err(err(format!("persisting the network map: {e:#}")));
             }
             *map = next;
@@ -1127,10 +1129,12 @@ async fn remove_server_prepare_inner(
             }
         };
         let mut targets = Vec::new();
-        for cluster in
-            map.clusters.iter().filter(|cluster| affected_ids.contains(&cluster.id))
+        for cluster in map
+            .resolver_clusters
+            .iter()
+            .filter(|cluster| affected_ids.contains(&cluster.id))
         {
-            for server in map.servers.iter().filter(|server| {
+            for server in map.admin_servers.iter().filter(|server| {
                 server.cluster == Some(cluster.id)
                     && server.state == admin_proto::ServerState::Registered
             }) {
@@ -1255,7 +1259,7 @@ async fn approve_delegation_prepare_inner(
         // Persist a staged snapshot before publishing it in memory. A failed disk
         // write must not leave the live controller map ahead of its durable map.
         let mut staged = map.clone();
-        let change = netmap::delegate(
+        let change = trust_domain::delegate(
             &mut staged,
             &pending.proposed_path,
             pending.proposed_child,
@@ -1266,7 +1270,7 @@ async fn approve_delegation_prepare_inner(
         let parent = change.parent;
         let child = change.child;
         let config_lock = ca.config_lock();
-        netmap::save_async(&config_lock, &ca_dir, &staged)
+        trust_domain::save_async(&config_lock, &ca_dir, &staged)
             .await
             .map_err(|e| err(format!("persisting authoritative topology: {e:#}")))?;
         *map = staged;
@@ -1297,18 +1301,18 @@ struct TopologyFanout {
 }
 
 fn registration_topology_fanout(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     server_id: admin_proto::AdminServerId,
 ) -> Option<TopologyFanout> {
     let cluster = map
-        .servers
+        .admin_servers
         .iter()
         .find(|server| server.id == server_id)?
         .cluster
-        .and_then(|id| map.clusters.iter().find(|cluster| cluster.id == id))?;
+        .and_then(|id| map.resolver_clusters.iter().find(|cluster| cluster.id == id))?;
     Some(topology_fanout(
         map,
-        map.clusters.iter().filter(|candidate| {
+        map.resolver_clusters.iter().filter(|candidate| {
             candidate.id == cluster.id
                 || cluster.parent == Some(candidate.id)
                 || cluster.children.contains(&candidate.id)
@@ -1317,12 +1321,12 @@ fn registration_topology_fanout(
 }
 
 fn topology_fanout<'a>(
-    map: &NetworkMap,
-    clusters: impl IntoIterator<Item = &'a admin_proto::ClusterEntry>,
+    map: &TrustDomainMap,
+    clusters: impl IntoIterator<Item = &'a admin_proto::ResolverClusterEntry>,
 ) -> TopologyFanout {
     let mut targets = Vec::new();
     for cluster in clusters {
-        for server in map.servers.iter().filter(|server| {
+        for server in map.admin_servers.iter().filter(|server| {
             server.cluster == Some(cluster.id)
                 && server.state == admin_proto::ServerState::Registered
         }) {
@@ -1340,13 +1344,13 @@ fn topology_fanout<'a>(
 }
 
 fn topology_edit(
-    map: &NetworkMap,
-    cluster: &admin_proto::ClusterEntry,
+    map: &TrustDomainMap,
+    cluster: &admin_proto::ResolverClusterEntry,
     local_member: ResolverAddr,
 ) -> ReferralEdit {
     let parent = cluster.parent.and_then(|id| {
-        map.clusters.iter().find(|parent| parent.id == id).map(|parent| {
-            admin_proto::ClusterEdge {
+        map.resolver_clusters.iter().find(|parent| parent.id == id).map(|parent| {
+            admin_proto::ResolverClusterEdge {
                 path: cluster.base.clone(),
                 addrs: parent.members.clone(),
             }
@@ -1356,8 +1360,8 @@ fn topology_edit(
         .children
         .iter()
         .filter_map(|id| {
-            map.clusters.iter().find(|child| child.id == *id).map(|child| {
-                admin_proto::ClusterEdge {
+            map.resolver_clusters.iter().find(|child| child.id == *id).map(|child| {
+                admin_proto::ResolverClusterEdge {
                     path: child.base.clone(),
                     addrs: child.members.clone(),
                 }

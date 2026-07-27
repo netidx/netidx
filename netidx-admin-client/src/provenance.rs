@@ -46,15 +46,15 @@ impl InstallRole {
 /// grouped-base32 text form ([`Fingerprint::text`]) so the record reads
 /// the same as the glyph shown at install; compare via [`Self::matches`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkIdentity {
+pub struct TrustDomainIdentity {
     pub domain: String,
     pub ca_fingerprint: String,
 }
 
-impl NetworkIdentity {
+impl TrustDomainIdentity {
     /// Build from a confirmed [`Fingerprint`] and domain.
     pub fn new(domain: impl Into<String>, ca: &Fingerprint) -> Self {
-        NetworkIdentity { domain: domain.into(), ca_fingerprint: ca.text() }
+        TrustDomainIdentity { domain: domain.into(), ca_fingerprint: ca.text() }
     }
 
     /// Does `presented` match the pinned identity? Parses the stored
@@ -84,7 +84,7 @@ pub struct InstallRecord {
     /// `None` for a standalone/local-only install (a workstation with no
     /// parent, or a resolver with no admin server).
     #[serde(default)]
-    pub network: Option<NetworkIdentity>,
+    pub network: Option<TrustDomainIdentity>,
     /// A admin-server address known at install time, if any — a starting
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
@@ -104,7 +104,7 @@ impl InstallRecord {
         role: InstallRole,
         base: impl Into<String>,
         auth: impl Into<String>,
-        network: Option<NetworkIdentity>,
+        network: Option<TrustDomainIdentity>,
         admin_server: Option<SocketAddr>,
     ) -> Self {
         let created_unix = SystemTime::now()
@@ -201,7 +201,7 @@ mod tests {
             InstallRole::Workstation,
             "/local",
             "tls",
-            Some(NetworkIdentity::new("ryu-oh.org", &fp)),
+            Some(TrustDomainIdentity::new("ryu-oh.org", &fp)),
             Some("192.168.50.11:4564".parse().unwrap()),
         );
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn local_only_has_no_network() {
+    fn local_only_has_no_trust_domain() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("install.json");
         let rec =

@@ -6,9 +6,9 @@
 //! is the certificate-renewal supervisor, for TLS setups.
 
 use super::{
-    InstallCommon, finish_with, install_renew_unit, network_provenance,
-    prompt_resolver_port, prompt_resolver_tls_name, publisher_bind_shape,
-    resolve_units_dir, suggest_client_san,
+    InstallCommon, finish_with, install_renew_unit, prompt_resolver_port,
+    prompt_resolver_tls_name, publisher_bind_shape, resolve_units_dir,
+    suggest_client_san, trust_domain_provenance,
 };
 use crate::{
     admin_proto::NodeKind,
@@ -138,16 +138,16 @@ pub async fn run_publisher(
     // discovered (glyph-confirmed) admin server yields every resolver address
     // with its auth — and, on TLS networks, our client cert.
     let probe = if let Some(addr) = admin_server {
-        enroll::confirm_network_at(ans, addr, NodeKind::Publisher).await?
+        enroll::confirm_trust_domain_at(ans, addr, NodeKind::Publisher).await?
     } else if addrs.is_empty() && auth.is_none() {
-        enroll::discover_network(ans, NodeKind::Publisher).await?
+        enroll::discover_trust_domain(ans, NodeKind::Publisher).await?
     } else {
         AdminServers::NotProbed
     };
     let resolved_addrs: Vec<(SocketAddr, ReferralAuth)> = match &probe {
         AdminServers::Have(net) => {
             let have_identity = !tls_identities.is_empty();
-            enroll::network_addrs_and_identity(
+            enroll::trust_domain_addrs_and_identity(
                 ans,
                 net,
                 NodeKind::Publisher,
@@ -275,7 +275,7 @@ pub async fn run_publisher(
     } else {
         ServiceNeed::NONE
     };
-    let (network, admin_server) = network_provenance(&probe);
+    let (network, admin_server) = trust_domain_provenance(&probe);
     // On the discovery/auto-import path `auth` is never set — the scheme comes
     // from the network's per-referral auths — so fall back to what we actually
     // configured rather than defaulting the record to "tls".

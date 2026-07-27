@@ -20,9 +20,9 @@ use crate::{
     admin_proto::{
         self, ApproveOk, ApproveRequest, ApproveResponse, DenyRequest, DenyResponse,
         EnqueueRequest, EnqueueResponse, IssuedEntry, ListIssuedRequest,
-        ListIssuedResponse, ListQueueRequest, ListQueueResponse, NetworkMap, PollRequest,
+        ListIssuedResponse, ListQueueRequest, ListQueueResponse, PollRequest,
         PollResponse, QueueEntry, QueuedOk, SERVING_SAN, SignOk, SignRequest,
-        SignResponse,
+        SignResponse, TrustDomainMap,
     },
     ca_store, transport,
 };
@@ -281,7 +281,7 @@ async fn handle_approve(
     req: &ApproveRequest,
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> std::result::Result<Approved, String> {
     // This cheap precheck (no auth) rejects an already-terminal request;
     // issuance checks it again before committing.
@@ -312,7 +312,7 @@ async fn approve_serialized(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     queued: ca_store::QueuedReq,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> std::result::Result<Approved, String> {
     // A queued admin-server enrollment: gated on the approving admin's
     // scoped enrollment authority; signs the reserved serving SAN; no one-live
@@ -662,14 +662,15 @@ async fn handle_list_queue_inner(
                 .map(|q| {
                     let cluster_base =
                         q.enrollment.as_ref().and_then(|e| match &e.cluster {
-                            admin_proto::ClusterPlacement::Create { base } => {
+                            admin_proto::ResolverClusterPlacement::Create { base } => {
                                 Some(base.clone())
                             }
-                            admin_proto::ClusterPlacement::Join { cluster } => map
-                                .clusters
-                                .iter()
-                                .find(|c| c.id == *cluster)
-                                .map(|c| c.base.clone()),
+                            admin_proto::ResolverClusterPlacement::Join { cluster } => {
+                                map.resolver_clusters
+                                    .iter()
+                                    .find(|c| c.id == *cluster)
+                                    .map(|c| c.base.clone())
+                            }
                         });
                     QueueEntry {
                         age_secs: q.age_secs(),
@@ -695,7 +696,7 @@ pub(super) async fn handle_deny(
     ca: &mut ca_store::CaDir,
     req: &DenyRequest,
     authentication: &PreparedAdminAuthentication,
-    map: Option<&NetworkMap>,
+    map: Option<&TrustDomainMap>,
 ) -> DenyResponse {
     // Cheap precheck (no auth) for an already-terminal/unknown request.
     let queued = match ca.store.status(&req.request_id).await {

@@ -5,7 +5,7 @@
 //! through `Config::from_file`.
 
 use crate::{
-    admin_proto::{ClusterEdge, ClusterFacts, InfoAuth, ResolverAddr},
+    admin_proto::{InfoAuth, ResolverAddr, ResolverClusterEdge, ResolverClusterFacts},
     atomic, paths,
 };
 use anyhow::{Context, Result, bail};
@@ -186,19 +186,19 @@ impl ResolverConfig {
     }
 
     /// The parent cluster this resolver attaches under, as a map edge, if any.
-    pub fn parent_edge(&self) -> Option<ClusterEdge> {
+    pub fn parent_edge(&self) -> Option<ResolverClusterEdge> {
         self.0.parent.as_ref().map(referral_to_edge)
     }
 
     /// The child clusters delegated below this resolver, as map edges.
-    pub fn children_edges(&self) -> Vec<ClusterEdge> {
+    pub fn children_edges(&self) -> Vec<ResolverClusterEdge> {
         self.0.children.iter().map(referral_to_edge).collect()
     }
 
-    /// This resolver cluster's [`ClusterFacts`] for the network map:
+    /// This resolver cluster's [`ResolverClusterFacts`] for the network map:
     /// advertisable members + base path + hierarchy edges.
-    pub fn cluster_facts(&self) -> ClusterFacts {
-        ClusterFacts {
+    pub fn cluster_facts(&self) -> ResolverClusterFacts {
+        ResolverClusterFacts {
             members: self.resolver_addrs(),
             base: self.base_path(),
             parent: self.parent_edge(),
@@ -234,10 +234,10 @@ fn validate_permission_topology(
     Ok(())
 }
 
-/// Map a referral (parent / child) to a network-map [`ClusterEdge`],
+/// Map a referral (parent / child) to a network-map [`ResolverClusterEdge`],
 /// dropping `Local`-auth addrs (host-local, nothing to advertise).
-fn referral_to_edge(r: &file::Referral) -> ClusterEdge {
-    ClusterEdge {
+fn referral_to_edge(r: &file::Referral) -> ResolverClusterEdge {
+    ResolverClusterEdge {
         path: r.path.to_string(),
         addrs: r
             .addrs

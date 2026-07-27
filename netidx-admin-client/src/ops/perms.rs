@@ -11,7 +11,7 @@ use super::{AdminSession, open_admin_session, resolve_identity};
 #[cfg(unix)]
 use crate::local;
 use crate::{
-    admin_proto::{NetworkMap, NodeKind, PeerResult, Secret},
+    admin_proto::{NodeKind, PeerResult, Secret, TrustDomainMap},
     answer::Answerer,
     transport,
 };
@@ -30,7 +30,7 @@ async fn bootstrap(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<&Path>,
-) -> Result<NetworkMap> {
+) -> Result<TrustDomainMap> {
     let (addr, id) = resolve_identity(ans, server, ca_dir).await?;
     transport::get_map_pinned(addr, NodeKind::Client, &id)
         .await
@@ -87,9 +87,9 @@ pub async fn list_levels(
 ) -> Result<Vec<String>> {
     let map = bootstrap(ans, server, ca_dir.as_deref()).await?;
     let bases: BTreeSet<String> = map
-        .clusters
+        .resolver_clusters
         .iter()
-        .filter(|c| c.state == netidx_admin_proto::ClusterState::Active)
+        .filter(|c| c.state == netidx_admin_proto::ResolverClusterState::Active)
         .map(|c| c.base.clone())
         .collect();
     Ok(bases.into_iter().collect())

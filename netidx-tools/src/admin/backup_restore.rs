@@ -14,7 +14,7 @@ use netidx_admin_client::{
     config_lock::ConfigDirLock,
     paths,
     plan::AuthKind,
-    plan::enroll::{self, DiscoveredNetwork},
+    plan::enroll::{self, DiscoveredTrustDomain},
     provenance::{InstallRecord, InstallRole},
     service::{ServiceParams, ServiceScope, ServiceStatus},
     tls, transport,
@@ -296,10 +296,10 @@ fn install_service(
     }
 }
 
-pub(super) async fn network_for_restore(
+pub(super) async fn trust_domain_for_restore(
     manifest: &install_bundle::Manifest,
     override_: Option<&str>,
-) -> Result<Option<(SocketAddr, DiscoveredNetwork)>> {
+) -> Result<Option<(SocketAddr, DiscoveredTrustDomain)>> {
     let Some(network) = &manifest.install.network else { return Ok(None) };
     let mut seed = match override_ {
         Some(addr) => init::resolve_admin_server_addr(addr)?,
@@ -340,7 +340,7 @@ pub(super) async fn network_for_restore(
         bail!("the discovered controller did not match the backup's pinned CA identity");
     }
     let info = transport::aggregate(&[controller], NodeKind::Client, &identity).await?;
-    Ok(Some((controller, DiscoveredNetwork { identity, info })))
+    Ok(Some((controller, DiscoveredTrustDomain { identity, info })))
 }
 
 fn node_kind(kind: IdentityKind) -> NodeKind {
@@ -387,7 +387,7 @@ pub(super) async fn reenroll_data_identities(
     root: &Path,
     manifest: &install_bundle::Manifest,
     controller: SocketAddr,
-    net: &DiscoveredNetwork,
+    net: &DiscoveredTrustDomain,
     key_protection: Option<netidx_admin_client::plan::enroll::KeyProtArg>,
 ) -> Result<()> {
     for recipe in
@@ -413,7 +413,7 @@ pub(super) async fn reenroll_data_identities(
                     old_certificate.display()
                 )
             })?;
-        let (identity, _staging) = enroll::join_network_replacing(
+        let (identity, _staging) = enroll::join_trust_domain_replacing(
             ans,
             controller,
             node_kind(recipe.kind),
@@ -450,7 +450,7 @@ pub(super) async fn reenroll_satellite_admin(
     config_lock: &ConfigDirLock,
     root: &Path,
     manifest: &install_bundle::Manifest,
-    net: &DiscoveredNetwork,
+    net: &DiscoveredTrustDomain,
     listen_override: Option<SocketAddr>,
 ) -> Result<()> {
     if !manifest.identities.iter().any(|i| i.kind == IdentityKind::AdminServer)
@@ -480,7 +480,7 @@ pub(super) async fn reenroll_satellite_admin(
                 &net.identity,
             )
             .await?;
-            map.servers
+            map.admin_servers
                 .iter()
                 .find(|server| server.id == old)
                 .and_then(|server| server.resolver.as_ref())
@@ -736,7 +736,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         )?;
         let rt = tokio::runtime::Runtime::new()?;
         let Some((controller, net)) =
-            rt.block_on(network_for_restore(&manifest, a.admin_server.as_deref()))?
+            rt.block_on(trust_domain_for_restore(&manifest, a.admin_server.as_deref()))?
         else {
             bail!(
                 "the backup contains TLS identities but no administrative network identity"

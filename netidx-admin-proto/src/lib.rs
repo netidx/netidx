@@ -568,7 +568,7 @@ pub struct ApplyControllerStateRequest {
     pub operation_id: OperationId,
     pub controller: AdminServerId,
     pub addr: SocketAddr,
-    pub map: NetworkMap,
+    pub map: TrustDomainMap,
     pub crl_pem: String,
 }
 
@@ -720,7 +720,7 @@ pub struct EnrollRequest {
     /// optional launch blocks as the authoritative roster.
     pub resolver_member: Option<ResolverAddr>,
     pub resolver_members: Vec<ResolverAddr>,
-    pub cluster: ClusterPlacement,
+    pub cluster: ResolverClusterPlacement,
     /// Accepted only on the protected local control socket, for renewing the
     /// already-installed controller identity across a key rotation.
     pub renew_identity: Option<AdminServerId>,
@@ -734,7 +734,7 @@ pub struct EnrollRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
-pub enum ClusterPlacement {
+pub enum ResolverClusterPlacement {
     #[pack(tag(0))]
     Create { base: String },
     #[pack(tag(1))]
@@ -747,7 +747,7 @@ pub struct EnrollmentRequest {
     pub roles: BitFlags<Role>,
     pub resolver_member: Option<ResolverAddr>,
     pub resolver_members: Vec<ResolverAddr>,
-    pub cluster: ClusterPlacement,
+    pub cluster: ResolverClusterPlacement,
     #[serde(default)]
     #[pack(default)]
     pub replaces: Option<AdminServerId>,
@@ -1043,8 +1043,8 @@ pub enum ReferralEdit {
     SetTopology {
         local_member: ResolverAddr,
         members: Vec<ResolverAddr>,
-        parent: Option<ClusterEdge>,
-        children: Vec<ClusterEdge>,
+        parent: Option<ResolverClusterEdge>,
+        children: Vec<ResolverClusterEdge>,
     },
 }
 
@@ -1095,7 +1095,7 @@ pub struct GetInfoResponse {
 /// points at. A read-only fact for the network map — distinct from
 /// [`ReferralEdit`], which *mutates* a referral during delegation.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
-pub struct ClusterEdge {
+pub struct ResolverClusterEdge {
     pub path: String,
     pub addrs: Vec<ResolverAddr>,
 }
@@ -1105,16 +1105,16 @@ pub struct ClusterEdge {
 /// The CA derives the authoritative cluster roster from enrolled server
 /// ownership; `members` may be only this node or a convenient larger subset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
-pub struct ClusterFacts {
+pub struct ResolverClusterFacts {
     /// This host's configured advertisable member blocks (`Local` dropped).
     pub members: Vec<ResolverAddr>,
     /// Where this cluster attaches — its parent-referral path, or `/` for
     /// the root cluster.
     pub base: String,
     /// The parent cluster this one attaches under, if any.
-    pub parent: Option<ClusterEdge>,
+    pub parent: Option<ResolverClusterEdge>,
     /// The child clusters delegated below this one.
-    pub children: Vec<ClusterEdge>,
+    pub children: Vec<ResolverClusterEdge>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -1126,7 +1126,7 @@ pub enum ServerState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
-pub enum ClusterState {
+pub enum ResolverClusterState {
     #[pack(tag(0))]
     Pending,
     #[pack(tag(1))]
@@ -1136,7 +1136,7 @@ pub enum ClusterState {
 /// One admin server grant in the CA-owned map. The immutable identity is the
 /// key; `addr` is mutable routing data and never serves as identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
-pub struct ServerEntry {
+pub struct AdminServerEntry {
     pub id: AdminServerId,
     pub addr: SocketAddr,
     pub roles: BitFlags<Role>,
@@ -1149,10 +1149,10 @@ pub struct ServerEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
-pub struct ClusterEntry {
+pub struct ResolverClusterEntry {
     pub id: ResolverClusterId,
     pub base: String,
-    pub state: ClusterState,
+    pub state: ResolverClusterState,
     pub members: Vec<ResolverAddr>,
     pub parent: Option<ResolverClusterId>,
     pub children: Vec<ResolverClusterId>,
@@ -1164,26 +1164,31 @@ pub struct ClusterEntry {
 /// Every admin server caches a copy (version-checked) and serves it to
 /// clients, so one round trip to any admin server is the whole network.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
-pub struct NetworkMap {
+pub struct TrustDomainMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
     /// this (via [`Request::GetMapVersion`]) before pulling the full map.
     pub version: u64,
     pub controller: AdminServerId,
-    pub servers: Vec<ServerEntry>,
-    pub clusters: Vec<ClusterEntry>,
+    pub admin_servers: Vec<AdminServerEntry>,
+    pub resolver_clusters: Vec<ResolverClusterEntry>,
 }
 
-impl NetworkMap {
+impl TrustDomainMap {
     pub fn empty(controller: AdminServerId) -> Self {
-        Self { version: 0, controller, servers: Vec::new(), clusters: Vec::new() }
+        Self {
+            version: 0,
+            controller,
+            admin_servers: Vec::new(),
+            resolver_clusters: Vec::new(),
+        }
     }
 
-    pub fn controller_entry(&self) -> Option<&ServerEntry> {
-        self.servers.iter().find(|s| s.id == self.controller)
+    pub fn controller_entry(&self) -> Option<&AdminServerEntry> {
+        self.admin_servers.iter().find(|s| s.id == self.controller)
     }
 }
 
-impl Default for NetworkMap {
+impl Default for TrustDomainMap {
     fn default() -> Self {
         Self::empty(AdminServerId(Uuid::nil()))
     }
@@ -1195,7 +1200,7 @@ pub struct RegisterRequest {
     pub addr: SocketAddr,
     /// The resolver configuration is evidence checked against the CA grant;
     /// it is never copied wholesale into the authoritative map.
-    pub resolver: Option<ClusterFacts>,
+    pub resolver: Option<ResolverClusterFacts>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1206,7 +1211,7 @@ pub struct MapVersion {
 pub type RegisterResponse = RpcResult<MapVersion>;
 pub type GetMapVersionResponse = RpcResult<MapVersion>;
 
-pub type GetMapResponse = RpcResult<NetworkMap>;
+pub type GetMapResponse = RpcResult<TrustDomainMap>;
 
 /// Admin-authenticated permanent removal of one immutable dead-server identity.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1504,7 +1509,7 @@ mod tests {
         roles: BitFlags<Role>,
         resolver_member: Option<ResolverAddr>,
         resolver_members: Vec<ResolverAddr>,
-        cluster: ClusterPlacement,
+        cluster: ResolverClusterPlacement,
     }
 
     #[derive(netidx_derive::Pack)]
@@ -1515,7 +1520,7 @@ mod tests {
         roles: BitFlags<Role>,
         resolver_member: Option<ResolverAddr>,
         resolver_members: Vec<ResolverAddr>,
-        cluster: ClusterPlacement,
+        cluster: ResolverClusterPlacement,
         renew_identity: Option<AdminServerId>,
     }
 
@@ -1574,7 +1579,7 @@ mod tests {
             roles: Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
-            cluster: ClusterPlacement::Create { base: "/".into() },
+            cluster: ResolverClusterPlacement::Create { base: "/".into() },
         });
         let enrollment = EnrollmentRequest::decode(&mut old.as_slice()).unwrap();
         assert_eq!(enrollment.replaces, None);
@@ -1586,7 +1591,7 @@ mod tests {
             roles: Role::Resolver.into(),
             resolver_member: None,
             resolver_members: Vec::new(),
-            cluster: ClusterPlacement::Create { base: "/".into() },
+            cluster: ResolverClusterPlacement::Create { base: "/".into() },
             renew_identity: None,
         });
         let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
@@ -1628,7 +1633,7 @@ mod tests {
             operation_id: OperationId::new(),
             controller,
             addr: "127.0.0.1:4565".parse().unwrap(),
-            map: NetworkMap::empty(controller),
+            map: TrustDomainMap::empty(controller),
             crl_pem: "crl".into(),
         }));
         assert_eq!(apply[1], 40);
@@ -1832,7 +1837,7 @@ mod tests {
             edit: ReferralEdit::SetTopology {
                 local_member: local_member.clone(),
                 members: vec![local_member.clone()],
-                parent: Some(ClusterEdge {
+                parent: Some(ResolverClusterEdge {
                     path: "/eu".to_string(),
                     addrs: vec![ResolverAddr {
                         addr: "10.0.0.1:4564".parse().unwrap(),
@@ -1926,13 +1931,13 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let req = Request::Register(RegisterRequest {
             addr: "10.0.0.2:4565".parse().unwrap(),
-            resolver: Some(ClusterFacts {
+            resolver: Some(ResolverClusterFacts {
                 members: vec![ResolverAddr {
                     addr: "10.0.0.2:4564".parse().unwrap(),
                     auth: InfoAuth::Anonymous,
                 }],
                 base: "/eu".to_string(),
-                parent: Some(ClusterEdge {
+                parent: Some(ResolverClusterEdge {
                     path: "/eu".to_string(),
                     addrs: vec![ResolverAddr {
                         addr: "10.0.0.1:4564".parse().unwrap(),
@@ -1949,10 +1954,10 @@ mod tests {
         assert_eq!(got.resolver.unwrap().base, "/eu");
 
         let controller = AdminServerId::new();
-        let resp = GetMapResponse::Ok(NetworkMap {
+        let resp = GetMapResponse::Ok(TrustDomainMap {
             version: 7,
             controller,
-            servers: vec![ServerEntry {
+            admin_servers: vec![AdminServerEntry {
                 id: controller,
                 addr: "10.0.0.1:4565".parse().unwrap(),
                 roles: Role::Ca | Role::Resolver,
@@ -1960,14 +1965,14 @@ mod tests {
                 cluster: None,
                 state: ServerState::Registered,
             }],
-            clusters: vec![],
+            resolver_clusters: vec![],
         });
         write_msg(&mut a, &resp).await.unwrap();
         match read_msg::<_, GetMapResponse>(&mut b).await.unwrap() {
             GetMapResponse::Ok(map) => {
                 assert_eq!(map.version, 7);
-                assert_eq!(map.servers.len(), 1);
-                assert_eq!(map.servers[0].roles, Role::Ca | Role::Resolver);
+                assert_eq!(map.admin_servers.len(), 1);
+                assert_eq!(map.admin_servers[0].roles, Role::Ca | Role::Resolver);
             }
             GetMapResponse::Err { reason } => panic!("err: {reason}"),
         }
@@ -2032,7 +2037,7 @@ mod tests {
     fn cluster_facts_root_decodes() {
         // A root cluster reports base "/" and no parent/children.
         let json = r#"{"members":[{"addr":"10.0.0.1:4564","auth":"Anonymous"}],"base":"/","parent":null,"children":[]}"#;
-        let cf: ClusterFacts = serde_json::from_str(json).unwrap();
+        let cf: ResolverClusterFacts = serde_json::from_str(json).unwrap();
         assert_eq!(cf.base, "/");
         assert!(cf.parent.is_none());
         assert!(cf.children.is_empty());

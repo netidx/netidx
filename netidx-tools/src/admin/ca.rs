@@ -1796,7 +1796,7 @@ fn fingerprint(p: FingerprintArgs) -> Result<()> {
             let identity = rt
                 .block_on(transport::fetch_identity(addr, NodeKind::Client))
                 .with_context(|| format!("contacting admin server {addr}"))?;
-            init::show_network_identity(addr, &identity);
+            init::show_trust_domain_identity(addr, &identity);
             Ok(())
         }
         // Local: this host's own CA.
@@ -1829,7 +1829,7 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
     let identity = transport::fetch_identity(server, NodeKind::Client)
         .await
         .with_context(|| format!("contacting admin server {server}"))?;
-    init::show_network_identity(server, &identity);
+    init::show_trust_domain_identity(server, &identity);
     if !ans.confirm_identity(&identity).await? {
         bail!(
             "CA identity was not confirmed (--accept-glyph mismatch); nothing was sent"
@@ -2222,14 +2222,18 @@ fn queue(f: QueueArgs) -> Result<()> {
                     );
                 }
                 match &e.cluster {
-                    Some(admin_proto::ClusterPlacement::Create { .. }) => println!(
-                        "    cluster create at {}",
-                        e.cluster_base.as_deref().unwrap_or("(unknown base)")
-                    ),
-                    Some(admin_proto::ClusterPlacement::Join { cluster }) => println!(
-                        "    cluster {cluster} at {}",
-                        e.cluster_base.as_deref().unwrap_or("(unknown base)")
-                    ),
+                    Some(admin_proto::ResolverClusterPlacement::Create { .. }) => {
+                        println!(
+                            "    cluster create at {}",
+                            e.cluster_base.as_deref().unwrap_or("(unknown base)")
+                        )
+                    }
+                    Some(admin_proto::ResolverClusterPlacement::Join { cluster }) => {
+                        println!(
+                            "    cluster {cluster} at {}",
+                            e.cluster_base.as_deref().unwrap_or("(unknown base)")
+                        )
+                    }
                     None => println!("    cluster (missing)"),
                 }
                 println!("    resolver members:");

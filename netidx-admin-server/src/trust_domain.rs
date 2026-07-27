@@ -2,9 +2,10 @@
 
 use crate::{
     admin_proto::{
-        AdminServerId, ClusterEdge, ClusterEntry, ClusterFacts, ClusterPlacement,
-        ClusterState, EnrollmentRequest, NetworkMap, ResolverAddr, ResolverClusterId,
-        Role, ServerEntry, ServerState,
+        AdminServerEntry, AdminServerId, EnrollmentRequest, ResolverAddr,
+        ResolverClusterEdge, ResolverClusterEntry, ResolverClusterFacts,
+        ResolverClusterId, ResolverClusterPlacement, ResolverClusterState, Role,
+        ServerState, TrustDomainMap,
     },
     atomic,
     config_lock::ConfigDirLock,
@@ -13,14 +14,14 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 pub fn path(ca_dir: &Path) -> PathBuf {
-    ca_dir.join("netmap.json")
+    ca_dir.join("trust-domain.json")
 }
 
-pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
+pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<TrustDomainMap> {
     let p = path(ca_dir);
     match std::fs::read(&p) {
         Ok(bytes) => {
-            let map: NetworkMap = serde_json::from_slice(&bytes)
+            let map: TrustDomainMap = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing network map {p:?}"))?;
             if map.controller != controller {
                 bail!(
@@ -32,22 +33,29 @@ pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(NetworkMap::empty(controller))
+            Ok(TrustDomainMap::empty(controller))
         }
         Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
     }
 }
 
-pub fn save(config_lock: &ConfigDirLock, ca_dir: &Path, map: &NetworkMap) -> Result<()> {
+pub fn save(
+    config_lock: &ConfigDirLock,
+    ca_dir: &Path,
+    map: &TrustDomainMap,
+) -> Result<()> {
     let ca_dir = config_lock.require_contained(ca_dir)?;
     atomic::write_atomic_pretty_json(&path(&ca_dir), map)
 }
 
-pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<NetworkMap> {
+pub async fn load_async(
+    ca_dir: &Path,
+    controller: AdminServerId,
+) -> Result<TrustDomainMap> {
     let p = path(ca_dir);
     match tokio::fs::read(&p).await {
         Ok(bytes) => {
-            let map: NetworkMap = serde_json::from_slice(&bytes)
+            let map: TrustDomainMap = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing network map {p:?}"))?;
             if map.controller != controller {
                 bail!(
@@ -59,7 +67,7 @@ pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<Netw
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(NetworkMap::empty(controller))
+            Ok(TrustDomainMap::empty(controller))
         }
         Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
     }
@@ -68,40 +76,40 @@ pub async fn load_async(ca_dir: &Path, controller: AdminServerId) -> Result<Netw
 pub async fn save_async(
     config_lock: &ConfigDirLock,
     ca_dir: &Path,
-    map: &NetworkMap,
+    map: &TrustDomainMap,
 ) -> Result<()> {
     let ca_dir = config_lock.require_contained(ca_dir)?;
     atomic::write_atomic_pretty_json_async(&path(&ca_dir), map).await
 }
 
-fn changed(map: &mut NetworkMap) {
-    map.servers.sort_by_key(|s| s.id);
-    map.clusters.sort_by_key(|c| c.id);
+fn changed(map: &mut TrustDomainMap) {
+    map.admin_servers.sort_by_key(|s| s.id);
+    map.resolver_clusters.sort_by_key(|c| c.id);
     map.version = map.version.saturating_add(1);
 }
 
 pub fn upsert_controller(
-    map: &mut NetworkMap,
-    mut entry: ServerEntry,
-    cluster: Option<ClusterFacts>,
+    map: &mut TrustDomainMap,
+    mut entry: AdminServerEntry,
+    cluster: Option<ResolverClusterFacts>,
 ) -> Result<bool> {
     if entry.id != map.controller || !entry.roles.contains(Role::Ca) {
         bail!("controller entry must use the map controller id and carry the Ca role");
     }
     entry.state = ServerState::Registered;
-    let mut did_change = match map.servers.iter_mut().find(|s| s.id == entry.id) {
+    let mut did_change = match map.admin_servers.iter_mut().find(|s| s.id == entry.id) {
         Some(old) if *old == entry => false,
         Some(old) => {
             *old = entry.clone();
             true
         }
         None => {
-            map.servers.push(entry.clone());
+            map.admin_servers.push(entry.clone());
             true
         }
     };
     if let (Some(cluster_id), Some(facts)) = (entry.cluster, cluster) {
-        match map.clusters.iter().find(|c| c.id == cluster_id) {
+        match map.resolver_clusters.iter().find(|c| c.id == cluster_id) {
             // Startup facts are observations, not topology authority. They
             // seed a fresh map, but may be stale while a delegation fanout is
             // incomplete or while the controller awaits its manual rolling
@@ -109,10 +117,10 @@ pub fn upsert_controller(
             // reparenting, or member assignment on an existing map.
             Some(_) => {}
             None => {
-                map.clusters.push(ClusterEntry {
+                map.resolver_clusters.push(ResolverClusterEntry {
                     id: cluster_id,
                     base: facts.base,
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: entry.resolver.clone().into_iter().collect(),
                     parent: None,
                     children: Vec::new(),
@@ -130,12 +138,12 @@ pub fn upsert_controller(
 /// Move one server's resolver endpoint without changing its identity, grant,
 /// cluster placement, or data-plane authentication.
 pub fn relocate_resolver(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     server_id: AdminServerId,
     addr: std::net::SocketAddr,
 ) -> Result<bool> {
     let server = map
-        .servers
+        .admin_servers
         .iter()
         .find(|server| server.id == server_id)
         .with_context(|| format!("admin server {server_id} does not exist"))?;
@@ -148,7 +156,7 @@ pub fn relocate_resolver(
     if old.addr == addr {
         return Ok(false);
     }
-    if map.servers.iter().any(|server| {
+    if map.admin_servers.iter().any(|server| {
         server.id != server_id
             && server.resolver.as_ref().is_some_and(|resolver| resolver.addr == addr)
     }) {
@@ -158,7 +166,7 @@ pub fn relocate_resolver(
         .cluster
         .with_context(|| format!("resolver admin server {server_id} has no cluster"))?;
     let cluster = map
-        .clusters
+        .resolver_clusters
         .iter()
         .find(|cluster| cluster.id == cluster_id)
         .context("the server's assigned resolver cluster does not exist")?;
@@ -171,13 +179,13 @@ pub fn relocate_resolver(
     }
 
     let replacement = ResolverAddr { addr, auth: old.auth.clone() };
-    map.servers
+    map.admin_servers
         .iter_mut()
         .find(|server| server.id == server_id)
         .expect("server checked above")
         .resolver = Some(replacement.clone());
     let cluster = map
-        .clusters
+        .resolver_clusters
         .iter_mut()
         .find(|cluster| cluster.id == cluster_id)
         .expect("cluster checked above");
@@ -195,11 +203,11 @@ pub fn relocate_resolver(
 /// not choose either identity: `server_id` and a created cluster id come from
 /// the CA.
 pub fn enroll(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     server_id: AdminServerId,
     request: &EnrollmentRequest,
 ) -> Result<ResolverClusterId> {
-    if map.servers.iter().any(|s| s.id == server_id) {
+    if map.admin_servers.iter().any(|s| s.id == server_id) {
         bail!("server identity {server_id} is already enrolled");
     }
     if request.roles.contains(Role::Ca) {
@@ -220,7 +228,7 @@ pub fn enroll(
     if !request.resolver_members.contains(resolver_member) {
         bail!("the owned resolver member must appear in the requested member set");
     }
-    if map.servers.iter().any(|s| {
+    if map.admin_servers.iter().any(|s| {
         s.resolver.as_ref().is_some_and(|member| member.addr == resolver_member.addr)
     }) {
         bail!(
@@ -229,18 +237,18 @@ pub fn enroll(
         );
     }
     let cluster = match &request.cluster {
-        ClusterPlacement::Create { base } => {
+        ResolverClusterPlacement::Create { base } => {
             if base.is_empty() || !base.starts_with('/') {
                 bail!("cluster base must be an absolute netidx path");
             }
-            if map.clusters.iter().any(|c| c.base == *base) {
+            if map.resolver_clusters.iter().any(|c| c.base == *base) {
                 bail!("a cluster already exists at base {base:?}");
             }
             let id = ResolverClusterId::new();
-            map.clusters.push(ClusterEntry {
+            map.resolver_clusters.push(ResolverClusterEntry {
                 id,
                 base: base.clone(),
-                state: ClusterState::Pending,
+                state: ResolverClusterState::Pending,
                 // Cluster membership is the union of CA-issued server
                 // identities, not the local resolver.json launch menu.
                 members: vec![resolver_member.clone()],
@@ -249,9 +257,9 @@ pub fn enroll(
             });
             id
         }
-        ClusterPlacement::Join { cluster } => {
+        ResolverClusterPlacement::Join { cluster } => {
             let approved = map
-                .clusters
+                .resolver_clusters
                 .iter_mut()
                 .find(|c| c.id == *cluster)
                 .context("requested resolver cluster does not exist")?;
@@ -269,7 +277,7 @@ pub fn enroll(
             *cluster
         }
     };
-    map.servers.push(ServerEntry {
+    map.admin_servers.push(AdminServerEntry {
         id: server_id,
         addr: request.listen,
         roles: request.roles,
@@ -282,7 +290,7 @@ pub fn enroll(
 }
 
 fn server_set(
-    map: &NetworkMap,
+    map: &TrustDomainMap,
     ids: &[AdminServerId],
     require_registered: bool,
 ) -> Result<(ResolverClusterId, Vec<ResolverAddr>)> {
@@ -293,7 +301,7 @@ fn server_set(
     let mut members = Vec::with_capacity(ids.len());
     for id in ids {
         let server = map
-            .servers
+            .admin_servers
             .iter()
             .find(|s| s.id == *id)
             .with_context(|| format!("admin server {id} does not exist"))?;
@@ -323,10 +331,13 @@ fn server_set(
 /// a delegation under them would restructure. Authorization needs this before
 /// [`delegate`] runs, because `delegate` only checks that the proposed child
 /// path lies *under* this base, which says nothing about who owns the base.
-pub fn parent_base(map: &NetworkMap, parent_servers: &[AdminServerId]) -> Result<String> {
+pub fn parent_base(
+    map: &TrustDomainMap,
+    parent_servers: &[AdminServerId],
+) -> Result<String> {
     let (cluster, _) = server_set(map, &canonical_ids(parent_servers), true)?;
     Ok(map
-        .clusters
+        .resolver_clusters
         .iter()
         .find(|entry| entry.id == cluster)
         .context("parent cluster does not exist")?
@@ -334,9 +345,12 @@ pub fn parent_base(map: &NetworkMap, parent_servers: &[AdminServerId]) -> Result
         .clone())
 }
 
-fn assigned_servers(map: &NetworkMap, cluster: ResolverClusterId) -> Vec<AdminServerId> {
+fn assigned_servers(
+    map: &TrustDomainMap,
+    cluster: ResolverClusterId,
+) -> Vec<AdminServerId> {
     let mut ids: Vec<_> = map
-        .servers
+        .admin_servers
         .iter()
         .filter(|s| s.cluster == Some(cluster) && s.roles.contains(Role::Resolver))
         .map(|s| s.id)
@@ -355,8 +369,8 @@ fn canonical_ids(ids: &[AdminServerId]) -> Vec<AdminServerId> {
 /// The authoritative result of attaching or splitting resolver clusters.
 #[derive(Debug, Clone)]
 pub struct DelegationChange {
-    pub parent: ClusterEntry,
-    pub child: ClusterEntry,
+    pub parent: ResolverClusterEntry,
+    pub child: ResolverClusterEntry,
     pub changed: bool,
 }
 
@@ -366,7 +380,7 @@ pub struct DelegationChange {
 /// to distinct clusters, attach/rebase the complete child cluster. Reapplying
 /// the final proposal is idempotent.
 pub fn delegate(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     proposed_path: &str,
     proposed_child: ResolverClusterId,
     parent_servers: &[AdminServerId],
@@ -386,17 +400,17 @@ pub fn delegate(
     let (parent_id, parent_members) = server_set(map, &parent_servers, true)?;
     let (current_child_id, child_members) = server_set(map, &child_servers, false)?;
     let parent_pos = map
-        .clusters
+        .resolver_clusters
         .iter()
         .position(|c| c.id == parent_id)
         .context("parent cluster does not exist")?;
-    if map.clusters[parent_pos].state != ClusterState::Active {
+    if map.resolver_clusters[parent_pos].state != ResolverClusterState::Active {
         bail!("the parent cluster is not active");
     }
-    if !NPath::is_parent(&map.clusters[parent_pos].base, &path) {
+    if !NPath::is_parent(&map.resolver_clusters[parent_pos].base, &path) {
         bail!(
             "delegated path {proposed_path:?} is outside parent base {:?}",
-            map.clusters[parent_pos].base
+            map.resolver_clusters[parent_pos].base
         );
     }
 
@@ -405,18 +419,18 @@ pub fn delegate(
     // and returns without version churn.
     if parent_id != current_child_id {
         let child_pos = map
-            .clusters
+            .resolver_clusters
             .iter()
             .position(|c| c.id == current_child_id)
             .context("child cluster does not exist")?;
         let mut descendants = std::collections::BTreeSet::new();
-        let mut pending = map.clusters[child_pos].children.clone();
+        let mut pending = map.resolver_clusters[child_pos].children.clone();
         while let Some(id) = pending.pop() {
             if !descendants.insert(id) {
                 continue;
             }
             let cluster = map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|cluster| cluster.id == id)
                 .context("child topology references a missing cluster")?;
@@ -427,7 +441,7 @@ pub fn delegate(
         }
         for id in &descendants {
             let descendant =
-                map.clusters.iter().find(|cluster| cluster.id == *id).unwrap();
+                map.resolver_clusters.iter().find(|cluster| cluster.id == *id).unwrap();
             if !NPath::is_parent(&path, &descendant.base) {
                 bail!(
                     "existing descendant {:?} is outside the proposed child base {proposed_path:?}",
@@ -447,41 +461,46 @@ pub fn delegate(
                 "the child selection must include every resolver server in its cluster"
             );
         }
-        let already = map.clusters[child_pos].base == proposed_path
-            && map.clusters[child_pos].parent == Some(parent_id)
-            && map.clusters[child_pos].state == ClusterState::Active
-            && map.clusters[parent_pos].children.contains(&current_child_id);
+        let already = map.resolver_clusters[child_pos].base == proposed_path
+            && map.resolver_clusters[child_pos].parent == Some(parent_id)
+            && map.resolver_clusters[child_pos].state == ResolverClusterState::Active
+            && map.resolver_clusters[parent_pos].children.contains(&current_child_id);
         if already {
             return Ok(DelegationChange {
-                parent: map.clusters[parent_pos].clone(),
-                child: map.clusters[child_pos].clone(),
+                parent: map.resolver_clusters[parent_pos].clone(),
+                child: map.resolver_clusters[child_pos].clone(),
                 changed: false,
             });
         }
-        if map.clusters[child_pos].parent.is_some() {
+        if map.resolver_clusters[child_pos].parent.is_some() {
             bail!("the selected child cluster is already attached");
         }
         if map
-            .clusters
+            .resolver_clusters
             .iter()
             .any(|c| c.id != current_child_id && c.base == proposed_path)
         {
             bail!("another resolver cluster already owns {proposed_path:?}");
         }
-        map.clusters[child_pos].base = proposed_path.to_string();
-        map.clusters[child_pos].members = child_members;
-        map.clusters[child_pos].parent = Some(parent_id);
-        map.clusters[child_pos].state = ClusterState::Active;
-        map.clusters[parent_pos].members = parent_members;
-        if !map.clusters[parent_pos].children.contains(&current_child_id) {
-            map.clusters[parent_pos].children.push(current_child_id);
-            map.clusters[parent_pos].children.sort();
+        map.resolver_clusters[child_pos].base = proposed_path.to_string();
+        map.resolver_clusters[child_pos].members = child_members;
+        map.resolver_clusters[child_pos].parent = Some(parent_id);
+        map.resolver_clusters[child_pos].state = ResolverClusterState::Active;
+        map.resolver_clusters[parent_pos].members = parent_members;
+        if !map.resolver_clusters[parent_pos].children.contains(&current_child_id) {
+            map.resolver_clusters[parent_pos].children.push(current_child_id);
+            map.resolver_clusters[parent_pos].children.sort();
         }
         changed(map);
         return Ok(DelegationChange {
-            parent: map.clusters.iter().find(|c| c.id == parent_id).unwrap().clone(),
+            parent: map
+                .resolver_clusters
+                .iter()
+                .find(|c| c.id == parent_id)
+                .unwrap()
+                .clone(),
             child: map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|c| c.id == current_child_id)
                 .unwrap()
@@ -499,18 +518,18 @@ pub fn delegate(
     if union != assigned_servers(map, parent_id) {
         bail!("a cluster split must assign every resolver server to parent or child");
     }
-    if map.clusters.iter().any(|c| c.id == proposed_child) {
+    if map.resolver_clusters.iter().any(|c| c.id == proposed_child) {
         bail!("the proposed child cluster identity is already in use");
     }
-    if map.clusters.iter().any(|c| c.base == proposed_path) {
+    if map.resolver_clusters.iter().any(|c| c.base == proposed_path) {
         bail!("another resolver cluster already owns {proposed_path:?}");
     }
 
-    let old_children = map.clusters[parent_pos].children.clone();
+    let old_children = map.resolver_clusters[parent_pos].children.clone();
     let mut parent_children = Vec::new();
     let mut child_children = Vec::new();
     for id in old_children {
-        let Some(existing) = map.clusters.iter().find(|c| c.id == id) else {
+        let Some(existing) = map.resolver_clusters.iter().find(|c| c.id == id) else {
             continue;
         };
         if NPath::is_parent(&path, &existing.base) {
@@ -522,39 +541,44 @@ pub fn delegate(
     parent_children.push(proposed_child);
     parent_children.sort();
     child_children.sort();
-    map.clusters[parent_pos].members = parent_members;
-    map.clusters[parent_pos].children = parent_children;
+    map.resolver_clusters[parent_pos].members = parent_members;
+    map.resolver_clusters[parent_pos].children = parent_children;
     for id in &child_children {
-        if let Some(cluster) = map.clusters.iter_mut().find(|c| c.id == *id) {
+        if let Some(cluster) = map.resolver_clusters.iter_mut().find(|c| c.id == *id) {
             cluster.parent = Some(proposed_child);
         }
     }
-    map.clusters.push(ClusterEntry {
+    map.resolver_clusters.push(ResolverClusterEntry {
         id: proposed_child,
         base: proposed_path.to_string(),
-        state: ClusterState::Active,
+        state: ResolverClusterState::Active,
         members: child_members,
         parent: Some(parent_id),
         children: child_children,
     });
-    for server in &mut map.servers {
+    for server in &mut map.admin_servers {
         if child_servers.contains(&server.id) {
             server.cluster = Some(proposed_child);
         }
     }
     changed(map);
     Ok(DelegationChange {
-        parent: map.clusters.iter().find(|c| c.id == parent_id).unwrap().clone(),
-        child: map.clusters.iter().find(|c| c.id == proposed_child).unwrap().clone(),
+        parent: map.resolver_clusters.iter().find(|c| c.id == parent_id).unwrap().clone(),
+        child: map
+            .resolver_clusters
+            .iter()
+            .find(|c| c.id == proposed_child)
+            .unwrap()
+            .clone(),
         changed: true,
     })
 }
 
-fn edge_for(map: &NetworkMap, id: ResolverClusterId) -> Option<ClusterEdge> {
-    map.clusters
+fn edge_for(map: &TrustDomainMap, id: ResolverClusterId) -> Option<ResolverClusterEdge> {
+    map.resolver_clusters
         .iter()
         .find(|c| c.id == id)
-        .map(|c| ClusterEdge { path: c.base.clone(), addrs: c.members.clone() })
+        .map(|c| ResolverClusterEdge { path: c.base.clone(), addrs: c.members.clone() })
 }
 
 fn normalize_addrs(addrs: &mut Vec<ResolverAddr>) {
@@ -563,10 +587,10 @@ fn normalize_addrs(addrs: &mut Vec<ResolverAddr>) {
 }
 
 fn facts_match(
-    map: &NetworkMap,
-    cluster: &ClusterEntry,
+    map: &TrustDomainMap,
+    cluster: &ResolverClusterEntry,
     owned: Option<&ResolverAddr>,
-    facts: &ClusterFacts,
+    facts: &ResolverClusterFacts,
 ) -> bool {
     let mut expected_members = cluster.members.clone();
     let mut got_members = facts.members.clone();
@@ -577,12 +601,14 @@ fn facts_match(
     // parent's own base here (`/` for the root) rejects every correctly
     // configured non-root server as topology drift.
     let expected_parent = cluster.parent.and_then(|id| {
-        map.clusters.iter().find(|c| c.id == id).map(|parent| ClusterEdge {
-            path: cluster.base.clone(),
-            addrs: parent.members.clone(),
+        map.resolver_clusters.iter().find(|c| c.id == id).map(|parent| {
+            ResolverClusterEdge {
+                path: cluster.base.clone(),
+                addrs: parent.members.clone(),
+            }
         })
     });
-    let mut expected_children: Vec<ClusterEdge> =
+    let mut expected_children: Vec<ResolverClusterEdge> =
         cluster.children.iter().filter_map(|id| edge_for(map, *id)).collect();
     expected_children.sort_by(|a, b| a.path.cmp(&b.path));
     let mut got_children = facts.children.clone();
@@ -597,22 +623,22 @@ fn facts_match(
 /// Activate only the authenticated node's existing grant and allow it to
 /// update only its own routing address.
 pub fn register(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     server_id: AdminServerId,
     addr: std::net::SocketAddr,
-    resolver: Option<&ClusterFacts>,
+    resolver: Option<&ResolverClusterFacts>,
 ) -> Result<bool> {
     let pos = map
-        .servers
+        .admin_servers
         .iter()
         .position(|s| s.id == server_id)
         .context("the authenticated server has no enrollment grant")?;
-    let cluster_id = map.servers[pos].cluster;
-    let owned = map.servers[pos].resolver.clone();
+    let cluster_id = map.admin_servers[pos].cluster;
+    let owned = map.admin_servers[pos].resolver.clone();
     match (cluster_id, resolver) {
         (Some(id), Some(facts)) => {
             let cluster = map
-                .clusters
+                .resolver_clusters
                 .iter()
                 .find(|c| c.id == id)
                 .context("the server grant references a missing cluster")?;
@@ -633,25 +659,25 @@ pub fn register(
     // no such ceremony: registration of its approved first member is what makes
     // the administrative network routable.
     let activate_root = cluster_id.is_some_and(|id| {
-        map.clusters.iter().any(|cluster| {
+        map.resolver_clusters.iter().any(|cluster| {
             cluster.id == id
                 && cluster.base == "/"
                 && cluster.parent.is_none()
-                && cluster.state == ClusterState::Pending
+                && cluster.state == ResolverClusterState::Pending
         })
     });
-    let server = &mut map.servers[pos];
+    let server = &mut map.admin_servers[pos];
     let server_changed = server.addr != addr || server.state != ServerState::Registered;
     if server_changed {
         server.addr = addr;
         server.state = ServerState::Registered;
     }
     if activate_root {
-        map.clusters
+        map.resolver_clusters
             .iter_mut()
             .find(|cluster| Some(cluster.id) == cluster_id)
             .unwrap()
-            .state = ClusterState::Active;
+            .state = ResolverClusterState::Active;
     }
     if server_changed || activate_root {
         changed(map);
@@ -659,9 +685,9 @@ pub fn register(
     Ok(server_changed || activate_root)
 }
 
-pub fn deregister(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool> {
+pub fn deregister(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<bool> {
     let server = map
-        .servers
+        .admin_servers
         .iter_mut()
         .find(|s| s.id == server_id)
         .context("the authenticated server has no enrollment grant")?;
@@ -673,23 +699,27 @@ pub fn deregister(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool
     Ok(true)
 }
 
-pub fn remove(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool> {
+pub fn remove(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<bool> {
     if server_id == map.controller {
         bail!("the active controller cannot be removed; replace and revoke it first");
     }
-    let before = map.servers.len();
-    map.servers.retain(|s| s.id != server_id);
-    if before == map.servers.len() {
+    let before = map.admin_servers.len();
+    map.admin_servers.retain(|s| s.id != server_id);
+    if before == map.admin_servers.len() {
         return Ok(false);
     }
     let used: std::collections::BTreeSet<_> =
-        map.servers.iter().filter_map(|s| s.cluster).collect();
-    let removed_clusters: std::collections::BTreeSet<_> =
-        map.clusters.iter().filter(|c| !used.contains(&c.id)).map(|c| c.id).collect();
-    map.clusters.retain(|c| !removed_clusters.contains(&c.id));
-    for cluster in &mut map.clusters {
+        map.admin_servers.iter().filter_map(|s| s.cluster).collect();
+    let removed_clusters: std::collections::BTreeSet<_> = map
+        .resolver_clusters
+        .iter()
+        .filter(|c| !used.contains(&c.id))
+        .map(|c| c.id)
+        .collect();
+    map.resolver_clusters.retain(|c| !removed_clusters.contains(&c.id));
+    for cluster in &mut map.resolver_clusters {
         let mut owned: Vec<_> = map
-            .servers
+            .admin_servers
             .iter()
             .filter(|server| server.cluster == Some(cluster.id))
             .filter_map(|server| server.resolver.clone())
@@ -698,7 +728,7 @@ pub fn remove(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool> {
         cluster.members = owned;
         if cluster.parent.is_some_and(|id| removed_clusters.contains(&id)) {
             cluster.parent = None;
-            cluster.state = ClusterState::Pending;
+            cluster.state = ResolverClusterState::Pending;
         }
         cluster.children.retain(|id| !removed_clusters.contains(id));
     }
@@ -707,7 +737,7 @@ pub fn remove(map: &mut NetworkMap, server_id: AdminServerId) -> Result<bool> {
 }
 
 pub fn reparent(
-    map: &mut NetworkMap,
+    map: &mut TrustDomainMap,
     child: ResolverClusterId,
     parent: ResolverClusterId,
 ) -> Result<bool> {
@@ -715,35 +745,35 @@ pub fn reparent(
         bail!("a resolver cluster cannot be its own parent");
     }
     let child_pos = map
-        .clusters
+        .resolver_clusters
         .iter()
         .position(|c| c.id == child)
         .context("child cluster does not exist")?;
     let parent_pos = map
-        .clusters
+        .resolver_clusters
         .iter()
         .position(|c| c.id == parent)
         .context("parent cluster does not exist")?;
-    if map.clusters[parent_pos].state != ClusterState::Active {
+    if map.resolver_clusters[parent_pos].state != ResolverClusterState::Active {
         bail!("the parent cluster is not active");
     }
-    let old_parent = map.clusters[child_pos].parent;
+    let old_parent = map.resolver_clusters[child_pos].parent;
     let already = old_parent == Some(parent)
-        && map.clusters[child_pos].state == ClusterState::Active
-        && map.clusters[parent_pos].children.contains(&child);
+        && map.resolver_clusters[child_pos].state == ResolverClusterState::Active
+        && map.resolver_clusters[parent_pos].children.contains(&child);
     if already {
         return Ok(false);
     }
     if let Some(old) = old_parent
-        && let Some(old) = map.clusters.iter_mut().find(|c| c.id == old)
+        && let Some(old) = map.resolver_clusters.iter_mut().find(|c| c.id == old)
     {
         old.children.retain(|id| *id != child);
     }
-    map.clusters[child_pos].parent = Some(parent);
-    map.clusters[child_pos].state = ClusterState::Active;
-    if !map.clusters[parent_pos].children.contains(&child) {
-        map.clusters[parent_pos].children.push(child);
-        map.clusters[parent_pos].children.sort();
+    map.resolver_clusters[child_pos].parent = Some(parent);
+    map.resolver_clusters[child_pos].state = ResolverClusterState::Active;
+    if !map.resolver_clusters[parent_pos].children.contains(&child) {
+        map.resolver_clusters[parent_pos].children.push(child);
+        map.resolver_clusters[parent_pos].children.sort();
     }
     changed(map);
     Ok(true)
@@ -765,7 +795,7 @@ mod tests {
             roles: Role::Resolver.into(),
             resolver_member: Some(member.clone()),
             resolver_members: vec![member],
-            cluster: ClusterPlacement::Create { base: base.into() },
+            cluster: ResolverClusterPlacement::Create { base: base.into() },
             replaces: None,
         }
     }
@@ -780,7 +810,7 @@ mod tests {
             auth: InfoAuth::Tls { name: "resolver.example.com".into() },
         };
         let peer_addr = addr("10.0.0.2:4564");
-        let controller_entry = ServerEntry {
+        let controller_entry = AdminServerEntry {
             id: controller,
             addr: "10.0.0.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
@@ -788,7 +818,7 @@ mod tests {
             cluster: Some(cluster),
             state: ServerState::Registered,
         };
-        let peer_entry = ServerEntry {
+        let peer_entry = AdminServerEntry {
             id: peer,
             addr: "10.0.0.2:4565".parse().unwrap(),
             roles: Role::Resolver.into(),
@@ -796,14 +826,14 @@ mod tests {
             cluster: Some(cluster),
             state: ServerState::Registered,
         };
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 7,
             controller,
-            servers: vec![controller_entry.clone(), peer_entry.clone()],
-            clusters: vec![ClusterEntry {
+            admin_servers: vec![controller_entry.clone(), peer_entry.clone()],
+            resolver_clusters: vec![ResolverClusterEntry {
                 id: cluster,
                 base: "/".into(),
-                state: ClusterState::Active,
+                state: ResolverClusterState::Active,
                 members: vec![old.clone(), peer_addr.clone()],
                 parent: None,
                 children: vec![],
@@ -823,11 +853,11 @@ mod tests {
             Some(ResolverAddr { addr: new_addr, auth: old.auth.clone() })
         );
         assert_eq!(
-            map.servers.iter().find(|server| server.id == peer),
+            map.admin_servers.iter().find(|server| server.id == peer),
             Some(&peer_entry)
         );
         assert_eq!(
-            map.clusters[0].members,
+            map.resolver_clusters[0].members,
             vec![peer_addr, ResolverAddr { addr: new_addr, auth: old.auth }]
         );
         assert!(!relocate_resolver(&mut map, controller, new_addr).unwrap());
@@ -841,11 +871,11 @@ mod tests {
         let cluster = ResolverClusterId::new();
         let old = addr("10.0.0.1:4564");
         let peer_addr = addr("10.0.0.2:4564");
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 3,
             controller,
-            servers: vec![
-                ServerEntry {
+            admin_servers: vec![
+                AdminServerEntry {
                     id: controller,
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     roles: Role::Ca | Role::Resolver,
@@ -853,7 +883,7 @@ mod tests {
                     cluster: Some(cluster),
                     state: ServerState::Registered,
                 },
-                ServerEntry {
+                AdminServerEntry {
                     id: peer,
                     addr: "10.0.0.2:4565".parse().unwrap(),
                     roles: Role::Resolver.into(),
@@ -862,10 +892,10 @@ mod tests {
                     state: ServerState::Registered,
                 },
             ],
-            clusters: vec![ClusterEntry {
+            resolver_clusters: vec![ResolverClusterEntry {
                 id: cluster,
                 base: "/".into(),
-                state: ClusterState::Active,
+                state: ResolverClusterState::Active,
                 members: vec![old, peer_addr.clone()],
                 parent: None,
                 children: vec![],
@@ -880,25 +910,25 @@ mod tests {
     #[test]
     fn permanent_removal_never_accepts_the_active_controller() {
         let controller = AdminServerId::new();
-        let mut map = NetworkMap::empty(controller);
+        let mut map = TrustDomainMap::empty(controller);
         let before = map.clone();
         let error = remove(&mut map, controller).unwrap_err().to_string();
         assert!(error.contains("active controller"));
         assert_eq!(map.controller, before.controller);
         assert_eq!(map.version, before.version);
-        assert_eq!(map.servers.len(), before.servers.len());
+        assert_eq!(map.admin_servers.len(), before.admin_servers.len());
     }
 
     #[test]
     fn enrollment_registration_and_self_only_address_update() {
         let controller = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = NetworkMap::empty(controller);
+        let mut map = TrustDomainMap::empty(controller);
         let request = enrollment("/eu", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
-        assert_eq!(map.servers[0].state, ServerState::Enrolled);
-        assert_eq!(map.clusters[0].state, ClusterState::Pending);
-        let facts = ClusterFacts {
+        assert_eq!(map.admin_servers[0].state, ServerState::Enrolled);
+        assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
+        let facts = ResolverClusterFacts {
             members: request.resolver_members.clone(),
             base: "/eu".into(),
             parent: None,
@@ -908,29 +938,29 @@ mod tests {
             register(&mut map, server, "10.0.0.20:4565".parse().unwrap(), Some(&facts),)
                 .unwrap()
         );
-        assert_eq!(map.servers[0].id, server);
-        assert_eq!(map.servers[0].cluster, Some(cluster));
-        assert_eq!(map.servers[0].roles, Role::Resolver);
-        assert_eq!(map.servers[0].addr, "10.0.0.20:4565".parse().unwrap());
-        assert_eq!(map.clusters[0].state, ClusterState::Pending);
+        assert_eq!(map.admin_servers[0].id, server);
+        assert_eq!(map.admin_servers[0].cluster, Some(cluster));
+        assert_eq!(map.admin_servers[0].roles, Role::Resolver);
+        assert_eq!(map.admin_servers[0].addr, "10.0.0.20:4565".parse().unwrap());
+        assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
         let mut drift = facts.clone();
         drift.base = "/us".into();
         assert!(
             register(&mut map, server, "10.0.0.30:4565".parse().unwrap(), Some(&drift),)
                 .is_err()
         );
-        assert_eq!(map.servers[0].addr, "10.0.0.20:4565".parse().unwrap());
+        assert_eq!(map.admin_servers[0].addr, "10.0.0.20:4565".parse().unwrap());
     }
 
     #[test]
     fn first_root_resolver_below_a_dedicated_controller_activates_on_registration() {
         let controller = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = NetworkMap::empty(controller);
+        let mut map = TrustDomainMap::empty(controller);
         let request = enrollment("/", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
-        assert_eq!(map.clusters[0].state, ClusterState::Pending);
-        let facts = ClusterFacts {
+        assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
+        let facts = ResolverClusterFacts {
             members: request.resolver_members.clone(),
             base: "/".into(),
             parent: None,
@@ -940,9 +970,9 @@ mod tests {
             register(&mut map, server, "10.0.0.10:4565".parse().unwrap(), Some(&facts),)
                 .unwrap()
         );
-        assert_eq!(map.clusters[0].id, cluster);
-        assert_eq!(map.clusters[0].state, ClusterState::Active);
-        assert_eq!(map.servers[0].state, ServerState::Registered);
+        assert_eq!(map.resolver_clusters[0].id, cluster);
+        assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Active);
+        assert_eq!(map.admin_servers[0].state, ServerState::Registered);
         assert!(
             !register(&mut map, server, "10.0.0.10:4565".parse().unwrap(), Some(&facts),)
                 .unwrap()
@@ -954,7 +984,7 @@ mod tests {
         let controller = AdminServerId::new();
         let root = ResolverClusterId::new();
         let child = ResolverClusterId::new();
-        let controller_entry = ServerEntry {
+        let controller_entry = AdminServerEntry {
             id: controller,
             addr: "10.0.0.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
@@ -962,32 +992,32 @@ mod tests {
             cluster: Some(root),
             state: ServerState::Registered,
         };
-        let facts = ClusterFacts {
+        let facts = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564")],
             base: "/".into(),
             parent: None,
-            children: vec![ClusterEdge {
+            children: vec![ResolverClusterEdge {
                 path: "/eu".into(),
                 addrs: vec![addr("10.0.0.2:4564")],
             }],
         };
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 1,
             controller,
-            servers: vec![controller_entry.clone()],
-            clusters: vec![
-                ClusterEntry {
+            admin_servers: vec![controller_entry.clone()],
+            resolver_clusters: vec![
+                ResolverClusterEntry {
                     id: root,
                     base: "/".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: facts.members.clone(),
                     parent: None,
                     children: vec![child],
                 },
-                ClusterEntry {
+                ResolverClusterEntry {
                     id: child,
                     base: "/eu".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: vec![addr("10.0.0.2:4564")],
                     parent: Some(root),
                     children: vec![],
@@ -996,7 +1026,7 @@ mod tests {
         };
 
         assert!(!upsert_controller(&mut map, controller_entry, Some(facts)).unwrap());
-        let root = map.clusters.iter().find(|c| c.id == root).unwrap();
+        let root = map.resolver_clusters.iter().find(|c| c.id == root).unwrap();
         assert_eq!(root.children, vec![child]);
     }
 
@@ -1006,7 +1036,7 @@ mod tests {
         let root_server = AdminServerId::new();
         let root = ResolverClusterId::new();
         let child = ResolverClusterId::new();
-        let controller_entry = ServerEntry {
+        let controller_entry = AdminServerEntry {
             id: controller,
             addr: "10.0.60.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
@@ -1014,20 +1044,20 @@ mod tests {
             cluster: Some(child),
             state: ServerState::Registered,
         };
-        let authoritative_child = ClusterEntry {
+        let authoritative_child = ResolverClusterEntry {
             id: child,
             base: "/ap".into(),
-            state: ClusterState::Active,
+            state: ResolverClusterState::Active,
             members: vec![addr("10.0.60.1:4564")],
             parent: Some(root),
             children: vec![],
         };
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 3,
             controller,
-            servers: vec![
+            admin_servers: vec![
                 controller_entry.clone(),
-                ServerEntry {
+                AdminServerEntry {
                     id: root_server,
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     roles: Role::Resolver.into(),
@@ -1036,11 +1066,11 @@ mod tests {
                     state: ServerState::Registered,
                 },
             ],
-            clusters: vec![
-                ClusterEntry {
+            resolver_clusters: vec![
+                ResolverClusterEntry {
                     id: root,
                     base: "/".into(),
-                    state: ClusterState::Active,
+                    state: ResolverClusterState::Active,
                     members: vec![addr("10.0.0.1:4564")],
                     parent: None,
                     children: vec![child],
@@ -1050,7 +1080,7 @@ mod tests {
         };
         // The resolver file may still contain its pre-split peer topology
         // until the controller fanout and manual rolling restart complete.
-        let stale = ClusterFacts {
+        let stale = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564"), addr("10.0.60.1:4564")],
             base: "/".into(),
             parent: None,
@@ -1059,7 +1089,7 @@ mod tests {
 
         assert!(!upsert_controller(&mut map, controller_entry, Some(stale)).unwrap());
         assert_eq!(
-            map.clusters.iter().find(|c| c.id == child),
+            map.resolver_clusters.iter().find(|c| c.id == child),
             Some(&authoritative_child)
         );
         assert_eq!(map.version, 3);
@@ -1071,11 +1101,11 @@ mod tests {
         let first = AdminServerId::new();
         let second = AdminServerId::new();
         let parent_server = AdminServerId::new();
-        let mut map = NetworkMap::empty(controller);
+        let mut map = TrustDomainMap::empty(controller);
         let parent =
             enroll(&mut map, parent_server, &enrollment("/", "10.0.0.1:4564")).unwrap();
-        map.clusters.iter_mut().find(|c| c.id == parent).unwrap().state =
-            ClusterState::Active;
+        map.resolver_clusters.iter_mut().find(|c| c.id == parent).unwrap().state =
+            ResolverClusterState::Active;
         let request = enrollment("/eu", "10.0.0.10:4564");
         let child = enroll(&mut map, first, &request).unwrap();
         let second_member = addr("10.0.0.11:4564");
@@ -1086,19 +1116,19 @@ mod tests {
             roles: Role::Resolver.into(),
             resolver_member: Some(second_member.clone()),
             resolver_members: vec![second_member],
-            cluster: ClusterPlacement::Join { cluster: child },
+            cluster: ResolverClusterPlacement::Join { cluster: child },
             replaces: None,
         };
         assert_eq!(enroll(&mut map, second, &join).unwrap(), child);
         assert!(reparent(&mut map, child, parent).unwrap());
         assert_eq!(
-            map.clusters.iter().find(|c| c.id == child).unwrap().state,
-            ClusterState::Active
+            map.resolver_clusters.iter().find(|c| c.id == child).unwrap().state,
+            ResolverClusterState::Active
         );
-        let child_facts = ClusterFacts {
+        let child_facts = ResolverClusterFacts {
             members: expanded_members,
             base: "/eu".into(),
-            parent: Some(ClusterEdge {
+            parent: Some(ResolverClusterEdge {
                 path: "/eu".into(),
                 addrs: vec![addr("10.0.0.1:4564")],
             }),
@@ -1124,8 +1154,10 @@ mod tests {
             )
             .is_err()
         );
-        let second_local_only =
-            ClusterFacts { members: vec![addr("10.0.0.11:4564")], ..child_facts.clone() };
+        let second_local_only = ResolverClusterFacts {
+            members: vec![addr("10.0.0.11:4564")],
+            ..child_facts.clone()
+        };
         assert!(
             register(
                 &mut map,
@@ -1137,10 +1169,10 @@ mod tests {
         );
         assert!(deregister(&mut map, first).unwrap());
         assert!(remove(&mut map, first).unwrap());
-        let remaining = map.clusters.iter().find(|c| c.id == child).unwrap();
+        let remaining = map.resolver_clusters.iter().find(|c| c.id == child).unwrap();
         assert_eq!(remaining.members, vec![addr("10.0.0.11:4564")]);
         assert!(remove(&mut map, second).unwrap());
-        assert!(!map.clusters.iter().any(|c| c.id == child));
+        assert!(!map.resolver_clusters.iter().any(|c| c.id == child));
     }
 
     #[test]
@@ -1157,9 +1189,9 @@ mod tests {
             (ap1, "10.0.60.1:4565", "10.0.60.1:4564", false),
             (ap2, "10.0.60.2:4565", "10.0.60.2:4564", false),
         ];
-        let servers: Vec<_> = specs
+        let admin_servers: Vec<_> = specs
             .iter()
-            .map(|(id, admin, member, ca)| ServerEntry {
+            .map(|(id, admin, member, ca)| AdminServerEntry {
                 id: *id,
                 addr: admin.parse().unwrap(),
                 roles: if *ca {
@@ -1175,14 +1207,14 @@ mod tests {
         let mut members: Vec<_> =
             specs.iter().map(|(_, _, member, _)| addr(member)).collect();
         normalize_addrs(&mut members);
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 7,
             controller: us1,
-            servers,
-            clusters: vec![ClusterEntry {
+            admin_servers,
+            resolver_clusters: vec![ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
-                state: ClusterState::Active,
+                state: ResolverClusterState::Active,
                 members,
                 parent: None,
                 children: vec![],
@@ -1207,13 +1239,13 @@ mod tests {
             vec![addr("10.0.60.1:4564"), addr("10.0.60.2:4564")]
         );
         assert!(
-            map.servers
+            map.admin_servers
                 .iter()
                 .filter(|s| [us1, us2].contains(&s.id))
                 .all(|s| { s.cluster == Some(root) })
         );
         assert!(
-            map.servers
+            map.admin_servers
                 .iter()
                 .filter(|s| [ap1, ap2].contains(&s.id))
                 .all(|s| { s.cluster == Some(proposed_child) })
@@ -1232,16 +1264,16 @@ mod tests {
         let second = AdminServerId::new();
         let third = AdminServerId::new();
         let cluster = ResolverClusterId::new();
-        let mut map = NetworkMap {
+        let mut map = TrustDomainMap {
             version: 0,
             controller,
-            servers: [
+            admin_servers: [
                 (controller, "10.0.0.1:4565", "10.0.0.1:4564"),
                 (second, "10.0.0.2:4565", "10.0.0.2:4564"),
                 (third, "10.0.0.3:4565", "10.0.0.3:4564"),
             ]
             .into_iter()
-            .map(|(id, admin, member)| ServerEntry {
+            .map(|(id, admin, member)| AdminServerEntry {
                 id,
                 addr: admin.parse().unwrap(),
                 roles: Role::Resolver.into(),
@@ -1250,10 +1282,10 @@ mod tests {
                 state: ServerState::Registered,
             })
             .collect(),
-            clusters: vec![ClusterEntry {
+            resolver_clusters: vec![ResolverClusterEntry {
                 id: cluster,
                 base: "/".into(),
-                state: ClusterState::Active,
+                state: ResolverClusterState::Active,
                 members: vec![
                     addr("10.0.0.1:4564"),
                     addr("10.0.0.2:4564"),

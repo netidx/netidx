@@ -540,7 +540,7 @@ impl RenderedTemplate {
 ///
 /// Errors if the resolver already carries a parent referral: re-joining
 /// a different network is a separate, more careful operation.
-pub fn attach_to_network(
+pub fn attach_to_trust_domain(
     resolver_config_path: &Path,
     client_config_path: &Path,
     parent: ParentRef,
@@ -568,7 +568,7 @@ pub fn attach_to_network(
 
 /// Set the `parent` referral on an existing resolver config — the
 /// resolver-only half of attaching to a network, for `resolver
-/// add-parent` (and reused by [`attach_to_network`]). Returns a
+/// add-parent` (and reused by [`attach_to_trust_domain`]). Returns a
 /// [`RenderedTemplate`] touching only the resolver config (no client
 /// edit, no cert install). Refuses a resolver that already has a parent —
 /// re-parenting a different network is a separate, more careful op.
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_to_network_adds_parent_and_derives_default_auth() {
+    fn attach_to_trust_domain_adds_parent_and_derives_default_auth() {
         let dir = tempfile::tempdir().unwrap();
         // A local-only workstation: resolver with no parent, client with
         // default_auth Local.
@@ -894,7 +894,7 @@ mod tests {
         );
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
 
-        let rt = attach_to_network(&rpath, &cpath, anon_parent(), vec![]).unwrap();
+        let rt = attach_to_trust_domain(&rpath, &cpath, anon_parent(), vec![]).unwrap();
         rt.apply_test(dir.path()).unwrap();
 
         // The resolver gained the parent referral...
@@ -918,7 +918,7 @@ mod tests {
             ),
         );
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
-        assert!(attach_to_network(&rpath, &cpath, anon_parent(), vec![]).is_err());
+        assert!(attach_to_trust_domain(&rpath, &cpath, anon_parent(), vec![]).is_err());
     }
 
     #[test]
