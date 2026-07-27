@@ -218,8 +218,8 @@ impl Field {
             },
             PublisherBind => FieldInfo {
                 flag: "--bind",
-                label: "publisher admin domain bind",
-                help: "The admin domain this publisher should bind and advertise on, \
+                label: "publisher network bind",
+                help: "The network this publisher should bind and advertise on, \
                        for example 10.0.0.0/24, an exact host as 10.0.0.5/32, \
                        or local. The detected interface subnet is usually the \
                        right choice.",

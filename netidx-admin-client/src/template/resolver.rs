@@ -1,4 +1,4 @@
-//! Resolver-server template. A single admin domain-facing resolver,
+//! Resolver-server template. A single network-facing resolver,
 //! with the operator's chosen auth scheme on the one member,
 //! optional parent referral, optional perms seed, and a single
 //! activation unit that runs `netidx resolver-server`.

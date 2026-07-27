@@ -77,7 +77,7 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: roles::workstation::Cmd,
     },
-    /// resolver role: an admin domain-facing resolver server
+    /// resolver role: an network-facing resolver server
     Resolver {
         #[command(subcommand)]
         cmd: roles::resolver::Cmd,

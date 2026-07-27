@@ -1,4 +1,4 @@
-//! The resolver role install: an admin domain-facing resolver server, its data-plane
+//! The resolver role install: an network-facing resolver server, its data-plane
 //! auth (anonymous / krb5 / tls), the id-mapper daemon, and — on a fresh TLS or
 //! krb5/anonymous admin domain — the admin-plane CA and this host's admin server.
 //!
@@ -127,7 +127,7 @@ pub struct ResolverInput {
 }
 
 /// Install a standalone resolver, returning the OS-service scope the frontend
-/// should register (system scope — a resolver is an admin domain-facing daemon), or
+/// should register (system scope — a resolver is an network-facing daemon), or
 /// `None`.
 pub async fn run_resolver(
     ans: &mut dyn Answerer,
@@ -592,7 +592,7 @@ pub async fn run_resolver(
         resolver.as_file_mut().children =
             joining_children.into_iter().map(edge_into_file).collect();
     }
-    // A standalone resolver is an admin domain-facing daemon — system-scope is what
+    // A standalone resolver is an network-facing daemon — system-scope is what
     // makes it boot-triggered and visible to the OS.
     finish_with(
         ans,

@@ -668,7 +668,7 @@ mod tests {
     fn explicit_default_auth_override_wins() {
         let out = tempfile::tempdir().unwrap();
         let mut p = base_params(&out);
-        // A workstation that also hosts an admin domain-facing publisher
+        // A workstation that also hosts an network-facing publisher
         // wants Krb5 as the publisher's accepted scheme.
         p.default_auth = Some(DefaultAuthMech::Krb5);
         let rt = workstation(&p).unwrap();

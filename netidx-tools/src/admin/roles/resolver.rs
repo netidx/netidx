@@ -1,4 +1,4 @@
-//! `netidx admin resolver …` — the resolver role: an admin domain-facing
+//! `netidx admin resolver …` — the resolver role: an network-facing
 //! resolver-server (with optional admin server / CA).
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use crate::admin::{init, lifecycle};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// install an admin domain-facing resolver server
+    /// install an network-facing resolver server
     Install(init::ResolverFlags),
     /// report what this resolver is and whether its config is in sync with
     /// the admin domain map
