@@ -45,9 +45,8 @@ const RESTORE_CHOICE: FreshChoice = FreshChoice {
 const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Ca),
-        title: "CA / CA",
-        blurb: "Install the admin domain's one active ca and \
-                certificate authority on this machine. It may be dedicated to this role; \
+        title: "CA",
+        blurb: "Install the admin domain's certificate authority on this machine. It may be dedicated to this role; \
                 resolver servers are installed separately and enroll with it.",
     },
     FreshChoice {
@@ -61,7 +60,7 @@ const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "An admin domain-facing resolver server — the directory that maps paths to \
+        blurb: "A network-facing resolver server — the directory that maps paths to \
                 publishers for a whole admin domain or a delegated subtree. Can mint a new \
                 admin domain's certificate authority and admin server, or enroll under an \
                 existing one.",
@@ -69,7 +68,7 @@ const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
-        blurb: "A client configuration for a host that publishes data: point it at a \
+        blurb: "A client configuration for a host that publishes data: point it at an \
                 admin domain's resolvers with the right auth. Installs a certificate-renewal \
                 service when the admin domain uses TLS.",
     },
@@ -89,14 +88,14 @@ const FRESH_CHOICES: [FreshChoice; 4] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "An admin domain-facing resolver server — the directory that maps paths to \
+        blurb: "A network-facing resolver server — the directory that maps paths to \
                 publishers for a whole admin domain or a delegated subtree. Enrolls under an \
-                existing ca.",
+                existing CA.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
-        blurb: "A client configuration for a host that publishes data: point it at a \
+        blurb: "A client configuration for a host that publishes data: point it at an \
                 admin domain's resolvers with the right auth. Installs a certificate-renewal \
                 service when the admin domain uses TLS.",
     },
@@ -1186,7 +1185,7 @@ fn service_line(status: ServiceStatus) -> Line<'static> {
 
 fn role_title(role: InstallRole) -> &'static str {
     match role {
-        InstallRole::Ca => "CA / CA",
+        InstallRole::Ca => "CA",
         InstallRole::Workstation => "Workstation",
         InstallRole::Resolver => "Resolver",
         InstallRole::Publisher => "Publisher",
