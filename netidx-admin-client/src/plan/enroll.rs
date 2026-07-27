@@ -527,28 +527,33 @@ pub async fn discover_network(
         return Ok(AdminServers::NotProbed);
     }
     // Role-specific framing: a resolver can found a new cluster, so it defaults
-    // to that; a workstation or publisher can't found one, so it either joins a
-    // cluster (the default) or installs stand-alone. Either way the non-join
-    // option means "no parent cluster" → `DontHave`.
-    let (field, standalone, join, default) = match kind {
-        NodeKind::Resolver => (
+    // to that; a workstation can't found one, so it either joins a cluster (the
+    // default) or installs stand-alone. Either way the non-join option means
+    // "no parent cluster" → `DontHave`. A publisher is not offered the choice at
+    // all: it publishes to somebody's resolver or it does nothing, so a
+    // stand-alone publisher is not a thing and it always joins.
+    let membership = match kind {
+        NodeKind::Resolver => Some((
             Field::ClusterMode,
             "Create a new administrative network (creates a CA)",
             "Use an existing controller / CA",
             "Create a new administrative network (creates a CA)",
-        ),
-        NodeKind::Publisher
-        | NodeKind::Client
-        | NodeKind::Workstation
-        | NodeKind::AdminServer => {
-            (Field::Membership, "Install stand alone", "Join a cluster", "Join a cluster")
-        }
+        )),
+        NodeKind::Client | NodeKind::Workstation | NodeKind::AdminServer => Some((
+            Field::Membership,
+            "Install stand alone",
+            "Join a cluster",
+            "Join a cluster",
+        )),
+        NodeKind::Publisher => None,
     };
     // Decide first, discover second — so the flow is identical however many
     // clusters happen to be on the network.
-    let choice = ans.choice(field, None, &[standalone, join], Some(default)).await?;
-    if choice != join {
-        return Ok(AdminServers::DontHave);
+    if let Some((field, standalone, join, default)) = membership {
+        let choice = ans.choice(field, None, &[standalone, join], Some(default)).await?;
+        if choice != join {
+            return Ok(AdminServers::DontHave);
+        }
     }
     // Connecting: browse the local network for clusters and fetch each one's CA
     // identity, so the operator can recognize the one they mean by its glyph. The

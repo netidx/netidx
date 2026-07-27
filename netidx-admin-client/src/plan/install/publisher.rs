@@ -144,8 +144,8 @@ pub async fn run_publisher(
     } else {
         AdminServers::NotProbed
     };
-    let resolved_addrs: Vec<(SocketAddr, ReferralAuth)> = match probe.have() {
-        Some(net) => {
+    let resolved_addrs: Vec<(SocketAddr, ReferralAuth)> = match &probe {
+        AdminServers::Have(net) => {
             let have_identity = !tls_identities.is_empty();
             enroll::network_addrs_and_identity(
                 ans,
@@ -159,7 +159,15 @@ pub async fn run_publisher(
             )
             .await?
         }
-        None => {
+        // The interactive flow never offers a publisher a stand-alone install,
+        // so this is only reachable via a frontend bug. Configuring resolvers
+        // by hand is the strict CLI's `NotProbed` path below.
+        AdminServers::DontHave => bail!(
+            "a publisher must connect to a resolver, so it has no stand-alone \
+             install; join a network, or name the resolvers explicitly with \
+             --addr and --auth"
+        ),
+        AdminServers::NotProbed => {
             let kind: AuthKind = ans
                 .choice(
                     Field::Auth,
