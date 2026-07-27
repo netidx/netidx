@@ -448,7 +448,7 @@ pub enum Request {
     /// of the active resolver cluster mounted at `target_path`. The CA
     /// authorizes the scope and reads one exact CA-owned server identity via
     /// [`Request::GetPerms`]. Local-control callers are authorized by the
-    /// protected socket and confined to this host's own level. Answered with
+    /// protected socket and confined to this host's own resolver cluster. Answered with
     /// [`ReadPermsResponse`].
     #[pack(tag(37))]
     ReadPerms(ReadPermsRequest),
@@ -1101,7 +1101,7 @@ pub struct ResolverClusterEdge {
 }
 
 /// Resolver facts self-reported by one admin server: its locally configured
-/// launch members, where its assigned resolver cluster attaches, and hierarchy edges.
+/// launch members, where its assigned resolver cluster attaches, and resolver hierarchy edges.
 /// The CA derives the authoritative resolver cluster roster from enrolled server
 /// ownership; `members` may be only this node or a convenient larger subset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]

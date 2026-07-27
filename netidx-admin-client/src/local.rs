@@ -340,7 +340,7 @@ pub async fn list_admins(
 }
 
 /// Read this resolver host's own permissions over the protected local socket.
-/// The daemon confines `target_path` to its configured resolver level; no
+/// The daemon confines `target_path` to its configured resolver cluster; no
 /// admin domain map or remote discovery hint participates in this operation.
 pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
     let mut s = connect(cfg_path).await?;

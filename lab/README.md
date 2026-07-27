@@ -116,7 +116,7 @@ teardown.
    password is **printed once** — capture it.
 4. Enroll the rest with the strict `netidx admin ... install` commands or the
    bare `netidx admin` TUI. Approve queued identities on .11 with `netidx admin
-   ca approve`; approve hierarchy changes with `netidx admin resolver
+   ca approve`; approve resolver hierarchy changes with `netidx admin resolver
    approve-delegation`.
 5. Run daemons by hand with `scripts/start-member.sh <id>` (resolver + admin
    server), or launch the generated activation directory directly. The helper

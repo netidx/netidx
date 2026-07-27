@@ -333,7 +333,7 @@ pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<Ed
 
 // ---- admin domain-map-driven reconcile (Phase B) ----
 //
-// These reconcile a host's config to exactly ONE level of the hierarchy —
+// These reconcile a host's config to exactly ONE resolver cluster of the resolver hierarchy —
 // the resolver cluster its current addrs already belong to — from the CA-authoritative
 // admin domain map. Unlike `reconcile_resolver_peers` above (additive-only, over
 // the flat legacy `AdminDomainInfo`), these both ADD missing resolver cluster members and
@@ -368,7 +368,7 @@ pub fn clusters(map: &AdminDomainMap) -> Vec<ResolverClusterView> {
         .collect()
 }
 
-/// The resolver cluster whose members overlap `addrs` — the config's "one level".
+/// The resolver cluster whose members overlap `addrs` — the config's one resolver cluster.
 /// Lenient: a config whose addrs straddle resolver clusters (e.g. one polluted by
 /// the old flat reconcile) matches the maximally-overlapping resolver cluster, with
 /// a warning. `None` when nothing overlaps (the resolver cluster may be transiently

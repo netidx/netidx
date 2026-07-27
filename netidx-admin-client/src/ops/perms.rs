@@ -24,7 +24,7 @@ use std::{
 
 /// Reach an admin server (explicit, else this host's own), confirm its CA glyph
 /// (auto-verified against the local cert, or through the answerer), and pull the
-/// map for the level picker. The map is a discovery hint only; authenticated
+/// map for the resolver cluster picker. The map is a discovery hint only; authenticated
 /// reads and edits separately resolve and verify the CA.
 async fn bootstrap(
     ans: &mut dyn Answerer,
@@ -77,10 +77,10 @@ pub async fn open_perms_session(
     Ok((session, perms_json))
 }
 
-/// List every level (resolver cluster base) in the admin domain map — the exact
+/// List every resolver cluster base in the admin domain map — the exact
 /// `--at` targets a perms read/edit can route to. Deduped and sorted. The
 /// resolver cluster-scope perms UI offers these instead of a free-text path.
-pub async fn list_levels(
+pub async fn list_resolver_clusters(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,

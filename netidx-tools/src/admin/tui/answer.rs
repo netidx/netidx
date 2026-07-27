@@ -38,8 +38,8 @@ pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
 pub(super) struct ParentRow {
     /// e.g. `resolver-eu-a  10.0.60.15:4564`.
     pub(super) label: String,
-    /// The resolver's hierarchy level (its admin domain's base), shown as info.
-    pub(super) level: String,
+    /// The resolver's cluster base, shown as info.
+    pub(super) base: String,
 }
 
 /// The operator's pick from the parent picker.
@@ -75,7 +75,7 @@ pub(super) enum UiRequest {
         admin_domains: Vec<AdminDomainOption>,
         reply: oneshot::Sender<Result<AdminDomainChoice>>,
     },
-    /// Multi-select the parent's resolver servers (each with its level), or the
+    /// Multi-select the parent's resolver servers (each with its resolver cluster base), or the
     /// trailing "enter an address manually" option.
     SelectParent {
         rows: Vec<ParentRow>,
@@ -935,7 +935,7 @@ impl Modal {
                                 format!("{marker} {:<40}", r.label),
                                 theme::panel_style(),
                             ),
-                            Span::styled(r.level.clone(), theme::hint_style()),
+                            Span::styled(r.base.clone(), theme::hint_style()),
                         ]))
                     })
                     .chain(std::iter::once(ListItem::new(Line::from(Span::styled(
@@ -1125,8 +1125,8 @@ mod tests {
 
     fn rows() -> Vec<ParentRow> {
         vec![
-            ParentRow { label: "10.0.0.1:4564".to_string(), level: "/".to_string() },
-            ParentRow { label: "10.0.60.1:4564".to_string(), level: "/ap".to_string() },
+            ParentRow { label: "10.0.0.1:4564".to_string(), base: "/".to_string() },
+            ParentRow { label: "10.0.60.1:4564".to_string(), base: "/ap".to_string() },
         ]
     }
 
@@ -1209,7 +1209,7 @@ mod tests {
             out.contains("10.0.0.1:4564") && out.contains("10.0.60.1:4564"),
             "labels: {out:?}"
         );
-        assert!(out.contains("/ap"), "level column missing: {out:?}");
+        assert!(out.contains("/ap"), "base column missing: {out:?}");
         assert!(out.contains("Enter an address manually"), "manual row missing: {out:?}");
     }
 

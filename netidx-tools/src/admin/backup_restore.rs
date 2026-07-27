@@ -766,7 +766,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
     if has_ca && resolver_relocated {
         let operation_id =
             tokio::runtime::Runtime::new()?.block_on(reconcile_restored_ca(&root))?;
-        println!("  CA hierarchy reconciled (operation {operation_id})");
+        println!("  resolver hierarchy reconciled (operation {operation_id})");
     }
     println!(
         "restore complete: {} is installed and ready",

@@ -168,15 +168,18 @@ impl Outcome {
         }
     }
 
-    /// A silent result that opens a panel's level picker (admin domain perms).
-    pub(super) fn levels(panel: super::remote::Panel, levels: Vec<String>) -> Outcome {
+    /// A silent result that opens a panel's resolver cluster picker (admin domain perms).
+    pub(super) fn resolver_clusters(
+        panel: super::remote::Panel,
+        bases: Vec<String>,
+    ) -> Outcome {
         Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
             install_service: None,
             after_service: None,
-            remote: Some(super::remote::RemoteUpdate::Levels { panel, levels }),
+            remote: Some(super::remote::RemoteUpdate::ResolverClusters { panel, bases }),
             services: None,
             quiet: true,
         }
@@ -934,7 +937,7 @@ async fn finish_restore(
         let mut lines = lines;
         let operation =
             super::super::backup_restore::reconcile_restored_ca(&config_root).await?;
-        lines.push(format!("Hierarchy reconciled (operation {operation})."));
+        lines.push(format!("Resolver hierarchy reconciled (operation {operation})."));
         lines
     } else {
         lines
@@ -1152,7 +1155,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     use netidx_admin_proto::{ResolverAddr, ResolverClusterId, ServerState};
     let rpath = paths::discover_resolver_config()?;
 
-    // Candidate parents come from the admin domain map (each resolver + its level),
+    // Candidate parents come from the admin domain map (each resolver + its resolver cluster base),
     // minus this host's own resolvers. If the map is unreachable or offers no
     // other resolver, fall back to typing an admin-server address.
     let map = super::lifecycle::fetch_local_map(&config_root).await.ok();
@@ -1209,9 +1212,9 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
         loop {
             let rows: Vec<ParentRow> = cand
                 .iter()
-                .map(|(_, resolver, _, level)| ParentRow {
+                .map(|(_, resolver, _, base)| ParentRow {
                     label: resolver.addr.to_string(),
-                    level: level.clone(),
+                    base: base.clone(),
                 })
                 .collect();
             match ans.select_parent(rows).await? {

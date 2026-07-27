@@ -149,7 +149,7 @@ impl Panel {
     }
 
     /// Whether this panel first needs a target netidx path (the map routes it to
-    /// the admin domain owning that path). Only admin domain Perms — a level pick from the
+    /// the admin domain owning that path). Only admin domain Perms — a resolver cluster pick from the
     /// map. Services picks an admin server (also from the map), not a path.
     fn path_scoped(self) -> bool {
         matches!(self, Panel::Perms)
@@ -276,9 +276,9 @@ pub(super) enum RemoteAction {
     /// Re-send the CA's current address, map, and CRL to every
     /// registered node. Idempotent manual retry after recovery/relocation.
     ReconcileCa { target: PanelTarget },
-    /// List the admin domain's permission levels (resolver bases) from the map, to
+    /// List the admin domain's resolver clusters (by base path) from the map, to
     /// pick one to view/edit — replaces free-text path entry for admin domain perms.
-    ListLevels { target: PanelTarget },
+    ListResolverClusters { target: PanelTarget },
     /// Edit the permissions of the admin domain mounted at `at` (via `$EDITOR`).
     EditPerms { target: PanelTarget, at: String },
     /// List the admin domain's admin servers from the map, to pick one whose services
@@ -313,7 +313,7 @@ impl RemoteAction {
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
             RemoteAction::ReconcileCa { .. } => "Reconciling CA state".to_string(),
-            RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
+            RemoteAction::ListResolverClusters { .. } => "Loading bases".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
             RemoteAction::ListServiceServers { .. } => "Loading servers".to_string(),
             RemoteAction::ServiceControl { op, .. } => match op {
@@ -376,7 +376,7 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { .. }
             | RemoteAction::SetPolicy { .. }
             | RemoteAction::ReconcileCa { .. }
-            | RemoteAction::ListLevels { .. }
+            | RemoteAction::ListResolverClusters { .. }
             | RemoteAction::EditPerms { .. }
             | RemoteAction::ListServiceServers { .. }
             | RemoteAction::ServiceControl { .. } => None,
@@ -405,7 +405,7 @@ impl RemoteAction {
             | RemoteAction::RemoveAdmin { .. }
             | RemoteAction::RemoveServer { .. }
             | RemoteAction::ReconcileCa { .. }
-            | RemoteAction::ListLevels { .. }
+            | RemoteAction::ListResolverClusters { .. }
             | RemoteAction::EditPerms { .. }
             | RemoteAction::ListServiceServers { .. }
             | RemoteAction::ServiceControl { .. } => None,
@@ -430,7 +430,7 @@ impl RemoteAction {
             | RemoteAction::RemoveAdmin { target, .. }
             | RemoteAction::RemoveServer { target, .. }
             | RemoteAction::ReconcileCa { target }
-            | RemoteAction::ListLevels { target }
+            | RemoteAction::ListResolverClusters { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ListServiceServers { target }
             | RemoteAction::ServiceControl { target, .. } => target.glyph(),
@@ -463,10 +463,10 @@ pub(super) enum RemoteUpdate {
     },
     /// The saved admin domain registry after a discover pass — refreshes the list.
     AdminDomains(Vec<KnownAdminDomain>),
-    /// The admin domain's permission levels — opens the level picker for a panel.
-    Levels {
+    /// The admin domain's permission bases — opens the resolver cluster picker for a panel.
+    ResolverClusters {
         panel: Panel,
-        levels: Vec<String>,
+        bases: Vec<String>,
     },
     /// The admin domain's admin servers — opens the service-control server picker.
     ServiceServers {
@@ -496,7 +496,9 @@ pub(super) async fn run(
         RemoteAction::Refresh { target, panel, path } => {
             refresh(ans, target, panel, path).await
         }
-        RemoteAction::ListLevels { target } => list_levels(ans, target).await,
+        RemoteAction::ListResolverClusters { target } => {
+            list_resolver_clusters(ans, target).await
+        }
         RemoteAction::ListServiceServers { target } => {
             list_service_servers(ans, target).await
         }
@@ -1534,7 +1536,7 @@ async fn remove_admin(
 
 /// Read the perms of the admin domain mounted at `at`, for either target. A remote
 /// target authenticates to its verified CA; a local target uses the
-/// protected control socket and is confined to this host's own level.
+/// protected control socket and is confined to this host's own resolver cluster.
 #[cfg(unix)]
 async fn show_perms_for(
     ans: &mut TuiAnswerer,
@@ -1551,21 +1553,25 @@ async fn show_perms_for(
     }
 }
 
-/// Fetch the admin domain's permission levels (resolver bases) and open the level
+/// Fetch the admin domain's resolver clusters (by base path) and open the resolver cluster
 /// picker for the Perms panel — the admin domain-scope replacement for typing a path.
 #[cfg(unix)]
-async fn list_levels(
+async fn list_resolver_clusters(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
 ) -> Result<super::action::Outcome> {
-    let levels = match &target {
+    let bases = match &target {
         PanelTarget::Remote(conn) => {
-            netidx_admin_client::ops::perms::list_levels(ans, Some(conn.server), None)
-                .await?
+            netidx_admin_client::ops::perms::list_resolver_clusters(
+                ans,
+                Some(conn.server),
+                None,
+            )
+            .await?
         }
         PanelTarget::Local { .. } => vec![local_own_base()],
     };
-    Ok(super::action::Outcome::levels(Panel::Perms, levels))
+    Ok(super::action::Outcome::resolver_clusters(Panel::Perms, bases))
 }
 
 #[cfg(unix)]
@@ -1653,7 +1659,7 @@ async fn edit_perms(
 }
 
 /// The admin domain's admin servers, from the map — the service-control server
-/// picker (level 1). Each row preserves the immutable ID that a control op uses;
+/// picker (the first pick). Each row preserves the immutable ID that a control op uses;
 /// its address is display-only routing context.
 #[cfg(unix)]
 async fn list_service_servers(
@@ -1757,9 +1763,9 @@ enum Screen {
     Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
     Menu,
-    /// Pick one of the admin domain's permission levels (from the map) before opening
+    /// Pick one of the admin domain's resolver clusters (from the map) before opening
     /// the perms panel — the admin domain-scope map-driven pick.
-    LevelPick { panel: Panel, levels: Vec<String>, state: ListState },
+    ResolverClusterPick { panel: Panel, bases: Vec<String>, state: ListState },
     /// Pick one of the admin domain's admin servers (from the map) before opening the
     /// services panel — service control is per-server, so you pick the one to
     /// manage.
@@ -1828,12 +1834,12 @@ const PANELS: [Panel; 7] = [
 
 /// The panels a local (no-auth) target can serve: the admin roster over the
 /// control socket, and perms — read and written over the control socket (the
-/// daemon authorizes the local superuser and confines both to its own level).
+/// daemon authorizes the local superuser and confines both to its own resolver cluster).
 /// The queue, delegations, and revocation have no no-auth local backend and
 /// stay Admin domain-only.
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
-/// This host's own resolver base — the single level a local (control-socket)
+/// This host's own resolver base — the single resolver cluster a local (control-socket)
 /// perms edit is allowed to touch. Best-effort from the local resolver config,
 /// falling back to the root; the admin server enforces the confinement anyway.
 fn local_own_base() -> String {
@@ -1888,7 +1894,7 @@ impl RemoteState {
         let mut s = RemoteState::new();
         let target = PanelTarget::Local { cfg_path };
         s.target = Some(target.clone());
-        // Local perms are always this host's own level — no prompt, no picking
+        // Local perms are always this host's own resolver cluster — no prompt, no picking
         // another resolver's permissions.
         let path = panel.path_scoped().then(local_own_base);
         s.panel_path = path.clone();
@@ -1983,10 +1989,10 @@ impl RemoteState {
                 self.screen = Screen::AdminDomains;
                 self.error = None;
             }
-            RemoteUpdate::Levels { panel, levels } => {
+            RemoteUpdate::ResolverClusters { panel, bases } => {
                 let mut state = ListState::default();
-                state.select((!levels.is_empty()).then_some(0));
-                self.screen = Screen::LevelPick { panel, levels, state };
+                state.select((!bases.is_empty()).then_some(0));
+                self.screen = Screen::ResolverClusterPick { panel, bases, state };
                 self.error = None;
             }
             RemoteUpdate::ServiceServers { servers } => {
@@ -2031,7 +2037,7 @@ impl RemoteState {
                     "↑/↓ · Enter open · L logout · Esc disconnect"
                 }
             },
-            Screen::LevelPick { .. } => "↑/↓ · Enter open · Esc back",
+            Screen::ResolverClusterPick { .. } => "↑/↓ · Enter open · Esc back",
             Screen::ServerPick { .. } => "↑/↓ · Enter open · Esc back",
             Screen::Panel(panel) => panel.keys(),
         };
@@ -2046,16 +2052,16 @@ impl RemoteState {
             Screen::AdminDomains => self.on_key_clusters(code),
             Screen::Manual { .. } => self.on_key_manual(code),
             Screen::Menu => self.on_key_menu(code),
-            Screen::LevelPick { .. } => self.on_key_level_pick(code),
+            Screen::ResolverClusterPick { .. } => self.on_key_resolver_cluster_pick(code),
             Screen::ServerPick { .. } => self.on_key_server_pick(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
         }
     }
 
-    /// Pick an admin domain permission level from the map-derived list, then open the
+    /// Pick a resolver cluster from the map-derived list, then open the
     /// perms panel against it.
-    fn on_key_level_pick(&mut self, code: KeyCode) -> Option<Action> {
-        let Screen::LevelPick { panel, levels, state } = &mut self.screen else {
+    fn on_key_resolver_cluster_pick(&mut self, code: KeyCode) -> Option<Action> {
+        let Screen::ResolverClusterPick { panel, bases, state } = &mut self.screen else {
             return None;
         };
         match code {
@@ -2065,7 +2071,7 @@ impl RemoteState {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let last = levels.len().saturating_sub(1);
+                let last = bases.len().saturating_sub(1);
                 let i = state.selected().map_or(0, |i| (i + 1).min(last));
                 state.select(Some(i));
                 None
@@ -2076,7 +2082,7 @@ impl RemoteState {
             }
             KeyCode::Enter => {
                 let sel = state.selected()?;
-                let path = levels.get(sel)?.clone();
+                let path = bases.get(sel)?.clone();
                 let panel = *panel;
                 let target = self.target.clone()?;
                 self.panel_path = Some(path.clone());
@@ -2240,12 +2246,12 @@ impl RemoteState {
                 let panel =
                     panels[self.menu.selected().unwrap_or(0).min(panels.len() - 1)];
                 if matches!(panel, Panel::Perms) {
-                    // Admin domain perms: pick a level from the map, not a typed path.
+                    // Admin domain perms: pick a resolver cluster from the map, not a typed path.
                     self.error = None;
                     if let Some(target) = &self.target {
-                        return Some(Action::Remote(RemoteAction::ListLevels {
-                            target: target.clone(),
-                        }));
+                        return Some(Action::Remote(
+                            RemoteAction::ListResolverClusters { target: target.clone() },
+                        ));
                     }
                 } else if matches!(panel, Panel::Service) {
                     // Admin domain services: pick an admin server from the map, then
@@ -2514,9 +2520,8 @@ impl RemoteState {
                 self.render_manual(f, area, host, port, *focus)
             }
             Screen::Menu => self.render_menu(f, area),
-            Screen::LevelPick { panel, levels, state } => {
-                self.render_level_pick(f, area, *panel, levels, &mut state.clone())
-            }
+            Screen::ResolverClusterPick { panel, bases, state } => self
+                .render_resolver_cluster_pick(f, area, *panel, bases, &mut state.clone()),
             Screen::ServerPick { admin_servers: servers, state } => {
                 self.render_server_pick(f, area, servers, &mut state.clone())
             }
@@ -2524,27 +2529,27 @@ impl RemoteState {
         }
     }
 
-    /// The admin domain permission-level picker: a list of the map's resolver bases.
-    fn render_level_pick(
+    /// The admin domain resolver cluster picker: a list of the map's resolver bases.
+    fn render_resolver_cluster_pick(
         &self,
         f: &mut Frame,
         area: Rect,
         panel: Panel,
-        levels: &[String],
+        bases: &[String],
         state: &mut ListState,
     ) {
-        let items: Vec<ListItem> = if levels.is_empty() {
+        let items: Vec<ListItem> = if bases.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
-                "(no levels found in the admin domain map)",
+                "(no bases found in the admin domain map)",
                 theme::hint_style(),
             )))]
         } else {
-            levels.iter().map(|l| ListItem::new(l.clone())).collect()
+            bases.iter().map(|l| ListItem::new(l.clone())).collect()
         };
         let list = List::new(items)
             .style(theme::panel_style())
             .block(theme::panel_block().title(Span::styled(
-                format!(" {} — pick a level ", panel.title()),
+                format!(" {} — pick a resolver cluster ", panel.title()),
                 theme::title_style(),
             )))
             .highlight_style(theme::selected_style())
@@ -2553,7 +2558,7 @@ impl RemoteState {
     }
 
     /// The service-control server picker: the admin domain's admin servers, each
-    /// labelled with its level. Pick one to control its services.
+    /// labelled with its resolver cluster base. Pick one to control its services.
     fn render_server_pick(
         &self,
         f: &mut Frame,
@@ -2825,7 +2830,7 @@ impl RemoteState {
         } else {
             self.rows.iter().map(|r| ListItem::new(r.text.clone())).collect()
         };
-        // A path-scoped panel (perms) shows its level; otherwise just the name.
+        // A path-scoped panel (perms) shows its resolver cluster base; otherwise just the name.
         // (The services panel renders elsewhere, via the shared units view.)
         let title = match &self.panel_path {
             Some(p) => format!(" {} @ {p} ", panel.title()),
@@ -3072,10 +3077,10 @@ mod tests {
         // The admin domain list is the tab landing (tab bar + global gutter).
         let mut s = clusters_state(vec![], vec![]);
         assert!(s.gutter().is_none(), "admin domain list should not be drilled in");
-        // Drilling into a level picker (a tool) owns the gutter.
-        s.apply(RemoteUpdate::Levels {
+        // Drilling into a resolver cluster picker (a tool) owns the gutter.
+        s.apply(RemoteUpdate::ResolverClusters {
             panel: Panel::Perms,
-            levels: vec!["/".to_string()],
+            bases: vec!["/".to_string()],
         });
         assert!(s.gutter().is_some(), "a drilled-in screen should provide gutter keys");
     }
@@ -3083,13 +3088,13 @@ mod tests {
     #[test]
     fn level_pick_lists_cluster_levels() {
         let mut s = RemoteState::new();
-        s.apply(RemoteUpdate::Levels {
+        s.apply(RemoteUpdate::ResolverClusters {
             panel: Panel::Perms,
-            levels: vec!["/".to_string(), "/eu".to_string()],
+            bases: vec!["/".to_string(), "/eu".to_string()],
         });
         let out = render(&mut s, 100, 20);
-        assert!(out.contains("pick a level"), "picker title missing: {out:?}");
-        assert!(out.contains("/eu"), "admin domain level missing: {out:?}");
+        assert!(out.contains("pick a resolver cluster"), "picker title missing: {out:?}");
+        assert!(out.contains("/eu"), "resolver cluster base missing: {out:?}");
     }
 
     #[test]
@@ -3299,7 +3304,7 @@ mod tests {
         let out = render(&mut s, 100, 20);
         assert!(out.contains("pick an admin server"), "picker title missing: {out:?}");
         assert!(out.contains("10.0.0.11:4565"), "first server missing: {out:?}");
-        assert!(out.contains("/ap"), "level column missing: {out:?}");
+        assert!(out.contains("/ap"), "base column missing: {out:?}");
         assert!(out.contains(&root.to_string()), "immutable ID missing: {out:?}");
     }
 

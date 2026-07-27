@@ -391,7 +391,7 @@ pub(super) fn admin_authority_over(
     name_permitted(name, &authd.policy.allowed_san)
 }
 
-/// Whether `authd` may approve or deny a delegation of the hierarchy subtree
+/// Whether `authd` may approve or deny a delegation of the resolver hierarchy subtree
 /// at `path`. A delegation restructures the resolver hierarchy under `path`,
 /// so — like a perms edit (see [`handle_edit_perms`]) — it needs authority
 /// over that subtree: a broad admin (signing slot / `may_manage_admins`) or a

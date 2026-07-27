@@ -129,7 +129,7 @@ async fn confine_local_perms(
         Ok(())
     } else {
         bail!(
-            "local perms {operation}s are confined to this host's own level ({}); \
+            "local perms {operation}s are confined to this host's own resolver cluster ({}); \
              refusing to {operation} {:?}",
             base.as_deref().unwrap_or("<none>"),
             target_path,
@@ -165,7 +165,7 @@ pub(super) async fn handle_read_perms(
     }
     // The protected local socket is deliberately useful on every resolver,
     // including satellites that do not have the CA role. It may read only the
-    // host's own level and never consults or trusts remote map hints.
+    // host's own resolver cluster and never consults or trusts remote map hints.
     if local {
         let (server, addr) =
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;

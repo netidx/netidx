@@ -1020,10 +1020,10 @@ pub struct AdminDomainInfo {
     pub ca_addr: Option<SocketAddr>,
     /// The active members of the bootstrap server's CA-owned resolver cluster. These
     /// are replicas of one resolver cluster, never a flattening of the
-    /// hierarchy's parent and child resolver clusters.
+    /// resolver hierarchy's parent and child clusters.
     pub resolvers: Vec<ResolverAddr>,
     /// Base of that one bootstrap resolver cluster. Installers use it when adding a
-    /// replica to a non-root level; it is ordinary admin metadata and never
+    /// replica to a non-root resolver cluster; it is ordinary admin metadata and never
     /// changes netidx's data-plane protocol.
     pub resolver_base: Option<String>,
     /// Referral topology for that one resolver cluster, derived from the authoritative
@@ -1063,8 +1063,8 @@ fn registered_members(
 }
 
 /// One active resolver cluster's CA-authoritative resolver topology. This is also used
-/// by strict installers whose explicit bootstrap server belongs to a different
-/// level of the hierarchy than the resolver cluster they are joining.
+/// by strict installers whose explicit bootstrap server belongs to a
+/// different resolver cluster than the one they are joining.
 pub struct ResolverClusterTopology {
     pub members: Vec<ResolverAddr>,
     pub parent: Option<admin_proto::ResolverClusterEdge>,
@@ -1154,7 +1154,7 @@ fn bootstrap_cluster(
     // A dedicated CA has no resolver cluster of its own. It is still a
     // normal discovery seed, so map it to the one active root resolver cluster when
     // constructing client configuration. A satellite seed continues to select
-    // its exact resolver cluster; hierarchy levels are never flattened.
+    // its exact resolver cluster; the resolver hierarchy is never flattened.
     let bootstrap_cluster = bootstrap.cluster.or_else(|| {
         (bootstrap.id == map.ca)
             .then(|| {

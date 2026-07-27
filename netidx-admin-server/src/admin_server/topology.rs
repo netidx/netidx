@@ -562,7 +562,7 @@ async fn handle_list_delegations_inner(
 
 /// Whether `authd` may approve or deny `pending`.
 ///
-/// A delegation restructures the hierarchy on **both** sides of the split: it
+/// A delegation restructures the resolver hierarchy on **both** sides of the split: it
 /// mounts the child subtree, and it rewrites the *parent* resolver cluster's referrals.
 /// So it needs authority over the parent resolver cluster's base as well as over the
 /// proposed child path — an admin scoped to `/eu` must not be able to decide a
@@ -769,7 +769,7 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
 
 /// This host's own [`AdminServerEntry`] for the admin domain map: its listen
 /// address, its roles, and — if it runs a resolver — its resolver cluster facts.
-/// This host's own resolver base (the single level a local, control-socket
+/// This host's own resolver base (the single resolver cluster a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
 pub(super) async fn own_base(state: &Server) -> Option<String> {
     state

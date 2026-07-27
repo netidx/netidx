@@ -196,7 +196,7 @@ impl ResolverConfig {
     }
 
     /// This resolver cluster's [`ResolverClusterFacts`] for the admin domain map:
-    /// advertisable members + base path + hierarchy edges.
+    /// advertisable members + base path + resolver hierarchy edges.
     pub fn cluster_facts(&self) -> ResolverClusterFacts {
         ResolverClusterFacts {
             members: self.resolver_addrs(),
@@ -208,7 +208,7 @@ impl ResolverConfig {
 }
 
 /// Check the part of resolver permission validation that depends on the
-/// resolver's place in the hierarchy. `Config::from_file` validates the
+/// resolver's place in the resolver hierarchy. `Config::from_file` validates the
 /// resolver topology and loads the permission files, but the resolver does
 /// not normally apply these containment checks until it constructs its auth
 /// map during startup. Admin topology fanout must perform them before writing

@@ -1,7 +1,7 @@
 //! `netidx admin …` CLI surface. A thin presentation layer over
 //! `netidx-admin`.
 //!
-//! Two levels: **system roles** (`workstation` / `resolver` /
+//! Two bases: **system roles** (`workstation` / `resolver` /
 //! `publisher`, each with `install` and lifecycle actions) plus `ca`,
 //! are top-level; the low-level single-component commands live under
 //! `component`. `uninstall` tears an install down.
