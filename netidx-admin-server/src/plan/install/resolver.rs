@@ -1133,10 +1133,22 @@ async fn resolver_auth_from_admin_domain(
                     "note: an existing resolver in this admin domain uses SPN {example:?}"
                 ));
             }
-            let spn = ans
-                .text(Field::Spn, input.spn.clone(), None, true)
-                .await?
-                .context("a kerberos SPN for this resolver is required")?;
+            // Same `netidx/<fqdn>@<REALM>` default a founding resolver gets:
+            // this host has a krb5.conf and a hostname whether it founds the
+            // admin domain or joins one, so it should not have to be typed here
+            // and prefilled there.
+            let spn = match default_krb5_spn().await {
+                Some(def) => {
+                    let answer = ans
+                        .text(Field::Spn, input.spn.clone(), Some(&def), false)
+                        .await?;
+                    answer.unwrap_or(def)
+                }
+                None => ans
+                    .text(Field::Spn, input.spn.clone(), None, true)
+                    .await?
+                    .context("a kerberos SPN for this resolver is required")?,
+            };
             Ok(ResolvedAuth::external(AuthChoice::Krb5 {
                 spn: ArcStr::from(spn.as_str()),
             }))
