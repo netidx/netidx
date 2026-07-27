@@ -1562,7 +1562,7 @@ fn init(p: InitParams) -> Result<()> {
     };
     // The founding superuser's password (minted only when a server is set up)
     // comes from --password-file / --password-stdin. `ca init` creates the CA,
-    // it never joins a admin domain, so there is no glyph to confirm.
+    // it never joins an admin domain, so there is no glyph to confirm.
     let mut ans = super::answer_cli::make_flag_answerer(
         p.password_file.as_deref(),
         p.password_stdin,

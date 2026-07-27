@@ -1,7 +1,7 @@
 //! `netidx admin component server …` — run the admin-server daemon.
 //!
 //! The daemon itself lives in `netidx_admin_server`; this module is the
-//! CLI shell that runs it. Standing a admin server *up* (issuing its serving
+//! CLI shell that runs it. Standing an admin server *up* (issuing its serving
 //! cert, writing its config, dropping its unit) lives in the library —
 //! `netidx_admin_server::plan::server_setup::setup_server` — shared by `ca init` and
 //! the install flows.

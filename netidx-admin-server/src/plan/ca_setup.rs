@@ -567,7 +567,7 @@ pub async fn create_vaulted_external_ca(
 }
 
 /// Build the [`NewCaOpts`] for the founding CA a resolver install stands
-/// up when it creates a admin domain's trust root — shared by the TLS
+/// up when it creates an admin domain's trust root — shared by the TLS
 /// "generate" branch and the krb5/anonymous admin-plane branch so the two
 /// cannot drift. Unlike `ca init` (the explicit tuning flow, which
 /// interrogates the founding admin), an install applies a sensible

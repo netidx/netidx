@@ -168,7 +168,7 @@ impl App {
     fn next_tab(&mut self) {
         let i = (self.tab.index() + 1) % Tab::ALL.len();
         self.tab = Tab::ALL[i];
-        // Re-read the saved admin domain registry (a admin domain may have been saved this
+        // Re-read the saved admin domain registry (an admin domain may have been saved this
         // session) and re-poll it when the Admin Domains tab regains focus.
         if self.tab == Tab::Remote {
             self.remote.on_focus();
@@ -496,7 +496,7 @@ impl App {
             }
             self.render_footer(f, chunks[1]);
         } else if self.local.installed() {
-            // Drilled into a tool (Services, a admin domain panel, …): the tab bar
+            // Drilled into a tool (Services, an admin domain panel, …): the tab bar
             // goes away — you're inside a tool, not switching tabs — and the
             // gutter shows the tool's keys instead of the global tab/quit keys.
             let gutter = match self.tab {

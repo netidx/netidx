@@ -3,7 +3,7 @@
 //! installed and **which admin domain** it joined.
 //!
 //! The admin domain half is load-bearing for the lifecycle ops (`status`,
-//! `update`, `join`): they trust a admin server's picture of the admin domain
+//! `update`, `join`): they trust an admin server's picture of the admin domain
 //! ("here are the resolvers, add the ones you're missing"), so they must
 //! first re-pin to the **same** CA identity the operator glyph-confirmed
 //! at install. Storing that identity here is what makes an unattended
@@ -79,13 +79,13 @@ pub struct InstallRecord {
     pub base: String,
     /// The data-plane auth chosen at install (`anonymous`/`local`/`krb5`/`tls`).
     pub auth: String,
-    /// The admin admin domain this host belongs to — the admin domain it founded or the
+    /// The admin domain this host belongs to — the admin domain it founded or the
     /// one it joined — carrying that admin domain's CA identity (domain + glyph).
     /// `None` for a standalone/local-only install (a workstation with no
     /// parent, or a resolver with no admin server).
     #[serde(default)]
     pub admin_domain: Option<AdminDomainIdentity>,
-    /// A admin-server address known at install time, if any — a starting
+    /// An admin-server address known at install time, if any — a starting
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
     pub admin_server: Option<SocketAddr>,

@@ -184,7 +184,7 @@ struct CommonFlags {
     /// Read the CA recovery password from stdin instead (strict mode).
     #[arg(long = "recovery-password-stdin", conflicts_with = "recovery_password_file")]
     recovery_password_stdin: bool,
-    /// A CA fingerprint obtained out of band; confirms a admin domain's
+    /// A CA fingerprint obtained out of band; confirms an admin domain's
     /// identity non-interactively (e.g. with `--parent-admin-server`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
@@ -402,7 +402,7 @@ pub(crate) struct WorkstationJoinFlags {
 }
 
 /// `workstation join` — graduate a local-only workstation to a joined
-/// one: select + glyph-confirm a admin domain (by `--admin-server` or discovery),
+/// one: select + glyph-confirm an admin domain (by `--admin-server` or discovery),
 /// enroll a client cert if it's TLS, and attach the local resolver to it via a
 /// parent referral — without a reinstall or a hand-edit. The marker records the
 /// joined (pinned) admin domain so later `status`/`update` can re-pin to it.
@@ -599,7 +599,7 @@ pub(crate) struct ResolverFlags {
     id_map_mode: Option<String>,
     /// Skip admin-server setup entirely (expert). On a fresh krb5 /
     /// anonymous admin domain this also skips the admin-plane CA. A host
-    /// without a admin server is invisible to discovery, and if no admin
+    /// without an admin server is invisible to discovery, and if no admin
     /// server exists anywhere on the admin domain, certificate renewal and
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-admin-server")]
@@ -612,7 +612,7 @@ pub(crate) struct ResolverFlags {
     with_admin_server: bool,
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// Only relevant when this install mints a new CA (the netidx-CA TLS
-    /// resolver path with no existing CA, or a admin plane on a
+    /// resolver path with no existing CA, or an admin plane on a
     /// krb5/anonymous admin domain). DANGER: the CA's autorenew credential is
     /// then written in PLAINTEXT, so every backup or disk image of this
     /// machine is a CA compromise. Test CAs only.

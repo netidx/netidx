@@ -139,7 +139,7 @@ pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 #[cfg(not(any(unix, windows)))]
 pub const UNSUPPORTED_MSG: &str = "the workstation role needs a Local-auth local resolver supervised by \
      netidx-activation, neither of which exists on this platform. To put \
-     this host on a admin domain, install a publisher instead: `netidx admin \
+     this host on an admin domain, install a publisher instead: `netidx admin \
      publisher install`.";
 
 /// Unsupported-platform stub: the workstation role can't be rendered
@@ -668,7 +668,7 @@ mod tests {
     fn explicit_default_auth_override_wins() {
         let out = tempfile::tempdir().unwrap();
         let mut p = base_params(&out);
-        // A workstation that also hosts a admin domain-facing publisher
+        // A workstation that also hosts an admin domain-facing publisher
         // wants Krb5 as the publisher's accepted scheme.
         p.default_auth = Some(DefaultAuthMech::Krb5);
         let rt = workstation(&p).unwrap();

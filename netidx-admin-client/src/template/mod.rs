@@ -530,7 +530,7 @@ impl RenderedTemplate {
 }
 
 /// Build the edits that attach an already-installed workstation/client
-/// to a admin domain — the engine half of `workstation join`. Loads the
+/// to an admin domain — the engine half of `workstation join`. Loads the
 /// existing resolver + client configs, adds `parent` to the resolver,
 /// sets the client's `default_auth` (derived from the parent's auth) and
 /// TLS identities, and returns a [`RenderedTemplate`] that touches ONLY
@@ -567,7 +567,7 @@ pub fn attach_to_admin_domain(
 }
 
 /// Set the `parent` referral on an existing resolver config — the
-/// resolver-only half of attaching to a admin domain, for `resolver
+/// resolver-only half of attaching to an admin domain, for `resolver
 /// add-parent` (and reused by [`attach_to_admin_domain`]). Returns a
 /// [`RenderedTemplate`] touching only the resolver config (no client
 /// edit, no cert install). Refuses a resolver that already has a parent —
@@ -590,7 +590,7 @@ pub(crate) fn set_parent_referral_on(
     if rcfg.as_file().parent.is_some() {
         bail!(
             "this resolver already has a parent referral — it's already attached \
-             to a admin domain. Re-parenting isn't supported yet (uninstall + \
+             to an admin domain. Re-parenting isn't supported yet (uninstall + \
              reinstall to switch admin domains)."
         );
     }

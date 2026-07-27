@@ -79,7 +79,7 @@ impl Drop for Advertisement {
     }
 }
 
-/// Advertise a admin server at `listen`. When the listen IP is concrete
+/// Advertise an admin server at `listen`. When the listen IP is concrete
 /// it is advertised directly; an unspecified IP (0.0.0.0 / ::) lets the
 /// responder advertise every interface address automatically.
 pub fn advertise(
@@ -136,7 +136,7 @@ pub fn advertise(
     Ok(Advertisement { daemon, fullname })
 }
 
-/// A admin server seen on the local network. Everything here is
+/// An admin server seen on the local network. Everything here is
 /// unauthenticated hint material.
 #[derive(Debug, Clone)]
 pub struct Discovered {
@@ -250,7 +250,7 @@ pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
 }
 
 /// Async wrapper for [`browse_blocking`] — runs it on the blocking
-/// pool so a admin server can browse mid-request without stalling the
+/// pool so an admin server can browse mid-request without stalling the
 /// runtime.
 pub async fn browse(timeout: Duration) -> Result<Vec<Discovered>> {
     tokio::task::spawn_blocking(move || browse_blocking(timeout))

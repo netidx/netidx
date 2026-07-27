@@ -61,10 +61,10 @@ pub enum Field {
     /// Whether a CA admin is present to authorize an enrollment now.
     AdminHere,
     /// Whether to found a new admin domain here or connect to an existing one
-    /// (resolver install — the role that can found a admin domain).
+    /// (resolver install — the role that can found an admin domain).
     AdminDomainMode,
     /// Whether to join an existing admin domain or run this machine stand-alone,
-    /// for a role that can't found a admin domain (workstation, publisher).
+    /// for a role that can't found an admin domain (workstation, publisher).
     Membership,
     /// Which discovered admin domain to connect to (or enter an address manually).
     SelectAdminDomain,
@@ -276,13 +276,13 @@ impl Field {
             },
             Membership => FieldInfo {
                 flag: "--server",
-                label: "stand-alone or join a admin domain",
+                label: "stand-alone or join an admin domain",
                 help: "Join an existing netidx admin domain on your admin domain, or set \
                        up this machine on its own.",
             },
             SelectAdminDomain => FieldInfo {
                 flag: "--admin-server",
-                label: "connect to a admin domain",
+                label: "connect to an admin domain",
                 help: "Choose a discovered netidx admin domain by its glyph, or enter \
                        an admin-server address manually.",
             },

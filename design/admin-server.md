@@ -58,7 +58,7 @@ pair.
    host's domain + roles; it's trustworthy because the serving chain
    roots at the confirmed CA and the leaf carries the reserved SAN.
 6. **Server-to-server uses real PKI, not TOFU.** Server hosts have the
-   CA bundle installed, so a admin server connecting to a peer verifies
+   CA bundle installed, so an admin server connecting to a peer verifies
    it with webpki (`ServerName = "netidx-admin-server"`) and presents
    its own serving cert as the client certificate. The receiving
    daemon's client-cert verification is *optional* (join clients have
@@ -188,7 +188,7 @@ index is what makes certificates manageable by *name*:
   CRL is (re-)signed at every revocation and *opportunistically in
   every authenticated admin session* (sign/approve/deny/list all
   refresh a CRL nearing its `nextUpdate` — 90d validity, 30d refresh
-  window). A admin domain where literally nothing is signed for months gets
+  window). An admin domain where literally nothing is signed for months gets
   staleness warnings.
 - **Distribution**: `Request::GetCrl` (public — a CRL is a public
   document); the renewal daemon drops `crl.pem` beside each resolver's
@@ -482,10 +482,10 @@ Canonical locations: `${config}/netidx/admin-server.json`, then
 ## Install flows
 
 The probe outcome is a three-state value threaded through every
-sub-flow that could offer a admin domain join: `Have(admin domain)` (discovered
+sub-flow that could offer an admin domain join: `Have(admin domain)` (discovered
 and glyph-confirmed — use it, ask nothing), `DontHave` (probed and/or
 declined — never re-offer), `NotProbed` (CLI-flag path, non-TTY — a
-sub-flow that wants a admin server probes itself; this is also how
+sub-flow that wants an admin server probes itself; this is also how
 `netidx admin component tls join` without `--server` finds the admin domain). The
 operator answers the admin-server question at most once per install.
 
@@ -511,7 +511,7 @@ operator answers the admin-server question at most once per install.
 - **Second resolver**: discovers the admin domain, imports its settings
   (auth scheme, domain), CA-joins for its resolver identity (suggested
   `resolver.<domain>`), prompts for an SPN on krb5 admin domains, then
-  **enrolls** a admin server here: the admin domain CA signs its reserved-SAN
+  **enrolls** an admin server here: the admin domain CA signs its reserved-SAN
   serving cert over the wire, the host writes `admin-server.json` with
   its roles + the admin servers it found as peers, and drops the
   activation unit. Nothing is pushed to existing resolvers.
@@ -543,7 +543,7 @@ Expert escapes, all warned about where they're used:
   nobody and perms deny everything; the template emits a render-time
   coherence warning (visible on `--dry-run` too).
 - `--no-admin-server` — skips the admin plane entirely; the host is
-  invisible to discovery, and a admin domain with no admin server anywhere
+  invisible to discovery, and an admin domain with no admin server anywhere
   has no enrollment and no certificate renewal.
 - Bring-your-own data-plane certificates are **not** a wizard option: to
   run resolver/publisher/subscriber TLS with unrelated certificates,

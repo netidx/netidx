@@ -667,7 +667,7 @@ pub(super) async fn issue_serialized(
     })
 }
 
-/// Handle a admin-server enrollment: authenticate the admin, require the
+/// Handle an admin-server enrollment: authenticate the admin, require the
 /// scoped enrollment policy, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
 

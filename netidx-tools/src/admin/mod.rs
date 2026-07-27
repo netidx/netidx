@@ -49,7 +49,7 @@ mod resolver;
 mod roles;
 // `server` (the admin-server daemon CLI) depends on the
 // `netidx_admin_server` daemon implementation, which is unix-only (the
-// CA signer pulls openssl). On Windows, put a host on a admin domain by
+// CA signer pulls openssl). On Windows, put a host on an admin domain by
 // installing a publisher client config (`netidx admin publisher
 // install`); the `workstation` role is unix-only too (Local auth +
 // activation supervisor) until full Windows support lands.
@@ -77,7 +77,7 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: roles::workstation::Cmd,
     },
-    /// resolver role: a admin domain-facing resolver server
+    /// resolver role: an admin domain-facing resolver server
     Resolver {
         #[command(subcommand)]
         cmd: roles::resolver::Cmd,

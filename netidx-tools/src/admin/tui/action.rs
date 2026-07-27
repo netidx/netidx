@@ -274,7 +274,7 @@ pub(super) enum Action {
     Renew { server: Option<SocketAddr> },
     /// Reconcile this host's config with the admin domain (add/remove peers).
     Update { role: InstallRole, config_root: PathBuf },
-    /// Graduate a local-only workstation onto a admin domain. `dry_run` previews.
+    /// Graduate a local-only workstation onto an admin domain. `dry_run` previews.
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
     AddParent { config_root: PathBuf },
@@ -337,7 +337,7 @@ impl Action {
                 if *dry_run {
                     "Previewing join".to_string()
                 } else {
-                    "Joining a admin domain".to_string()
+                    "Joining an admin domain".to_string()
                 }
             }
             Action::AddParent { .. } => "Adding a parent".to_string(),
@@ -1087,7 +1087,7 @@ async fn update(
     })
 }
 
-/// Graduate a local-only workstation onto a admin domain.
+/// Graduate a local-only workstation onto an admin domain.
 async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     use netidx_admin_client::plan::install::workstation::{
         WorkstationJoinInput, run_workstation_join,

@@ -9,7 +9,7 @@
 //! the join CLI shows the artifact of whatever the daemon actually
 //! presented, and the two are eyeball-compared.
 //!
-//! **What gets hashed**: for a admin domain/CA identity, the CA
+//! **What gets hashed**: for an admin domain/CA identity, the CA
 //! certificate's *public key* (its SubjectPublicKeyInfo DER, via
 //! [`Fingerprint::of_cert_der`]) — NOT the certificate itself. The key
 //! is the thing that's unique to the admin domain: a same-key certificate

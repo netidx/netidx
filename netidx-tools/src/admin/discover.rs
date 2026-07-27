@@ -1,7 +1,7 @@
 //! `netidx admin discover` — browse mDNS for netidx admin domains and print each
 //! one's admin-server address(es) + CA glyph. A pure read-only query: unlike
 //! the interactive install discovery (which strict mode disables), this is
-//! valid in strict/scripted mode, so a script can discover a admin domain and feed
+//! valid in strict/scripted mode, so a script can discover an admin domain and feed
 //! the address + glyph to `--admin-server` / `--accept-glyph`.
 
 use anyhow::{Context, Result};

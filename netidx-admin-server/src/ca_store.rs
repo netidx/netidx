@@ -79,7 +79,7 @@ pub struct QueuedReq {
     /// and approval cannot be outrun. `None` ⇒ an ordinary request.
     #[serde(default)]
     pub renewal_of: Option<u64>,
-    /// `Some` ⇒ a admin-server enrollment.
+    /// `Some` ⇒ an admin-server enrollment.
     #[serde(default)]
     pub enrollment: Option<EnrollmentRequest>,
     /// Exact live certificate this approved restore request replaces.
@@ -139,7 +139,7 @@ pub struct IssuedRecord {
     pub req: QueuedReq,
     pub serial: u64,
     /// The DNS SAN actually signed (== `req.requested_name`, or the
-    /// reserved serving name for a admin-server enrollment).
+    /// reserved serving name for an admin-server enrollment).
     pub name: String,
     /// SPKI fingerprint of the leaf public key (revoke UI glyph).
     pub spki_fp: String,
@@ -220,7 +220,7 @@ pub enum Status {
 /// re-signing needs an admin password (the vault has no signing capability
 /// at rest) — but every admin session re-signs opportunistically (see
 /// [`CAStore::refresh_crl_if_stale`]), so a CRL only approaches this age on
-/// a admin domain where no admin has signed, approved, or revoked anything for
+/// an admin domain where no admin has signed, approved, or revoked anything for
 /// months.
 pub const CRL_VALIDITY: Duration = Duration::from_secs(90 * 24 * 3600);
 

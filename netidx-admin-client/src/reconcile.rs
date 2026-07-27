@@ -263,7 +263,7 @@ fn referral_eq(a: &rfile::Referral, b: &rfile::Referral) -> bool {
     a.path == b.path && a.ttl == b.ttl && ref_addrs_eq(&a.addrs, &b.addrs)
 }
 
-/// Map a admin domain-reported data-plane auth (from a admin server's
+/// Map an admin domain-reported data-plane auth (from an admin server's
 /// `GetInfo`) to a resolver-referral auth.
 fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     match a {
@@ -301,7 +301,7 @@ pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<Ed
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a admin domain (run `join` to attach one)",
+         attached to an admin domain (run `join` to attach one)",
     )?;
     let mut replacement = expected.addrs.clone();
     let mut changes = Vec::new();
@@ -341,7 +341,7 @@ pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<Ed
 // the source of truth, so an addr absent from its authoritative resolver cluster is
 // authoritatively gone. Host-local entries are never removed.
 
-/// Map a admin domain-reported data-plane auth to a client-config auth.
+/// Map an admin domain-reported data-plane auth to a client-config auth.
 fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
     use netidx::config::file::Auth;
     match a {
@@ -493,7 +493,7 @@ pub fn reconcile_parent_peers(path: &Path, map: &AdminDomainMap) -> Result<EditP
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a admin domain",
+         attached to an admin domain",
     )?;
     let cur: Vec<SocketAddr> = expected.addrs.iter().map(|(a, _)| *a).collect();
     let cls = clusters(map);

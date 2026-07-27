@@ -61,11 +61,11 @@ pub struct DiscoveredAdminDomain {
 }
 
 /// What the calling flow knows about admin servers on this admin domain. Threaded
-/// into every sub-flow that could otherwise offer a admin domain join, so the
+/// into every sub-flow that could otherwise offer an admin domain join, so the
 /// operator is asked at most once.
 #[allow(clippy::large_enum_variant)]
 pub enum AdminServers {
-    /// A admin domain was discovered and its identity glyph-confirmed: use it, ask
+    /// An admin domain was discovered and its identity glyph-confirmed: use it, ask
     /// nothing further.
     Have(DiscoveredAdminDomain),
     /// We probed (and/or the operator declined): there is none. Never offer a
@@ -437,7 +437,7 @@ fn manual_seeds(answer: Option<String>) -> Result<Option<Vec<SocketAddr>>> {
     }
 }
 
-/// A admin domain found by [`discover_admin_domains`]: its TLS domain, the admin-server
+/// An admin domain found by [`discover_admin_domains`]: its TLS domain, the admin-server
 /// address(es) that advertised it over mDNS, and — when one answered — the CA
 /// identity they present (whose `fingerprint` is the glyph a script passes to
 /// `--accept-glyph`), or the reason none did.
@@ -451,11 +451,11 @@ pub struct DiscoveredAdminDomainReport {
 /// the CA identity from the first reachable server. A pure read-only QUERY —
 /// no prompts, no decisions — so, unlike the interactive [`discover_admin_domain`]
 /// cascade (which the strict CLI disables), it is valid in strict/scripted
-/// mode: a script runs it, reads a admin domain's admin-server address + glyph, and
+/// mode: a script runs it, reads an admin domain's admin-server address + glyph, and
 /// feeds them to `--admin-server` / `--accept-glyph`.
 ///
 /// `early_exit = Some(settle)` browses at least `settle` and then returns as
-/// soon as a admin domain is found (up to `timeout`) — the interactive join, where
+/// soon as an admin domain is found (up to `timeout`) — the interactive join, where
 /// one admin domain is expected. `None` browses the whole `timeout` to enumerate
 /// every admin domain — the strict enumerator.
 pub async fn discover_admin_domains(
@@ -527,7 +527,7 @@ pub async fn discover_admin_domain(
         return Ok(AdminServers::NotProbed);
     }
     // Role-specific framing: a resolver can found a new admin domain, so it defaults
-    // to that; a workstation can't found one, so it either joins a admin domain (the
+    // to that; a workstation can't found one, so it either joins an admin domain (the
     // default) or installs stand-alone. Either way the non-join option means
     // "no parent admin domain" → `DontHave`. A publisher is not offered the choice at
     // all: it publishes to somebody's resolver or it does nothing, so a
@@ -542,8 +542,8 @@ pub async fn discover_admin_domain(
         NodeKind::Client | NodeKind::Workstation | NodeKind::AdminServer => Some((
             Field::Membership,
             "Install stand alone",
-            "Join a admin domain",
-            "Join a admin domain",
+            "Join an admin domain",
+            "Join an admin domain",
         )),
         NodeKind::Publisher => None,
     };
@@ -557,7 +557,7 @@ pub async fn discover_admin_domain(
     }
     // Connecting: browse the local network for admin domains and fetch each one's CA
     // identity, so the operator can recognize the one they mean by its glyph. The
-    // operator can browse again ("poll for more") to pick up a admin domain that
+    // operator can browse again ("poll for more") to pick up an admin domain that
     // answered late; new ones are appended, deduped by domain.
     let mut options: Vec<AdminDomainOption> = Vec::new();
     let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
@@ -658,7 +658,7 @@ pub async fn confirm_seeds(
     Ok(AdminServers::Have(DiscoveredAdminDomain { identity, info }))
 }
 
-/// Confirm a admin domain reachable at one explicit address — the WAN parent given
+/// Confirm an admin domain reachable at one explicit address — the WAN parent given
 /// via `--parent-admin-server`, where there is no mDNS. Resolving the parent
 /// into a `Have` BEFORE the create-vs-enroll decision is what makes a
 /// satellite enroll its cert from the existing CA and never mint its own.

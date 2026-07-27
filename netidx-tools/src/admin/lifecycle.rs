@@ -3,9 +3,9 @@
 //! per-role command modules under [`super::roles`].
 //!
 //! The security-critical step is [`fetch_admin_domain_pinned`]: these ops
-//! trust a admin server's picture of the admin domain, so they first re-pin to
+//! trust an admin server's picture of the admin domain, so they first re-pin to
 //! the **same** CA identity the operator glyph-confirmed at install
-//! (stored in the [`InstallRecord`]). A admin server whose CA fingerprint
+//! (stored in the [`InstallRecord`]). An admin server whose CA fingerprint
 //! doesn't match the pin is refused before anything is read or changed.
 
 use anyhow::{Context, Result};
@@ -78,7 +78,7 @@ fn fetch_admin_domain_pinned(
     for addr in &candidates {
         let id = match rt.block_on(transport::fetch_identity(*addr, kind)) {
             Ok(id) => id,
-            // Unreachable / not a admin server — try the next candidate.
+            // Unreachable / not an admin server — try the next candidate.
             Err(_) => continue,
         };
         // Fail closed on a malformed stored fingerprint (corrupt record).
@@ -91,7 +91,7 @@ fn fetch_admin_domain_pinned(
     }
     if saw_mismatch {
         bail!(
-            "reached a admin server, but its CA fingerprint did not match this \
+            "reached an admin server, but its CA fingerprint did not match this \
              install's pinned admin domain identity (admin domain {:?}). Refusing to \
              trust it — if your admin domain's CA legitimately changed, re-join.",
             net_id.domain,
@@ -137,7 +137,7 @@ pub(crate) fn workstation_status() -> Result<()> {
     match &rec.admin_domain {
         None => println!(
             "  admin domain: local-only — run `netidx admin workstation join` to \
-             attach to a admin domain",
+             attach to an admin domain",
         ),
         Some(net_id) => {
             println!("  admin domain: {:?}", net_id.domain);
@@ -169,7 +169,7 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Workstation)?;
     let net_id = rec.admin_domain.as_ref().context(
-        "this workstation is local-only — it hasn't joined a admin domain, so there \
+        "this workstation is local-only — it hasn't joined an admin domain, so there \
          is nothing to update. Run `netidx admin workstation join` first.",
     )?;
     let rpath = resolver_config_path()?;
@@ -227,7 +227,7 @@ fn fetch_map_pinned(
     }
     if saw_mismatch {
         bail!(
-            "reached a admin server, but its CA fingerprint did not match this \
+            "reached an admin server, but its CA fingerprint did not match this \
              install's pinned admin domain identity (admin domain {:?}). Refusing to trust \
              it — if your admin domain's CA legitimately changed, re-join.",
             net_id.domain,
@@ -321,7 +321,7 @@ pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Resolver)?;
     let net_id = rec.admin_domain.as_ref().context(
-        "this resolver is local-only — it hasn't joined a admin domain, so there is \
+        "this resolver is local-only — it hasn't joined an admin domain, so there is \
          nothing to update",
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver)?;
@@ -380,7 +380,7 @@ pub(crate) fn publisher_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Publisher)?;
     let net_id = rec.admin_domain.as_ref().context(
-        "this publisher is local-only — it hasn't joined a admin domain, so there is \
+        "this publisher is local-only — it hasn't joined an admin domain, so there is \
          nothing to update",
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher)?;

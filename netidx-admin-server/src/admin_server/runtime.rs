@@ -479,7 +479,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         .transpose()?;
     // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
     // this machine; `load_serving_keypair` unseals + decrypts in memory.
-    // Failure is a hard error (a admin server silently down means no discovery
+    // Failure is a hard error (an admin server silently down means no discovery
     // and no renewals for the whole admin domain).
     let (serving_cert_pem, serving_key_pem) =
         load_serving_keypair(&cfg.serving_cert, &cfg.serving_key).await?;

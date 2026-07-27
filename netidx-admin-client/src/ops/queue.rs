@@ -50,7 +50,7 @@ pub struct QueueItem {
     /// A cryptographically-verified renewal (proof of possession) — no code to
     /// match; batch-approvable via [`approve_renewals`].
     pub verified_renewal: bool,
-    /// `Some` ⇒ a admin-server enrollment (approval signs the reserved serving
+    /// `Some` ⇒ an admin-server enrollment (approval signs the reserved serving
     /// name and registers a peer); id-map groups are forced empty.
     pub enroll_listen: Option<SocketAddr>,
     pub requested_roles: BitFlags<netidx_admin_proto::Role>,
@@ -111,7 +111,7 @@ pub async fn list_queue(
 pub struct ApproveOutcome {
     /// The identity name that was signed.
     pub requested_name: String,
-    /// `Some` ⇒ the approved request was a admin-server enrollment.
+    /// `Some` ⇒ the approved request was an admin-server enrollment.
     pub enroll_listen: Option<SocketAddr>,
     /// The id-map groups the new identity was registered with (empty for a
     /// server enrollment or `--no-id-map`).

@@ -164,7 +164,7 @@ pub async fn run_publisher(
         // by hand is the strict CLI's `NotProbed` path below.
         AdminServers::DontHave => bail!(
             "a publisher must connect to a resolver, so it has no stand-alone \
-             install; join a admin domain, or name the resolvers explicitly with \
+             install; join an admin domain, or name the resolvers explicitly with \
              --addr and --auth"
         ),
         AdminServers::NotProbed => {

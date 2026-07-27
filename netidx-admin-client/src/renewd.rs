@@ -554,7 +554,7 @@ async fn renew_identity(
 /// (0600), then certificate, then the (possibly rolled) trust bundle —
 /// each write atomic.
 ///
-/// Chain preservation: a admin server's serving certificate file is a
+/// Chain preservation: an admin server's serving certificate file is a
 /// chain `[leaf, ca]` (clients read the CA from the end of it); plain
 /// client identities hold just the leaf. The renewal response carries
 /// the bare leaf, so whichever shape the file had is rebuilt — the

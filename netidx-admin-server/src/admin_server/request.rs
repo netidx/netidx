@@ -182,7 +182,7 @@ where
         Request::AddIdentity(req) => {
             let resp = if !peer_is_admin_server {
                 AddIdentityResponse::Err {
-                    reason: "identity registration requires a admin-server peer \
+                    reason: "identity registration requires an admin-server peer \
                              certificate"
                         .to_string(),
                 }
@@ -332,7 +332,7 @@ where
         Request::ApplyReferralEdit(req) => {
             let resp = if !peer_is_admin_server {
                 ApplyReferralEditResponse::Err {
-                    reason: "a referral edit requires a admin-server peer certificate"
+                    reason: "a referral edit requires an admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -351,7 +351,7 @@ where
         Request::Register(req) => {
             let resp = if !peer_is_admin_server {
                 RegisterResponse::Err {
-                    reason: "register requires a admin-server peer certificate"
+                    reason: "register requires an admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -365,7 +365,7 @@ where
         Request::Deregister => {
             let resp = if !peer_is_admin_server {
                 RegisterResponse::Err {
-                    reason: "deregister requires a admin-server peer certificate"
+                    reason: "deregister requires an admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -426,7 +426,7 @@ where
         Request::ApplyPermsEdit(req) => {
             let resp = if !peer_is_admin_server {
                 ApplyPermsEditResponse::Err {
-                    reason: "a perms edit requires a admin-server peer certificate"
+                    reason: "a perms edit requires an admin-server peer certificate"
                         .to_string(),
                 }
             } else {
@@ -526,7 +526,7 @@ where
         Request::ApplyServiceControl(req) => {
             let resp = if !peer_is_admin_server {
                 ApplyServiceControlResponse::Err {
-                    reason: "service control requires a admin-server peer certificate"
+                    reason: "service control requires an admin-server peer certificate"
                         .to_string(),
                 }
             } else {

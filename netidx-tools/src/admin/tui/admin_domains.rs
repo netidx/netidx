@@ -1,13 +1,13 @@
-//! The Admin domain tab's known-admin domain registry: admin admin domains this machine has
-//! connected to or discovered, persisted to the config dir so commonly-used
-//! admin domains reappear without retyping an address.
+//! The Admin Domain tab's registry of known admin domains: the ones this
+//! machine has connected to or discovered, persisted to the config dir so
+//! commonly-used domains reappear without retyping an address.
 //!
-//! A admin domain is identified by its **CA fingerprint** (one CA identity, reachable
-//! at one or more admin-server addresses). Before a saved admin domain is shown, an
-//! on-entry poll re-fetches the identity at its saved addresses and confirms the
-//! fingerprint still matches — so an address reused by a *different* CA on a
-//! different admin domain (`192.168.1.1:4565` is the same on every LAN) can never
-//! masquerade as a admin domain you trusted elsewhere.
+//! An admin domain is identified by its **CA fingerprint** (one CA identity,
+//! reachable at one or more admin-server addresses). Before a saved domain is
+//! shown, an on-entry poll re-fetches the identity at its saved addresses and
+//! confirms the fingerprint still matches — so an address reused by a
+//! *different* CA on a different network (`192.168.1.1:4565` is the same on
+//! every LAN) can never masquerade as a domain you trusted elsewhere.
 
 use futures::future::join_all;
 use netidx_admin_client::{paths, transport::fetch_identity};
@@ -19,7 +19,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 /// whole poll.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// One known admin admin domain — a single CA identity reachable at one or more
+/// One known admin domain — a single CA identity reachable at one or more
 /// admin-server addresses. Persisted as JSON; the fingerprint is stored in its
 /// grouped-base32 text form ([`Fingerprint`] has no serde derive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub(super) struct KnownAdminDomains {
 
 impl KnownAdminDomains {
     fn path() -> anyhow::Result<PathBuf> {
-        Ok(paths::user_config_root()?.join("admin-admin domains.json"))
+        Ok(paths::user_config_root()?.join("admin-domains.json"))
     }
 
     /// Load the saved admin domains, or an empty set if the file is missing or
@@ -114,7 +114,7 @@ impl KnownAdminDomains {
     }
 }
 
-/// If this host runs its own admin server — i.e. it founded or joined a admin domain
+/// If this host runs its own admin server — i.e. it founded or joined an admin domain
 /// and hosts a member of it — make sure that admin domain is in the saved set, so it
 /// appears on the Admin domain tab without a manual discover. The identity is the one
 /// recorded in this host's install record (`admin domain`); the admin-server address
@@ -122,8 +122,10 @@ impl KnownAdminDomains {
 /// on-entry poll then verifies it live like any other saved admin domain. Returns
 /// whether the saved set changed (worth saving).
 #[cfg(unix)]
-pub(super) fn seed_local_cluster(clusters: &mut KnownAdminDomains) -> bool {
-    let Some((domain, fp, recorded)) = local_cluster_identity() else { return false };
+pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
+    let Some((domain, fp, recorded)) = local_admin_domain_identity() else {
+        return false;
+    };
     // The address to reach this admin domain's CA: this host's own admin-server listen
     // if it hosts a member (a CA / resolver), else the upstream admin server this
     // host enrolled against, recorded at join (a workstation / publisher runs no
@@ -133,14 +135,14 @@ pub(super) fn seed_local_cluster(clusters: &mut KnownAdminDomains) -> bool {
     else {
         return false;
     };
-    clusters.upsert(&domain, addr, fp)
+    domains.upsert(&domain, addr, fp)
 }
 
-/// The admin admin domain this host belongs to — domain, CA fingerprint, and the
+/// The admin domain this host belongs to — domain, CA fingerprint, and the
 /// admin-server address recorded at install (the upstream one it joined, if
 /// any) — from its install record: the user-scope record, else the system one.
 #[cfg(unix)]
-fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
+fn local_admin_domain_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
     use netidx_admin_client::provenance::InstallRecord;
     let sys = paths::system_install_record();
     let records = [
@@ -155,7 +157,7 @@ fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)>
 }
 
 #[cfg(not(unix))]
-pub(super) fn seed_local_cluster(_clusters: &mut KnownAdminDomains) -> bool {
+pub(super) fn seed_local_admin_domain(_domains: &mut KnownAdminDomains) -> bool {
     false
 }
 

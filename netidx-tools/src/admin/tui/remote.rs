@@ -73,7 +73,7 @@ impl PanelTarget {
         match self {
             PanelTarget::Remote(c) => Ok(c),
             PanelTarget::Local { .. } => {
-                anyhow::bail!("this operation requires connecting to a admin domain")
+                anyhow::bail!("this operation requires connecting to an admin domain")
             }
         }
     }
@@ -83,7 +83,7 @@ impl PanelTarget {
         match self {
             PanelTarget::Remote(c) => Ok(c),
             PanelTarget::Local { .. } => {
-                anyhow::bail!("this operation requires connecting to a admin domain")
+                anyhow::bail!("this operation requires connecting to an admin domain")
             }
         }
     }
@@ -143,7 +143,7 @@ impl Panel {
             }
             Panel::Perms => "View and edit the permissions on a netidx path.",
             Panel::Service => {
-                "Start, stop, or restart the netidx services on a admin domain member."
+                "Start, stop, or restart the netidx services on an admin domain member."
             }
         }
     }
@@ -288,7 +288,7 @@ pub(super) enum RemoteAction {
     ListServiceServers { target: PanelTarget },
     /// Control services on ONE admin server (`server`): `Status` carries no
     /// units and (re)lists; `Start`/`Stop`/`Restart` carry the selected unit.
-    /// Per-server by design — never a admin domain-wide fanout. Stop is confirm-gated.
+    /// Per-server by design — never an admin domain-wide fanout. Stop is confirm-gated.
     ServiceControl {
         target: PanelTarget,
         server: ServiceTarget,
@@ -655,7 +655,7 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
     Ok(super::action::Outcome::remote_toast("Logged out", lines, RemoteUpdate::LoggedOut))
 }
 
-/// Discover admin admin domains on the local network and refresh the Admin domain tab's
+/// Discover admin domains on the local network and refresh the Admin domain tab's
 /// list — the same browse + per-admin domain CA-identity fetch the install flow and
 /// `netidx admin discover` use (via [`enroll::discover_admin_domains`]), not a private
 /// copy. Merges every reachable admin domain into the saved registry, then hands the
@@ -1856,7 +1856,7 @@ fn local_own_base() -> String {
 /// without a manual discover, and persisting that addition.
 fn load_seeded_clusters() -> KnownAdminDomains {
     let mut known = KnownAdminDomains::load();
-    if admin_domains::seed_local_cluster(&mut known) {
+    if admin_domains::seed_local_admin_domain(&mut known) {
         let _ = known.save();
     }
     known
@@ -1907,7 +1907,7 @@ impl RemoteState {
     }
 
     /// Admin domain tab regained focus: on the landing list (not mid-session), reload
-    /// the saved registry — a admin domain may have been saved this session — and
+    /// the saved registry — an admin domain may have been saved this session — and
     /// re-poll it.
     pub(super) fn on_focus(&mut self) {
         if matches!(self.screen, Screen::AdminDomains) {
@@ -2061,7 +2061,7 @@ impl RemoteState {
         }
     }
 
-    /// Pick a admin domain permission level from the map-derived list, then open the
+    /// Pick an admin domain permission level from the map-derived list, then open the
     /// perms panel against it.
     fn on_key_level_pick(&mut self, code: KeyCode) -> Option<Action> {
         let Screen::LevelPick { panel, levels, state } = &mut self.screen else {
@@ -2102,7 +2102,7 @@ impl RemoteState {
         }
     }
 
-    /// Pick a admin domain admin server from the map-derived list, then open the
+    /// Pick an admin domain admin server from the map-derived list, then open the
     /// services panel scoped to that one server.
     fn on_key_server_pick(&mut self, code: KeyCode) -> Option<Action> {
         let Screen::ServerPick { admin_servers: servers, state } = &mut self.screen
@@ -2258,7 +2258,7 @@ impl RemoteState {
                     }
                 } else if matches!(panel, Panel::Service) {
                     // Admin domain services: pick an admin server from the map, then
-                    // control that one server (never a admin domain-wide fanout).
+                    // control that one server (never an admin domain-wide fanout).
                     self.error = None;
                     if let Some(target) = &self.target {
                         return Some(Action::Remote(RemoteAction::ListServiceServers {
@@ -2611,7 +2611,7 @@ impl RemoteState {
             } else if checking {
                 "Checking saved admin domains…"
             } else {
-                "No saved admin domain is reachable here right now (a admin domain only shows \
+                "No saved admin domain is reachable here right now (an admin domain only shows \
                  when its CA glyph verifies). Press d to discover, c to connect, or r \
                  to re-check."
             };

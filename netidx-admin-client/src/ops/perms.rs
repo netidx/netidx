@@ -77,7 +77,7 @@ pub async fn open_perms_session(
     Ok((session, perms_json))
 }
 
-/// List every level (resolver-resolver cluster base) in the admin domain map — the exact
+/// List every level (resolver cluster base) in the admin domain map — the exact
 /// `--at` targets a perms read/edit can route to. Deduped and sorted. The
 /// resolver cluster-scope perms UI offers these instead of a free-text path.
 pub async fn list_levels(

@@ -1,9 +1,9 @@
 //! The workstation role install: a local resolver + matching client, with an
-//! optional parent referral up to a admin domain-wide resolver.
+//! optional parent referral up to an admin domain-wide resolver.
 //!
-//! A workstation never mints a CA; when it joins a admin domain it enrolls a client
+//! A workstation never mints a CA; when it joins an admin domain it enrolls a client
 //! cert over the admin plane. `run_workstation_join` graduates an existing
-//! local-only workstation onto a admin domain without a reinstall.
+//! local-only workstation onto an admin domain without a reinstall.
 
 use super::{
     InstallCommon, InstallMode, admin_domain_provenance, finish_with, install_renew_unit,
@@ -261,7 +261,7 @@ pub async fn run_workstation(
     .await
 }
 
-/// Graduate a local-only workstation onto a admin domain: discover + glyph-confirm
+/// Graduate a local-only workstation onto an admin domain: discover + glyph-confirm
 /// it, enroll a client cert if it's TLS, attach the local resolver via a
 /// parent referral, and record the joined (pinned) admin domain — without a
 /// reinstall.

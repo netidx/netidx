@@ -1,4 +1,4 @@
-//! The resolver role install: a admin domain-facing resolver server, its data-plane
+//! The resolver role install: an admin domain-facing resolver server, its data-plane
 //! auth (anonymous / krb5 / tls), the id-mapper daemon, and — on a fresh TLS or
 //! krb5/anonymous admin domain — the admin-plane CA and this host's admin server.
 //!
@@ -127,7 +127,7 @@ pub struct ResolverInput {
 }
 
 /// Install a standalone resolver, returning the OS-service scope the frontend
-/// should register (system scope — a resolver is a admin domain-facing daemon), or
+/// should register (system scope — a resolver is an admin domain-facing daemon), or
 /// `None`.
 pub async fn run_resolver(
     ans: &mut dyn Answerer,
@@ -318,7 +318,7 @@ pub async fn run_resolver(
     };
     #[cfg(not(unix))]
     let control_plane_domain: Option<String> = None;
-    // ── Data plane ── the auth scheme (imported when joining a admin domain, else
+    // ── Data plane ── the auth scheme (imported when joining an admin domain, else
     // chosen now that the control plane exists) and the resolver's own identity
     // for it. On the founding TLS path the CA was created above, so
     // `resolver_self_auth` only issues this resolver's certificate from it.
@@ -593,7 +593,7 @@ pub async fn run_resolver(
         resolver.as_file_mut().children =
             joining_children.into_iter().map(edge_into_file).collect();
     }
-    // A standalone resolver is a admin domain-facing daemon — system-scope is what
+    // A standalone resolver is an admin domain-facing daemon — system-scope is what
     // makes it boot-triggered and visible to the OS.
     finish_with(
         ans,
@@ -605,7 +605,7 @@ pub async fn run_resolver(
         // discovered admin domain ⇒ enroll a new admin server here; a fresh
         // admin domain ⇒ add this host's roles to the config the CA setup wrote.
         // Then the renewal daemon, on any host with certificates our CA can
-        // renew (a netidx-CA-issued resolver identity, or a admin-server
+        // renew (a netidx-CA-issued resolver identity, or an admin-server
         // serving cert).
         async move |ans, config_lock| {
             #[cfg(unix)]
@@ -775,8 +775,8 @@ async fn resolver_self_auth(
         AuthKind::Local => bail!(
             "the resolver template does not support local auth: local (unix-socket) \
              auth only authenticates clients on the same machine, so it cannot serve \
-             a admin domain. For a single-machine setup use `netidx admin workstation \
-             install`; for a admin domain resolver choose anonymous, krb5, or tls."
+             an admin domain. For a single-machine setup use `netidx admin workstation \
+             install`; for an admin domain resolver choose anonymous, krb5, or tls."
         ),
         AuthKind::Krb5 => {
             let spn = match default_krb5_spn().await {
@@ -854,7 +854,7 @@ async fn resolver_tls_auth(
             None => bail!(
                 "a TLS resolver identity requires a reachable admin server to \
                  enroll against (creating a CA is unix-only). To run TLS without \
-                 a admin server, configure the resolver's TLS identity by hand."
+                 an admin server, configure the resolver's TLS identity by hand."
             ),
         }
     };
@@ -880,7 +880,7 @@ async fn resolver_tls_generate(
     units_dir: Option<&Path>,
     probe: &AdminServers,
 ) -> Result<ResolvedAuth> {
-    // First the admin domain path: a admin server signs our CSR on the spot.
+    // First the admin domain path: an admin server signs our CSR on the spot.
     // Whether this asks anything is decided by `probe`. The issued files are
     // written to a staging tempdir; we hand it back so the caller can hold it
     // across the template install.
@@ -1182,7 +1182,7 @@ fn authchoice_to_info(a: &AuthChoice) -> Result<InfoAuth> {
         AuthChoice::Krb5 { spn } => Ok(InfoAuth::Krb5 { spn: spn.to_string() }),
         AuthChoice::Tls { name, .. } => Ok(InfoAuth::Tls { name: name.to_string() }),
         AuthChoice::Local { .. } => bail!(
-            "a local-auth resolver can't be delegated a admin domain subtree (its auth \
+            "a local-auth resolver can't be delegated an admin domain subtree (its auth \
              is host-local)"
         ),
     }
@@ -1193,7 +1193,7 @@ fn authchoice_to_info(a: &AuthChoice) -> Result<InfoAuth> {
 /// fresh admin domain we just created, OR a "discovered" admin domain whose CA *this host
 /// already holds* ⇒ the ca-role `admin-server.json` already exists; merge this
 /// host's resolver / id-map roles into it, preserving the `ca` role. (3) No
-/// config at all ⇒ the operator declined a admin server — nothing to do.
+/// config at all ⇒ the operator declined an admin server — nothing to do.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn post_apply_admin_server(
@@ -1273,7 +1273,7 @@ async fn host_holds_ca(net: &DiscoveredAdminDomain) -> bool {
 
 /// Merge this host's resolver / id-map roles into the existing
 /// `admin-server.json`, preserving every other role (notably `ca`). No existing
-/// config ⇒ the operator declined a admin server here, so there's nothing to do.
+/// config ⇒ the operator declined an admin server here, so there's nothing to do.
 #[cfg(unix)]
 async fn merge_resolver_roles(
     ans: &mut dyn Answerer,
@@ -1295,7 +1295,7 @@ async fn merge_resolver_roles(
     Ok(())
 }
 
-/// Enroll a admin server on this (non-CA) host: the admin domain's CA signs our
+/// Enroll an admin server on this (non-CA) host: the admin domain's CA signs our
 /// reserved-SAN serving cert (admin-authorized, policy-gated), we install the
 /// serving identity + `admin-server.json` with this host's roles, and drop the
 /// activation unit.
@@ -1332,7 +1332,7 @@ pub async fn enroll_admin_server(
     match admin_plane_decision(kind, no_admin_server) {
         AdminPlane::Skip => return Ok(false),
         AdminPlane::Mandatory => ans.note(
-            "enrolling a admin server on this host — it advertises this resolver to \
+            "enrolling an admin server on this host — it advertises this resolver to \
              future installs and renews its certificates. (expert opt-out: \
              --no-admin-server)",
         ),
@@ -1342,7 +1342,7 @@ pub async fn enroll_admin_server(
                 .await?
             {
                 ans.note(
-                    "note: skipped — discovery only sees hosts running a admin \
+                    "note: skipped — discovery only sees hosts running an admin \
                      server, so future installs won't learn about this resolver \
                      from this host",
                 );

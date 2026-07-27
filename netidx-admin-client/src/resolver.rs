@@ -234,7 +234,7 @@ fn validate_permission_topology(
     Ok(())
 }
 
-/// Map a referral (parent / child) to a admin domain-map [`ResolverClusterEdge`],
+/// Map a referral (parent / child) to an admin domain-map [`ResolverClusterEdge`],
 /// dropping `Local`-auth addrs (host-local, nothing to advertise).
 fn referral_to_edge(r: &file::Referral) -> ResolverClusterEdge {
     ResolverClusterEdge {

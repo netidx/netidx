@@ -39,7 +39,7 @@ pub mod workstation;
 // stay cfg-free and the crate still builds without the feature — degrading to
 // "no suggestion, ask the operator" rather than failing to compile.
 
-/// The IP a admin domain daemon on this host should advertise, if the environment
+/// The IP an admin domain daemon on this host should advertise, if the environment
 /// can be probed. `None` without `cloud-detect`.
 ///
 /// `NetShape::detect` does blocking work — interface enumeration plus a

@@ -56,7 +56,7 @@ pub const DEFAULT_PORT: u16 = 4565;
 /// Reserved DNS SAN of every admin server's TLS *serving* certificate.
 /// Clients require the presented serving cert to carry exactly this
 /// name and to be signed by the fingerprint-confirmed CA — that's what
-/// distinguishes a admin-server daemon from any other node the same CA
+/// distinguishes an admin-server daemon from any other node the same CA
 /// has issued a cert to. Issuance policy must never grant this name to
 /// a normal join; it is only issued locally on the CA host or via the
 /// policy-gated [`Request::Enroll`].
@@ -341,7 +341,7 @@ pub enum Request {
     #[pack(tag(19))]
     ApplyReferralEdit(ApplyReferralEditRequest),
     /// Server→CA push: register/update this admin server's facts (address,
-    /// roles, resolver-resolver cluster facts) in the CA's authoritative admin domain
+    /// roles, resolver cluster facts) in the CA's authoritative admin domain
     /// map. Peer-cert-gated like [`Request::AddIdentity`]. Answered with
     /// [`RegisterResponse`].
     #[pack(tag(20))]
@@ -356,7 +356,7 @@ pub enum Request {
     /// [`GetMapVersionResponse`].
     #[pack(tag(22))]
     GetMapVersion,
-    /// Fetch the full admin domain map — the CA's authoritative copy, or a admin
+    /// Fetch the full admin domain map — the CA's authoritative copy, or an admin
     /// server's cache. One round trip to any admin server is the whole
     /// admin domain. Answered with [`GetMapResponse`].
     #[pack(tag(23))]
@@ -887,7 +887,7 @@ pub struct QueueEntry {
     #[serde(default)]
     #[pack(default)]
     pub verified_renewal: bool,
-    /// `Some` ⇒ a admin-server enrollment (see
+    /// `Some` ⇒ an admin-server enrollment (see
     /// [`EnqueueRequest::enroll_listen`]): approval signs the reserved
     /// [`SERVING_SAN`] and requires scoped server-enrollment authority; id-map groups
     /// don't apply.

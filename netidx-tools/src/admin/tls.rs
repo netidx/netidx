@@ -1,6 +1,6 @@
 //! `netidx admin component tls …` — client-side TLS identity commands: obtain a
 //! certificate for *this* host (generate a key + CSR for offline
-//! signing, or join a admin server's CA over the network) and keep it
+//! signing, or join an admin server's CA over the network) and keep it
 //! fresh (the auto-renew daemon). CA-operator commands — issuing,
 //! signing, approving, revoking — live under `netidx admin ca`.
 //!
@@ -24,7 +24,7 @@ pub(crate) enum Cmd {
     /// generate a private key + CSR locally, to be signed by a CA elsewhere
     #[cfg(unix)]
     Request(ca::RequestArgs),
-    /// request a certificate from a admin server's CA and install it
+    /// request a certificate from an admin server's CA and install it
     #[cfg(unix)]
     Join(ca::JoinArgs),
     /// keep this host's TLS identities fresh (the renewal daemon)

@@ -61,7 +61,7 @@ const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "A admin domain-facing resolver server — the directory that maps paths to \
+        blurb: "An admin domain-facing resolver server — the directory that maps paths to \
                 publishers for a whole admin domain or a delegated subtree. Can mint a new \
                 admin domain's certificate authority and admin server, or enroll under an \
                 existing one.",
@@ -89,7 +89,7 @@ const FRESH_CHOICES: [FreshChoice; 4] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "A admin domain-facing resolver server — the directory that maps paths to \
+        blurb: "An admin domain-facing resolver server — the directory that maps paths to \
                 publishers for a whole admin domain or a delegated subtree. Enrolls under an \
                 existing controller.",
     },
@@ -129,7 +129,7 @@ struct LocalCa {
 
 /// The credential-state half of [`LocalCa`], filled in by a background probe.
 ///
-/// Reading it drives the daemon's local control socket, and that is a admin domain
+/// Reading it drives the daemon's local control socket, and that is an admin domain
 /// round trip in all but name: connecting to a bound unix socket succeeds into
 /// the backlog whether or not the daemon is accepting. Doing it inline on the
 /// UI task froze the whole TUI behind a wedged daemon, so it lives here on the
@@ -249,11 +249,11 @@ pub(super) async fn probe_local_cas(
 
 /// Admin domain-sync state for a detected install, filled in asynchronously by a
 /// background check (the same reconcile the CLI `status`/`update` runs). Kept
-/// out of [`Detected`] because probing it is a admin domain round-trip, while
+/// out of [`Detected`] because probing it is an admin domain round-trip, while
 /// `Detected` is built synchronously from local files.
 #[derive(Clone)]
 pub(super) enum SyncState {
-    /// An install that has joined a admin domain not yet checked; the event loop launches a check.
+    /// An install that has joined an admin domain not yet checked; the event loop launches a check.
     Unchecked,
     /// A background check is in flight.
     Checking,
@@ -753,10 +753,10 @@ fn action_desc(action: &Action) -> &'static str {
              resolvers as necessary."
         }
         Join { dry_run: false } => {
-            "Graduate this local-only workstation onto a admin domain, enrolling a TLS identity."
+            "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity."
         }
         Join { dry_run: true } => {
-            "Preview joining a admin domain, without changing anything."
+            "Preview joining an admin domain, without changing anything."
         }
         AddParent { .. } => "Attach this resolver under a parent resolver by delegation.",
         Remote(_) => "Connect to a remote admin server.",
@@ -816,7 +816,7 @@ fn service_word(status: ServiceStatus) -> &'static str {
 /// The detailed-status overlay — the former always-on card, now shown on demand
 /// over the action list (any key closes). Left column is the record + sync
 /// detail; the right column carries the admin domain's CA glyph and fingerprint when
-/// this host belongs to a admin domain.
+/// this host belongs to an admin domain.
 fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncState) {
     let mut lines = detail_lines(d);
     lines.extend(sync_lines(sync));
@@ -1012,7 +1012,7 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
 fn render_welcome(f: &mut Frame, screen: Rect) {
     let heading = "netidx isn't installed on this machine.";
     let body = "Choose a role to install — a Workstation for a laptop or desktop, a \
-                Resolver to run a admin domain's directory, or a Publisher — or choose \
+                Resolver to run an admin domain's directory, or a Publisher — or choose \
                 Restore from Backup to recover any managed installation.";
     let prompt = " Press Enter to continue ";
     let w = 64.min(screen.width.saturating_sub(4)).max(24);

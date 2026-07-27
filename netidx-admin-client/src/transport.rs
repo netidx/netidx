@@ -230,7 +230,7 @@ pub fn generate_key_and_csr(name: &str) -> Result<KeyAndCsr> {
     })
 }
 
-/// A admin server's verified identity, captured by [`fetch_identity`]:
+/// An admin server's verified identity, captured by [`fetch_identity`]:
 /// the CA [`Fingerprint`] to show the operator out of band, the CA
 /// certificate it's bound to, and the domain + roles the server claimed
 /// inside TLS. Pass it to [`get_info`] / [`request_cert`] / [`enroll`]
@@ -1960,7 +1960,7 @@ pub async fn revoke(
 /// Push an identity registration to a peer admin server, authenticating
 /// with *our* serving cert (server-to-server; the receiver requires the
 /// reserved SAN). Unlike the operator-facing calls this does real PKI —
-/// the caller is a admin server that has the CA bundle installed — so
+/// the caller is an admin server that has the CA bundle installed — so
 /// there is no TOFU and no pinning: the client's roots are the trust anchors.
 ///
 /// Returns `Ok(None)` when the peer's hello shows it has no id-map role
@@ -2205,7 +2205,7 @@ pub async fn reconcile_controller(
     }
 }
 
-/// Connect to a admin server with real PKI using a reusable trust and
+/// Connect to an admin server with real PKI using a reusable trust and
 /// authentication context.
 async fn connect_pki<C: HasTlsClient>(
     client: &C,

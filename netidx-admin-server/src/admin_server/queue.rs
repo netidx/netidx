@@ -263,7 +263,7 @@ async fn start_list_issued(
 /// A successful [`handle_approve`]: the signed outcome plus what the
 /// dispatch arm needs to finish the job — the push plan for id-map
 /// registration, and the peer address to record when the approved
-/// entry was a admin-server enrollment.
+/// entry was an admin-server enrollment.
 struct Approved {
     resp: SignResponse,
     push: Option<PushPlan>,
@@ -316,7 +316,7 @@ async fn approve_serialized(
 ) -> std::result::Result<Approved, String> {
     // A queued admin-server enrollment: gated on the approving admin's
     // scoped enrollment authority; signs the reserved serving SAN; no one-live
-    // check and no id-map groups (a admin server isn't a user).
+    // check and no id-map groups (an admin server isn't a user).
     if let Some(enrollment) = queued.enrollment.clone() {
         let authd = authenticate(ca, &req.credential, authentication)?;
         authorize_enrollment(&authd, &enrollment, map)?;
@@ -578,7 +578,7 @@ pub(super) async fn handle_enqueue(
     if !verified_renewal {
         // Fail fast on the reserved name — approval would refuse it
         // anyway, but the enrollee should hear it now, not after the
-        // admin clicked through. (A admin server renewing its own
+        // admin clicked through. (An admin server renewing its own
         // serving cert is the legitimate exception above.)
         if name.eq_ignore_ascii_case(SERVING_SAN) {
             return EnqueueResponse::Err {

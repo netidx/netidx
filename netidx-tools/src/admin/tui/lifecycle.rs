@@ -70,13 +70,13 @@ pub(super) async fn update_plan(
 
 /// Fetch the admin domain map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
-/// part of a admin domain or no admin server answers with the pinned identity.
+/// part of an admin domain or no admin server answers with the pinned identity.
 pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap> {
     let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec
         .admin_domain
         .as_ref()
-        .context("this host is not part of a admin domain (local-only)")?;
+        .context("this host is not part of an admin domain (local-only)")?;
     fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
 }
 

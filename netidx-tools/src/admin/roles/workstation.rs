@@ -1,5 +1,5 @@
 //! `netidx admin workstation …` — the workstation role: a local-auth
-//! resolver + matching client, optionally referred up to a admin domain.
+//! resolver + matching client, optionally referred up to an admin domain.
 
 use anyhow::Result;
 use clap::Subcommand;

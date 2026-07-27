@@ -47,7 +47,7 @@ pub struct ResolverParams {
     /// emits a [`TlsCopyJob`] that copies them to the canonical
     /// location before the resolver config references them.
     pub auth: AuthChoice,
-    /// Resolver resolver cluster base path (default `/`).
+    /// Resolver cluster base path (default `/`).
     pub base: ArcStr,
     /// `(addr, bind_addr)` for the single member server. If the second
     /// element is `None`, defaults to the address part of `addr`.

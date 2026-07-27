@@ -23,7 +23,7 @@ pub mod install;
 /// The OS-service setup decision seam (`ServiceNeed` / `offer`).
 pub mod service;
 
-/// The data-plane authentication scheme a admin domain uses: how subscribers prove
+/// The data-plane authentication scheme an admin domain uses: how subscribers prove
 /// who they are to publishers and resolvers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
@@ -90,7 +90,7 @@ pub enum AdminPlane {
 /// TLS already creates the CA on a fresh admin domain (it signs the data plane),
 /// and krb5/anonymous still need the admin plane's TLS trust root for
 /// discovery, enrollment, and renewal — declining it on a TLS or krb5 admin domain
-/// produces a admin domain where certificate renewal and zero-touch installs can
+/// produces an admin domain where certificate renewal and zero-touch installs can
 /// never work, so neither is offered as a question. Anonymous admin domains may
 /// genuinely not want the machinery (lab/dev setups), so they're asked. Local
 /// auth is host-local by definition: nothing to discover, nothing to enroll.

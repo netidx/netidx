@@ -769,7 +769,7 @@ pub(super) async fn handle_apply_referral_edit(
     state.apply_referral_edit(req).await
 }
 
-/// The role list a admin-server config implies.
+/// The role list an admin-server config implies.
 pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
     let mut out = BitFlags::empty();
     if cfg.roles.ca.is_some() {
@@ -901,7 +901,7 @@ pub(super) async fn handle_register(
     response
 }
 
-/// CA-side: drop a admin server from the map on uninstall.
+/// CA-side: drop an admin server from the map on uninstall.
 pub(super) async fn handle_deregister(
     state: &Server,
     server_id: admin_proto::AdminServerId,
@@ -987,8 +987,8 @@ async fn remove_server_prepare_inner(
         Ok(a) => a,
         Err(reason) => return Err(err(reason)),
     };
-    // Evicting a admin server from the authoritative map cascades that host's
-    // resolver-resolver cluster facts out of the map — a privileged, admin domain-affecting
+    // Evicting an admin server from the authoritative map cascades that host's
+    // resolver cluster facts out of the map — a privileged, admin domain-affecting
     // edit. Gate it on the admin-server lifecycle capability (the same bit
     // that authorizes enrolling one) or a broad admin.
     let broad = broad_admin(&authd);
