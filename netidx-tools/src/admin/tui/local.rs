@@ -840,10 +840,11 @@ fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncS
     } else {
         Layout::horizontal([Constraint::Min(0)]).split(inner)
     };
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme::panel_style()),
-        cols[0],
-    );
+    // Deliberately not wrapped. These are aligned `label: value` lines, and a
+    // wrapped value continues at column 0, which breaks the alignment of every
+    // line below it. Clipping a long value (a lock error carrying a path) keeps
+    // the card readable.
+    f.render_widget(Paragraph::new(lines).style(theme::panel_style()), cols[0]);
     if let Some(fp) = &d.ca {
         let mut g = vec![Line::from(Span::styled("CA glyph", theme::hint_style()))];
         g.extend(widgets::identicon_lines(fp));

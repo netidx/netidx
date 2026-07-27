@@ -290,7 +290,8 @@ impl Field {
                 flag: "--id-map",
                 label: "user/group id-map source",
                 help: "Where the resolver maps users and groups from: platform \
-                       (the OS), netidx (a shared admin domain map), or none.",
+                       (the OS), netidx (an identity map published in netidx), \
+                       or none.",
             },
             Owner => FieldInfo {
                 flag: "--owner",
@@ -450,10 +451,10 @@ impl Field {
             DelegateSubtree => FieldInfo {
                 flag: "--delegate-subtree",
                 label: "delegated subtree",
-                help: "Leave blank to install this resolver as a peer of the \
-                       base admin domain, or name a subtree (e.g. /eu) to request the \
-                       admin domain delegate it to this resolver — the parent's admin \
-                       must approve the delegation.",
+                help: "Leave blank to install this resolver as a member of the \
+                       base resolver cluster, or name a subtree (e.g. /eu) to \
+                       request that it be delegated to this resolver as a \
+                       cluster of its own — the parent's admin must approve.",
             },
             AdminServerAddr => FieldInfo {
                 flag: "--server",
