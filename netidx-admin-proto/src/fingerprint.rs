@@ -3,16 +3,16 @@
 //!
 //! The point is syncthing's trick — distinct identities look obviously
 //! different at a glance, so the operator joining a deployment can
-//! verify out of band that they're talking to the real network
+//! verify out of band that they're talking to the real trust domain
 //! *before* sending the admin password. The CA admin sees this same
 //! artifact at `ca init` and communicates it (in person, Signal, …);
 //! the join CLI shows the artifact of whatever the daemon actually
 //! presented, and the two are eyeball-compared.
 //!
-//! **What gets hashed**: for a network/CA identity, the CA
+//! **What gets hashed**: for a trust domain/CA identity, the CA
 //! certificate's *public key* (its SubjectPublicKeyInfo DER, via
 //! [`Fingerprint::of_cert_der`]) — NOT the certificate itself. The key
-//! is the thing that's unique to the network: a same-key certificate
+//! is the thing that's unique to the trust domain: a same-key certificate
 //! renewal leaves the glyph on the office wiki valid, while a key
 //! rotation (a new controller) changes it, as it must. Request codes
 //! in queued enrollment hash the CSR's SPKI for the same reason, so

@@ -35,7 +35,7 @@ use std::time::Duration;
 /// the bookkeeping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
-    // -- install: identity & network -----------------------------------------
+    // -- install: identity & trust domain -----------------------------------------
     /// Data-plane auth scheme (`anonymous` / `local` / `krb5` / `tls`).
     Auth,
     /// Kerberos service principal name for a krb5 resolver/publisher.
@@ -60,13 +60,13 @@ pub enum Field {
     IdMapGroups,
     /// Whether a CA admin is present to authorize an enrollment now.
     AdminHere,
-    /// Whether to found a new cluster here or connect to an existing one
-    /// (resolver install — the role that can found a cluster).
+    /// Whether to found a new trust domain here or connect to an existing one
+    /// (resolver install — the role that can found a trust domain).
     TrustDomainMode,
-    /// Whether to join an existing cluster or run this machine stand-alone,
-    /// for a role that can't found a cluster (workstation, publisher).
+    /// Whether to join an existing trust domain or run this machine stand-alone,
+    /// for a role that can't found a trust domain (workstation, publisher).
     Membership,
-    /// Which discovered cluster to connect to (or enter an address manually).
+    /// Which discovered trust domain to connect to (or enter an address manually).
     SelectTrustDomain,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
@@ -87,9 +87,9 @@ pub enum Field {
     ResolverPort,
     /// The TLS domain a resolver's certificate name is under.
     TlsDomain,
-    /// The network domain (groups the network in discovery).
+    /// The trust domain domain (groups the trust domain in discovery).
     TrustDomainName,
-    /// The CA / network domain (e.g. `ryu-oh.org`).
+    /// The CA / trust domain domain (e.g. `ryu-oh.org`).
     Domain,
     /// A publisher's resolver-server address(es).
     ResolverAddr,
@@ -97,7 +97,7 @@ pub enum Field {
     Socket,
     /// The leftmost label of a resolver's certificate name.
     ResolverName,
-    /// Whether to set up an admin server (admin-plane CA) for this network.
+    /// Whether to set up an admin server (admin-plane CA) for this trust domain.
     SetupAdminServer,
     /// Whether the controller CA certificate is signed by an external PKI.
     ExternalSign,
@@ -189,7 +189,7 @@ impl Field {
                 label: "auth scheme",
                 help: "How clients prove who they are: anonymous (no auth), \
                        local (unix peer creds), krb5 (Kerberos), or tls \
-                       (certificates issued by this cluster's CA).",
+                       (certificates issued by this trust domain's CA).",
             },
             Spn => FieldInfo {
                 flag: "--spn",
@@ -218,8 +218,8 @@ impl Field {
             },
             PublisherBind => FieldInfo {
                 flag: "--bind",
-                label: "publisher network bind",
-                help: "The network this publisher should bind and advertise on, \
+                label: "publisher trust domain bind",
+                help: "The trust domain this publisher should bind and advertise on, \
                        for example 10.0.0.0/24, an exact host as 10.0.0.5/32, \
                        or local. The detected interface subnet is usually the \
                        right choice.",
@@ -268,29 +268,29 @@ impl Field {
             },
             TrustDomainMode => FieldInfo {
                 flag: "--server",
-                label: "choose an administrative network",
-                help: "Create a new administrative network and certificate \
+                label: "choose an trust domain",
+                help: "Create a new trust domain and certificate \
                        authority on this machine, or enroll under an existing \
                        controller / CA. Choose the existing controller when \
                        adding the first resolver below a dedicated CA host.",
             },
             Membership => FieldInfo {
                 flag: "--server",
-                label: "stand-alone or join a cluster",
-                help: "Join an existing netidx cluster on your network, or set \
+                label: "stand-alone or join a trust domain",
+                help: "Join an existing netidx trust domain on your trust domain, or set \
                        up this machine on its own.",
             },
             SelectTrustDomain => FieldInfo {
                 flag: "--admin-server",
-                label: "connect to a cluster",
-                help: "Choose a discovered netidx cluster by its glyph, or enter \
+                label: "connect to a trust domain",
+                help: "Choose a discovered netidx trust domain by its glyph, or enter \
                        an admin-server address manually.",
             },
             IdMapMode => FieldInfo {
                 flag: "--id-map",
                 label: "user/group id-map source",
                 help: "Where the resolver maps users and groups from: platform \
-                       (the OS), netidx (a shared network map), or none.",
+                       (the OS), netidx (a shared trust domain map), or none.",
             },
             Owner => FieldInfo {
                 flag: "--owner",
@@ -351,14 +351,14 @@ impl Field {
             },
             TrustDomainName => FieldInfo {
                 flag: "--domain",
-                label: "cluster domain",
-                help: "The domain this cluster is grouped under in discovery, \
+                label: "trust domain domain",
+                help: "The domain this trust domain is grouped under in discovery, \
                        e.g. ryu-oh.org.",
             },
             Domain => FieldInfo {
                 flag: "--domain",
-                label: "cluster domain",
-                help: "The domain this cluster's CA is named for, e.g. \
+                label: "trust domain domain",
+                help: "The domain this trust domain's CA is named for, e.g. \
                        example.com.",
             },
             ResolverAddr => FieldInfo {
@@ -385,7 +385,7 @@ impl Field {
             SetupAdminServer => FieldInfo {
                 flag: "--with-admin-server",
                 label: "set up admin server?",
-                help: "Set up an admin server for this cluster — a small CA that \
+                help: "Set up an admin server for this trust domain — a small CA that \
                        secures the admin plane (discovery, enrollment, certificate \
                        renewal). Data-plane auth is unaffected. On an anonymous \
                        data plane it is optional, so strict mode needs an explicit \
@@ -451,8 +451,8 @@ impl Field {
                 flag: "--delegate-subtree",
                 label: "delegated subtree",
                 help: "Leave blank to install this resolver as a peer of the \
-                       base cluster, or name a subtree (e.g. /eu) to request the \
-                       network delegate it to this resolver — the parent's admin \
+                       base trust domain, or name a subtree (e.g. /eu) to request the \
+                       trust domain delegate it to this resolver — the parent's admin \
                        must approve the delegation.",
             },
             AdminServerAddr => FieldInfo {
@@ -485,7 +485,7 @@ impl Field {
                 flag: "--at",
                 label: "target path",
                 help: "The netidx path this operation acts on (routed to the \
-                       cluster that owns it).",
+                       trust domain that owns it).",
             },
             RevokeName => FieldInfo {
                 flag: "--name",
@@ -521,7 +521,7 @@ impl Field {
             RootAdminName => FieldInfo {
                 flag: "--admin",
                 label: "root user name",
-                help: "Create a root user for this cluster's certificate authority. \
+                help: "Create a root user for this trust domain's certificate authority. \
                        The root user can sign certificates and perform any other \
                        administrative function, including creating other users. \
                        Defaults to your current login name.",
@@ -570,7 +570,7 @@ impl Field {
                 help: "The advertised address and port of the resolver co-located \
                        with this controller. The IP defaults from this host's interfaces \
                        and the port comes from the backup. This updates the resolver \
-                       config, local client config, and CA-owned cluster map together.",
+                       config, local client config, and CA-owned trust domain map together.",
             },
             RestoreResolverBind => FieldInfo {
                 flag: "--resolver-bind",
@@ -652,7 +652,7 @@ impl Progress {
     }
 }
 
-/// A netidx cluster discovered on the local network, offered to the operator by
+/// A netidx trust domain discovered on the local network, offered to the operator by
 /// [`Answerer::select_trust_domain`]: the TLS domain that groups it in discovery and
 /// the CA identity (glyph + fingerprint) fetched from one of its reachable admin
 /// servers.
@@ -665,11 +665,11 @@ pub struct TrustDomainOption {
 /// The operator's pick from [`Answerer::select_trust_domain`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrustDomainChoice {
-    /// The discovered network at this index in the offered slice.
+    /// The discovered trust domain at this index in the offered slice.
     Discovered(usize),
     /// None of the above — enter an admin-server address manually instead.
     Manual,
-    /// Browse again and add any newly-discovered clusters to the list.
+    /// Browse again and add any newly-discovered trust domains to the list.
     PollMore,
 }
 
@@ -685,7 +685,7 @@ pub enum TrustDomainChoice {
 pub trait Answerer: Send {
     /// Whether this frontend prompts interactively. The strict-CLI answerer
     /// returns `false`, which tells the engine never to run an
-    /// interactive-only step (network discovery, glyph confirm with no
+    /// interactive-only step (trust domain discovery, glyph confirm with no
     /// out-of-band value) — every value must come from a flag or error.
     fn interactive(&self) -> bool;
 
@@ -709,13 +709,13 @@ pub trait Answerer: Send {
         default: Option<&str>,
     ) -> Result<String>;
 
-    /// Present the netidx clusters discovered on the local network — each shown
+    /// Present the netidx trust domains discovered on the local network — each shown
     /// with its CA glyph and fingerprint — plus a trailing "enter an address
     /// manually" option, and return which the operator picked. Interactive
     /// only: the strict answerer never discovers, so it errors.
     async fn select_trust_domain(
         &mut self,
-        networks: &[TrustDomainOption],
+        domains: &[TrustDomainOption],
     ) -> Result<TrustDomainChoice>;
 
     /// Ask a yes/no question with the given default.

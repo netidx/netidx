@@ -68,7 +68,7 @@ impl Tab {
     fn title(self) -> &'static str {
         match self {
             Tab::Local => "Local",
-            Tab::Remote => "Cluster",
+            Tab::Remote => "Trust Domain",
         }
     }
 
@@ -168,8 +168,8 @@ impl App {
     fn next_tab(&mut self) {
         let i = (self.tab.index() + 1) % Tab::ALL.len();
         self.tab = Tab::ALL[i];
-        // Re-read the saved cluster registry (a cluster may have been saved this
-        // session) and re-poll it when the Cluster tab regains focus.
+        // Re-read the saved trust domain registry (a trust domain may have been saved this
+        // session) and re-poll it when the Trust Domains tab regains focus.
         if self.tab == Tab::Remote {
             self.remote.on_focus();
         }
@@ -200,7 +200,7 @@ impl App {
                 }
                 if let Some(update) = out.remote {
                     // Route panel rows to whichever surface launched the op — the
-                    // Local tab's local-admin surface, or the Cluster tab. Input
+                    // Local tab's local-admin surface, or the Trust Domains tab. Input
                     // is blocked while busy, so this state matches the launch.
                     if self.tab == Tab::Local && self.local.admin_open() {
                         self.local.apply_admin(update);
@@ -422,7 +422,7 @@ impl App {
                     remove_ca: false,
                 };
                 self.confirm = Some((
-                    "This install holds the cluster's certificate authority. Also \
+                    "This install holds the trust domain's certificate authority. Also \
                      destroy it? Destroying the CA is irreversible — every enrolled \
                      node's certificate becomes unverifiable and unrenewable.\n\n\
                      y = destroy the CA and uninstall · n = keep the CA and uninstall \
@@ -496,7 +496,7 @@ impl App {
             }
             self.render_footer(f, chunks[1]);
         } else if self.local.installed() {
-            // Drilled into a tool (Services, a cluster panel, …): the tab bar
+            // Drilled into a tool (Services, a trust domain panel, …): the tab bar
             // goes away — you're inside a tool, not switching tabs — and the
             // gutter shows the tool's keys instead of the global tab/quit keys.
             let gutter = match self.tab {
@@ -532,7 +532,7 @@ impl App {
             }
         } else {
             // Fresh machine: the install flow only — no tabs, no remote admin
-            // (there's no local cluster to administer yet).
+            // (there's no local trust domain to administer yet).
             let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)])
                 .split(screen);
             self.local.render(f, chunks[0]);
@@ -870,14 +870,14 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiRequest>();
     let mut app = App::new();
     let mut op: Option<OpFuture> = None;
-    // A quiet background network-sync check for the Local tab's installs. Runs
+    // A quiet background trust domain-sync check for the Local tab's installs. Runs
     // off the main op slot so the status card renders instantly from local
-    // files and gains its sync line once the network answers; never sets `busy`.
+    // files and gains its sync line once the trust domain answers; never sets `busy`.
     type SyncFuture = Pin<Box<dyn Future<Output = Vec<(usize, local::SyncState)>>>>;
     let mut sync_op: Option<SyncFuture> = None;
-    // The Cluster tab's on-entry poll: verify each saved cluster's CA identity is
+    // The Trust Domains tab's on-entry poll: verify each saved trust domain's CA identity is
     // still reachable before showing it. Same background slot idea as `sync_op` —
-    // never sets `busy`, so the cluster list renders instantly and fills in.
+    // never sets `busy`, so the trust domain list renders instantly and fills in.
     type TrustDomainPollFuture =
         Pin<Box<dyn Future<Output = Vec<(usize, trust_domains::PollState)>>>>;
     let mut cluster_op: Option<TrustDomainPollFuture> = None;
@@ -901,7 +901,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         terminal.draw(|f| app.render(f))?;
         let animating = app.progress.is_some();
         // Kick off the sync check when the Local tab is focused and has an
-        // unchecked networked install. `take_pending_checks` marks them
+        // unchecked joined install. `take_pending_checks` marks them
         // `Checking`, so this launches exactly one check per install.
         if app.tab == Tab::Local && sync_op.is_none() {
             let pending = app.local.take_pending_checks();
@@ -917,8 +917,8 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 ca_probe_op = Some(Box::pin(local::probe_local_cas(pending)));
             }
         }
-        // Kick off the cluster poll when the Cluster tab is focused and has
-        // unpolled saved clusters. `take_pending_poll` marks them `Polling`, so
+        // Kick off the trust domain poll when the Trust Domains tab is focused and has
+        // unpolled saved trust domains. `take_pending_poll` marks them `Polling`, so
         // this launches exactly one poll pass per pending set.
         if app.tab == Tab::Remote && cluster_op.is_none() {
             let pending = app.remote.take_pending_poll();
@@ -981,7 +981,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 sync_op = None;
                 app.local.apply_sync(synced);
             }
-            // Lowest priority: a finished cluster poll fills in the Cluster tab's
+            // Lowest priority: a finished trust domain poll fills in the Trust Domains tab's
             // reachability/glyph state — no overlay, no `busy`.
             polled = async {
                 match cluster_op.as_mut() {
@@ -1190,7 +1190,7 @@ mod render_tests {
         assert!(s.contains("Set Up This Machine"), "setup menu missing: {s:?}");
         assert!(s.contains("Restore from Backup"), "restore choice missing: {s:?}");
         assert!(
-            !s.contains("Cluster"),
+            !s.contains("Trust Domain"),
             "tab bar should be hidden on a fresh machine: {s:?}"
         );
     }
@@ -1359,7 +1359,7 @@ mod render_tests {
         let mut app = App::new();
         app.log_line(Line::raw("seed"));
         app.tab = Tab::Remote;
-        // Enter the manual host/port form via the cluster screen's 'c' action.
+        // Enter the manual host/port form via the trust domain screen's 'c' action.
         app.remote.on_key(KeyCode::Char('c'));
         for ch in "qlab".chars() {
             assert!(app.on_key(KeyCode::Char(ch), KeyModifiers::NONE).is_none());
@@ -1391,7 +1391,7 @@ mod render_tests {
         // Housekeeping notes must never render inline (the flash Eric hit) —
         // they go only to the on-demand log pane.
         let mut app = App::new();
-        app.begin("Founding a new cluster".to_string());
+        app.begin("Founding a new trust domain".to_string());
         app.handle_request(UiRequest::Note("created a new CA at /x".to_string()));
         let s = render(&mut app);
         assert!(!s.contains("created a new CA"), "note leaked into the busy view: {s:?}");
@@ -1479,11 +1479,14 @@ mod render_tests {
         let mut app = App::new();
         let (tx, _rx) = oneshot::channel();
         app.modal = Modal::from_request(UiRequest::SelectTrustDomain {
-            networks: vec![],
+            trust_domains: vec![],
             reply: tx,
         });
         let s = render(&mut app);
-        assert!(s.contains("No clusters found"), "empty-state header missing: {s:?}");
+        assert!(
+            s.contains("No trust domains found"),
+            "empty-state header missing: {s:?}"
+        );
         assert!(s.contains("Search again for more"), "poll-more row missing: {s:?}");
         assert!(
             s.contains("Enter an address manually"),
@@ -1498,10 +1501,10 @@ mod render_tests {
         app.modal = Modal::from_request(UiRequest::Choice {
             field: Field::TrustDomainMode,
             choices: vec![
-                "Create a new administrative network (creates a CA)".into(),
+                "Create a new trust domain (creates a CA)".into(),
                 "Use an existing controller / CA".into(),
             ],
-            default: Some("Create a new administrative network (creates a CA)".into()),
+            default: Some("Create a new trust domain (creates a CA)".into()),
             reply: tx,
         });
         let s = render(&mut app);

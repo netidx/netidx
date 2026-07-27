@@ -39,7 +39,7 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: activation::Cmd,
     },
-    /// run the admin server (network discovery + setup daemon)
+    /// run the admin server (trust domain discovery + setup daemon)
     #[cfg(unix)]
     Server {
         #[command(subcommand)]

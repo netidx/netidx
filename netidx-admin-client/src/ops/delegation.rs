@@ -44,9 +44,9 @@ pub struct PendingDelegation {
     pub code: Fingerprint,
     /// The subtree the child asks to own.
     pub proposed_path: String,
-    /// The proposed/final parent cluster's resolver address(es).
+    /// The proposed/final parent resolver cluster's resolver address(es).
     pub parent: Vec<ResolverAddr>,
-    /// The proposed/final child cluster's resolver address(es).
+    /// The proposed/final child resolver cluster's resolver address(es).
     pub child: Vec<ResolverAddr>,
     /// Immutable identities covered by the out-of-band request code.
     pub parent_servers: Vec<netidx_admin_proto::AdminServerId>,
@@ -104,19 +104,19 @@ pub async fn list_pending_delegations(
 }
 
 /// The outcome of approving a delegation: the subtree, plus the per-peer
-/// cluster-propagation results (an already-approved request re-applies and
-/// re-pushes idempotently, so re-running converges a cluster whose peer was
+/// resolver cluster-propagation results (an already-approved request re-applies and
+/// re-pushes idempotently, so re-running converges a resolver cluster whose peer was
 /// unreachable).
 pub struct DelegationDecision {
     /// The subtree that was delegated.
     pub proposed_path: String,
-    /// Per-cluster-member propagation results.
+    /// Per-resolver cluster-member propagation results.
     pub peers: Vec<PeerResult>,
 }
 
 /// The `resolver approve-delegation <code>` action. Re-lists the queue,
 /// [`find_by_code`]s the one request whose recomputed code matches (refusing on
-/// no-match / ambiguity), and approves it cluster-wide.
+/// no-match / ambiguity), and approves it resolver cluster-wide.
 pub async fn approve_delegation(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
@@ -206,7 +206,7 @@ pub async fn deny_delegation(
 }
 
 /// Whether the child's freshly-written parent referral reached the rest of its
-/// cluster.
+/// resolver cluster.
 pub enum ResolverClusterPropagation {
     /// The CA controller updated every registered parent and child member.
     ControllerManaged,
@@ -216,7 +216,7 @@ pub enum ResolverClusterPropagation {
 pub struct AddParentOutcome {
     /// The subtree this resolver now owns under the parent.
     pub proposed_path: String,
-    /// Whether/how the referral propagated to the child's other cluster members.
+    /// Whether/how the referral propagated to the child's other resolver cluster members.
     pub propagation: ResolverClusterPropagation,
 }
 
@@ -284,13 +284,13 @@ fn validate_existing_parent(
         bail!(
             "this resolver is already attached at {existing_path:?}; re-parenting \
              to {proposed_path:?} isn't supported (uninstall + reinstall to switch \
-             networks)"
+             trust domains)"
         );
     }
     if !has_complete_parent_selection {
         bail!(
             "refreshing an existing delegation requires selecting every resolver \
-             in the parent cluster (`--parent-resolver` once per member), so the \
+             in the parent resolver cluster (`--parent-resolver` once per member), so the \
              new approval code covers the complete current parent and child server \
              sets"
         );
@@ -319,13 +319,13 @@ pub async fn prepare_add_parent(
     let child = rcfg.resolver_addrs();
     if child.is_empty() {
         bail!(
-            "this resolver advertises no network address (Local-only?) — it cannot \
+            "this resolver advertises no trust domain address (Local-only?) — it cannot \
              be delegated a subtree."
         );
     }
     // Queue the request, glyph-confirm the parent, and poll until approved. The
     // approval is authoritative; the returned members are the exact parent
-    // cluster produced by the CA-owned split/attach transaction.
+    // resolver cluster produced by the CA-owned split/attach transaction.
     let approved =
         delegate_under_parent(ans, parent_server, proposed_path, &child, selection, None)
             .await?;

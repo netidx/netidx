@@ -18,16 +18,16 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// show the permissions of the cluster mounted at <path> (admin)
+    /// show the permissions of the resolver cluster mounted at <path> (admin)
     Show(Flags),
-    /// edit the permissions of the cluster mounted at <path> (admin)
+    /// edit the permissions of the resolver cluster mounted at <path> (admin)
     Edit(Flags),
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct Flags {
-    /// The hierarchy path whose cluster's perms to act on (e.g. `/eu`, or `/`
-    /// for the root cluster).
+    /// The hierarchy path whose resolver cluster's perms to act on (e.g. `/eu`, or `/`
+    /// for the root resolver cluster).
     #[arg(long = "at")]
     at: String,
     #[command(flatten)]
@@ -60,7 +60,7 @@ fn edit(f: Flags) -> Result<()> {
     let mut ans = f.auth.answerer()?;
     let server = f.auth.server_addr()?;
     let rt = runtime()?;
-    // Seed the editor with the cluster's current perms, then hand the edited,
+    // Seed the editor with the resolver cluster's current perms, then hand the edited,
     // locally-validated result to the library's authenticated write.
     let (session, current) = rt.block_on(perms_ops::open_perms_session(
         &mut ans,
@@ -103,7 +103,10 @@ pub(crate) fn pretty(perms_json: &str) -> Result<String> {
 fn report_peers(peers: &[PeerResult], at: &str) {
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     if failed.is_empty() {
-        println!("ok — perms at {at:?} updated on {} cluster member(s).", peers.len());
+        println!(
+            "ok — perms at {at:?} updated on {} resolver cluster member(s).",
+            peers.len()
+        );
         println!("  restart the resolver server(s) to load the new perms.");
         return;
     }
@@ -116,7 +119,7 @@ fn report_peers(peers: &[PeerResult], at: &str) {
         println!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?"));
     }
     println!(
-        "  the cluster is INCONSISTENT. The edit is idempotent — re-run \
+        "  the resolver cluster is INCONSISTENT. The edit is idempotent — re-run \
          `perms edit --at {at}` once the member(s) are back to converge."
     );
 }

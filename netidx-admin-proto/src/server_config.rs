@@ -116,7 +116,7 @@ impl AdminServerConfig {
         if self.roles.ca.is_none() && self.ca_addr.is_none() {
             bail!(
                 "a non-CA admin server must set `ca_addr` — the CA it registers \
-                 with and fetches the network map from. Only the CA host (with \
+                 with and fetches the trust domain map from. Only the CA host (with \
                  a `ca` role) may omit it."
             );
         }

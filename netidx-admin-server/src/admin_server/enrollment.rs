@@ -161,7 +161,7 @@ async fn grant_enrollment(
 
 /// Stage a new enrollment and, for restore, atomically replace the failed
 /// satellite named by the bundle. Enroll first so replacing the sole member of
-/// a cluster cannot transiently delete that stable cluster ID.
+/// a resolver cluster cannot transiently delete that stable resolver cluster ID.
 pub(super) fn stage_enrollment(
     map: &mut TrustDomainMap,
     server_id: admin_proto::AdminServerId,
@@ -187,8 +187,8 @@ pub(super) fn stage_enrollment(
     if let Some(old) = enrollment.replaces {
         // The replacement normally owns the same resolver endpoint. Release
         // that ownership on the staged copy before enrolling the fresh ID;
-        // the old server remains a cluster member until the new grant exists,
-        // so the stable cluster itself can never disappear in between.
+        // the old server remains a resolver cluster member until the new grant exists,
+        // so the stable resolver cluster itself can never disappear in between.
         if let Some(server) = map.admin_servers.iter_mut().find(|server| server.id == old)
         {
             server.resolver = None;
@@ -230,7 +230,8 @@ pub(super) fn authorize_enrollment(
             .and_then(|m| m.resolver_clusters.iter().find(|c| c.id == cluster))
             .map(|c| c.base.as_str())
             .ok_or_else(|| {
-                "the requested cluster is not in the authoritative map".to_string()
+                "the requested resolver cluster is not in the authoritative map"
+                    .to_string()
             })?,
     };
     if !scope_covers(&authd.policy.server_enroll_scopes, base) {
@@ -350,7 +351,7 @@ async fn try_enroll(
             replaces: req.replaces,
         };
         let Some(map) = map else {
-            return Ok(reject("the CA-owned network map is unavailable"));
+            return Ok(reject("the CA-owned trust domain map is unavailable"));
         };
         let mut staged = map.clone();
         if let Err(e) = stage_enrollment(&mut staged, identity.server_id, &enrollment) {

@@ -261,7 +261,7 @@ fn load_roots_from_pem(pem: &[u8], trusted: &Path) -> Result<rustls::RootCertSto
     Ok(roots)
 }
 
-/// Find the network's CA admin server, verified against `roots`:
+/// Find the trust domain's CA admin server, verified against `roots`:
 /// an explicit override, the local admin-server config (unix), or mDNS
 /// discovery + a PKI-verified peer walk. Unattended-safe — candidates
 /// that don't verify against our trust bundle are just skipped.
@@ -311,7 +311,7 @@ async fn find_ca_addr(
                 queue.extend(info.peers);
             }
             Err(e) => {
-                // Wrong network or down — either way, not ours.
+                // Wrong trust domain or down — either way, not ours.
                 log::debug!("renewd: admin server {addr} not usable: {e:#}");
             }
         }
@@ -615,7 +615,7 @@ fn install(id: &Identity, issued: &transport::Issued) -> Result<()> {
     Ok(())
 }
 
-/// Pull the network CRL and install it beside every trust bundle on
+/// Pull the trust domain CRL and install it beside every trust bundle on
 /// this host (only when changed — the resolver's CRL-watching acceptor
 /// rebuilds on mtime, so gratuitous writes would churn it).
 async fn distribute_crl(

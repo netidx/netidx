@@ -156,7 +156,7 @@ impl ResolverConfig {
     /// This resolver cluster's advertised member addresses + data-plane
     /// auth, as [`ResolverAddr`]s — the form delegation exchanges and
     /// `GetInfo` reports. `Local`-auth members are host-local by
-    /// definition and omitted (nothing to advertise to the network).
+    /// definition and omitted (nothing to advertise to the trust domain).
     pub fn resolver_addrs(&self) -> Vec<ResolverAddr> {
         self.0
             .member_servers
@@ -175,8 +175,8 @@ impl ResolverConfig {
             .collect()
     }
 
-    /// Where this cluster attaches in the namespace — the parent
-    /// referral's path, or `/` for a root cluster with no parent.
+    /// Where this resolver cluster attaches in the namespace — the parent
+    /// referral's path, or `/` for a root resolver cluster with no parent.
     pub fn base_path(&self) -> String {
         self.0
             .parent
@@ -185,17 +185,17 @@ impl ResolverConfig {
             .unwrap_or_else(|| "/".to_string())
     }
 
-    /// The parent cluster this resolver attaches under, as a map edge, if any.
+    /// The parent resolver cluster this resolver attaches under, as a map edge, if any.
     pub fn parent_edge(&self) -> Option<ResolverClusterEdge> {
         self.0.parent.as_ref().map(referral_to_edge)
     }
 
-    /// The child clusters delegated below this resolver, as map edges.
+    /// The child resolver clusters delegated below this resolver, as map edges.
     pub fn children_edges(&self) -> Vec<ResolverClusterEdge> {
         self.0.children.iter().map(referral_to_edge).collect()
     }
 
-    /// This resolver cluster's [`ResolverClusterFacts`] for the network map:
+    /// This resolver cluster's [`ResolverClusterFacts`] for the trust domain map:
     /// advertisable members + base path + hierarchy edges.
     pub fn cluster_facts(&self) -> ResolverClusterFacts {
         ResolverClusterFacts {
@@ -234,7 +234,7 @@ fn validate_permission_topology(
     Ok(())
 }
 
-/// Map a referral (parent / child) to a network-map [`ResolverClusterEdge`],
+/// Map a referral (parent / child) to a trust domain-map [`ResolverClusterEdge`],
 /// dropping `Local`-auth addrs (host-local, nothing to advertise).
 fn referral_to_edge(r: &file::Referral) -> ResolverClusterEdge {
     ResolverClusterEdge {
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn cluster_facts_reports_members_base_and_edges() {
-        // A child cluster: two members (one Local, dropped), a parent
+        // A child resolver cluster: two members (one Local, dropped), a parent
         // referral at /eu, and one child edge.
         let json = r#"{
             "children": [

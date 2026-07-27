@@ -49,7 +49,7 @@ fn perms_path_from_config(
 ) -> Result<PathBuf> {
     let inc = rc.as_file().include_permissions.first().cloned().context(
         "this resolver has no permissions file (include_permissions is empty — an \
-         anonymous network has no perms)",
+         anonymous trust domain has no perms)",
     )?;
     let base = rconfig.parent().unwrap_or_else(|| Path::new("."));
     Ok(base.join(inc.as_str()))
@@ -138,7 +138,7 @@ async fn confine_local_perms(
 }
 
 /// Admin → controller permissions read. Authentication and policy are checked
-/// once at the controller, then registered cluster members are tried in stable
+/// once at the controller, then registered resolver cluster members are tried in stable
 /// server-ID order using the controller certificate and exact target pinning.
 pub(super) async fn handle_read_perms(
     state: &Arc<Server>,
@@ -183,7 +183,7 @@ pub(super) async fn handle_read_perms(
             Some(targets) => targets,
             None => {
                 return err(format!(
-                    "no registered resolver cluster serving {:?} in the network map",
+                    "no registered resolver cluster serving {:?} in the trust domain map",
                     req.target_path
                 ));
             }
@@ -228,7 +228,7 @@ pub(super) async fn handle_read_perms(
         }
     }
     err(format!(
-        "no registered member of cluster {:?} could provide permissions: {}",
+        "no registered member of resolver cluster {:?} could provide permissions: {}",
         req.target_path,
         failures.join("; ")
     ))
@@ -313,7 +313,7 @@ fn cluster_members_for(
     (!members.is_empty()).then_some(members)
 }
 
-/// Push a perms edit to every registered server in the target cluster, using
+/// Push a perms edit to every registered server in the target resolver cluster, using
 /// each CA-owned routing address. Every unreachable/erroring target is returned
 /// as a `PeerResult` carrying its immutable identity and current address.
 async fn push_perms_edit_to_peers(
@@ -367,9 +367,9 @@ async fn push_perms_edit_to_peers(
     results
 }
 
-/// CA-side: authenticate the admin, find the target cluster in the map, and
+/// CA-side: authenticate the admin, find the target resolver cluster in the map, and
 /// propagate the perms edit to its admin servers (peer-cert-gated). The CA
-/// never edits a foreign cluster's files directly — it pushes.
+/// never edits a foreign resolver cluster's files directly — it pushes.
 pub(super) async fn handle_edit_perms(
     state: &Arc<Server>,
     req: &EditPermsRequest,
@@ -399,7 +399,7 @@ pub(super) async fn handle_edit_perms(
             Some(m) => m,
             None => {
                 return err(format!(
-                    "no resolver cluster serving {:?} in the network map",
+                    "no resolver cluster serving {:?} in the trust domain map",
                     req.target_path
                 ));
             }

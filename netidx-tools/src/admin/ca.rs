@@ -130,7 +130,7 @@ fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, Stri
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// install this machine as the network's controller and certificate authority
+    /// install this machine as the trust domain's controller and certificate authority
     Install(ControllerInstallArgs),
     /// create a new local CA (keyslot vault; can serve via `admin server`)
     Init(InitParams),
@@ -162,7 +162,7 @@ pub(crate) enum Cmd {
     Issued(IssuedArgs),
     /// revoke certificate(s) by serial or name and re-sign the CRL
     Revoke(RevokeArgs),
-    /// list every CA-authoritative admin-server identity, grouped by cluster
+    /// list every CA-authoritative admin-server identity, grouped by resolver cluster
     Servers(ServersArgs),
     /// permanently revoke and remove one dead admin-server identity
     RemoveServer(RemoveServerArgs),
@@ -187,7 +187,7 @@ pub(crate) enum Cmd {
 
 #[derive(Args, Debug)]
 pub(crate) struct ControllerInstallArgs {
-    /// Administrative network domain (default: local).
+    /// Administrative trust domain domain (default: local).
     #[arg(long)]
     domain: Option<String>,
     /// Controller admin-server listen address.
@@ -552,7 +552,7 @@ pub(crate) struct AdminRemoveArgs {
 #[derive(Args, Debug)]
 pub(crate) struct FingerprintArgs {
     /// Admin server address (`ip:port`) to fetch and display the glyph for —
-    /// the network identity to verify out of band before enrolling against it
+    /// the trust domain identity to verify out of band before enrolling against it
     /// (pass the confirmed value to a join's `--accept-glyph`). When omitted,
     /// show this host's own local CA glyph.
     pub server: Option<SocketAddr>,
@@ -562,7 +562,7 @@ pub(crate) struct FingerprintArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct JoinArgs {
-    /// Admin server address (`ip:port`). Required — network discovery is
+    /// Admin server address (`ip:port`). Required — trust domain discovery is
     /// interactive only.
     #[arg(long)]
     pub server: Option<SocketAddr>,
@@ -581,7 +581,7 @@ pub(crate) struct JoinArgs {
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
     /// The admin server's CA fingerprint, obtained out of band (view it with
-    /// `netidx admin ca fingerprint <ip:port>`); confirms the network identity.
+    /// `netidx admin ca fingerprint <ip:port>`); confirms the trust domain identity.
     #[arg(long = "accept-glyph")]
     pub accept_glyph: Option<String>,
     /// Read the admin password from a file (never on the command line).
@@ -1115,7 +1115,7 @@ fn servers(f: ServersArgs) -> Result<()> {
             group = Some(row_group);
             match (row.cluster_base.as_deref(), row.cluster, row.cluster_state) {
                 (Some(base), Some(id), Some(state)) => {
-                    println!("cluster {base}  {id}  [{state:?}]")
+                    println!("resolver cluster {base}  {id}  [{state:?}]")
                 }
                 _ => println!("no resolver cluster"),
             }
@@ -1562,7 +1562,7 @@ fn init(p: InitParams) -> Result<()> {
     };
     // The founding superuser's password (minted only when a server is set up)
     // comes from --password-file / --password-stdin. `ca init` creates the CA,
-    // it never joins a network, so there is no glyph to confirm.
+    // it never joins a trust domain, so there is no glyph to confirm.
     let mut ans = super::answer_cli::make_flag_answerer(
         p.password_file.as_deref(),
         p.password_stdin,
@@ -1820,11 +1820,11 @@ pub(crate) fn join(p: JoinArgs) -> Result<()> {
 }
 
 async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
-    // Non-interactive: the network must be named explicitly (discovery is an
+    // Non-interactive: the trust domain must be named explicitly (discovery is an
     // interactive-only step) and its identity confirmed out of band via the
     // glyph. `fetch_identity` sends nothing secret and closes before returning.
     let server = p.server.context(
-        "--server <ip:port> is required (network discovery is interactive only)",
+        "--server <ip:port> is required (trust domain discovery is interactive only)",
     )?;
     let identity = transport::fetch_identity(server, NodeKind::Client)
         .await
@@ -2224,17 +2224,17 @@ fn queue(f: QueueArgs) -> Result<()> {
                 match &e.cluster {
                     Some(admin_proto::ResolverClusterPlacement::Create { .. }) => {
                         println!(
-                            "    cluster create at {}",
+                            "    resolver cluster create at {}",
                             e.cluster_base.as_deref().unwrap_or("(unknown base)")
                         )
                     }
                     Some(admin_proto::ResolverClusterPlacement::Join { cluster }) => {
                         println!(
-                            "    cluster {cluster} at {}",
+                            "    resolver cluster {cluster} at {}",
                             e.cluster_base.as_deref().unwrap_or("(unknown base)")
                         )
                     }
-                    None => println!("    cluster (missing)"),
+                    None => println!("    resolver cluster (missing)"),
                 }
                 println!("    resolver members:");
                 for member in &e.resolver_members {
@@ -2425,9 +2425,9 @@ fn list() -> Result<()> {
 // is the whole point.
 
 /// Refuse to mint the admin server's reserved serving name from the
-/// local CLI, mirroring the network sign path's refusal. The reserved
+/// local CLI, mirroring the trust domain sign path's refusal. The reserved
 /// name is the linchpin of the trust model; only the admin-server setup
-/// flow (which signs it directly) and the policy-gated network Enroll
+/// flow (which signs it directly) and the policy-gated trust domain Enroll
 /// may issue it.
 
 #[cfg(test)]

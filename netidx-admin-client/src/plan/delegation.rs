@@ -41,7 +41,7 @@ fn selected_server_sets(
     selected: &DelegationSelection,
 ) -> Result<DelegationServers> {
     if selected.parent_resolvers.is_empty() {
-        bail!("select at least one resolver server for the parent cluster");
+        bail!("select at least one resolver server for the parent resolver cluster");
     }
     let selected_addrs: BTreeSet<_> = selected.parent_resolvers.iter().copied().collect();
     if selected_addrs.len() != selected.parent_resolvers.len() {
@@ -69,7 +69,9 @@ fn selected_server_sets(
         match parent_cluster {
             None => parent_cluster = Some(cluster),
             Some(expected) if expected == cluster => {}
-            Some(_) => bail!("selected parent resolvers do not belong to one cluster"),
+            Some(_) => {
+                bail!("selected parent resolvers do not belong to one resolver cluster")
+            }
         }
         parent.push(server.id);
     }
@@ -92,7 +94,7 @@ fn selected_server_sets(
         .map(|server| server.id)
         .collect();
     if !child.contains(&local.id) {
-        bail!("the local resolver must remain in the delegated child cluster");
+        bail!("the local resolver must remain in the delegated child resolver cluster");
     }
     if parent_cluster != local_cluster {
         let mut complete_parent: Vec<_> = map
@@ -108,7 +110,7 @@ fn selected_server_sets(
         parent.sort();
         if parent != complete_parent {
             bail!(
-                "attaching an existing child cluster requires selecting every resolver in the parent cluster"
+                "attaching an existing child resolver cluster requires selecting every resolver in the parent resolver cluster"
             );
         }
     }
@@ -132,7 +134,7 @@ pub fn info_to_referral_auth(a: &InfoAuth) -> ReferralAuth {
 /// already confirmed — the install probe confirms the parent up front, so we
 /// don't ask twice), resolve the selected resolver addresses to stable IDs in
 /// the controller map, queue the server-set proposal, show its request code,
-/// and poll until the parent admin approves (or denies / expires). Returns the parent cluster's resolver
+/// and poll until the parent admin approves (or denies / expires). Returns the parent resolver cluster's resolver
 /// address(es) for the child's `parent` referral.
 pub async fn delegate_under_parent(
     ans: &mut dyn Answerer,
@@ -154,7 +156,9 @@ pub async fn delegate_under_parent(
                     format!("contacting parent admin server {parent_conf_addr}")
                 })?;
             if !ans.confirm_identity(&id).await? {
-                bail!("the parent network identity was not confirmed; nothing was sent");
+                bail!(
+                    "the parent trust domain identity was not confirmed; nothing was sent"
+                );
             }
             id
         }
@@ -180,7 +184,7 @@ pub async fn delegate_under_parent(
                 .find(|c| c.base == proposed_path && c.members == child)
                 .map(|c| c.id)
                 .context(
-                    "the child must be enrolled as a pending CA-owned cluster before delegation",
+                    "the child must be enrolled as a pending CA-owned resolver cluster before delegation",
                 )?;
             DelegationServers {
                 parent: map

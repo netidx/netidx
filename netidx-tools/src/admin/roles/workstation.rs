@@ -1,5 +1,5 @@
 //! `netidx admin workstation …` — the workstation role: a local-auth
-//! resolver + matching client, optionally referred up to a network.
+//! resolver + matching client, optionally referred up to a trust domain.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -11,13 +11,13 @@ pub(crate) enum Cmd {
     /// install a workstation (local resolver + matching client)
     Install(init::WorkstationFlags),
     /// report what this workstation is and whether it's in sync with
-    /// its network
+    /// its trust domain
     Status,
-    /// add resolver peers the network has gained since install (additive
+    /// add resolver peers the trust domain has gained since install (additive
     /// reconcile of the parent referral)
     Update(lifecycle::UpdateFlags),
-    /// attach this local-only workstation to an existing network (add a
-    /// parent referral; enroll a cert if the network is TLS)
+    /// attach this local-only workstation to an existing trust domain (add a
+    /// parent referral; enroll a cert if the trust domain is TLS)
     Join(init::WorkstationJoinFlags),
 }
 

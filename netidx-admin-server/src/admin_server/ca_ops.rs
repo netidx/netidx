@@ -421,7 +421,7 @@ async fn handle_external_ca_install_inner(
 /// to unlock MK and re-wrap the recovery slot. Returns the new password in
 /// grouped display form — shown to the operator once, never stored. Refused
 /// over the network admin plane: reaching the local socket is itself the
-/// authority, and a recovery password must never travel the network.
+/// authority, and a recovery password must never travel the trust domain.
 pub(super) async fn rotate_recovery(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,

@@ -4,7 +4,7 @@
 //! trust decision), and resolves the authoritative controller before sending
 //! credentials. Both reads and edits authenticate there. The controller
 //! authorizes the requested path and uses its CA-owned map plus exact server-ID
-//! pinning to reach cluster members. The `$EDITOR` loop between read and write
+//! pinning to reach resolver cluster members. The `$EDITOR` loop between read and write
 //! is a frontend concern and stays in the CLI.
 
 use super::{AdminSession, open_admin_session, resolve_identity};
@@ -34,10 +34,10 @@ async fn bootstrap(
     let (addr, id) = resolve_identity(ans, server, ca_dir).await?;
     transport::get_map_pinned(addr, NodeKind::Client, &id)
         .await
-        .context("fetching the network map")
+        .context("fetching the trust domain map")
 }
 
-/// The `perms show --at <path>` query: read the raw perms JSON of the cluster
+/// The `perms show --at <path>` query: read the raw perms JSON of the resolver cluster
 /// mounted at `at`. The authoritative controller is verified before collecting
 /// credentials, then authenticates and authorizes the read. The CLI
 /// pretty-prints the result.
@@ -77,9 +77,9 @@ pub async fn open_perms_session(
     Ok((session, perms_json))
 }
 
-/// List every level (resolver-cluster base) in the network map — the exact
+/// List every level (resolver-resolver cluster base) in the trust domain map — the exact
 /// `--at` targets a perms read/edit can route to. Deduped and sorted. The
-/// cluster-scope perms UI offers these instead of a free-text path.
+/// resolver cluster-scope perms UI offers these instead of a free-text path.
 pub async fn list_levels(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
@@ -97,7 +97,7 @@ pub async fn list_levels(
 
 /// The `perms edit --at <path>` action: hand the already-edited, already-
 /// validated `edited` perms JSON to the CA (authenticated), which re-validates
-/// and propagates it to every cluster member. Returns the per-peer results so a
+/// and propagates it to every resolver cluster member. Returns the per-peer results so a
 /// partial failure surfaces. The editor loop + validation live in the CLI; this
 /// is the authenticated write only.
 pub async fn edit_perms(
@@ -135,9 +135,9 @@ pub async fn edit_perms_with_session(
 /// The Local-tab `perms edit` action: hand the already-edited, already-
 /// validated `edited` perms JSON to *this host's own* CA over its local
 /// control socket — no glyph, no admin password (the `SO_PEERCRED` superuser
-/// gate is the authorization). The daemon re-validates, routes by the network
-/// map, and propagates the edit to every member of the cluster mounted at
-/// `target_path`, so a local edit is as cluster-consistent as a remote one.
+/// gate is the authorization). The daemon re-validates, routes by the trust domain
+/// map, and propagates the edit to every member of the resolver cluster mounted at
+/// `target_path`, so a local edit is as resolver cluster-consistent as a remote one.
 ///
 #[cfg(unix)]
 pub async fn edit_perms_local(
@@ -149,7 +149,7 @@ pub async fn edit_perms_local(
 }
 
 /// Read this resolver's own permissions over its protected local socket. The
-/// daemon confines the request to the host's configured cluster base.
+/// daemon confines the request to the host's configured resolver cluster base.
 #[cfg(unix)]
 pub async fn show_perms_local(cfg_path: &Path, target_path: &str) -> Result<String> {
     local::read_perms(cfg_path, target_path).await

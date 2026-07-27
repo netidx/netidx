@@ -498,7 +498,7 @@ fn controller_resolver_endpoint(
         .context("verifying embedded controller backup")?;
     let map: netidx_admin_proto::TrustDomainMap =
         serde_json::from_slice(&fs::read(controller.join("ca/trust-domain.json"))?)
-            .context("parsing the controller backup's authoritative network map")?;
+            .context("parsing the controller backup's authoritative trust domain map")?;
     if map.controller != inner.controller {
         bail!("embedded controller map identity does not match its signed manifest");
     }

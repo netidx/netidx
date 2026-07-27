@@ -1,4 +1,4 @@
-//! Tab 2 — **Cluster**: connect to a (local or remote) admin server and
+//! Tab 2 — **Trust domain**: connect to a (local or remote) admin server and
 //! drive its enrollment queue (and, in later slices, delegations, roster,
 //! perms, service control, revocation) over `netidx_admin_client::ops`.
 //!
@@ -48,7 +48,7 @@ pub(super) struct RemoteConn {
 /// Where an admin-panel op runs: this box's own admin server over its local
 /// control socket (no auth, `SO_PEERCRED` superuser), or a pinned authenticated
 /// remote session. The same panel surface serves the Local tab (a `Local`
-/// target, opened directly) and the Cluster tab (a `Remote` target, after the
+/// target, opened directly) and the Trust domain tab (a `Remote` target, after the
 /// connect form).
 #[derive(Clone)]
 pub(super) enum PanelTarget {
@@ -74,7 +74,7 @@ impl PanelTarget {
         match self {
             PanelTarget::Remote(c) => Ok(c),
             PanelTarget::Local { .. } => {
-                anyhow::bail!("this operation requires connecting to a cluster")
+                anyhow::bail!("this operation requires connecting to a trust domain")
             }
         }
     }
@@ -84,7 +84,7 @@ impl PanelTarget {
         match self {
             PanelTarget::Remote(c) => Ok(c),
             PanelTarget::Local { .. } => {
-                anyhow::bail!("this operation requires connecting to a cluster")
+                anyhow::bail!("this operation requires connecting to a trust domain")
             }
         }
     }
@@ -128,29 +128,29 @@ impl Panel {
     fn desc(self) -> &'static str {
         match self {
             Panel::Queue => {
-                "Review and approve certificate-enrollment requests from nodes joining the cluster."
+                "Review and approve certificate-enrollment requests from nodes joining the trust domain."
             }
             Panel::Delegations => {
-                "Review and approve requests from resolvers asking to attach under this cluster."
+                "Review and approve requests from resolvers asking to attach under this resolver cluster."
             }
             Panel::Roster => {
-                "The cluster's admins and their scopes — mint, scope, or remove admins."
+                "The trust domain's admins and their scopes — mint, scope, or remove admins."
             }
             Panel::Servers => {
                 "Every CA-authoritative server identity, grouped by resolver cluster — permanently remove a dead node."
             }
             Panel::Revocation => {
-                "Certificates this CA has issued — revoke one to bar the holder from the cluster."
+                "Certificates this CA has issued — revoke one to bar the holder from the trust domain."
             }
             Panel::Perms => "View and edit the permissions on a netidx path.",
             Panel::Service => {
-                "Start, stop, or restart the netidx services on a cluster member."
+                "Start, stop, or restart the netidx services on a trust domain member."
             }
         }
     }
 
     /// Whether this panel first needs a target netidx path (the map routes it to
-    /// the cluster owning that path). Only cluster Perms — a level pick from the
+    /// the trust domain owning that path). Only trust domain Perms — a level pick from the
     /// map. Services picks an admin server (also from the map), not a path.
     fn path_scoped(self) -> bool {
         matches!(self, Panel::Perms)
@@ -212,7 +212,7 @@ pub(super) enum RowKey {
         serial: u64,
         glyph: Option<Fingerprint>,
     },
-    /// An immutable admin-server identity. The mutable address and cluster are
+    /// An immutable admin-server identity. The mutable address and trust domain are
     /// carried only to make the destructive confirmation unambiguous.
     Server {
         id: AdminServerId,
@@ -238,13 +238,13 @@ pub(super) enum ServiceOp {
 pub(super) enum RemoteAction {
     /// Establish a session to `server`: fetch + confirm the CA glyph (always,
     /// before any credential), then prompt admin name + password. `expected_fp`
-    /// is a saved cluster's fingerprint, flagged if the live identity differs.
+    /// is a saved trust domain's fingerprint, flagged if the live identity differs.
     Connect { server: SocketAddr, expected_fp: Option<Fingerprint> },
     /// Revoke the active bearer session when reachable and always clear its
     /// sealed/process-local cache.
     Logout { conn: RemoteConn },
     /// Browse mDNS for admin servers, verify each, and merge them into the saved
-    /// cluster registry.
+    /// trust domain registry.
     Discover,
     /// (Re)list a panel. `path` is the target path for a path-scoped panel
     /// (perms), `None` for the rest.
@@ -255,7 +255,7 @@ pub(super) enum RemoteAction {
     ApproveRenewals { target: PanelTarget },
     /// Deny one queued enrollment by its full code (reason prompted).
     Deny { target: PanelTarget, code: String },
-    /// Approve one pending delegation by its full code (cluster-wide).
+    /// Approve one pending delegation by its full code (trust domain-wide).
     ApproveDelegation { target: PanelTarget, code: String },
     /// Deny one pending delegation by its full code (reason prompted).
     DenyDelegation { target: PanelTarget, code: String },
@@ -279,17 +279,17 @@ pub(super) enum RemoteAction {
     /// Re-send the controller's current address, map, and CRL to every
     /// registered node. Idempotent manual retry after recovery/relocation.
     ReconcileController { target: PanelTarget },
-    /// List the cluster's permission levels (resolver bases) from the map, to
-    /// pick one to view/edit — replaces free-text path entry for cluster perms.
+    /// List the trust domain's permission levels (resolver bases) from the map, to
+    /// pick one to view/edit — replaces free-text path entry for trust domain perms.
     ListLevels { target: PanelTarget },
-    /// Edit the permissions of the cluster mounted at `at` (via `$EDITOR`).
+    /// Edit the permissions of the trust domain mounted at `at` (via `$EDITOR`).
     EditPerms { target: PanelTarget, at: String },
-    /// List the cluster's admin servers from the map, to pick one whose services
-    /// to control — replaces free-text path entry for cluster services.
+    /// List the trust domain's admin servers from the map, to pick one whose services
+    /// to control — replaces free-text path entry for trust domain services.
     ListServiceServers { target: PanelTarget },
     /// Control services on ONE admin server (`server`): `Status` carries no
     /// units and (re)lists; `Start`/`Stop`/`Restart` carry the selected unit.
-    /// Per-server by design — never a cluster-wide fanout. Stop is confirm-gated.
+    /// Per-server by design — never a trust domain-wide fanout. Stop is confirm-gated.
     ServiceControl {
         target: PanelTarget,
         server: ServiceTarget,
@@ -303,7 +303,7 @@ impl RemoteAction {
         match self {
             RemoteAction::Connect { .. } => "Connecting".to_string(),
             RemoteAction::Logout { .. } => "Logging out".to_string(),
-            RemoteAction::Discover => "Discovering clusters".to_string(),
+            RemoteAction::Discover => "Discovering trust domains".to_string(),
             RemoteAction::Refresh { .. } => "Loading".to_string(),
             RemoteAction::Approve { .. } => "Approving".to_string(),
             RemoteAction::ApproveRenewals { .. } => "Approving renewals".to_string(),
@@ -349,7 +349,7 @@ impl RemoteAction {
             )),
             RemoteAction::Revoke { serial, .. } => Some(format!(
                 "Revoke certificate serial {serial}? This is irreversible — the \
-                 cluster re-signs its CRL and the holder can no longer authenticate."
+                 trust domain re-signs its CRL and the holder can no longer authenticate."
             )),
             RemoteAction::RemoveAdmin { name, .. } => Some(format!(
                 "Remove admin {name:?}? Their password will no longer authenticate \
@@ -466,14 +466,14 @@ pub(super) enum RemoteUpdate {
         panel: Panel,
         rows: Vec<PanelRow>,
     },
-    /// The saved cluster registry after a discover pass — refreshes the list.
+    /// The saved trust domain registry after a discover pass — refreshes the list.
     TrustDomains(Vec<KnownTrustDomain>),
-    /// The cluster's permission levels — opens the level picker for a panel.
+    /// The trust domain's permission levels — opens the level picker for a panel.
     Levels {
         panel: Panel,
         levels: Vec<String>,
     },
-    /// The cluster's admin servers — opens the service-control server picker.
+    /// The trust domain's admin servers — opens the service-control server picker.
     ServiceServers {
         servers: Vec<ServiceServerRow>,
     },
@@ -563,15 +563,15 @@ async fn connect(
     };
     use netidx_admin_proto::{AdminCredential, NodeKind};
     // Glyph first — always, before any credential. Fetch the live identity and,
-    // when we saved this cluster before, flag a fingerprint that has changed
-    // since (a CA rotation, or a different cluster reusing the address) so the
+    // when we saved this trust domain before, flag a fingerprint that has changed
+    // since (a CA rotation, or a different trust domain reusing the address) so the
     // operator scrutinises the glyph rather than rubber-stamping it.
     let id = fetch_identity(server, NodeKind::Client).await?;
     if let Some(fp) = expected_fp
         && fp != id.fingerprint
     {
         ans.warn(
-            "this cluster's CA glyph has CHANGED since you last saved it — verify \
+            "this trust domain's CA glyph has CHANGED since you last saved it — verify \
              the glyph below out of band before continuing.",
         );
     }
@@ -611,11 +611,11 @@ async fn connect(
         confirmed_fp: session.identity.fingerprint,
         admin,
     };
-    // Remember this cluster (by its confirmed identity) for next time.
+    // Remember this trust domain (by its confirmed identity) for next time.
     let mut known = KnownTrustDomains::load();
     if known.upsert(&id.domain, server, id.fingerprint) {
         if let Err(e) = known.save() {
-            ans.warn(&format!("could not save the cluster list: {e:#}"));
+            ans.warn(&format!("could not save the trust domain list: {e:#}"));
         }
     }
     Ok(super::action::Outcome::remote_toast(
@@ -656,10 +656,10 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
     Ok(super::action::Outcome::remote_toast("Logged out", lines, RemoteUpdate::LoggedOut))
 }
 
-/// Discover admin clusters on the local network and refresh the Cluster tab's
-/// list — the same browse + per-network CA-identity fetch the install flow and
+/// Discover admin trust domains on the local network and refresh the Trust domain tab's
+/// list — the same browse + per-trust domain CA-identity fetch the install flow and
 /// `netidx admin discover` use (via [`enroll::discover_trust_domains`]), not a private
-/// copy. Merges every reachable cluster into the saved registry, then hands the
+/// copy. Merges every reachable trust domain into the saved registry, then hands the
 /// list back so the landing screen re-polls and shows the verified ones — no
 /// toast to dismiss, just the list, like discovery everywhere else.
 #[cfg(unix)]
@@ -670,8 +670,12 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     };
     use netidx_admin_proto::NodeKind;
     let timeout = super::lifecycle::DISCOVERY_TIMEOUT;
-    ans.progress(Progress::timed(Stage::Discovering, "browsing for clusters…", timeout));
-    // `None` enumerates every cluster in the window — the tab may manage several,
+    ans.progress(Progress::timed(
+        Stage::Discovering,
+        "browsing for trust domains…",
+        timeout,
+    ));
+    // `None` enumerates every trust domain in the window — the tab may manage several,
     // unlike the install flow's early-exit-on-first-found.
     let reports = enroll::discover_trust_domains(timeout, NodeKind::Client, None).await;
     let mut known = KnownTrustDomains::load();
@@ -686,7 +690,7 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
                 for addr in &r.admin_servers {
                     known.upsert(&r.domain, *addr, id.fingerprint);
                 }
-                ans.note(&format!("discovered cluster {:?} at {addrs}", r.domain));
+                ans.note(&format!("discovered trust domain {:?} at {addrs}", r.domain));
             }
             Err(e) => {
                 ans.warn(&format!(
@@ -698,7 +702,7 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
         }
     }
     if let Err(e) = known.save() {
-        ans.warn(&format!("could not save the cluster list: {e:#}"));
+        ans.warn(&format!("could not save the trust domain list: {e:#}"));
     }
     // Success is silent — the refreshed list is the result. But if beacons were
     // seen yet none verified (the confusing empty-after-discover case), surface
@@ -821,7 +825,7 @@ fn queue_row(item: &netidx_admin_client::ops::queue::QueueItem) -> PanelRow {
         row.detail.extend([
             ("Listen".to_string(), listen.to_string()),
             ("Roles".to_string(), format!("{:?}", item.requested_roles)),
-            ("Cluster".to_string(), cluster),
+            ("Resolver cluster".to_string(), cluster),
             ("Resolver members".to_string(), members),
         ]);
         if let Some(old) = item.replaces {
@@ -979,11 +983,11 @@ async fn approve_delegation(
     )
     .await?;
     let mut lines =
-        vec![format!("Delegated {} to the child cluster.", out.proposed_path)];
+        vec![format!("Delegated {} to the child resolver cluster.", out.proposed_path)];
     let failed: Vec<_> = out.peers.iter().filter(|p| p.error.is_some()).collect();
     if failed.is_empty() {
         lines.push(format!(
-            "Wrote topology configuration on {} cluster member(s); no service was restarted.",
+            "Wrote topology configuration on {} resolver cluster member(s); no service was restarted.",
             out.peers.len()
         ));
     } else {
@@ -997,7 +1001,7 @@ async fn approve_delegation(
         }
     }
     lines.push(
-        "Roll each affected cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+        "Roll each affected resolver cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
             .to_string(),
     );
     let rows = delegation_rows(ans, &conn).await?;
@@ -1202,14 +1206,14 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
             ("Admin address".to_string(), server.addr.to_string()),
             ("Resolver cluster".to_string(), cluster),
             (
-                "Cluster ID".to_string(),
+                "Resolver cluster ID".to_string(),
                 server
                     .cluster
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "-".to_string()),
             ),
             (
-                "Cluster state".to_string(),
+                "Resolver cluster state".to_string(),
                 server
                     .cluster_state
                     .map(|state| format!("{state:?}"))
@@ -1278,7 +1282,10 @@ async fn remove_server(
         lines.push(format!("Operation {operation_id}; map version {}.", out.version));
     }
     if !out.affected_clusters.is_empty() {
-        lines.push(format!("Affected clusters: {}.", out.affected_clusters.join(", ")));
+        lines.push(format!(
+            "Affected resolver clusters: {}.",
+            out.affected_clusters.join(", ")
+        ));
     }
     for peer in failed {
         lines.push(format!(
@@ -1298,7 +1305,7 @@ async fn remove_server(
     }
     if !out.peers.is_empty() {
         lines.push(
-            "If the written topology requires a restart, roll each affected cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+            "If the written topology requires a restart, roll each affected resolver cluster manually: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
                 .to_string(),
         );
     }
@@ -1535,7 +1542,7 @@ async fn remove_admin(
     ))
 }
 
-/// Read the perms of the cluster mounted at `at`, for either target. A remote
+/// Read the perms of the trust domain mounted at `at`, for either target. A remote
 /// target authenticates to its verified controller; a local target uses the
 /// protected control socket and is confined to this host's own level.
 #[cfg(unix)]
@@ -1554,8 +1561,8 @@ async fn show_perms_for(
     }
 }
 
-/// Fetch the cluster's permission levels (resolver bases) and open the level
-/// picker for the Perms panel — the cluster-scope replacement for typing a path.
+/// Fetch the trust domain's permission levels (resolver bases) and open the level
+/// picker for the Perms panel — the trust domain-scope replacement for typing a path.
 #[cfg(unix)]
 async fn list_levels(
     ans: &mut TuiAnswerer,
@@ -1596,7 +1603,7 @@ async fn edit_perms(
     use netidx_admin_client::ops::perms::{
         edit_perms_local, edit_perms_with_session, open_perms_session, show_perms_local,
     };
-    // Seed the editor with the cluster's current perms, validate locally, then
+    // Seed the editor with the trust domain's current perms, validate locally, then
     // hand the normalized result to the CA (which re-validates + propagates).
     let (session, current) = match &target {
         PanelTarget::Remote(conn) => {
@@ -1635,13 +1642,13 @@ async fn edit_perms(
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     let lines = if failed.is_empty() {
         vec![format!(
-            "Updated perms at {at:?} on {} cluster member(s). Restart the resolver \
+            "Updated perms at {at:?} on {} resolver cluster member(s). Restart the resolver \
              server(s) to load them.",
             peers.len()
         )]
     } else {
         let mut v = vec![format!(
-            "{} of {} member(s) could NOT be updated — the cluster is INCONSISTENT; \
+            "{} of {} member(s) could NOT be updated — the resolver cluster is INCONSISTENT; \
              re-edit to converge:",
             failed.len(),
             peers.len()
@@ -1655,7 +1662,7 @@ async fn edit_perms(
     Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
 }
 
-/// The cluster's admin servers, from the map — the service-control server
+/// The trust domain's admin servers, from the map — the service-control server
 /// picker (level 1). Each row preserves the immutable ID that a control op uses;
 /// its address is display-only routing context.
 #[cfg(unix)]
@@ -1754,16 +1761,16 @@ async fn service_control(
 
 /// Which Tab-2 screen is showing.
 enum Screen {
-    /// The known-cluster list — the Cluster tab's landing screen.
+    /// The known-trust domain list — the Trust domain tab's landing screen.
     TrustDomains,
     /// Manually enter an admin-server host + port to connect to directly.
     Manual { host: String, port: String, focus: ManualFocus },
     /// Pick a panel.
     Menu,
-    /// Pick one of the cluster's permission levels (from the map) before opening
-    /// the perms panel — the cluster-scope map-driven pick.
+    /// Pick one of the trust domain's permission levels (from the map) before opening
+    /// the perms panel — the trust domain-scope map-driven pick.
     LevelPick { panel: Panel, levels: Vec<String>, state: ListState },
-    /// Pick one of the cluster's admin servers (from the map) before opening the
+    /// Pick one of the trust domain's admin servers (from the map) before opening the
     /// services panel — service control is per-server, so you pick the one to
     /// manage.
     ServerPick { admin_servers: Vec<ServiceServerRow>, state: ListState },
@@ -1789,7 +1796,7 @@ impl ManualFocus {
 
 pub(super) struct RemoteState {
     /// The panel target once established: a `Remote` session after connecting
-    /// (Cluster tab), or a `Local` control-socket target (Local tab).
+    /// (Trust domain tab), or a `Local` control-socket target (Local tab).
     target: Option<PanelTarget>,
     screen: Screen,
     /// The saved trust-domain registry (loaded from disk). The landing list
@@ -1833,7 +1840,7 @@ const PANELS: [Panel; 7] = [
 /// control socket, and perms — read and written over the control socket (the
 /// daemon authorizes the local superuser and confines both to its own level).
 /// The queue, delegations, and revocation have no no-auth local backend and
-/// stay Cluster-only.
+/// stay Trust domain-only.
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
 /// This host's own resolver base — the single level a local (control-socket)
@@ -1845,8 +1852,8 @@ fn local_own_base() -> String {
         .unwrap_or_else(|_| "/".to_string())
 }
 
-/// Load the saved cluster registry, ensuring this host's own cluster (when it
-/// runs an admin server) is included so a locally-created cluster shows up
+/// Load the saved trust domain registry, ensuring this host's own trust domain (when it
+/// runs an admin server) is included so a locally-created trust domain shows up
 /// without a manual discover, and persisting that addition.
 fn load_seeded_clusters() -> KnownTrustDomains {
     let mut known = KnownTrustDomains::load();
@@ -1900,8 +1907,8 @@ impl RemoteState {
         (s, Some(initial))
     }
 
-    /// Cluster tab regained focus: on the landing list (not mid-session), reload
-    /// the saved registry — a cluster may have been saved this session — and
+    /// Trust domain tab regained focus: on the landing list (not mid-session), reload
+    /// the saved registry — a trust domain may have been saved this session — and
     /// re-poll it.
     pub(super) fn on_focus(&mut self) {
         if matches!(self.screen, Screen::TrustDomains) {
@@ -1917,7 +1924,7 @@ impl RemoteState {
         self.poll = vec![PollState::Unpolled; self.domains.len()];
     }
 
-    /// The saved clusters currently verified `Present`, each with the address to
+    /// The saved trust domains currently verified `Present`, each with the address to
     /// connect to — exactly the rows the landing list shows.
     fn visible(&self) -> Vec<(usize, SocketAddr)> {
         self.domains
@@ -1929,7 +1936,7 @@ impl RemoteState {
             .collect()
     }
 
-    /// Saved clusters not yet polled; marks each `Polling` so the event loop
+    /// Saved trust domains not yet polled; marks each `Polling` so the event loop
     /// launches exactly one poll pass. Only polls on the landing screen.
     pub(super) fn take_pending_poll(&mut self) -> Vec<(usize, KnownTrustDomain)> {
         if !matches!(self.screen, Screen::TrustDomains) {
@@ -2020,7 +2027,7 @@ impl RemoteState {
     }
 
     /// The tool keys for the App gutter when this surface is drilled in (a
-    /// connected cluster or a sub-form), or `None` at the cluster-list landing
+    /// connected trust domain or a sub-form), or `None` at the trust domain-list landing
     /// (where the tab bar + global gutter show instead).
     pub(super) fn gutter(&self) -> Option<String> {
         let keys = match &self.screen {
@@ -2055,7 +2062,7 @@ impl RemoteState {
         }
     }
 
-    /// Pick a cluster permission level from the map-derived list, then open the
+    /// Pick a trust domain permission level from the map-derived list, then open the
     /// perms panel against it.
     fn on_key_level_pick(&mut self, code: KeyCode) -> Option<Action> {
         let Screen::LevelPick { panel, levels, state } = &mut self.screen else {
@@ -2096,7 +2103,7 @@ impl RemoteState {
         }
     }
 
-    /// Pick a cluster admin server from the map-derived list, then open the
+    /// Pick a trust domain admin server from the map-derived list, then open the
     /// services panel scoped to that one server.
     fn on_key_server_pick(&mut self, code: KeyCode) -> Option<Action> {
         let Screen::ServerPick { admin_servers: servers, state } = &mut self.screen
@@ -2139,7 +2146,7 @@ impl RemoteState {
         }
     }
 
-    /// The landing screen: navigate the verified-present clusters, connect to the
+    /// The landing screen: navigate the verified-present trust domains, connect to the
     /// selected one (glyph + login handled by the op), discover, or connect
     /// directly by address.
     fn on_key_clusters(&mut self, code: KeyCode) -> Option<Action> {
@@ -2224,8 +2231,8 @@ impl RemoteState {
             KeyCode::Up | KeyCode::Char('k') => self.menu.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.menu.select_next(),
             KeyCode::Esc => {
-                // Back to the cluster list (disconnect); the cached session is
-                // dropped. Reload so the cluster we just connected to (now saved)
+                // Back to the trust domain list (disconnect); the cached session is
+                // dropped. Reload so the trust domain we just connected to (now saved)
                 // appears. (A Local surface is instead closed by its host, which
                 // intercepts Esc-at-menu.)
                 self.target = None;
@@ -2243,7 +2250,7 @@ impl RemoteState {
                 let panel =
                     panels[self.menu.selected().unwrap_or(0).min(panels.len() - 1)];
                 if matches!(panel, Panel::Perms) {
-                    // Cluster perms: pick a level from the map, not a typed path.
+                    // Trust domain perms: pick a level from the map, not a typed path.
                     self.error = None;
                     if let Some(target) = &self.target {
                         return Some(Action::Remote(RemoteAction::ListLevels {
@@ -2251,8 +2258,8 @@ impl RemoteState {
                         }));
                     }
                 } else if matches!(panel, Panel::Service) {
-                    // Cluster services: pick an admin server from the map, then
-                    // control that one server (never a cluster-wide fanout).
+                    // Trust domain services: pick an admin server from the map, then
+                    // control that one server (never a trust domain-wide fanout).
                     self.error = None;
                     if let Some(target) = &self.target {
                         return Some(Action::Remote(RemoteAction::ListServiceServers {
@@ -2506,7 +2513,7 @@ impl RemoteState {
             .style(theme::panel_style())
             .block(
                 theme::panel_block()
-                    .title(Span::styled(" Cluster ", theme::title_style())),
+                    .title(Span::styled(" Trust domain ", theme::title_style())),
             );
             f.render_widget(msg, area);
             return;
@@ -2527,7 +2534,7 @@ impl RemoteState {
         }
     }
 
-    /// The cluster permission-level picker: a list of the map's resolver bases.
+    /// The trust domain permission-level picker: a list of the map's resolver bases.
     fn render_level_pick(
         &self,
         f: &mut Frame,
@@ -2538,7 +2545,7 @@ impl RemoteState {
     ) {
         let items: Vec<ListItem> = if levels.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
-                "(no levels found in the cluster map)",
+                "(no levels found in the trust domain map)",
                 theme::hint_style(),
             )))]
         } else {
@@ -2555,7 +2562,7 @@ impl RemoteState {
         f.render_stateful_widget(list, area, state);
     }
 
-    /// The service-control server picker: the cluster's admin servers, each
+    /// The service-control server picker: the trust domain's admin servers, each
     /// labelled with its level. Pick one to control its services.
     fn render_server_pick(
         &self,
@@ -2566,7 +2573,7 @@ impl RemoteState {
     ) {
         let items: Vec<ListItem> = if servers.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
-                "(no admin servers found in the cluster map)",
+                "(no admin servers found in the trust domain map)",
                 theme::hint_style(),
             )))]
         } else {
@@ -2583,8 +2590,8 @@ impl RemoteState {
         f.render_stateful_widget(list, area, state);
     }
 
-    /// The landing screen: the verified-present clusters on the left, the
-    /// selected cluster's CA glyph on the right (same split as the Local tab's
+    /// The landing screen: the verified-present trust domains on the left, the
+    /// selected trust domain's CA glyph on the right (same split as the Local tab's
     /// install card).
     fn render_clusters(&self, f: &mut Frame, area: Rect) {
         let visible = self.visible();
@@ -2600,12 +2607,12 @@ impl RemoteState {
                 .iter()
                 .any(|p| matches!(p, PollState::Unpolled | PollState::Polling));
             let msg = if self.domains.is_empty() {
-                "No saved clusters yet. Press d to discover clusters on the local \
-                 network, or c to connect to one by address."
+                "No saved trust domains yet. Press d to discover trust domains on the local \
+                 trust domain, or c to connect to one by address."
             } else if checking {
-                "Checking saved clusters…"
+                "Checking saved trust domains…"
             } else {
-                "No saved cluster is reachable here right now (a cluster only shows \
+                "No saved trust domain is reachable here right now (a trust domain only shows \
                  when its CA glyph verifies). Press d to discover, c to connect, or r \
                  to re-check."
             };
@@ -2636,7 +2643,7 @@ impl RemoteState {
             .highlight_style(theme::selected_style())
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, cols[0], &mut st);
-        // The selected cluster's glyph.
+        // The selected trust domain's glyph.
         let sel = st.selected().unwrap_or(0).min(visible.len() - 1);
         if let Some(fp) = self.domains[visible[sel].0].fp() {
             let mut lines =
@@ -2707,7 +2714,7 @@ impl RemoteState {
         let title = match &self.target {
             Some(PanelTarget::Remote(c)) => format!(" {} — {} ", c.domain, c.admin),
             Some(PanelTarget::Local { .. }) => " Local admin server ".to_string(),
-            None => " Cluster ".to_string(),
+            None => " Trust domain ".to_string(),
         };
         let cols =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(42)]).split(area);
@@ -3028,7 +3035,7 @@ mod tests {
             .collect()
     }
 
-    /// A `RemoteState` on the TrustDomains screen with injected clusters + poll state
+    /// A `RemoteState` on the TrustDomains screen with injected trust domains + poll state
     /// (bypassing the on-disk registry so the test is deterministic).
     fn clusters_state(
         clusters: Vec<KnownTrustDomain>,
@@ -3058,7 +3065,7 @@ mod tests {
     fn empty_cluster_list_shows_hint() {
         let mut s = clusters_state(vec![], vec![]);
         let out = render(&mut s, 100, 20);
-        assert!(out.contains("No saved clusters"), "empty hint missing: {out:?}");
+        assert!(out.contains("No saved trust domains"), "empty hint missing: {out:?}");
     }
 
     #[test]
@@ -3072,9 +3079,9 @@ mod tests {
 
     #[test]
     fn gutter_none_at_cluster_list_some_when_drilled() {
-        // The cluster list is the tab landing (tab bar + global gutter).
+        // The trust domain list is the tab landing (tab bar + global gutter).
         let mut s = clusters_state(vec![], vec![]);
-        assert!(s.gutter().is_none(), "cluster list should not be drilled in");
+        assert!(s.gutter().is_none(), "trust domain list should not be drilled in");
         // Drilling into a level picker (a tool) owns the gutter.
         s.apply(RemoteUpdate::Levels {
             panel: Panel::Perms,
@@ -3092,7 +3099,7 @@ mod tests {
         });
         let out = render(&mut s, 100, 20);
         assert!(out.contains("pick a level"), "picker title missing: {out:?}");
-        assert!(out.contains("/eu"), "cluster level missing: {out:?}");
+        assert!(out.contains("/eu"), "trust domain level missing: {out:?}");
     }
 
     #[test]
@@ -3111,17 +3118,17 @@ mod tests {
 
     #[test]
     fn unverified_cluster_is_hidden() {
-        // A saved cluster whose identity did not verify (Absent) never shows —
-        // the address may now be a different CA on this network.
+        // A saved trust domain whose identity did not verify (Absent) never shows —
+        // the address may now be a different CA on this trust domain.
         let (c, _) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
         let mut s = clusters_state(vec![c], vec![PollState::Absent]);
         let out = render(&mut s, 100, 20);
         assert!(
             !out.contains("hq.local"),
-            "unverified cluster leaked into the list: {out:?}"
+            "unverified trust domain leaked into the list: {out:?}"
         );
         assert!(
-            out.contains("No saved cluster is reachable"),
+            out.contains("No saved trust domain is reachable"),
             "absent hint missing: {out:?}"
         );
     }
@@ -3150,7 +3157,7 @@ mod tests {
             detail: vec![
                 ("Listen".to_string(), "10.0.60.11:4565".to_string()),
                 ("Roles".to_string(), "[Resolver, IdMap]".to_string()),
-                ("Cluster".to_string(), "create at /eu".to_string()),
+                ("Resolver cluster".to_string(), "create at /eu".to_string()),
                 ("Resolver members".to_string(), "10.0.60.11:4564 Tls".to_string()),
             ],
         }];
@@ -3176,7 +3183,7 @@ mod tests {
             out.contains("Resolver, IdMap"),
             "role values missing from detail: {out:?}"
         );
-        assert!(out.contains("/eu"), "cluster base missing from detail: {out:?}");
+        assert!(out.contains("/eu"), "trust domain base missing from detail: {out:?}");
         assert!(out.contains("10.0.60.11:4564"), "resolver members missing: {out:?}");
     }
 
@@ -3261,7 +3268,7 @@ mod tests {
         let out = render(&mut s, 120, 30);
         assert!(out.contains("Admin Servers"), "server title missing: {out:?}");
         assert!(out.contains("Server identity"), "detail title missing: {out:?}");
-        assert!(out.contains("/eu"), "cluster grouping missing: {out:?}");
+        assert!(out.contains("/eu"), "trust domain grouping missing: {out:?}");
     }
 
     fn a_conn(server: &str) -> RemoteConn {

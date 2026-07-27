@@ -22,10 +22,10 @@ pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<TrustDomainMap> 
     match std::fs::read(&p) {
         Ok(bytes) => {
             let map: TrustDomainMap = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing network map {p:?}"))?;
+                .with_context(|| format!("parsing trust domain map {p:?}"))?;
             if map.controller != controller {
                 bail!(
-                    "network map controller {} does not match installed controller certificate {}",
+                    "trust domain map controller {} does not match installed controller certificate {}",
                     map.controller,
                     controller
                 );
@@ -35,7 +35,7 @@ pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<TrustDomainMap> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(TrustDomainMap::empty(controller))
         }
-        Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
+        Err(e) => Err(e).with_context(|| format!("reading trust domain map {p:?}")),
     }
 }
 
@@ -56,10 +56,10 @@ pub async fn load_async(
     match tokio::fs::read(&p).await {
         Ok(bytes) => {
             let map: TrustDomainMap = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing network map {p:?}"))?;
+                .with_context(|| format!("parsing trust domain map {p:?}"))?;
             if map.controller != controller {
                 bail!(
-                    "network map controller {} does not match installed controller certificate {}",
+                    "trust domain map controller {} does not match installed controller certificate {}",
                     map.controller,
                     controller
                 );
@@ -69,7 +69,7 @@ pub async fn load_async(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(TrustDomainMap::empty(controller))
         }
-        Err(e) => Err(e).with_context(|| format!("reading network map {p:?}")),
+        Err(e) => Err(e).with_context(|| format!("reading trust domain map {p:?}")),
     }
 }
 
@@ -136,7 +136,7 @@ pub fn upsert_controller(
 }
 
 /// Move one server's resolver endpoint without changing its identity, grant,
-/// cluster placement, or data-plane authentication.
+/// resolver cluster placement, or data-plane authentication.
 pub fn relocate_resolver(
     map: &mut TrustDomainMap,
     server_id: AdminServerId,
@@ -162,9 +162,9 @@ pub fn relocate_resolver(
     }) {
         bail!("resolver member {addr} is already owned by another admin server");
     }
-    let cluster_id = server
-        .cluster
-        .with_context(|| format!("resolver admin server {server_id} has no cluster"))?;
+    let cluster_id = server.cluster.with_context(|| {
+        format!("resolver admin server {server_id} has no resolver cluster")
+    })?;
     let cluster = map
         .resolver_clusters
         .iter()
@@ -188,7 +188,7 @@ pub fn relocate_resolver(
         .resolver_clusters
         .iter_mut()
         .find(|cluster| cluster.id == cluster_id)
-        .expect("cluster checked above");
+        .expect("resolver cluster checked above");
     *cluster
         .members
         .iter_mut()
@@ -200,7 +200,7 @@ pub fn relocate_resolver(
 }
 
 /// Insert the immutable grant at certificate issuance time. The enrollee does
-/// not choose either identity: `server_id` and a created cluster id come from
+/// not choose either identity: `server_id` and a created resolver cluster id come from
 /// the CA.
 pub fn enroll(
     map: &mut TrustDomainMap,
@@ -239,17 +239,17 @@ pub fn enroll(
     let cluster = match &request.cluster {
         ResolverClusterPlacement::Create { base } => {
             if base.is_empty() || !base.starts_with('/') {
-                bail!("cluster base must be an absolute netidx path");
+                bail!("resolver cluster base must be an absolute netidx path");
             }
             if map.resolver_clusters.iter().any(|c| c.base == *base) {
-                bail!("a cluster already exists at base {base:?}");
+                bail!("a resolver cluster already exists at base {base:?}");
             }
             let id = ResolverClusterId::new();
             map.resolver_clusters.push(ResolverClusterEntry {
                 id,
                 base: base.clone(),
                 state: ResolverClusterState::Pending,
-                // Cluster membership is the union of CA-issued server
+                // Resolver cluster membership is the union of CA-issued server
                 // identities, not the local resolver.json launch menu.
                 members: vec![resolver_member.clone()],
                 parent: None,
@@ -267,7 +267,7 @@ pub fn enroll(
                 if configured != resolver_member && !approved.members.contains(configured)
                 {
                     bail!(
-                        "local resolver config names unowned member {} outside the approved cluster",
+                        "local resolver config names unowned member {} outside the approved resolver cluster",
                         configured.addr
                     );
                 }
@@ -311,13 +311,15 @@ fn server_set(
         if !server.roles.contains(Role::Resolver) {
             bail!("admin server {id} has no Resolver grant");
         }
-        let id_cluster = server
-            .cluster
-            .with_context(|| format!("resolver admin server {id} has no cluster"))?;
+        let id_cluster = server.cluster.with_context(|| {
+            format!("resolver admin server {id} has no resolver cluster")
+        })?;
         match cluster {
             None => cluster = Some(id_cluster),
             Some(expected) if expected == id_cluster => {}
-            Some(_) => bail!("the selected servers do not belong to one cluster"),
+            Some(_) => {
+                bail!("the selected servers do not belong to one resolver cluster")
+            }
         }
         members.push(server.resolver.clone().with_context(|| {
             format!("admin server {id} has no owned resolver member")
@@ -327,7 +329,7 @@ fn server_set(
     Ok((cluster.expect("nonempty ids"), members))
 }
 
-/// The namespace base of the cluster `parent_servers` belong to — the subtree
+/// The namespace base of the resolver cluster `parent_servers` belong to — the subtree
 /// a delegation under them would restructure. Authorization needs this before
 /// [`delegate`] runs, because `delegate` only checks that the proposed child
 /// path lies *under* this base, which says nothing about who owns the base.
@@ -340,7 +342,7 @@ pub fn parent_base(
         .resolver_clusters
         .iter()
         .find(|entry| entry.id == cluster)
-        .context("parent cluster does not exist")?
+        .context("parent resolver cluster does not exist")?
         .base
         .clone())
 }
@@ -375,9 +377,9 @@ pub struct DelegationChange {
 }
 
 /// Apply a delegation proposal expressed as immutable server sets. If both
-/// sets currently belong to one cluster, split it: the parent set retains the
-/// old cluster ID and the child set receives `proposed_child`. If they belong
-/// to distinct clusters, attach/rebase the complete child cluster. Reapplying
+/// sets currently belong to one resolver cluster, split it: the parent set retains the
+/// old resolver cluster ID and the child set receives `proposed_child`. If they belong
+/// to distinct resolver clusters, attach/rebase the complete child resolver cluster. Reapplying
 /// the final proposal is idempotent.
 pub fn delegate(
     map: &mut TrustDomainMap,
@@ -403,9 +405,9 @@ pub fn delegate(
         .resolver_clusters
         .iter()
         .position(|c| c.id == parent_id)
-        .context("parent cluster does not exist")?;
+        .context("parent resolver cluster does not exist")?;
     if map.resolver_clusters[parent_pos].state != ResolverClusterState::Active {
-        bail!("the parent cluster is not active");
+        bail!("the parent resolver cluster is not active");
     }
     if !NPath::is_parent(&map.resolver_clusters[parent_pos].base, &path) {
         bail!(
@@ -415,29 +417,29 @@ pub fn delegate(
     }
 
     // An already-applied split/attach resolves the two sets to different
-    // clusters and lands here. The ordinary attach path below recognizes it
+    // resolver clusters and lands here. The ordinary attach path below recognizes it
     // and returns without version churn.
     if parent_id != current_child_id {
         let child_pos = map
             .resolver_clusters
             .iter()
             .position(|c| c.id == current_child_id)
-            .context("child cluster does not exist")?;
+            .context("child resolver cluster does not exist")?;
         let mut descendants = std::collections::BTreeSet::new();
         let mut pending = map.resolver_clusters[child_pos].children.clone();
         while let Some(id) = pending.pop() {
             if !descendants.insert(id) {
                 continue;
             }
-            let cluster = map
-                .resolver_clusters
-                .iter()
-                .find(|cluster| cluster.id == id)
-                .context("child topology references a missing cluster")?;
+            let cluster =
+                map.resolver_clusters
+                    .iter()
+                    .find(|cluster| cluster.id == id)
+                    .context("child topology references a missing resolver cluster")?;
             pending.extend(cluster.children.iter().copied());
         }
         if descendants.contains(&parent_id) {
-            bail!("attaching these clusters would create a topology cycle");
+            bail!("attaching these resolver clusters would create a topology cycle");
         }
         for id in &descendants {
             let descendant =
@@ -453,12 +455,12 @@ pub fn delegate(
         let expected_child_ids = assigned_servers(map, current_child_id);
         if expected_parent_ids != parent_servers {
             bail!(
-                "the parent selection must include every resolver server in its cluster"
+                "the parent selection must include every resolver server in its resolver cluster"
             );
         }
         if expected_child_ids != child_servers {
             bail!(
-                "the child selection must include every resolver server in its cluster"
+                "the child selection must include every resolver server in its resolver cluster"
             );
         }
         let already = map.resolver_clusters[child_pos].base == proposed_path
@@ -473,7 +475,7 @@ pub fn delegate(
             });
         }
         if map.resolver_clusters[child_pos].parent.is_some() {
-            bail!("the selected child cluster is already attached");
+            bail!("the selected child resolver cluster is already attached");
         }
         if map
             .resolver_clusters
@@ -509,17 +511,19 @@ pub fn delegate(
         });
     }
 
-    // Split one active peer cluster. The proposal must partition every
+    // Split one active peer resolver cluster. The proposal must partition every
     // resolver identity assigned to it; otherwise approval would silently
     // orphan an unmentioned member.
     let mut union = parent_servers.clone();
     union.extend(child_servers.iter().copied());
     union.sort();
     if union != assigned_servers(map, parent_id) {
-        bail!("a cluster split must assign every resolver server to parent or child");
+        bail!(
+            "a resolver cluster split must assign every resolver server to parent or child"
+        );
     }
     if map.resolver_clusters.iter().any(|c| c.id == proposed_child) {
-        bail!("the proposed child cluster identity is already in use");
+        bail!("the proposed child resolver cluster identity is already in use");
     }
     if map.resolver_clusters.iter().any(|c| c.base == proposed_path) {
         bail!("another resolver cluster already owns {proposed_path:?}");
@@ -597,7 +601,7 @@ fn facts_match(
     normalize_addrs(&mut expected_members);
     normalize_addrs(&mut got_members);
     // A child's parent referral is mounted at the *child's* base (for example
-    // `/eu`) while its addresses come from the parent cluster. Using the
+    // `/eu`) while its addresses come from the parent resolver cluster. Using the
     // parent's own base here (`/` for the root) rejects every correctly
     // configured non-root server as topology drift.
     let expected_parent = cluster.parent.and_then(|id| {
@@ -641,23 +645,23 @@ pub fn register(
                 .resolver_clusters
                 .iter()
                 .find(|c| c.id == id)
-                .context("the server grant references a missing cluster")?;
+                .context("the server grant references a missing resolver cluster")?;
             if !facts_match(map, cluster, owned.as_ref(), facts) {
                 bail!(
-                    "reported resolver configuration drifts from the CA-approved cluster"
+                    "reported resolver configuration drifts from the CA-approved resolver cluster"
                 );
             }
         }
         (Some(_), None) => bail!("the approved Resolver role must report resolver facts"),
         (None, Some(_)) => {
-            bail!("resolver facts were reported without an approved cluster")
+            bail!("resolver facts were reported without an approved resolver cluster")
         }
         (None, None) => {}
     }
-    // A newly granted non-root cluster stays pending until delegation attaches it
-    // to an active parent. The first `/` cluster below a dedicated controller has
+    // A newly granted non-root resolver cluster stays pending until delegation attaches it
+    // to an active parent. The first `/` resolver cluster below a dedicated controller has
     // no such ceremony: registration of its approved first member is what makes
-    // the administrative network routable.
+    // the trust domain routable.
     let activate_root = cluster_id.is_some_and(|id| {
         map.resolver_clusters.iter().any(|cluster| {
             cluster.id == id
@@ -748,14 +752,14 @@ pub fn reparent(
         .resolver_clusters
         .iter()
         .position(|c| c.id == child)
-        .context("child cluster does not exist")?;
+        .context("child resolver cluster does not exist")?;
     let parent_pos = map
         .resolver_clusters
         .iter()
         .position(|c| c.id == parent)
-        .context("parent cluster does not exist")?;
+        .context("parent resolver cluster does not exist")?;
     if map.resolver_clusters[parent_pos].state != ResolverClusterState::Active {
-        bail!("the parent cluster is not active");
+        bail!("the parent resolver cluster is not active");
     }
     let old_parent = map.resolver_clusters[child_pos].parent;
     let already = old_parent == Some(parent)

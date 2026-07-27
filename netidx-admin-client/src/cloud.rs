@@ -90,7 +90,7 @@ async fn detect_aws() -> Option<Ipv4Addr> {
 async fn detect_gcp() -> Option<Ipv4Addr> {
     let client = client()?;
     let resp = client
-        .get("http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
+        .get("http://169.254.169.254/computeMetadata/v1/instance/trust domain-interfaces/0/access-configs/0/external-ip")
         .header("Metadata-Flavor", "Google")
         .send()
         .await
@@ -105,7 +105,7 @@ async fn detect_gcp() -> Option<Ipv4Addr> {
 async fn detect_azure() -> Option<Ipv4Addr> {
     let client = client()?;
     let resp = client
-        .get("http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text")
+        .get("http://169.254.169.254/metadata/instance/trust domain/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text")
         .header("Metadata", "true")
         .send()
         .await

@@ -13,7 +13,7 @@
 //!   workstation accept from incoming subscribers. Defaults to
 //!   [`Local`](DefaultAuthMech::Local) because the typical workstation
 //!   only exposes publishers to subscribers on the same machine.
-//!   Operators who host network publishers override via the
+//!   Operators who host trust domain publishers override via the
 //!   [`default_auth`](WorkstationParams::default_auth) field. The
 //!   choice here does *not* affect outbound subscribe behavior —
 //!   referrals from the local resolver carry their own per-address
@@ -55,7 +55,7 @@ pub struct WorkstationParams {
     pub tls_identities: Vec<TlsIdentitySpec>,
     /// `default_auth` for publishers on this workstation. `None` ⇒
     /// [`Local`](DefaultAuthMech::Local). Override when this
-    /// workstation hosts publishers that need to accept network
+    /// workstation hosts publishers that need to accept trust domain
     /// subscribers under Krb5 / Tls.
     pub default_auth: Option<DefaultAuthMech>,
     /// Base path of the local resolver cluster. Default `/local`.
@@ -139,7 +139,7 @@ pub const DEFAULT_LISTEN_PORT: u16 = 4654;
 #[cfg(not(any(unix, windows)))]
 pub const UNSUPPORTED_MSG: &str = "the workstation role needs a Local-auth local resolver supervised by \
      netidx-activation, neither of which exists on this platform. To put \
-     this host on a network, install a publisher instead: `netidx admin \
+     this host on a trust domain, install a publisher instead: `netidx admin \
      publisher install`.";
 
 /// Unsupported-platform stub: the workstation role can't be rendered
@@ -668,7 +668,7 @@ mod tests {
     fn explicit_default_auth_override_wins() {
         let out = tempfile::tempdir().unwrap();
         let mut p = base_params(&out);
-        // A workstation that also hosts a network-facing publisher
+        // A workstation that also hosts a trust domain-facing publisher
         // wants Krb5 as the publisher's accepted scheme.
         p.default_auth = Some(DefaultAuthMech::Krb5);
         let rt = workstation(&p).unwrap();

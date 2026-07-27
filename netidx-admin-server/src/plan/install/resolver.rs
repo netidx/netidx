@@ -1,6 +1,6 @@
-//! The resolver role install: a network-facing resolver server, its data-plane
+//! The resolver role install: a trust domain-facing resolver server, its data-plane
 //! auth (anonymous / krb5 / tls), the id-mapper daemon, and — on a fresh TLS or
-//! krb5/anonymous network — the admin-plane CA and this host's admin server.
+//! krb5/anonymous trust domain — the admin-plane CA and this host's admin server.
 //!
 //! This is the richest of the install cascades: it can mint a CA, enroll from a
 //! discovered one, delegate under a WAN parent, and stand up an admin server
@@ -108,7 +108,7 @@ pub struct ResolverInput {
     pub with_admin_server: bool,
     /// Proceed even without a usable TPM / Secure Enclave (test CAs only).
     pub insecure_no_tpm: bool,
-    /// Set this resolver up as a CHILD of an existing network: the parent's
+    /// Set this resolver up as a CHILD of an existing trust domain: the parent's
     /// admin-server address. Unix-only.
     pub parent_admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the WAN parent (e.g. `/eu`).
@@ -128,20 +128,20 @@ pub struct ResolverInput {
 }
 
 /// Install a standalone resolver, returning the OS-service scope the frontend
-/// should register (system scope — a resolver is a network-facing daemon), or
+/// should register (system scope — a resolver is a trust domain-facing daemon), or
 /// `None`.
 pub async fn run_resolver(
     ans: &mut dyn Answerer,
     mut input: ResolverInput,
 ) -> Result<Option<ServiceScope>> {
-    // Ask the network before asking the human: a second (or third…)
-    // resolver discovers the existing network and imports its settings
-    // — auth scheme, domain, where the CA is, and which one cluster it belongs
+    // Ask the trust domain before asking the human: a second (or third…)
+    // resolver discovers the existing trust domain and imports its settings
+    // — auth scheme, domain, where the CA is, and which one resolver cluster it belongs
     // to. Resolver member blocks are local launch choices, not peer links, so
     // a joining replica can keep a one-member local config.
     // The probe outcome rides through the whole install: once the
     // operator has said "no admin server", nothing downstream offers a
-    // network join again.
+    // trust domain join again.
     let probe = if let Some(parent) = input.parent_admin_server {
         if input.common.mode.is_dry_run() {
             // dry-run can't run the live confirm; the parent match below
@@ -149,7 +149,7 @@ pub async fn run_resolver(
             AdminServers::NotProbed
         } else {
             // An explicit WAN parent (no mDNS): confirm it and pin the
-            // network. This makes `probe.have()` Some, so the install
+            // trust domain. This makes `probe.have()` Some, so the install
             // ENROLLS this resolver's cert from the parent's CA and the
             // "create a local CA" branches become unreachable — a satellite
             // shares the one trust domain, it never mints its own.
@@ -166,10 +166,10 @@ pub async fn run_resolver(
     {
         input.base = base.clone();
     }
-    // Interactive delegation offer: if we joined an EXISTING network that runs a
+    // Interactive delegation offer: if we joined an EXISTING trust domain that runs a
     // resolver, offer to become a delegated SUBTREE of it (its own /path,
     // referred up to the parent) instead of a plain peer member of the root
-    // cluster. Gated on `Role::Resolver` — there must be an upstream resolver to
+    // resolver cluster. Gated on `Role::Resolver` — there must be an upstream resolver to
     // delegate FROM, else the option is meaningless. The strict CLI drives this
     // with --parent-admin-server/--delegate-subtree, so it only fires
     // interactively and when neither is already set. Setting these three inputs
@@ -196,16 +196,16 @@ pub async fn run_resolver(
     // A delegated child (`--parent-admin-server`) keeps the data-plane auth
     // the operator chose — a /eu subtree may run krb5 under a TLS parent —
     // so only the trust-domain/CA decision comes from the parent, never its
-    // auth. A plain discovered peer still imports its cluster's scheme. The
+    // auth. A plain discovered peer still imports its trust domain's scheme. The
     // auth *choice* itself is deferred until after the control plane (below):
-    // founding a new cluster sets up the CA first, then asks how the data
+    // founding a new trust domain sets up the CA first, then asks how the data
     // plane authenticates.
     let imported_auth = if input.parent_admin_server.is_some() {
         None
     } else {
         probe.have().and_then(trust_domain_auth_kind)
     };
-    // Founding a brand-new cluster stands up the control plane (CA + admin
+    // Founding a brand-new trust domain stands up the control plane (CA + admin
     // server) up front — before the data-plane auth is chosen (see the control
     // plane block below, after this host's address is resolved).
     #[cfg(unix)]
@@ -213,7 +213,7 @@ pub async fn run_resolver(
         && input.parent_admin_server.is_none()
         && !input.common.mode.is_dry_run()
         && !ca_setup::default_ca_present().await;
-    // Frame the whole "new cluster" install up front, before any machine or CA
+    // Frame the whole "new trust domain" install up front, before any machine or CA
     // questions, so they have context: administering netidx is always
     // authenticated over TLS by the CA no matter how the data plane
     // authenticates, so the control plane comes first and the data-plane auth
@@ -253,7 +253,7 @@ pub async fn run_resolver(
     // server, its `ca.unit` must land in the *same* dir as the resolver / id-map
     // units so the one supervisor runs them all.
     let units_dir = resolve_units_dir(input.common.no_units, input.units_dir.as_deref())?;
-    // ── Control plane ── For a new cluster the CA and this host's admin server
+    // ── Control plane ── For a new trust domain the CA and this host's admin server
     // are set up FIRST, before the data-plane auth is even chosen. Administering
     // netidx — this admin tool, discovery, enrollment, and certificate renewal —
     // is always authenticated over TLS by the CA, no matter how the *data* plane
@@ -263,15 +263,15 @@ pub async fn run_resolver(
     // to a control-plane-less resolver (never chosen interactively). The domain
     // is a control-plane fact (the CA's `ca.<domain>` CN) and flows into the data
     // plane below so a founding TLS resolver's own name shares it.
-    // The cluster this resolver belongs to, recorded in install.json so its
-    // status view can show the cluster glyph: a founding resolver records the
-    // cluster it just created (its own domain + CA fingerprint); a joining one
-    // pins the discovered network's identity via `trust_domain_provenance` below.
+    // The trust domain this resolver belongs to, recorded in install.json so its
+    // status view can show the trust domain glyph: a founding resolver records the
+    // trust domain it just created (its own domain + CA fingerprint); a joining one
+    // pins the discovered trust domain's identity via `trust_domain_provenance` below.
     #[allow(unused_mut)]
     let mut founding_identity: Option<TrustDomainIdentity> = None;
     #[cfg(unix)]
     let control_plane_domain: Option<String> = if founded_admin_plane {
-        // The network domain — the CA's `ca.<domain>` CN, and the domain the
+        // The trust domain domain — the CA's `ca.<domain>` CN, and the domain the
         // founding TLS resolver's own SAN reuses. Default it from an explicit
         // `--tls-name` when present (strict TLS derives the domain from the
         // resolver's SAN, so the CA and the cert agree); else the conventional
@@ -289,7 +289,7 @@ pub async fn run_resolver(
         // The founding controller/CA + this host's admin server + the superuser admin. The
         // returned `ServiceNeed` is intentionally dropped: this install ends with
         // one system-service offer, and the admin-server unit lands in the shared
-        // units dir. `Some(true)` — a new cluster always stands up its admin
+        // units dir. `Some(true)` — a new trust domain always stands up its admin
         // server (the `--no-admin-server` escape is handled by the gate above).
         let (_ca, _need, identity) = super::controller::create_self_signed_controller(
             ans,
@@ -305,8 +305,8 @@ pub async fn run_resolver(
             input.insecure_no_tpm,
         )
         .await?;
-        // Record the cluster this host just founded, so it reads back like a
-        // joined cluster everywhere downstream (status glyph, saved-cluster list).
+        // Record the trust domain this host just founded, so it reads back like a
+        // joined trust domain everywhere downstream (status glyph, saved-trust-domain list).
         founding_identity = Some(identity);
         ans.announce(
             "Resolver server",
@@ -319,14 +319,14 @@ pub async fn run_resolver(
     };
     #[cfg(not(unix))]
     let control_plane_domain: Option<String> = None;
-    // ── Data plane ── the auth scheme (imported when joining a network, else
+    // ── Data plane ── the auth scheme (imported when joining a trust domain, else
     // chosen now that the control plane exists) and the resolver's own identity
     // for it. On the founding TLS path the CA was created above, so
     // `resolver_self_auth` only issues this resolver's certificate from it.
     let kind: AuthKind = match imported_auth {
         Some(k) => {
             ans.note(&format_compact!(
-                "importing auth scheme from the cluster: {}",
+                "importing auth scheme from the trust domain: {}",
                 k.as_str()
             ));
             k
@@ -434,9 +434,9 @@ pub async fn run_resolver(
     };
     let post_apply_units_dir = units_dir.clone();
     // Build the install record before the post-apply closure moves `probe`. A
-    // founding resolver records the cluster it just created; a joining one pins
-    // the discovered network's identity and a reachable admin-server address.
-    let (network, admin_server) = match founding_identity {
+    // founding resolver records the trust domain it just created; a joining one pins
+    // the discovered trust domain's identity and a reachable admin-server address.
+    let (trust_domain, admin_server) = match founding_identity {
         Some(id) => (Some(id), None),
         None => trust_domain_provenance(&probe),
     };
@@ -444,27 +444,27 @@ pub async fn run_resolver(
         InstallRole::Resolver,
         input.base.clone(),
         input.auth.map(|k| k.as_str()).unwrap_or("tls"),
-        network,
+        trust_domain,
         admin_server,
     );
     // Install-time child: collect the delegation request now, but do not send it
     // until after apply() has written the resolver config and the post-apply
-    // step has enrolled this host's admin server. The CA owns cluster identity,
-    // so delegation must reference that already-enrolled pending cluster; the
+    // step has enrolled this host's admin server. The CA owns resolver cluster identity,
+    // so delegation must reference that already-enrolled pending resolver cluster; the
     // previous order sent the request first and was correctly rejected by the
-    // controller because no child cluster existed yet.
+    // controller because no child resolver cluster existed yet.
     #[cfg(unix)]
     let mut install_delegation = None;
     // `--parent-admin-server` is also the strict/non-mDNS way to name the
-    // existing network we are joining.  It only means "delegated child" when
+    // existing trust domain we are joining.  It only means "delegated child" when
     // a subtree was supplied; without one this resolver is a peer in the
-    // cluster at `input.base`, exactly like the interactive blank-subtree
+    // resolver cluster at `input.base`, exactly like the interactive blank-subtree
     // choice above.
     let delegated_child = input.delegate_subtree.is_some();
-    // An explicit bootstrap can be a controller in some other cluster (the
+    // An explicit bootstrap can be a controller in some other resolver cluster (the
     // common strict-CLI case is adding EU-B through HQ-A). Discovery facts are
-    // intentionally scoped to that bootstrap server's own cluster, so select
-    // the requested peer cluster from the verified controller map before
+    // intentionally scoped to that bootstrap server's own resolver cluster, so select
+    // the requested peer resolver cluster from the verified controller map before
     // rendering referrals. Otherwise HQ-A's `/eu` child would become a
     // nonsensical self-child on a resolver whose own base is `/eu`.
     let authoritative_peer_topology = if !delegated_child
@@ -472,16 +472,19 @@ pub async fn run_resolver(
         && probe.have().and_then(|net| net.info.resolver_base.as_deref())
             != Some(input.base.as_str())
     {
-        let net =
-            probe.have().context("the explicit bootstrap network was not verified")?;
+        let net = probe
+            .have()
+            .context("the explicit bootstrap trust domain was not verified")?;
         let controller = net
             .info
             .ca_addr
-            .context("the verified network reported no controller address")?;
+            .context("the verified trust domain reported no controller address")?;
         let map =
             transport::get_map_pinned(controller, NodeKind::Resolver, &net.identity)
                 .await
-                .context("fetching the authoritative map for peer-cluster topology")?;
+                .context(
+                    "fetching the authoritative map for peer resolver-cluster topology",
+                )?;
         Some(transport::cluster_topology_by_base(&map, &input.base)?)
     } else {
         None
@@ -495,7 +498,7 @@ pub async fn run_resolver(
                     // delegate_under_parent runs the real ceremony — it
                     // enqueues a request on the parent and blocks until a
                     // remote admin approves (which mutates the parent
-                    // cluster). That is not a no-op, so it cannot honor
+                    // resolver cluster). That is not a no-op, so it cannot honor
                     // --dry-run's "write nothing" contract.
                     bail!(
                         "--dry-run can't preview an install-time delegation: \
@@ -578,8 +581,8 @@ pub async fn run_resolver(
     // A delegated resolver's runtime base is encoded by its parent referral,
     // which is deliberately written only after the CA approves delegation.
     // Preserve the requested base separately so the preceding server-enrollment
-    // grant creates the pending cluster at that intended path rather than
-    // misreading the temporarily parentless config as the root cluster.
+    // grant creates the pending resolver cluster at that intended path rather than
+    // misreading the temporarily parentless config as the root resolver cluster.
     #[cfg(unix)]
     let resolver_base = params.base.to_string();
     let mut rt = template::resolver(&params)?;
@@ -591,7 +594,7 @@ pub async fn run_resolver(
         resolver.as_file_mut().children =
             joining_children.into_iter().map(edge_into_file).collect();
     }
-    // A standalone resolver is a network-facing daemon — system-scope is what
+    // A standalone resolver is a trust domain-facing daemon — system-scope is what
     // makes it boot-triggered and visible to the OS.
     finish_with(
         ans,
@@ -600,8 +603,8 @@ pub async fn run_resolver(
         ServiceNeed::at(ServiceScope::System),
         record,
         // Admin-server step, after the configs it points at exist: a
-        // discovered network ⇒ enroll a new admin server here; a fresh
-        // network ⇒ add this host's roles to the config the CA setup wrote.
+        // discovered trust domain ⇒ enroll a new admin server here; a fresh
+        // trust domain ⇒ add this host's roles to the config the CA setup wrote.
         // Then the renewal daemon, on any host with certificates our CA can
         // renew (a netidx-CA-issued resolver identity, or a admin-server
         // serving cert).
@@ -626,7 +629,7 @@ pub async fn run_resolver(
                 if !admin_server_ready {
                     bail!(
                         "the child admin server was not enrolled, so its pending \
-                         CA-owned cluster cannot be delegated"
+                         CA-owned resolver cluster cannot be delegated"
                     );
                 }
                 let parent_addrs = delegation::delegate_under_parent(
@@ -714,8 +717,8 @@ async fn resolve_id_map_choice(
 
 /// The resolver's resolved auth identity. `staging` is the TLS-issuance staging
 /// guard (see [`resolver_tls_generate`]); the caller must keep it alive until
-/// `apply()` has run. `netidx_ca` ⇒ the TLS identity chains to this network's
-/// netidx CA (issued locally or network-joined), so the renewal daemon can
+/// `apply()` has run. `netidx_ca` ⇒ the TLS identity chains to this trust domain's
+/// netidx CA (issued locally or trust domain-joined), so the renewal daemon can
 /// renew it; false for external-PKI identities and for all non-TLS schemes.
 struct ResolvedAuth {
     choice: AuthChoice,
@@ -773,8 +776,8 @@ async fn resolver_self_auth(
         AuthKind::Local => bail!(
             "the resolver template does not support local auth: local (unix-socket) \
              auth only authenticates clients on the same machine, so it cannot serve \
-             a network. For a single-machine setup use `netidx admin workstation \
-             install`; for a network resolver choose anonymous, krb5, or tls."
+             a trust domain. For a single-machine setup use `netidx admin workstation \
+             install`; for a trust domain resolver choose anonymous, krb5, or tls."
         ),
         AuthKind::Krb5 => {
             let spn = match default_krb5_spn().await {
@@ -809,7 +812,7 @@ async fn resolver_self_auth(
 
 /// Resolve the resolver's TLS identity via the netidx CA — the only in-wizard
 /// path. On unix this host either enrolls from a discovered admin server or
-/// creates the network's CA and issues its own cert (both inside
+/// creates the trust domain's CA and issues its own cert (both inside
 /// [`resolver_tls_generate`]). On non-unix, where creating a CA needs openssl,
 /// it can only enroll over the admin plane.
 async fn resolver_tls_auth(
@@ -878,7 +881,7 @@ async fn resolver_tls_generate(
     units_dir: Option<&Path>,
     probe: &AdminServers,
 ) -> Result<ResolvedAuth> {
-    // First the network path: a admin server signs our CSR on the spot.
+    // First the trust domain path: a admin server signs our CSR on the spot.
     // Whether this asks anything is decided by `probe`. The issued files are
     // written to a staging tempdir; we hand it back so the caller can hold it
     // across the template install.
@@ -941,10 +944,10 @@ async fn resolver_tls_generate(
         ans.note(&format_compact!("issuing from the local CA at {}", ca_dir.display()));
         offline_ca::open_default_ca(ans, config_lock).await?
     } else {
-        // No CA — this is the first resolver of a new TLS network, so the CA
+        // No CA — this is the first resolver of a new TLS trust domain, so the CA
         // is created right here: it signs the data plane *and* anchors the
         // admin plane. Belt-and-suspenders: a resolver told about a parent
-        // admin server must enroll from that network's CA, never mint its own.
+        // admin server must enroll from that trust domain's CA, never mint its own.
         // The probe (confirm_trust_domain_at) already routes such installs to the
         // enroll path, so reaching here with a parent set would be a bug.
         if input.parent_admin_server.is_some() {
@@ -955,7 +958,7 @@ async fn resolver_tls_generate(
             );
         }
         ans.note(&format_compact!(
-            "no CA found at {} — creating the cluster's CA (it signs this \
+            "no CA found at {} — creating the trust domain's CA (it signs this \
              resolver's certificate and anchors discovery, enrollment, and \
              renewal)",
             ca_dir.display()
@@ -1053,8 +1056,8 @@ async fn resolver_tls_generate(
     })
 }
 
-/// The auth scheme a discovered network's resolvers use (the first resolver's).
-/// `None` when the network reported no resolvers; the caller falls back to
+/// The auth scheme a discovered trust domain's resolvers use (the first resolver's).
+/// `None` when the trust domain reported no resolvers; the caller falls back to
 /// prompting.
 fn trust_domain_auth_kind(net: &DiscoveredTrustDomain) -> Option<AuthKind> {
     net.info.resolvers.first().map(|r| match &r.auth {
@@ -1106,8 +1109,8 @@ fn edge_into_file(
     }
 }
 
-/// Resolve this resolver's own auth by importing from a confirmed network: TLS
-/// ⇒ request our resolver cert from the network's CA (suggested
+/// Resolve this resolver's own auth by importing from a confirmed trust domain: TLS
+/// ⇒ request our resolver cert from the trust domain's CA (suggested
 /// `resolver.<domain>`, identity already glyph-confirmed); krb5 ⇒ prompt for
 /// this host's SPN (a peer's is shown as the shape to follow); anonymous ⇒
 /// anonymous.
@@ -1120,7 +1123,7 @@ async fn resolver_auth_from_trust_domain(
     match kind {
         AuthKind::Anonymous => Ok(ResolvedAuth::external(AuthChoice::Anonymous)),
         AuthKind::Local => bail!(
-            "a resolver joined to a discovered cluster cannot use local auth (it is host-local \
+            "a resolver joined to a discovered trust domain cannot use local auth (it is host-local \
              by definition)"
         ),
         AuthKind::Krb5 => {
@@ -1129,7 +1132,7 @@ async fn resolver_auth_from_trust_domain(
                 InfoAuth::Anonymous | InfoAuth::Tls { .. } => None,
             }) {
                 ans.note(&format_compact!(
-                    "note: an existing resolver on this cluster uses SPN {example:?}"
+                    "note: an existing resolver in this trust domain uses SPN {example:?}"
                 ));
             }
             let spn = ans
@@ -1143,7 +1146,7 @@ async fn resolver_auth_from_trust_domain(
         AuthKind::Tls => {
             let Some(ca_addr) = net.info.ca_addr else {
                 bail!(
-                    "cluster {:?} uses TLS but none of its admin servers reported a \
+                    "trust domain {:?} uses TLS but none of its admin servers reported a \
                      CA — cannot obtain the resolver certificate",
                     net.identity.domain,
                 )
@@ -1172,7 +1175,7 @@ async fn resolver_auth_from_trust_domain(
 
 /// Map this resolver's chosen data-plane auth to the `InfoAuth` the delegation
 /// handshake exchanges (the child's address carries it). Local auth is
-/// host-local and can't serve a delegated network subtree.
+/// host-local and can't serve a delegated trust domain subtree.
 #[cfg(unix)]
 fn authchoice_to_info(a: &AuthChoice) -> Result<InfoAuth> {
     match a {
@@ -1180,15 +1183,15 @@ fn authchoice_to_info(a: &AuthChoice) -> Result<InfoAuth> {
         AuthChoice::Krb5 { spn } => Ok(InfoAuth::Krb5 { spn: spn.to_string() }),
         AuthChoice::Tls { name, .. } => Ok(InfoAuth::Tls { name: name.to_string() }),
         AuthChoice::Local { .. } => bail!(
-            "a local-auth resolver can't be delegated a network subtree (its auth \
+            "a local-auth resolver can't be delegated a trust domain subtree (its auth \
              is host-local)"
         ),
     }
 }
 
 /// The resolver install's post-apply admin-server step. Three cases: (1) joining
-/// an existing network whose CA we do NOT hold ⇒ [`enroll_admin_server`]. (2) A
-/// fresh network we just created, OR a "discovered" network whose CA *this host
+/// an existing trust domain whose CA we do NOT hold ⇒ [`enroll_admin_server`]. (2) A
+/// fresh trust domain we just created, OR a "discovered" trust domain whose CA *this host
 /// already holds* ⇒ the ca-role `admin-server.json` already exists; merge this
 /// host's resolver / id-map roles into it, preserving the `ca` role. (3) No
 /// config at all ⇒ the operator declined a admin server — nothing to do.
@@ -1208,8 +1211,8 @@ async fn post_apply_admin_server(
     config_lock: &ConfigDirLock,
 ) -> Result<bool> {
     match discovered {
-        // A "discovered" network whose CA this host already holds is our OWN
-        // network: it already serves the admin plane with the `ca` role, so it
+        // A "discovered" trust domain whose CA this host already holds is our OWN
+        // trust domain: it already serves the admin plane with the `ca` role, so it
         // must MERGE the new resolver/id-map roles into that config — never
         // enroll a fresh admin server, whose join-shape config drops the `ca`
         // role and silently disables signing.
@@ -1251,10 +1254,10 @@ async fn post_apply_admin_server(
     }
 }
 
-/// True when this host already holds the CA for the just-discovered network —
-/// i.e. the network is our own. We compare the local CA cert's fingerprint
+/// True when this host already holds the CA for the just-discovered trust domain —
+/// i.e. the trust domain is our own. We compare the local CA cert's fingerprint
 /// against the discovered identity so we only short-circuit for genuinely our
-/// own CA, never a different network that merely happens to be reachable.
+/// own CA, never a different trust domain that merely happens to be reachable.
 #[cfg(unix)]
 async fn host_holds_ca(net: &DiscoveredTrustDomain) -> bool {
     if !ca_setup::default_ca_present().await {
@@ -1293,7 +1296,7 @@ async fn merge_resolver_roles(
     Ok(())
 }
 
-/// Enroll a admin server on this (non-CA) host: the network's CA signs our
+/// Enroll a admin server on this (non-CA) host: the trust domain's CA signs our
 /// reserved-SAN serving cert (admin-authorized, policy-gated), we install the
 /// serving identity + `admin-server.json` with this host's roles, and drop the
 /// activation unit.
@@ -1321,7 +1324,7 @@ pub async fn enroll_admin_server(
 ) -> Result<bool> {
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
-            "note: cluster {:?} reported no CA; skipping admin-server setup on this \
+            "note: trust domain {:?} reported no CA; skipping admin-server setup on this \
              host",
             net.identity.domain,
         ));
@@ -1408,10 +1411,10 @@ pub async fn enroll_admin_server(
     };
     let cluster_description = match &cluster {
         netidx_admin_proto::ResolverClusterPlacement::Create { base } => {
-            format!("create pending cluster at {base}")
+            format!("create pending resolver cluster at {base}")
         }
         netidx_admin_proto::ResolverClusterPlacement::Join { cluster } => {
-            format!("join cluster {cluster} at {base}")
+            format!("join resolver cluster {cluster} at {base}")
         }
     };
     ans.note(&format!(

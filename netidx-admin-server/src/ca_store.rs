@@ -220,7 +220,7 @@ pub enum Status {
 /// re-signing needs an admin password (the vault has no signing capability
 /// at rest) — but every admin session re-signs opportunistically (see
 /// [`CAStore::refresh_crl_if_stale`]), so a CRL only approaches this age on
-/// a network where no admin has signed, approved, or revoked anything for
+/// a trust domain where no admin has signed, approved, or revoked anything for
 /// months.
 pub const CRL_VALIDITY: Duration = Duration::from_secs(90 * 24 * 3600);
 
@@ -238,7 +238,7 @@ pub struct CaDir {
     /// edits on restart.
     pub lifetimes: crate::ca::CaLifetimes,
     pub sessions: crate::session::SessionStore,
-    /// The CA directory path — a lockless accessor for the trust_domain, the CA
+    /// The CA directory path — a lockless accessor for the trust domain map, the CA
     /// cert, and other files that are neither the store nor the vault.
     dir: PathBuf,
     _config_lock: ConfigDirLock,
@@ -266,7 +266,7 @@ impl CaDir {
         })
     }
 
-    /// The CA directory path — for the trust_domain, the CA cert, and other
+    /// The CA directory path — for the trust domain map, the CA cert, and other
     /// files in the dir that are neither the request store nor the vault.
     pub fn dir(&self) -> &Path {
         &self.dir

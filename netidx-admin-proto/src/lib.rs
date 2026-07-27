@@ -193,7 +193,7 @@ pub struct ClientHello {
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ServerHello {
     pub protocol_version: u32,
-    /// The TLS domain this network is rooted at (e.g. `ryu-oh.org`).
+    /// The TLS domain this trust domain is rooted at (e.g. `ryu-oh.org`).
     pub domain: String,
     /// What this host does — see [`Role`].
     pub roles: BitFlags<Role>,
@@ -256,14 +256,14 @@ pub enum Request {
     /// Revoke one in-memory CA session.
     #[pack(tag(2))]
     Logout(LogoutRequest),
-    /// Data-plane cert join (TLS networks), signed immediately — the
+    /// Data-plane cert join (TLS trust domains), signed immediately — the
     /// admin's password rides in the request, so an admin must be
     /// present at the enrolling node. Answered with [`SignResponse`].
     #[pack(tag(3))]
     Sign(SignRequest),
     /// Admin-server enrollment: issue the reserved [`SERVING_SAN`]
     /// serving cert to a new admin server. Requires an admin whose
-    /// policy covers the requested cluster base and roles. Answered with
+    /// policy covers the requested resolver cluster base and roles. Answered with
     /// [`SignResponse`].
     #[pack(tag(4))]
     Enroll(EnrollRequest),
@@ -295,7 +295,7 @@ pub enum Request {
     /// [`DenyResponse`].
     #[pack(tag(10))]
     Deny(DenyRequest),
-    /// Fetch the network's current CRL (no credentials — a CRL is
+    /// Fetch the trust domain's current CRL (no credentials — a CRL is
     /// public). Answered with [`GetCrlResponse`]. The renewal daemon
     /// pulls this and drops `crl.pem` beside each resolver's trusted
     /// bundle, where netidx's TLS acceptor enforces it.
@@ -325,8 +325,8 @@ pub enum Request {
     #[pack(tag(16))]
     ListDelegations(ListDelegationsRequest),
     /// Approve a queued delegation: add the child to this resolver's
-    /// `children` (propagated cluster-wide) and record the parent
-    /// cluster's address(es) for the child to poll (admin-authenticated).
+    /// `children` (propagated resolver cluster-wide) and record the parent
+    /// resolver cluster's address(es) for the child to poll (admin-authenticated).
     /// Answered with [`ApproveDelegationResponse`].
     #[pack(tag(17))]
     ApproveDelegation(ApproveDelegationRequest),
@@ -336,12 +336,12 @@ pub enum Request {
     DenyDelegation(DenyDelegationRequest),
     /// Server-to-server: apply a referral edit (add a child / set the
     /// parent) to this host's local resolver config — the receive side of
-    /// cluster-wide delegation propagation. Peer-cert-gated like
+    /// resolver cluster-wide delegation propagation. Peer-cert-gated like
     /// [`Request::AddIdentity`]. Answered with [`ApplyReferralEditResponse`].
     #[pack(tag(19))]
     ApplyReferralEdit(ApplyReferralEditRequest),
     /// Server→CA push: register/update this admin server's facts (address,
-    /// roles, resolver-cluster facts) in the CA's authoritative network
+    /// roles, resolver-resolver cluster facts) in the CA's authoritative trust domain
     /// map. Peer-cert-gated like [`Request::AddIdentity`]. Answered with
     /// [`RegisterResponse`].
     #[pack(tag(20))]
@@ -356,9 +356,9 @@ pub enum Request {
     /// [`GetMapVersionResponse`].
     #[pack(tag(22))]
     GetMapVersion,
-    /// Fetch the full network map — the CA's authoritative copy, or a admin
+    /// Fetch the full trust domain map — the CA's authoritative copy, or a admin
     /// server's cache. One round trip to any admin server is the whole
-    /// network. Answered with [`GetMapResponse`].
+    /// trust domain. Answered with [`GetMapResponse`].
     #[pack(tag(23))]
     GetMap,
     /// Admin-authenticated: permanently revoke and remove a dead admin-server
@@ -368,19 +368,19 @@ pub enum Request {
     #[pack(tag(24))]
     RemoveServer(RemoveServerRequest),
     /// Controller → node: read this resolver host's permissions file. This is
-    /// an internal exact-target RPC; network clients use [`Request::ReadPerms`]
+    /// an internal exact-target RPC; trust domain clients use [`Request::ReadPerms`]
     /// so credentials are verified at the controller first. Answered with
     /// [`GetPermsResponse`].
     #[pack(tag(25))]
     GetPerms,
-    /// Admin-authenticated, sent to the **CA**: replace a target cluster's
-    /// permissions file, validated and propagated cluster-wide. The CA
+    /// Admin-authenticated, sent to the **CA**: replace a target resolver cluster's
+    /// permissions file, validated and propagated resolver cluster-wide. The CA
     /// authorizes the admin and pushes [`Request::ApplyPermsEdit`] to the
-    /// target cluster's admin servers. Answered with [`EditPermsResponse`].
+    /// target resolver cluster's admin servers. Answered with [`EditPermsResponse`].
     #[pack(tag(26))]
     EditPerms(EditPermsRequest),
     /// Server-to-server: apply a permissions edit to this host's local
-    /// resolver perms — the receive side of cluster-wide perms propagation.
+    /// resolver perms — the receive side of resolver cluster-wide perms propagation.
     /// Peer-cert-gated like [`Request::ApplyReferralEdit`]. Answered with
     /// [`ApplyPermsEditResponse`].
     #[pack(tag(27))]
@@ -412,7 +412,7 @@ pub enum Request {
     /// Admin-authenticated, sent to the **CA**: restart / start / stop /
     /// status the activation units on **one** admin server (`target_server`).
     /// Gated on the caller's `service_control_scopes` covering that server's
-    /// cluster base (or a signing slot). The CA forwards a single
+    /// resolver cluster base (or a signing slot). The CA forwards a single
     /// [`Request::ApplyServiceControl`] to `target_server` (applying locally when
     /// it is the CA itself). Answered with [`ControlServiceResponse`].
     #[pack(tag(32))]
@@ -666,14 +666,14 @@ pub enum ListIssuedResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct GetCrlResponse {
-    /// `None` — no certificate has ever been revoked on this network.
+    /// `None` — no certificate has ever been revoked on this trust domain.
     pub crl_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct SignRequest {
     /// The identity class being issued. Resolver service identities may have
-    /// multiple live keys for their shared cluster TLS name; user-like kinds
+    /// multiple live keys for their shared resolver cluster TLS name; user-like kinds
     /// retain the one-live-name rule.
     pub kind: NodeKind,
     /// Which admin's password follows — selects the keyslot and its
@@ -689,7 +689,7 @@ pub struct SignRequest {
     /// id-map groups to register the new identity with (first is
     /// primary) — chosen by the admin at enrollment time, validated
     /// against the allowed set in their policy. Empty ⇒ don't
-    /// register this identity on the network's id-map hosts.
+    /// register this identity on the trust domain's id-map hosts.
     #[serde(default)]
     #[pack(default)]
     pub id_map_groups: Vec<String>,
@@ -716,7 +716,7 @@ pub struct EnrollRequest {
     pub roles: BitFlags<Role>,
     /// The resolver endpoint owned by this admin-server identity. It must be
     /// one of this host's locally configured `resolver_members`; stable
-    /// ownership lets the CA form and split clusters without treating those
+    /// ownership lets the CA form and split resolver clusters without treating those
     /// optional launch blocks as the authoritative roster.
     pub resolver_member: Option<ResolverAddr>,
     pub resolver_members: Vec<ResolverAddr>,
@@ -818,7 +818,7 @@ pub struct EnqueueRequest {
     /// the reserved [`SERVING_SAN`] (whatever `requested_name` says)
     /// and the value is where the new admin server will listen — the CA
     /// records it as a peer at approval. Approval requires an admin
-    /// whose policy covers the requested cluster base and roles; the request code
+    /// whose policy covers the requested resolver cluster base and roles; the request code
     /// ceremony is the same as any queued request.
     #[serde(default)]
     #[pack(default)]
@@ -895,7 +895,7 @@ pub struct QueueEntry {
     #[pack(default)]
     pub enrollment: Option<EnrollmentRequest>,
     /// Authoritative base of the requested resolver cluster. For `Create` this
-    /// repeats the requested base; for `Join` the CA resolves the stable cluster
+    /// repeats the requested base; for `Join` the CA resolves the stable resolver cluster
     /// ID through its map so approval UIs can show both identity and scope.
     #[serde(default)]
     #[pack(default)]
@@ -944,7 +944,7 @@ pub type DenyResponse = RpcResult<()>;
 
 /// A delegation request names the intended parent and child by immutable
 /// admin-server identities. The two sets may currently belong to distinct
-/// clusters (attach/rebase) or to one active peer cluster (split). No
+/// resolver clusters (attach/rebase) or to one active peer resolver cluster (split). No
 /// credentials are carried: approval is authorized by matching the
 /// out-of-band request code over this complete proposal.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -989,7 +989,7 @@ pub struct DelegationEntry {
     pub proposed_path: String,
     pub parent_servers: Vec<AdminServerId>,
     pub child_servers: Vec<AdminServerId>,
-    /// Current/final cluster IDs resolved by the controller for display.
+    /// Current/final resolver cluster IDs resolved by the controller for display.
     pub parent: ResolverClusterId,
     pub child: ResolverClusterId,
     pub parent_base: String,
@@ -1010,7 +1010,7 @@ pub struct ApproveDelegationRequest {
 }
 
 /// The per-peer outcome of propagating a delegation edit across the
-/// resolver cluster. A non-`Ok` peer means the cluster is inconsistent
+/// resolver cluster. A non-`Ok` peer means the resolver cluster is inconsistent
 /// until re-synced — the reviewer surfaces it loudly.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct PeerResult {
@@ -1031,7 +1031,7 @@ pub struct DenyDelegationRequest {
 
 pub type DenyDelegationResponse = RpcResult<()>;
 
-/// A referral edit pushed server-to-server for cluster-wide consistency.
+/// A referral edit pushed server-to-server for resolver cluster-wide consistency.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum ReferralEdit {
     /// Replace the complete CA-managed topology portion of a resolver config.
@@ -1077,7 +1077,7 @@ pub struct ResolverAddr {
 
 /// This host's local facts plus the admin servers it knows of. The
 /// client aggregates across servers (mDNS-discovered ∪ peer-walk) to
-/// build the network-wide picture; one reachable admin server is enough
+/// build the trust domain-wide picture; one reachable admin server is enough
 /// to walk the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct GetInfoResponse {
@@ -1091,8 +1091,8 @@ pub struct GetInfoResponse {
     pub peers: Vec<SocketAddr>,
 }
 
-/// One edge of the resolver hierarchy: a mount path and the cluster it
-/// points at. A read-only fact for the network map — distinct from
+/// One edge of the resolver hierarchy: a mount path and the resolver cluster it
+/// points at. A read-only fact for the trust domain map — distinct from
 /// [`ReferralEdit`], which *mutates* a referral during delegation.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
 pub struct ResolverClusterEdge {
@@ -1101,19 +1101,19 @@ pub struct ResolverClusterEdge {
 }
 
 /// Resolver facts self-reported by one admin server: its locally configured
-/// launch members, where its assigned cluster attaches, and hierarchy edges.
-/// The CA derives the authoritative cluster roster from enrolled server
+/// launch members, where its assigned resolver cluster attaches, and hierarchy edges.
+/// The CA derives the authoritative resolver cluster roster from enrolled server
 /// ownership; `members` may be only this node or a convenient larger subset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub struct ResolverClusterFacts {
     /// This host's configured advertisable member blocks (`Local` dropped).
     pub members: Vec<ResolverAddr>,
-    /// Where this cluster attaches — its parent-referral path, or `/` for
-    /// the root cluster.
+    /// Where this resolver cluster attaches — its parent-referral path, or `/` for
+    /// the root resolver cluster.
     pub base: String,
-    /// The parent cluster this one attaches under, if any.
+    /// The parent resolver cluster this one attaches under, if any.
     pub parent: Option<ResolverClusterEdge>,
-    /// The child clusters delegated below this one.
+    /// The child resolver clusters delegated below this one.
     pub children: Vec<ResolverClusterEdge>,
 }
 
@@ -1162,7 +1162,7 @@ pub struct ResolverClusterEntry {
 /// CA builds it from admin-server [`Request::Register`] pushes — never by
 /// walking — bumps `version` on every change, persists it, and serves it.
 /// Every admin server caches a copy (version-checked) and serves it to
-/// clients, so one round trip to any admin server is the whole network.
+/// clients, so one round trip to any admin server is the whole trust domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub struct TrustDomainMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
@@ -1250,7 +1250,7 @@ pub type RemoveServerResponse = RpcResult<RemoveServerOk>;
 /// This host's permissions file, serialized (a resolver `PMap` as JSON).
 pub type GetPermsResponse = RpcResult<String>;
 
-/// Admin → controller: read the permissions of the cluster mounted exactly at
+/// Admin → controller: read the permissions of the resolver cluster mounted exactly at
 /// `target_path`.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ReadPermsRequest {
@@ -1267,12 +1267,12 @@ pub struct ReadPermsOk {
 
 pub type ReadPermsResponse = RpcResult<ReadPermsOk>;
 
-/// Admin → CA: replace the `target_path` cluster's permissions with
+/// Admin → CA: replace the `target_path` resolver cluster's permissions with
 /// `perms_json` (a serialized resolver `PMap`).
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct EditPermsRequest {
     pub credential: AdminCredential,
-    /// The base path of the cluster whose perms to edit (e.g. `/eu`).
+    /// The base path of the resolver cluster whose perms to edit (e.g. `/eu`).
     pub target_path: String,
     pub perms_json: String,
 }
@@ -1326,7 +1326,7 @@ pub struct ListAdminsRequest {
     pub credential: AdminCredential,
 }
 
-/// Response to add/set/remove admin ops. These are CA-local (no cluster
+/// Response to add/set/remove admin ops. These are CA-local (no resolver cluster
 /// propagation), so there is no peer-result list — just success or a safe
 /// reason.
 pub type AdminMgmtResponse = RpcResult<()>;
@@ -1339,9 +1339,9 @@ pub type AdminListResponse = RpcResult<Vec<crate::policy::AdminInfo>>;
 
 /// Admin → CA: control services on **one** admin server (`target_server`, its
 /// immutable CA-issued identity). Restart is deliberately per-server, not
-/// cluster-wide — an operator restarts one resolver at a time so readers never
+/// resolver cluster-wide — an operator restarts one resolver at a time so readers never
 /// see a gap. Authorized by the caller's `service_control_scopes` covering that
-/// server's cluster base (or a signing slot). `units` empty ⇒ every unit (for
+/// server's resolver cluster base (or a signing slot). `units` empty ⇒ every unit (for
 /// [`netidx_activation::control::ControlOp::Status`]); the op + unit names come
 /// from the activation control protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1371,7 +1371,7 @@ pub struct ApplyServiceControlRequest {
 
 pub type ApplyServiceControlResponse = RpcResult<Vec<ServiceUnit>>;
 
-/// A cluster member's unit as reported to the service panel: its live run
+/// A resolver cluster member's unit as reported to the service panel: its live run
 /// state plus, when a definition file exists on that member, the display
 /// fields the panel shows (so the remote services view has the same
 /// list + status + definition layout as the local one). The member fills
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     fn cluster_facts_root_decodes() {
-        // A root cluster reports base "/" and no parent/children.
+        // A root resolver cluster reports base "/" and no parent/children.
         let json = r#"{"members":[{"addr":"10.0.0.1:4564","auth":"Anonymous"}],"base":"/","parent":null,"children":[]}"#;
         let cf: ResolverClusterFacts = serde_json::from_str(json).unwrap();
         assert_eq!(cf.base, "/");

@@ -1,9 +1,9 @@
 //! The workstation role install: a local resolver + matching client, with an
-//! optional parent referral up to a network-wide resolver.
+//! optional parent referral up to a trust domain-wide resolver.
 //!
-//! A workstation never mints a CA; when it joins a network it enrolls a client
+//! A workstation never mints a CA; when it joins a trust domain it enrolls a client
 //! cert over the admin plane. `run_workstation_join` graduates an existing
-//! local-only workstation onto a network without a reinstall.
+//! local-only workstation onto a trust domain without a reinstall.
 
 use super::{
     InstallCommon, InstallMode, finish_with, install_renew_unit, prompt_ip_or_addr,
@@ -38,7 +38,7 @@ pub struct WorkstationInput {
     /// run the discovery / prompt cascade.
     pub explicit_parent: Option<ParentRef>,
     /// Enroll against this admin server (`--admin-server`) instead of mDNS
-    /// discovery — the non-interactive join path. On a TLS network this
+    /// discovery — the non-interactive join path. On a TLS trust domain this
     /// enrolls a client certificate; the presented identity is confirmed via
     /// `--accept-glyph`. Ignored when `explicit_parent` is set.
     pub admin_server: Option<SocketAddr>,
@@ -111,10 +111,10 @@ impl WorkstationInput {
 /// Typed inputs for [`run_workstation_join`].
 pub struct WorkstationJoinInput {
     pub mode: InstallMode,
-    /// Private-key protection for an enrolled client cert (TLS networks).
+    /// Private-key protection for an enrolled client cert (TLS trust domains).
     pub key_protection: Option<KeyProtArg>,
-    /// The network's admin server, named explicitly (`--admin-server`) —
-    /// selects + glyph-confirms the network directly, so `join` works under the
+    /// The trust domain's admin server, named explicitly (`--admin-server`) —
+    /// selects + glyph-confirms the trust domain directly, so `join` works under the
     /// strict answerer (which disables mDNS discovery). `None` ⇒ discover.
     pub admin_server: Option<SocketAddr>,
 }
@@ -128,7 +128,7 @@ pub async fn run_workstation(
     input: WorkstationInput,
 ) -> Result<Option<ServiceScope>> {
     // Resolve before discovery or enrollment, so an unnameable Local-auth user
-    // fails before any network or disk changes.
+    // fails before any trust domain or disk changes.
     let input = input.resolve_owner()?;
     let WorkstationInput {
         explicit_parent,
@@ -153,13 +153,13 @@ pub async fn run_workstation(
     // Staging tempdirs for any admin-server-joined identity must outlive the
     // `finish_with` (apply) call.
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
-    // Provenance for the install record: set when we join a discovered network.
+    // Provenance for the install record: set when we join a discovered trust domain.
     let mut net_prov: (Option<TrustDomainIdentity>, Option<SocketAddr>) = (None, None);
     // `--parent-path` defaults to the workstation's own base.
     let parent = match explicit_parent {
         Some(p) => Some(p),
         None => {
-            // Ask the network before asking the human: a discovered
+            // Ask the trust domain before asking the human: a discovered
             // (glyph-confirmed) admin server answers everything the prompt
             // cascade would have. `--admin-server` names it explicitly (the
             // non-interactive path, where mDNS discovery is disabled).
@@ -235,14 +235,14 @@ pub async fn run_workstation(
         with_container,
     };
     let rt = template::workstation(&params)?;
-    let (network, admin_server) = net_prov;
-    // The workstation's own resolver is local-auth; the network it refers up
+    let (trust_domain, admin_server) = net_prov;
+    // The workstation's own resolver is local-auth; the trust domain it refers up
     // to (if any) carries its auth inside the parent referral.
     let record = InstallRecord::new(
         InstallRole::Workstation,
         base,
         "local",
-        network,
+        trust_domain,
         admin_server,
     );
     finish_with(
@@ -261,9 +261,9 @@ pub async fn run_workstation(
     .await
 }
 
-/// Graduate a local-only workstation onto a network: discover + glyph-confirm
+/// Graduate a local-only workstation onto a trust domain: discover + glyph-confirm
 /// it, enroll a client cert if it's TLS, attach the local resolver via a
-/// parent referral, and record the joined (pinned) network — without a
+/// parent referral, and record the joined (pinned) trust domain — without a
 /// reinstall.
 pub async fn run_workstation_join(
     ans: &mut dyn Answerer,
@@ -281,10 +281,10 @@ pub async fn run_workstation_join(
             rec.role.as_str(),
         );
     }
-    if let Some(net) = &rec.network {
+    if let Some(net) = &rec.trust_domain {
         bail!(
-            "this workstation has already joined network {:?}. Re-joining a \
-             different network isn't supported yet (uninstall + reinstall to \
+            "this workstation has already joined trust domain {:?}. Re-joining a \
+             different trust domain isn't supported yet (uninstall + reinstall to \
              switch).",
             net.domain,
         );
@@ -293,7 +293,7 @@ pub async fn run_workstation_join(
         .context("no resolver config found — is this a workstation install?")?;
     let cpath = paths::discover_client_config()
         .context("no client config found — is this a workstation install?")?;
-    // An explicit `--admin-server` names the network directly (and glyph-confirms
+    // An explicit `--admin-server` names the trust domain directly (and glyph-confirms
     // it via `--accept-glyph`); otherwise discover it (interactive only — the
     // strict answerer disables discovery, so strict `join` needs `--admin-server`).
     let probe = match admin_server {
@@ -303,7 +303,7 @@ pub async fn run_workstation_join(
         None => enroll::discover_trust_domain(ans, NodeKind::Workstation).await?,
     };
     let net = probe.have().context(
-        "no network was selected to join — pass --admin-server <addr> (with \
+        "no trust domain was selected to join — pass --admin-server <addr> (with \
          --accept-glyph) to name it explicitly, or run interactively to discover it",
     )?;
     let mut tls_identities: Vec<TlsIdentitySpec> = Vec::new();
@@ -321,7 +321,7 @@ pub async fn run_workstation_join(
     .await?;
     let parent = ParentRef { path: ArcStr::from(rec.base.as_str()), ttl: None, addrs };
     // Capture the confirmed identity for the marker before applying.
-    let network =
+    let trust_domain =
         TrustDomainIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
     let admin_server = net.info.reached.first().copied();
     let rt = template::attach_to_trust_domain(&rpath, &cpath, parent, tls_identities)?;
@@ -332,14 +332,14 @@ pub async fn run_workstation_join(
     let record_path = config_lock.require_contained(paths::user_install_record()?)?;
     rt.apply(config_lock).context("applying the join")?;
     ans.note("ok");
-    rec.network = Some(network);
+    rec.trust_domain = Some(trust_domain);
     rec.admin_server = admin_server;
     rec.save_async(config_lock, &record_path)
         .await
         .context("updating the install record")?;
     ans.note(&format_compact!(
-        "joined network {:?} — restart the local resolver to use it",
-        rec.network.as_ref().expect("just set").domain,
+        "joined trust domain {:?} — restart the local resolver to use it",
+        rec.trust_domain.as_ref().expect("just set").domain,
     ));
     Ok(())
 }

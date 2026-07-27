@@ -1,13 +1,13 @@
-//! The Cluster tab's known-cluster registry: admin clusters this machine has
+//! The Trust domain tab's known-trust domain registry: admin trust domains this machine has
 //! connected to or discovered, persisted to the config dir so commonly-used
-//! clusters reappear without retyping an address.
+//! trust domains reappear without retyping an address.
 //!
-//! A cluster is identified by its **CA fingerprint** (one CA identity, reachable
-//! at one or more admin-server addresses). Before a saved cluster is shown, an
+//! A trust domain is identified by its **CA fingerprint** (one CA identity, reachable
+//! at one or more admin-server addresses). Before a saved trust domain is shown, an
 //! on-entry poll re-fetches the identity at its saved addresses and confirms the
 //! fingerprint still matches — so an address reused by a *different* CA on a
-//! different network (`192.168.1.1:4565` is the same on every LAN) can never
-//! masquerade as a cluster you trusted elsewhere.
+//! different trust domain (`192.168.1.1:4565` is the same on every LAN) can never
+//! masquerade as a trust domain you trusted elsewhere.
 
 use futures::future::join_all;
 use netidx_admin_client::{paths, transport::fetch_identity};
@@ -15,20 +15,20 @@ use netidx_admin_proto::{NodeKind, fingerprint::Fingerprint};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-/// Per-address poll timeout — a down or firewalled cluster must not stall the
+/// Per-address poll timeout — a down or firewalled trust domain must not stall the
 /// whole poll.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// One known admin cluster — a single CA identity reachable at one or more
+/// One known admin trust domain — a single CA identity reachable at one or more
 /// admin-server addresses. Persisted as JSON; the fingerprint is stored in its
 /// grouped-base32 text form ([`Fingerprint`] has no serde derive).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct KnownTrustDomain {
     pub(super) domain: String,
-    /// The CA fingerprint text (the cluster's identity). Compared against a live
-    /// fetch before the cluster is shown or connected to.
+    /// The CA fingerprint text (the trust domain's identity). Compared against a live
+    /// fetch before the trust domain is shown or connected to.
     pub(super) fingerprint: String,
-    /// Admin-server addresses seen for this cluster's members, tried in order.
+    /// Admin-server addresses seen for this trust domain's members, tried in order.
     pub(super) addrs: Vec<SocketAddr>,
 }
 
@@ -39,7 +39,7 @@ impl KnownTrustDomain {
     }
 }
 
-/// The persisted set of known clusters.
+/// The persisted set of known trust domains.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct KnownTrustDomains {
     #[serde(default)]
@@ -48,11 +48,11 @@ pub(super) struct KnownTrustDomains {
 
 impl KnownTrustDomains {
     fn path() -> anyhow::Result<PathBuf> {
-        Ok(paths::user_config_root()?.join("admin-clusters.json"))
+        Ok(paths::user_config_root()?.join("admin-trust domains.json"))
     }
 
-    /// Load the saved clusters, or an empty set if the file is missing or
-    /// unreadable — a corrupt registry must never break the Cluster tab.
+    /// Load the saved trust domains, or an empty set if the file is missing or
+    /// unreadable — a corrupt registry must never break the Trust domain tab.
     pub(super) fn load() -> KnownTrustDomains {
         let Ok(path) = Self::path() else { return KnownTrustDomains::default() };
         match std::fs::read(&path) {
@@ -71,7 +71,7 @@ impl KnownTrustDomains {
         }
         let tmp = path.with_extension("json.tmp");
         let body =
-            serde_json::to_vec_pretty(self).context("serializing known clusters")?;
+            serde_json::to_vec_pretty(self).context("serializing known trust domains")?;
         std::fs::write(&tmp, &body)
             .with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
@@ -79,8 +79,8 @@ impl KnownTrustDomains {
         Ok(())
     }
 
-    /// Record a confirmed cluster: merge `addr` into the entry with a matching
-    /// fingerprint (one cluster = one CA identity, possibly several members), or
+    /// Record a confirmed trust domain: merge `addr` into the entry with a matching
+    /// fingerprint (one trust domain = one CA identity, possibly several members), or
     /// append a new entry. Returns whether anything changed (worth saving).
     pub(super) fn upsert(
         &mut self,
@@ -114,17 +114,17 @@ impl KnownTrustDomains {
     }
 }
 
-/// If this host runs its own admin server — i.e. it founded or joined a cluster
-/// and hosts a member of it — make sure that cluster is in the saved set, so it
-/// appears on the Cluster tab without a manual discover. The identity is the one
-/// recorded in this host's install record (`network`); the admin-server address
+/// If this host runs its own admin server — i.e. it founded or joined a trust domain
+/// and hosts a member of it — make sure that trust domain is in the saved set, so it
+/// appears on the Trust domain tab without a manual discover. The identity is the one
+/// recorded in this host's install record (`trust domain`); the admin-server address
 /// is this host's own listen address (a CA host records no upstream one). The
-/// on-entry poll then verifies it live like any other saved cluster. Returns
+/// on-entry poll then verifies it live like any other saved trust domain. Returns
 /// whether the saved set changed (worth saving).
 #[cfg(unix)]
 pub(super) fn seed_local_cluster(clusters: &mut KnownTrustDomains) -> bool {
     let Some((domain, fp, recorded)) = local_cluster_identity() else { return false };
-    // The address to reach this cluster's CA: this host's own admin-server listen
+    // The address to reach this trust domain's CA: this host's own admin-server listen
     // if it hosts a member (a CA / resolver), else the upstream admin server this
     // host enrolled against, recorded at join (a workstation / publisher runs no
     // admin server of its own). Either reaches the same CA; the on-entry poll
@@ -136,7 +136,7 @@ pub(super) fn seed_local_cluster(clusters: &mut KnownTrustDomains) -> bool {
     clusters.upsert(&domain, addr, fp)
 }
 
-/// The admin cluster this host belongs to — domain, CA fingerprint, and the
+/// The admin trust domain this host belongs to — domain, CA fingerprint, and the
 /// admin-server address recorded at install (the upstream one it joined, if
 /// any) — from its install record: the user-scope record, else the system one.
 #[cfg(unix)]
@@ -148,7 +148,7 @@ fn local_cluster_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)>
         sys.exists().then(|| InstallRecord::load(&sys).ok()).flatten(),
     ];
     records.into_iter().flatten().find_map(|r| {
-        let net = r.network?;
+        let net = r.trust_domain?;
         let fp = Fingerprint::parse_text(&net.ca_fingerprint).ok()?;
         Some((net.domain, fp, r.admin_server))
     })
@@ -159,7 +159,7 @@ pub(super) fn seed_local_cluster(_clusters: &mut KnownTrustDomains) -> bool {
     false
 }
 
-/// Where an on-entry poll of a known cluster landed.
+/// Where an on-entry poll of a known trust domain landed.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum PollState {
     /// Not yet polled — the event loop launches one poll pass per pending set.
@@ -169,12 +169,12 @@ pub(super) enum PollState {
     /// Reachable at `addr` with the saved CA identity — safe to show + connect.
     Present { addr: SocketAddr },
     /// No address answered with the saved fingerprint (down, or the address is
-    /// now a different cluster). Hidden from the list.
+    /// now a different trust domain). Hidden from the list.
     Absent,
 }
 
 impl PollState {
-    /// The verified address to connect to, when this cluster polled `Present`.
+    /// The verified address to connect to, when this trust domain polled `Present`.
     pub(super) fn present_addr(&self) -> Option<SocketAddr> {
         match self {
             PollState::Present { addr } => Some(*addr),
@@ -183,10 +183,10 @@ impl PollState {
     }
 }
 
-/// Poll each pending known cluster concurrently: try its addresses in order and
+/// Poll each pending known trust domain concurrently: try its addresses in order and
 /// accept the first that answers with the saved CA fingerprint. A live-but-
 /// different fingerprint (an address reused by another CA) is skipped, so a
-/// cluster is only `Present` when its identity actually verifies. Self-contained
+/// trust domain is only `Present` when its identity actually verifies. Self-contained
 /// (owns its inputs) so the event loop can poll it as a background future.
 pub(super) async fn poll_clusters(
     pending: Vec<(usize, KnownTrustDomain)>,
@@ -218,21 +218,21 @@ mod tests {
 
     #[test]
     fn upsert_dedups_by_fingerprint() {
-        let a = Fingerprint::of_der(b"cluster a spki");
-        let b = Fingerprint::of_der(b"cluster b spki");
+        let a = Fingerprint::of_der(b"trust domain a spki");
+        let b = Fingerprint::of_der(b"trust domain b spki");
         let mut kc = KnownTrustDomains::default();
         let addr1: SocketAddr = "10.0.0.1:4565".parse().unwrap();
         let addr2: SocketAddr = "10.0.0.2:4565".parse().unwrap();
-        // First sighting of cluster a.
+        // First sighting of trust domain a.
         assert!(kc.upsert("hq.local", addr1, a));
         assert_eq!(kc.domains.len(), 1);
-        // A second member of the *same* cluster merges its address in.
+        // A second member of the *same* trust domain merges its address in.
         assert!(kc.upsert("hq.local", addr2, a));
         assert_eq!(kc.domains.len(), 1);
         assert_eq!(kc.domains[0].addrs, vec![addr1, addr2]);
         // Re-seeing a known member is a no-op.
         assert!(!kc.upsert("hq.local", addr2, a));
-        // A different CA identity is a distinct cluster, even at a shared address.
+        // A different CA identity is a distinct trust domain, even at a shared address.
         assert!(kc.upsert("eu.local", addr1, b));
         assert_eq!(kc.domains.len(), 2);
     }

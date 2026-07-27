@@ -20,13 +20,13 @@ use crate::{
 use log::info;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-/// Whether `authd` may control services on an admin server whose cluster base
+/// Whether `authd` may control services on an admin server whose resolver cluster base
 /// is `base`.
 fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> bool {
     signing_slot(authd) || scope_covers(&authd.policy.service_control_scopes, base)
 }
 
-/// The cluster base of the admin server whose listen address is `addr`, from
+/// The resolver cluster base of the admin server whose listen address is `addr`, from
 /// the map — the authorization scope for controlling that server's services.
 /// `None` if the server isn't in the map or runs no resolver cluster.
 fn base_for_server(
@@ -59,7 +59,7 @@ fn registered_server_addr(
 /// apply the op to **one** admin server (`req.target_server`) — forwarding a
 /// single peer-cert-gated [`Request::ApplyServiceControl`], or applying locally
 /// when the target is the CA itself. Per-server by design: restart is never
-/// cluster-wide, so a careful operator restarts one resolver at a time.
+/// resolver cluster-wide, so a careful operator restarts one resolver at a time.
 pub(super) async fn handle_control_service(
     state: &Arc<Server>,
     req: &ControlServiceRequest,
@@ -85,7 +85,7 @@ pub(super) async fn handle_control_service(
         Ok(a) => a,
         Err(reason) => return err(safe_auth_failure(&req.credential, reason)),
     };
-    // The target server's cluster base is its authorization scope. A server not
+    // The target server's resolver cluster base is its authorization scope. A server not
     // in the map (or running no resolver) has no base — only a signing slot may
     // control it, so an unknown target can't be reached by a scoped role admin.
     let target_server = req.target_server;

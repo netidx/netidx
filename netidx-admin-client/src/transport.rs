@@ -1,6 +1,6 @@
-//! Admin-server client: discover what a netidx network looks like, join
+//! Admin-server client: discover what a netidx trust domain looks like, join
 //! it (generate a key + CSR locally and request a signature over TLS),
-//! and enroll new admin servers — verifying the network's CA identity by
+//! and enroll new admin servers — verifying the trust domain's CA identity by
 //! fingerprint before sending anything secret.
 //!
 //! Cross-platform — rcgen + rustls + sha2 + x509-parser, never openssl
@@ -240,7 +240,7 @@ pub struct CaIdentity {
     /// SHA-256 of the CA cert, for out-of-band comparison (text +
     /// identicon).
     pub fingerprint: Fingerprint,
-    /// The network's TLS domain, as claimed in the server hello.
+    /// The trust domain's TLS domain, as claimed in the server hello.
     pub domain: String,
     /// The roles the contacted host claimed in the server hello.
     pub roles: BitFlags<Role>,
@@ -495,7 +495,7 @@ async fn connect_pinned(
     // the trust anchor explicit).
     let cert_identity = verify_serving_cert(serving_der, &expected.ca_der).context(
         "the admin server's serving certificate failed verification against the \
-         confirmed CA — this is not the network you confirmed",
+         confirmed CA — this is not the trust domain you confirmed",
     )?;
     let hello = exchange_hello(&mut tls, kind).await?;
     if hello.server_id != cert_identity.server_id
@@ -613,7 +613,7 @@ pub async fn logout(
 }
 
 /// Fetch one admin server's local facts + known peers, pinned to the
-/// confirmed identity. See [`aggregate`] for the network-wide picture.
+/// confirmed identity. See [`aggregate`] for the trust domain-wide picture.
 pub async fn get_info(
     addr: SocketAddr,
     kind: NodeKind,
@@ -624,8 +624,8 @@ pub async fn get_info(
     admin_proto::read_msg(&mut tls).await
 }
 
-/// Fetch the whole network map from one admin server, pinned to the
-/// confirmed CA identity — one round trip is the entire network. The
+/// Fetch the whole trust domain map from one admin server, pinned to the
+/// confirmed CA identity — one round trip is the entire trust domain. The
 /// client-facing counterpart of [`get_map`] (which authenticates with a
 /// serving cert for the server-to-server refresh path).
 pub async fn get_map_pinned(
@@ -805,7 +805,7 @@ pub async fn pull_perms(
 }
 
 /// Admin → controller: authenticate, authorize `target_path`, and have the
-/// controller read one exact registered member of that cluster.
+/// controller read one exact registered member of that resolver cluster.
 pub async fn read_perms(
     addr: SocketAddr,
     kind: NodeKind,
@@ -833,7 +833,7 @@ pub async fn read_perms(
     }
 }
 
-/// Admin → CA (pinned): edit a target cluster's perms; returns the per-peer
+/// Admin → CA (pinned): edit a target resolver cluster's perms; returns the per-peer
 /// propagation results so the caller can surface a partial failure.
 pub async fn edit_perms(
     addr: SocketAddr,
@@ -1041,23 +1041,23 @@ pub async fn push_service_control(
 }
 
 /// The controller-authoritative picture of the bootstrap server's resolver
-/// cluster, plus the admin servers reached while walking discovery hints.
+/// resolver cluster, plus the admin servers reached while walking discovery hints.
 /// Everything in it was served over connections pinned to the
 /// operator-confirmed CA.
 pub struct TrustDomainInfo {
     pub domain: String,
     /// Where Sign/Enroll requests go. The first CA location seen wins;
-    /// a well-formed network only has one.
+    /// a well-formed trust domain only has one.
     pub ca_addr: Option<SocketAddr>,
-    /// The active members of the bootstrap server's CA-owned cluster. These
+    /// The active members of the bootstrap server's CA-owned resolver cluster. These
     /// are replicas of one resolver cluster, never a flattening of the
-    /// hierarchy's parent and child clusters.
+    /// hierarchy's parent and child resolver clusters.
     pub resolvers: Vec<ResolverAddr>,
-    /// Base of that one bootstrap cluster. Installers use it when adding a
+    /// Base of that one bootstrap resolver cluster. Installers use it when adding a
     /// replica to a non-root level; it is ordinary admin metadata and never
     /// changes netidx's data-plane protocol.
     pub resolver_base: Option<String>,
-    /// Referral topology for that one cluster, derived from the authoritative
+    /// Referral topology for that one resolver cluster, derived from the authoritative
     /// map and restricted to active, registered routing targets.
     pub resolver_parent: Option<admin_proto::ResolverClusterEdge>,
     pub resolver_children: Vec<admin_proto::ResolverClusterEdge>,
@@ -1065,7 +1065,7 @@ pub struct TrustDomainInfo {
     pub reached: Vec<SocketAddr>,
 }
 
-/// Upper bound on the peer walk — far above any plausible network, just
+/// Upper bound on the peer walk — far above any plausible trust domain, just
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
@@ -1093,9 +1093,9 @@ fn registered_members(
     members
 }
 
-/// One active cluster's CA-authoritative resolver topology. This is also used
+/// One active resolver cluster's CA-authoritative resolver topology. This is also used
 /// by strict installers whose explicit bootstrap server belongs to a different
-/// level of the hierarchy than the cluster they are joining.
+/// level of the hierarchy than the resolver cluster they are joining.
 pub struct ResolverClusterTopology {
     pub members: Vec<ResolverAddr>,
     pub parent: Option<admin_proto::ResolverClusterEdge>,
@@ -1151,7 +1151,7 @@ pub fn cluster_topology_by_base(
                 && cluster.state == admin_proto::ResolverClusterState::Active
         })
         .with_context(|| {
-            format!("the authoritative map has no active cluster at {base}")
+            format!("the authoritative map has no active resolver cluster at {base}")
         })?;
     cluster_topology(map, cluster.id)
 }
@@ -1173,17 +1173,19 @@ fn bootstrap_cluster(
     let controller = map
         .controller_entry()
         .filter(|s| s.state == admin_proto::ServerState::Registered)
-        .context("network map contains no registered controller")?;
+        .context("trust domain map contains no registered controller")?;
     let bootstrap = map
         .admin_servers
         .iter()
         .find(|s| s.id == server_id)
         .filter(|s| s.state == admin_proto::ServerState::Registered)
-        .context("the verified bootstrap server is not registered in the network map")?;
+        .context(
+            "the verified bootstrap server is not registered in the trust domain map",
+        )?;
     // A dedicated controller has no resolver cluster of its own. It is still a
-    // normal discovery seed, so map it to the one active root cluster when
+    // normal discovery seed, so map it to the one active root resolver cluster when
     // constructing client configuration. A satellite seed continues to select
-    // its exact cluster; hierarchy levels are never flattened.
+    // its exact resolver cluster; hierarchy levels are never flattened.
     let bootstrap_cluster = bootstrap.cluster.or_else(|| {
         (bootstrap.id == map.controller)
             .then(|| {
@@ -1215,12 +1217,12 @@ fn bootstrap_cluster(
 /// Try `seeds` and their advertised peers as candidate paths to the exact
 /// controller. Stop as soon as one candidate yields the controller-authoritative
 /// map: peer addresses are discovery hints, not a checklist that every client
-/// must contact before it can use the network. This matters across routed or
-/// partitioned sites, where a perfectly usable bootstrap cluster may advertise
+/// must contact before it can use the trust domain. This matters across routed or
+/// partitioned sites, where a perfectly usable bootstrap resolver cluster may advertise
 /// admin servers that the joining client cannot reach directly.
 ///
 /// Resolver membership comes only from the authoritative map. Parent/child
-/// clusters are referrals, not replicas, and must never be flattened into one
+/// resolver clusters are referrals, not replicas, and must never be flattened into one
 /// client address set.
 pub async fn aggregate(
     seeds: &[SocketAddr],
@@ -1274,7 +1276,7 @@ pub async fn aggregate(
         bail!("no admin server could be reached");
     }
     let map = authoritative.context(
-        "reachable admin servers did not yield a controller-authoritative network map",
+        "reachable admin servers did not yield a controller-authoritative trust domain map",
     )?;
     let BootstrapSelection { controller, resolver } =
         bootstrap_cluster(&map, expected.server_id)?;
@@ -1292,10 +1294,10 @@ pub async fn aggregate(
     Ok(info)
 }
 
-/// Submit a CSR for `name` to the network's CA, authenticated as
+/// Submit a CSR for `name` to the trust domain's CA, authenticated as
 /// `admin`/`password`, pinned to the identity the operator already
 /// confirmed (`expected`, from [`fetch_identity`]). `id_map_groups`
-/// (first = primary) registers the new identity on the network's
+/// (first = primary) registers the new identity on the trust domain's
 /// id-map hosts — chosen here, at enrollment, by the authenticated
 /// admin; the server validates the choice against that admin's
 /// allowed set. Empty ⇒ no registration. Returns the signed cert +
@@ -1355,8 +1357,8 @@ pub async fn request_cert_replacing(
 }
 
 /// Enroll a new admin server: request the reserved [`SERVING_SAN`]
-/// serving cert from the network's CA, authenticated as
-/// `admin`/`password` (whose policy must cover the requested cluster and roles),
+/// serving cert from the trust domain's CA, authenticated as
+/// `admin`/`password` (whose policy must cover the requested resolver cluster and roles),
 /// pinned to the confirmed identity. `listen` is where the new daemon
 /// will serve — the CA records it as a peer. The returned leaf + the
 /// confirmed CA ([`CaIdentity::ca_pem`]) form the new daemon's serving
@@ -1524,7 +1526,7 @@ pub async fn enqueue_replacing(
 
 /// Queue a **admin-server enrollment** for asynchronous admin approval:
 /// the reserved [`SERVING_SAN`] serving cert, approvable only by an
-/// admin whose policy covers the requested cluster and roles. Same request-code
+/// admin whose policy covers the requested resolver cluster and roles. Same request-code
 /// ceremony and [`poll`] loop as a queued sign; `listen` is where the
 /// new admin server will serve (recorded as a peer at approval).
 pub async fn enqueue_enroll(
@@ -1628,7 +1630,7 @@ pub async fn poll(
 }
 
 /// List the pending signing queue, authenticated as `admin` (pinned —
-/// the admin's password only ever goes to the confirmed network).
+/// the admin's password only ever goes to the confirmed trust domain).
 pub async fn list_queue(
     addr: SocketAddr,
     credential: admin_proto::AdminCredential,
@@ -1677,7 +1679,7 @@ pub async fn approve(
     }
 }
 
-/// Fetch the network's current CRL (pinned). `None` — nothing has ever
+/// Fetch the trust domain's current CRL (pinned). `None` — nothing has ever
 /// been revoked.
 pub async fn get_crl(
     addr: SocketAddr,
@@ -1805,7 +1807,7 @@ pub async fn list_delegations(
     }
 }
 
-/// Approve a queued delegation. Returns the per-peer cluster-push results
+/// Approve a queued delegation. Returns the per-peer resolver cluster-push results
 /// (a non-empty `error` means that peer is out of sync — surface it).
 pub async fn approve_delegation(
     addr: SocketAddr,
@@ -1857,7 +1859,7 @@ pub async fn deny_delegation(
 }
 
 /// Server-to-server: push a referral edit to a peer admin server's local
-/// resolver config (the cluster-wide propagation push), authenticated by
+/// resolver config (the resolver cluster-wide propagation push), authenticated by
 /// our reserved-SAN serving cert. Mirrors [`push_identity`].
 pub async fn push_referral_edit(
     client: &AuthenticatedPkiClient,
@@ -2006,7 +2008,7 @@ pub fn home_ca_from_chain(pem: &[u8]) -> Result<CertificateDer<'static>> {
     Ok(certs.last().expect("length checked").clone())
 }
 
-/// Server→CA: register/update this admin server's facts in the CA's network
+/// Server→CA: register/update this admin server's facts in the CA's trust domain
 /// map, authenticated with the serving cert (peer-cert-gated). Returns the
 /// CA's new map version.
 pub async fn register(
@@ -2092,7 +2094,7 @@ pub async fn get_map_version_from_controller(
     }
 }
 
-/// Fetch the whole network map in one round trip — every cluster, every
+/// Fetch the whole trust domain map in one round trip — every resolver cluster, every
 /// admin server's role, the CA location.
 pub async fn get_map(
     client: &PkiClient,
@@ -2404,7 +2406,7 @@ pub async fn poll_renewal(
 
 /// [`get_info`] over real PKI (webpki against `roots`) — for unattended
 /// callers that hold the trust bundle, e.g. the renewal daemon mapping
-/// the network to find the CA. Only genuine members of the network can
+/// the trust domain to find the CA. Only genuine members of the trust domain can
 /// answer; no human confirmation involved.
 pub async fn get_info_pki(
     client: &PkiClient,
@@ -3224,7 +3226,7 @@ mod tests {
         (cert.pem(), crl.pem().unwrap())
     }
 
-    /// A CRL pulled from the network is only installable if one of the CAs we
+    /// A CRL pulled from the trust domain is only installable if one of the CAs we
     /// already trust signed it. Without this the renewd distribution path will
     /// write whatever any peer that answers GetCrl hands it, straight into the
     /// file the resolver's TLS acceptor rebuilds from.

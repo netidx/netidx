@@ -321,7 +321,7 @@ impl Answerer for FlagAnswerer {
 
     async fn select_trust_domain(
         &mut self,
-        _networks: &[TrustDomainOption],
+        _domains: &[TrustDomainOption],
     ) -> Result<TrustDomainChoice> {
         // Discovery is interactive-only; the strict CLI takes an explicit
         // --admin-server instead and never reaches this.
@@ -356,7 +356,7 @@ impl Answerer for FlagAnswerer {
         match &self.accept_glyph {
             Some(expected) => Ok(&identity.fingerprint == expected),
             None => bail!(
-                "the admin server for network {:?} presented CA fingerprint:\n  \
+                "the admin server for trust domain {:?} presented CA fingerprint:\n  \
                  {}\nnon-interactively you must confirm it out of band and pass \
                  --accept-glyph <fingerprint>",
                 identity.domain,

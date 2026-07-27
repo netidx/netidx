@@ -39,7 +39,7 @@ pub mod workstation;
 // stay cfg-free and the crate still builds without the feature — degrading to
 // "no suggestion, ask the operator" rather than failing to compile.
 
-/// The IP a network daemon on this host should advertise, if the environment
+/// The IP a trust domain daemon on this host should advertise, if the environment
 /// can be probed. `None` without `cloud-detect`.
 ///
 /// `NetShape::detect` does blocking work — interface enumeration plus a
@@ -278,9 +278,9 @@ pub fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     }
 }
 
-/// Extract from a probe the network identity (domain + CA fingerprint) to pin
+/// Extract from a probe the trust domain identity (domain + CA fingerprint) to pin
 /// later lifecycle ops to, and a reachable admin-server address to start from.
-/// `(None, None)` when the install didn't join a *discovered* network (a
+/// `(None, None)` when the install didn't join a *discovered* trust domain (a
 /// CLI-flag parent, the manual prompt cascade, or no parent at all carry no
 /// confirmed identity).
 pub fn trust_domain_provenance(
@@ -323,7 +323,7 @@ pub fn install_renew_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()
 /// install a service at, or `None`.
 ///
 /// `post_apply` receives the `Answerer` and install-wide config lock. It is an
-/// `AsyncFnOnce` because standing up the admin server is network I/O.
+/// `AsyncFnOnce` because standing up the admin server is trust domain I/O.
 pub async fn finish_with(
     ans: &mut dyn Answerer,
     rt: RenderedTemplate,
@@ -602,7 +602,7 @@ mod tests {
 
         async fn select_trust_domain(
             &mut self,
-            _networks: &[TrustDomainOption],
+            _domains: &[TrustDomainOption],
         ) -> Result<TrustDomainChoice> {
             unreachable!()
         }
@@ -822,7 +822,7 @@ mod tests {
             async move |_ans, _config_lock| {
                 assert!(check_record.exists());
                 assert!(check_perms.exists());
-                bail!("simulated network failure")
+                bail!("simulated trust domain failure")
             },
         )
         .await
@@ -830,7 +830,7 @@ mod tests {
 
         let message = format!("{err:#}");
         assert!(message.contains("core install completed"));
-        assert!(message.contains("simulated network failure"));
+        assert!(message.contains("simulated trust domain failure"));
         assert_eq!(InstallRecord::load(&record_path).unwrap(), expected);
     }
 }

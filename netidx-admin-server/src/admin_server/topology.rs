@@ -398,7 +398,7 @@ pub(super) async fn get_info(state: &Server) -> GetInfoResponse {
 /// from its resolver config — the first advertisable (non-`Local`)
 /// member, the representative `GetInfo` reports. See
 /// [`ResolverConfig::resolver_addrs`](crate::resolver::ResolverConfig::resolver_addrs)
-/// for the full cluster set (used by delegation).
+/// for the full resolver cluster set (used by delegation).
 async fn resolver_info(config: &Path) -> Result<Option<ResolverAddr>> {
     let rc = crate::resolver::ResolverConfig::load_async(config).await?;
     Ok(rc.resolver_addrs().into_iter().next())
@@ -579,10 +579,10 @@ async fn handle_list_delegations_inner(
 /// Whether `authd` may approve or deny `pending`.
 ///
 /// A delegation restructures the hierarchy on **both** sides of the split: it
-/// mounts the child subtree, and it rewrites the *parent* cluster's referrals.
-/// So it needs authority over the parent cluster's base as well as over the
+/// mounts the child subtree, and it rewrites the *parent* resolver cluster's referrals.
+/// So it needs authority over the parent resolver cluster's base as well as over the
 /// proposed child path — an admin scoped to `/eu` must not be able to decide a
-/// delegation whose parent is the root cluster just because the child lands
+/// delegation whose parent is the root resolver cluster just because the child lands
 /// under `/eu`. [`trust_domain::delegate`] only enforces that the child path is
 /// under the parent base, and only after authorization has already run.
 ///
@@ -599,11 +599,12 @@ fn decide_delegation_authority(
             authd.admin, pending.proposed_path
         ));
     }
-    let base = trust_domain::parent_base(map, &pending.parent_servers)
-        .map_err(|e| format!("resolving the delegation's parent cluster: {e:#}"))?;
+    let base = trust_domain::parent_base(map, &pending.parent_servers).map_err(|e| {
+        format!("resolving the delegation's parent resolver cluster: {e:#}")
+    })?;
     if !delegation_authority(authd, &base) {
         return Err(format!(
-            "admin {} is not authorized to restructure the parent cluster at {base:?}",
+            "admin {} is not authorized to restructure the parent resolver cluster at {base:?}",
             authd.admin
         ));
     }
@@ -690,7 +691,7 @@ pub(super) async fn apply_referral_edit_local(
         ReferralEdit::SetTopology { local_member, members, parent, children } => {
             if !members.contains(local_member) {
                 bail!(
-                    "local resolver member {} is absent from its assigned cluster",
+                    "local resolver member {} is absent from its assigned resolver cluster",
                     local_member.addr
                 );
             }
@@ -705,7 +706,7 @@ pub(super) async fn apply_referral_edit_local(
                     "the target's owned resolver member does not match its local config",
                 )?;
             // `member_servers` are independent local launch choices, not a
-            // replica roster. Preserve whichever in-cluster convenience
+            // replica roster. Preserve whichever in-resolver cluster convenience
             // blocks this file already has, drop blocks moved to the other
             // side of a split, and never synthesize missing peers.
             let mut ordered = vec![local_block];
@@ -754,7 +755,7 @@ pub(super) async fn apply_referral_edit_local(
 }
 
 /// `ApplyReferralEdit` (server-to-server, peer-cert-gated): the receive
-/// side of cluster-wide delegation propagation. Requires a resolver role
+/// side of resolver cluster-wide delegation propagation. Requires a resolver role
 /// (the config to edit).
 pub(super) async fn handle_apply_referral_edit(
     state: &Server,
@@ -782,8 +783,8 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
     out
 }
 
-/// This host's own [`AdminServerEntry`] for the network map: its listen
-/// address, its roles, and — if it runs a resolver — its cluster facts.
+/// This host's own [`AdminServerEntry`] for the trust domain map: its listen
+/// address, its roles, and — if it runs a resolver — its resolver cluster facts.
 /// This host's own resolver base (the single level a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
 pub(super) async fn own_base(state: &Server) -> Option<String> {
@@ -874,7 +875,7 @@ pub(super) async fn handle_register(
             {
                 return (
                     RegisterResponse::Err {
-                        reason: format!("persisting the network map: {e:#}"),
+                        reason: format!("persisting the trust domain map: {e:#}"),
                     },
                     None,
                 );
@@ -924,7 +925,7 @@ pub(super) async fn handle_deregister(
                     trust_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
                 return RegisterResponse::Err {
-                    reason: format!("persisting the network map: {e:#}"),
+                    reason: format!("persisting the trust domain map: {e:#}"),
                 };
             }
             RegisterResponse::Ok(MapVersion { version: state.map.version })
@@ -944,7 +945,7 @@ struct RemoveServerPrepare {
 /// The blocking half of permanent server removal: authenticate, validate the
 /// transition, revoke every certificate for the immutable identity, and commit
 /// the new authoritative map. The returned topology fanout is deliberately
-/// separate: network I/O must not hold mutable state or the signing semaphore.
+/// separate: trust domain I/O must not hold mutable state or the signing semaphore.
 async fn remove_server_prepare(
     state: &Server,
     req: &RemoveServerRequest,
@@ -986,7 +987,7 @@ async fn remove_server_prepare_inner(
         Err(reason) => return Err(err(reason)),
     };
     // Evicting a admin server from the authoritative map cascades that host's
-    // resolver-cluster facts out of the map — a privileged, network-affecting
+    // resolver-resolver cluster facts out of the map — a privileged, trust domain-affecting
     // edit. Gate it on the admin-server lifecycle capability (the same bit
     // that authorizes enrolling one) or a broad admin.
     let broad = broad_admin(&authd);
@@ -1006,7 +1007,7 @@ async fn remove_server_prepare_inner(
         let scoped = match target_base {
             Some(base) => scope_covers(&authd.policy.server_enroll_scopes, base),
             // On an idempotent repeat the removed entry no longer tells us its
-            // cluster. A scoped admin may safely reconcile topology only inside its
+            // resolver cluster. A scoped admin may safely reconcile topology only inside its
             // own enrollment scopes.
             None => !authd.policy.server_enroll_scopes.is_empty(),
         };
@@ -1018,9 +1019,9 @@ async fn remove_server_prepare_inner(
                 target_base.unwrap_or("<unknown>")
             )));
         }
-        // Keep the removed cluster and each directly connected cluster in the
+        // Keep the removed resolver cluster and each directly connected resolver cluster in the
         // reconciliation set. If the last member disappears, `trust_domain::remove`
-        // deletes that cluster and detaches its children; the surviving parent and
+        // deletes that resolver cluster and detaches its children; the surviving parent and
         // children still need fresh topology.
         let mut affected_ids = BTreeSet::new();
         if let Some(cluster_id) = map
@@ -1051,10 +1052,10 @@ async fn remove_server_prepare_inner(
             Err(e) => return Err(err(format!("{e:#}"))),
         };
         // A repeat after partial fanout cannot recover the removed identity's
-        // cluster from the current map (there is deliberately no durable job
+        // resolver cluster from the current map (there is deliberately no durable job
         // record). Broad administrators therefore reconcile every surviving
-        // cluster on an idempotent repeat; scoped administrators reconcile only
-        // clusters their enrollment policy covers.
+        // resolver cluster on an idempotent repeat; scoped administrators reconcile only
+        // resolver clusters their enrollment policy covers.
         if !removed {
             affected_ids.extend(
                 map.resolver_clusters
@@ -1091,7 +1092,7 @@ async fn remove_server_prepare_inner(
             })?;
             let config_lock = ca.config_lock();
             if let Err(e) = trust_domain::save_async(&config_lock, &ca_dir, &next).await {
-                return Err(err(format!("persisting the network map: {e:#}")));
+                return Err(err(format!("persisting the trust domain map: {e:#}")));
             }
             *map = next;
             audit(
@@ -1160,7 +1161,7 @@ async fn remove_server_prepare_inner(
 }
 
 /// Permanently remove a dead identity, then reconcile only the surviving
-/// clusters whose referral topology changed. This never restarts a resolver;
+/// resolver clusters whose referral topology changed. This never restarts a resolver;
 /// administrators retain control of the rolling restart sequence.
 pub(super) async fn handle_remove_server(
     state: &Arc<Server>,
@@ -1378,7 +1379,7 @@ fn topology_edit(
 }
 
 /// Propagate topology edits to every registered server in the affected
-/// clusters using CA-owned routing addresses.
+/// resolver clusters using CA-owned routing addresses.
 async fn push_topology(
     state: &Arc<Server>,
     fanout: TopologyFanout,

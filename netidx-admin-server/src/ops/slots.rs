@@ -742,7 +742,7 @@ pub async fn external_install_cert(
     let (key, mut cadir) = external_ca_key(ans, lock.clone(), &ca_dir).await?;
     let (intermediate_pem, external_root_pem) =
         ca::validate_external_ca_cert(&signed_pem, root_pem.as_deref(), &key)?;
-    // certificate.pem is the intermediate ALONE (the network glyph is its key);
+    // certificate.pem is the intermediate ALONE (the trust domain glyph is its key);
     // trusted.pem is [external root, intermediate].
     atomic::write_atomic_async(&ca_dir.join("certificate.pem"), &intermediate_pem, 0o644)
         .await

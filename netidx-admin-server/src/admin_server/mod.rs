@@ -557,7 +557,7 @@ impl Server {
             }
             None => None,
         };
-        // The network map: the CA owns + persists it, seeded with the CA's
+        // The trust domain map: the CA owns + persists it, seeded with the CA's
         // own entry + address so it's never empty of itself; every other
         // host starts with an empty cache the refresh loop fills.
         let map = match &ca_dir {

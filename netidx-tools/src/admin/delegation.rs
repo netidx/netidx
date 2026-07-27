@@ -29,16 +29,16 @@ fn describe_ids(ids: &[netidx_admin_proto::AdminServerId]) -> String {
     ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
-/// Report a cluster-propagation push (idempotent — re-run to converge if a peer
+/// Report a resolver cluster-propagation push (idempotent — re-run to converge if a peer
 /// was down).
 fn report_peers(subject: &str, peers: &[PeerResult]) {
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     if failed.is_empty() {
-        println!("{subject}: {} cluster peer(s) updated.", peers.len());
+        println!("{subject}: {} resolver cluster peer(s) updated.", peers.len());
         return;
     }
     println!(
-        "{subject}: {} of {} cluster peer(s) could NOT be updated:",
+        "{subject}: {} of {} resolver cluster peer(s) could NOT be updated:",
         failed.len(),
         peers.len()
     );
@@ -51,7 +51,7 @@ fn report_peers(subject: &str, peers: &[PeerResult]) {
         );
     }
     println!(
-        "  the cluster is INCONSISTENT until every peer is updated. The push is \
+        "  the resolver cluster is INCONSISTENT until every peer is updated. The push is \
          idempotent — re-run this command once the failed peer(s) are back."
     );
 }
@@ -65,12 +65,12 @@ pub(crate) struct AddParentFlags {
     /// The subtree this resolver will own under the parent (e.g. `/eu`).
     #[arg(long = "path")]
     path: String,
-    /// The parent network's CA fingerprint, obtained out of band (view it with
+    /// The parent trust domain's CA fingerprint, obtained out of band (view it with
     /// `netidx admin ca fingerprint <ip:port>`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
-    /// A resolver address that should remain in the parent cluster. Repeat for
-    /// every parent member when splitting an existing peer cluster. Omit only
+    /// A resolver address that should remain in the parent resolver cluster. Repeat for
+    /// every parent member when splitting an existing peer resolver cluster. Omit only
     /// for install-time attachment of an already-enrolled pending child.
     #[arg(long = "parent-resolver", value_name = "ADDR")]
     parent_resolver: Vec<std::net::SocketAddr>,
@@ -106,7 +106,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
         out.proposed_path
     );
     println!(
-        "roll the affected cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
+        "roll the affected resolver cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
     );
     Ok(())
 }
@@ -177,7 +177,7 @@ pub(crate) struct ApproveDelegationFlags {
 }
 
 /// `resolver approve-delegation <code>` — approve the one pending request whose
-/// recomputed code matches, cluster-wide.
+/// recomputed code matches, resolver cluster-wide.
 pub(crate) fn approve_delegation(f: ApproveDelegationFlags) -> Result<()> {
     let mut ans = f.auth.answerer()?;
     let server = f.auth.server_addr()?;
@@ -194,7 +194,7 @@ pub(crate) fn approve_delegation(f: ApproveDelegationFlags) -> Result<()> {
     report_peers("approval", &d.peers);
     println!("no resolver service was restarted.");
     println!(
-        "roll each affected cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
+        "roll each affected resolver cluster one member at a time: restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next"
     );
     Ok(())
 }

@@ -102,7 +102,7 @@ struct PreparedRevoke {
 }
 
 /// Authenticate, apply the requested serial revocations, and re-sign the CRL.
-/// The async wrapper below performs the network fanout after this
+/// The async wrapper below performs the trust domain fanout after this
 /// Argon2/signing-bound phase releases the signing semaphore.
 async fn prepare_revoke(
     state: &Server,
@@ -152,7 +152,7 @@ fn revoke_authority(
         ));
     };
     let authorized = if record.name.eq_ignore_ascii_case(SERVING_SAN) {
-        // A serving cert's scope is its admin server's cluster, which only the
+        // A serving cert's scope is its admin server's resolver cluster, which only the
         // certificate's embedded identity can tell us.
         crate::tls::admin_cert_identity_from_pem(record.cert_pem.as_bytes())
             .ok()

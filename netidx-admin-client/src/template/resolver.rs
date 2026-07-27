@@ -1,4 +1,4 @@
-//! Resolver-server template. A single network-facing resolver,
+//! Resolver-server template. A single trust domain-facing resolver,
 //! with the operator's chosen auth scheme on the one member,
 //! optional parent referral, optional perms seed, and a single
 //! activation unit that runs `netidx resolver-server`.
@@ -47,7 +47,7 @@ pub struct ResolverParams {
     /// emits a [`TlsCopyJob`] that copies them to the canonical
     /// location before the resolver config references them.
     pub auth: AuthChoice,
-    /// Resolver cluster base path (default `/`).
+    /// Resolver resolver cluster base path (default `/`).
     pub base: ArcStr,
     /// `(addr, bind_addr)` for the single member server. If the second
     /// element is `None`, defaults to the address part of `addr`.
@@ -251,7 +251,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     // itself (TLS cert SAN, Krb5 SPN), grant that identity full
     // rights at the base — without it the resolver can't
     // subscribe / publish under its own tree (e.g. the local-client
-    // config we emit below, or future self-published cluster state).
+    // config we emit below, or future self-published resolver cluster state).
     let anonymous = matches!(p.auth, AuthChoice::Anonymous);
     let perms_file = if p.with_perms_file && !anonymous {
         let path = match &p.perms_path {
@@ -319,7 +319,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         // Delay serving reads until publishers have had a chance to
         // re-register (~2× the writer TTL) so a restarted member never
         // serves an incomplete view — this is what makes a careful
-        // one-at-a-time rolling restart of a cluster invisible to readers.
+        // one-at-a-time rolling restart of a resolver cluster invisible to readers.
         "--delay-reads".to_string(),
     ];
     units.insert(
@@ -329,7 +329,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
                 netidx_activation::file::ProcessCfgBuilder::default()
                     .exe(netidx_binary.to_string_lossy().into_owned())
                     .args(resolver_args)
-                    // Resolver-server clusters are rolled manually, one member
+                    // Resolver-server resolver clusters are rolled manually, one member
                     // at a time. A failed start must stay failed: an automatic
                     // retry could come up later, outside the operator's rollout
                     // sequence, and overlap another member's planned restart.
@@ -708,7 +708,7 @@ mod tests {
         let tls = c.0.tls.as_ref().expect("client tls section");
         // The identity is keyed by the *domain* part of the cert
         // SAN (`example.com`), not the full SAN (`resolver.example.com`).
-        // netidx keys identities per administrative trust domain and
+        // netidx keys identities per trust domain and
         // matches hosts under that domain via reverse-domain prefix
         // lookup at handshake time.
         let identity = tls
@@ -1046,7 +1046,7 @@ mod tests {
     /// Krb5 resolver must grant its own SPN full rights at the base —
     /// same shape as the TLS branch, just keyed by SPN instead of
     /// cert SAN. Without it the resolver can't subscribe / publish
-    /// under its own tree once cluster / self-published state lands.
+    /// under its own tree once resolver cluster / self-published state lands.
     #[test]
     fn krb5_resolver_seeds_self_spn_in_perms() {
         let out = tempfile::tempdir().unwrap();

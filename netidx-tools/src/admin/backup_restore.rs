@@ -70,7 +70,7 @@ pub(crate) struct RestoreArgs {
     pub resolver_bind: Option<IpAddr>,
     /// Explicitly attest that the old controller cannot run. Required for a
     /// controller restore because two copies of the same controller identity
-    /// would violate the administrative network's single-writer boundary.
+    /// would violate the trust domain's single-writer boundary.
     #[arg(long = "old-controller-fenced")]
     pub old_controller_fenced: bool,
     /// Read the controller recovery password from a file.
@@ -300,7 +300,7 @@ pub(super) async fn trust_domain_for_restore(
     manifest: &install_bundle::Manifest,
     override_: Option<&str>,
 ) -> Result<Option<(SocketAddr, DiscoveredTrustDomain)>> {
-    let Some(network) = &manifest.install.network else { return Ok(None) };
+    let Some(trust_domain) = &manifest.install.trust_domain else { return Ok(None) };
     let mut seed = match override_ {
         Some(addr) => init::resolve_admin_server_addr(addr)?,
         None => manifest.install.admin_server.or(manifest.admin_listen).context(
@@ -329,14 +329,14 @@ pub(super) async fn trust_domain_for_restore(
             last.unwrap_or_else(|| anyhow::anyhow!("the admin server did not start"))
         })?
     };
-    if !network.matches(&first.fingerprint)? {
+    if !trust_domain.matches(&first.fingerprint)? {
         bail!("the server at {seed} belongs to a different CA than the backup");
     }
     let info = transport::aggregate(&[seed], NodeKind::Client, &first).await?;
     let controller =
-        info.ca_addr.context("the verified network reported no controller")?;
+        info.ca_addr.context("the verified trust domain reported no controller")?;
     let identity = transport::fetch_identity(controller, NodeKind::Client).await?;
-    if !identity.controller || !network.matches(&identity.fingerprint)? {
+    if !identity.controller || !trust_domain.matches(&identity.fingerprint)? {
         bail!("the discovered controller did not match the backup's pinned CA identity");
     }
     let info = transport::aggregate(&[controller], NodeKind::Client, &identity).await?;
@@ -725,7 +725,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             a.recovery_password_stdin,
             manifest
                 .install
-                .network
+                .trust_domain
                 .as_ref()
                 .map(|n| {
                     netidx_admin_proto::fingerprint::Fingerprint::parse_text(
@@ -738,9 +738,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         let Some((controller, net)) =
             rt.block_on(trust_domain_for_restore(&manifest, a.admin_server.as_deref()))?
         else {
-            bail!(
-                "the backup contains TLS identities but no administrative network identity"
-            );
+            bail!("the backup contains TLS identities but no trust domain identity");
         };
         rt.block_on(reenroll_data_identities(
             &mut ans,

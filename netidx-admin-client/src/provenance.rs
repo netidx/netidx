@@ -1,9 +1,9 @@
 //! Install provenance: a small record (`install.json`) written next to a
 //! host's config at install/join time, recording **what role** was
-//! installed and **which network** it joined.
+//! installed and **which trust domain** it joined.
 //!
-//! The network half is load-bearing for the lifecycle ops (`status`,
-//! `update`, `join`): they trust a admin server's picture of the network
+//! The trust domain half is load-bearing for the lifecycle ops (`status`,
+//! `update`, `join`): they trust a admin server's picture of the trust domain
 //! ("here are the resolvers, add the ones you're missing"), so they must
 //! first re-pin to the **same** CA identity the operator glyph-confirmed
 //! at install. Storing that identity here is what makes an unattended
@@ -41,7 +41,7 @@ impl InstallRole {
     }
 }
 
-/// The network a host joined: the domain and the CA fingerprint the
+/// The trust domain a host joined: the domain and the CA fingerprint the
 /// operator glyph-confirmed. The fingerprint is stored in the
 /// grouped-base32 text form ([`Fingerprint::text`]) so the record reads
 /// the same as the glyph shown at install; compare via [`Self::matches`].
@@ -79,12 +79,12 @@ pub struct InstallRecord {
     pub base: String,
     /// The data-plane auth chosen at install (`anonymous`/`local`/`krb5`/`tls`).
     pub auth: String,
-    /// The admin cluster this host belongs to — the cluster it founded or the
-    /// one it joined — carrying that cluster's CA identity (domain + glyph).
+    /// The admin trust domain this host belongs to — the trust domain it founded or the
+    /// one it joined — carrying that trust domain's CA identity (domain + glyph).
     /// `None` for a standalone/local-only install (a workstation with no
     /// parent, or a resolver with no admin server).
     #[serde(default)]
-    pub network: Option<TrustDomainIdentity>,
+    pub trust_domain: Option<TrustDomainIdentity>,
     /// A admin-server address known at install time, if any — a starting
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
@@ -104,7 +104,7 @@ impl InstallRecord {
         role: InstallRole,
         base: impl Into<String>,
         auth: impl Into<String>,
-        network: Option<TrustDomainIdentity>,
+        trust_domain: Option<TrustDomainIdentity>,
         admin_server: Option<SocketAddr>,
     ) -> Self {
         let created_unix = SystemTime::now()
@@ -115,7 +115,7 @@ impl InstallRecord {
             role,
             base: base.into(),
             auth: auth.into(),
-            network,
+            trust_domain,
             admin_server,
             managed_paths: Vec::new(),
             created_unix,
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(rec, back);
         // The pinned identity round-trips through the stored text form
         // and matches the original fingerprint; a different key doesn't.
-        let net = back.network.as_ref().unwrap();
+        let net = back.trust_domain.as_ref().unwrap();
         assert!(net.matches(&fp).unwrap());
         let other = Fingerprint::of_der(b"a different key");
         assert!(!net.matches(&other).unwrap());
@@ -225,7 +225,7 @@ mod tests {
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         rec.save(&lock, &path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
-        assert!(back.network.is_none());
+        assert!(back.trust_domain.is_none());
         assert!(back.admin_server.is_none());
     }
 

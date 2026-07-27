@@ -20,7 +20,7 @@ use std::{net::SocketAddr, path::Path, time::Duration};
 pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Build the config-reconciliation plan for this host's role, checking it
-/// against the network (pinned to the CA identity recorded at install). The
+/// against the trust domain (pinned to the CA identity recorded at install). The
 /// caller renders `plan.describe()` and applies it. Errors if this host is
 /// local-only (nothing to update) or the wrong role.
 pub(super) async fn update_plan(
@@ -31,8 +31,10 @@ pub(super) async fn update_plan(
     if rec.role != role {
         bail!("this host is a {} install, not a {}", rec.role.as_str(), role.as_str());
     }
-    let net_id =
-        rec.network.as_ref().context("this host is local-only — nothing to update")?;
+    let net_id = rec
+        .trust_domain
+        .as_ref()
+        .context("this host is local-only — nothing to update")?;
     match role {
         InstallRole::Controller => {
             bail!("the controller has no resolver configuration to reconcile")
@@ -66,15 +68,15 @@ pub(super) async fn update_plan(
     }
 }
 
-/// Fetch the network map as this host, pinned to the CA identity recorded at
+/// Fetch the trust domain map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
-/// part of a cluster or no admin server answers with the pinned identity.
+/// part of a trust domain or no admin server answers with the pinned identity.
 pub(super) async fn fetch_local_map(config_root: &Path) -> Result<TrustDomainMap> {
     let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec
-        .network
+        .trust_domain
         .as_ref()
-        .context("this host is not part of a cluster (local-only)")?;
+        .context("this host is not part of a trust domain (local-only)")?;
     fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
 }
 
@@ -89,7 +91,7 @@ pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'sta
         }
         InstallRole::Resolver if plan.changes_resolver_config() => {
             "No service was restarted. Restart this resolver manually at its place in the \
-             cluster's rolling sequence; re-run client processes if their resolver addresses \
+             resolver cluster's rolling sequence; re-run client processes if their resolver addresses \
              changed."
         }
         InstallRole::Resolver => {
@@ -113,7 +115,7 @@ async fn candidates(admin_server: Option<SocketAddr>) -> Vec<SocketAddr> {
     out
 }
 
-/// Walk the network (GetInfo aggregate) via the first candidate whose CA matches
+/// Walk the trust domain (GetInfo aggregate) via the first candidate whose CA matches
 /// the pinned identity. Fail-closed: a reachable server with a different CA is
 /// refused, never silently trusted.
 async fn fetch_trust_domain_pinned(
@@ -130,14 +132,14 @@ async fn fetch_trust_domain_pinned(
         if net_id.matches(&id.fingerprint)? {
             return transport::aggregate(&[addr], kind, &id)
                 .await
-                .context("mapping the network (GetInfo)");
+                .context("mapping the trust domain (GetInfo)");
         }
         saw_mismatch = true;
     }
     fail(saw_mismatch)
 }
 
-/// One-shot pinned network-map fetch, same fail-closed logic as
+/// One-shot pinned trust domain-map fetch, same fail-closed logic as
 /// [`fetch_trust_domain_pinned`].
 async fn fetch_map_pinned(
     net_id: &TrustDomainIdentity,
@@ -153,7 +155,7 @@ async fn fetch_map_pinned(
         if net_id.matches(&id.fingerprint)? {
             return transport::get_map_pinned(addr, kind, &id)
                 .await
-                .context("fetching the network map");
+                .context("fetching the trust domain map");
         }
         saw_mismatch = true;
     }
@@ -164,7 +166,7 @@ fn fail<T>(saw_mismatch: bool) -> Result<T> {
     if saw_mismatch {
         bail!(
             "reached an admin server, but its CA fingerprint did not match this \
-             install's pinned network identity — refusing to trust it; re-join if \
+             install's pinned trust domain identity — refusing to trust it; re-join if \
              the CA legitimately changed"
         )
     }

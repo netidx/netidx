@@ -405,7 +405,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     let map: crate::admin_proto::TrustDomainMap =
         serde_json::from_slice(&fs::read(bundle.join("ca/trust-domain.json"))?)?;
     if map.controller != manifest.controller || map.version != manifest.map_version {
-        bail!("backup network map does not match its manifest");
+        bail!("backup trust domain map does not match its manifest");
     }
     Ok(manifest)
 }

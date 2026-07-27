@@ -344,10 +344,10 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
     );
 }
 
-/// Deciding a delegation needs authority over the parent cluster's base, not
+/// Deciding a delegation needs authority over the parent resolver cluster's base, not
 /// just over the proposed child path. `trust_domain::delegate` only requires the
 /// child to sit under the parent's base, so without this check an admin scoped
-/// to `/eu` could approve a delegation of `/eu/x` parented at the ROOT cluster
+/// to `/eu` could approve a delegation of `/eu/x` parented at the ROOT resolver cluster
 /// and rewrite the root resolvers' referrals.
 #[test]
 fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {

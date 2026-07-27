@@ -76,7 +76,7 @@ pub struct Policy {
     pub may_manage_admins: bool,
     /// Netidx hierarchy paths under which this admin may control services
     /// (restart / start / stop / status the activation units on the admin
-    /// servers of the cluster serving that path). Same path-scoping as
+    /// servers of the resolver cluster serving that path). Same path-scoping as
     /// [`perms_edit_scopes`](Self::perms_edit_scopes) but a separate grant —
     /// editing perms and restarting services are distinct authorities.
     /// Needs no CA key, so a `Role` keyslot can carry it.

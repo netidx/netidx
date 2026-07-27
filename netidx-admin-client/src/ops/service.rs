@@ -1,7 +1,7 @@
 //! Remote service control over the admin plane.
 //!
 //! `netidx admin activation {restart,start,stop,status} --server …` controls the
-//! activation units of the cluster serving a netidx path, RBAC-gated by the
+//! activation units of the resolver cluster serving a netidx path, RBAC-gated by the
 //! caller's `service_control_scopes` covering that path. Only this pinned,
 //! admin-authenticated **remote** path lives here — the **local** path (this
 //! host's own supervisor, over its cross-platform control socket in
@@ -30,8 +30,8 @@ pub struct ServiceServer {
     pub roles: BitFlags<Role>,
 }
 
-/// Every admin server that runs a resolver, read from the CA network map — the
-/// pick list for cluster service control. Sourced entirely from the map, so the
+/// Every admin server that runs a resolver, read from the CA trust domain map — the
+/// pick list for resolver cluster service control. Sourced entirely from the map, so the
 /// operator picks a server by identity rather than typing a namespace path.
 pub async fn list_service_servers(
     ans: &mut dyn Answerer,
@@ -60,7 +60,7 @@ pub async fn list_service_servers(
 /// Remote service control over the admin plane: glyph-confirm + authenticate to
 /// `server` (the CA), then apply `op` to `units` on the single immutable admin
 /// server identity `target_server`. The CA enforces the caller's `service_control_scopes`
-/// covering that server's cluster base. Returns that server's per-unit statuses.
+/// covering that server's resolver cluster base. Returns that server's per-unit statuses.
 #[allow(clippy::too_many_arguments)]
 pub async fn control_remote(
     ans: &mut dyn Answerer,

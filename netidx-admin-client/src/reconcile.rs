@@ -8,9 +8,9 @@
 //! only the fields it changes, leaving every other field (and any
 //! operator customization) intact.
 //!
-//! Reconciles are **additive**: they add what the network has that the
+//! Reconciles are **additive**: they add what the trust domain has that the
 //! local config lacks, and never remove what the config has that the
-//! network doesn't (so operator-added peers survive). An empty plan is
+//! trust domain doesn't (so operator-added peers survive). An empty plan is
 //! the in-sync / idempotent result.
 
 use crate::{
@@ -263,7 +263,7 @@ fn referral_eq(a: &rfile::Referral, b: &rfile::Referral) -> bool {
     a.path == b.path && a.ttl == b.ttl && ref_addrs_eq(&a.addrs, &b.addrs)
 }
 
-/// Map a network-reported data-plane auth (from a admin server's
+/// Map a trust domain-reported data-plane auth (from a admin server's
 /// `GetInfo`) to a resolver-referral auth.
 fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     match a {
@@ -281,27 +281,27 @@ fn describe_info_auth(a: &InfoAuth) -> &'static str {
     }
 }
 
-/// Reconcile a resolver's **parent referral** against the network's
+/// Reconcile a resolver's **parent referral** against the trust domain's
 /// current resolver set: add every resolver `net` reports that the
 /// config's parent doesn't already list (matched by `SocketAddr`),
 /// mapping each one's auth.
 ///
-/// This is the workstation/child-resolver `update`: when the network
+/// This is the workstation/child-resolver `update`: when the trust domain
 /// grows from one resolver to several, the local parent referral learns
 /// the new peers (so client referrals can fail over) without a
 /// reinstall or a hand-edit.
 ///
 /// Additive: peers the config already lists — including operator-added
-/// ones absent from the network — are left untouched. It *will* re-add a
-/// network peer the operator deleted; suppressing that is a later design.
-/// Idempotent: a config already carrying every network peer yields an
+/// ones absent from the trust domain — are left untouched. It *will* re-add a
+/// trust domain peer the operator deleted; suppressing that is a later design.
+/// Idempotent: a config already carrying every trust domain peer yields an
 /// empty plan.
 pub fn reconcile_resolver_peers(path: &Path, net: &TrustDomainInfo) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a network (run `join` to attach one)",
+         attached to a trust domain (run `join` to attach one)",
     )?;
     let mut replacement = expected.addrs.clone();
     let mut changes = Vec::new();
@@ -331,17 +331,17 @@ pub fn reconcile_resolver_peers(path: &Path, net: &TrustDomainInfo) -> Result<Ed
     })
 }
 
-// ---- network-map-driven reconcile (Phase B) ----
+// ---- trust domain-map-driven reconcile (Phase B) ----
 //
 // These reconcile a host's config to exactly ONE level of the hierarchy —
-// the cluster its current addrs already belong to — from the CA-authoritative
-// network map. Unlike `reconcile_resolver_peers` above (additive-only, over
-// the flat legacy `TrustDomainInfo`), these both ADD missing cluster members and
-// AUTO-REMOVE entries the cluster no longer lists, with no consent: the CA is
-// the source of truth, so an addr absent from its authoritative cluster is
+// the resolver cluster its current addrs already belong to — from the CA-authoritative
+// trust domain map. Unlike `reconcile_resolver_peers` above (additive-only, over
+// the flat legacy `TrustDomainInfo`), these both ADD missing resolver cluster members and
+// AUTO-REMOVE entries the resolver cluster no longer lists, with no consent: the CA is
+// the source of truth, so an addr absent from its authoritative resolver cluster is
 // authoritatively gone. Host-local entries are never removed.
 
-/// Map a network-reported data-plane auth to a client-config auth.
+/// Map a trust domain-reported data-plane auth to a client-config auth.
 fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
     use netidx::config::file::Auth;
     match a {
@@ -351,7 +351,7 @@ fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
     }
 }
 
-/// One distinct resolver cluster in the network map: where it attaches and
+/// One distinct resolver cluster in the trust domain map: where it attaches and
 /// its full member roster.
 pub struct ResolverClusterView {
     pub base: String,
@@ -359,7 +359,7 @@ pub struct ResolverClusterView {
 }
 
 /// The distinct resolver clusters in `map`, grouped by base path. A
-/// cluster's members each report the same roster; union them by address.
+/// resolver cluster's members each report the same roster; union them by address.
 pub fn clusters(map: &TrustDomainMap) -> Vec<ResolverClusterView> {
     map.resolver_clusters
         .iter()
@@ -368,10 +368,10 @@ pub fn clusters(map: &TrustDomainMap) -> Vec<ResolverClusterView> {
         .collect()
 }
 
-/// The cluster whose members overlap `addrs` — the config's "one level".
-/// Lenient: a config whose addrs straddle clusters (e.g. one polluted by
-/// the old flat reconcile) matches the maximally-overlapping cluster, with
-/// a warning. `None` when nothing overlaps (the cluster may be transiently
+/// The resolver cluster whose members overlap `addrs` — the config's "one level".
+/// Lenient: a config whose addrs straddle resolver clusters (e.g. one polluted by
+/// the old flat reconcile) matches the maximally-overlapping resolver cluster, with
+/// a warning. `None` when nothing overlaps (the resolver cluster may be transiently
 /// unreachable — the caller no-ops rather than wiping the config).
 pub fn match_cluster<'a>(
     clusters: &'a [ResolverClusterView],
@@ -395,7 +395,7 @@ pub fn match_cluster<'a>(
             let warn = (overlapping > 1).then(|| {
                 ArcStr::from(
                     format!(
-                        "config addrs span {overlapping} clusters; reconciling to the \
+                        "config addrs span {overlapping} resolver clusters; reconciling to the \
                          most-overlapping one ({})",
                         c.base
                     )
@@ -407,9 +407,9 @@ pub fn match_cluster<'a>(
     }
 }
 
-/// Reconcile a peer list to the matched cluster's roster: add every member
-/// the config lacks, remove every entry the cluster no longer lists —
-/// except host-local entries, which are never network peers. Returns the
+/// Reconcile a peer list to the matched resolver cluster's roster: add every member
+/// the config lacks, remove every entry the resolver cluster no longer lists —
+/// except host-local entries, which are never trust domain peers. Returns the
 /// `+`/`-` change lines.
 fn reconcile_peer_list<A: Clone>(
     current: &mut Vec<(SocketAddr, A)>,
@@ -443,8 +443,8 @@ fn reconcile_peer_list<A: Clone>(
 }
 
 /// Reconcile a host's **client config** addrs to its own resolver cluster
-/// (the cluster its current addrs belong to) from the network map. Add +
-/// auto-remove; a config matching no cluster is left untouched (warned).
+/// (the resolver cluster its current addrs belong to) from the trust domain map. Add +
+/// auto-remove; a config matching no resolver cluster is left untouched (warned).
 pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
     let cfg = ClientConfig::load(path)
         .with_context(|| format!("loading client config {}", path.display()))?;
@@ -455,7 +455,7 @@ pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
     let Some(cluster) = cluster else {
         warnings.push(ArcStr::from(
-            "this client's resolvers match no cluster in the network map \
+            "this client's resolvers match no resolver cluster in the trust domain map \
              (unreachable?) — leaving the config unchanged",
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
@@ -485,15 +485,15 @@ pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
     })
 }
 
-/// Reconcile a resolver's **parent referral** to the parent cluster (the
-/// cluster the referral already points at) from the network map. Add +
+/// Reconcile a resolver's **parent referral** to the parent resolver cluster (the
+/// resolver cluster the referral already points at) from the trust domain map. Add +
 /// auto-remove. Errors if the resolver has no parent referral.
 pub fn reconcile_parent_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a network",
+         attached to a trust domain",
     )?;
     let cur: Vec<SocketAddr> = expected.addrs.iter().map(|(a, _)| *a).collect();
     let cls = clusters(map);
@@ -501,7 +501,7 @@ pub fn reconcile_parent_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
     let Some(cluster) = cluster else {
         warnings.push(ArcStr::from(
-            "this resolver's parent referral matches no cluster in the network \
+            "this resolver's parent referral matches no resolver cluster in the trust domain \
              map (unreachable?) — leaving it unchanged",
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
@@ -608,13 +608,13 @@ mod tests {
     #[test]
     fn adds_missing_peers_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        // Config knows about A; the network has A and B.
+        // Config knows about A; the trust domain has A and B.
         let path = write_resolver(&dir.path(), r#"["10.0.0.1:4564", "Anonymous"]"#);
-        let network = net(vec![
+        let trust_domain = net(vec![
             ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous },
             ResolverAddr { addr: addr("10.0.0.2:4564"), auth: InfoAuth::Anonymous },
         ]);
-        let plan = reconcile_resolver_peers(&path, &network).unwrap();
+        let plan = reconcile_resolver_peers(&path, &trust_domain).unwrap();
         assert_eq!(plan.changes.len(), 1, "exactly one new peer (B)");
         assert!(plan.changes[0].text().contains("10.0.0.2:4564"));
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
@@ -624,24 +624,24 @@ mod tests {
         let parent = cfg.as_file().parent.as_ref().unwrap();
         assert_eq!(parent.addrs.len(), 2);
         // Second run is a no-op — additive reconcile converged.
-        let plan2 = reconcile_resolver_peers(&path, &network).unwrap();
+        let plan2 = reconcile_resolver_peers(&path, &trust_domain).unwrap();
         assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes);
     }
 
     #[test]
     fn preserves_operator_added_peer() {
         let dir = tempfile::tempdir().unwrap();
-        // Config has the network peer A plus an operator-added X the
-        // network doesn't report.
+        // Config has the trust domain peer A plus an operator-added X the
+        // trust domain doesn't report.
         let path = write_resolver(
             &dir.path(),
             r#"["10.0.0.1:4564", "Anonymous"], ["10.9.9.9:4564", "Anonymous"]"#,
         );
-        let network = net(vec![ResolverAddr {
+        let trust_domain = net(vec![ResolverAddr {
             addr: addr("10.0.0.1:4564"),
             auth: InfoAuth::Anonymous,
         }]);
-        let plan = reconcile_resolver_peers(&path, &network).unwrap();
+        let plan = reconcile_resolver_peers(&path, &trust_domain).unwrap();
         // Nothing to add (A present); X is NOT removed.
         assert!(plan.is_empty());
         let cfg = ResolverConfig::load(&path).unwrap();
@@ -660,11 +660,11 @@ mod tests {
             1,
         );
         std::fs::write(&path, json).unwrap();
-        let network = net(vec![ResolverAddr {
+        let trust_domain = net(vec![ResolverAddr {
             addr: addr("10.0.0.1:4564"),
             auth: InfoAuth::Anonymous,
         }]);
-        assert!(reconcile_resolver_peers(&path, &network).is_err());
+        assert!(reconcile_resolver_peers(&path, &trust_domain).is_err());
     }
 
     // ---- map-driven reconcile (Phase B) ----
@@ -717,13 +717,13 @@ mod tests {
             srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564", "10.0.0.16:4564"]),
         ]);
         let cls = clusters(&m);
-        assert_eq!(cls.len(), 2, "two distinct clusters by base");
+        assert_eq!(cls.len(), 2, "two distinct resolver clusters by base");
         let (c, w) = match_cluster(&cls, &[addr("10.0.0.15:4564")]);
         assert_eq!(c.unwrap().base, "/eu");
         assert!(w.is_none());
         let (c, _) = match_cluster(&cls, &[addr("10.9.9.9:4564")]);
         assert!(c.is_none(), "no overlap → None");
-        // Straddling both clusters → max-overlap (root wins 2:1) + a warning.
+        // Straddling both resolver clusters → max-overlap (root wins 2:1) + a warning.
         let (c, w) = match_cluster(
             &cls,
             &[addr("10.0.0.11:4564"), addr("10.0.0.12:4564"), addr("10.0.0.15:4564")],
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn client_reconcile_adds_removes_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        // Client points at one /eu member plus a stale addr the cluster
+        // Client points at one /eu member plus a stale addr the resolver cluster
         // no longer lists.
         let path = write_client(&dir.path(), &["10.0.0.15:4564", "10.0.0.99:4564"]);
         let m = map_of(vec![srv(

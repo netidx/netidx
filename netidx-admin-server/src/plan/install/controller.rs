@@ -101,7 +101,7 @@ pub async fn run_controller(
         ans.confirm(Field::ExternalSign, input.external_sign, false).await?;
     ans.announce(
         "Controller / Certificate Authority",
-        "This machine will be the administrative network's one active controller and \
+        "This machine will be the trust domain's one active controller and \
          certificate authority. It does not need to run a resolver.",
     )
     .await?;

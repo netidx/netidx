@@ -235,7 +235,7 @@ pub fn next_gid(map: &IdMap) -> u32 {
 /// [`next_uid`]. Returns the identity's uid.
 ///
 /// Names are checked against the id-map delimiter rules up front so a
-/// network caller gets a clear refusal instead of a save-time
+/// trust domain caller gets a clear refusal instead of a save-time
 /// validation failure.
 pub fn register_identity(
     map: &mut IdMap,

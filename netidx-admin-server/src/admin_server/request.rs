@@ -99,7 +99,7 @@ where
     // Only a CA can run a password KDF. Reserve the source before dispatch,
     // sleeping outside the global Argon2 semaphore when recent failures impose
     // a delay. Local-control requests are kernel-credential authorized and do
-    // not participate in network throttling.
+    // not participate in trust domain throttling.
     let credential = requirements.admin_credential();
     let password_attempt = if !local
         && state.has_ca().await

@@ -27,7 +27,7 @@ mod backup_restore;
 mod ca;
 mod client;
 mod component;
-// `discover` (browse mDNS for networks + print their glyphs) is a read-only
+// `discover` (browse mDNS for trust domains + print their glyphs) is a read-only
 // query over the cross-platform discovery + admin-client layers.
 mod discover;
 // `delegation` (resolver hierarchy add-parent / review-delegation) drives
@@ -40,7 +40,7 @@ mod init;
 mod lifecycle;
 mod perms;
 // `perms` admin (remote, map-routed perms show/edit) drives the admin
-// server's CA admin auth + cluster push, both unix-only (the engine
+// server's CA admin auth + resolver cluster push, both unix-only (the engine
 // pulls openssl), same as `delegation`.
 #[cfg(unix)]
 mod perms_admin;
@@ -49,7 +49,7 @@ mod resolver;
 mod roles;
 // `server` (the admin-server daemon CLI) depends on the
 // `netidx_admin_server` daemon implementation, which is unix-only (the
-// CA signer pulls openssl). On Windows, put a host on a network by
+// CA signer pulls openssl). On Windows, put a host on a trust domain by
 // installing a publisher client config (`netidx admin publisher
 // install`); the `workstation` role is unix-only too (Local auth +
 // activation supervisor) until full Windows support lands.
@@ -77,7 +77,7 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: roles::workstation::Cmd,
     },
-    /// resolver role: a network-facing resolver server
+    /// resolver role: a trust domain-facing resolver server
     Resolver {
         #[command(subcommand)]
         cmd: roles::resolver::Cmd,
@@ -95,15 +95,15 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
-    /// remotely show or edit a cluster's permissions through the admin
-    /// server, routed by the network map (no SSH).
+    /// remotely show or edit a resolver cluster's permissions through the admin
+    /// server, routed by the trust domain map (no SSH).
     // Unix-only — like `ca`/`delegation`, the admin path needs openssl.
     #[cfg(unix)]
     Perms {
         #[command(subcommand)]
         cmd: perms_admin::Cmd,
     },
-    /// discover netidx networks on the local network (mDNS) and print each
+    /// discover netidx trust domains on the local network (mDNS) and print each
     /// one's admin-server address + CA glyph — a read-only query a script can
     /// feed to `--admin-server` / `--accept-glyph`.
     Discover(discover::DiscoverArgs),

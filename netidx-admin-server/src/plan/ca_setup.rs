@@ -304,10 +304,10 @@ pub async fn create_vaulted_ca(
 ) -> Result<(Ca, ServiceNeed)> {
     config_lock.require_contained(&opts.dir)?;
     // No "a CA will be created" announce here: the caller already framed it
-    // (the resolver install's opening "new admin cluster" dialog, or the
+    // (the resolver install's opening "new admin resolver cluster" dialog, or the
     // explicit `ca init` command), and the CA's creation + identity are
     // announced once it exists (below). This path only runs when there is no CA
-    // to enroll under — a node joining an existing network never reaches it.
+    // to enroll under — a node joining an existing trust domain never reaches it.
     //
     // CN first (matching the prompt order `ca init` had before this was
     // centralized here): an explicit `--cn` / threaded value wins,
@@ -316,7 +316,7 @@ pub async fn create_vaulted_ca(
     let common_name =
         resolve_ca_cn(ans, opts.common_name.clone(), opts.domain.as_deref()).await?;
     // The admin-server config wants a concrete domain (it's what the
-    // network is grouped by in discovery). Prefer the threaded one;
+    // trust domain is grouped by in discovery). Prefer the threaded one;
     // fall back to the CN's domain part, which `resolve_ca_cn` makes
     // likely (`ca.<domain>`).
     let domain = match &opts.domain {
@@ -389,7 +389,7 @@ pub async fn create_vaulted_ca(
     };
     ans.announce_identity(
         "Your new certificate authority has been created. This glyph is its \
-         identity — it is shown to anyone joining the cluster so they can verify \
+         identity — it is shown to anyone joining the trust domain so they can verify \
          they are trusting the real CA before sending a password.",
         &ca_fp,
     )
@@ -408,7 +408,7 @@ pub async fn create_vaulted_ca(
     ans.note(&format_compact!("created a new CA at {}", opts.dir.display()));
 
     // No "now setting up the admin server" announce: standing up this host's
-    // admin server is part of founding the cluster the caller already framed.
+    // admin server is part of founding the resolver cluster the caller already framed.
     let set_up_server =
         ans.confirm(Field::SetupAdminServer, opts.setup_server, true).await?;
     let need = if set_up_server {
@@ -567,7 +567,7 @@ pub async fn create_vaulted_external_ca(
 }
 
 /// Build the [`NewCaOpts`] for the founding CA a resolver install stands
-/// up when it creates a network's trust root — shared by the TLS
+/// up when it creates a trust domain's trust root — shared by the TLS
 /// "generate" branch and the krb5/anonymous admin-plane branch so the two
 /// cannot drift. Unlike `ca init` (the explicit tuning flow, which
 /// interrogates the founding admin), an install applies a sensible
@@ -756,7 +756,7 @@ pub async fn setup_superuser(
             perms_scope: &[],
             service_scope: &[],
         },
-        // The superuser founds the network, so may-enroll defaults to yes.
+        // The superuser founds the trust domain, so may-enroll defaults to yes.
         true,
         cn,
         opts.domain.as_deref(),
@@ -850,7 +850,7 @@ pub struct PolicyInputs<'a> {
 /// [`PolicyInputs`], asking the answerer for any knob not supplied by a flag.
 /// `cn`/`domain` seed the `*.<domain>` SAN suggestion. `enroll_default` is the
 /// interactive default for the may-enroll-servers confirm (strict mode ignores
-/// it and requires the flag): the founding superuser founds the network, so it
+/// it and requires the flag): the founding superuser founds the trust domain, so it
 /// defaults to yes; an added admin defaults to no.
 ///
 /// Shared by the founding-superuser setup ([`setup_superuser`]) and the remote

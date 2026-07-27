@@ -38,7 +38,7 @@ pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
 pub(super) struct ParentRow {
     /// e.g. `resolver-eu-a  10.0.60.15:4564`.
     pub(super) label: String,
-    /// The resolver's hierarchy level (its cluster's base), shown as info.
+    /// The resolver's hierarchy level (its trust domain's base), shown as info.
     pub(super) level: String,
 }
 
@@ -69,10 +69,10 @@ pub(super) enum UiRequest {
         default: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
-    /// Pick a discovered cluster (each shown with its CA glyph + fingerprint),
+    /// Pick a discovered trust domain (each shown with its CA glyph + fingerprint),
     /// or the trailing "enter an address manually" option.
     SelectTrustDomain {
-        networks: Vec<TrustDomainOption>,
+        trust_domains: Vec<TrustDomainOption>,
         reply: oneshot::Sender<Result<TrustDomainChoice>>,
     },
     /// Multi-select the parent's resolver servers (each with its level), or the
@@ -162,7 +162,7 @@ impl TuiAnswerer {
         self.ask(|reply| UiRequest::Editor { seed, validate, reply }).await
     }
 
-    /// Multi-select the parent's resolver servers from the network map, or fall
+    /// Multi-select the parent's resolver servers from the trust domain map, or fall
     /// back to a typed address. Inherent (TUI-only), like [`Self::edit`] — the
     /// strict CLI takes an explicit `--parent-*` instead.
     pub(super) async fn select_parent(
@@ -221,10 +221,10 @@ impl Answerer for TuiAnswerer {
 
     async fn select_trust_domain(
         &mut self,
-        networks: &[TrustDomainOption],
+        trust_domains: &[TrustDomainOption],
     ) -> Result<TrustDomainChoice> {
-        let networks = networks.to_vec();
-        self.ask(|reply| UiRequest::SelectTrustDomain { networks, reply }).await
+        let trust_domains = trust_domains.to_vec();
+        self.ask(|reply| UiRequest::SelectTrustDomain { trust_domains, reply }).await
     }
 
     async fn confirm(
@@ -313,11 +313,11 @@ pub(super) enum Modal {
         state: ListState,
         reply: Option<oneshot::Sender<Result<String>>>,
     },
-    /// Pick one of the discovered clusters (rendered with its glyph +
+    /// Pick one of the discovered trust domains (rendered with its glyph +
     /// fingerprint) or the trailing manual-entry row. Selection index
-    /// `networks.len()` is the manual row.
+    /// `trust domains.len()` is the manual row.
     SelectTrustDomain {
-        networks: Vec<TrustDomainOption>,
+        trust_domains: Vec<TrustDomainOption>,
         state: ListState,
         reply: Option<oneshot::Sender<Result<TrustDomainChoice>>>,
     },
@@ -393,10 +393,14 @@ impl Modal {
                 state.select(Some(sel));
                 Some(Modal::Choice { field, choices, state, reply: Some(reply) })
             }
-            UiRequest::SelectTrustDomain { networks, reply } => {
+            UiRequest::SelectTrustDomain { trust_domains, reply } => {
                 let mut state = ListState::default();
                 state.select(Some(0));
-                Some(Modal::SelectTrustDomain { networks, state, reply: Some(reply) })
+                Some(Modal::SelectTrustDomain {
+                    trust_domains,
+                    state,
+                    reply: Some(reply),
+                })
             }
             UiRequest::SelectParent { rows, reply } => {
                 let mut state = ListState::default();
@@ -529,10 +533,10 @@ impl Modal {
                 }
                 _ => false,
             },
-            // The list is the discovered networks, then a "poll for more" row,
-            // then a manual-entry row: indices `networks.len()` and
-            // `networks.len() + 1` respectively.
-            Modal::SelectTrustDomain { networks, state, reply } => match code {
+            // The list is the discovered trust domains, then a "poll for more" row,
+            // then a manual-entry row: indices `trust domains.len()` and
+            // `trust domains.len() + 1` respectively.
+            Modal::SelectTrustDomain { trust_domains, state, reply } => match code {
                 KeyCode::Esc => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Err(anyhow!("cancelled")));
@@ -545,16 +549,17 @@ impl Modal {
                     false
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let i =
-                        state.selected().map_or(0, |i| (i + 1).min(networks.len() + 1));
+                    let i = state
+                        .selected()
+                        .map_or(0, |i| (i + 1).min(trust_domains.len() + 1));
                     state.select(Some(i));
                     false
                 }
                 KeyCode::Enter => {
-                    let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
-                    let choice = if sel == networks.len() {
+                    let sel = state.selected().unwrap_or(0).min(trust_domains.len() + 1);
+                    let choice = if sel == trust_domains.len() {
                         TrustDomainChoice::PollMore
-                    } else if sel == networks.len() + 1 {
+                    } else if sel == trust_domains.len() + 1 {
                         TrustDomainChoice::Manual
                     } else {
                         TrustDomainChoice::Discovered(sel)
@@ -798,16 +803,16 @@ impl Modal {
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, rows[2], &mut st);
             }
-            Modal::SelectTrustDomain { networks, state, .. } => {
-                const POLL_MORE: &str = "Search again for more clusters";
+            Modal::SelectTrustDomain { trust_domains, state, .. } => {
+                const POLL_MORE: &str = "Search again for more trust domains";
                 const MANUAL: &str = "Enter an address manually…";
-                let sel = state.selected().unwrap_or(0).min(networks.len() + 1);
+                let sel = state.selected().unwrap_or(0).min(trust_domains.len() + 1);
                 let w = 68u16.min(screen.width.saturating_sub(4)).max(40);
                 // Body holds the list (left) beside the selected glyph (right, 10
                 // tile rows + a blank + up to 3 fingerprint lines). The list is
-                // the networks plus the poll-more and manual-entry rows.
+                // the trust domains plus the poll-more and manual-entry rows.
                 let body_h =
-                    (networks.len() as u16 + 2).max(widgets::IDENTICON_HEIGHT + 4);
+                    (trust_domains.len() as u16 + 2).max(widgets::IDENTICON_HEIGHT + 4);
                 let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
                     .min(screen.height);
                 let area = widgets::centered(w, h, screen);
@@ -826,10 +831,10 @@ impl Modal {
                     Constraint::Min(0),    // list | glyph
                 ])
                 .split(inner);
-                let header = if networks.is_empty() {
-                    "No clusters found on the local network."
+                let header = if trust_domains.is_empty() {
+                    "No trust domains found on the local network."
                 } else {
-                    "netidx clusters discovered on the local network:"
+                    "netidx trust domains discovered on the local network:"
                 };
                 f.render_widget(
                     Paragraph::new(header)
@@ -840,7 +845,7 @@ impl Modal {
                 let cols =
                     Layout::horizontal([Constraint::Min(20), Constraint::Length(26)])
                         .split(rows[2]);
-                let items: Vec<ListItem> = networks
+                let items: Vec<ListItem> = trust_domains
                     .iter()
                     .map(|n| ListItem::new(n.domain.clone()))
                     .chain([ListItem::new(POLL_MORE), ListItem::new(MANUAL)])
@@ -850,9 +855,9 @@ impl Modal {
                     .style(theme::panel_style())
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, cols[0], &mut st);
-                // Right: the selected network's glyph + grouped fingerprint, or a
+                // Right: the selected trust domain's glyph + grouped fingerprint, or a
                 // hint for the poll-more / manual-entry rows.
-                let glyph = match networks.get(sel) {
+                let glyph = match trust_domains.get(sel) {
                     Some(n) => {
                         let mut lines = widgets::identicon_lines(&n.identity.fingerprint);
                         lines.push(Line::from(""));
@@ -865,8 +870,8 @@ impl Modal {
                         }
                         lines
                     }
-                    None if sel == networks.len() => vec![Line::from(Span::styled(
-                        "Browse the network again and add any clusters that answer.",
+                    None if sel == trust_domains.len() => vec![Line::from(Span::styled(
+                        "Browse the network again and add any trust domains that answer.",
                         theme::hint_style(),
                     ))],
                     None => vec![Line::from(Span::styled(
@@ -973,7 +978,7 @@ impl Modal {
                 let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
                     Line::from(Span::styled(
-                        "Verify this is the cluster you intend to trust, out of band,",
+                        "Verify this is the trust domain you intend to trust, out of band,",
                         theme::panel_style(),
                     )),
                     Line::from(Span::styled(
@@ -999,7 +1004,7 @@ impl Modal {
                     " a/Enter accept · Esc/r reject ",
                     theme::hint_style(),
                 )));
-                popup(f, screen, "Confirm cluster identity", lines, 60);
+                popup(f, screen, "Confirm trust domain identity", lines, 60);
             }
             Modal::Announce { title, body, .. } => {
                 let mut lines = body
@@ -1347,10 +1352,10 @@ mod tests {
 
     fn select_trust_domain_modal() -> (Modal, oneshot::Receiver<Result<TrustDomainChoice>>)
     {
-        // Empty network list: index 0 is the poll-more row, index 1 the manual row.
+        // Empty trust domain list: index 0 is the poll-more row, index 1 the manual row.
         let (tx, rx) = oneshot::channel();
         let modal = Modal::from_request(UiRequest::SelectTrustDomain {
-            networks: vec![],
+            trust_domains: vec![],
             reply: tx,
         })
         .unwrap();

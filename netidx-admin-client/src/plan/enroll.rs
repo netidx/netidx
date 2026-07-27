@@ -1,7 +1,7 @@
-//! Network discovery + certificate enrollment — the keystone every role
+//! Trust domain discovery + certificate enrollment — the keystone every role
 //! install shares.
 //!
-//! Discover a netidx network over mDNS, **glyph-confirm** its identity (the
+//! Discover a netidx trust domain over mDNS, **glyph-confirm** its identity (the
 //! one human trust decision; everything after pins to the confirmed
 //! fingerprint), and enroll a TLS certificate from its CA — all through the
 //! [`Answerer`] seam, so the strict CLI, the TUI, and Atlas drive the same
@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 /// the ceiling for the case where mDNS is slow or nothing is there.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The minimum the interactive flows browse before an early exit: collect at
-/// least this long so a second cluster (a VM, a satellite office) that answers a
+/// least this long so a second trust domain (a VM, a satellite office) that answers a
 /// beat later still makes the list, then early-exit once we have anything.
 const DISCOVERY_SETTLE: Duration = Duration::from_secs(3);
 /// Per-address bound on the CA-identity fetch a discovered beacon triggers.
@@ -50,26 +50,26 @@ const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
 /// short pinned connection, so waiting holds nothing open.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-// -- discovered-network types -------------------------------------------------
+// -- discovered-trust domain types -------------------------------------------------
 
-/// A discovered-and-confirmed netidx network: the operator-confirmed
-/// admin-plane identity plus the aggregated picture of the network (every
+/// A discovered-and-confirmed netidx trust domain: the operator-confirmed
+/// admin-plane identity plus the aggregated picture of the trust domain (every
 /// connection behind `info` was pinned to that identity).
 pub struct DiscoveredTrustDomain {
     pub identity: CaIdentity,
     pub info: TrustDomainInfo,
 }
 
-/// What the calling flow knows about admin servers on this network. Threaded
-/// into every sub-flow that could otherwise offer a network join, so the
+/// What the calling flow knows about admin servers on this trust domain. Threaded
+/// into every sub-flow that could otherwise offer a trust domain join, so the
 /// operator is asked at most once.
 #[allow(clippy::large_enum_variant)]
 pub enum AdminServers {
-    /// A network was discovered and its identity glyph-confirmed: use it, ask
+    /// A trust domain was discovered and its identity glyph-confirmed: use it, ask
     /// nothing further.
     Have(DiscoveredTrustDomain),
     /// We probed (and/or the operator declined): there is none. Never offer a
-    /// network join again in this run.
+    /// trust domain join again in this run.
     DontHave,
     /// Nobody has checked (strict CLI, dry-run). A sub-flow that wants an
     /// admin server may probe itself.
@@ -77,7 +77,7 @@ pub enum AdminServers {
 }
 
 impl AdminServers {
-    /// The confirmed network, if one was found and accepted.
+    /// The confirmed trust domain, if one was found and accepted.
     pub fn have(&self) -> Option<&DiscoveredTrustDomain> {
         match self {
             AdminServers::Have(net) => Some(net),
@@ -437,7 +437,7 @@ fn manual_seeds(answer: Option<String>) -> Result<Option<Vec<SocketAddr>>> {
     }
 }
 
-/// A network found by [`discover_trust_domains`]: its TLS domain, the admin-server
+/// A trust domain found by [`discover_trust_domains`]: its TLS domain, the admin-server
 /// address(es) that advertised it over mDNS, and — when one answered — the CA
 /// identity they present (whose `fingerprint` is the glyph a script passes to
 /// `--accept-glyph`), or the reason none did.
@@ -447,17 +447,17 @@ pub struct DiscoveredTrustDomainReport {
     pub identity: Result<CaIdentity, String>,
 }
 
-/// Browse mDNS for netidx admin servers and, for each distinct network, fetch
+/// Browse mDNS for netidx admin servers and, for each distinct trust domain, fetch
 /// the CA identity from the first reachable server. A pure read-only QUERY —
 /// no prompts, no decisions — so, unlike the interactive [`discover_trust_domain`]
 /// cascade (which the strict CLI disables), it is valid in strict/scripted
-/// mode: a script runs it, reads a network's admin-server address + glyph, and
+/// mode: a script runs it, reads a trust domain's admin-server address + glyph, and
 /// feeds them to `--admin-server` / `--accept-glyph`.
 ///
 /// `early_exit = Some(settle)` browses at least `settle` and then returns as
-/// soon as a cluster is found (up to `timeout`) — the interactive join, where
-/// one cluster is expected. `None` browses the whole `timeout` to enumerate
-/// every network — the strict enumerator.
+/// soon as a trust domain is found (up to `timeout`) — the interactive join, where
+/// one trust domain is expected. `None` browses the whole `timeout` to enumerate
+/// every trust domain — the strict enumerator.
 pub async fn discover_trust_domains(
     timeout: Duration,
     kind: NodeKind,
@@ -465,8 +465,8 @@ pub async fn discover_trust_domains(
 ) -> Vec<DiscoveredTrustDomainReport> {
     // The mDNS browse blocks for `timeout`; keep it off the async worker.
     // `early_exit = Some(settle)` waits at least `settle` then early-exits once a
-    // cluster is found (the interactive join); `None` waits the full window to
-    // list every network (the strict enumerator).
+    // trust domain is found (the interactive join); `None` waits the full window to
+    // list every trust domain (the strict enumerator).
     let found = tokio::task::spawn_blocking(move || match early_exit {
         Some(settle) => discovery::browse_first_or_empty(timeout, settle),
         None => discovery::browse_or_empty(timeout),
@@ -511,9 +511,9 @@ pub async fn discover_trust_domains(
     out
 }
 
-/// Find the network this node should join: browse mDNS, group by domain, let
+/// Find the trust domain this node should join: browse mDNS, group by domain, let
 /// the operator pick (falling back to a manual admin-server address when
-/// discovery finds nothing), then fetch and glyph-confirm the network's
+/// discovery finds nothing), then fetch and glyph-confirm the trust domain's
 /// identity and aggregate `GetInfo` across its admin servers.
 ///
 /// [`AdminServers::DontHave`] ⇒ the operator concluded there is none (nothing
@@ -526,43 +526,43 @@ pub async fn discover_trust_domain(
     if !ans.interactive() {
         return Ok(AdminServers::NotProbed);
     }
-    // Role-specific framing: a resolver can found a new cluster, so it defaults
-    // to that; a workstation can't found one, so it either joins a cluster (the
+    // Role-specific framing: a resolver can found a new trust domain, so it defaults
+    // to that; a workstation can't found one, so it either joins a trust domain (the
     // default) or installs stand-alone. Either way the non-join option means
-    // "no parent cluster" → `DontHave`. A publisher is not offered the choice at
+    // "no parent trust domain" → `DontHave`. A publisher is not offered the choice at
     // all: it publishes to somebody's resolver or it does nothing, so a
     // stand-alone publisher is not a thing and it always joins.
     let membership = match kind {
         NodeKind::Resolver => Some((
             Field::TrustDomainMode,
-            "Create a new administrative network (creates a CA)",
+            "Create a new trust domain (creates a CA)",
             "Use an existing controller / CA",
-            "Create a new administrative network (creates a CA)",
+            "Create a new trust domain (creates a CA)",
         )),
         NodeKind::Client | NodeKind::Workstation | NodeKind::AdminServer => Some((
             Field::Membership,
             "Install stand alone",
-            "Join a cluster",
-            "Join a cluster",
+            "Join a trust domain",
+            "Join a trust domain",
         )),
         NodeKind::Publisher => None,
     };
     // Decide first, discover second — so the flow is identical however many
-    // clusters happen to be on the network.
+    // trust domains happen to be on the network.
     if let Some((field, standalone, join, default)) = membership {
         let choice = ans.choice(field, None, &[standalone, join], Some(default)).await?;
         if choice != join {
             return Ok(AdminServers::DontHave);
         }
     }
-    // Connecting: browse the local network for clusters and fetch each one's CA
+    // Connecting: browse the local network for trust domains and fetch each one's CA
     // identity, so the operator can recognize the one they mean by its glyph. The
-    // operator can browse again ("poll for more") to pick up a cluster that
+    // operator can browse again ("poll for more") to pick up a trust domain that
     // answered late; new ones are appended, deduped by domain.
     let mut options: Vec<TrustDomainOption> = Vec::new();
     let mut servers: Vec<Vec<SocketAddr>> = Vec::new();
     discover_into(ans, kind, &mut options, &mut servers).await;
-    // Pick a discovered cluster by its glyph, enter an admin-server address
+    // Pick a discovered trust domain by its glyph, enter an admin-server address
     // manually, or poll again for more.
     let seeds: Vec<SocketAddr> = 'pick: loop {
         match ans.select_trust_domain(&options).await? {
@@ -580,8 +580,8 @@ pub async fn discover_trust_domain(
             },
             TrustDomainChoice::PollMore => {
                 match discover_into(ans, kind, &mut options, &mut servers).await {
-                    0 => ans.note("no additional clusters found"),
-                    n => ans.note(&format_compact!("found {n} more cluster(s)")),
+                    0 => ans.note("no additional trust domains found"),
+                    n => ans.note(&format_compact!("found {n} more trust domain(s)")),
                 }
             }
         }
@@ -589,10 +589,10 @@ pub async fn discover_trust_domain(
     confirm_seeds(ans, &seeds, kind).await
 }
 
-/// Browse the network once and append any newly-discovered clusters (deduped by
+/// Browse the network once and append any newly-discovered trust domains (deduped by
 /// domain) to `options`/`servers`, fetching each one's CA identity so it can be
 /// picked by its glyph. Returns how many were newly added. A previously-listed
-/// cluster is skipped; a previously-unreachable one is re-attempted (it may
+/// trust domain is skipped; a previously-unreachable one is re-attempted (it may
 /// answer now), which is exactly what "poll for more" is for.
 async fn discover_into(
     ans: &mut dyn Answerer,
@@ -602,7 +602,7 @@ async fn discover_into(
 ) -> usize {
     ans.progress(Progress::timed(
         Stage::Discovering,
-        "searching for a netidx cluster on the local network…",
+        "searching for a netidx trust domain on the local network…",
         DISCOVERY_TIMEOUT,
     ));
     let reports =
@@ -624,9 +624,9 @@ async fn discover_into(
     added
 }
 
-/// Fetch the network identity from the first reachable seed and have the
+/// Fetch the trust domain identity from the first reachable seed and have the
 /// operator glyph-confirm it — the single human trust decision; everything
-/// after is pinned to the confirmed fingerprint. Then map the network.
+/// after is pinned to the confirmed fingerprint. Then map the trust domain.
 pub async fn confirm_seeds(
     ans: &mut dyn Answerer,
     seeds: &[SocketAddr],
@@ -650,15 +650,15 @@ pub async fn confirm_seeds(
         bail!("no admin server could be reached")
     };
     if !ans.confirm_identity(&identity).await? {
-        bail!("the cluster identity was not confirmed; nothing was sent");
+        bail!("the trust domain identity was not confirmed; nothing was sent");
     }
     let info = transport::aggregate(seeds, kind, &identity)
         .await
-        .context("mapping the network (GetInfo peer walk)")?;
+        .context("mapping the trust domain (GetInfo peer walk)")?;
     Ok(AdminServers::Have(DiscoveredTrustDomain { identity, info }))
 }
 
-/// Confirm a network reachable at one explicit address — the WAN parent given
+/// Confirm a trust domain reachable at one explicit address — the WAN parent given
 /// via `--parent-admin-server`, where there is no mDNS. Resolving the parent
 /// into a `Have` BEFORE the create-vs-enroll decision is what makes a
 /// satellite enroll its cert from the existing CA and never mint its own.
@@ -670,8 +670,8 @@ pub async fn confirm_trust_domain_at(
     confirm_seeds(ans, &[addr], kind).await
 }
 
-/// Map a confirmed network's resolvers into per-address referral auth,
-/// obtaining a client TLS identity from the network's CA when the network runs
+/// Map a confirmed trust domain's resolvers into per-address referral auth,
+/// obtaining a client TLS identity from the trust domain's CA when the trust domain runs
 /// TLS and the caller doesn't already have one (`have_identity`). The identity
 /// was already glyph-confirmed in [`discover_trust_domain`] — no second
 /// confirmation; the signing connection still pins to it.
@@ -688,14 +688,14 @@ pub async fn trust_domain_addrs_and_identity(
 ) -> Result<Vec<(SocketAddr, ReferralAuth)>> {
     if net.info.resolvers.is_empty() {
         bail!(
-            "the admin servers of cluster {:?} reported no resolvers — is the \
+            "the admin servers of trust domain {:?} reported no resolvers — is the \
              resolver host's admin server down? (manual setup: re-run and leave \
              the admin-server prompts blank)",
             net.identity.domain,
         );
     }
     ans.note(&format_compact!(
-        "cluster {:?}: {} resolver(s)",
+        "trust domain {:?}: {} resolver(s)",
         net.identity.domain,
         net.info.resolvers.len()
     ));
@@ -716,7 +716,7 @@ pub async fn trust_domain_addrs_and_identity(
     if needs_tls && !have_identity {
         let Some(ca_addr) = net.info.ca_addr else {
             bail!(
-                "cluster {:?} uses TLS but none of its admin servers reported a \
+                "trust domain {:?} uses TLS but none of its admin servers reported a \
                  CA — cannot obtain a client certificate",
                 net.identity.domain,
             )
@@ -756,7 +756,7 @@ pub async fn trust_domain_addrs_and_identity(
     Ok(addrs)
 }
 
-/// Obtain a TLS identity from the network's admin server when one is known (or
+/// Obtain a TLS identity from the trust domain's admin server when one is known (or
 /// discoverable), instead of the local-CA / CSR flow. Keyed on what the
 /// calling flow already knows ([`AdminServers`]): `Have` joins with no further
 /// questions; `DontHave` returns `None`; `NotProbed` runs discovery here.
@@ -795,7 +795,7 @@ async fn selected_ca_server(
     };
     let Some(ca_addr) = net.info.ca_addr else {
         ans.note(&format_compact!(
-            "cluster {:?} reported no CA; falling back to local certificate setup",
+            "trust domain {:?} reported no CA; falling back to local certificate setup",
             net.identity.domain,
         ));
         return Ok(None);
@@ -856,7 +856,7 @@ pub async fn await_issuance(
     Ok(settled)
 }
 
-/// Obtain a cert from an **already confirmed** network — every connection pins
+/// Obtain a cert from an **already confirmed** trust domain — every connection pins
 /// to `identity`. Returns the issued identity staged in a tempdir (the
 /// template's `--force`-gated `apply()` installs it).
 ///

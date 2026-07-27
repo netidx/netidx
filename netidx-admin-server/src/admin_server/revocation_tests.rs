@@ -126,7 +126,7 @@ fn revoke_authority_denies_serials_it_cannot_evaluate() {
     assert!(
         revoke_authority(&scoped, &map, 8, Some(&issued_for(8, "a.ap.example"))).is_err()
     );
-    // A serving cert whose identity can't be resolved to a cluster is refused.
+    // A serving cert whose identity can't be resolved to a resolver cluster is refused.
     assert!(
         revoke_authority(&scoped, &map, 9, Some(&issued_for(9, SERVING_SAN))).is_err()
     );

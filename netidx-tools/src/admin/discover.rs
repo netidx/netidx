@@ -1,7 +1,7 @@
-//! `netidx admin discover` — browse mDNS for netidx networks and print each
+//! `netidx admin discover` — browse mDNS for netidx trust domains and print each
 //! one's admin-server address(es) + CA glyph. A pure read-only query: unlike
 //! the interactive install discovery (which strict mode disables), this is
-//! valid in strict/scripted mode, so a script can discover a network and feed
+//! valid in strict/scripted mode, so a script can discover a trust domain and feed
 //! the address + glyph to `--admin-server` / `--accept-glyph`.
 
 use anyhow::{Context, Result};
@@ -19,22 +19,22 @@ pub(crate) struct DiscoverArgs {
     /// instead of the human-readable report.
     #[arg(long)]
     json: bool,
-    /// Also print each reachable network's identicon (human output only).
+    /// Also print each reachable trust domain's identicon (human output only).
     #[arg(long)]
     identicon: bool,
 }
 
 pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let networks = rt.block_on(enroll::discover_trust_domains(
+    let trust_domains = rt.block_on(enroll::discover_trust_domains(
         Duration::from_secs(a.timeout),
         NodeKind::Client,
         None,
     ));
     if a.json {
-        print_json(&networks);
+        print_json(&trust_domains);
     } else {
-        print_human(&networks, a.identicon);
+        print_human(&trust_domains, a.identicon);
     }
     Ok(())
 }
@@ -47,13 +47,13 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn print_human(networks: &[DiscoveredTrustDomainReport], identicon: bool) {
-    if networks.is_empty() {
-        println!("no netidx networks discovered on the local network.");
+fn print_human(trust_domains: &[DiscoveredTrustDomainReport], identicon: bool) {
+    if trust_domains.is_empty() {
+        println!("no netidx trust domains discovered on the local network.");
         return;
     }
-    for n in networks {
-        println!("network {:?}", n.domain);
+    for n in trust_domains {
+        println!("trust domain {:?}", n.domain);
         let addrs =
             n.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
         println!("  admin server(s): {addrs}");
@@ -75,9 +75,9 @@ fn print_human(networks: &[DiscoveredTrustDomainReport], identicon: bool) {
     }
 }
 
-fn print_json(networks: &[DiscoveredTrustDomainReport]) {
+fn print_json(trust_domains: &[DiscoveredTrustDomainReport]) {
     use serde_json::{Map, Value};
-    let arr = networks
+    let arr = trust_domains
         .iter()
         .map(|n| {
             let mut obj = Map::new();

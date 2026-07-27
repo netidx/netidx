@@ -160,7 +160,7 @@ pub(super) async fn handle_poll(state: &Arc<Server>, req: &PollRequest) -> PollR
                         Ok(Some(_)) | Ok(None) => None,
                         // The record we just reported as Signed won't read
                         // back. Say so — silently skipping the id-map push
-                        // leaves an identity the network can't authorize.
+                        // leaves an identity the trust domain can't authorize.
                         Err(e) => {
                             warn!(
                                 "admin-server: reading issued record {id} for id-map \
@@ -323,7 +323,7 @@ async fn approve_serialized(
         let server_id = admin_proto::AdminServerId::new();
         let mut staged = map
             .cloned()
-            .ok_or_else(|| "the CA-owned network map is unavailable".to_string())?;
+            .ok_or_else(|| "the CA-owned trust domain map is unavailable".to_string())?;
         stage_enrollment(&mut staged, server_id, &enrollment)
             .map_err(|e| format!("invalid enrollment grant: {e:#}"))?;
         let signing = server_unlock(ca, prepared_server_unlock).await?;
@@ -463,7 +463,7 @@ pub(super) async fn handle_enqueue(
     // Admin-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
     // reserved-name refusal (this is the sanctioned way to request it)
-    // and not one-live-cert (every admin server on the network holds the
+    // and not one-live-cert (every admin server on the trust domain holds the
     // same name). The real gate — the approving admin's
     // scoped enrollment authorization runs at approval; this entry just waits in
     // the queue under the same code-matching ceremony as any other.
@@ -591,7 +591,7 @@ pub(super) async fn handle_enqueue(
         // here too so the enrollee hears it immediately instead of
         // after the admin clicked through an approval that would only
         // be refused. Resolver replicas are the deliberate exception: each
-        // has its own key but presents the cluster's shared TLS server name.
+        // has its own key but presents the resolver cluster's shared TLS server name.
         if one_live_name(req.kind) && replacement_of.is_none() {
             match store.live_for_name(name).await {
                 Ok(live) if !live.is_empty() => {

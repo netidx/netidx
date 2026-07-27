@@ -8,7 +8,7 @@
 //! Records live under `<ca-dir>/delegations/`, in three dirs that keep the
 //! active queue away from history:
 //!   - `queue/<id>.json`    — Pending delegation requests.
-//!   - `approved/<id>.json` — Approved records (carry the parent cluster's
+//!   - `approved/<id>.json` — Approved records (carry the parent resolver cluster's
 //!     address(es) for the child to poll). TTL-pruned with the queue.
 //!   - `denied/<id>.json`   — Denied requests, with the reason.
 //!
@@ -39,7 +39,7 @@ pub struct PendingDelegation {
     pub proposed_path: String,
     pub parent_servers: Vec<AdminServerId>,
     pub child_servers: Vec<AdminServerId>,
-    /// Stable CA allocation used if approval splits one active cluster.
+    /// Stable CA allocation used if approval splits one active resolver cluster.
     pub proposed_child: ResolverClusterId,
     pub received_unix: u64,
     /// Socket address the request arrived from (display context).
@@ -222,7 +222,7 @@ pub async fn read_pending(ca_dir: &Path, id: &str) -> Result<Option<PendingDeleg
 
 /// Read the approved record by id — the original request + the recorded
 /// parent address(es). Used to idempotently re-sync an already-approved
-/// delegation (re-apply the child edit + re-push to cluster peers).
+/// delegation (re-apply the child edit + re-push to resolver cluster peers).
 pub async fn read_approved(ca_dir: &Path, id: &str) -> Result<Option<ApprovedRecord>> {
     if !valid_id(id) {
         return Ok(None);

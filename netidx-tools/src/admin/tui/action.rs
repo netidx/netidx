@@ -114,9 +114,9 @@ impl Outcome {
         }
     }
 
-    /// A silent Cluster-tab discovery result: refresh the known-cluster list and
+    /// A silent Trust domain-tab discovery result: refresh the known-trust domain list and
     /// return to the landing screen with no overlay — the list is the result, and
-    /// the landing screen re-polls it to show the verified clusters.
+    /// the landing screen re-polls it to show the verified trust domains.
     pub(super) fn remote_clusters(
         clusters: Vec<super::trust_domains::KnownTrustDomain>,
     ) -> Outcome {
@@ -168,7 +168,7 @@ impl Outcome {
         }
     }
 
-    /// A silent result that opens a panel's level picker (cluster perms).
+    /// A silent result that opens a panel's level picker (trust domain perms).
     pub(super) fn levels(panel: super::remote::Panel, levels: Vec<String>) -> Outcome {
         Outcome {
             title: String::new(),
@@ -182,7 +182,7 @@ impl Outcome {
         }
     }
 
-    /// A silent result that opens the service-control server picker (cluster
+    /// A silent result that opens the service-control server picker (trust domain
     /// services): the map's admin servers, one to pick and control.
     pub(super) fn service_servers(
         servers: Vec<super::remote::ServiceServerRow>,
@@ -199,7 +199,7 @@ impl Outcome {
         }
     }
 
-    /// A silent Cluster-tab services listing: apply the rows and open the
+    /// A silent Trust domain-tab services listing: apply the rows and open the
     /// services panel with no overlay — selecting a server drops straight into
     /// the units, and a refresh doesn't flash a toast.
     pub(super) fn remote_service_rows(rows: Vec<super::services::ServiceRow>) -> Outcome {
@@ -215,7 +215,7 @@ impl Outcome {
         }
     }
 
-    /// A Cluster-tab service-control result: a toast plus the refreshed units.
+    /// A Trust domain-tab service-control result: a toast plus the refreshed units.
     pub(super) fn remote_service_after(
         title: impl Into<String>,
         lines: Vec<String>,
@@ -272,9 +272,9 @@ pub(super) enum Action {
     Install { role: InstallRole, dry_run: bool },
     /// Renew this host's certificates now.
     Renew { server: Option<SocketAddr> },
-    /// Reconcile this host's config with the network (add/remove peers).
+    /// Reconcile this host's config with the trust domain (add/remove peers).
     Update { role: InstallRole, config_root: PathBuf },
-    /// Graduate a local-only workstation onto a network. `dry_run` previews.
+    /// Graduate a local-only workstation onto a trust domain. `dry_run` previews.
     Join { dry_run: bool },
     /// Attach this resolver under a parent by delegation (resolver only).
     AddParent { config_root: PathBuf },
@@ -337,7 +337,7 @@ impl Action {
                 if *dry_run {
                     "Previewing join".to_string()
                 } else {
-                    "Joining a cluster".to_string()
+                    "Joining a trust domain".to_string()
                 }
             }
             Action::AddParent { .. } => "Adding a parent".to_string(),
@@ -405,7 +405,7 @@ impl Action {
             Action::Uninstall { remove_ca, .. } => Some(if *remove_ca {
                 "Remove this install AND DESTROY THE CA? This stops and removes the \
                  OS service, deletes the configuration, and irreversibly deletes \
-                 the CA directory — the network's trust root. Every enrolled node's \
+                 the CA directory — the trust domain's trust root. Every enrolled node's \
                  certificate becomes unverifiable and unrenewable. There is no undo."
                     .to_string()
             } else {
@@ -659,9 +659,7 @@ async fn finish_identities(
     let (controller, net) =
         super::super::backup_restore::trust_domain_for_restore(manifest, None)
             .await?
-            .context(
-                "the backup contains TLS identities but no administrative network",
-            )?;
+            .context("the backup contains TLS identities but no trust domain")?;
     super::super::backup_restore::reenroll_data_identities(
         ans, root, manifest, controller, &net, None,
     )
@@ -1051,13 +1049,16 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
     }
 }
 
-/// Reconcile config with the network and apply the resulting edit plan.
+/// Reconcile config with the trust domain and apply the resulting edit plan.
 async fn update(
     ans: &mut TuiAnswerer,
     role: InstallRole,
     config_root: PathBuf,
 ) -> Result<Outcome> {
-    ans.progress(Progress::new(Stage::Discovering, "checking the cluster for changes…"));
+    ans.progress(Progress::new(
+        Stage::Discovering,
+        "checking the trust domain for changes…",
+    ));
     let config_lock =
         netidx_admin_client::config_lock::ConfigDirLock::acquire_async(&config_root)
             .await?;
@@ -1065,7 +1066,7 @@ async fn update(
     if plan.is_empty() {
         return Ok(Outcome::plain(
             "Up to date",
-            vec!["Already in sync with the cluster — no changes.".to_string()],
+            vec!["Already in sync with the trust domain — no changes.".to_string()],
             false,
         ));
     }
@@ -1086,7 +1087,7 @@ async fn update(
     })
 }
 
-/// Graduate a local-only workstation onto a network.
+/// Graduate a local-only workstation onto a trust domain.
 async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     use netidx_admin_client::plan::install::workstation::{
         WorkstationJoinInput, run_workstation_join,
@@ -1105,7 +1106,10 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     } else {
         (
             "Joined",
-            vec!["Joined the cluster. Restart the local resolver to use it.".to_string()],
+            vec![
+                "Joined the trust domain. Restart the local resolver to use it."
+                    .to_string(),
+            ],
         )
     };
     Ok(Outcome {
@@ -1121,7 +1125,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
 }
 
 /// Prompt for the parent's admin-server address (the manual fallback when the
-/// parent isn't in this host's network map).
+/// parent isn't in this host's trust domain map).
 #[cfg(unix)]
 async fn prompt_parent_admin(ans: &mut TuiAnswerer) -> Result<SocketAddr> {
     use netidx_admin_client::plan::resolve_admin_server_addr;
@@ -1152,7 +1156,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     use netidx_admin_proto::{ResolverAddr, ResolverClusterId, ServerState};
     let rpath = paths::discover_resolver_config()?;
 
-    // Candidate parents come from the network map (each resolver + its level),
+    // Candidate parents come from the trust domain map (each resolver + its level),
     // minus this host's own resolvers. If the map is unreachable or offers no
     // other resolver, fall back to typing an admin-server address.
     let map = super::lifecycle::fetch_local_map(&config_root).await.ok();
@@ -1168,9 +1172,11 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
         map.admin_servers.iter().find(|s| s.resolver.as_ref() == Some(local))
     });
     if map.is_some() && local_server.is_none() {
-        bail!("this resolver's locally owned member is absent from the CA network map");
+        bail!(
+            "this resolver's locally owned member is absent from the CA trust domain map"
+        );
     }
-    // (admin addr, resolver addr+auth, current cluster, base)
+    // (admin addr, resolver addr+auth, current trust domain, base)
     // — the global source of truth for the picker.
     let cand: Vec<(SocketAddr, ResolverAddr, ResolverClusterId, String)> = match &map {
         Some(map) => {
@@ -1223,8 +1229,8 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
                     let parent_cluster = picked[0].2;
                     if picked.iter().any(|candidate| candidate.2 != parent_cluster) {
                         ans.warn(
-                            "those resolvers aren't all in one parent cluster — pick \
-                             resolvers served by a single cluster",
+                            "those resolvers aren't all in one parent trust domain — pick \
+                             resolvers served by a single trust domain",
                         );
                         continue;
                     }
@@ -1259,7 +1265,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
         ResolverClusterPropagation::ControllerManaged => {}
     }
     lines.push(
-        "Configuration is written; do not restart the whole cluster at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+        "Configuration is written; do not restart the whole trust domain at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
             .to_string(),
     );
     Ok(Outcome {

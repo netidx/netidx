@@ -115,9 +115,9 @@ fn do_primary_scope(p: &Params, scope: ServiceScope) -> Result<()> {
     // a hand-rolled config (no marker) just skips the line. The marker
     // itself is removed with the rest of the config root below.
     if let Some(rec) = load_install_record(p, scope) {
-        match &rec.network {
+        match &rec.trust_domain {
             Some(net) => println!(
-                "tearing down {} install (cluster {:?})",
+                "tearing down {} install (trust domain {:?})",
                 rec.role.as_str(),
                 net.domain,
             ),
@@ -332,7 +332,7 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
     }
 }
 
-/// Tell the CA to drop this admin server from the network map before we
+/// Tell the CA to drop this admin server from the trust domain map before we
 /// delete its config + certs. Best-effort: a non-CA admin server registers
 /// its facts with the CA, so on teardown it should deregister, or the CA
 /// keeps a dead entry until `admin ca remove-server`. The CA host itself

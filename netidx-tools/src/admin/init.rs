@@ -184,7 +184,7 @@ struct CommonFlags {
     /// Read the CA recovery password from stdin instead (strict mode).
     #[arg(long = "recovery-password-stdin", conflicts_with = "recovery_password_file")]
     recovery_password_stdin: bool,
-    /// A CA fingerprint obtained out of band; confirms a network's
+    /// A CA fingerprint obtained out of band; confirms a trust domain's
     /// identity non-interactively (e.g. with `--parent-admin-server`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
@@ -266,19 +266,19 @@ pub(crate) struct WorkstationFlags {
     #[command(flatten)]
     parent: ParentFlags,
     /// Enroll against this admin server (`ip:port`) instead of mDNS
-    /// discovery — the non-interactive join path. On a TLS network this
+    /// discovery — the non-interactive join path. On a TLS trust domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
-    /// network out of band with `--accept-glyph` (view the glyph via `netidx
+    /// trust domain out of band with `--accept-glyph` (view the glyph via `netidx
     /// admin ca fingerprint <ip:port>`). Ignored when a `--parent-*` flag
     /// specifies the parent explicitly.
     #[arg(long = "admin-server")]
     admin_server: Option<SocketAddr>,
     /// `default_auth` on the client config. Defaults to `local`.
     /// Override only when the workstation hosts publishers that
-    /// network subscribers must reach.
+    /// trust domain subscribers must reach.
     #[arg(long = "default-auth")]
     default_auth: Option<AuthKind>,
-    /// Base path of the local resolver cluster (default `/local`).
+    /// Base path of the local resolver trust domain (default `/local`).
     #[arg(long = "base", default_value = "/local")]
     base: String,
     /// Port the local resolver listens on. Default 4654 — chosen to
@@ -379,17 +379,17 @@ pub(crate) struct WorkstationJoinFlags {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
     /// How a newly-enrolled private key is protected at rest: `seal`,
-    /// `password`, or `none`. Only relevant when joining a TLS network
+    /// `password`, or `none`. Only relevant when joining a TLS trust domain
     /// (where `join` enrolls a client certificate).
     #[arg(long = "key-protection")]
     pub key_protection: Option<KeyProtArg>,
-    /// The network's admin server (`ip:port`, or a host resolved with the
-    /// default admin port). Names the network directly instead of discovering
+    /// The trust domain's admin server (`ip:port`, or a host resolved with the
+    /// default admin port). Names the trust domain directly instead of discovering
     /// it — required in strict mode (discovery is interactive-only).
     #[arg(long = "admin-server")]
     pub admin_server: Option<String>,
-    /// The network's CA fingerprint, obtained out of band; confirms the
-    /// network's identity non-interactively (required with `--admin-server`).
+    /// The trust domain's CA fingerprint, obtained out of band; confirms the
+    /// trust domain's identity non-interactively (required with `--admin-server`).
     #[arg(long = "accept-glyph")]
     pub accept_glyph: Option<String>,
     /// Under `--key-protection password`, read the leaf key password from this
@@ -401,14 +401,14 @@ pub(crate) struct WorkstationJoinFlags {
     pub password_stdin: bool,
 }
 
-/// `workstation join` — graduate a local-only workstation to a networked
-/// one: select + glyph-confirm a network (by `--admin-server` or discovery),
+/// `workstation join` — graduate a local-only workstation to a joined
+/// one: select + glyph-confirm a trust domain (by `--admin-server` or discovery),
 /// enroll a client cert if it's TLS, and attach the local resolver to it via a
 /// parent referral — without a reinstall or a hand-edit. The marker records the
-/// joined (pinned) network so later `status`/`update` can re-pin to it.
+/// joined (pinned) trust domain so later `status`/`update` can re-pin to it.
 pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     // The only secret is the leaf key password (under --key-protection
-    // password); the network is named by --admin-server + glyph-confirmed by
+    // password); the trust domain is named by --admin-server + glyph-confirmed by
     // --accept-glyph, so `join` works with no TTY.
     let mut ans = super::answer_cli::make_flag_answerer(
         f.password_file.as_deref(),
@@ -435,14 +435,14 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     ))
 }
 
-/// Print a confirmed-or-not network identity: domain, claimed roles,
+/// Print a confirmed-or-not trust domain identity: domain, claimed roles,
 /// fingerprint text + identicon.
 pub(super) fn show_trust_domain_identity(
     addr: SocketAddr,
     identity: &transport::CaIdentity,
 ) {
     println!(
-        "The admin server at {addr} serves network {:?} (roles: {}) and presented \
+        "The admin server at {addr} serves trust domain {:?} (roles: {}) and presented \
          this identity:",
         identity.domain,
         describe_roles(identity.roles),
@@ -534,7 +534,7 @@ pub(crate) struct ResolverFlags {
     /// Must be a concrete address (not `0.0.0.0`). The interactive
     /// prompt suggests an IPv4 address discovered from the machine's
     /// network interfaces: the first public IPv4, else the first
-    /// private-network IPv4, else loopback. IPv6 is accepted if you
+    /// private-trust domain IPv4, else loopback. IPv6 is accepted if you
     /// type it explicitly, but not suggested as the default. Use
     /// `--bind` if the socket should bind somewhere other than the
     /// advertised address.
@@ -598,13 +598,13 @@ pub(crate) struct ResolverFlags {
     #[arg(long = "id-map-mode")]
     id_map_mode: Option<String>,
     /// Skip admin-server setup entirely (expert). On a fresh krb5 /
-    /// anonymous network this also skips the admin-plane CA. A host
+    /// anonymous trust domain this also skips the admin-plane CA. A host
     /// without a admin server is invisible to discovery, and if no admin
-    /// server exists anywhere on the network, certificate renewal and
+    /// server exists anywhere on the trust domain, certificate renewal and
     /// future zero-touch installs don't work at all.
     #[arg(long = "no-admin-server")]
     no_admin_server: bool,
-    /// Explicitly set up an admin server for this network. Only meaningful on an
+    /// Explicitly set up an admin server for this trust domain. Only meaningful on an
     /// anonymous data plane, where an admin server is optional — TLS/krb5 set one
     /// up automatically. Required (with `--no-admin-server` as the opposite) to
     /// make an anonymous install's choice non-interactively.
@@ -613,12 +613,12 @@ pub(crate) struct ResolverFlags {
     /// Proceed even when this host has no usable TPM / Secure Enclave.
     /// Only relevant when this install mints a new CA (the netidx-CA TLS
     /// resolver path with no existing CA, or a admin plane on a
-    /// krb5/anonymous network). DANGER: the CA's autorenew credential is
+    /// krb5/anonymous trust domain). DANGER: the CA's autorenew credential is
     /// then written in PLAINTEXT, so every backup or disk image of this
     /// machine is a CA compromise. Test CAs only.
     #[arg(long = "insecure-no-tpm")]
     insecure_no_tpm: bool,
-    /// Set this resolver up as a CHILD of an existing network: give the
+    /// Set this resolver up as a CHILD of an existing trust domain: give the
     /// parent's admin-server address (`ip:port`). The install requests
     /// delegation of a subtree (`--delegate-subtree`) and, once the parent
     /// admin approves, bakes the parent referral into the config — no
@@ -627,7 +627,7 @@ pub(crate) struct ResolverFlags {
     parent_admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the parent (with
     /// `--parent-admin-server`), e.g. `/eu`. Omit to install as a peer
-    /// of the base cluster instead of requesting delegation.
+    /// of the base trust domain instead of requesting delegation.
     #[arg(long = "delegate-subtree")]
     delegate_subtree: Option<String>,
     /// How new private keys are protected at rest: `seal` (bind to
@@ -711,7 +711,7 @@ fn resolver_input(
 
 #[derive(Args, Debug)]
 pub(crate) struct PublisherFlags {
-    /// Cluster address (repeatable). All addresses share the auth
+    /// Trust domain address (repeatable). All addresses share the auth
     /// scheme; for heterogeneous setups, edit the generated JSON.
     /// Prompted (single address) when omitted.
     #[arg(long = "addr", num_args = 1)]
@@ -720,9 +720,9 @@ pub(crate) struct PublisherFlags {
     #[arg(long = "auth")]
     auth: Option<AuthKind>,
     /// Enroll against this admin server (`ip:port`) instead of mDNS
-    /// discovery — the non-interactive join path. On a TLS network this
+    /// discovery — the non-interactive join path. On a TLS trust domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
-    /// network out of band with `--accept-glyph` (view the glyph via `netidx
+    /// trust domain out of band with `--accept-glyph` (view the glyph via `netidx
     /// admin ca fingerprint <ip:port>`). Takes precedence over `--addr` /
     /// `--auth`.
     #[arg(long = "admin-server")]

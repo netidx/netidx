@@ -7,7 +7,7 @@
 //! server. That is deliberate and load-bearing: a unit is an arbitrary command
 //! line, so defining one is equivalent to running code on the box. **Unit
 //! definition (create / edit / delete) is therefore local-only** — this module
-//! is the *sole* path to `ActivationDir`, and no remote/cluster code ever
+//! is the *sole* path to `ActivationDir`, and no remote/resolver cluster code ever
 //! constructs a [`ServicesAction`]. Cluster-scope service control (the Cluster
 //! tab's `Service` panel) can only start/stop/restart units defined here.
 
@@ -54,7 +54,7 @@ pub(super) struct ServiceRow {
 }
 
 impl ServiceRow {
-    /// Build a display row from a cluster member's reported unit (the Cluster
+    /// Build a display row from a resolver cluster member's reported unit (the Cluster
     /// tab's remote services panel). The member pre-formats the definition
     /// fields, so this is a pure mapping — no `ActivationDir` access, which
     /// stays local-only.

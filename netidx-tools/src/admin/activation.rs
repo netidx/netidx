@@ -202,7 +202,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 }
 
 /// Restart / start / stop / status units — over the admin plane (`--server`,
-/// RBAC-gated, cluster+member targeting) or against the local activation
+/// RBAC-gated, resolver cluster+member targeting) or against the local activation
 /// supervisor's control socket (on-box).
 fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
     let server = a.auth.server_addr()?;

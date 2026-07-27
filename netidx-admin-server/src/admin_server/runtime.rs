@@ -48,7 +48,7 @@ pub fn load_roots(trusted_pem: &[u8]) -> Result<RootCertStore> {
 
 const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// On a non-CA admin server, keep the cached network map current and keep
+/// On a non-CA admin server, keep the cached trust domain map current and keep
 /// our own entry registered with the CA. The CA owns the map; we are a
 /// read-replica — if the CA is unreachable we keep serving the last copy
 /// we cached, and the re-register self-heals a push lost while it was down.
@@ -109,7 +109,7 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
                         {
                             Ok(map) => state.write(move |state| state.map = map).await,
                             Err(e) => warn!(
-                                "admin-server: pulling the network map from {ca_addr} failed \
+                                "admin-server: pulling the trust domain map from {ca_addr} failed \
                                  (serving the cached copy): {e:#}"
                             ),
                         }
@@ -367,7 +367,7 @@ async fn build_serving_acceptor(
 /// How often the daemon re-stats its serving cert + CRL on disk. Both were
 /// previously read once at startup, so a serving cert the renewal daemon
 /// renewed *on disk* sat unused until the running daemon's in-memory copy
-/// expired — taking the admin plane down network-wide. Now a long-running
+/// expired — taking the admin plane down trust domain-wide. Now a long-running
 /// daemon picks up a renewal (or a fresh CRL / revocation) within one poll,
 /// no restart needed. Cheap: a stat, and a rebuild only when an mtime moves.
 const SERVING_RELOAD_POLL: Duration = Duration::from_secs(30);
@@ -480,7 +480,7 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
     // A TPM-sealed serving key has its password in `<key>.tpm`, sealed to
     // this machine; `load_serving_keypair` unseals + decrypts in memory.
     // Failure is a hard error (a admin server silently down means no discovery
-    // and no renewals for the whole network).
+    // and no renewals for the whole trust domain).
     let (serving_cert_pem, serving_key_pem) =
         load_serving_keypair(&cfg.serving_cert, &cfg.serving_key).await?;
     let listen = cfg.listen;
@@ -680,7 +680,7 @@ fn local_peer_allowed(stream: &tokio::net::UnixStream) -> bool {
 /// control socket and serve admin / recovery / service requests from it.
 /// Best-effort: a bind failure is logged and the daemon keeps serving the
 /// network admin plane. Local connections share the sign semaphore (the
-/// Argon2 budget) but not the network connection limit — the socket is a
+/// Argon2 budget) but not the trust domain connection limit — the socket is a
 /// privileged, peer-cred-gated local channel.
 async fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
     let Some(cfg_path) = state.cfg_path.clone() else { return };
