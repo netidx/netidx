@@ -536,7 +536,7 @@ pub async fn discover_admin_domain(
         NodeKind::Resolver => Some((
             Field::AdminDomainMode,
             "Create a new admin domain (creates a CA)",
-            "Use an existing CA / CA",
+            "Use an existing CA",
             "Create a new admin domain (creates a CA)",
         )),
         NodeKind::Client | NodeKind::Workstation | NodeKind::AdminServer => Some((

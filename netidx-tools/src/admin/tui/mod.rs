@@ -1502,7 +1502,7 @@ mod render_tests {
             field: Field::AdminDomainMode,
             choices: vec![
                 "Create a new admin domain (creates a CA)".into(),
-                "Use an existing CA / CA".into(),
+                "Use an existing CA".into(),
             ],
             default: Some("Create a new admin domain (creates a CA)".into()),
             reply: tx,
