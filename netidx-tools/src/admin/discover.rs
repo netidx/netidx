@@ -1,12 +1,12 @@
-//! `netidx admin discover` — browse mDNS for netidx trust domains and print each
+//! `netidx admin discover` — browse mDNS for netidx admin domains and print each
 //! one's admin-server address(es) + CA glyph. A pure read-only query: unlike
 //! the interactive install discovery (which strict mode disables), this is
-//! valid in strict/scripted mode, so a script can discover a trust domain and feed
+//! valid in strict/scripted mode, so a script can discover a admin domain and feed
 //! the address + glyph to `--admin-server` / `--accept-glyph`.
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin_client::plan::enroll::{self, DiscoveredTrustDomainReport};
+use netidx_admin_client::plan::enroll::{self, DiscoveredAdminDomainReport};
 use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
 use std::time::Duration;
 
@@ -19,22 +19,22 @@ pub(crate) struct DiscoverArgs {
     /// instead of the human-readable report.
     #[arg(long)]
     json: bool,
-    /// Also print each reachable trust domain's identicon (human output only).
+    /// Also print each reachable admin domain's identicon (human output only).
     #[arg(long)]
     identicon: bool,
 }
 
 pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let trust_domains = rt.block_on(enroll::discover_trust_domains(
+    let admin_domains = rt.block_on(enroll::discover_admin_domains(
         Duration::from_secs(a.timeout),
         NodeKind::Client,
         None,
     ));
     if a.json {
-        print_json(&trust_domains);
+        print_json(&admin_domains);
     } else {
-        print_human(&trust_domains, a.identicon);
+        print_human(&admin_domains, a.identicon);
     }
     Ok(())
 }
@@ -47,13 +47,13 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn print_human(trust_domains: &[DiscoveredTrustDomainReport], identicon: bool) {
-    if trust_domains.is_empty() {
-        println!("no netidx trust domains discovered on the local network.");
+fn print_human(admin_domains: &[DiscoveredAdminDomainReport], identicon: bool) {
+    if admin_domains.is_empty() {
+        println!("no netidx admin domains discovered on the local network.");
         return;
     }
-    for n in trust_domains {
-        println!("trust domain {:?}", n.domain);
+    for n in admin_domains {
+        println!("admin domain {:?}", n.domain);
         let addrs =
             n.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
         println!("  admin server(s): {addrs}");
@@ -75,9 +75,9 @@ fn print_human(trust_domains: &[DiscoveredTrustDomainReport], identicon: bool) {
     }
 }
 
-fn print_json(trust_domains: &[DiscoveredTrustDomainReport]) {
+fn print_json(admin_domains: &[DiscoveredAdminDomainReport]) {
     use serde_json::{Map, Value};
-    let arr = trust_domains
+    let arr = admin_domains
         .iter()
         .map(|n| {
             let mut obj = Map::new();

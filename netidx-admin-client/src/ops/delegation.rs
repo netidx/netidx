@@ -284,7 +284,7 @@ fn validate_existing_parent(
         bail!(
             "this resolver is already attached at {existing_path:?}; re-parenting \
              to {proposed_path:?} isn't supported (uninstall + reinstall to switch \
-             trust domains)"
+             admin domains)"
         );
     }
     if !has_complete_parent_selection {
@@ -319,7 +319,7 @@ pub async fn prepare_add_parent(
     let child = rcfg.resolver_addrs();
     if child.is_empty() {
         bail!(
-            "this resolver advertises no trust domain address (Local-only?) — it cannot \
+            "this resolver advertises no admin domain address (Local-only?) — it cannot \
              be delegated a subtree."
         );
     }

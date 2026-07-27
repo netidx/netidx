@@ -119,7 +119,7 @@ pub fn user_admin_server_config() -> Result<PathBuf> {
 
 /// `${dirs::config_dir}/netidx/install.json`. No existence check. The
 /// install provenance record — what role was installed here and which
-/// trust domain (identity-pinned) it joined. See [`crate::provenance`].
+/// admin domain (identity-pinned) it joined. See [`crate::provenance`].
 pub fn user_install_record() -> Result<PathBuf> {
     let mut p = user_config_root()?;
     p.push("install.json");

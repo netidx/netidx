@@ -11,7 +11,7 @@ use crate::{
         ca_setup,
         service::{ServiceGate, ServiceNeed, offer},
     },
-    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
+    provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
     service::ServiceScope,
 };
 use anyhow::{Context, Result, bail};
@@ -31,7 +31,7 @@ pub async fn create_self_signed_controller(
     listen_hint: Option<IpAddr>,
     units_dir: Option<PathBuf>,
     insecure_no_tpm: bool,
-) -> Result<(crate::ca::Ca, ServiceNeed, TrustDomainIdentity)> {
+) -> Result<(crate::ca::Ca, ServiceNeed, AdminDomainIdentity)> {
     ca_setup::announce_founding_policy(ans, &domain);
     let mut opts = ca_setup::founding_ca_opts(
         paths::user_ca_dir()?,
@@ -43,7 +43,7 @@ pub async fn create_self_signed_controller(
     );
     opts.listen = listen;
     let (ca, need) = ca_setup::create_vaulted_ca(ans, config_lock, opts).await?;
-    let identity = TrustDomainIdentity::new(
+    let identity = AdminDomainIdentity::new(
         domain,
         &Fingerprint::of_cert_pem(&ca.certificate_pem()?)?,
     );
@@ -93,7 +93,7 @@ pub async fn run_controller(
         );
     }
     let domain = ans
-        .text(Field::TrustDomainName, input.domain, Some(DEFAULT_TLS_DOMAIN), false)
+        .text(Field::AdminDomainName, input.domain, Some(DEFAULT_TLS_DOMAIN), false)
         .await?
         .unwrap_or_else(|| DEFAULT_TLS_DOMAIN.to_string());
     let units_dir = resolve_units_dir(input.common.no_units, input.units_dir.as_deref())?;
@@ -101,7 +101,7 @@ pub async fn run_controller(
         ans.confirm(Field::ExternalSign, input.external_sign, false).await?;
     ans.announce(
         "Controller / Certificate Authority",
-        "This machine will be the trust domain's one active controller and \
+        "This machine will be the admin domain's one active controller and \
          certificate authority. It does not need to run a resolver.",
     )
     .await?;

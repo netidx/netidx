@@ -13,10 +13,11 @@ use super::{
     revocation::revoke_server_certificates,
 };
 use crate::{
+    admin_domain,
     admin_proto::{
-        self, EnrollRequest, Role, SERVING_SAN, SignOk, SignResponse, TrustDomainMap,
+        self, AdminDomainMap, EnrollRequest, Role, SERVING_SAN, SignOk, SignResponse,
     },
-    ca_store, ca_vault, trust_domain,
+    ca_store, ca_vault,
 };
 use anyhow::{Context, Result};
 use log::warn;
@@ -142,7 +143,7 @@ async fn grant_enrollment(
                 .await
                 .context("revoking the replaced server identity")?;
             }
-            trust_domain::save_async(&config_lock, &ca_dir, &staged)
+            admin_domain::save_async(&config_lock, &ca_dir, &staged)
                 .await
                 .context("persisting the enrollment grant")?;
             *map = staged;
@@ -163,7 +164,7 @@ async fn grant_enrollment(
 /// satellite named by the bundle. Enroll first so replacing the sole member of
 /// a resolver cluster cannot transiently delete that stable resolver cluster ID.
 pub(super) fn stage_enrollment(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
 ) -> Result<admin_proto::ResolverClusterId> {
@@ -194,12 +195,12 @@ pub(super) fn stage_enrollment(
             server.resolver = None;
         }
     }
-    let cluster = trust_domain::enroll(map, server_id, enrollment)?;
+    let cluster = admin_domain::enroll(map, server_id, enrollment)?;
     if let Some(old) = enrollment.replaces {
         if replaced_cluster.flatten() != Some(cluster) {
             bail!("a restored server must rejoin the same resolver cluster it replaces");
         }
-        trust_domain::remove(map, old)?;
+        admin_domain::remove(map, old)?;
     }
     Ok(cluster)
 }
@@ -207,7 +208,7 @@ pub(super) fn stage_enrollment(
 pub(super) fn authorize_enrollment(
     authd: &ca_vault::Authenticated,
     enrollment: &admin_proto::EnrollmentRequest,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> std::result::Result<(), String> {
     if enrollment.roles.contains(Role::Ca) {
         return Err("an enrollee may never request the Ca role".to_string());
@@ -249,7 +250,7 @@ pub(super) async fn handle_enroll_request(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> SignResponse {
     match try_enroll(ca, req, authentication, prepared_server_unlock, local, map).await {
         Ok(resp) => resp,
@@ -260,7 +261,7 @@ pub(super) async fn handle_enroll_request(
 fn enrollment_cert_identity(
     local: bool,
     renew_identity: Option<admin_proto::AdminServerId>,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> std::result::Result<crate::tls::AdminCertIdentity, String> {
     if !local {
         return Ok(crate::tls::AdminCertIdentity {
@@ -285,7 +286,7 @@ async fn try_enroll(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> Result<SignResponse> {
     // A request over the local control socket is already authorized as a
     // signing-tier superuser (`SO_PEERCRED` root / the daemon's own uid),
@@ -351,7 +352,7 @@ async fn try_enroll(
             replaces: req.replaces,
         };
         let Some(map) = map else {
-            return Ok(reject("the CA-owned trust domain map is unavailable"));
+            return Ok(reject("the CA-owned admin domain map is unavailable"));
         };
         let mut staged = map.clone();
         if let Err(e) = stage_enrollment(&mut staged, identity.server_id, &enrollment) {

@@ -1,9 +1,9 @@
 //! Install provenance: a small record (`install.json`) written next to a
 //! host's config at install/join time, recording **what role** was
-//! installed and **which trust domain** it joined.
+//! installed and **which admin domain** it joined.
 //!
-//! The trust domain half is load-bearing for the lifecycle ops (`status`,
-//! `update`, `join`): they trust a admin server's picture of the trust domain
+//! The admin domain half is load-bearing for the lifecycle ops (`status`,
+//! `update`, `join`): they trust a admin server's picture of the admin domain
 //! ("here are the resolvers, add the ones you're missing"), so they must
 //! first re-pin to the **same** CA identity the operator glyph-confirmed
 //! at install. Storing that identity here is what makes an unattended
@@ -41,20 +41,20 @@ impl InstallRole {
     }
 }
 
-/// The trust domain a host joined: the domain and the CA fingerprint the
+/// The admin domain a host joined: the domain and the CA fingerprint the
 /// operator glyph-confirmed. The fingerprint is stored in the
 /// grouped-base32 text form ([`Fingerprint::text`]) so the record reads
 /// the same as the glyph shown at install; compare via [`Self::matches`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrustDomainIdentity {
+pub struct AdminDomainIdentity {
     pub domain: String,
     pub ca_fingerprint: String,
 }
 
-impl TrustDomainIdentity {
+impl AdminDomainIdentity {
     /// Build from a confirmed [`Fingerprint`] and domain.
     pub fn new(domain: impl Into<String>, ca: &Fingerprint) -> Self {
-        TrustDomainIdentity { domain: domain.into(), ca_fingerprint: ca.text() }
+        AdminDomainIdentity { domain: domain.into(), ca_fingerprint: ca.text() }
     }
 
     /// Does `presented` match the pinned identity? Parses the stored
@@ -79,12 +79,12 @@ pub struct InstallRecord {
     pub base: String,
     /// The data-plane auth chosen at install (`anonymous`/`local`/`krb5`/`tls`).
     pub auth: String,
-    /// The admin trust domain this host belongs to — the trust domain it founded or the
-    /// one it joined — carrying that trust domain's CA identity (domain + glyph).
+    /// The admin admin domain this host belongs to — the admin domain it founded or the
+    /// one it joined — carrying that admin domain's CA identity (domain + glyph).
     /// `None` for a standalone/local-only install (a workstation with no
     /// parent, or a resolver with no admin server).
     #[serde(default)]
-    pub trust_domain: Option<TrustDomainIdentity>,
+    pub admin_domain: Option<AdminDomainIdentity>,
     /// A admin-server address known at install time, if any — a starting
     /// point for lifecycle ops (which also fall back to mDNS discovery).
     #[serde(default)]
@@ -104,7 +104,7 @@ impl InstallRecord {
         role: InstallRole,
         base: impl Into<String>,
         auth: impl Into<String>,
-        trust_domain: Option<TrustDomainIdentity>,
+        admin_domain: Option<AdminDomainIdentity>,
         admin_server: Option<SocketAddr>,
     ) -> Self {
         let created_unix = SystemTime::now()
@@ -115,7 +115,7 @@ impl InstallRecord {
             role,
             base: base.into(),
             auth: auth.into(),
-            trust_domain,
+            admin_domain,
             admin_server,
             managed_paths: Vec::new(),
             created_unix,
@@ -201,7 +201,7 @@ mod tests {
             InstallRole::Workstation,
             "/local",
             "tls",
-            Some(TrustDomainIdentity::new("ryu-oh.org", &fp)),
+            Some(AdminDomainIdentity::new("ryu-oh.org", &fp)),
             Some("192.168.50.11:4564".parse().unwrap()),
         );
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
@@ -210,14 +210,14 @@ mod tests {
         assert_eq!(rec, back);
         // The pinned identity round-trips through the stored text form
         // and matches the original fingerprint; a different key doesn't.
-        let net = back.trust_domain.as_ref().unwrap();
+        let net = back.admin_domain.as_ref().unwrap();
         assert!(net.matches(&fp).unwrap());
         let other = Fingerprint::of_der(b"a different key");
         assert!(!net.matches(&other).unwrap());
     }
 
     #[test]
-    fn local_only_has_no_trust_domain() {
+    fn local_only_has_no_admin_domain() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("install.json");
         let rec =
@@ -225,7 +225,7 @@ mod tests {
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         rec.save(&lock, &path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
-        assert!(back.trust_domain.is_none());
+        assert!(back.admin_domain.is_none());
         assert!(back.admin_server.is_none());
     }
 

@@ -1,4 +1,4 @@
-//! Resolver-server template. A single trust domain-facing resolver,
+//! Resolver-server template. A single admin domain-facing resolver,
 //! with the operator's chosen auth scheme on the one member,
 //! optional parent referral, optional perms seed, and a single
 //! activation unit that runs `netidx resolver-server`.
@@ -708,7 +708,7 @@ mod tests {
         let tls = c.0.tls.as_ref().expect("client tls section");
         // The identity is keyed by the *domain* part of the cert
         // SAN (`example.com`), not the full SAN (`resolver.example.com`).
-        // netidx keys identities per trust domain and
+        // netidx keys identities per admin domain and
         // matches hosts under that domain via reverse-domain prefix
         // lookup at handshake time.
         let identity = tls

@@ -34,7 +34,7 @@ pub struct SetupArgs<'a> {
     pub ca_dir: &'a Path,
     pub ca: &'a Ca,
     pub config_lock: ConfigDirLock,
-    /// The trust domain's TLS domain — what discovery groups by.
+    /// The admin domain's TLS domain — what discovery groups by.
     pub domain: &'a str,
     /// Explicit `--listen` (skips the prompt).
     pub listen: Option<SocketAddr>,
@@ -54,7 +54,7 @@ pub struct SetupArgs<'a> {
 /// id-map roles as they set those up), and (when `units_dir` is set)
 /// drop the `admin-server` activation unit. Returns the [`ServiceNeed`]
 /// the caller folds into its single end-of-process service offer — an
-/// admin server is a trust domain daemon, so it needs a **system**-scope
+/// admin server is a admin domain daemon, so it needs a **system**-scope
 /// service when a unit was written, or `NONE` when `--no-units` left the
 /// operator to run it.
 pub async fn setup_server(
@@ -210,7 +210,7 @@ pub async fn setup_server(
         return Ok(ServiceNeed::NONE);
     };
     install_unit(ans, units_dir, &cfg_path).await?;
-    // An admin server is a trust domain daemon → system-scope service.
+    // An admin server is a admin domain daemon → system-scope service.
     Ok(ServiceNeed::at(ServiceScope::System))
 }
 

@@ -9,18 +9,18 @@
 use anyhow::{Context, Result, bail};
 use netidx_admin_client::{
     discovery, paths,
-    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
+    provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
     reconcile::{self, EditPlan},
     resolver::ResolverConfig,
-    transport::{self, TrustDomainInfo},
+    transport::{self, AdminDomainInfo},
 };
-use netidx_admin_proto::{NodeKind, TrustDomainMap};
+use netidx_admin_proto::{AdminDomainMap, NodeKind};
 use std::{net::SocketAddr, path::Path, time::Duration};
 
 pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Build the config-reconciliation plan for this host's role, checking it
-/// against the trust domain (pinned to the CA identity recorded at install). The
+/// against the admin domain (pinned to the CA identity recorded at install). The
 /// caller renders `plan.describe()` and applies it. Errors if this host is
 /// local-only (nothing to update) or the wrong role.
 pub(super) async fn update_plan(
@@ -32,7 +32,7 @@ pub(super) async fn update_plan(
         bail!("this host is a {} install, not a {}", rec.role.as_str(), role.as_str());
     }
     let net_id = rec
-        .trust_domain
+        .admin_domain
         .as_ref()
         .context("this host is local-only — nothing to update")?;
     match role {
@@ -42,7 +42,7 @@ pub(super) async fn update_plan(
         InstallRole::Workstation => {
             let rpath = paths::discover_resolver_config()?;
             let info =
-                fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client)
+                fetch_admin_domain_pinned(net_id, rec.admin_server, NodeKind::Client)
                     .await?;
             reconcile::reconcile_resolver_peers(&rpath, &info)
         }
@@ -68,15 +68,15 @@ pub(super) async fn update_plan(
     }
 }
 
-/// Fetch the trust domain map as this host, pinned to the CA identity recorded at
+/// Fetch the admin domain map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
-/// part of a trust domain or no admin server answers with the pinned identity.
-pub(super) async fn fetch_local_map(config_root: &Path) -> Result<TrustDomainMap> {
+/// part of a admin domain or no admin server answers with the pinned identity.
+pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap> {
     let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec
-        .trust_domain
+        .admin_domain
         .as_ref()
-        .context("this host is not part of a trust domain (local-only)")?;
+        .context("this host is not part of a admin domain (local-only)")?;
     fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
 }
 
@@ -115,14 +115,14 @@ async fn candidates(admin_server: Option<SocketAddr>) -> Vec<SocketAddr> {
     out
 }
 
-/// Walk the trust domain (GetInfo aggregate) via the first candidate whose CA matches
+/// Walk the admin domain (GetInfo aggregate) via the first candidate whose CA matches
 /// the pinned identity. Fail-closed: a reachable server with a different CA is
 /// refused, never silently trusted.
-async fn fetch_trust_domain_pinned(
-    net_id: &TrustDomainIdentity,
+async fn fetch_admin_domain_pinned(
+    net_id: &AdminDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<TrustDomainInfo> {
+) -> Result<AdminDomainInfo> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
         let id = match transport::fetch_identity(addr, kind).await {
@@ -132,20 +132,20 @@ async fn fetch_trust_domain_pinned(
         if net_id.matches(&id.fingerprint)? {
             return transport::aggregate(&[addr], kind, &id)
                 .await
-                .context("mapping the trust domain (GetInfo)");
+                .context("mapping the admin domain (GetInfo)");
         }
         saw_mismatch = true;
     }
     fail(saw_mismatch)
 }
 
-/// One-shot pinned trust domain-map fetch, same fail-closed logic as
-/// [`fetch_trust_domain_pinned`].
+/// One-shot pinned admin domain-map fetch, same fail-closed logic as
+/// [`fetch_admin_domain_pinned`].
 async fn fetch_map_pinned(
-    net_id: &TrustDomainIdentity,
+    net_id: &AdminDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let mut saw_mismatch = false;
     for addr in candidates(admin_server).await {
         let id = match transport::fetch_identity(addr, kind).await {
@@ -155,7 +155,7 @@ async fn fetch_map_pinned(
         if net_id.matches(&id.fingerprint)? {
             return transport::get_map_pinned(addr, kind, &id)
                 .await
-                .context("fetching the trust domain map");
+                .context("fetching the admin domain map");
         }
         saw_mismatch = true;
     }
@@ -166,7 +166,7 @@ fn fail<T>(saw_mismatch: bool) -> Result<T> {
     if saw_mismatch {
         bail!(
             "reached an admin server, but its CA fingerprint did not match this \
-             install's pinned trust domain identity — refusing to trust it; re-join if \
+             install's pinned admin domain identity — refusing to trust it; re-join if \
              the CA legitimately changed"
         )
     }

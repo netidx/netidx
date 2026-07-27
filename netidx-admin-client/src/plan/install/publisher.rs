@@ -1,14 +1,14 @@
 //! The publisher role install: a client config for a host that publishes.
 //!
 //! A publisher never mints a CA or an admin server — it either joins a
-//! discovered trust domain (enrolling a TLS cert over the admin plane) or is
+//! discovered admin domain (enrolling a TLS cert over the admin plane) or is
 //! configured against explicit resolver addresses. The one daemon it may run
 //! is the certificate-renewal supervisor, for TLS setups.
 
 use super::{
-    InstallCommon, finish_with, install_renew_unit, prompt_resolver_port,
-    prompt_resolver_tls_name, publisher_bind_shape, resolve_units_dir,
-    suggest_client_san, trust_domain_provenance,
+    InstallCommon, admin_domain_provenance, finish_with, install_renew_unit,
+    prompt_resolver_port, prompt_resolver_tls_name, publisher_bind_shape,
+    resolve_units_dir, suggest_client_san,
 };
 use crate::{
     admin_proto::NodeKind,
@@ -32,12 +32,12 @@ use std::{
 /// Typed inputs for [`run_publisher`] — the resolved form of the clap
 /// `PublisherFlags` (the clap struct stays in the CLI frontend).
 pub struct PublisherInput {
-    /// Trust domain addresses (empty ⇒ discover or prompt).
+    /// Admin domain addresses (empty ⇒ discover or prompt).
     pub addrs: Vec<SocketAddr>,
     /// Data-plane auth scheme (`None` ⇒ discover or prompt).
     pub auth: Option<AuthKind>,
     /// Enroll against this admin server (`--admin-server`) instead of mDNS
-    /// discovery — the non-interactive join path. On a TLS trust domain this
+    /// discovery — the non-interactive join path. On a TLS admin domain this
     /// enrolls a client certificate; the presented identity is confirmed via
     /// `--accept-glyph`. Takes precedence over `--addr`/`--auth`.
     pub admin_server: Option<SocketAddr>,
@@ -134,20 +134,20 @@ pub async fn run_publisher(
     // Staging tempdirs for any admin-server-joined identity must outlive the
     // `finish_with` call (dropping a TempDir deletes its contents).
     let mut tls_staging: Vec<tempfile::TempDir> = Vec::new();
-    // Ask the trust domain before asking the human: with no `--addr` / `--auth`, a
+    // Ask the admin domain before asking the human: with no `--addr` / `--auth`, a
     // discovered (glyph-confirmed) admin server yields every resolver address
-    // with its auth — and, on TLS trust domains, our client cert.
+    // with its auth — and, on TLS admin domains, our client cert.
     let probe = if let Some(addr) = admin_server {
-        enroll::confirm_trust_domain_at(ans, addr, NodeKind::Publisher).await?
+        enroll::confirm_admin_domain_at(ans, addr, NodeKind::Publisher).await?
     } else if addrs.is_empty() && auth.is_none() {
-        enroll::discover_trust_domain(ans, NodeKind::Publisher).await?
+        enroll::discover_admin_domain(ans, NodeKind::Publisher).await?
     } else {
         AdminServers::NotProbed
     };
     let resolved_addrs: Vec<(SocketAddr, ReferralAuth)> = match &probe {
         AdminServers::Have(net) => {
             let have_identity = !tls_identities.is_empty();
-            enroll::trust_domain_addrs_and_identity(
+            enroll::admin_domain_addrs_and_identity(
                 ans,
                 net,
                 NodeKind::Publisher,
@@ -164,7 +164,7 @@ pub async fn run_publisher(
         // by hand is the strict CLI's `NotProbed` path below.
         AdminServers::DontHave => bail!(
             "a publisher must connect to a resolver, so it has no stand-alone \
-             install; join a trust domain, or name the resolvers explicitly with \
+             install; join a admin domain, or name the resolvers explicitly with \
              --addr and --auth"
         ),
         AdminServers::NotProbed => {
@@ -182,10 +182,10 @@ pub async fn run_publisher(
                 let ip: IpAddr = ans
                     .text(Field::ResolverAddr, None, None, true)
                     .await?
-                    .context("the trust domain IP (resolver to connect to) is required")?
+                    .context("the admin domain IP (resolver to connect to) is required")?
                     .trim()
                     .parse()
-                    .context("invalid trust domain IP")?;
+                    .context("invalid admin domain IP")?;
                 addrs.push(prompt_resolver_port(ans, ip, None).await?);
             }
             let per_addr_auth = publisher_per_addr_auth(
@@ -275,9 +275,9 @@ pub async fn run_publisher(
     } else {
         ServiceNeed::NONE
     };
-    let (trust_domain, admin_server) = trust_domain_provenance(&probe);
+    let (admin_domain, admin_server) = admin_domain_provenance(&probe);
     // On the discovery/auto-import path `auth` is never set — the scheme comes
-    // from the trust domain's per-referral auths — so fall back to what we actually
+    // from the admin domain's per-referral auths — so fall back to what we actually
     // configured rather than defaulting the record to "tls".
     let record_auth = auth
         .map(|k| k.as_str())
@@ -287,7 +287,7 @@ pub async fn run_publisher(
         InstallRole::Publisher,
         base.clone(),
         record_auth,
-        trust_domain,
+        admin_domain,
         admin_server,
     );
     let params = template::publisher::PublisherParams {

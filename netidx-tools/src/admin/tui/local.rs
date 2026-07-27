@@ -46,7 +46,7 @@ const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
         action: FreshAction::Install(InstallRole::Controller),
         title: "Controller / CA",
-        blurb: "Install the trust domain's one active controller and \
+        blurb: "Install the admin domain's one active controller and \
                 certificate authority on this machine. It may be dedicated to this role; \
                 resolver servers are installed separately and enroll with it.",
     },
@@ -54,24 +54,24 @@ const FRESH_CHOICES: [FreshChoice; 5] = [
         action: FreshAction::Install(InstallRole::Workstation),
         title: "Workstation",
         blurb: "Turn this machine into a full netidx node: a local resolver serving a \
-                /local namespace plus a matching client. Join an existing trust domain to \
+                /local namespace plus a matching client. Join an existing admin domain to \
                 enroll a TLS identity, or run standalone. The usual choice for a laptop \
                 or desktop.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "A trust domain-facing resolver server — the directory that maps paths to \
-                publishers for a whole trust domain or a delegated subtree. Can mint a new \
-                trust domain's certificate authority and admin server, or enroll under an \
+        blurb: "A admin domain-facing resolver server — the directory that maps paths to \
+                publishers for a whole admin domain or a delegated subtree. Can mint a new \
+                admin domain's certificate authority and admin server, or enroll under an \
                 existing one.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
         blurb: "A client configuration for a host that publishes data: point it at a \
-                trust domain's resolvers with the right auth. Installs a certificate-renewal \
-                service when the trust domain uses TLS.",
+                admin domain's resolvers with the right auth. Installs a certificate-renewal \
+                service when the admin domain uses TLS.",
     },
     RESTORE_CHOICE,
 ];
@@ -82,23 +82,23 @@ const FRESH_CHOICES: [FreshChoice; 4] = [
         action: FreshAction::Install(InstallRole::Workstation),
         title: "Workstation",
         blurb: "Turn this machine into a full netidx node: a local resolver serving a \
-                /local namespace plus a matching client. Join an existing trust domain to \
+                /local namespace plus a matching client. Join an existing admin domain to \
                 enroll a TLS identity, or run standalone. The usual choice for a laptop \
                 or desktop.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Resolver),
         title: "Resolver",
-        blurb: "A trust domain-facing resolver server — the directory that maps paths to \
-                publishers for a whole trust domain or a delegated subtree. Enrolls under an \
+        blurb: "A admin domain-facing resolver server — the directory that maps paths to \
+                publishers for a whole admin domain or a delegated subtree. Enrolls under an \
                 existing controller.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Publisher),
         title: "Publisher",
         blurb: "A client configuration for a host that publishes data: point it at a \
-                trust domain's resolvers with the right auth. Installs a certificate-renewal \
-                service when the trust domain uses TLS.",
+                admin domain's resolvers with the right auth. Installs a certificate-renewal \
+                service when the admin domain uses TLS.",
     },
     RESTORE_CHOICE,
 ];
@@ -129,7 +129,7 @@ struct LocalCa {
 
 /// The credential-state half of [`LocalCa`], filled in by a background probe.
 ///
-/// Reading it drives the daemon's local control socket, and that is a trust domain
+/// Reading it drives the daemon's local control socket, and that is a admin domain
 /// round trip in all but name: connecting to a bound unix socket succeeds into
 /// the backlog whether or not the daemon is accepting. Doing it inline on the
 /// UI task froze the whole TUI behind a wedged daemon, so it lives here on the
@@ -174,10 +174,10 @@ impl Detected {
         scope: ServiceScope,
         config_dir: PathBuf,
     ) -> Detected {
-        // The CA glyph comes from the trust domain identity recorded at install — set
-        // for both a founding host (its own trust domain) and a joining one.
+        // The CA glyph comes from the admin domain identity recorded at install — set
+        // for both a founding host (its own admin domain) and a joining one.
         let ca = record
-            .trust_domain
+            .admin_domain
             .as_ref()
             .and_then(|n| Fingerprint::parse_text(&n.ca_fingerprint).ok());
         let service = probe_service(&record);
@@ -247,22 +247,22 @@ pub(super) async fn probe_local_cas(
     Vec::new()
 }
 
-/// Trust domain-sync state for a detected install, filled in asynchronously by a
+/// Admin domain-sync state for a detected install, filled in asynchronously by a
 /// background check (the same reconcile the CLI `status`/`update` runs). Kept
-/// out of [`Detected`] because probing it is a trust domain round-trip, while
+/// out of [`Detected`] because probing it is a admin domain round-trip, while
 /// `Detected` is built synchronously from local files.
 #[derive(Clone)]
 pub(super) enum SyncState {
-    /// An install that has joined a trust domain not yet checked; the event loop launches a check.
+    /// An install that has joined a admin domain not yet checked; the event loop launches a check.
     Unchecked,
     /// A background check is in flight.
     Checking,
-    /// The config already matches the trust domain — nothing to apply.
+    /// The config already matches the admin domain — nothing to apply.
     InSync,
-    /// The trust domain has member servers this config lacks; each string is one
+    /// The admin domain has member servers this config lacks; each string is one
     /// pending addition (e.g. `client resolver 192.168.50.12:4564 (tls)`).
     OutOfSync(Vec<String>),
-    /// The check couldn't reach the trust domain; carries the error for display.
+    /// The check couldn't reach the admin domain; carries the error for display.
     Failed(String),
 }
 
@@ -313,9 +313,9 @@ fn detect() -> Vec<Detected> {
 /// fresh-machine case.
 pub(super) struct LocalState {
     installs: Vec<Detected>,
-    /// Per-install trust domain-sync state, parallel to `installs` — filled in by a
+    /// Per-install admin domain-sync state, parallel to `installs` — filled in by a
     /// background check so the status view can render instantly from local files
-    /// and gain the sync line once the trust domain answers.
+    /// and gain the sync line once the admin domain answers.
     sync: Vec<SyncState>,
     role_menu: ListState,
     /// Which detected install the action list + status apply to.
@@ -329,7 +329,7 @@ pub(super) struct LocalState {
     welcome_seen: bool,
     /// The open local admin-server panel surface (roster, …) over the control
     /// socket, if the operator chose "Manage admins". Takes over the tab while
-    /// open; shares the panel machinery with the Trust domain tab (a `Local` target).
+    /// open; shares the panel machinery with the Admin domain tab (a `Local` target).
     admin: Option<super::remote::RemoteState>,
     /// The open Services surface (list + control + local unit CRUD) over the
     /// local activation supervisor, if the operator chose "Services". Takes over
@@ -420,7 +420,7 @@ impl LocalState {
     }
 
     /// Re-run detection (after an install/uninstall completes). Resets the sync
-    /// state so the loop re-checks against the trust domain.
+    /// state so the loop re-checks against the admin domain.
     pub(super) fn refresh(&mut self) {
         self.installs = detect();
         self.sync = vec![SyncState::Unchecked; self.installs.len()];
@@ -445,7 +445,7 @@ impl LocalState {
     pub(super) fn take_pending_checks(&mut self) -> Vec<(usize, InstallRole, PathBuf)> {
         let mut out = Vec::new();
         for i in 0..self.installs.len() {
-            if self.installs[i].record.trust_domain.is_some()
+            if self.installs[i].record.admin_domain.is_some()
                 && self.installs[i].record.role != InstallRole::Controller
                 && matches!(self.sync[i], SyncState::Unchecked)
             {
@@ -602,12 +602,12 @@ impl LocalState {
             Char('u') => {
                 return Some(uninstall_action(&self.installs[self.selected], false));
             }
-            // Uppercase U applies the trust domain sync (the Update action) — mnemonic
+            // Uppercase U applies the admin domain sync (the Update action) — mnemonic
             // and distinct from lowercase `u` (uninstall). Only meaningful for a
             // joined install; the status overlay surfaces it when out of sync.
             Char('U') => {
                 let d = &self.installs[self.selected];
-                if d.record.trust_domain.is_some()
+                if d.record.admin_domain.is_some()
                     && d.record.role != InstallRole::Controller
                 {
                     return Some(Action::Update {
@@ -618,7 +618,7 @@ impl LocalState {
             }
             Char('r') => {
                 let d = &self.installs[self.selected];
-                if d.record.trust_domain.is_some() {
+                if d.record.admin_domain.is_some() {
                     return Some(Action::Renew { server: d.record.admin_server });
                 }
             }
@@ -734,7 +734,7 @@ impl LocalState {
 
 /// The Status item's description in the tool detail pane.
 const STATUS_DESC: &str = "Full status detail for this install: its config, whether it is in sync with \
-     the trust domain, and its CA glyph.";
+     the admin domain, and its CA glyph.";
 
 /// A one-line description of a Local-tab action, shown in the menu detail pane.
 fn action_desc(action: &Action) -> &'static str {
@@ -745,18 +745,18 @@ fn action_desc(action: &Action) -> &'static str {
             "Preview installing this role — show the plan without changing anything."
         }
         Renew { .. } => {
-            "Renew this host's TLS certificates from the trust domain's CA now. The \
+            "Renew this host's TLS certificates from the admin domain's CA now. The \
              auto-renew service does this automatically unless it has been turned off."
         }
         Update { .. } => {
-            "Reconcile this host's resolver list with the trust domain, adding or removing \
+            "Reconcile this host's resolver list with the admin domain, adding or removing \
              resolvers as necessary."
         }
         Join { dry_run: false } => {
-            "Graduate this local-only workstation onto a trust domain, enrolling a TLS identity."
+            "Graduate this local-only workstation onto a admin domain, enrolling a TLS identity."
         }
         Join { dry_run: true } => {
-            "Preview joining a trust domain, without changing anything."
+            "Preview joining a admin domain, without changing anything."
         }
         AddParent { .. } => "Attach this resolver under a parent resolver by delegation.",
         Remote(_) => "Connect to a remote admin server.",
@@ -768,11 +768,11 @@ fn action_desc(action: &Action) -> &'static str {
         }
         AutoApprove { rotate: true, .. } => {
             "Rotate this admin server's auto-renew credential. The auto-renew service \
-             automatically renews expiring certificates for the trust domain's members."
+             automatically renews expiring certificates for the admin domain's members."
         }
         AutoApprove { rotate: false, .. } => {
             "Enable the auto-renew service, which automatically renews expiring \
-             certificates for the trust domain's members, without an admin approving each one."
+             certificates for the admin domain's members, without an admin approving each one."
         }
         RecoveryRotate { .. } => {
             "Mint a fresh CA recovery password. Use this if you lost or forgot the old \
@@ -815,8 +815,8 @@ fn service_word(status: ServiceStatus) -> &'static str {
 
 /// The detailed-status overlay — the former always-on card, now shown on demand
 /// over the action list (any key closes). Left column is the record + sync
-/// detail; the right column carries the trust domain's CA glyph and fingerprint when
-/// this host belongs to a trust domain.
+/// detail; the right column carries the admin domain's CA glyph and fingerprint when
+/// this host belongs to a admin domain.
 fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncState) {
     let mut lines = detail_lines(d);
     lines.extend(sync_lines(sync));
@@ -867,7 +867,7 @@ fn render_status_overlay(f: &mut Frame, screen: Rect, d: &Detected, sync: &SyncS
 /// is prepended by the caller; these are the actionable items.
 fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let role = d.record.role;
-    let joined = d.record.trust_domain.is_some();
+    let joined = d.record.admin_domain.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
     if joined && role != InstallRole::Controller {
         items.push((
@@ -876,7 +876,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         ));
     }
     if role == InstallRole::Workstation && !joined {
-        items.push(("Join a Trust domain".to_string(), Action::Join { dry_run: false }));
+        items.push(("Join a Admin domain".to_string(), Action::Join { dry_run: false }));
         items
             .push(("Preview Join (Dry Run)".to_string(), Action::Join { dry_run: true }));
     }
@@ -889,7 +889,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // delegation handlers require an authenticated admin password and have no
         // local-superuser control-socket bypass (unlike roster/perms/rotate), so
         // it can't run over the local control socket. Review delegations from the
-        // Trust domain tab (connect to this host's own admin server).
+        // Admin domain tab (connect to this host's own admin server).
     }
     if joined {
         items.push((
@@ -1012,7 +1012,7 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
 fn render_welcome(f: &mut Frame, screen: Rect) {
     let heading = "netidx isn't installed on this machine.";
     let body = "Choose a role to install — a Workstation for a laptop or desktop, a \
-                Resolver to run a trust domain's directory, or a Publisher — or choose \
+                Resolver to run a admin domain's directory, or a Publisher — or choose \
                 Restore from Backup to recover any managed installation.";
     let prompt = " Press Enter to continue ";
     let w = 64.min(screen.width.saturating_sub(4)).max(24);
@@ -1046,12 +1046,12 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
         kv("Base", r.base.clone()),
         kv("Data-plane auth", r.auth.clone()),
     ];
-    match &r.trust_domain {
+    match &r.admin_domain {
         Some(net) => {
-            lines.push(kv("Trust domain", net.domain.clone()));
+            lines.push(kv("Admin domain", net.domain.clone()));
             lines.push(kv("CA fingerprint", net.ca_fingerprint.clone()));
         }
-        None => lines.push(kv("Trust domain", "standalone (local-only)".to_string())),
+        None => lines.push(kv("Admin domain", "standalone (local-only)".to_string())),
     }
     if let Some(addr) = r.admin_server {
         lines.push(kv("Admin server", addr.to_string()));
@@ -1118,26 +1118,26 @@ fn kv_status(label: &'static str, value: String, color: Color) -> Line<'static> 
     ])
 }
 
-/// The status-card lines describing this install's trust domain-sync state — the
+/// The status-card lines describing this install's admin domain-sync state — the
 /// TUI counterpart of the CLI `status` "in sync / out of sync" report.
 fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
     match sync {
         // A local-only install never gets here (never checked); render nothing.
         SyncState::Unchecked => Vec::new(),
         SyncState::Checking => {
-            vec![kv_status("Trust domain sync", "checking…".to_string(), theme::HINT_FG)]
+            vec![kv_status("Admin domain sync", "checking…".to_string(), theme::HINT_FG)]
         }
         SyncState::InSync => {
-            vec![kv_status("Trust domain sync", "✓ in sync".to_string(), theme::OK)]
+            vec![kv_status("Admin domain sync", "✓ in sync".to_string(), theme::OK)]
         }
         SyncState::Failed(e) => vec![kv_status(
-            "Trust domain sync",
+            "Admin domain sync",
             format!("could not check ({e})"),
             theme::HINT_FG,
         )],
         SyncState::OutOfSync(changes) => {
             let mut lines = vec![kv_status(
-                "Trust domain sync",
+                "Admin domain sync",
                 format!("⚠ {} new member server(s) — press U to apply", changes.len()),
                 theme::WARN,
             )];
@@ -1155,7 +1155,7 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
     }
 }
 
-/// Background trust domain-sync check for the given installs — the quiet counterpart
+/// Background admin domain-sync check for the given installs — the quiet counterpart
 /// of the Update action. Runs the same reconcile the CLI `status`/`update` does
 /// (via [`super::lifecycle::update_plan`]) and maps each result to a
 /// [`SyncState`]. Self-contained (owns its inputs, borrows no UI state) so the
@@ -1207,7 +1207,7 @@ fn fmt_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netidx_admin_client::provenance::TrustDomainIdentity;
+    use netidx_admin_client::provenance::AdminDomainIdentity;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -1260,13 +1260,13 @@ mod tests {
 
     #[test]
     fn status_glyph_not_clipped() {
-        let fp = Fingerprint::of_der(b"installed trust domain CA");
+        let fp = Fingerprint::of_der(b"installed admin domain CA");
         let detected = Detected {
             record: InstallRecord::new(
                 InstallRole::Resolver,
                 "/",
                 "tls",
-                Some(TrustDomainIdentity::new("example.com", &fp)),
+                Some(AdminDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,
@@ -1294,7 +1294,7 @@ mod tests {
                 InstallRole::Resolver,
                 "/",
                 "tls",
-                Some(TrustDomainIdentity::new("example.com", &fp)),
+                Some(AdminDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,
@@ -1326,7 +1326,7 @@ mod tests {
                 InstallRole::Controller,
                 "/",
                 "tls",
-                Some(TrustDomainIdentity::new("example.com", &fp)),
+                Some(AdminDomainIdentity::new("example.com", &fp)),
                 Some("127.0.0.1:4565".parse().unwrap()),
             ),
             service: ServiceStatus::Active,

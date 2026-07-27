@@ -6,7 +6,7 @@ use std::time::Duration;
 #[test]
 fn controller_identity_is_renewal_only_and_preserved() {
     let controller = admin_proto::AdminServerId::new();
-    let map = TrustDomainMap::empty(controller);
+    let map = AdminDomainMap::empty(controller);
     let identity = enrollment_cert_identity(true, Some(controller), Some(&map)).unwrap();
     assert_eq!(identity.server_id, controller);
     assert!(identity.controller);
@@ -30,7 +30,7 @@ fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
     let controller = admin_proto::AdminServerId::new();
     let old = admin_proto::AdminServerId::new();
     let fresh = admin_proto::AdminServerId::new();
-    let mut map = TrustDomainMap::empty(controller);
+    let mut map = AdminDomainMap::empty(controller);
     let member = ResolverAddr {
         addr: "10.0.0.10:4564".parse().unwrap(),
         auth: InfoAuth::Anonymous,

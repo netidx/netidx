@@ -40,14 +40,15 @@ pub(crate) use ca_ops::read_autorenew_password_async;
 pub use runtime::{load_roots, serve};
 
 use crate::{
+    admin_domain,
     admin_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, AdminServerEntry,
-        ApplyReferralEditRequest, ApplyReferralEditResponse, Role, TrustDomainMap,
+        self, AddIdentityRequest, AddIdentityResponse, AdminDomainMap, AdminServerEntry,
+        ApplyReferralEditRequest, ApplyReferralEditResponse, Role,
     },
     admin_server_config::AdminServerConfig,
     ca_store,
     config_lock::ConfigDirLock,
-    transport, trust_domain,
+    transport,
 };
 use anyhow::{Context, Result, bail};
 use enumflags2::BitFlags;
@@ -148,7 +149,7 @@ mod state_tests {
                     mdns: false,
                     activation_units_dir: None,
                 },
-                map: TrustDomainMap::empty(id),
+                map: AdminDomainMap::empty(id),
                 ca,
                 password_limiter: PasswordLimiter::default(),
             },
@@ -437,7 +438,7 @@ mod state_tests {
 
 struct MutableState {
     cfg: AdminServerConfig,
-    map: TrustDomainMap,
+    map: AdminDomainMap,
     ca: Option<ca_store::CaDir>,
     password_limiter: PasswordLimiter,
 }
@@ -557,12 +558,12 @@ impl Server {
             }
             None => None,
         };
-        // The trust domain map: the CA owns + persists it, seeded with the CA's
+        // The admin domain map: the CA owns + persists it, seeded with the CA's
         // own entry + address so it's never empty of itself; every other
         // host starts with an empty cache the refresh loop fills.
         let map = match &ca_dir {
             Some(dir) => {
-                let mut m = trust_domain::load_async(dir, cfg.server_id).await?;
+                let mut m = admin_domain::load_async(dir, cfg.server_id).await?;
                 let (resolver, facts) = local_resolver_data(&cfg).await;
                 let existing_cluster = m
                     .admin_servers
@@ -572,7 +573,7 @@ impl Server {
                 let cluster = facts.as_ref().map(|_| {
                     existing_cluster.unwrap_or_else(admin_proto::ResolverClusterId::new)
                 });
-                trust_domain::upsert_controller(
+                admin_domain::upsert_controller(
                     &mut m,
                     AdminServerEntry {
                         id: cfg.server_id,
@@ -584,10 +585,10 @@ impl Server {
                     },
                     facts,
                 )?;
-                trust_domain::save_async(&config_lock, dir, &m).await?;
+                admin_domain::save_async(&config_lock, dir, &m).await?;
                 m
             }
-            None => TrustDomainMap::default(),
+            None => AdminDomainMap::default(),
         };
         Server::from_state(
             config_lock,

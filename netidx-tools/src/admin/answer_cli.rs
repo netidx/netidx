@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use netidx_admin_client::{
-    answer::{Answerer, Field, Progress, TrustDomainChoice, TrustDomainOption},
+    answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -319,13 +319,13 @@ impl Answerer for FlagAnswerer {
         provided.ok_or_else(|| missing(field))
     }
 
-    async fn select_trust_domain(
+    async fn select_admin_domain(
         &mut self,
-        _domains: &[TrustDomainOption],
-    ) -> Result<TrustDomainChoice> {
+        _domains: &[AdminDomainOption],
+    ) -> Result<AdminDomainChoice> {
         // Discovery is interactive-only; the strict CLI takes an explicit
         // --admin-server instead and never reaches this.
-        Err(missing(Field::SelectTrustDomain))
+        Err(missing(Field::SelectAdminDomain))
     }
 
     async fn secret(&mut self, field: Field, provided: Option<Secret>) -> Result<Secret> {
@@ -356,7 +356,7 @@ impl Answerer for FlagAnswerer {
         match &self.accept_glyph {
             Some(expected) => Ok(&identity.fingerprint == expected),
             None => bail!(
-                "the admin server for trust domain {:?} presented CA fingerprint:\n  \
+                "the admin server for admin domain {:?} presented CA fingerprint:\n  \
                  {}\nnon-interactively you must confirm it out of band and pass \
                  --accept-glyph <fingerprint>",
                 identity.domain,

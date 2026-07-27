@@ -97,17 +97,17 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
         idle_timeout_secs: logged.idle_timeout_secs,
     })?;
     println!("logged in as {}", logged.admin);
-    println!("trust domain: {fingerprint}");
+    println!("admin domain: {fingerprint}");
     println!("expires: @{}", logged.absolute_deadline_unix);
     Ok(())
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct LogoutArgs {
-    /// Revoke and remove every cached trust domain session.
+    /// Revoke and remove every cached admin domain session.
     #[arg(long)]
     all: bool,
-    /// Select the trust domain by its CA glyph when more than one is cached.
+    /// Select the admin domain by its CA glyph when more than one is cached.
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
 }
@@ -124,7 +124,7 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
     } else {
         if sessions.len() > 1 {
             bail!(
-                "more than one trust domain session is cached; pass --accept-glyph or --all"
+                "more than one admin domain session is cached; pass --accept-glyph or --all"
             );
         }
         sessions

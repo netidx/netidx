@@ -14,7 +14,7 @@ use netidx_admin_client::{
     config_lock::ConfigDirLock,
     paths,
     plan::AuthKind,
-    plan::enroll::{self, DiscoveredTrustDomain},
+    plan::enroll::{self, DiscoveredAdminDomain},
     provenance::{InstallRecord, InstallRole},
     service::{ServiceParams, ServiceScope, ServiceStatus},
     tls, transport,
@@ -70,7 +70,7 @@ pub(crate) struct RestoreArgs {
     pub resolver_bind: Option<IpAddr>,
     /// Explicitly attest that the old controller cannot run. Required for a
     /// controller restore because two copies of the same controller identity
-    /// would violate the trust domain's single-writer boundary.
+    /// would violate the admin domain's single-writer boundary.
     #[arg(long = "old-controller-fenced")]
     pub old_controller_fenced: bool,
     /// Read the controller recovery password from a file.
@@ -296,11 +296,11 @@ fn install_service(
     }
 }
 
-pub(super) async fn trust_domain_for_restore(
+pub(super) async fn admin_domain_for_restore(
     manifest: &install_bundle::Manifest,
     override_: Option<&str>,
-) -> Result<Option<(SocketAddr, DiscoveredTrustDomain)>> {
-    let Some(trust_domain) = &manifest.install.trust_domain else { return Ok(None) };
+) -> Result<Option<(SocketAddr, DiscoveredAdminDomain)>> {
+    let Some(admin_domain) = &manifest.install.admin_domain else { return Ok(None) };
     let mut seed = match override_ {
         Some(addr) => init::resolve_admin_server_addr(addr)?,
         None => manifest.install.admin_server.or(manifest.admin_listen).context(
@@ -329,18 +329,18 @@ pub(super) async fn trust_domain_for_restore(
             last.unwrap_or_else(|| anyhow::anyhow!("the admin server did not start"))
         })?
     };
-    if !trust_domain.matches(&first.fingerprint)? {
+    if !admin_domain.matches(&first.fingerprint)? {
         bail!("the server at {seed} belongs to a different CA than the backup");
     }
     let info = transport::aggregate(&[seed], NodeKind::Client, &first).await?;
     let controller =
-        info.ca_addr.context("the verified trust domain reported no controller")?;
+        info.ca_addr.context("the verified admin domain reported no controller")?;
     let identity = transport::fetch_identity(controller, NodeKind::Client).await?;
-    if !identity.controller || !trust_domain.matches(&identity.fingerprint)? {
+    if !identity.controller || !admin_domain.matches(&identity.fingerprint)? {
         bail!("the discovered controller did not match the backup's pinned CA identity");
     }
     let info = transport::aggregate(&[controller], NodeKind::Client, &identity).await?;
-    Ok(Some((controller, DiscoveredTrustDomain { identity, info })))
+    Ok(Some((controller, DiscoveredAdminDomain { identity, info })))
 }
 
 fn node_kind(kind: IdentityKind) -> NodeKind {
@@ -387,7 +387,7 @@ pub(super) async fn reenroll_data_identities(
     root: &Path,
     manifest: &install_bundle::Manifest,
     controller: SocketAddr,
-    net: &DiscoveredTrustDomain,
+    net: &DiscoveredAdminDomain,
     key_protection: Option<netidx_admin_client::plan::enroll::KeyProtArg>,
 ) -> Result<()> {
     for recipe in
@@ -413,7 +413,7 @@ pub(super) async fn reenroll_data_identities(
                     old_certificate.display()
                 )
             })?;
-        let (identity, _staging) = enroll::join_trust_domain_replacing(
+        let (identity, _staging) = enroll::join_admin_domain_replacing(
             ans,
             controller,
             node_kind(recipe.kind),
@@ -450,7 +450,7 @@ pub(super) async fn reenroll_satellite_admin(
     config_lock: &ConfigDirLock,
     root: &Path,
     manifest: &install_bundle::Manifest,
-    net: &DiscoveredTrustDomain,
+    net: &DiscoveredAdminDomain,
     listen_override: Option<SocketAddr>,
 ) -> Result<()> {
     if !manifest.identities.iter().any(|i| i.kind == IdentityKind::AdminServer)
@@ -725,7 +725,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             a.recovery_password_stdin,
             manifest
                 .install
-                .trust_domain
+                .admin_domain
                 .as_ref()
                 .map(|n| {
                     netidx_admin_proto::fingerprint::Fingerprint::parse_text(
@@ -736,9 +736,9 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         )?;
         let rt = tokio::runtime::Runtime::new()?;
         let Some((controller, net)) =
-            rt.block_on(trust_domain_for_restore(&manifest, a.admin_server.as_deref()))?
+            rt.block_on(admin_domain_for_restore(&manifest, a.admin_server.as_deref()))?
         else {
-            bail!("the backup contains TLS identities but no trust domain identity");
+            bail!("the backup contains TLS identities but no admin domain identity");
         };
         rt.block_on(reenroll_data_identities(
             &mut ans,

@@ -14,7 +14,7 @@ use std::{net::SocketAddr, str::FromStr};
 
 /// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
 pub mod delegation;
-/// Trust domain discovery + certificate enrollment — the keystone subgraph every
+/// Admin domain discovery + certificate enrollment — the keystone subgraph every
 /// role install shares, driven through the [`crate::answer::Answerer`] seam.
 pub mod enroll;
 /// The role install cascades (`resolver` / `workstation` / `publisher`) and
@@ -23,7 +23,7 @@ pub mod install;
 /// The OS-service setup decision seam (`ServiceNeed` / `offer`).
 pub mod service;
 
-/// The data-plane authentication scheme a trust domain uses: how subscribers prove
+/// The data-plane authentication scheme a admin domain uses: how subscribers prove
 /// who they are to publishers and resolvers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthKind {
@@ -33,7 +33,7 @@ pub enum AuthKind {
     Local,
     /// Kerberos v5.
     Krb5,
-    /// Certificates issued by this trust domain's CA.
+    /// Certificates issued by this admin domain's CA.
     Tls,
 }
 
@@ -73,7 +73,7 @@ impl AuthKind {
 }
 
 /// What a resolver install should do about the admin plane (the admin server,
-/// and on non-TLS trust domains the admin-plane CA that anchors it).
+/// and on non-TLS admin domains the admin-plane CA that anchors it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminPlane {
     /// Set it up. Announce what's happening; don't ask.
@@ -87,15 +87,15 @@ pub enum AdminPlane {
 /// Decide how a resolver install treats the admin plane for a given auth
 /// scheme.
 ///
-/// TLS already creates the CA on a fresh trust domain (it signs the data plane),
+/// TLS already creates the CA on a fresh admin domain (it signs the data plane),
 /// and krb5/anonymous still need the admin plane's TLS trust root for
-/// discovery, enrollment, and renewal — declining it on a TLS or krb5 trust domain
-/// produces a trust domain where certificate renewal and zero-touch installs can
-/// never work, so neither is offered as a question. Anonymous trust domains may
+/// discovery, enrollment, and renewal — declining it on a TLS or krb5 admin domain
+/// produces a admin domain where certificate renewal and zero-touch installs can
+/// never work, so neither is offered as a question. Anonymous admin domains may
 /// genuinely not want the machinery (lab/dev setups), so they're asked. Local
 /// auth is host-local by definition: nothing to discover, nothing to enroll.
 ///
-/// The same rule covers joining an existing trust domain: enrolling an admin server
+/// The same rule covers joining an existing admin domain: enrolling an admin server
 /// queues for remote approval like any other request (the admin's
 /// scoped enrollment authorization runs at approval), so no admin needs to be at
 /// this keyboard and there is no reason for the join side of the matrix to
@@ -202,10 +202,10 @@ mod tests {
     fn the_admin_plane_matrix() {
         use AdminPlane::*;
         use AuthKind::*;
-        // Declining the admin plane on a TLS or krb5 trust domain breaks renewal +
+        // Declining the admin plane on a TLS or krb5 admin domain breaks renewal +
         // zero-touch installs forever, so neither is a question — fresh
-        // trust domain or joining one (enrollment queues for remote approval, so no
-        // admin is needed at this keyboard). Anonymous trust domains may not want
+        // admin domain or joining one (enrollment queues for remote approval, so no
+        // admin is needed at this keyboard). Anonymous admin domains may not want
         // the machinery; local auth has nothing to discover.
         for (kind, want) in
             [(Tls, Mandatory), (Krb5, Mandatory), (Anonymous, Ask), (Local, Skip)]

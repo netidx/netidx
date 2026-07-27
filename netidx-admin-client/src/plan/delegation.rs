@@ -36,7 +36,7 @@ struct DelegationServers {
 }
 
 fn selected_server_sets(
-    map: &netidx_admin_proto::TrustDomainMap,
+    map: &netidx_admin_proto::AdminDomainMap,
     local_member: &ResolverAddr,
     selected: &DelegationSelection,
 ) -> Result<DelegationServers> {
@@ -157,7 +157,7 @@ pub async fn delegate_under_parent(
                 })?;
             if !ans.confirm_identity(&id).await? {
                 bail!(
-                    "the parent trust domain identity was not confirmed; nothing was sent"
+                    "the parent admin domain identity was not confirmed; nothing was sent"
                 );
             }
             id
@@ -261,8 +261,8 @@ pub async fn delegate_under_parent(
 mod tests {
     use super::*;
     use netidx_admin_proto::{
-        AdminServerEntry, ResolverClusterEntry, ResolverClusterId, ResolverClusterState,
-        ServerState, TrustDomainMap,
+        AdminDomainMap, AdminServerEntry, ResolverClusterEntry, ResolverClusterId,
+        ResolverClusterState, ServerState,
     };
 
     fn resolver(addr: &str) -> ResolverAddr {
@@ -298,7 +298,7 @@ mod tests {
             server(ap1, "10.0.60.1:4565", "10.0.60.1:4564", root),
             server(ap2, "10.0.60.2:4565", "10.0.60.2:4564", root),
         ];
-        let map = TrustDomainMap {
+        let map = AdminDomainMap {
             version: 1,
             controller: us1,
             resolver_clusters: vec![ResolverClusterEntry {
@@ -341,7 +341,7 @@ mod tests {
             server(us2, "10.0.0.2:4565", "10.0.0.2:4564", root),
             server(ap1, "10.0.60.1:4565", "10.0.60.1:4564", ap),
         ];
-        let map = TrustDomainMap {
+        let map = AdminDomainMap {
             version: 1,
             controller: us1,
             resolver_clusters: vec![

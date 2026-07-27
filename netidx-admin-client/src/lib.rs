@@ -74,7 +74,7 @@ pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`transport`] and
 /// [`resolver_probe`].
 mod tls_tofu;
-/// Admin-server client: fetch a trust domain's identity and info, join it
+/// Admin-server client: fetch a admin domain's identity and info, join it
 /// (key + CSR + signature over TLS), and enroll new admin servers —
 /// verifying the CA identity by fingerprint first. Cross-platform
 /// (rcgen + rustls, no openssl).

@@ -156,7 +156,7 @@ impl ResolverConfig {
     /// This resolver cluster's advertised member addresses + data-plane
     /// auth, as [`ResolverAddr`]s — the form delegation exchanges and
     /// `GetInfo` reports. `Local`-auth members are host-local by
-    /// definition and omitted (nothing to advertise to the trust domain).
+    /// definition and omitted (nothing to advertise to the admin domain).
     pub fn resolver_addrs(&self) -> Vec<ResolverAddr> {
         self.0
             .member_servers
@@ -195,7 +195,7 @@ impl ResolverConfig {
         self.0.children.iter().map(referral_to_edge).collect()
     }
 
-    /// This resolver cluster's [`ResolverClusterFacts`] for the trust domain map:
+    /// This resolver cluster's [`ResolverClusterFacts`] for the admin domain map:
     /// advertisable members + base path + hierarchy edges.
     pub fn cluster_facts(&self) -> ResolverClusterFacts {
         ResolverClusterFacts {
@@ -234,7 +234,7 @@ fn validate_permission_topology(
     Ok(())
 }
 
-/// Map a referral (parent / child) to a trust domain-map [`ResolverClusterEdge`],
+/// Map a referral (parent / child) to a admin domain-map [`ResolverClusterEdge`],
 /// dropping `Local`-auth addrs (host-local, nothing to advertise).
 fn referral_to_edge(r: &file::Referral) -> ResolverClusterEdge {
     ResolverClusterEdge {

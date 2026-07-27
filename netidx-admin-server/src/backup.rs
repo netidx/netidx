@@ -402,10 +402,10 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     {
         bail!("backup admin-server identity does not match its manifest");
     }
-    let map: crate::admin_proto::TrustDomainMap =
-        serde_json::from_slice(&fs::read(bundle.join("ca/trust-domain.json"))?)?;
+    let map: crate::admin_proto::AdminDomainMap =
+        serde_json::from_slice(&fs::read(bundle.join("ca/admin-domain.json"))?)?;
     if map.controller != manifest.controller || map.version != manifest.map_version {
-        bail!("backup trust domain map does not match its manifest");
+        bail!("backup admin domain map does not match its manifest");
     }
     Ok(manifest)
 }

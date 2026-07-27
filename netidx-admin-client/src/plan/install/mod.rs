@@ -14,7 +14,7 @@ use crate::{
         enroll::{self, AdminServers},
         service::{ServiceGate, ServiceNeed, offer},
     },
-    provenance::{InstallRecord, TrustDomainIdentity},
+    provenance::{AdminDomainIdentity, InstallRecord},
     resolver_probe,
     service::ServiceScope,
     template::RenderedTemplate,
@@ -39,7 +39,7 @@ pub mod workstation;
 // stay cfg-free and the crate still builds without the feature — degrading to
 // "no suggestion, ask the operator" rather than failing to compile.
 
-/// The IP a trust domain daemon on this host should advertise, if the environment
+/// The IP a admin domain daemon on this host should advertise, if the environment
 /// can be probed. `None` without `cloud-detect`.
 ///
 /// `NetShape::detect` does blocking work — interface enumeration plus a
@@ -278,17 +278,17 @@ pub fn check_no_overwrite(rt: &RenderedTemplate, force: bool) -> Result<()> {
     }
 }
 
-/// Extract from a probe the trust domain identity (domain + CA fingerprint) to pin
+/// Extract from a probe the admin domain identity (domain + CA fingerprint) to pin
 /// later lifecycle ops to, and a reachable admin-server address to start from.
-/// `(None, None)` when the install didn't join a *discovered* trust domain (a
+/// `(None, None)` when the install didn't join a *discovered* admin domain (a
 /// CLI-flag parent, the manual prompt cascade, or no parent at all carry no
 /// confirmed identity).
-pub fn trust_domain_provenance(
+pub fn admin_domain_provenance(
     probe: &AdminServers,
-) -> (Option<TrustDomainIdentity>, Option<SocketAddr>) {
+) -> (Option<AdminDomainIdentity>, Option<SocketAddr>) {
     match probe.have() {
         Some(net) => {
-            let id = TrustDomainIdentity::new(
+            let id = AdminDomainIdentity::new(
                 net.identity.domain.clone(),
                 &net.identity.fingerprint,
             );
@@ -323,7 +323,7 @@ pub fn install_renew_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()
 /// install a service at, or `None`.
 ///
 /// `post_apply` receives the `Answerer` and install-wide config lock. It is an
-/// `AsyncFnOnce` because standing up the admin server is trust domain I/O.
+/// `AsyncFnOnce` because standing up the admin server is admin domain I/O.
 pub async fn finish_with(
     ans: &mut dyn Answerer,
     rt: RenderedTemplate,
@@ -564,7 +564,7 @@ mod tests {
     use super::*;
     use crate::{
         admin_proto::Secret,
-        answer::{Progress, TrustDomainChoice, TrustDomainOption},
+        answer::{AdminDomainChoice, AdminDomainOption, Progress},
         fingerprint::Fingerprint,
         provenance::InstallRole,
         template::{RenderedTemplate, TlsCopyJob},
@@ -600,10 +600,10 @@ mod tests {
             unreachable!()
         }
 
-        async fn select_trust_domain(
+        async fn select_admin_domain(
             &mut self,
-            _domains: &[TrustDomainOption],
-        ) -> Result<TrustDomainChoice> {
+            _domains: &[AdminDomainOption],
+        ) -> Result<AdminDomainChoice> {
             unreachable!()
         }
 
@@ -822,7 +822,7 @@ mod tests {
             async move |_ans, _config_lock| {
                 assert!(check_record.exists());
                 assert!(check_perms.exists());
-                bail!("simulated trust domain failure")
+                bail!("simulated admin domain failure")
             },
         )
         .await
@@ -830,7 +830,7 @@ mod tests {
 
         let message = format!("{err:#}");
         assert!(message.contains("core install completed"));
-        assert!(message.contains("simulated trust domain failure"));
+        assert!(message.contains("simulated admin domain failure"));
         assert_eq!(InstallRecord::load(&record_path).unwrap(), expected);
     }
 }

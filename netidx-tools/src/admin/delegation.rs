@@ -65,7 +65,7 @@ pub(crate) struct AddParentFlags {
     /// The subtree this resolver will own under the parent (e.g. `/eu`).
     #[arg(long = "path")]
     path: String,
-    /// The parent trust domain's CA fingerprint, obtained out of band (view it with
+    /// The parent admin domain's CA fingerprint, obtained out of band (view it with
     /// `netidx admin ca fingerprint <ip:port>`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,

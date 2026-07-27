@@ -16,8 +16,9 @@ use super::{
     },
 };
 use crate::{
+    admin_domain,
     admin_proto::{
-        self, ApplyControllerStateRequest, ApplyControllerStateResponse,
+        self, AdminDomainMap, ApplyControllerStateRequest, ApplyControllerStateResponse,
         ApplyReferralEditRequest, ApplyReferralEditResponse, ApproveDelegationRequest,
         ApproveDelegationResponse, DelegationEntry, DelegationPollResponse,
         DelegationRequest, DelegationResponse, DenyDelegationRequest,
@@ -25,11 +26,11 @@ use crate::{
         ListDelegationsResponse, MapVersion, PeerResult, PollRequest, PropagationOk,
         QueuedOk, ReconcileControllerResponse, ReferralEdit, RegisterRequest,
         RegisterResponse, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
-        ResolverAddr, Role, TrustDomainMap,
+        ResolverAddr, Role,
     },
     admin_server_config::AdminServerConfig,
     config_lock::ConfigDirLock,
-    delegation_store, transport, trust_domain,
+    delegation_store, transport,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use enumflags2::BitFlags;
@@ -459,7 +460,7 @@ pub(super) async fn handle_request_delegation(
     state
         .write_async(async move |state| {
             let mut staged = state.map.clone();
-            if let Err(e) = trust_domain::delegate(
+            if let Err(e) = admin_domain::delegate(
                 &mut staged,
                 &pending.proposed_path,
                 pending.proposed_child,
@@ -546,7 +547,7 @@ async fn handle_list_delegations_inner(
             reqs.into_iter()
                 .filter_map(|(r, approved)| {
                     let mut staged = map.clone();
-                    let change = trust_domain::delegate(
+                    let change = admin_domain::delegate(
                         &mut staged,
                         &r.proposed_path,
                         r.proposed_child,
@@ -583,14 +584,14 @@ async fn handle_list_delegations_inner(
 /// So it needs authority over the parent resolver cluster's base as well as over the
 /// proposed child path — an admin scoped to `/eu` must not be able to decide a
 /// delegation whose parent is the root resolver cluster just because the child lands
-/// under `/eu`. [`trust_domain::delegate`] only enforces that the child path is
+/// under `/eu`. [`admin_domain::delegate`] only enforces that the child path is
 /// under the parent base, and only after authorization has already run.
 ///
 /// Deny is held to the same rule as approve, per [`admin_authority_over`]:
 /// authority to destroy must mirror authority to create.
 fn decide_delegation_authority(
     authd: &crate::ca_vault::Authenticated,
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     pending: &delegation_store::PendingDelegation,
 ) -> std::result::Result<(), String> {
     if !delegation_authority(authd, &pending.proposed_path) {
@@ -599,7 +600,7 @@ fn decide_delegation_authority(
             authd.admin, pending.proposed_path
         ));
     }
-    let base = trust_domain::parent_base(map, &pending.parent_servers).map_err(|e| {
+    let base = admin_domain::parent_base(map, &pending.parent_servers).map_err(|e| {
         format!("resolving the delegation's parent resolver cluster: {e:#}")
     })?;
     if !delegation_authority(authd, &base) {
@@ -783,7 +784,7 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
     out
 }
 
-/// This host's own [`AdminServerEntry`] for the trust domain map: its listen
+/// This host's own [`AdminServerEntry`] for the admin domain map: its listen
 /// address, its roles, and — if it runs a resolver — its resolver cluster facts.
 /// This host's own resolver base (the single level a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
@@ -835,7 +836,7 @@ pub(super) async fn handle_register(
             let reconcile = current.state == admin_proto::ServerState::Enrolled
                 && current.roles.contains(Role::IdMap);
             let mut staged = state.map.clone();
-            trust_domain::register(
+            admin_domain::register(
                 &mut staged,
                 server_id,
                 validation_req.addr,
@@ -858,7 +859,7 @@ pub(super) async fn handle_register(
     let config_lock = state.config_lock.clone();
     let (response, fanout) = state
         .write_async(async move |state| {
-            let updated = match trust_domain::register(
+            let updated = match admin_domain::register(
                 &mut state.map,
                 server_id,
                 req.addr,
@@ -871,11 +872,11 @@ pub(super) async fn handle_register(
             };
             if updated
                 && let Err(e) =
-                    trust_domain::save_async(&config_lock, &ca_dir, &state.map).await
+                    admin_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
                 return (
                     RegisterResponse::Err {
-                        reason: format!("persisting the trust domain map: {e:#}"),
+                        reason: format!("persisting the admin domain map: {e:#}"),
                     },
                     None,
                 );
@@ -916,16 +917,16 @@ pub(super) async fn handle_deregister(
     let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
-            let updated = match trust_domain::deregister(&mut state.map, server_id) {
+            let updated = match admin_domain::deregister(&mut state.map, server_id) {
                 Ok(updated) => updated,
                 Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
             };
             if updated
                 && let Err(e) =
-                    trust_domain::save_async(&config_lock, &ca_dir, &state.map).await
+                    admin_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
                 return RegisterResponse::Err {
-                    reason: format!("persisting the trust domain map: {e:#}"),
+                    reason: format!("persisting the admin domain map: {e:#}"),
                 };
             }
             RegisterResponse::Ok(MapVersion { version: state.map.version })
@@ -945,7 +946,7 @@ struct RemoveServerPrepare {
 /// The blocking half of permanent server removal: authenticate, validate the
 /// transition, revoke every certificate for the immutable identity, and commit
 /// the new authoritative map. The returned topology fanout is deliberately
-/// separate: trust domain I/O must not hold mutable state or the signing semaphore.
+/// separate: admin domain I/O must not hold mutable state or the signing semaphore.
 async fn remove_server_prepare(
     state: &Server,
     req: &RemoveServerRequest,
@@ -987,7 +988,7 @@ async fn remove_server_prepare_inner(
         Err(reason) => return Err(err(reason)),
     };
     // Evicting a admin server from the authoritative map cascades that host's
-    // resolver-resolver cluster facts out of the map — a privileged, trust domain-affecting
+    // resolver-resolver cluster facts out of the map — a privileged, admin domain-affecting
     // edit. Gate it on the admin-server lifecycle capability (the same bit
     // that authorizes enrolling one) or a broad admin.
     let broad = broad_admin(&authd);
@@ -1020,7 +1021,7 @@ async fn remove_server_prepare_inner(
             )));
         }
         // Keep the removed resolver cluster and each directly connected resolver cluster in the
-        // reconciliation set. If the last member disappears, `trust_domain::remove`
+        // reconciliation set. If the last member disappears, `admin_domain::remove`
         // deletes that resolver cluster and detaches its children; the surviving parent and
         // children still need fresh topology.
         let mut affected_ids = BTreeSet::new();
@@ -1047,7 +1048,7 @@ async fn remove_server_prepare_inner(
         affected_clusters.sort();
         affected_clusters.dedup();
         let mut next = map.clone();
-        let removed = match trust_domain::remove(&mut next, req.server) {
+        let removed = match admin_domain::remove(&mut next, req.server) {
             Ok(removed) => removed,
             Err(e) => return Err(err(format!("{e:#}"))),
         };
@@ -1091,8 +1092,8 @@ async fn remove_server_prepare_inner(
                 err(format!("revoking the server's serving certificates: {e:#}"))
             })?;
             let config_lock = ca.config_lock();
-            if let Err(e) = trust_domain::save_async(&config_lock, &ca_dir, &next).await {
-                return Err(err(format!("persisting the trust domain map: {e:#}")));
+            if let Err(e) = admin_domain::save_async(&config_lock, &ca_dir, &next).await {
+                return Err(err(format!("persisting the admin domain map: {e:#}")));
             }
             *map = next;
             audit(
@@ -1260,7 +1261,7 @@ async fn approve_delegation_prepare_inner(
         // Persist a staged snapshot before publishing it in memory. A failed disk
         // write must not leave the live controller map ahead of its durable map.
         let mut staged = map.clone();
-        let change = trust_domain::delegate(
+        let change = admin_domain::delegate(
             &mut staged,
             &pending.proposed_path,
             pending.proposed_child,
@@ -1271,7 +1272,7 @@ async fn approve_delegation_prepare_inner(
         let parent = change.parent;
         let child = change.child;
         let config_lock = ca.config_lock();
-        trust_domain::save_async(&config_lock, &ca_dir, &staged)
+        admin_domain::save_async(&config_lock, &ca_dir, &staged)
             .await
             .map_err(|e| err(format!("persisting authoritative topology: {e:#}")))?;
         *map = staged;
@@ -1302,7 +1303,7 @@ struct TopologyFanout {
 }
 
 fn registration_topology_fanout(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     server_id: admin_proto::AdminServerId,
 ) -> Option<TopologyFanout> {
     let cluster = map
@@ -1322,7 +1323,7 @@ fn registration_topology_fanout(
 }
 
 fn topology_fanout<'a>(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     clusters: impl IntoIterator<Item = &'a admin_proto::ResolverClusterEntry>,
 ) -> TopologyFanout {
     let mut targets = Vec::new();
@@ -1345,7 +1346,7 @@ fn topology_fanout<'a>(
 }
 
 fn topology_edit(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     cluster: &admin_proto::ResolverClusterEntry,
     local_member: ResolverAddr,
 ) -> ReferralEdit {

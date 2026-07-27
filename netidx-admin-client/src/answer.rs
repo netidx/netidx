@@ -35,7 +35,7 @@ use std::time::Duration;
 /// the bookkeeping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
-    // -- install: identity & trust domain -----------------------------------------
+    // -- install: identity & admin domain -----------------------------------------
     /// Data-plane auth scheme (`anonymous` / `local` / `krb5` / `tls`).
     Auth,
     /// Kerberos service principal name for a krb5 resolver/publisher.
@@ -60,14 +60,14 @@ pub enum Field {
     IdMapGroups,
     /// Whether a CA admin is present to authorize an enrollment now.
     AdminHere,
-    /// Whether to found a new trust domain here or connect to an existing one
-    /// (resolver install — the role that can found a trust domain).
-    TrustDomainMode,
-    /// Whether to join an existing trust domain or run this machine stand-alone,
-    /// for a role that can't found a trust domain (workstation, publisher).
+    /// Whether to found a new admin domain here or connect to an existing one
+    /// (resolver install — the role that can found a admin domain).
+    AdminDomainMode,
+    /// Whether to join an existing admin domain or run this machine stand-alone,
+    /// for a role that can't found a admin domain (workstation, publisher).
     Membership,
-    /// Which discovered trust domain to connect to (or enter an address manually).
-    SelectTrustDomain,
+    /// Which discovered admin domain to connect to (or enter an address manually).
+    SelectAdminDomain,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
     /// The owner principal a workstation grants admin over its subtree.
@@ -87,9 +87,9 @@ pub enum Field {
     ResolverPort,
     /// The TLS domain a resolver's certificate name is under.
     TlsDomain,
-    /// The trust domain domain (groups the trust domain in discovery).
-    TrustDomainName,
-    /// The CA / trust domain domain (e.g. `ryu-oh.org`).
+    /// The admin domain's domain name (groups admin domains in discovery).
+    AdminDomainName,
+    /// The domain name the admin domain's CA is named for (e.g. `ryu-oh.org`).
     Domain,
     /// A publisher's resolver-server address(es).
     ResolverAddr,
@@ -97,7 +97,7 @@ pub enum Field {
     Socket,
     /// The leftmost label of a resolver's certificate name.
     ResolverName,
-    /// Whether to set up an admin server (admin-plane CA) for this trust domain.
+    /// Whether to set up an admin server (admin-plane CA) for this admin domain.
     SetupAdminServer,
     /// Whether the controller CA certificate is signed by an external PKI.
     ExternalSign,
@@ -189,7 +189,7 @@ impl Field {
                 label: "auth scheme",
                 help: "How clients prove who they are: anonymous (no auth), \
                        local (unix peer creds), krb5 (Kerberos), or tls \
-                       (certificates issued by this trust domain's CA).",
+                       (certificates issued by this admin domain's CA).",
             },
             Spn => FieldInfo {
                 flag: "--spn",
@@ -218,8 +218,8 @@ impl Field {
             },
             PublisherBind => FieldInfo {
                 flag: "--bind",
-                label: "publisher trust domain bind",
-                help: "The trust domain this publisher should bind and advertise on, \
+                label: "publisher admin domain bind",
+                help: "The admin domain this publisher should bind and advertise on, \
                        for example 10.0.0.0/24, an exact host as 10.0.0.5/32, \
                        or local. The detected interface subnet is usually the \
                        right choice.",
@@ -266,31 +266,31 @@ impl Field {
                 help: "Yes: a CA admin at this machine authorizes now with their \
                        password. No: queue the request for remote approval.",
             },
-            TrustDomainMode => FieldInfo {
+            AdminDomainMode => FieldInfo {
                 flag: "--server",
-                label: "choose an trust domain",
-                help: "Create a new trust domain and certificate \
+                label: "choose an admin domain",
+                help: "Create a new admin domain and certificate \
                        authority on this machine, or enroll under an existing \
                        controller / CA. Choose the existing controller when \
                        adding the first resolver below a dedicated CA host.",
             },
             Membership => FieldInfo {
                 flag: "--server",
-                label: "stand-alone or join a trust domain",
-                help: "Join an existing netidx trust domain on your trust domain, or set \
+                label: "stand-alone or join a admin domain",
+                help: "Join an existing netidx admin domain on your admin domain, or set \
                        up this machine on its own.",
             },
-            SelectTrustDomain => FieldInfo {
+            SelectAdminDomain => FieldInfo {
                 flag: "--admin-server",
-                label: "connect to a trust domain",
-                help: "Choose a discovered netidx trust domain by its glyph, or enter \
+                label: "connect to a admin domain",
+                help: "Choose a discovered netidx admin domain by its glyph, or enter \
                        an admin-server address manually.",
             },
             IdMapMode => FieldInfo {
                 flag: "--id-map",
                 label: "user/group id-map source",
                 help: "Where the resolver maps users and groups from: platform \
-                       (the OS), netidx (a shared trust domain map), or none.",
+                       (the OS), netidx (a shared admin domain map), or none.",
             },
             Owner => FieldInfo {
                 flag: "--owner",
@@ -349,16 +349,16 @@ impl Field {
                 help: "The domain part of this resolver's certificate name, \
                        e.g. ryu-oh.org.",
             },
-            TrustDomainName => FieldInfo {
+            AdminDomainName => FieldInfo {
                 flag: "--domain",
-                label: "trust domain domain",
-                help: "The domain this trust domain is grouped under in discovery, \
+                label: "admin domain name",
+                help: "The domain this admin domain is grouped under in discovery, \
                        e.g. ryu-oh.org.",
             },
             Domain => FieldInfo {
                 flag: "--domain",
-                label: "trust domain domain",
-                help: "The domain this trust domain's CA is named for, e.g. \
+                label: "admin domain name",
+                help: "The domain this admin domain's CA is named for, e.g. \
                        example.com.",
             },
             ResolverAddr => FieldInfo {
@@ -385,7 +385,7 @@ impl Field {
             SetupAdminServer => FieldInfo {
                 flag: "--with-admin-server",
                 label: "set up admin server?",
-                help: "Set up an admin server for this trust domain — a small CA that \
+                help: "Set up an admin server for this admin domain — a small CA that \
                        secures the admin plane (discovery, enrollment, certificate \
                        renewal). Data-plane auth is unaffected. On an anonymous \
                        data plane it is optional, so strict mode needs an explicit \
@@ -451,8 +451,8 @@ impl Field {
                 flag: "--delegate-subtree",
                 label: "delegated subtree",
                 help: "Leave blank to install this resolver as a peer of the \
-                       base trust domain, or name a subtree (e.g. /eu) to request the \
-                       trust domain delegate it to this resolver — the parent's admin \
+                       base admin domain, or name a subtree (e.g. /eu) to request the \
+                       admin domain delegate it to this resolver — the parent's admin \
                        must approve the delegation.",
             },
             AdminServerAddr => FieldInfo {
@@ -485,7 +485,7 @@ impl Field {
                 flag: "--at",
                 label: "target path",
                 help: "The netidx path this operation acts on (routed to the \
-                       trust domain that owns it).",
+                       admin domain that owns it).",
             },
             RevokeName => FieldInfo {
                 flag: "--name",
@@ -521,7 +521,7 @@ impl Field {
             RootAdminName => FieldInfo {
                 flag: "--admin",
                 label: "root user name",
-                help: "Create a root user for this trust domain's certificate authority. \
+                help: "Create a root user for this admin domain's certificate authority. \
                        The root user can sign certificates and perform any other \
                        administrative function, including creating other users. \
                        Defaults to your current login name.",
@@ -570,7 +570,7 @@ impl Field {
                 help: "The advertised address and port of the resolver co-located \
                        with this controller. The IP defaults from this host's interfaces \
                        and the port comes from the backup. This updates the resolver \
-                       config, local client config, and CA-owned trust domain map together.",
+                       config, local client config, and CA-owned admin domain map together.",
             },
             RestoreResolverBind => FieldInfo {
                 flag: "--resolver-bind",
@@ -652,24 +652,24 @@ impl Progress {
     }
 }
 
-/// A netidx trust domain discovered on the local network, offered to the operator by
-/// [`Answerer::select_trust_domain`]: the TLS domain that groups it in discovery and
+/// A netidx admin domain discovered on the local network, offered to the operator by
+/// [`Answerer::select_admin_domain`]: the TLS domain that groups it in discovery and
 /// the CA identity (glyph + fingerprint) fetched from one of its reachable admin
 /// servers.
 #[derive(Clone)]
-pub struct TrustDomainOption {
+pub struct AdminDomainOption {
     pub domain: String,
     pub identity: CaIdentity,
 }
 
-/// The operator's pick from [`Answerer::select_trust_domain`].
+/// The operator's pick from [`Answerer::select_admin_domain`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrustDomainChoice {
-    /// The discovered trust domain at this index in the offered slice.
+pub enum AdminDomainChoice {
+    /// The discovered admin domain at this index in the offered slice.
     Discovered(usize),
     /// None of the above — enter an admin-server address manually instead.
     Manual,
-    /// Browse again and add any newly-discovered trust domains to the list.
+    /// Browse again and add any newly-discovered admin domains to the list.
     PollMore,
 }
 
@@ -685,7 +685,7 @@ pub enum TrustDomainChoice {
 pub trait Answerer: Send {
     /// Whether this frontend prompts interactively. The strict-CLI answerer
     /// returns `false`, which tells the engine never to run an
-    /// interactive-only step (trust domain discovery, glyph confirm with no
+    /// interactive-only step (admin domain discovery, glyph confirm with no
     /// out-of-band value) — every value must come from a flag or error.
     fn interactive(&self) -> bool;
 
@@ -709,14 +709,14 @@ pub trait Answerer: Send {
         default: Option<&str>,
     ) -> Result<String>;
 
-    /// Present the netidx trust domains discovered on the local network — each shown
+    /// Present the netidx admin domains discovered on the local network — each shown
     /// with its CA glyph and fingerprint — plus a trailing "enter an address
     /// manually" option, and return which the operator picked. Interactive
     /// only: the strict answerer never discovers, so it errors.
-    async fn select_trust_domain(
+    async fn select_admin_domain(
         &mut self,
-        domains: &[TrustDomainOption],
-    ) -> Result<TrustDomainChoice>;
+        domains: &[AdminDomainOption],
+    ) -> Result<AdminDomainChoice>;
 
     /// Ask a yes/no question with the given default.
     async fn confirm(

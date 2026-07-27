@@ -1,9 +1,9 @@
 //! Lifecycle ops on an *already-installed* role: `status` (read-only)
-//! and `update` (additive reconcile against the trust domain). Shared by the
+//! and `update` (additive reconcile against the admin domain). Shared by the
 //! per-role command modules under [`super::roles`].
 //!
-//! The security-critical step is [`fetch_trust_domain_pinned`]: these ops
-//! trust a admin server's picture of the trust domain, so they first re-pin to
+//! The security-critical step is [`fetch_admin_domain_pinned`]: these ops
+//! trust a admin server's picture of the admin domain, so they first re-pin to
 //! the **same** CA identity the operator glyph-confirmed at install
 //! (stored in the [`InstallRecord`]). A admin server whose CA fingerprint
 //! doesn't match the pin is refused before anything is read or changed.
@@ -13,13 +13,13 @@ use clap::Args;
 use netidx_admin_client::{
     config_lock::ConfigDirLock,
     discovery, paths,
-    provenance::{InstallRecord, InstallRole, TrustDomainIdentity},
+    provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
     reconcile,
     resolver::ResolverConfig,
     template::{describe_member_auth, describe_ref_auth},
-    transport::{self, TrustDomainInfo},
+    transport::{self, AdminDomainInfo},
 };
-use netidx_admin_proto::{NodeKind, TrustDomainMap};
+use netidx_admin_proto::{AdminDomainMap, NodeKind};
 use std::{net::SocketAddr, time::Duration};
 
 /// How long to browse mDNS for the install's admin server when the
@@ -55,16 +55,16 @@ fn require_role(rec: &InstallRecord, want: InstallRole) -> Result<()> {
     Ok(())
 }
 
-/// Locate the install's admin server and return the trust domain's current
+/// Locate the install's admin server and return the admin domain's current
 /// facts, **pinned** to the CA fingerprint recorded at install. Tries
 /// the recorded address first, then mDNS; every candidate is verified
 /// against the pin before any info is trusted. Fails closed: a reachable
 /// but wrong-fingerprint server is refused, not used.
-fn fetch_trust_domain_pinned(
-    net_id: &TrustDomainIdentity,
+fn fetch_admin_domain_pinned(
+    net_id: &AdminDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<TrustDomainInfo> {
+) -> Result<AdminDomainInfo> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
     if let Some(a) = admin_server {
@@ -85,20 +85,20 @@ fn fetch_trust_domain_pinned(
         if net_id.matches(&id.fingerprint)? {
             return rt
                 .block_on(transport::aggregate(&[*addr], kind, &id))
-                .context("mapping the trust domain (GetInfo)");
+                .context("mapping the admin domain (GetInfo)");
         }
         saw_mismatch = true;
     }
     if saw_mismatch {
         bail!(
             "reached a admin server, but its CA fingerprint did not match this \
-             install's pinned trust domain identity (trust domain {:?}). Refusing to \
-             trust it — if your trust domain's CA legitimately changed, re-join.",
+             install's pinned admin domain identity (admin domain {:?}). Refusing to \
+             trust it — if your admin domain's CA legitimately changed, re-join.",
             net_id.domain,
         )
     }
     bail!(
-        "could not reach any admin server for trust domain {:?} (the recorded \
+        "could not reach any admin server for admin domain {:?} (the recorded \
          address and mDNS both failed). Is the resolver / admin-server host up?",
         net_id.domain,
     )
@@ -134,20 +134,20 @@ pub(crate) fn workstation_status() -> Result<()> {
         None => println!("  parent: none (local-only)"),
     }
 
-    match &rec.trust_domain {
+    match &rec.admin_domain {
         None => println!(
-            "  trust domain: local-only — run `netidx admin workstation join` to \
-             attach to a trust domain",
+            "  admin domain: local-only — run `netidx admin workstation join` to \
+             attach to a admin domain",
         ),
         Some(net_id) => {
-            println!("  trust domain: {:?}", net_id.domain);
-            match fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client) {
+            println!("  admin domain: {:?}", net_id.domain);
+            match fetch_admin_domain_pinned(net_id, rec.admin_server, NodeKind::Client) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(info) => {
                     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
                     if plan.is_empty() {
                         println!(
-                            "  sync: in sync ({} trust domain resolver(s))",
+                            "  sync: in sync ({} admin domain resolver(s))",
                             info.resolvers.len()
                         );
                     } else {
@@ -168,12 +168,12 @@ pub(crate) fn workstation_status() -> Result<()> {
 pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Workstation)?;
-    let net_id = rec.trust_domain.as_ref().context(
-        "this workstation is local-only — it hasn't joined a trust domain, so there \
+    let net_id = rec.admin_domain.as_ref().context(
+        "this workstation is local-only — it hasn't joined a admin domain, so there \
          is nothing to update. Run `netidx admin workstation join` first.",
     )?;
     let rpath = resolver_config_path()?;
-    let info = fetch_trust_domain_pinned(net_id, rec.admin_server, NodeKind::Client)?;
+    let info = fetch_admin_domain_pinned(net_id, rec.admin_server, NodeKind::Client)?;
     let mode = if flags.dry_run {
         UpdateMode::DryRun
     } else {
@@ -181,10 +181,10 @@ pub(crate) fn workstation_update(flags: UpdateFlags) -> Result<()> {
     };
     let plan = reconcile::reconcile_resolver_peers(&rpath, &info)?;
     if plan.is_empty() {
-        println!("already in sync with trust domain {:?} — nothing to do", net_id.domain);
+        println!("already in sync with admin domain {:?} — nothing to do", net_id.domain);
         return Ok(());
     }
-    println!("update plan for trust domain {:?}:", net_id.domain);
+    println!("update plan for admin domain {:?}:", net_id.domain);
     run_update(plan, mode, "restart the local resolver to serve the new peers")
 }
 
@@ -196,13 +196,13 @@ fn client_config_path() -> Result<std::path::PathBuf> {
         .context("no client config found at the standard locations")
 }
 
-/// Like [`fetch_trust_domain_pinned`] but returns the CA-authoritative trust domain
+/// Like [`fetch_admin_domain_pinned`] but returns the CA-authoritative admin domain
 /// map in one round trip (no client-side walk). Same fail-closed pinning.
 fn fetch_map_pinned(
-    net_id: &TrustDomainIdentity,
+    net_id: &AdminDomainIdentity,
     admin_server: Option<SocketAddr>,
     kind: NodeKind,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     let mut candidates: Vec<SocketAddr> = Vec::new();
     if let Some(a) = admin_server {
@@ -221,20 +221,20 @@ fn fetch_map_pinned(
         if net_id.matches(&id.fingerprint)? {
             return rt
                 .block_on(transport::get_map_pinned(*addr, kind, &id))
-                .context("fetching the trust domain map");
+                .context("fetching the admin domain map");
         }
         saw_mismatch = true;
     }
     if saw_mismatch {
         bail!(
             "reached a admin server, but its CA fingerprint did not match this \
-             install's pinned trust domain identity (trust domain {:?}). Refusing to trust \
-             it — if your trust domain's CA legitimately changed, re-join.",
+             install's pinned admin domain identity (admin domain {:?}). Refusing to trust \
+             it — if your admin domain's CA legitimately changed, re-join.",
             net_id.domain,
         )
     }
     bail!(
-        "could not reach any admin server for trust domain {:?} (the recorded address \
+        "could not reach any admin server for admin domain {:?} (the recorded address \
          and mDNS both failed). Is the resolver / admin-server host up?",
         net_id.domain,
     )
@@ -291,10 +291,10 @@ pub(crate) fn resolver_status() -> Result<()> {
         println!("  member: {} ({})", m.addr, describe_member_auth(&m.auth));
     }
     let has_parent = rcfg.as_file().parent.is_some();
-    match &rec.trust_domain {
-        None => println!("  trust domain: local-only — not attached"),
+    match &rec.admin_domain {
+        None => println!("  admin domain: local-only — not attached"),
         Some(net_id) => {
-            println!("  trust domain: {:?}", net_id.domain);
+            println!("  admin domain: {:?}", net_id.domain);
             match fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => {
@@ -320,8 +320,8 @@ pub(crate) fn resolver_status() -> Result<()> {
 pub(crate) fn resolver_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Resolver)?;
-    let net_id = rec.trust_domain.as_ref().context(
-        "this resolver is local-only — it hasn't joined a trust domain, so there is \
+    let net_id = rec.admin_domain.as_ref().context(
+        "this resolver is local-only — it hasn't joined a admin domain, so there is \
          nothing to update",
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver)?;
@@ -357,10 +357,10 @@ pub(crate) fn publisher_status() -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Publisher)?;
     println!("publisher install (base {})", rec.base);
-    match &rec.trust_domain {
-        None => println!("  trust domain: local-only — not attached"),
+    match &rec.admin_domain {
+        None => println!("  admin domain: local-only — not attached"),
         Some(net_id) => {
-            println!("  trust domain: {:?}", net_id.domain);
+            println!("  admin domain: {:?}", net_id.domain);
             match fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher) {
                 Err(e) => println!("  sync: could not check ({e:#})"),
                 Ok(map) => match client_config_path() {
@@ -379,8 +379,8 @@ pub(crate) fn publisher_status() -> Result<()> {
 pub(crate) fn publisher_update(flags: UpdateFlags) -> Result<()> {
     let rec = require_record()?;
     require_role(&rec, InstallRole::Publisher)?;
-    let net_id = rec.trust_domain.as_ref().context(
-        "this publisher is local-only — it hasn't joined a trust domain, so there is \
+    let net_id = rec.admin_domain.as_ref().context(
+        "this publisher is local-only — it hasn't joined a admin domain, so there is \
          nothing to update",
     )?;
     let map = fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher)?;

@@ -1,5 +1,5 @@
 //! `netidx admin publisher …` — the publisher role: a client config for
-//! a publisher host pointing at a remote resolver trust domain.
+//! a publisher host pointing at a remote resolver admin domain.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -8,12 +8,12 @@ use crate::admin::{init, lifecycle};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// install a publisher-host config pointing at a remote trust domain
+    /// install a publisher-host config pointing at a remote admin domain
     Install(init::PublisherFlags),
     /// report what this publisher is and whether its client config is in
-    /// sync with the trust domain map
+    /// sync with the admin domain map
     Status,
-    /// reconcile this publisher's client config to its resolver trust domain
+    /// reconcile this publisher's client config to its resolver admin domain
     Update(lifecycle::UpdateFlags),
 }
 

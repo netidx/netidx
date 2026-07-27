@@ -1,4 +1,4 @@
-//! TPM/Secure-Enclave sealed per-trust domain administrator session cache.
+//! TPM/Secure-Enclave sealed per-admin domain administrator session cache.
 
 use crate::{admin_proto::Secret, atomic, fingerprint::Fingerprint};
 use anyhow::{Context, Result, bail};
@@ -125,7 +125,7 @@ pub fn load(ca_fingerprint: &str) -> Result<Option<CachedSession>> {
         .with_context(|| format!("decoding {}", path.display()))?;
     if payload.version != VERSION || payload.session.ca_fingerprint != normalized {
         bail!(
-            "sealed administrator session has the wrong version or trust domain identity"
+            "sealed administrator session has the wrong version or admin domain identity"
         );
     }
     if now() >= payload.session.absolute_deadline_unix {

@@ -4,7 +4,7 @@
 //! authorizes it as a superuser. Unix-only: the socket is a daemon feature
 //! and the daemon is unix.
 //!
-//! The wire types are the same [`netidx_admin_proto`] messages the trust domain
+//! The wire types are the same [`netidx_admin_proto`] messages the admin domain
 //! [`crate::transport`] sends, so the daemon dispatches both through one
 //! code path; only the transport (a unix socket) and the authorization
 //! (local superuser vs. a pinned-TLS admin password) differ. The credential
@@ -342,7 +342,7 @@ pub async fn list_admins(
 
 /// Read this resolver host's own permissions over the protected local socket.
 /// The daemon confines `target_path` to its configured resolver level; no
-/// trust domain map or remote discovery hint participates in this operation.
+/// admin domain map or remote discovery hint participates in this operation.
 pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
@@ -363,7 +363,7 @@ pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
 /// Replace the `target_path` resolver cluster's permissions with `perms_json`. The
 /// daemon authorizes this local caller as a signing superuser (the
 /// `SO_PEERCRED` gate is the authorization — no admin password), then routes
-/// by the trust domain map and propagates the edit to every member of the target
+/// by the admin domain map and propagates the edit to every member of the target
 /// resolver cluster exactly as a remote signing-admin edit would. Returns the per-peer
 /// results so a partial (resolver cluster-inconsistent) failure surfaces.
 pub async fn edit_perms(

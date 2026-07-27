@@ -632,7 +632,7 @@ impl Ca {
 
 /// Re-sign the CA certificate **with the same key** if it is inside its
 /// renewal window. Same key + same subject + same SAN means: existing
-/// leaves still chain, serving chains keep verifying, and the trust domain glyph
+/// leaves still chain, serving chains keep verifying, and the admin domain glyph
 /// (a hash of the key) is unchanged — only the validity window moves. The
 /// new window is the CA cert's **own original span** (`not_after -
 /// not_before`), so a CA keeps the validity it was configured with across

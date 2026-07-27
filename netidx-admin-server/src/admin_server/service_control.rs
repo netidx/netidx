@@ -11,9 +11,9 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, ApplyServiceControlRequest, ApplyServiceControlResponse, ControlServiceOk,
-        ControlServiceRequest, ControlServiceResponse, ServiceUnit, ServiceUnitDef,
-        TrustDomainMap,
+        self, AdminDomainMap, ApplyServiceControlRequest, ApplyServiceControlResponse,
+        ControlServiceOk, ControlServiceRequest, ControlServiceResponse, ServiceUnit,
+        ServiceUnitDef,
     },
     ca_vault, transport,
 };
@@ -30,7 +30,7 @@ fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> boo
 /// the map — the authorization scope for controlling that server's services.
 /// `None` if the server isn't in the map or runs no resolver cluster.
 fn base_for_server(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     id: admin_proto::AdminServerId,
 ) -> Option<String> {
     let cluster = map
@@ -44,7 +44,7 @@ fn base_for_server(
 /// Resolve only an immutable registered identity to its current routing
 /// address. Addresses are deliberately never accepted as lookup keys here.
 fn registered_server_addr(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     id: admin_proto::AdminServerId,
 ) -> Option<SocketAddr> {
     map.admin_servers

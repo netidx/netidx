@@ -66,9 +66,9 @@ pub fn parse_san_one(s: &str) -> Result<SanEntry> {
 }
 
 /// Refuse to mint the admin server's reserved serving name from the local CLI,
-/// mirroring the trust domain sign path's refusal. The reserved name is the linchpin
+/// mirroring the admin domain sign path's refusal. The reserved name is the linchpin
 /// of the trust model; only the admin-server setup flow (which signs it
-/// directly) and the policy-gated trust domain Enroll may issue it.
+/// directly) and the policy-gated admin domain Enroll may issue it.
 pub fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
     for s in san {
         if let SanEntry::Dns(d) = s

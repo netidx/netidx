@@ -6,6 +6,7 @@ compile_error!("netidx-admin-server is supported only on unix");
 #[macro_use]
 extern crate anyhow;
 
+pub mod admin_domain;
 mod admin_server;
 pub mod backup;
 pub mod ca;
@@ -17,7 +18,6 @@ pub mod offline_ca;
 pub mod ops;
 pub mod plan;
 pub mod session;
-pub mod trust_domain;
 
 pub use admin_server::{AUTORENEW_ADMIN, load_roots, serve};
 

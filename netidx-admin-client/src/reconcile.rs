@@ -8,17 +8,17 @@
 //! only the fields it changes, leaving every other field (and any
 //! operator customization) intact.
 //!
-//! Reconciles are **additive**: they add what the trust domain has that the
+//! Reconciles are **additive**: they add what the admin domain has that the
 //! local config lacks, and never remove what the config has that the
-//! trust domain doesn't (so operator-added peers survive). An empty plan is
+//! admin domain doesn't (so operator-added peers survive). An empty plan is
 //! the in-sync / idempotent result.
 
 use crate::{
-    admin_proto::{InfoAuth, ResolverAddr, TrustDomainMap},
+    admin_proto::{AdminDomainMap, InfoAuth, ResolverAddr},
     client::ClientConfig,
     config_lock::ConfigDirLock,
     resolver::ResolverConfig,
-    transport::TrustDomainInfo,
+    transport::AdminDomainInfo,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -263,7 +263,7 @@ fn referral_eq(a: &rfile::Referral, b: &rfile::Referral) -> bool {
     a.path == b.path && a.ttl == b.ttl && ref_addrs_eq(&a.addrs, &b.addrs)
 }
 
-/// Map a trust domain-reported data-plane auth (from a admin server's
+/// Map a admin domain-reported data-plane auth (from a admin server's
 /// `GetInfo`) to a resolver-referral auth.
 fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     match a {
@@ -281,27 +281,27 @@ fn describe_info_auth(a: &InfoAuth) -> &'static str {
     }
 }
 
-/// Reconcile a resolver's **parent referral** against the trust domain's
+/// Reconcile a resolver's **parent referral** against the admin domain's
 /// current resolver set: add every resolver `net` reports that the
 /// config's parent doesn't already list (matched by `SocketAddr`),
 /// mapping each one's auth.
 ///
-/// This is the workstation/child-resolver `update`: when the trust domain
+/// This is the workstation/child-resolver `update`: when the admin domain
 /// grows from one resolver to several, the local parent referral learns
 /// the new peers (so client referrals can fail over) without a
 /// reinstall or a hand-edit.
 ///
 /// Additive: peers the config already lists — including operator-added
-/// ones absent from the trust domain — are left untouched. It *will* re-add a
-/// trust domain peer the operator deleted; suppressing that is a later design.
-/// Idempotent: a config already carrying every trust domain peer yields an
+/// ones absent from the admin domain — are left untouched. It *will* re-add a
+/// admin domain peer the operator deleted; suppressing that is a later design.
+/// Idempotent: a config already carrying every admin domain peer yields an
 /// empty plan.
-pub fn reconcile_resolver_peers(path: &Path, net: &TrustDomainInfo) -> Result<EditPlan> {
+pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a trust domain (run `join` to attach one)",
+         attached to a admin domain (run `join` to attach one)",
     )?;
     let mut replacement = expected.addrs.clone();
     let mut changes = Vec::new();
@@ -331,17 +331,17 @@ pub fn reconcile_resolver_peers(path: &Path, net: &TrustDomainInfo) -> Result<Ed
     })
 }
 
-// ---- trust domain-map-driven reconcile (Phase B) ----
+// ---- admin domain-map-driven reconcile (Phase B) ----
 //
 // These reconcile a host's config to exactly ONE level of the hierarchy —
 // the resolver cluster its current addrs already belong to — from the CA-authoritative
-// trust domain map. Unlike `reconcile_resolver_peers` above (additive-only, over
-// the flat legacy `TrustDomainInfo`), these both ADD missing resolver cluster members and
+// admin domain map. Unlike `reconcile_resolver_peers` above (additive-only, over
+// the flat legacy `AdminDomainInfo`), these both ADD missing resolver cluster members and
 // AUTO-REMOVE entries the resolver cluster no longer lists, with no consent: the CA is
 // the source of truth, so an addr absent from its authoritative resolver cluster is
 // authoritatively gone. Host-local entries are never removed.
 
-/// Map a trust domain-reported data-plane auth to a client-config auth.
+/// Map a admin domain-reported data-plane auth to a client-config auth.
 fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
     use netidx::config::file::Auth;
     match a {
@@ -351,7 +351,7 @@ fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
     }
 }
 
-/// One distinct resolver cluster in the trust domain map: where it attaches and
+/// One distinct resolver cluster in the admin domain map: where it attaches and
 /// its full member roster.
 pub struct ResolverClusterView {
     pub base: String,
@@ -360,7 +360,7 @@ pub struct ResolverClusterView {
 
 /// The distinct resolver clusters in `map`, grouped by base path. A
 /// resolver cluster's members each report the same roster; union them by address.
-pub fn clusters(map: &TrustDomainMap) -> Vec<ResolverClusterView> {
+pub fn clusters(map: &AdminDomainMap) -> Vec<ResolverClusterView> {
     map.resolver_clusters
         .iter()
         .filter(|c| c.state == netidx_admin_proto::ResolverClusterState::Active)
@@ -409,7 +409,7 @@ pub fn match_cluster<'a>(
 
 /// Reconcile a peer list to the matched resolver cluster's roster: add every member
 /// the config lacks, remove every entry the resolver cluster no longer lists —
-/// except host-local entries, which are never trust domain peers. Returns the
+/// except host-local entries, which are never admin domain peers. Returns the
 /// `+`/`-` change lines.
 fn reconcile_peer_list<A: Clone>(
     current: &mut Vec<(SocketAddr, A)>,
@@ -443,9 +443,9 @@ fn reconcile_peer_list<A: Clone>(
 }
 
 /// Reconcile a host's **client config** addrs to its own resolver cluster
-/// (the resolver cluster its current addrs belong to) from the trust domain map. Add +
+/// (the resolver cluster its current addrs belong to) from the admin domain map. Add +
 /// auto-remove; a config matching no resolver cluster is left untouched (warned).
-pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
+pub fn reconcile_client_peers(path: &Path, map: &AdminDomainMap) -> Result<EditPlan> {
     let cfg = ClientConfig::load(path)
         .with_context(|| format!("loading client config {}", path.display()))?;
     let expected = cfg.as_file().addrs.clone();
@@ -455,7 +455,7 @@ pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
     let Some(cluster) = cluster else {
         warnings.push(ArcStr::from(
-            "this client's resolvers match no resolver cluster in the trust domain map \
+            "this client's resolvers match no resolver cluster in the admin domain map \
              (unreachable?) — leaving the config unchanged",
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
@@ -486,14 +486,14 @@ pub fn reconcile_client_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
 }
 
 /// Reconcile a resolver's **parent referral** to the parent resolver cluster (the
-/// resolver cluster the referral already points at) from the trust domain map. Add +
+/// resolver cluster the referral already points at) from the admin domain map. Add +
 /// auto-remove. Errors if the resolver has no parent referral.
-pub fn reconcile_parent_peers(path: &Path, map: &TrustDomainMap) -> Result<EditPlan> {
+pub fn reconcile_parent_peers(path: &Path, map: &AdminDomainMap) -> Result<EditPlan> {
     let cfg = ResolverConfig::load(path)
         .with_context(|| format!("loading resolver config {}", path.display()))?;
     let expected = cfg.as_file().parent.clone().context(
         "this resolver has no parent referral to reconcile — it isn't \
-         attached to a trust domain",
+         attached to a admin domain",
     )?;
     let cur: Vec<SocketAddr> = expected.addrs.iter().map(|(a, _)| *a).collect();
     let cls = clusters(map);
@@ -501,7 +501,7 @@ pub fn reconcile_parent_peers(path: &Path, map: &TrustDomainMap) -> Result<EditP
     let mut warnings: Vec<ArcStr> = warn.into_iter().collect();
     let Some(cluster) = cluster else {
         warnings.push(ArcStr::from(
-            "this resolver's parent referral matches no resolver cluster in the trust domain \
+            "this resolver's parent referral matches no resolver cluster in the admin domain \
              map (unreachable?) — leaving it unchanged",
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
@@ -577,8 +577,8 @@ mod tests {
         path
     }
 
-    fn net(resolvers: Vec<ResolverAddr>) -> TrustDomainInfo {
-        TrustDomainInfo {
+    fn net(resolvers: Vec<ResolverAddr>) -> AdminDomainInfo {
+        AdminDomainInfo {
             domain: "local".into(),
             ca_addr: None,
             resolvers,
@@ -608,13 +608,13 @@ mod tests {
     #[test]
     fn adds_missing_peers_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        // Config knows about A; the trust domain has A and B.
+        // Config knows about A; the admin domain has A and B.
         let path = write_resolver(&dir.path(), r#"["10.0.0.1:4564", "Anonymous"]"#);
-        let trust_domain = net(vec![
+        let admin_domain = net(vec![
             ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous },
             ResolverAddr { addr: addr("10.0.0.2:4564"), auth: InfoAuth::Anonymous },
         ]);
-        let plan = reconcile_resolver_peers(&path, &trust_domain).unwrap();
+        let plan = reconcile_resolver_peers(&path, &admin_domain).unwrap();
         assert_eq!(plan.changes.len(), 1, "exactly one new peer (B)");
         assert!(plan.changes[0].text().contains("10.0.0.2:4564"));
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
@@ -624,24 +624,24 @@ mod tests {
         let parent = cfg.as_file().parent.as_ref().unwrap();
         assert_eq!(parent.addrs.len(), 2);
         // Second run is a no-op — additive reconcile converged.
-        let plan2 = reconcile_resolver_peers(&path, &trust_domain).unwrap();
+        let plan2 = reconcile_resolver_peers(&path, &admin_domain).unwrap();
         assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes);
     }
 
     #[test]
     fn preserves_operator_added_peer() {
         let dir = tempfile::tempdir().unwrap();
-        // Config has the trust domain peer A plus an operator-added X the
-        // trust domain doesn't report.
+        // Config has the admin domain peer A plus an operator-added X the
+        // admin domain doesn't report.
         let path = write_resolver(
             &dir.path(),
             r#"["10.0.0.1:4564", "Anonymous"], ["10.9.9.9:4564", "Anonymous"]"#,
         );
-        let trust_domain = net(vec![ResolverAddr {
+        let admin_domain = net(vec![ResolverAddr {
             addr: addr("10.0.0.1:4564"),
             auth: InfoAuth::Anonymous,
         }]);
-        let plan = reconcile_resolver_peers(&path, &trust_domain).unwrap();
+        let plan = reconcile_resolver_peers(&path, &admin_domain).unwrap();
         // Nothing to add (A present); X is NOT removed.
         assert!(plan.is_empty());
         let cfg = ResolverConfig::load(&path).unwrap();
@@ -660,11 +660,11 @@ mod tests {
             1,
         );
         std::fs::write(&path, json).unwrap();
-        let trust_domain = net(vec![ResolverAddr {
+        let admin_domain = net(vec![ResolverAddr {
             addr: addr("10.0.0.1:4564"),
             auth: InfoAuth::Anonymous,
         }]);
-        assert!(reconcile_resolver_peers(&path, &trust_domain).is_err());
+        assert!(reconcile_resolver_peers(&path, &admin_domain).is_err());
     }
 
     // ---- map-driven reconcile (Phase B) ----
@@ -686,8 +686,8 @@ mod tests {
         }
     }
 
-    fn map_of(resolver_clusters: Vec<ResolverClusterEntry>) -> TrustDomainMap {
-        TrustDomainMap {
+    fn map_of(resolver_clusters: Vec<ResolverClusterEntry>) -> AdminDomainMap {
+        AdminDomainMap {
             version: 1,
             controller: AdminServerId::new(),
             admin_servers: vec![],

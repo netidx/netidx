@@ -102,7 +102,7 @@ struct PreparedRevoke {
 }
 
 /// Authenticate, apply the requested serial revocations, and re-sign the CRL.
-/// The async wrapper below performs the trust domain fanout after this
+/// The async wrapper below performs the admin domain fanout after this
 /// Argon2/signing-bound phase releases the signing semaphore.
 async fn prepare_revoke(
     state: &Server,
@@ -139,7 +139,7 @@ async fn prepare_revoke(
 /// `Err` carries the operator-facing reason it was skipped.
 fn revoke_authority(
     authd: &crate::ca_vault::Authenticated,
-    map: &admin_proto::TrustDomainMap,
+    map: &admin_proto::AdminDomainMap,
     serial: u64,
     record: Option<&ca_store::IssuedRecord>,
 ) -> std::result::Result<(), String> {

@@ -18,11 +18,11 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, ApproveOk, ApproveRequest, ApproveResponse, DenyRequest, DenyResponse,
-        EnqueueRequest, EnqueueResponse, IssuedEntry, ListIssuedRequest,
+        self, AdminDomainMap, ApproveOk, ApproveRequest, ApproveResponse, DenyRequest,
+        DenyResponse, EnqueueRequest, EnqueueResponse, IssuedEntry, ListIssuedRequest,
         ListIssuedResponse, ListQueueRequest, ListQueueResponse, PollRequest,
         PollResponse, QueueEntry, QueuedOk, SERVING_SAN, SignOk, SignRequest,
-        SignResponse, TrustDomainMap,
+        SignResponse,
     },
     ca_store, transport,
 };
@@ -160,7 +160,7 @@ pub(super) async fn handle_poll(state: &Arc<Server>, req: &PollRequest) -> PollR
                         Ok(Some(_)) | Ok(None) => None,
                         // The record we just reported as Signed won't read
                         // back. Say so — silently skipping the id-map push
-                        // leaves an identity the trust domain can't authorize.
+                        // leaves an identity the admin domain can't authorize.
                         Err(e) => {
                             warn!(
                                 "admin-server: reading issued record {id} for id-map \
@@ -281,7 +281,7 @@ async fn handle_approve(
     req: &ApproveRequest,
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> std::result::Result<Approved, String> {
     // This cheap precheck (no auth) rejects an already-terminal request;
     // issuance checks it again before committing.
@@ -312,7 +312,7 @@ async fn approve_serialized(
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     queued: ca_store::QueuedReq,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> std::result::Result<Approved, String> {
     // A queued admin-server enrollment: gated on the approving admin's
     // scoped enrollment authority; signs the reserved serving SAN; no one-live
@@ -323,7 +323,7 @@ async fn approve_serialized(
         let server_id = admin_proto::AdminServerId::new();
         let mut staged = map
             .cloned()
-            .ok_or_else(|| "the CA-owned trust domain map is unavailable".to_string())?;
+            .ok_or_else(|| "the CA-owned admin domain map is unavailable".to_string())?;
         stage_enrollment(&mut staged, server_id, &enrollment)
             .map_err(|e| format!("invalid enrollment grant: {e:#}"))?;
         let signing = server_unlock(ca, prepared_server_unlock).await?;
@@ -463,7 +463,7 @@ pub(super) async fn handle_enqueue(
     // Admin-server enrollment: the name is the reserved serving SAN by
     // definition, so none of the name rules below apply — not the
     // reserved-name refusal (this is the sanctioned way to request it)
-    // and not one-live-cert (every admin server on the trust domain holds the
+    // and not one-live-cert (every admin server on the admin domain holds the
     // same name). The real gate — the approving admin's
     // scoped enrollment authorization runs at approval; this entry just waits in
     // the queue under the same code-matching ceremony as any other.
@@ -696,7 +696,7 @@ pub(super) async fn handle_deny(
     ca: &mut ca_store::CaDir,
     req: &DenyRequest,
     authentication: &PreparedAdminAuthentication,
-    map: Option<&TrustDomainMap>,
+    map: Option<&AdminDomainMap>,
 ) -> DenyResponse {
     // Cheap precheck (no auth) for an already-terminal/unknown request.
     let queued = match ca.store.status(&req.request_id).await {

@@ -3,7 +3,7 @@
 > **Superseded in part by [`admin-server.md`](admin-server.md).** The CA
 > server has been generalized into the **admin server**: one per-host
 > daemon with roles (`ca`, `resolver`, `id-map`), mDNS discovery, a
-> `GetInfo` protocol, trust domain enrollment, and CA-pushed id-map
+> `GetInfo` protocol, admin domain enrollment, and CA-pushed id-map
 > registration. Module renames: `ca_proto` → `conf_proto`, `ca_join` →
 > `conf_client`, `ca_server` → `admin_server`; the reserved serving SAN
 > is now `netidx-admin-server`; the daemon config is `admin-server.json`
@@ -645,7 +645,7 @@ compatibility alias for the explicit emit/install commands.
 ### On-disk layout and trust distribution
 
 - `certificate.pem` is the **intermediate alone** — never a chain. The
-  trust domain glyph is `split_chain(chain).last()`'s SPKI, which stays the
+  admin domain glyph is `split_chain(chain).last()`'s SPKI, which stays the
   netidx CA's key; a chain here would flip the glyph to the external
   root's key and break `verify_serving_cert`.
 - `trusted.pem` is `[external root, intermediate]`, so netidx nodes hold

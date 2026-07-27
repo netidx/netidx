@@ -1,6 +1,6 @@
-//! Admin-server client: discover what a netidx trust domain looks like, join
+//! Admin-server client: discover what a netidx admin domain looks like, join
 //! it (generate a key + CSR locally and request a signature over TLS),
-//! and enroll new admin servers — verifying the trust domain's CA identity by
+//! and enroll new admin servers — verifying the admin domain's CA identity by
 //! fingerprint before sending anything secret.
 //!
 //! Cross-platform — rcgen + rustls + sha2 + x509-parser, never openssl
@@ -34,7 +34,7 @@
 use crate::{
     admin_proto::{
         self, AddIdentityOk, AddIdentityRequest, AddIdentityResponse,
-        AddRoleAdminRequest, AdminListResponse, AdminMgmtResponse,
+        AddRoleAdminRequest, AdminDomainMap, AdminListResponse, AdminMgmtResponse,
         ApplyControllerStateRequest, ApplyControllerStateResponse, ApplyCrlRequest,
         ApplyCrlResponse, ApplyPermsEditRequest, ApplyPermsEditResponse,
         ApplyReferralEditRequest, ApplyReferralEditResponse, ApplyServiceControlRequest,
@@ -54,7 +54,7 @@ use crate::{
         RemoveAdminRequest, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
         Request, ResolverAddr, RevokeOk, RevokeRequest, RevokeResponse, Role,
         SERVING_SAN, Secret, ServerHello, SetAdminPolicyRequest, SignOk, SignRequest,
-        SignResponse, TrustDomainMap,
+        SignResponse,
     },
     fingerprint::Fingerprint,
     tls_tofu::TofuVerifier,
@@ -240,7 +240,7 @@ pub struct CaIdentity {
     /// SHA-256 of the CA cert, for out-of-band comparison (text +
     /// identicon).
     pub fingerprint: Fingerprint,
-    /// The trust domain's TLS domain, as claimed in the server hello.
+    /// The admin domain's TLS domain, as claimed in the server hello.
     pub domain: String,
     /// The roles the contacted host claimed in the server hello.
     pub roles: BitFlags<Role>,
@@ -495,7 +495,7 @@ async fn connect_pinned(
     // the trust anchor explicit).
     let cert_identity = verify_serving_cert(serving_der, &expected.ca_der).context(
         "the admin server's serving certificate failed verification against the \
-         confirmed CA — this is not the trust domain you confirmed",
+         confirmed CA — this is not the admin domain you confirmed",
     )?;
     let hello = exchange_hello(&mut tls, kind).await?;
     if hello.server_id != cert_identity.server_id
@@ -613,7 +613,7 @@ pub async fn logout(
 }
 
 /// Fetch one admin server's local facts + known peers, pinned to the
-/// confirmed identity. See [`aggregate`] for the trust domain-wide picture.
+/// confirmed identity. See [`aggregate`] for the admin domain-wide picture.
 pub async fn get_info(
     addr: SocketAddr,
     kind: NodeKind,
@@ -624,15 +624,15 @@ pub async fn get_info(
     admin_proto::read_msg(&mut tls).await
 }
 
-/// Fetch the whole trust domain map from one admin server, pinned to the
-/// confirmed CA identity — one round trip is the entire trust domain. The
+/// Fetch the whole admin domain map from one admin server, pinned to the
+/// confirmed CA identity — one round trip is the entire admin domain. The
 /// client-facing counterpart of [`get_map`] (which authenticates with a
 /// serving cert for the server-to-server refresh path).
 pub async fn get_map_pinned(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let mut tls = connect_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     let hint = match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
@@ -1044,10 +1044,10 @@ pub async fn push_service_control(
 /// resolver cluster, plus the admin servers reached while walking discovery hints.
 /// Everything in it was served over connections pinned to the
 /// operator-confirmed CA.
-pub struct TrustDomainInfo {
+pub struct AdminDomainInfo {
     pub domain: String,
     /// Where Sign/Enroll requests go. The first CA location seen wins;
-    /// a well-formed trust domain only has one.
+    /// a well-formed admin domain only has one.
     pub ca_addr: Option<SocketAddr>,
     /// The active members of the bootstrap server's CA-owned resolver cluster. These
     /// are replicas of one resolver cluster, never a flattening of the
@@ -1065,12 +1065,12 @@ pub struct TrustDomainInfo {
     pub reached: Vec<SocketAddr>,
 }
 
-/// Upper bound on the peer walk — far above any plausible trust domain, just
+/// Upper bound on the peer walk — far above any plausible admin domain, just
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
 fn registered_members(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     cluster_id: admin_proto::ResolverClusterId,
 ) -> Vec<ResolverAddr> {
     let Some(cluster) = map.resolver_clusters.iter().find(|cluster| {
@@ -1103,7 +1103,7 @@ pub struct ResolverClusterTopology {
 }
 
 fn cluster_topology(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     cluster_id: admin_proto::ResolverClusterId,
 ) -> Result<ResolverClusterTopology> {
     let cluster = map
@@ -1140,7 +1140,7 @@ fn cluster_topology(
 }
 
 pub fn cluster_topology_by_base(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     base: &str,
 ) -> Result<ResolverClusterTopology> {
     let cluster = map
@@ -1167,20 +1167,20 @@ struct ResolverSelection {
 }
 
 fn bootstrap_cluster(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     server_id: admin_proto::AdminServerId,
 ) -> Result<BootstrapSelection> {
     let controller = map
         .controller_entry()
         .filter(|s| s.state == admin_proto::ServerState::Registered)
-        .context("trust domain map contains no registered controller")?;
+        .context("admin domain map contains no registered controller")?;
     let bootstrap = map
         .admin_servers
         .iter()
         .find(|s| s.id == server_id)
         .filter(|s| s.state == admin_proto::ServerState::Registered)
         .context(
-            "the verified bootstrap server is not registered in the trust domain map",
+            "the verified bootstrap server is not registered in the admin domain map",
         )?;
     // A dedicated controller has no resolver cluster of its own. It is still a
     // normal discovery seed, so map it to the one active root resolver cluster when
@@ -1217,7 +1217,7 @@ fn bootstrap_cluster(
 /// Try `seeds` and their advertised peers as candidate paths to the exact
 /// controller. Stop as soon as one candidate yields the controller-authoritative
 /// map: peer addresses are discovery hints, not a checklist that every client
-/// must contact before it can use the trust domain. This matters across routed or
+/// must contact before it can use the admin domain. This matters across routed or
 /// partitioned sites, where a perfectly usable bootstrap resolver cluster may advertise
 /// admin servers that the joining client cannot reach directly.
 ///
@@ -1228,14 +1228,14 @@ pub async fn aggregate(
     seeds: &[SocketAddr],
     kind: NodeKind,
     expected: &CaIdentity,
-) -> Result<TrustDomainInfo> {
+) -> Result<AdminDomainInfo> {
     // Preserve candidate order: `confirm_seeds` records the identity of the
-    // first reachable seed, and `TrustDomainInfo::reached[0]` becomes the durable
+    // first reachable seed, and `AdminDomainInfo::reached[0]` becomes the durable
     // bootstrap hint in the install record. A LIFO walk could silently record
     // a different same-CA satellite from the tail of an mDNS result.
     let mut queue: VecDeque<SocketAddr> = seeds.iter().copied().collect();
     let mut visited: Vec<SocketAddr> = Vec::new();
-    let mut info = TrustDomainInfo {
+    let mut info = AdminDomainInfo {
         domain: expected.domain.clone(),
         ca_addr: None,
         resolvers: Vec::new(),
@@ -1276,7 +1276,7 @@ pub async fn aggregate(
         bail!("no admin server could be reached");
     }
     let map = authoritative.context(
-        "reachable admin servers did not yield a controller-authoritative trust domain map",
+        "reachable admin servers did not yield a controller-authoritative admin domain map",
     )?;
     let BootstrapSelection { controller, resolver } =
         bootstrap_cluster(&map, expected.server_id)?;
@@ -1294,10 +1294,10 @@ pub async fn aggregate(
     Ok(info)
 }
 
-/// Submit a CSR for `name` to the trust domain's CA, authenticated as
+/// Submit a CSR for `name` to the admin domain's CA, authenticated as
 /// `admin`/`password`, pinned to the identity the operator already
 /// confirmed (`expected`, from [`fetch_identity`]). `id_map_groups`
-/// (first = primary) registers the new identity on the trust domain's
+/// (first = primary) registers the new identity on the admin domain's
 /// id-map hosts — chosen here, at enrollment, by the authenticated
 /// admin; the server validates the choice against that admin's
 /// allowed set. Empty ⇒ no registration. Returns the signed cert +
@@ -1357,7 +1357,7 @@ pub async fn request_cert_replacing(
 }
 
 /// Enroll a new admin server: request the reserved [`SERVING_SAN`]
-/// serving cert from the trust domain's CA, authenticated as
+/// serving cert from the admin domain's CA, authenticated as
 /// `admin`/`password` (whose policy must cover the requested resolver cluster and roles),
 /// pinned to the confirmed identity. `listen` is where the new daemon
 /// will serve — the CA records it as a peer. The returned leaf + the
@@ -1630,7 +1630,7 @@ pub async fn poll(
 }
 
 /// List the pending signing queue, authenticated as `admin` (pinned —
-/// the admin's password only ever goes to the confirmed trust domain).
+/// the admin's password only ever goes to the confirmed admin domain).
 pub async fn list_queue(
     addr: SocketAddr,
     credential: admin_proto::AdminCredential,
@@ -1679,7 +1679,7 @@ pub async fn approve(
     }
 }
 
-/// Fetch the trust domain's current CRL (pinned). `None` — nothing has ever
+/// Fetch the admin domain's current CRL (pinned). `None` — nothing has ever
 /// been revoked.
 pub async fn get_crl(
     addr: SocketAddr,
@@ -2008,7 +2008,7 @@ pub fn home_ca_from_chain(pem: &[u8]) -> Result<CertificateDer<'static>> {
     Ok(certs.last().expect("length checked").clone())
 }
 
-/// Server→CA: register/update this admin server's facts in the CA's trust domain
+/// Server→CA: register/update this admin server's facts in the CA's admin domain
 /// map, authenticated with the serving cert (peer-cert-gated). Returns the
 /// CA's new map version.
 pub async fn register(
@@ -2056,7 +2056,7 @@ pub async fn deregister(
 }
 
 /// Cheap probe: the served map's current version. No client cert needed —
-/// the map is public within the trust domain (reads are pinned to the CA).
+/// the map is public within the admin domain (reads are pinned to the CA).
 pub async fn get_map_version(
     client: &PkiClient,
     addr: SocketAddr,
@@ -2094,13 +2094,13 @@ pub async fn get_map_version_from_controller(
     }
 }
 
-/// Fetch the whole trust domain map in one round trip — every resolver cluster, every
+/// Fetch the whole admin domain map in one round trip — every resolver cluster, every
 /// admin server's role, the CA location.
 pub async fn get_map(
     client: &PkiClient,
     addr: SocketAddr,
     kind: NodeKind,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let (mut tls, _hello) = connect_pki(client, addr, kind).await?;
     admin_proto::write_msg(&mut tls, &Request::GetMap).await?;
     match admin_proto::read_msg::<_, GetMapResponse>(&mut tls).await? {
@@ -2114,7 +2114,7 @@ pub async fn get_map_from_controller(
     addr: SocketAddr,
     home_ca: CertificateDer<'static>,
     kind: NodeKind,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let (mut tls, _hello) = connect_pki_target(
         client,
         addr,
@@ -2406,7 +2406,7 @@ pub async fn poll_renewal(
 
 /// [`get_info`] over real PKI (webpki against `roots`) — for unattended
 /// callers that hold the trust bundle, e.g. the renewal daemon mapping
-/// the trust domain to find the CA. Only genuine members of the trust domain can
+/// the admin domain to find the CA. Only genuine members of the admin domain can
 /// answer; no human confirmation involved.
 pub async fn get_info_pki(
     client: &PkiClient,
@@ -2970,7 +2970,7 @@ mod tests {
         let acceptor = TlsAcceptor::from(material.config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let hostile_map = TrustDomainMap {
+        let hostile_map = AdminDomainMap {
             version: 1,
             controller: server_id,
             admin_servers: vec![AdminServerEntry {
@@ -3102,7 +3102,7 @@ mod tests {
             addr: "192.168.50.12:4564".parse().unwrap(),
             auth: admin_proto::InfoAuth::Tls { name: "root.example".into() },
         };
-        let map = TrustDomainMap {
+        let map = AdminDomainMap {
             version: 1,
             controller,
             admin_servers: vec![
@@ -3226,7 +3226,7 @@ mod tests {
         (cert.pem(), crl.pem().unwrap())
     }
 
-    /// A CRL pulled from the trust domain is only installable if one of the CAs we
+    /// A CRL pulled from the admin domain is only installable if one of the CAs we
     /// already trust signed it. Without this the renewd distribution path will
     /// write whatever any peer that answers GetCrl hands it, straight into the
     /// file the resolver's TLS acceptor rebuilds from.

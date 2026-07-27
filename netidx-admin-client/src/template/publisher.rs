@@ -209,7 +209,7 @@ mod tests {
                 ReferralAuth::Tls(ArcStr::from("resolver.example.com")),
             )],
             default_auth: Some(DefaultAuthMech::Tls),
-            // Standard layout: identity keyed by the trust domain
+            // Standard layout: identity keyed by the admin domain
             // (`example.com`) while `our_name` is the full host SAN
             // (`client.example.com`) so the install dir matches
             // what netidx sees on the wire. Same convention as the

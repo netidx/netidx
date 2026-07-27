@@ -104,7 +104,7 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
     };
     let root_member = resolver("10.1.0.1:4564");
     let child_member = resolver("10.2.0.1:4564");
-    let map = TrustDomainMap {
+    let map = AdminDomainMap {
         version: 9,
         controller,
         admin_servers: vec![
@@ -187,7 +187,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
     let peer_member = resolver("10.2.0.2:4564");
     let grandchild_member = resolver("10.3.0.1:4564");
     let sibling_member = resolver("10.4.0.1:4564");
-    let map = TrustDomainMap {
+    let map = AdminDomainMap {
         version: 12,
         controller,
         admin_servers: vec![
@@ -289,7 +289,7 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
         cluster: None,
         state: admin_proto::ServerState::Registered,
     };
-    let mut old_map = TrustDomainMap::empty(controller);
+    let mut old_map = AdminDomainMap::empty(controller);
     old_map.version = 4;
     old_map.admin_servers.push(entry(controller, old_addr, Role::Ca.into()));
     old_map.admin_servers.push(entry(node, cfg.listen, Role::Resolver.into()));
@@ -345,7 +345,7 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
 }
 
 /// Deciding a delegation needs authority over the parent resolver cluster's base, not
-/// just over the proposed child path. `trust_domain::delegate` only requires the
+/// just over the proposed child path. `admin_domain::delegate` only requires the
 /// child to sit under the parent's base, so without this check an admin scoped
 /// to `/eu` could approve a delegation of `/eu/x` parented at the ROOT resolver cluster
 /// and rewrite the root resolvers' referrals.
@@ -370,7 +370,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
     };
-    let map = TrustDomainMap {
+    let map = AdminDomainMap {
         version: 1,
         controller: root_srv,
         admin_servers: vec![

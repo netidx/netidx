@@ -14,7 +14,7 @@ use super::{theme, widgets};
 use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyModifiers};
 use netidx_admin_client::{
-    answer::{Answerer, Field, Progress, TrustDomainChoice, TrustDomainOption},
+    answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -38,7 +38,7 @@ pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
 pub(super) struct ParentRow {
     /// e.g. `resolver-eu-a  10.0.60.15:4564`.
     pub(super) label: String,
-    /// The resolver's hierarchy level (its trust domain's base), shown as info.
+    /// The resolver's hierarchy level (its admin domain's base), shown as info.
     pub(super) level: String,
 }
 
@@ -69,11 +69,11 @@ pub(super) enum UiRequest {
         default: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
-    /// Pick a discovered trust domain (each shown with its CA glyph + fingerprint),
+    /// Pick a discovered admin domain (each shown with its CA glyph + fingerprint),
     /// or the trailing "enter an address manually" option.
-    SelectTrustDomain {
-        trust_domains: Vec<TrustDomainOption>,
-        reply: oneshot::Sender<Result<TrustDomainChoice>>,
+    SelectAdminDomain {
+        admin_domains: Vec<AdminDomainOption>,
+        reply: oneshot::Sender<Result<AdminDomainChoice>>,
     },
     /// Multi-select the parent's resolver servers (each with its level), or the
     /// trailing "enter an address manually" option.
@@ -162,7 +162,7 @@ impl TuiAnswerer {
         self.ask(|reply| UiRequest::Editor { seed, validate, reply }).await
     }
 
-    /// Multi-select the parent's resolver servers from the trust domain map, or fall
+    /// Multi-select the parent's resolver servers from the admin domain map, or fall
     /// back to a typed address. Inherent (TUI-only), like [`Self::edit`] — the
     /// strict CLI takes an explicit `--parent-*` instead.
     pub(super) async fn select_parent(
@@ -219,12 +219,12 @@ impl Answerer for TuiAnswerer {
         self.ask(|reply| UiRequest::Choice { field, choices, default, reply }).await
     }
 
-    async fn select_trust_domain(
+    async fn select_admin_domain(
         &mut self,
-        trust_domains: &[TrustDomainOption],
-    ) -> Result<TrustDomainChoice> {
-        let trust_domains = trust_domains.to_vec();
-        self.ask(|reply| UiRequest::SelectTrustDomain { trust_domains, reply }).await
+        admin_domains: &[AdminDomainOption],
+    ) -> Result<AdminDomainChoice> {
+        let admin_domains = admin_domains.to_vec();
+        self.ask(|reply| UiRequest::SelectAdminDomain { admin_domains, reply }).await
     }
 
     async fn confirm(
@@ -313,13 +313,13 @@ pub(super) enum Modal {
         state: ListState,
         reply: Option<oneshot::Sender<Result<String>>>,
     },
-    /// Pick one of the discovered trust domains (rendered with its glyph +
+    /// Pick one of the discovered admin domains (rendered with its glyph +
     /// fingerprint) or the trailing manual-entry row. Selection index
-    /// `trust domains.len()` is the manual row.
-    SelectTrustDomain {
-        trust_domains: Vec<TrustDomainOption>,
+    /// `admin domains.len()` is the manual row.
+    SelectAdminDomain {
+        admin_domains: Vec<AdminDomainOption>,
         state: ListState,
-        reply: Option<oneshot::Sender<Result<TrustDomainChoice>>>,
+        reply: Option<oneshot::Sender<Result<AdminDomainChoice>>>,
     },
     /// Multi-select parent resolvers (checkbox per row) with a trailing
     /// manual-entry row. `checked` parallels `rows`; the cursor index
@@ -393,11 +393,11 @@ impl Modal {
                 state.select(Some(sel));
                 Some(Modal::Choice { field, choices, state, reply: Some(reply) })
             }
-            UiRequest::SelectTrustDomain { trust_domains, reply } => {
+            UiRequest::SelectAdminDomain { admin_domains, reply } => {
                 let mut state = ListState::default();
                 state.select(Some(0));
-                Some(Modal::SelectTrustDomain {
-                    trust_domains,
+                Some(Modal::SelectAdminDomain {
+                    admin_domains,
                     state,
                     reply: Some(reply),
                 })
@@ -443,7 +443,7 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
-            Modal::SelectTrustDomain { .. }
+            Modal::SelectAdminDomain { .. }
             | Modal::SelectParent { .. }
             | Modal::Identity { .. }
             | Modal::Announce { .. }
@@ -533,10 +533,10 @@ impl Modal {
                 }
                 _ => false,
             },
-            // The list is the discovered trust domains, then a "poll for more" row,
-            // then a manual-entry row: indices `trust domains.len()` and
-            // `trust domains.len() + 1` respectively.
-            Modal::SelectTrustDomain { trust_domains, state, reply } => match code {
+            // The list is the discovered admin domains, then a "poll for more" row,
+            // then a manual-entry row: indices `admin domains.len()` and
+            // `admin domains.len() + 1` respectively.
+            Modal::SelectAdminDomain { admin_domains, state, reply } => match code {
                 KeyCode::Esc => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Err(anyhow!("cancelled")));
@@ -551,18 +551,18 @@ impl Modal {
                 KeyCode::Down | KeyCode::Char('j') => {
                     let i = state
                         .selected()
-                        .map_or(0, |i| (i + 1).min(trust_domains.len() + 1));
+                        .map_or(0, |i| (i + 1).min(admin_domains.len() + 1));
                     state.select(Some(i));
                     false
                 }
                 KeyCode::Enter => {
-                    let sel = state.selected().unwrap_or(0).min(trust_domains.len() + 1);
-                    let choice = if sel == trust_domains.len() {
-                        TrustDomainChoice::PollMore
-                    } else if sel == trust_domains.len() + 1 {
-                        TrustDomainChoice::Manual
+                    let sel = state.selected().unwrap_or(0).min(admin_domains.len() + 1);
+                    let choice = if sel == admin_domains.len() {
+                        AdminDomainChoice::PollMore
+                    } else if sel == admin_domains.len() + 1 {
+                        AdminDomainChoice::Manual
                     } else {
-                        TrustDomainChoice::Discovered(sel)
+                        AdminDomainChoice::Discovered(sel)
                     };
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(choice));
@@ -803,22 +803,22 @@ impl Modal {
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, rows[2], &mut st);
             }
-            Modal::SelectTrustDomain { trust_domains, state, .. } => {
-                const POLL_MORE: &str = "Search again for more trust domains";
+            Modal::SelectAdminDomain { admin_domains, state, .. } => {
+                const POLL_MORE: &str = "Search again for more admin domains";
                 const MANUAL: &str = "Enter an address manually…";
-                let sel = state.selected().unwrap_or(0).min(trust_domains.len() + 1);
+                let sel = state.selected().unwrap_or(0).min(admin_domains.len() + 1);
                 let w = 68u16.min(screen.width.saturating_sub(4)).max(40);
                 // Body holds the list (left) beside the selected glyph (right, 10
                 // tile rows + a blank + up to 3 fingerprint lines). The list is
-                // the trust domains plus the poll-more and manual-entry rows.
+                // the admin domains plus the poll-more and manual-entry rows.
                 let body_h =
-                    (trust_domains.len() as u16 + 2).max(widgets::IDENTICON_HEIGHT + 4);
+                    (admin_domains.len() as u16 + 2).max(widgets::IDENTICON_HEIGHT + 4);
                 let h = (1 /*header*/ + 1 /*spacer*/ + body_h + 2/*borders*/)
                     .min(screen.height);
                 let area = widgets::centered(w, h, screen);
                 widgets::shadow(f, area, screen);
                 f.render_widget(Clear, area);
-                let block = theme::dialog_block(Field::SelectTrustDomain.label())
+                let block = theme::dialog_block(Field::SelectAdminDomain.label())
                     .title_bottom(Line::from(Span::styled(
                         " ↑/↓ move · Enter select · Esc cancel ",
                         theme::hint_style(),
@@ -831,10 +831,10 @@ impl Modal {
                     Constraint::Min(0),    // list | glyph
                 ])
                 .split(inner);
-                let header = if trust_domains.is_empty() {
-                    "No trust domains found on the local network."
+                let header = if admin_domains.is_empty() {
+                    "No admin domains found on the local network."
                 } else {
-                    "netidx trust domains discovered on the local network:"
+                    "netidx admin domains discovered on the local network:"
                 };
                 f.render_widget(
                     Paragraph::new(header)
@@ -845,7 +845,7 @@ impl Modal {
                 let cols =
                     Layout::horizontal([Constraint::Min(20), Constraint::Length(26)])
                         .split(rows[2]);
-                let items: Vec<ListItem> = trust_domains
+                let items: Vec<ListItem> = admin_domains
                     .iter()
                     .map(|n| ListItem::new(n.domain.clone()))
                     .chain([ListItem::new(POLL_MORE), ListItem::new(MANUAL)])
@@ -855,9 +855,9 @@ impl Modal {
                     .style(theme::panel_style())
                     .highlight_style(theme::selected_style());
                 f.render_stateful_widget(list, cols[0], &mut st);
-                // Right: the selected trust domain's glyph + grouped fingerprint, or a
+                // Right: the selected admin domain's glyph + grouped fingerprint, or a
                 // hint for the poll-more / manual-entry rows.
-                let glyph = match trust_domains.get(sel) {
+                let glyph = match admin_domains.get(sel) {
                     Some(n) => {
                         let mut lines = widgets::identicon_lines(&n.identity.fingerprint);
                         lines.push(Line::from(""));
@@ -870,8 +870,8 @@ impl Modal {
                         }
                         lines
                     }
-                    None if sel == trust_domains.len() => vec![Line::from(Span::styled(
-                        "Browse the network again and add any trust domains that answer.",
+                    None if sel == admin_domains.len() => vec![Line::from(Span::styled(
+                        "Browse the network again and add any admin domains that answer.",
                         theme::hint_style(),
                     ))],
                     None => vec![Line::from(Span::styled(
@@ -978,7 +978,7 @@ impl Modal {
                 let val = |s: String| Span::styled(s, theme::panel_style());
                 let mut lines = vec![
                     Line::from(Span::styled(
-                        "Verify this is the trust domain you intend to trust, out of band,",
+                        "Verify this is the admin domain you intend to trust, out of band,",
                         theme::panel_style(),
                     )),
                     Line::from(Span::styled(
@@ -1004,7 +1004,7 @@ impl Modal {
                     " a/Enter accept · Esc/r reject ",
                     theme::hint_style(),
                 )));
-                popup(f, screen, "Confirm trust domain identity", lines, 60);
+                popup(f, screen, "Confirm admin domain identity", lines, 60);
             }
             Modal::Announce { title, body, .. } => {
                 let mut lines = body
@@ -1186,7 +1186,7 @@ mod tests {
     fn ctrl_u_clears_a_prefilled_text_field() {
         let (tx, mut rx) = oneshot::channel();
         let mut modal = Modal::from_request(UiRequest::Text {
-            field: Field::TrustDomainName,
+            field: Field::AdminDomainName,
             default: Some("local".into()),
             required: false,
             reply: tx,
@@ -1350,12 +1350,12 @@ mod tests {
         assert!(rx.try_recv().unwrap().is_err(), "Esc must send a cancel error");
     }
 
-    fn select_trust_domain_modal() -> (Modal, oneshot::Receiver<Result<TrustDomainChoice>>)
+    fn select_admin_domain_modal() -> (Modal, oneshot::Receiver<Result<AdminDomainChoice>>)
     {
-        // Empty trust domain list: index 0 is the poll-more row, index 1 the manual row.
+        // Empty admin domain list: index 0 is the poll-more row, index 1 the manual row.
         let (tx, rx) = oneshot::channel();
-        let modal = Modal::from_request(UiRequest::SelectTrustDomain {
-            trust_domains: vec![],
+        let modal = Modal::from_request(UiRequest::SelectAdminDomain {
+            admin_domains: vec![],
             reply: tx,
         })
         .unwrap();
@@ -1363,17 +1363,17 @@ mod tests {
     }
 
     #[test]
-    fn select_trust_domain_enter_polls_more() {
-        let (mut modal, mut rx) = select_trust_domain_modal();
+    fn select_admin_domain_enter_polls_more() {
+        let (mut modal, mut rx) = select_admin_domain_modal();
         assert!(modal.on_key(KeyCode::Enter), "Enter must close the modal");
-        assert_eq!(rx.try_recv().unwrap().unwrap(), TrustDomainChoice::PollMore);
+        assert_eq!(rx.try_recv().unwrap().unwrap(), AdminDomainChoice::PollMore);
     }
 
     #[test]
-    fn select_trust_domain_manual_is_the_last_row() {
-        let (mut modal, mut rx) = select_trust_domain_modal();
+    fn select_admin_domain_manual_is_the_last_row() {
+        let (mut modal, mut rx) = select_admin_domain_modal();
         modal.on_key(KeyCode::Down); // past poll-more, onto manual
         assert!(modal.on_key(KeyCode::Enter));
-        assert_eq!(rx.try_recv().unwrap().unwrap(), TrustDomainChoice::Manual);
+        assert_eq!(rx.try_recv().unwrap().unwrap(), AdminDomainChoice::Manual);
     }
 }

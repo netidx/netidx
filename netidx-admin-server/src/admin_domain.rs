@@ -2,10 +2,10 @@
 
 use crate::{
     admin_proto::{
-        AdminServerEntry, AdminServerId, EnrollmentRequest, ResolverAddr,
+        AdminDomainMap, AdminServerEntry, AdminServerId, EnrollmentRequest, ResolverAddr,
         ResolverClusterEdge, ResolverClusterEntry, ResolverClusterFacts,
         ResolverClusterId, ResolverClusterPlacement, ResolverClusterState, Role,
-        ServerState, TrustDomainMap,
+        ServerState,
     },
     atomic,
     config_lock::ConfigDirLock,
@@ -14,18 +14,18 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 pub fn path(ca_dir: &Path) -> PathBuf {
-    ca_dir.join("trust-domain.json")
+    ca_dir.join("admin-domain.json")
 }
 
-pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<TrustDomainMap> {
+pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<AdminDomainMap> {
     let p = path(ca_dir);
     match std::fs::read(&p) {
         Ok(bytes) => {
-            let map: TrustDomainMap = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing trust domain map {p:?}"))?;
+            let map: AdminDomainMap = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing admin domain map {p:?}"))?;
             if map.controller != controller {
                 bail!(
-                    "trust domain map controller {} does not match installed controller certificate {}",
+                    "admin domain map controller {} does not match installed controller certificate {}",
                     map.controller,
                     controller
                 );
@@ -33,16 +33,16 @@ pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<TrustDomainMap> 
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(TrustDomainMap::empty(controller))
+            Ok(AdminDomainMap::empty(controller))
         }
-        Err(e) => Err(e).with_context(|| format!("reading trust domain map {p:?}")),
+        Err(e) => Err(e).with_context(|| format!("reading admin domain map {p:?}")),
     }
 }
 
 pub fn save(
     config_lock: &ConfigDirLock,
     ca_dir: &Path,
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
 ) -> Result<()> {
     let ca_dir = config_lock.require_contained(ca_dir)?;
     atomic::write_atomic_pretty_json(&path(&ca_dir), map)
@@ -51,15 +51,15 @@ pub fn save(
 pub async fn load_async(
     ca_dir: &Path,
     controller: AdminServerId,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let p = path(ca_dir);
     match tokio::fs::read(&p).await {
         Ok(bytes) => {
-            let map: TrustDomainMap = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing trust domain map {p:?}"))?;
+            let map: AdminDomainMap = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing admin domain map {p:?}"))?;
             if map.controller != controller {
                 bail!(
-                    "trust domain map controller {} does not match installed controller certificate {}",
+                    "admin domain map controller {} does not match installed controller certificate {}",
                     map.controller,
                     controller
                 );
@@ -67,29 +67,29 @@ pub async fn load_async(
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(TrustDomainMap::empty(controller))
+            Ok(AdminDomainMap::empty(controller))
         }
-        Err(e) => Err(e).with_context(|| format!("reading trust domain map {p:?}")),
+        Err(e) => Err(e).with_context(|| format!("reading admin domain map {p:?}")),
     }
 }
 
 pub async fn save_async(
     config_lock: &ConfigDirLock,
     ca_dir: &Path,
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
 ) -> Result<()> {
     let ca_dir = config_lock.require_contained(ca_dir)?;
     atomic::write_atomic_pretty_json_async(&path(&ca_dir), map).await
 }
 
-fn changed(map: &mut TrustDomainMap) {
+fn changed(map: &mut AdminDomainMap) {
     map.admin_servers.sort_by_key(|s| s.id);
     map.resolver_clusters.sort_by_key(|c| c.id);
     map.version = map.version.saturating_add(1);
 }
 
 pub fn upsert_controller(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     mut entry: AdminServerEntry,
     cluster: Option<ResolverClusterFacts>,
 ) -> Result<bool> {
@@ -138,7 +138,7 @@ pub fn upsert_controller(
 /// Move one server's resolver endpoint without changing its identity, grant,
 /// resolver cluster placement, or data-plane authentication.
 pub fn relocate_resolver(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     server_id: AdminServerId,
     addr: std::net::SocketAddr,
 ) -> Result<bool> {
@@ -203,7 +203,7 @@ pub fn relocate_resolver(
 /// not choose either identity: `server_id` and a created resolver cluster id come from
 /// the CA.
 pub fn enroll(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     server_id: AdminServerId,
     request: &EnrollmentRequest,
 ) -> Result<ResolverClusterId> {
@@ -290,7 +290,7 @@ pub fn enroll(
 }
 
 fn server_set(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     ids: &[AdminServerId],
     require_registered: bool,
 ) -> Result<(ResolverClusterId, Vec<ResolverAddr>)> {
@@ -334,7 +334,7 @@ fn server_set(
 /// [`delegate`] runs, because `delegate` only checks that the proposed child
 /// path lies *under* this base, which says nothing about who owns the base.
 pub fn parent_base(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     parent_servers: &[AdminServerId],
 ) -> Result<String> {
     let (cluster, _) = server_set(map, &canonical_ids(parent_servers), true)?;
@@ -348,7 +348,7 @@ pub fn parent_base(
 }
 
 fn assigned_servers(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     cluster: ResolverClusterId,
 ) -> Vec<AdminServerId> {
     let mut ids: Vec<_> = map
@@ -382,7 +382,7 @@ pub struct DelegationChange {
 /// to distinct resolver clusters, attach/rebase the complete child resolver cluster. Reapplying
 /// the final proposal is idempotent.
 pub fn delegate(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     proposed_path: &str,
     proposed_child: ResolverClusterId,
     parent_servers: &[AdminServerId],
@@ -578,7 +578,7 @@ pub fn delegate(
     })
 }
 
-fn edge_for(map: &TrustDomainMap, id: ResolverClusterId) -> Option<ResolverClusterEdge> {
+fn edge_for(map: &AdminDomainMap, id: ResolverClusterId) -> Option<ResolverClusterEdge> {
     map.resolver_clusters
         .iter()
         .find(|c| c.id == id)
@@ -591,7 +591,7 @@ fn normalize_addrs(addrs: &mut Vec<ResolverAddr>) {
 }
 
 fn facts_match(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     cluster: &ResolverClusterEntry,
     owned: Option<&ResolverAddr>,
     facts: &ResolverClusterFacts,
@@ -627,7 +627,7 @@ fn facts_match(
 /// Activate only the authenticated node's existing grant and allow it to
 /// update only its own routing address.
 pub fn register(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     server_id: AdminServerId,
     addr: std::net::SocketAddr,
     resolver: Option<&ResolverClusterFacts>,
@@ -661,7 +661,7 @@ pub fn register(
     // A newly granted non-root resolver cluster stays pending until delegation attaches it
     // to an active parent. The first `/` resolver cluster below a dedicated controller has
     // no such ceremony: registration of its approved first member is what makes
-    // the trust domain routable.
+    // the admin domain routable.
     let activate_root = cluster_id.is_some_and(|id| {
         map.resolver_clusters.iter().any(|cluster| {
             cluster.id == id
@@ -689,7 +689,7 @@ pub fn register(
     Ok(server_changed || activate_root)
 }
 
-pub fn deregister(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<bool> {
+pub fn deregister(map: &mut AdminDomainMap, server_id: AdminServerId) -> Result<bool> {
     let server = map
         .admin_servers
         .iter_mut()
@@ -703,7 +703,7 @@ pub fn deregister(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<
     Ok(true)
 }
 
-pub fn remove(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<bool> {
+pub fn remove(map: &mut AdminDomainMap, server_id: AdminServerId) -> Result<bool> {
     if server_id == map.controller {
         bail!("the active controller cannot be removed; replace and revoke it first");
     }
@@ -741,7 +741,7 @@ pub fn remove(map: &mut TrustDomainMap, server_id: AdminServerId) -> Result<bool
 }
 
 pub fn reparent(
-    map: &mut TrustDomainMap,
+    map: &mut AdminDomainMap,
     child: ResolverClusterId,
     parent: ResolverClusterId,
 ) -> Result<bool> {
@@ -830,7 +830,7 @@ mod tests {
             cluster: Some(cluster),
             state: ServerState::Registered,
         };
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 7,
             controller,
             admin_servers: vec![controller_entry.clone(), peer_entry.clone()],
@@ -875,7 +875,7 @@ mod tests {
         let cluster = ResolverClusterId::new();
         let old = addr("10.0.0.1:4564");
         let peer_addr = addr("10.0.0.2:4564");
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 3,
             controller,
             admin_servers: vec![
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn permanent_removal_never_accepts_the_active_controller() {
         let controller = AdminServerId::new();
-        let mut map = TrustDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(controller);
         let before = map.clone();
         let error = remove(&mut map, controller).unwrap_err().to_string();
         assert!(error.contains("active controller"));
@@ -927,7 +927,7 @@ mod tests {
     fn enrollment_registration_and_self_only_address_update() {
         let controller = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = TrustDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(controller);
         let request = enrollment("/eu", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
         assert_eq!(map.admin_servers[0].state, ServerState::Enrolled);
@@ -960,7 +960,7 @@ mod tests {
     fn first_root_resolver_below_a_dedicated_controller_activates_on_registration() {
         let controller = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = TrustDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(controller);
         let request = enrollment("/", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
         assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
@@ -1005,7 +1005,7 @@ mod tests {
                 addrs: vec![addr("10.0.0.2:4564")],
             }],
         };
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 1,
             controller,
             admin_servers: vec![controller_entry.clone()],
@@ -1056,7 +1056,7 @@ mod tests {
             parent: Some(root),
             children: vec![],
         };
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 3,
             controller,
             admin_servers: vec![
@@ -1105,7 +1105,7 @@ mod tests {
         let first = AdminServerId::new();
         let second = AdminServerId::new();
         let parent_server = AdminServerId::new();
-        let mut map = TrustDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(controller);
         let parent =
             enroll(&mut map, parent_server, &enrollment("/", "10.0.0.1:4564")).unwrap();
         map.resolver_clusters.iter_mut().find(|c| c.id == parent).unwrap().state =
@@ -1211,7 +1211,7 @@ mod tests {
         let mut members: Vec<_> =
             specs.iter().map(|(_, _, member, _)| addr(member)).collect();
         normalize_addrs(&mut members);
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 7,
             controller: us1,
             admin_servers,
@@ -1268,7 +1268,7 @@ mod tests {
         let second = AdminServerId::new();
         let third = AdminServerId::new();
         let cluster = ResolverClusterId::new();
-        let mut map = TrustDomainMap {
+        let mut map = AdminDomainMap {
             version: 0,
             controller,
             admin_servers: [

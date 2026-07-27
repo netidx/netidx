@@ -30,7 +30,7 @@ pub struct ServiceServer {
     pub roles: BitFlags<Role>,
 }
 
-/// Every admin server that runs a resolver, read from the CA trust domain map — the
+/// Every admin server that runs a resolver, read from the CA admin domain map — the
 /// pick list for resolver cluster service control. Sourced entirely from the map, so the
 /// operator picks a server by identity rather than typing a namespace path.
 pub async fn list_service_servers(

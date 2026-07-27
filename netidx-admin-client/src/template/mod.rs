@@ -530,7 +530,7 @@ impl RenderedTemplate {
 }
 
 /// Build the edits that attach an already-installed workstation/client
-/// to a trust domain — the engine half of `workstation join`. Loads the
+/// to a admin domain — the engine half of `workstation join`. Loads the
 /// existing resolver + client configs, adds `parent` to the resolver,
 /// sets the client's `default_auth` (derived from the parent's auth) and
 /// TLS identities, and returns a [`RenderedTemplate`] that touches ONLY
@@ -539,8 +539,8 @@ impl RenderedTemplate {
 /// the returned template's `describe()`/`apply()` like any install.
 ///
 /// Errors if the resolver already carries a parent referral: re-joining
-/// a different trust domain is a separate, more careful operation.
-pub fn attach_to_trust_domain(
+/// a different admin domain is a separate, more careful operation.
+pub fn attach_to_admin_domain(
     resolver_config_path: &Path,
     client_config_path: &Path,
     parent: ParentRef,
@@ -567,11 +567,11 @@ pub fn attach_to_trust_domain(
 }
 
 /// Set the `parent` referral on an existing resolver config — the
-/// resolver-only half of attaching to a trust domain, for `resolver
-/// add-parent` (and reused by [`attach_to_trust_domain`]). Returns a
+/// resolver-only half of attaching to a admin domain, for `resolver
+/// add-parent` (and reused by [`attach_to_admin_domain`]). Returns a
 /// [`RenderedTemplate`] touching only the resolver config (no client
 /// edit, no cert install). Refuses a resolver that already has a parent —
-/// re-parenting a different trust domain is a separate, more careful op.
+/// re-parenting a different admin domain is a separate, more careful op.
 pub fn set_parent_referral(
     resolver_config_path: &Path,
     parent: ParentRef,
@@ -590,8 +590,8 @@ pub(crate) fn set_parent_referral_on(
     if rcfg.as_file().parent.is_some() {
         bail!(
             "this resolver already has a parent referral — it's already attached \
-             to a trust domain. Re-parenting isn't supported yet (uninstall + \
-             reinstall to switch trust domains)."
+             to a admin domain. Re-parenting isn't supported yet (uninstall + \
+             reinstall to switch admin domains)."
         );
     }
     rcfg.as_file_mut().parent = Some(parent_into_file(parent));
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_to_trust_domain_adds_parent_and_derives_default_auth() {
+    fn attach_to_admin_domain_adds_parent_and_derives_default_auth() {
         let dir = tempfile::tempdir().unwrap();
         // A local-only workstation: resolver with no parent, client with
         // default_auth Local.
@@ -894,7 +894,7 @@ mod tests {
         );
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
 
-        let rt = attach_to_trust_domain(&rpath, &cpath, anon_parent(), vec![]).unwrap();
+        let rt = attach_to_admin_domain(&rpath, &cpath, anon_parent(), vec![]).unwrap();
         rt.apply_test(dir.path()).unwrap();
 
         // The resolver gained the parent referral...
@@ -918,7 +918,7 @@ mod tests {
             ),
         );
         let cpath = write(dir.path(), "client.json", LOCAL_CLIENT);
-        assert!(attach_to_trust_domain(&rpath, &cpath, anon_parent(), vec![]).is_err());
+        assert!(attach_to_admin_domain(&rpath, &cpath, anon_parent(), vec![]).is_err());
     }
 
     #[test]

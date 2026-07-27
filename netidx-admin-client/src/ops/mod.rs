@@ -76,7 +76,7 @@ pub fn local_admin_server_listen() -> Option<SocketAddr> {
 /// case — no glyph to confirm); otherwise it is routed through
 /// [`Answerer::confirm_identity`] (an interactive glyph confirm, or the strict
 /// answerer's `--accept-glyph` comparison). The library never mDNS-discovers:
-/// an interactive frontend resolves a discovered trust domain to a concrete
+/// an interactive frontend resolves a discovered admin domain to a concrete
 /// `Some(addr)` before calling in.
 async fn resolve_identity(
     ans: &mut dyn Answerer,

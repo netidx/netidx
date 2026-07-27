@@ -16,7 +16,7 @@ fn service_control_routing_uses_identity_across_address_reuse() {
         cluster: None,
         state: admin_proto::ServerState::Registered,
     };
-    let mut map = TrustDomainMap::empty(controller);
+    let mut map = AdminDomainMap::empty(controller);
     // The selected identity moved, and a different identity reused its old
     // address. Routing by address would now hit `replacement`.
     map.admin_servers.push(entry(selected, new_addr));

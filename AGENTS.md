@@ -973,7 +973,7 @@ document into many retained pieces), reach for it.
 
 # Netidx Project Overview
 
-Netidx is a high-performance, distributed publish-subscribe middleware for Rust. It enables publishing values in one program and consuming them in another, either locally or across a trust domain, using a hierarchical namespace with globally unique paths.
+Netidx is a high-performance, distributed publish-subscribe middleware for Rust. It enables publishing values in one program and consuming them in another, either locally or across a admin domain, using a hierarchical namespace with globally unique paths.
 
 ## Build Commands
 

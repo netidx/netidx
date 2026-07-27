@@ -11,7 +11,7 @@ use super::{AdminSession, open_admin_session, resolve_identity};
 #[cfg(unix)]
 use crate::local;
 use crate::{
-    admin_proto::{NodeKind, PeerResult, Secret, TrustDomainMap},
+    admin_proto::{AdminDomainMap, NodeKind, PeerResult, Secret},
     answer::Answerer,
     transport,
 };
@@ -30,11 +30,11 @@ async fn bootstrap(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<&Path>,
-) -> Result<TrustDomainMap> {
+) -> Result<AdminDomainMap> {
     let (addr, id) = resolve_identity(ans, server, ca_dir).await?;
     transport::get_map_pinned(addr, NodeKind::Client, &id)
         .await
-        .context("fetching the trust domain map")
+        .context("fetching the admin domain map")
 }
 
 /// The `perms show --at <path>` query: read the raw perms JSON of the resolver cluster
@@ -77,7 +77,7 @@ pub async fn open_perms_session(
     Ok((session, perms_json))
 }
 
-/// List every level (resolver-resolver cluster base) in the trust domain map — the exact
+/// List every level (resolver-resolver cluster base) in the admin domain map — the exact
 /// `--at` targets a perms read/edit can route to. Deduped and sorted. The
 /// resolver cluster-scope perms UI offers these instead of a free-text path.
 pub async fn list_levels(
@@ -135,7 +135,7 @@ pub async fn edit_perms_with_session(
 /// The Local-tab `perms edit` action: hand the already-edited, already-
 /// validated `edited` perms JSON to *this host's own* CA over its local
 /// control socket — no glyph, no admin password (the `SO_PEERCRED` superuser
-/// gate is the authorization). The daemon re-validates, routes by the trust domain
+/// gate is the authorization). The daemon re-validates, routes by the admin domain
 /// map, and propagates the edit to every member of the resolver cluster mounted at
 /// `target_path`, so a local edit is as resolver cluster-consistent as a remote one.
 ///

@@ -12,9 +12,9 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, ApplyPermsEditRequest, ApplyPermsEditResponse, EditPermsRequest,
-        EditPermsResponse, GetPermsResponse, PeerResult, PropagationOk, ReadPermsOk,
-        ReadPermsRequest, ReadPermsResponse, TrustDomainMap,
+        self, AdminDomainMap, ApplyPermsEditRequest, ApplyPermsEditResponse,
+        EditPermsRequest, EditPermsResponse, GetPermsResponse, PeerResult, PropagationOk,
+        ReadPermsOk, ReadPermsRequest, ReadPermsResponse,
     },
     ca_vault, transport,
 };
@@ -49,7 +49,7 @@ fn perms_path_from_config(
 ) -> Result<PathBuf> {
     let inc = rc.as_file().include_permissions.first().cloned().context(
         "this resolver has no permissions file (include_permissions is empty — an \
-         anonymous trust domain has no perms)",
+         anonymous admin domain has no perms)",
     )?;
     let base = rconfig.parent().unwrap_or_else(|| Path::new("."));
     Ok(base.join(inc.as_str()))
@@ -183,7 +183,7 @@ pub(super) async fn handle_read_perms(
             Some(targets) => targets,
             None => {
                 return err(format!(
-                    "no registered resolver cluster serving {:?} in the trust domain map",
+                    "no registered resolver cluster serving {:?} in the admin domain map",
                     req.target_path
                 ));
             }
@@ -294,7 +294,7 @@ pub(super) async fn handle_apply_perms_edit(
 /// from a scope (`/` covers the whole tree). The path-aware prefix test
 /// (`Path::is_parent`) won't let `/eu` match `/europe`.
 fn cluster_members_for(
-    map: &TrustDomainMap,
+    map: &AdminDomainMap,
     target_path: &str,
 ) -> Option<Vec<(admin_proto::AdminServerId, SocketAddr)>> {
     let cluster = map.resolver_clusters.iter().find(|c| {
@@ -399,7 +399,7 @@ pub(super) async fn handle_edit_perms(
             Some(m) => m,
             None => {
                 return err(format!(
-                    "no resolver cluster serving {:?} in the trust domain map",
+                    "no resolver cluster serving {:?} in the admin domain map",
                     req.target_path
                 ));
             }

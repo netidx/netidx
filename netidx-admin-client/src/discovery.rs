@@ -1,7 +1,7 @@
 //! mDNS/DNS-SD advertisement + browsing for admin servers.
 //!
 //! Admin servers register `_netidx-admin._tcp.local.` with a TXT record
-//! carrying the trust domain domain, the host's roles, and a short CA
+//! carrying the admin domain's domain name, the host's roles, and a short CA
 //! fingerprint. **The beacon is a hint, never trusted**: browsing
 //! yields candidate addresses and labels for grouping in the setup UI;
 //! every security-relevant fact (domain, roles, the CA itself) is
@@ -91,7 +91,7 @@ pub fn advertise(
     let daemon = ServiceDaemon::new().context("starting mDNS responder")?;
     // Instance names must be unique on the LAN. The concrete listen
     // address is unique by definition; for a bind-all listen fall back
-    // to fingerprint + pid (two daemons of the same trust domain on one
+    // to fingerprint + pid (two daemons of the same admin domain on one
     // host would differ by pid).
     let instance = if listen.ip().is_unspecified() {
         format!("netidx-admin-{}-{}", fp_short.to_lowercase(), std::process::id())
@@ -209,13 +209,13 @@ fn collect_until(
 /// Browse for admin servers up to `timeout`, blocking the calling thread.
 ///
 /// `settle` = `None` waits the whole window and returns every distinct service
-/// resolved (possibly from multiple trust domains — group by `domain` + confirm
+/// resolved (possibly from multiple admin domains — group by `domain` + confirm
 /// fingerprints before trusting anything). This is for the scripted enumerator.
 ///
 /// `settle` = `Some(d)` is the interactive-join mode: collect for at least `d`
-/// (so slow-to-answer trust domains — a VM, a second office — still make the list),
+/// (so slow-to-answer admin domains — a VM, a second office — still make the list),
 /// then early-exit if we found anything; if nothing answered within `d`, keep
-/// waiting up to `timeout`, returning on the first trust domain to appear.
+/// waiting up to `timeout`, returning on the first admin domain to appear.
 fn browse_inner(timeout: Duration, settle: Option<Duration>) -> Result<Vec<Discovered>> {
     let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
     let receiver = daemon.browse(SERVICE_TYPE).context("browsing for admin servers")?;
@@ -243,7 +243,7 @@ fn browse_inner(timeout: Duration, settle: Option<Duration>) -> Result<Vec<Disco
 
 /// Browse for admin servers for the full `timeout`, blocking the calling thread.
 /// Returns every distinct service resolved in the window — possibly from
-/// multiple trust domains (group by `domain` + confirm fingerprints before trusting
+/// multiple admin domains (group by `domain` + confirm fingerprints before trusting
 /// anything).
 pub fn browse_blocking(timeout: Duration) -> Result<Vec<Discovered>> {
     browse_inner(timeout, None)
@@ -273,7 +273,7 @@ pub fn browse_or_empty(timeout: Duration) -> Vec<Discovered> {
 
 /// Like [`browse_or_empty`], but the interactive-join browse: collect for at
 /// least `settle`, then early-exit if anything answered, waiting up to `timeout`
-/// for the first trust domain if nothing did. See [`browse_inner`].
+/// for the first admin domain if nothing did. See [`browse_inner`].
 pub fn browse_first_or_empty(timeout: Duration, settle: Duration) -> Vec<Discovered> {
     match browse_inner(timeout, Some(settle)) {
         Ok(found) => found,
