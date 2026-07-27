@@ -661,31 +661,31 @@ pub(crate) struct InitParams {
     /// CAs only.
     #[arg(long = "insecure-no-tpm")]
     pub insecure_no_tpm: bool,
-    /// Set up the CA server (issue a serving cert + write server.json)
+    /// Set up the controller (issue a serving cert + write server.json)
     /// without prompting. By default `ca init` asks.
     #[arg(long)]
     pub with_server: bool,
     /// Skip the CA-server setup entirely (offline CA only).
     #[arg(long, conflicts_with = "with_server")]
     pub no_server: bool,
-    /// Address the CA server should listen on when set up. Default
+    /// Address the controller should listen on when set up. Default
     /// `0.0.0.0:<ca-port>`.
     #[arg(long)]
     pub listen: Option<SocketAddr>,
-    /// Where to drop the CA server's activation unit. Defaults to the
+    /// Where to drop the controller's activation unit. Defaults to the
     /// user activation dir (same place the resolver/id-map units go).
     #[arg(long = "units-dir")]
     pub units_dir: Option<PathBuf>,
-    /// After setting up the CA server, also register netidx as an OS
+    /// After setting up the controller, also register netidx as an OS
     /// service without prompting. Mutually exclusive with
     /// `--no-service`.
     #[arg(long = "with-service", conflicts_with = "no_service")]
     pub with_service: bool,
-    /// Skip the OS-service prompt after setting up the CA server.
+    /// Skip the OS-service prompt after setting up the controller.
     #[arg(long = "no-service")]
     pub no_service: bool,
     /// Read the founding superuser's password from a file (never on the
-    /// command line). Required when the CA server is set up (`--with-server`),
+    /// command line). Required when the controller is set up (`--with-server`),
     /// which mints the superuser role admin.
     #[arg(long = "password-file")]
     pub password_file: Option<PathBuf>,

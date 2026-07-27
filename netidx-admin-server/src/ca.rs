@@ -199,7 +199,7 @@ fn check_key_bits(bits: u32) -> Result<()> {
 /// key. RSA must be ≥ [`MIN_KEY_BITS`]; elliptic-curve keys (P-256 and
 /// up) and the Edwards curves are fixed-strength and accepted; anything
 /// else is refused. A flat bit-count minimum would wrongly reject a
-/// perfectly strong 256-bit EC key, so the CA server's ECDSA join
+/// perfectly strong 256-bit EC key, so the controller's ECDSA join
 /// clients need this rather than [`check_key_bits`] alone.
 fn check_pubkey_strength(pubkey: &PKey<Public>) -> Result<()> {
     match pubkey.id() {
@@ -498,7 +498,7 @@ impl Ca {
 
     /// Build a CA from an in-memory **unencrypted** PKCS#8 key PEM and
     /// cert PEM, with `directory` providing the serial counter. Used by
-    /// the CA server: [`crate::ca_vault::CAVault::unlock`] hands back the
+    /// the controller: [`crate::ca_vault::CAVault::unlock`] hands back the
     /// decrypted key per request, and this turns it into a transient
     /// signer without the key ever touching disk in plaintext.
     pub fn from_pem(directory: PathBuf, key_pem: &[u8], cert_pem: &[u8]) -> Result<Self> {
@@ -549,7 +549,7 @@ impl Ca {
         // Enforce key strength on externally-supplied CSRs too. The
         // entry-point check in `generate_csr` / `init` / `issue` guards
         // keys we generate (always RSA); this guards keys submitted to
-        // us — notably by the CA server's join clients, which build
+        // us — notably by the controller's join clients, which build
         // their CSRs with rcgen whose only practical keygen is ECDSA.
         // So the check is algorithm-aware: RSA ≥ MIN_KEY_BITS, EC
         // P-256+, Edwards curves accepted.

@@ -37,7 +37,7 @@ impl ServiceNeed {
     /// that needs *any* system-scope daemon needs a system service.
     ///
     /// The composition seam: a flow that stands up more than one daemon (e.g.
-    /// a resolver install that also sets up a CA server) folds each sub-step's
+    /// a resolver install that also sets up a controller) folds each sub-step's
     /// need together with this and offers once.
     pub fn merge(self, other: ServiceNeed) -> ServiceNeed {
         fn rank(n: ServiceNeed) -> u8 {

@@ -139,9 +139,9 @@ pub struct NewCaOpts {
     pub insecure_no_tpm: bool,
     /// `None` ⇒ prompt "set up the admin server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
-    /// Explicit `--listen` for the CA server (skips the prompt).
+    /// Explicit `--listen` for the controller (skips the prompt).
     pub listen: Option<SocketAddr>,
-    /// IP to suggest for the CA server's listen address when prompting
+    /// IP to suggest for the controller's listen address when prompting
     /// (e.g. the resolver being created in the same flow). `None` ⇒
     /// fall back to an existing resolver's IP, then the public IP.
     pub listen_hint: Option<IpAddr>,
@@ -288,7 +288,7 @@ async fn staged_ca_lock(
 /// **The** entry point for building a new vaulted CA, shared verbatim
 /// by `netidx admin ca init` and the `netidx admin resolver install`
 /// "create a new CA" branch — so the operator gets the identical
-/// experience (admin/policy, identicon, the "set up the CA server?"
+/// experience (admin/policy, identicon, the "set up the controller?"
 /// question) either way.
 ///
 /// Returns the in-memory signing [`Ca`] (use it to issue certs before

@@ -775,7 +775,7 @@ pub async fn push_controller_state(
     }
 }
 
-/// Controller → node: read one exact home-CA server's local permissions using
+/// Controller → node: read one exact home controller's local permissions using
 /// the controller serving certificate. This is the internal target-side half
 /// of [`read_perms`]; ordinary clients cannot invoke `GetPerms`.
 #[cfg_attr(not(unix), allow(dead_code))]
