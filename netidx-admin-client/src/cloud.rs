@@ -188,6 +188,34 @@ fn parse_ipv4(s: &str) -> Option<Ipv4Addr> {
 mod tests {
     use super::*;
 
+    /// These endpoints are link-local and cannot be exercised in a test, so a
+    /// typo in one fails silently on a cloud VM and nowhere else. A
+    /// project-wide terminology rename once rewrote two of them to contain a
+    /// space ("instance/admin domain-interfaces/..."), which compiled fine.
+    /// Assert the literals are still well-formed.
+    #[test]
+    fn metadata_urls_are_well_formed() {
+        let src = include_str!("cloud.rs");
+        // Stop at the test module, or this scan finds its own search literals.
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        let mut checked = 0;
+        for line in src.lines() {
+            for start in ["\"http://", "\"https://"] {
+                let Some(i) = line.find(start) else { continue };
+                let rest = &line[i + 1..];
+                let Some(end) = rest.find('"') else { continue };
+                let url = &rest[..end];
+                assert!(!url.contains(' '), "metadata URL contains a space: {url:?}");
+                assert!(
+                    url.split("://").nth(1).is_some_and(|s| !s.is_empty()),
+                    "malformed metadata URL: {url:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "expected to find the metadata URLs, saw {checked}");
+    }
+
     #[test]
     fn parse_ipv4_accepts_public() {
         assert_eq!(parse_ipv4("54.32.224.1"), Some(Ipv4Addr::new(54, 32, 224, 1)));
