@@ -269,10 +269,10 @@ impl Field {
             AdminDomainMode => FieldInfo {
                 flag: "--server",
                 label: "choose an admin domain",
-                help: "Create a new admin domain and certificate \
-                       authority on this machine, or enroll under an existing \
-                       ca / CA. Choose the existing ca when \
-                       adding the first resolver below a dedicated CA host.",
+                help: "Create a new admin domain and certificate authority on \
+                       this machine, or enroll under an existing CA. Choose the \
+                       existing CA when adding the first resolver below a \
+                       dedicated CA host.",
             },
             Membership => FieldInfo {
                 flag: "--server",
@@ -397,7 +397,7 @@ impl Field {
                 label: "use an external root CA?",
                 help: "Generate the CA key and a subordinate-CA CSR, then \
                        wait for your external PKI or hardware root to sign it. The \
-                       ca starts after the signed certificate is installed.",
+                       CA starts after the signed certificate is installed.",
             },
             AdminServerListenIp => FieldInfo {
                 flag: "--listen",
@@ -582,8 +582,8 @@ impl Field {
             FenceOldCa => FieldInfo {
                 flag: "--old-ca-fenced",
                 label: "old CA is fenced",
-                help: "Confirm that the old ca cannot run. Two machines using \
-                       the same ca identity would violate the admin plane's \
+                help: "Confirm that the old CA cannot run. Two machines using \
+                       the same CA identity would violate the admin plane's \
                        single-writer security boundary.",
             },
         }

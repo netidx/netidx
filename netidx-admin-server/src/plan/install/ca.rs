@@ -86,9 +86,9 @@ pub async fn run_ca(
             .map(|r| r.role.as_str().to_string())
             .unwrap_or_else(|_| "existing".to_string());
         bail!(
-            "refusing to install a ca over the {existing} install recorded at {}; \
+            "refusing to install a CA over the {existing} install recorded at {}; \
              use a fresh dedicated machine, or let the first resolver compose the \
-             ca role during its own install",
+             CA role during its own install",
             record_path.display()
         );
     }
@@ -153,7 +153,7 @@ pub async fn run_ca(
         let record = InstallRecord::new(InstallRole::Ca, "/", "admin-tls", None, None);
         record.save_default_async(config_lock).await?;
         ans.note(
-            "ca key and recovery material installed; the ca remains \
+            "CA key and recovery material installed; the CA remains \
              pending until the external PKI returns and you install its certificate",
         );
         return Ok(None);

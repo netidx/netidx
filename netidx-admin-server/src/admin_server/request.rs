@@ -448,8 +448,8 @@ where
         Request::ApplyCaState(req) => {
             let resp = if !peer_is_ca {
                 ApplyCaStateResponse::Err {
-                    reason: "ca-state reconciliation requires the exact home CA \
-                                     ca certificate"
+                    reason: "CA-state reconciliation requires the exact home CA \
+                                     certificate"
                         .to_string(),
                 }
             } else {

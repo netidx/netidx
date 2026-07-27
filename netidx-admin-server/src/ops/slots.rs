@@ -416,7 +416,7 @@ async fn recover_ca_with_password_and_lock(
     let listen = listen.unwrap_or(cfg.listen);
     if listen.ip().is_unspecified() {
         bail!(
-            "ca recovery needs a routable admin address, not {listen}; pass \
+            "CA recovery needs a routable admin address, not {listen}; pass \
              --listen <address:port>"
         );
     }
