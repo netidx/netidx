@@ -66,7 +66,7 @@ pub(crate) struct AddParentFlags {
     #[arg(long = "path")]
     path: String,
     /// The parent admin domain's CA fingerprint, obtained out of band (view it with
-    /// `netidx admin ca fingerprint <ip:port>`).
+    /// `netidx admin CA fingerprint <ip:port>`).
     #[arg(long = "accept-glyph")]
     accept_glyph: Option<String>,
     /// A resolver address that should remain in the parent resolver cluster. Repeat for
@@ -99,7 +99,7 @@ pub(crate) fn add_parent(f: AddParentFlags) -> Result<()> {
         }
     })?;
     match out.propagation {
-        ResolverClusterPropagation::ControllerManaged => {}
+        ResolverClusterPropagation::CaManaged => {}
     }
     println!(
         "ok — configuration for {:?} is written; no service was restarted",

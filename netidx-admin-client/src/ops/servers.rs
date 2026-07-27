@@ -1,6 +1,6 @@
 //! CA-authoritative admin-server inventory and permanent removal.
 
-use super::{open_admin_session, resolve_controller};
+use super::{open_admin_session, resolve_ca};
 use crate::{
     admin_proto::{
         AdminServerId, NodeKind, ResolverAddr, ResolverClusterId, ResolverClusterState,
@@ -23,20 +23,20 @@ pub struct ServerInfo {
     pub cluster: Option<ResolverClusterId>,
     pub cluster_base: Option<String>,
     pub cluster_state: Option<ResolverClusterState>,
-    pub controller: bool,
+    pub ca: bool,
 }
 
-/// List every server grant in the verified controller map, including enrolled
-/// (not currently routing) nodes and the controller itself.
+/// List every server grant in the verified CA map, including enrolled
+/// (not currently routing) nodes and the CA itself.
 pub async fn list_servers(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,
 ) -> Result<Vec<ServerInfo>> {
     // The bootstrap node's map is only a discovery hint. Follow it to the
-    // controller and require the controller URI + exact home CA before treating
+    // CA and require the CA URI + exact home CA before treating
     // the returned inventory as authoritative.
-    let (addr, identity) = resolve_controller(ans, server, ca_dir.as_deref()).await?;
+    let (addr, identity) = resolve_ca(ans, server, ca_dir.as_deref()).await?;
     let map = transport::get_map_pinned(addr, NodeKind::Client, &identity)
         .await
         .context("fetching the authoritative server map")?;
@@ -56,7 +56,7 @@ pub async fn list_servers(
                 cluster: entry.cluster,
                 cluster_base: cluster.map(|cluster| cluster.base.clone()),
                 cluster_state: cluster.map(|cluster| cluster.state),
-                controller: entry.id == map.controller,
+                ca: entry.id == map.ca,
             }
         })
         .collect();
@@ -69,7 +69,7 @@ pub async fn list_servers(
 
 /// Permanently remove one server ID. Re-fetch the map after authentication so
 /// a stale UI/CLI selection cannot silently target an identity that has become
-/// the controller. An already-absent identity is allowed: repeating the exact
+/// the CA. An already-absent identity is allowed: repeating the exact
 /// UUID is the manual reconciliation path after partial fanout.
 pub async fn remove_server(
     ans: &mut dyn Answerer,
@@ -83,8 +83,8 @@ pub async fn remove_server(
     let map = transport::get_map_pinned(sess.server, NodeKind::Client, &sess.identity)
         .await
         .context("refreshing the authoritative server map")?;
-    if target == map.controller {
-        bail!("the active controller cannot be removed")
+    if target == map.ca {
+        bail!("the active CA cannot be removed")
     }
     transport::remove_server(
         sess.server,
@@ -96,9 +96,9 @@ pub async fn remove_server(
     .await
 }
 
-/// Re-send the controller's current address, authoritative map, and CRL to all
+/// Re-send the CA's current address, authoritative map, and CRL to all
 /// registered servers. Safe to repeat after any partial result.
-pub async fn reconcile_controller(
+pub async fn reconcile_ca(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,
@@ -106,7 +106,7 @@ pub async fn reconcile_controller(
     password: Option<netidx_admin_proto::Secret>,
 ) -> Result<(netidx_admin_proto::OperationId, Vec<netidx_admin_proto::PeerResult>)> {
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
-    transport::reconcile_controller(
+    transport::reconcile_ca(
         sess.server,
         NodeKind::Client,
         &sess.identity,

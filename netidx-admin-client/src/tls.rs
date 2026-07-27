@@ -430,10 +430,10 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let cert_src = src.path().join("cert.pem");
         let key_src = src.path().join("key.pem");
-        let ca_src = src.path().join("ca.pem");
+        let ca_src = src.path().join("CA.pem");
         write(&cert_src, b"-----BEGIN CERTIFICATE-----\n...");
         write(&key_src, b"-----BEGIN PRIVATE KEY-----\n...");
-        write(&ca_src, b"-----BEGIN CERTIFICATE-----\n...ca...");
+        write(&ca_src, b"-----BEGIN CERTIFICATE-----\n...CA...");
 
         let id = install_identity(&InstallIdentity {
             cn: "host.example.com",
@@ -477,10 +477,10 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let cert_src = src.path().join("cert.pem");
         let key_src = src.path().join("key.pem");
-        let ca_src = src.path().join("ca.pem");
+        let ca_src = src.path().join("CA.pem");
         write(&cert_src, b"first cert");
         write(&key_src, b"first key");
-        write(&ca_src, b"first ca");
+        write(&ca_src, b"first CA");
 
         let p = InstallIdentity {
             cn: "h",
@@ -598,10 +598,10 @@ mod tests {
         let dest = tempfile::tempdir().unwrap();
         let cert_src = src.path().join("cert.pem");
         let key_src = src.path().join("key.pem");
-        let ca_src = src.path().join("ca.pem");
+        let ca_src = src.path().join("CA.pem");
         write(&cert_src, b"cert");
         write(&key_src, b"key");
-        write(&ca_src, b"ca");
+        write(&ca_src, b"CA");
         write(&sealed_sidecar(&key_src), b"sealed blob");
         let p = InstallIdentity {
             cn: "h",
@@ -637,11 +637,10 @@ mod tests {
     #[test]
     fn protocol_v6_admin_certificate_identity_is_strict() {
         let id = netidx_admin_proto::AdminServerId::new();
-        let der =
-            admin_cert(&[id.uri(), netidx_admin_proto::CONTROLLER_ROLE_URI.to_string()]);
+        let der = admin_cert(&[id.uri(), netidx_admin_proto::CA_ROLE_URI.to_string()]);
         let parsed = admin_cert_identity_from_der(&der).unwrap();
         assert_eq!(parsed.server_id, id);
-        assert!(parsed.controller);
+        assert!(parsed.ca);
 
         let legacy = admin_cert(&[]);
         assert!(admin_cert_identity_from_der(&legacy).is_err());
@@ -654,8 +653,8 @@ mod tests {
         assert!(admin_cert_identity_from_der(&malformed).is_err());
         let duplicate_role = admin_cert(&[
             id.uri(),
-            netidx_admin_proto::CONTROLLER_ROLE_URI.to_string(),
-            netidx_admin_proto::CONTROLLER_ROLE_URI.to_string(),
+            netidx_admin_proto::CA_ROLE_URI.to_string(),
+            netidx_admin_proto::CA_ROLE_URI.to_string(),
         ]);
         assert!(admin_cert_identity_from_der(&duplicate_role).is_err());
     }

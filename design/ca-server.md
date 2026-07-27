@@ -607,12 +607,12 @@ CA still holds its key and signs normally.
 ### Two-phase ceremony
 
 The TUI exposes the complete ceremony. On a fresh dedicated host choose
-**Controller / CA**, answer yes to external-root signing, and save the recovery
+**CA**, answer yes to external-root signing, and save the recovery
 password. The result screen identifies the subordinate-CA CSR and makes clear
-that the controller is not running yet. After the external PKI returns a signed
+that the CA is not running yet. After the external PKI returns a signed
 CA certificate, reopen the TUI and choose **Install Signed Certificate (External
 CA)**. Supply the signed certificate and, unless it is included in the returned
-chain, the external root certificate. Only then is the controller configured
+chain, the external root certificate. Only then is the CA configured
 and its OS service registered.
 
 The equivalent strict CLI flow is:
@@ -638,7 +638,7 @@ For renewal, **Emit Renewal CSR (External CA)** in the TUI (or `netidx admin ca
 external emit-csr`) emits a CSR over the existing CA key. After the external PKI
 signs it, **Install Renewed Certificate (External CA)** (or the same `external
 install` CLI command) swaps the certificate through the protected local control
-socket while the controller remains online. The CA glyph is the intermediate
+socket while the CA remains online. The CA glyph is the intermediate
 key fingerprint, so it does not change. `ca external renew` remains only as a
 compatibility alias for the explicit emit/install commands.
 

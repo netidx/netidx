@@ -2,7 +2,7 @@
 //! drive its enrollment queue (and, in later slices, delegations, roster,
 //! perms, service control, revocation) over `netidx_admin_client::ops`.
 //!
-//! The connection is established once (glyph confirm → controller verification
+//! The connection is established once (glyph confirm → CA verification
 //! → login) and cached in [`RemoteConn`]; every subsequent op reuses it — the cached
 //! fingerprint is fed to a [`TuiAnswerer::with_glyph`](super::answer::TuiAnswerer)
 //! so `confirm_identity` auto-accepts (still re-pinning per op), while the
@@ -161,9 +161,7 @@ impl Panel {
             Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
             Panel::Delegations => "a approve · d deny · r refresh · Esc back",
             Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
-            Panel::Servers => {
-                "c reconcile controller · x force-remove · r refresh · Esc back"
-            }
+            Panel::Servers => "c reconcile CA · x force-remove · r refresh · Esc back",
             Panel::Revocation => "x revoke · r refresh · Esc back",
             Panel::Perms => "e edit · r reload · Esc back",
             Panel::Service => "s start · t stop · R restart · r refresh · Esc back",
@@ -217,7 +215,7 @@ pub(super) enum RowKey {
         id: AdminServerId,
         addr: SocketAddr,
         cluster: String,
-        controller: bool,
+        ca: bool,
     },
 }
 
@@ -268,16 +266,16 @@ pub(super) enum RemoteAction {
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
     RemoveAdmin { target: PanelTarget, name: String },
     /// Permanently revoke and remove a dead admin-server identity. The active
-    /// controller is shown in the inventory but never yields this action.
+    /// CA is shown in the inventory but never yields this action.
     RemoveServer {
         target: PanelTarget,
         server: AdminServerId,
         addr: SocketAddr,
         cluster: String,
     },
-    /// Re-send the controller's current address, map, and CRL to every
+    /// Re-send the CA's current address, map, and CRL to every
     /// registered node. Idempotent manual retry after recovery/relocation.
-    ReconcileController { target: PanelTarget },
+    ReconcileCa { target: PanelTarget },
     /// List the admin domain's permission levels (resolver bases) from the map, to
     /// pick one to view/edit — replaces free-text path entry for admin domain perms.
     ListLevels { target: PanelTarget },
@@ -314,9 +312,7 @@ impl RemoteAction {
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
-            RemoteAction::ReconcileController { .. } => {
-                "Reconciling controller state".to_string()
-            }
+            RemoteAction::ReconcileCa { .. } => "Reconciling CA state".to_string(),
             RemoteAction::ListLevels { .. } => "Loading levels".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
             RemoteAction::ListServiceServers { .. } => "Loading servers".to_string(),
@@ -355,7 +351,7 @@ impl RemoteAction {
                  to this CA."
             )),
             RemoteAction::RemoveServer { server, addr, cluster, .. } => Some(format!(
-                "Force-remove dead server {server}?\n\nLast address: {addr}\nResolver cluster: {cluster}\n\nThis permanently revokes every serving certificate for that immutable identity and removes its enrollment grant. The active controller cannot be removed. No service will be restarted."
+                "Force-remove dead server {server}?\n\nLast address: {addr}\nResolver cluster: {cluster}\n\nThis permanently revokes every serving certificate for that immutable identity and removes its enrollment grant. The active CA cannot be removed. No service will be restarted."
             )),
             RemoteAction::ServiceControl {
                 op: ServiceOp::Stop, units, server, ..
@@ -379,7 +375,7 @@ impl RemoteAction {
             | RemoteAction::DenyDelegation { .. }
             | RemoteAction::AddAdmin { .. }
             | RemoteAction::SetPolicy { .. }
-            | RemoteAction::ReconcileController { .. }
+            | RemoteAction::ReconcileCa { .. }
             | RemoteAction::ListLevels { .. }
             | RemoteAction::EditPerms { .. }
             | RemoteAction::ListServiceServers { .. }
@@ -408,7 +404,7 @@ impl RemoteAction {
             | RemoteAction::SetPolicy { .. }
             | RemoteAction::RemoveAdmin { .. }
             | RemoteAction::RemoveServer { .. }
-            | RemoteAction::ReconcileController { .. }
+            | RemoteAction::ReconcileCa { .. }
             | RemoteAction::ListLevels { .. }
             | RemoteAction::EditPerms { .. }
             | RemoteAction::ListServiceServers { .. }
@@ -433,7 +429,7 @@ impl RemoteAction {
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
             | RemoteAction::RemoveServer { target, .. }
-            | RemoteAction::ReconcileController { target }
+            | RemoteAction::ReconcileCa { target }
             | RemoteAction::ListLevels { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ListServiceServers { target }
@@ -530,8 +526,8 @@ pub(super) async fn run(
         RemoteAction::RemoveServer { target, server, .. } => {
             remove_server(ans, target.into_remote()?, server).await
         }
-        RemoteAction::ReconcileController { target } => {
-            reconcile_controller(ans, target.into_remote()?).await
+        RemoteAction::ReconcileCa { target } => {
+            reconcile_ca(ans, target.into_remote()?).await
         }
         RemoteAction::EditPerms { target, at } => edit_perms(ans, target, at).await,
         RemoteAction::ServiceControl { target, server, units, op } => {
@@ -575,7 +571,7 @@ async fn connect(
         );
     }
     // `open_admin_session` repeats the identity fetch so its own trust ceremony
-    // stays self-contained, resolves and verifies the exact controller, and
+    // stays self-contained, resolves and verifies the exact CA, and
     // only then asks for a password (unless a valid cache already exists).
     let session = ops::open_admin_session(ans, Some(server), None, None, None).await?;
     let admin = session.admin.clone();
@@ -635,8 +631,8 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
             let revoked = async {
                 let identity =
                     transport::fetch_identity(conn.server, NodeKind::Client).await?;
-                if identity.fingerprint != conn.confirmed_fp || !identity.controller {
-                    anyhow::bail!("the cached controller identity changed");
+                if identity.fingerprint != conn.confirmed_fp || !identity.ca {
+                    anyhow::bail!("the cached CA identity changed");
                 }
                 transport::logout(conn.server, &identity, cached.token.as_str()).await
             }
@@ -1182,15 +1178,15 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
         .roles
         .iter()
         .map(|role| match role {
-            netidx_admin_proto::Role::Ca => "ca",
+            netidx_admin_proto::Role::Ca => "CA",
             netidx_admin_proto::Role::Resolver => "resolver",
             netidx_admin_proto::Role::IdMap => "id-map",
         })
         .collect::<Vec<_>>()
         .join(", ");
     let mut tags = format!("{:?}", server.state);
-    if server.controller {
-        tags.push_str(", CONTROLLER");
+    if server.ca {
+        tags.push_str(", CA");
     }
     PanelRow {
         text: format!("{:<12}  {}  {}  [{tags}]", cluster, server.id, server.addr),
@@ -1198,7 +1194,7 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
             id: server.id,
             addr: server.addr,
             cluster: cluster.clone(),
-            controller: server.controller,
+            ca: server.ca,
         },
         detail: vec![
             ("Server ID".to_string(), server.id.to_string()),
@@ -1230,8 +1226,8 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
             ),
             (
                 "Removal".to_string(),
-                if server.controller {
-                    "protected — replace the controller first".to_string()
+                if server.ca {
+                    "protected — replace the CA first".to_string()
                 } else {
                     "press x only after the machine is permanently dead".to_string()
                 },
@@ -1326,12 +1322,12 @@ async fn remove_server(
 }
 
 #[cfg(unix)]
-async fn reconcile_controller(
+async fn reconcile_ca(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
 ) -> Result<super::action::Outcome> {
     use netidx_admin_client::ops::servers;
-    let (operation_id, peers) = servers::reconcile_controller(
+    let (operation_id, peers) = servers::reconcile_ca(
         ans,
         Some(conn.server),
         None,
@@ -1358,17 +1354,12 @@ async fn reconcile_controller(
     }
     if !peers.iter().all(|peer| peer.error.is_none()) {
         lines.push(
-            "Bring failed servers back online and press c again; controller reconciliation is idempotent."
+            "Bring failed servers back online and press c again; CA reconciliation is idempotent."
                 .to_string(),
         );
     }
     let rows = server_rows(ans, &conn).await?;
-    Ok(super::action::Outcome::remote_after(
-        "Controller reconciled",
-        lines,
-        Panel::Servers,
-        rows,
-    ))
+    Ok(super::action::Outcome::remote_after("CA reconciled", lines, Panel::Servers, rows))
 }
 
 /// Format one roster entry. Reserved signing slots (recovery / autorenew) are
@@ -1542,7 +1533,7 @@ async fn remove_admin(
 }
 
 /// Read the perms of the admin domain mounted at `at`, for either target. A remote
-/// target authenticates to its verified controller; a local target uses the
+/// target authenticates to its verified CA; a local target uses the
 /// protected control socket and is confined to this host's own level.
 #[cfg(unix)]
 async fn show_perms_for(
@@ -2428,7 +2419,7 @@ impl RemoteState {
     fn on_key_servers(&mut self, code: KeyCode, target: PanelTarget) -> Option<Action> {
         match code {
             KeyCode::Char('c') => {
-                Some(Action::Remote(RemoteAction::ReconcileController { target }))
+                Some(Action::Remote(RemoteAction::ReconcileCa { target }))
             }
             KeyCode::Char('x') => {
                 self.selected_server().map(|(server, addr, cluster)| {
@@ -2477,18 +2468,18 @@ impl RemoteState {
         }
     }
 
-    /// The selected non-controller server. The controller remains visible in
+    /// The selected non-ca server. The CA remains visible in
     /// the inventory but cannot produce a destructive action.
     fn selected_server(&self) -> Option<(AdminServerId, SocketAddr, String)> {
         match &self.rows.get(self.list.selected()?)?.key {
-            RowKey::Server { id, addr, cluster, controller: false } => {
+            RowKey::Server { id, addr, cluster, ca: false } => {
                 Some((*id, *addr, cluster.clone()))
             }
             RowKey::None
             | RowKey::Code(_)
             | RowKey::Name(_)
             | RowKey::Cert { .. }
-            | RowKey::Server { controller: true, .. } => None,
+            | RowKey::Server { ca: true, .. } => None,
         }
     }
 
@@ -3103,7 +3094,7 @@ mod tests {
 
     #[test]
     fn present_cluster_shows_domain_and_glyph() {
-        let (c, addr) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
+        let (c, addr) = cluster("hq.local", "10.0.0.1:4565", b"hq CA spki");
         let mut s = clusters_state(vec![c], vec![PollState::Present { addr }]);
         let terminal = draw(&mut s, 100, 20);
         assert_eq!(
@@ -3119,7 +3110,7 @@ mod tests {
     fn unverified_cluster_is_hidden() {
         // A saved admin domain whose identity did not verify (Absent) never shows —
         // the address may now be a different CA on this admin domain.
-        let (c, _) = cluster("hq.local", "10.0.0.1:4565", b"hq ca spki");
+        let (c, _) = cluster("hq.local", "10.0.0.1:4565", b"hq CA spki");
         let mut s = clusters_state(vec![c], vec![PollState::Absent]);
         let out = render(&mut s, 100, 20);
         assert!(
@@ -3214,24 +3205,24 @@ mod tests {
     }
 
     #[test]
-    fn server_panel_lists_identity_and_protects_controller() {
-        let controller = AdminServerId::new();
+    fn server_panel_lists_identity_and_protects_ca() {
+        let ca = AdminServerId::new();
         let satellite = AdminServerId::new();
         let mut s = RemoteState::new();
         s.target = Some(PanelTarget::Remote(a_conn("10.0.0.1:4565")));
         s.screen = Screen::Panel(Panel::Servers);
         s.rows = vec![
             PanelRow {
-                text: format!("/  {controller}  10.0.0.1:4565  [CONTROLLER]"),
+                text: format!("/  {ca}  10.0.0.1:4565  [CA]"),
                 key: RowKey::Server {
-                    id: controller,
+                    id: ca,
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     cluster: "/".to_string(),
-                    controller: true,
+                    ca: true,
                 },
                 detail: vec![(
                     "Removal".to_string(),
-                    "protected — replace the controller first".to_string(),
+                    "protected — replace the CA first".to_string(),
                 )],
             },
             PanelRow {
@@ -3240,7 +3231,7 @@ mod tests {
                     id: satellite,
                     addr: "10.0.60.11:4565".parse().unwrap(),
                     cluster: "/eu".to_string(),
-                    controller: false,
+                    ca: false,
                 },
                 detail: vec![("Roles".to_string(), "resolver".to_string())],
             },
@@ -3248,11 +3239,11 @@ mod tests {
         s.list.select(Some(0));
         assert!(matches!(
             s.on_key(KeyCode::Char('c')),
-            Some(Action::Remote(RemoteAction::ReconcileController { .. }))
+            Some(Action::Remote(RemoteAction::ReconcileCa { .. }))
         ));
         assert!(
             s.on_key(KeyCode::Char('x')).is_none(),
-            "the controller row must never produce a remove action"
+            "the CA row must never produce a remove action"
         );
         s.list.select(Some(1));
         let Some(Action::Remote(action @ RemoteAction::RemoveServer { server, .. })) =
@@ -3274,7 +3265,7 @@ mod tests {
         RemoteConn {
             server: server.parse().unwrap(),
             domain: "example.com".to_string(),
-            confirmed_fp: Fingerprint::of_der(b"ca"),
+            confirmed_fp: Fingerprint::of_der(b"CA"),
             admin: "eric".to_string(),
         }
     }

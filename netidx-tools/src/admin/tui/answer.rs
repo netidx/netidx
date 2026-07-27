@@ -1141,7 +1141,7 @@ mod tests {
     fn offline_ca_opts(dir: std::path::PathBuf) -> ca_setup::NewCaOpts {
         ca_setup::NewCaOpts {
             dir,
-            common_name: Some("ca.example.com".into()),
+            common_name: Some("CA.example.com".into()),
             domain: Some("example.com".into()),
             country: None,
             state: None,
@@ -1291,7 +1291,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_recovery_ack_rolls_back_new_ca() {
         let scratch = tempfile::tempdir().unwrap();
-        let ca_dir = scratch.path().join("ca");
+        let ca_dir = scratch.path().join("CA");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ans = TuiAnswerer::new(tx);
         let opts = offline_ca_opts(ca_dir.clone());
@@ -1335,7 +1335,7 @@ mod tests {
                 .filter(|entry| {
                     entry
                         .as_ref()
-                        .is_ok_and(|entry| entry.file_name() != ".ca.netidx.lock")
+                        .is_ok_and(|entry| entry.file_name() != ".CA.netidx.lock")
                 })
                 .count(),
             0,

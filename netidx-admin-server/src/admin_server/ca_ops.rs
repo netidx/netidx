@@ -62,12 +62,12 @@ pub(super) async fn handle_backup(
 ) -> BackupResponse {
     if !state.has_ca().await {
         return BackupResponse::Err {
-            reason: "backup must be run on the CA controller".to_string(),
+            reason: "backup must be run on the CA".to_string(),
         };
     }
     let Some(cfg_path) = state.cfg_path.clone() else {
         return BackupResponse::Err {
-            reason: "the running controller has no persistent config path".to_string(),
+            reason: "the running CA has no persistent config path".to_string(),
         };
     };
     let ca_dir = state.ca_dir().await.expect("CA role held");
@@ -157,7 +157,7 @@ pub(super) async fn handle_backup(
     BackupResponse::Ok(BackupOk {
         target: outcome.target.to_string_lossy().into_owned(),
         ca_fingerprint: outcome.ca_fingerprint,
-        controller: outcome.controller,
+        ca: outcome.ca,
         map_version: outcome.map_version,
         highest_serial: outcome.highest_serial,
         files: outcome.files,
@@ -242,7 +242,7 @@ async fn handle_external_ca_csr_inner(
         return err("external-CA CSR emission is local-control-only".to_string());
     }
     let Some(ca) = state.ca.as_mut() else {
-        return err("this host is not the controller CA".to_string());
+        return err("this host is not the CA".to_string());
     };
     let dir = ca.dir().to_path_buf();
     let signing = match server_unlock(ca, prepared_server_unlock).await {
@@ -296,7 +296,7 @@ async fn handle_external_ca_install_inner(
         return err("external-CA certificate installation is local-control-only".into());
     }
     let Some(ca) = state.ca.as_mut() else {
-        return err("this host is not the controller CA".into());
+        return err("this host is not the CA".into());
     };
     let dir = match config_lock.require_contained(ca.dir()) {
         Ok(dir) => dir,
@@ -304,7 +304,7 @@ async fn handle_external_ca_install_inner(
     };
     match crate::ca::CaLifetimes::load_async(&dir).await {
         Ok(l) if l.externally_signed => {}
-        Ok(_) => return err("this controller CA is not externally signed".into()),
+        Ok(_) => return err("this CA is not externally signed".into()),
         Err(e) => return err(format!("reading CA lifetime policy: {e:#}")),
     }
     let signing = match server_unlock(ca, prepared_server_unlock).await {
@@ -370,7 +370,7 @@ async fn handle_external_ca_install_inner(
             .any(|d| d.as_ref() == new_der.as_ref());
     if !accepted {
         return err(
-            "the renewed CA certificate was not signed by the controller's already-pinned external issuer"
+            "the renewed CA certificate was not signed by the CA's already-pinned external issuer"
                 .into(),
         );
     }
@@ -410,7 +410,7 @@ async fn handle_external_ca_install_inner(
     )
     .await
     {
-        return err(format!("refreshing the controller serving chain: {e:#}"));
+        return err(format!("refreshing the CA serving chain: {e:#}"));
     }
     audit(&dir, "local", "external-ca-install", &new_fp.text(), Duration::ZERO).await;
     ExternalCaInstallResponse::Ok(ExternalCaInstallOk { ca_fingerprint: new_fp.text() })

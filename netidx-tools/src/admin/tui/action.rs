@@ -28,7 +28,7 @@ use netidx_admin_client::{
 #[cfg(unix)]
 use netidx_admin_client::{atomic, local};
 #[cfg(unix)]
-use netidx_admin_server::plan::install::controller::{ControllerInput, run_controller};
+use netidx_admin_server::plan::install::ca::{CaInput, run_ca};
 #[cfg(unix)]
 use netidx_admin_server::{
     install_bundle, offline_ca,
@@ -50,8 +50,8 @@ pub(super) struct Outcome {
     /// the OS service at this scope. `None` ⇒ nothing to do.
     pub(super) install_service: Option<ServiceInstall>,
     /// Continue a multi-phase operation after the service registration has
-    /// completed (controller+resolver restore uses this to re-enroll local
-    /// identities against the newly started controller).
+    /// completed (CA+resolver restore uses this to re-enroll local
+    /// identities against the newly started CA).
     pub(super) after_service: Option<Action>,
     /// A result to apply to the Remote tab's state (connection / panel rows).
     pub(super) remote: Option<super::remote::RemoteUpdate>,
@@ -294,12 +294,12 @@ pub(super) enum Action {
     AutoApprove { rotate: bool, ca_dir: PathBuf, cfg: Option<PathBuf> },
     /// Mint a fresh CA recovery password on this box (local, no-auth).
     RecoveryRotate { ca_dir: PathBuf, cfg: Option<PathBuf> },
-    /// Back up the complete managed installation. A controller component is
+    /// Back up the complete managed installation. A CA component is
     /// captured through its protected local control socket.
     Backup { config_root: PathBuf, scope: ServiceScope },
     /// Select and restore an installation bundle on a fresh machine.
     Restore,
-    /// Resume controller+resolver restore after the privileged service step.
+    /// Resume CA+resolver restore after the privileged service step.
     FinishRestore {
         bundle: PathBuf,
         config_root: PathBuf,
@@ -515,8 +515,8 @@ async fn auto_approve(
                 AutorenewWiring::Updated(p) => {
                     l.push(format!("Config updated: {}", p.display()))
                 }
-                AutorenewWiring::NoControllerConfig => {
-                    l.push("No controller config owns this CA.".to_string())
+                AutorenewWiring::NoCaConfig => {
+                    l.push("No CA config owns this CA.".to_string())
                 }
                 AutorenewWiring::Failed(e) => {
                     l.push(format!("Config update failed (non-fatal): {e}"))
@@ -569,7 +569,7 @@ async fn backup(
     )?;
     let service_scope = match record.role {
         InstallRole::Workstation => ServiceScope::User,
-        InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher => {
+        InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
             ServiceScope::System
         }
     };
@@ -597,17 +597,17 @@ async fn backup(
         installed: service != netidx_admin_client::service::ServiceStatus::NotInstalled,
     };
     #[cfg(unix)]
-    let controller_tmp = tempfile::tempdir()?;
-    let inner: Option<PathBuf> = if config_root.join("ca").is_dir() {
+    let ca_tmp = tempfile::tempdir()?;
+    let inner: Option<PathBuf> = if config_root.join("CA").is_dir() {
         #[cfg(unix)]
         {
-            let inner = controller_tmp.path().join("controller");
+            let inner = ca_tmp.path().join("CA");
             local::backup(&config_root.join("admin-server.json"), &inner).await?;
             Some(inner)
         }
         #[cfg(not(unix))]
         {
-            bail!("controller backup is supported only on unix")
+            bail!("CA backup is supported only on unix")
         }
     } else {
         None
@@ -656,16 +656,16 @@ async fn finish_identities(
     {
         return Ok(());
     }
-    let (controller, net) =
+    let (ca, net) =
         super::super::backup_restore::admin_domain_for_restore(manifest, None)
             .await?
             .context("the backup contains TLS identities but no admin domain")?;
     super::super::backup_restore::reenroll_data_identities(
-        ans, root, manifest, controller, &net, None,
+        ans, root, manifest, ca, &net, None,
     )
     .await?;
     #[cfg(unix)]
-    if !manifest.components.contains(&install_bundle::Component::Controller) {
+    if !manifest.components.contains(&install_bundle::Component::Ca) {
         let config_lock = ConfigDirLock::acquire_async(root).await?;
         super::super::backup_restore::reenroll_satellite_admin(
             ans,
@@ -701,8 +701,8 @@ async fn restore_addresses(
     ans: &mut TuiAnswerer,
     manifest: &install_bundle::Manifest,
 ) -> Result<install_bundle::RestoreAddresses> {
-    let controller = manifest.components.contains(&install_bundle::Component::Controller);
-    let shape = if controller || manifest.resolver_endpoint.is_some() {
+    let ca = manifest.components.contains(&install_bundle::Component::Ca);
+    let shape = if ca || manifest.resolver_endpoint.is_some() {
         let shape = netidx_admin_client::plan::install::detect_resolver_shape().await;
         netidx_admin_client::plan::install::warn_incomplete_resolver_address(ans, &shape);
         Some(shape)
@@ -710,17 +710,17 @@ async fn restore_addresses(
         None
     };
     let detected = shape.as_ref().and_then(|shape| shape.advertised_ip);
-    let admin_listen = if controller {
+    let admin_listen = if ca {
         let original = manifest
             .admin_listen
-            .context("the controller backup has no recorded admin address")?;
+            .context("the CA backup has no recorded admin address")?;
         let default = restored_listen_default(original, detected).to_string();
         Some(
             ans.text(Field::RestoreAdminListen, None, Some(&default), true)
                 .await?
-                .context("the restored controller address is required")?
+                .context("the restored CA address is required")?
                 .parse::<SocketAddr>()
-                .context("the restored controller address must be IP:port")?,
+                .context("the restored CA address must be IP:port")?,
         )
     } else {
         None
@@ -761,8 +761,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         .context("a backup bundle directory is required")?;
     let bundle = PathBuf::from(source).canonicalize()?;
     let preflight = install_bundle::verify(&bundle)?;
-    let controller =
-        preflight.components.contains(&install_bundle::Component::Controller);
+    let ca = preflight.components.contains(&install_bundle::Component::Ca);
     ans.announce(
         "Restore plan",
         &format!(
@@ -773,8 +772,8 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         ),
     )
     .await?;
-    if controller && !ans.confirm(Field::FenceOldController, None, false).await? {
-        bail!("controller restore cancelled until the old controller is fenced");
+    if ca && !ans.confirm(Field::FenceOldCa, None, false).await? {
+        bail!("CA restore cancelled until the old CA is fenced");
     }
     let addresses = restore_addresses(ans, &preflight).await?;
     let resolver_relocated = addresses
@@ -803,12 +802,12 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         },
         None => ServiceInstall::defaults(scope),
     });
-    if controller
+    if ca
         && (!preflight.identities.is_empty() || resolver_relocated)
         && service_install.is_none()
     {
         bail!(
-            "a controller with co-located roles must run its service before restore can finish enrollment and hierarchy reconciliation"
+            "a CA with co-located roles must run its service before restore can finish enrollment and hierarchy reconciliation"
         );
     }
     let root = restore_root(&preflight)?;
@@ -818,15 +817,14 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
     let manifest =
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
     #[cfg(unix)]
-    if controller {
-        let ca_dir = root.join("ca");
+    if ca {
+        let ca_dir = root.join("CA");
         let cfg_path = root.join("admin-server.json");
-        if !install_bundle::controller_recovered(&bundle, &cfg_path)? {
-            if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg_path)?
-            {
+        if !install_bundle::ca_recovered(&bundle, &cfg_path)? {
+            if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg_path)? {
                 netidx_admin_server::backup::restore(
                     &config_lock,
-                    &bundle.join(install_bundle::CONTROLLER_DIR),
+                    &bundle.join(install_bundle::CA_DIR),
                     &ca_dir,
                     &cfg_path,
                 )?;
@@ -852,7 +850,7 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                 )
                 .await?;
             }
-            netidx_admin_server::ops::slots::recover_controller(
+            netidx_admin_server::ops::slots::recover_ca(
                 ans,
                 &config_lock,
                 ca_dir,
@@ -875,15 +873,15 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
         manifest.install.save_async(&config_lock, &root.join("install.json")).await?;
     }
     #[cfg(not(unix))]
-    if controller {
-        bail!("controller restore is supported only on unix")
+    if ca {
+        bail!("CA restore is supported only on unix")
     }
-    if controller && (!manifest.identities.is_empty() || resolver_relocated) {
+    if ca && (!manifest.identities.is_empty() || resolver_relocated) {
         let service_install = service_install.expect("required before restore writes");
         return Ok(Outcome {
-            title: "Controller restored".to_string(),
+            title: "CA restored".to_string(),
             lines: vec![
-                "Starting the controller before re-enrolling its co-located TLS roles…"
+                "Starting the CA before re-enrolling its co-located TLS roles…"
                     .to_string(),
             ],
             refresh_local: false,
@@ -935,8 +933,7 @@ async fn finish_restore(
     let lines = if resolver_relocated {
         let mut lines = lines;
         let operation =
-            super::super::backup_restore::reconcile_restored_controller(&config_root)
-                .await?;
+            super::super::backup_restore::reconcile_restored_ca(&config_root).await?;
         lines.push(format!("Hierarchy reconciled (operation {operation})."));
         lines
     } else {
@@ -1000,8 +997,7 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             Ok(Outcome::plain(
                 "Certificate renewed",
                 vec![
-                    "Renewed the externally-signed controller CA without stopping it."
-                        .to_string(),
+                    "Renewed the externally-signed CA without stopping it.".to_string(),
                     format!("CA identity: {fingerprint}"),
                 ],
                 true,
@@ -1022,9 +1018,9 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             .await?
             {
                 ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
-                    title: "Controller certificate installed".to_string(),
+                    title: "CA certificate installed".to_string(),
                     lines: vec![format!(
-                        "Installed the externally-signed CA certificate; controller configured at {}.",
+                        "Installed the externally-signed CA certificate; CA configured at {}.",
                         cfg_path.display()
                     )],
                     refresh_local: true,
@@ -1041,9 +1037,9 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
                     ],
                     true,
                 )),
-                ExternalInstallOutcome::Renewal => bail!(
-                    "a served controller CA must be renewed over its local control socket"
-                ),
+                ExternalInstallOutcome::Renewal => {
+                    bail!("a served CA must be renewed over its local control socket")
+                }
             }
         }
     }
@@ -1262,7 +1258,7 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     let mut lines =
         vec![format!("Delegation of {:?} requested and approved.", out.proposed_path)];
     match out.propagation {
-        ResolverClusterPropagation::ControllerManaged => {}
+        ResolverClusterPropagation::CaManaged => {}
     }
     lines.push(
         "Configuration is written; do not restart the whole admin domain at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
@@ -1315,17 +1311,15 @@ async fn install(
     };
     let scope = match role {
         #[cfg(unix)]
-        InstallRole::Controller => {
-            run_controller(ans, ControllerInput::defaults(common)).await?
-        }
+        InstallRole::Ca => run_ca(ans, CaInput::defaults(common)).await?,
         #[cfg(not(unix))]
-        InstallRole::Controller => bail!("the controller role is supported only on unix"),
+        InstallRole::Ca => bail!("the CA role is supported only on unix"),
         InstallRole::Resolver => run_resolver(ans, resolver_input(common)).await?,
         InstallRole::Publisher => run_publisher(ans, publisher_input(common)).await?,
         InstallRole::Workstation => run_workstation(ans, common).await?,
     };
     #[cfg(unix)]
-    if !dry_run && matches!(role, InstallRole::Controller) && scope.is_none() {
+    if !dry_run && matches!(role, InstallRole::Ca) && scope.is_none() {
         let ca_dir = paths::user_ca_dir()?;
         let access = super::super::ca::ca_access(&ca_dir, None).await?;
         let status =
@@ -1334,9 +1328,9 @@ async fn install(
             let relative = offline_ca::default_csr_filename(&common_name);
             let csr = std::env::current_dir()?.join(relative);
             return Ok(Outcome::plain(
-                "Controller awaiting external signature",
+                "CA awaiting external signature",
                 vec![
-                    "The controller is not running yet; no OS service was registered."
+                    "The CA is not running yet; no OS service was registered."
                         .into(),
                     format!("Subordinate-CA CSR: {}", csr.display()),
                     "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."

@@ -14,7 +14,7 @@
 //! [`Fingerprint::of_cert_der`]) — NOT the certificate itself. The key
 //! is the thing that's unique to the admin domain: a same-key certificate
 //! renewal leaves the glyph on the office wiki valid, while a key
-//! rotation (a new controller) changes it, as it must. Request codes
+//! rotation (a new CA) changes it, as it must. Request codes
 //! in queued enrollment hash the CSR's SPKI for the same reason, so
 //! both glyphs in the system are fingerprints of keys.
 //!
@@ -80,7 +80,7 @@ impl Fingerprint {
     /// The identity fingerprint of an X.509 certificate: a hash of its
     /// *public key* (SubjectPublicKeyInfo DER), not of the certificate.
     /// Stable across same-key certificate renewals; changes iff the key
-    /// — the actual controller of the identity — changes.
+    /// — the actual CA of the identity — changes.
     pub fn of_cert_der(der: &[u8]) -> Result<Self> {
         use x509_parser::prelude::{FromDer, X509Certificate};
         let (_, cert) = X509Certificate::from_der(der)

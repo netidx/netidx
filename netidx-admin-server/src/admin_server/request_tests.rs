@@ -1,6 +1,6 @@
 use super::*;
 use crate::admin_proto::{
-    AddIdentityRequest, AdminDomainMap, AdminServerEntry, ApplyControllerStateRequest,
+    AddIdentityRequest, AdminDomainMap, AdminServerEntry, ApplyCaStateRequest,
     ApplyCrlRequest, ApplyPermsEditRequest, ApplyReferralEditRequest,
     ApplyServiceControlRequest, ExternalCaInstallRequest, InfoAuth, LoginRequest,
     LogoutRequest, ReadPermsRequest, ReferralEdit, RegisterRequest, ResolverAddr, Role,
@@ -10,8 +10,8 @@ fn assert_public(req: &Request) {
     assert!(matches!(request_requirements(req), RequestRequirements::Public));
 }
 
-fn assert_controller(req: &Request) {
-    assert!(matches!(request_requirements(req), RequestRequirements::ControllerOnly));
+fn assert_ca(req: &Request) {
+    assert!(matches!(request_requirements(req), RequestRequirements::CaOnly));
 }
 
 fn assert_node(req: &Request) {
@@ -46,17 +46,17 @@ fn centralized_requirements_protect_all_mutations() {
         addr: "127.0.0.1:4565".parse().unwrap(),
         resolver: None,
     }));
-    assert_controller(&Request::AddIdentity(AddIdentityRequest {
+    assert_ca(&Request::AddIdentity(AddIdentityRequest {
         operation_id,
         san: "alice.example".into(),
         primary_group: "users".into(),
         groups: vec![],
     }));
-    assert_controller(&Request::ApplyPermsEdit(ApplyPermsEditRequest {
+    assert_ca(&Request::ApplyPermsEdit(ApplyPermsEditRequest {
         operation_id,
         perms_json: "{}".into(),
     }));
-    assert_controller(&Request::GetPerms);
+    assert_ca(&Request::GetPerms);
     assert_admin(
         &Request::ReadPerms(ReadPermsRequest {
             credential: admin_proto::AdminCredential::password("alice", "pw"),
@@ -64,23 +64,23 @@ fn centralized_requirements_protect_all_mutations() {
         }),
         NotNeeded,
     );
-    assert_controller(&Request::ApplyCrl(ApplyCrlRequest {
+    assert_ca(&Request::ApplyCrl(ApplyCrlRequest {
         operation_id,
         crl_pem: "crl".into(),
     }));
-    let controller = admin_proto::AdminServerId::new();
-    let mut map = AdminDomainMap::empty(controller);
+    let ca = admin_proto::AdminServerId::new();
+    let mut map = AdminDomainMap::empty(ca);
     map.admin_servers.push(AdminServerEntry {
-        id: controller,
+        id: ca,
         addr: "127.0.0.1:4565".parse().unwrap(),
         roles: Role::Ca.into(),
         resolver: None,
         cluster: None,
         state: admin_proto::ServerState::Registered,
     });
-    assert_controller(&Request::ApplyControllerState(ApplyControllerStateRequest {
+    assert_ca(&Request::ApplyCaState(ApplyCaStateRequest {
         operation_id,
-        controller,
+        ca,
         addr: "127.0.0.1:4565".parse().unwrap(),
         map,
         crl_pem: "crl".into(),
@@ -90,12 +90,12 @@ fn centralized_requirements_protect_all_mutations() {
         Required,
     );
     assert_admin(
-        &Request::ReconcileController(admin_proto::ReconcileControllerRequest {
+        &Request::ReconcileCa(admin_proto::ReconcileCaRequest {
             credential: admin_proto::AdminCredential::password("admin", "pw"),
         }),
         Required,
     );
-    assert_controller(&Request::ApplyReferralEdit(ApplyReferralEditRequest {
+    assert_ca(&Request::ApplyReferralEdit(ApplyReferralEditRequest {
         operation_id,
         edit: ReferralEdit::SetTopology {
             local_member: ResolverAddr {
@@ -107,7 +107,7 @@ fn centralized_requirements_protect_all_mutations() {
             children: vec![],
         },
     }));
-    assert_controller(&Request::ApplyServiceControl(ApplyServiceControlRequest {
+    assert_ca(&Request::ApplyServiceControl(ApplyServiceControlRequest {
         operation_id,
         units: vec![],
         op: netidx_activation::control::ControlOp::Status,
@@ -138,26 +138,15 @@ fn centralized_requirements_protect_all_mutations() {
 #[test]
 fn origin_requirements_are_enforced_independently_of_credentials() {
     assert!(
-        authorize_request_origin(
-            RequestRequirements::ControllerOnly,
-            false,
-            true,
-            false,
-        )
-        .is_err()
+        authorize_request_origin(RequestRequirements::CaOnly, false, true, false,)
+            .is_err()
     );
     assert!(
-        authorize_request_origin(RequestRequirements::ControllerOnly, false, true, true,)
-            .is_ok()
+        authorize_request_origin(RequestRequirements::CaOnly, false, true, true,).is_ok()
     );
     assert!(
-        authorize_request_origin(
-            RequestRequirements::ControllerOnly,
-            false,
-            false,
-            false,
-        )
-        .is_err()
+        authorize_request_origin(RequestRequirements::CaOnly, false, false, false,)
+            .is_err()
     );
     assert!(
         authorize_request_origin(RequestRequirements::NodeSelf, false, true, false)

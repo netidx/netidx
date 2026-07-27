@@ -11,7 +11,7 @@
 
 use crate::{
     activation,
-    admin_proto::{self, AdminServerId, CONTROLLER_ROLE_URI, NodeKind, SERVING_SAN},
+    admin_proto::{self, AdminServerId, CA_ROLE_URI, NodeKind, SERVING_SAN},
     admin_server_config::{self, AdminServerConfig, CaRole, Roles},
     answer::{Answerer, Field},
     atomic,
@@ -50,7 +50,7 @@ pub struct SetupArgs<'a> {
 
 /// Stand up an admin server on the CA host: issue the daemon's serving
 /// cert (a CA-issued leaf with the reserved [`SERVING_SAN`]), write
-/// `admin-server.json` (ca role only — install flows add resolver /
+/// `admin-server.json` (CA role only — install flows add resolver /
 /// id-map roles as they set those up), and (when `units_dir` is set)
 /// drop the `admin-server` activation unit. Returns the [`ServiceNeed`]
 /// the caller folds into its single end-of-process service offer — an
@@ -82,7 +82,7 @@ pub async fn setup_server(
         &[
             SanEntry::Dns(SERVING_SAN.to_string()),
             SanEntry::Uri(server_id.uri()),
-            SanEntry::Uri(CONTROLLER_ROLE_URI.to_string()),
+            SanEntry::Uri(CA_ROLE_URI.to_string()),
         ],
         SERVING_SAN,
         ca::CaLifetimes::load_async(a.ca_dir)
@@ -95,7 +95,7 @@ pub async fn setup_server(
     let ca_cert = tokio::fs::read(a.ca_dir.join("certificate.pem")).await?;
     let home_ca_fingerprint =
         netidx_admin_proto::fingerprint::Fingerprint::of_cert_pem(&ca_cert)?.text();
-    // Chain = [serving leaf, ca cert] so the client receives the CA.
+    // Chain = [serving leaf, CA cert] so the client receives the CA.
     let mut chain = leaf;
     chain.extend_from_slice(&ca_cert);
     let serving_cert = server_dir.join("cert.pem");

@@ -5,7 +5,7 @@ use super::{
     issuance::{PushPlan, leaf_serial, push_registrations},
     queue::autorenew_sweep,
     request::{PeerIdent, cert_signed_by, serve_request},
-    topology::{local_resolver_data, reconcile_controller_state_on_start},
+    topology::{local_resolver_data, reconcile_ca_state_on_start},
 };
 use crate::{
     admin_proto::{NodeKind, RegisterRequest},
@@ -88,7 +88,7 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
                 );
             }
             // Refresh the cache: cheap version check, full pull only when changed.
-            match transport::get_map_version_from_controller(
+            match transport::get_map_version_from_ca(
                 &state.pki_client,
                 ca_addr,
                 state.home_ca_der.clone(),
@@ -99,7 +99,7 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
                 Ok(v) => {
                     let stale = state.read(move |state| state.map.version != v).await;
                     if stale {
-                        match transport::get_map_from_controller(
+                        match transport::get_map_from_ca(
                             &state.pki_client,
                             ca_addr,
                             state.home_ca_der.clone(),
@@ -517,16 +517,14 @@ pub async fn serve(cfg_path: PathBuf) -> Result<()> {
         None
     };
     let signs = Arc::new(Semaphore::new(MAX_CONCURRENT_SIGNS));
-    // Reconcile the current CRL on every controller start. This is especially
-    // important after offline disaster recovery: the superseded controller
+    // Reconcile the current CRL on every CA start. This is especially
+    // important after offline disaster recovery: the superseded CA
     // certificate was revoked before the replacement daemon existed to do the
     // ordinary immediate fanout. Startup is the first safe moment to push it.
     if state.has_ca().await {
         let state = state.clone();
         let signs = signs.clone();
-        tokio::spawn(
-            async move { reconcile_controller_state_on_start(state, signs).await },
-        );
+        tokio::spawn(async move { reconcile_ca_state_on_start(state, signs).await });
     }
     serve_on(listener, acceptor, state, signs).await
 }

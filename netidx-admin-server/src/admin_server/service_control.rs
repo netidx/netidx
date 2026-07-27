@@ -153,15 +153,14 @@ pub(super) async fn handle_control_service(
             Ok(client) => client,
             Err(e) => return err(format!("loading outbound identity: {e:#}")),
         };
-        let target_is_controller =
-            state.read(move |state| target_server == state.map.controller).await;
+        let target_is_ca = state.read(move |state| target_server == state.map.ca).await;
         tokio::time::timeout(
             PUSH_TIMEOUT,
             transport::push_service_control(
                 &client,
                 target_addr,
                 req.target_server,
-                target_is_controller,
+                target_is_ca,
                 state.home_ca_der.clone(),
                 operation_id,
                 req.units.clone(),

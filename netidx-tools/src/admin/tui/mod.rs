@@ -408,7 +408,7 @@ impl App {
                 config_dir,
                 needs_root,
                 remove_ca: false,
-            } if config_dir.join("ca").is_dir() => {
+            } if config_dir.join("CA").is_dir() => {
                 let destroy = Action::Uninstall {
                     config_scope,
                     config_dir: config_dir.clone(),
@@ -1502,7 +1502,7 @@ mod render_tests {
             field: Field::AdminDomainMode,
             choices: vec![
                 "Create a new admin domain (creates a CA)".into(),
-                "Use an existing controller / CA".into(),
+                "Use an existing CA / CA".into(),
             ],
             default: Some("Create a new admin domain (creates a CA)".into()),
             reply: tx,

@@ -61,32 +61,32 @@ pub(crate) struct RestoreArgs {
     #[arg(long)]
     pub listen: Option<SocketAddr>,
     /// Override the advertised address of a resolver co-located with the
-    /// restored controller.
+    /// restored CA.
     #[arg(long = "resolver-listen")]
     pub resolver_listen: Option<SocketAddr>,
     /// Override the local bind IP of a resolver co-located with the restored
-    /// controller. When only --resolver-listen changes, its IP is the default.
+    /// CA. When only --resolver-listen changes, its IP is the default.
     #[arg(long = "resolver-bind")]
     pub resolver_bind: Option<IpAddr>,
-    /// Explicitly attest that the old controller cannot run. Required for a
-    /// controller restore because two copies of the same controller identity
+    /// Explicitly attest that the old CA cannot run. Required for a
+    /// CA restore because two copies of the same CA identity
     /// would violate the admin domain's single-writer boundary.
-    #[arg(long = "old-controller-fenced")]
-    pub old_controller_fenced: bool,
-    /// Read the controller recovery password from a file.
+    #[arg(long = "old-ca-fenced")]
+    pub old_ca_fenced: bool,
+    /// Read the CA recovery password from a file.
     #[arg(long = "recovery-password-file")]
     pub recovery_password_file: Option<PathBuf>,
-    /// Read the controller recovery password from stdin.
+    /// Read the CA recovery password from stdin.
     #[arg(long = "recovery-password-stdin", conflicts_with = "recovery_password_file")]
     pub recovery_password_stdin: bool,
     /// Fresh externally-signed intermediate CA certificate, required when the
-    /// bundled controller certificate has expired.
+    /// bundled CA certificate has expired.
     #[arg(long = "external-cert")]
     pub external_cert: Option<PathBuf>,
     /// External root certificate when it is not appended to --external-cert.
     #[arg(long = "external-root")]
     pub external_root: Option<PathBuf>,
-    /// Protection for freshly enrolled non-controller TLS keys.
+    /// Protection for freshly enrolled non-ca TLS keys.
     #[arg(long = "key-protection")]
     pub key_protection: Option<init::KeyProtArg>,
     /// Password for `--key-protection password`.
@@ -95,7 +95,7 @@ pub(crate) struct RestoreArgs {
     /// Read the key password from stdin.
     #[arg(long = "key-password-stdin", conflicts_with = "key_password_file")]
     pub key_password_stdin: bool,
-    /// Override the controller/bootstrap address recorded in the bundle.
+    /// Override the CA/bootstrap address recorded in the bundle.
     #[arg(long = "admin-server")]
     pub admin_server: Option<String>,
     /// Restore the recorded OS service even if the source install had none.
@@ -110,7 +110,7 @@ pub(crate) struct RestoreArgs {
     /// Override the account used by a restored system service.
     #[arg(long = "for-user")]
     pub for_user: Option<String>,
-    /// Permit plaintext replacement controller credentials when no TPM or
+    /// Permit plaintext replacement CA credentials when no TPM or
     /// Secure Enclave is usable. Test installations only.
     #[arg(long = "insecure-no-tpm")]
     pub insecure_no_tpm: bool,
@@ -124,7 +124,7 @@ fn restore_addresses(
         (None, None) => None,
         (listen, bind) => {
             let original = manifest.resolver_endpoint.context(
-                "--resolver-listen/--resolver-bind require a backup of a controller with a co-located resolver",
+                "--resolver-listen/--resolver-bind require a backup of a CA with a co-located resolver",
             )?;
             let listen = listen.unwrap_or(original.listen);
             Some(install_bundle::ResolverEndpoint {
@@ -182,7 +182,7 @@ fn find_install(a: &BackupArgs) -> Result<(PathBuf, BundleScope, InstallRecord)>
 fn service_intent(a: &BackupArgs, record: &InstallRecord) -> Result<ServiceIntent> {
     let scope = match record.role {
         InstallRole::Workstation => ServiceScope::User,
-        InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher => {
+        InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
             ServiceScope::System
         }
     };
@@ -216,22 +216,21 @@ pub(crate) fn backup(a: BackupArgs) -> Result<()> {
         std::env::current_dir()?.join(&a.target)
     };
     let service = service_intent(&a, &record)?;
-    let has_controller = root.join("ca").is_dir();
+    let has_ca = root.join("CA").is_dir();
     #[cfg(unix)]
-    let controller_tmp =
-        tempfile::tempdir().context("creating controller-backup staging directory")?;
-    let controller: Option<PathBuf> = if has_controller {
+    let ca_tmp = tempfile::tempdir().context("creating ca-backup staging directory")?;
+    let ca: Option<PathBuf> = if has_ca {
         #[cfg(unix)]
         {
             let cfg = root.join("admin-server.json");
-            let inner = controller_tmp.path().join("controller");
+            let inner = ca_tmp.path().join("CA");
             tokio::runtime::Runtime::new()?
                 .block_on(netidx_admin_client::local::backup(&cfg, &inner))?;
             Some(inner)
         }
         #[cfg(not(unix))]
         {
-            bail!("a controller backup can only be captured on its unix host")
+            bail!("a CA backup can only be captured on its unix host")
         }
     } else {
         None
@@ -241,7 +240,7 @@ pub(crate) fn backup(a: BackupArgs) -> Result<()> {
         record,
         scope,
         Some(service),
-        controller.as_deref(),
+        ca.as_deref(),
         &target,
     )?;
     println!("created {} backup at {}", out.role.as_str(), out.target.display());
@@ -333,14 +332,13 @@ pub(super) async fn admin_domain_for_restore(
         bail!("the server at {seed} belongs to a different CA than the backup");
     }
     let info = transport::aggregate(&[seed], NodeKind::Client, &first).await?;
-    let controller =
-        info.ca_addr.context("the verified admin domain reported no controller")?;
-    let identity = transport::fetch_identity(controller, NodeKind::Client).await?;
-    if !identity.controller || !admin_domain.matches(&identity.fingerprint)? {
-        bail!("the discovered controller did not match the backup's pinned CA identity");
+    let ca = info.ca_addr.context("the verified admin domain reported no CA")?;
+    let identity = transport::fetch_identity(ca, NodeKind::Client).await?;
+    if !identity.ca || !admin_domain.matches(&identity.fingerprint)? {
+        bail!("the discovered CA did not match the backup's pinned CA identity");
     }
-    let info = transport::aggregate(&[controller], NodeKind::Client, &identity).await?;
-    Ok(Some((controller, DiscoveredAdminDomain { identity, info })))
+    let info = transport::aggregate(&[ca], NodeKind::Client, &identity).await?;
+    Ok(Some((ca, DiscoveredAdminDomain { identity, info })))
 }
 
 fn node_kind(kind: IdentityKind) -> NodeKind {
@@ -386,7 +384,7 @@ pub(super) async fn reenroll_data_identities(
     ans: &mut dyn netidx_admin_client::answer::Answerer,
     root: &Path,
     manifest: &install_bundle::Manifest,
-    controller: SocketAddr,
+    ca: SocketAddr,
     net: &DiscoveredAdminDomain,
     key_protection: Option<netidx_admin_client::plan::enroll::KeyProtArg>,
 ) -> Result<()> {
@@ -415,7 +413,7 @@ pub(super) async fn reenroll_data_identities(
             })?;
         let (identity, _staging) = enroll::join_admin_domain_replacing(
             ans,
-            controller,
+            ca,
             node_kind(recipe.kind),
             Some(&recipe.name),
             key_protection,
@@ -454,7 +452,7 @@ pub(super) async fn reenroll_satellite_admin(
     listen_override: Option<SocketAddr>,
 ) -> Result<()> {
     if !manifest.identities.iter().any(|i| i.kind == IdentityKind::AdminServer)
-        || manifest.components.contains(&Component::Controller)
+        || manifest.components.contains(&Component::Ca)
     {
         return Ok(());
     }
@@ -473,13 +471,9 @@ pub(super) async fn reenroll_satellite_admin(
     let resolver_path = root.join("resolver.json");
     let resolver = netidx_admin_client::resolver::ResolverConfig::load(&resolver_path)?;
     let resolver_listen = match (manifest.previous_admin_server, net.info.ca_addr) {
-        (Some(old), Some(controller)) => {
-            let map = transport::get_map_pinned(
-                controller,
-                NodeKind::AdminServer,
-                &net.identity,
-            )
-            .await?;
+        (Some(old), Some(ca)) => {
+            let map = transport::get_map_pinned(ca, NodeKind::AdminServer, &net.identity)
+                .await?;
             map.admin_servers
                 .iter()
                 .find(|server| server.id == old)
@@ -525,10 +519,10 @@ pub(super) async fn reenroll_satellite_admin(
     Ok(())
 }
 
-/// The recovered controller must start before its co-located identities can
+/// The recovered CA must start before its co-located identities can
 /// enroll. Units that needed those absent keys may therefore have died once;
 /// after enrollment, start only non-running units. Healthy units (especially
-/// the controller) are never restarted here.
+/// the CA) are never restarted here.
 pub(super) async fn start_restored_units(root: &Path) -> Result<()> {
     use netidx_activation::control::{
         ControlOp, ControlRequest, ControlResponse, UnitState, control,
@@ -561,15 +555,14 @@ pub(super) async fn start_restored_units(root: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) async fn reconcile_restored_controller(
+pub(super) async fn reconcile_restored_ca(
     root: &Path,
 ) -> Result<netidx_admin_proto::OperationId> {
     use poolshark::local::LPooled;
     use std::fmt::Write as _;
 
     let (operation_id, peers) =
-        netidx_admin_client::local::reconcile_controller(&root.join("admin-server.json"))
-            .await?;
+        netidx_admin_client::local::reconcile_ca(&root.join("admin-server.json")).await?;
     let mut failures: LPooled<String> = LPooled::take();
     for peer in peers {
         if let Some(error) = peer.error {
@@ -579,7 +572,7 @@ pub(super) async fn reconcile_restored_controller(
         }
     }
     if !failures.is_empty() {
-        bail!("controller reconciliation operation {operation_id} failed: {failures}");
+        bail!("CA reconciliation operation {operation_id} failed: {failures}");
     }
     Ok(operation_id)
 }
@@ -587,10 +580,10 @@ pub(super) async fn reconcile_restored_controller(
 pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
     let bundle = a.bundle.canonicalize().context("canonicalizing backup bundle")?;
     let preflight = install_bundle::verify(&bundle)?;
-    let has_controller = preflight.components.contains(&Component::Controller);
-    if has_controller && !a.old_controller_fenced {
+    let has_ca = preflight.components.contains(&Component::Ca);
+    if has_ca && !a.old_ca_fenced {
         bail!(
-            "controller restore requires --old-controller-fenced; do not continue until the old controller cannot run"
+            "CA restore requires --old-ca-fenced; do not continue until the old CA cannot run"
         );
     }
     let root = match &a.config_dir {
@@ -604,12 +597,12 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         .zip(preflight.resolver_endpoint)
         .is_some_and(|(replacement, original)| replacement != original);
     let service = desired_service(&preflight, &a);
-    if has_controller
+    if has_ca
         && (!preflight.identities.is_empty() || resolver_relocated)
         && service.is_none()
     {
         bail!(
-            "a controller with co-located roles requires restoring its OS service so it can finish enrollment and hierarchy reconciliation"
+            "a CA with co-located roles requires restoring its OS service so it can finish enrollment and hierarchy reconciliation"
         );
     }
     println!("restoring {:?} to {}", preflight.components, root.display());
@@ -623,18 +616,18 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
 
     #[cfg(unix)]
-    if has_controller {
-        let ca_dir = root.join("ca");
+    if has_ca {
+        let ca_dir = root.join("CA");
         let cfg = root.join("admin-server.json");
-        if !install_bundle::controller_recovered(&bundle, &cfg)? {
-            if !install_bundle::controller_snapshot_prepared(&bundle, &ca_dir, &cfg)? {
+        if !install_bundle::ca_recovered(&bundle, &cfg)? {
+            if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg)? {
                 netidx_admin_server::backup::restore(
                     config_lock.as_ref().expect("restore lock held"),
-                    &bundle.join(install_bundle::CONTROLLER_DIR),
+                    &bundle.join(install_bundle::CA_DIR),
                     &ca_dir,
                     &cfg,
                 )
-                .context("restoring the verified controller state")?;
+                .context("restoring the verified CA state")?;
             }
             let mut recovery = answer_cli::FlagAnswerer::install(
                 a.key_password_file.as_deref(),
@@ -672,7 +665,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                     ),
                 )?;
             }
-            runtime.block_on(netidx_admin_server::ops::slots::recover_controller(
+            runtime.block_on(netidx_admin_server::ops::slots::recover_ca(
                 &mut recovery,
                 config_lock.as_ref().expect("restore lock held"),
                 ca_dir,
@@ -682,7 +675,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 a.insecure_no_tpm,
             ))?;
         }
-        // The inner controller snapshot uses portable recovered-* role paths;
+        // The inner CA snapshot uses portable recovered-* role paths;
         // reconnect it to the complete role configs restored by the outer bundle.
         let mut cfgv = netidx_admin_client::admin_server_config::load_for_recovery(&cfg)?;
         if let Some(role) = cfgv.roles.resolver.as_mut() {
@@ -702,13 +695,13 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         )?;
     }
     #[cfg(not(unix))]
-    if has_controller {
-        bail!("controller restore is supported only on unix")
+    if has_ca {
+        bail!("CA restore is supported only on unix")
     }
 
-    // A recovered controller must be reachable before its co-located resolver
+    // A recovered CA must be reachable before its co-located resolver
     // identities can pass through the normal enrollment ceremony.
-    if has_controller {
+    if has_ca {
         drop(config_lock.take());
         if let Some(scope) = service {
             install_service(&manifest, &a, scope)?;
@@ -735,7 +728,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 .transpose()?,
         )?;
         let rt = tokio::runtime::Runtime::new()?;
-        let Some((controller, net)) =
+        let Some((ca, net)) =
             rt.block_on(admin_domain_for_restore(&manifest, a.admin_server.as_deref()))?
         else {
             bail!("the backup contains TLS identities but no admin domain identity");
@@ -744,12 +737,12 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
             &mut ans,
             &root,
             &manifest,
-            controller,
+            ca,
             &net,
             init::lib_kp(a.key_protection),
         ))?;
         #[cfg(unix)]
-        if !has_controller {
+        if !has_ca {
             rt.block_on(reenroll_satellite_admin(
                 &mut ans,
                 config_lock.as_ref().context("restore lock not held")?,
@@ -759,21 +752,21 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 a.listen,
             ))?;
         }
-        if has_controller && service.is_some() {
+        if has_ca && service.is_some() {
             rt.block_on(start_restored_units(&root))?;
         }
     }
-    if !has_controller {
+    if !has_ca {
         drop(config_lock.take());
         if let Some(scope) = service {
             install_service(&manifest, &a, scope)?;
         }
     }
     #[cfg(unix)]
-    if has_controller && resolver_relocated {
-        let operation_id = tokio::runtime::Runtime::new()?
-            .block_on(reconcile_restored_controller(&root))?;
-        println!("  controller hierarchy reconciled (operation {operation_id})");
+    if has_ca && resolver_relocated {
+        let operation_id =
+            tokio::runtime::Runtime::new()?.block_on(reconcile_restored_ca(&root))?;
+        println!("  CA hierarchy reconciled (operation {operation_id})");
     }
     println!(
         "restore complete: {} is installed and ready",
@@ -808,7 +801,7 @@ mod tests {
             "admin",
             "restore",
             "/srv/netidx-backup",
-            "--old-controller-fenced",
+            "--old-ca-fenced",
             "--recovery-password-stdin",
             "--listen",
             "10.1.0.4:5565",
@@ -819,7 +812,7 @@ mod tests {
         ])
         .unwrap();
         let Command::Restore(args) = parsed.command else { panic!("restore") };
-        assert!(args.old_controller_fenced);
+        assert!(args.old_ca_fenced);
         assert!(args.recovery_password_stdin);
         assert_eq!(args.listen, Some("10.1.0.4:5565".parse().unwrap()));
         assert_eq!(args.resolver_listen, Some("203.0.113.4:5564".parse().unwrap()));

@@ -315,7 +315,7 @@ async fn prepare_revoke_inner(
 }
 
 /// Validate that `crl_pem` is exactly one CRL signed by this node's immutable
-/// home CA. Controller-only transport is the authorization boundary, while
+/// home CA. Ca-only transport is the authorization boundary, while
 /// this signature check prevents a corrupted payload from replacing working
 /// revocation state.
 pub(super) fn validate_home_crl(crl_pem: &str, home_ca_der: &[u8]) -> Result<()> {
@@ -461,17 +461,16 @@ where
 }
 
 /// Immediately distribute a newly signed CRL to every registered node. The
-/// local controller uses the same application core without a loopback TLS
+/// local CA uses the same application core without a loopback TLS
 /// connection; remote targets are exact-ID/home-CA pinned and bounded exactly
-/// like the other controller mutation fanouts.
+/// like the other CA mutation fanouts.
 pub(super) async fn push_crl_to_peers(
     state: &Arc<Server>,
     crl_pem: &str,
     operation_id: admin_proto::OperationId,
 ) -> Vec<PeerResult> {
     let targets = registered_crl_targets(state).await;
-    let (my_id, controller) =
-        state.read(move |state| (state.cfg.server_id, state.map.controller)).await;
+    let (my_id, ca) = state.read(move |state| (state.cfg.server_id, state.map.ca)).await;
     let mut results = Vec::new();
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let crl_pem = crl_pem.to_string();
@@ -508,7 +507,7 @@ pub(super) async fn push_crl_to_peers(
                         &client,
                         addr,
                         server,
-                        server == controller,
+                        server == ca,
                         home_ca,
                         operation_id,
                         &crl_pem,

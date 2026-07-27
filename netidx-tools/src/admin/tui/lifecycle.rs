@@ -36,8 +36,8 @@ pub(super) async fn update_plan(
         .as_ref()
         .context("this host is local-only — nothing to update")?;
     match role {
-        InstallRole::Controller => {
-            bail!("the controller has no resolver configuration to reconcile")
+        InstallRole::Ca => {
+            bail!("the CA has no resolver configuration to reconcile")
         }
         InstallRole::Workstation => {
             let rpath = paths::discover_resolver_config()?;
@@ -85,7 +85,7 @@ pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap
 /// hint must follow the actual edit plan rather than only the host role.
 pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'static str {
     match role {
-        InstallRole::Controller => "The controller requires no resolver restart.",
+        InstallRole::Ca => "The CA requires no resolver restart.",
         InstallRole::Workstation => {
             "No service was restarted. Restart the local resolver to serve the new peers."
         }

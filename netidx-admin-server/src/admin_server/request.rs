@@ -29,14 +29,14 @@ use super::{
     revocation::{handle_apply_crl, handle_get_crl, handle_revoke},
     service_control::{handle_apply_service_control, handle_control_service},
     topology::{
-        get_info, handle_apply_controller_state, handle_apply_referral_edit,
+        get_info, handle_apply_ca_state, handle_apply_referral_edit,
         handle_approve_delegation, handle_deny_delegation, handle_deregister,
-        handle_list_delegations, handle_poll_delegation, handle_reconcile_controller,
+        handle_list_delegations, handle_poll_delegation, handle_reconcile_ca,
         handle_register, handle_remove_server, handle_request_delegation,
     },
 };
 use crate::admin_proto::{
-    self, AddIdentityResponse, ApplyControllerStateResponse, ApplyCrlResponse,
+    self, AddIdentityResponse, ApplyCaStateResponse, ApplyCrlResponse,
     ApplyPermsEditResponse, ApplyReferralEditResponse, ApplyServiceControlResponse,
     ClientHello, DelegationPollResponse, DelegationResponse, DenyResponse,
     EnqueueResponse, GetMapResponse, GetMapVersionResponse, ListDelegationsResponse,
@@ -60,10 +60,10 @@ where
 {
     let peer_admin = peer_ident.as_ref().filter(|p| p.home_ca).and_then(|p| p.admin);
     let peer_is_admin_server = peer_admin.is_some();
-    let peer_is_controller = peer_admin.is_some_and(|p| p.controller);
+    let peer_is_ca = peer_admin.is_some_and(|p| p.ca);
     let hello: ClientHello =
         admin_proto::read_msg(&mut tls).await.context("reading ClientHello")?;
-    let (domain, server_id, controller) = state
+    let (domain, server_id, ca) = state
         .read(move |state| {
             (state.cfg.domain.clone(), state.cfg.server_id, state.cfg.roles.ca.is_some())
         })
@@ -75,7 +75,7 @@ where
             domain,
             roles: state.roles().await,
             server_id,
-            controller,
+            ca,
         },
     )
     .await
@@ -88,12 +88,9 @@ where
     let req: Request =
         admin_proto::read_msg(&mut tls).await.context("reading Request")?;
     let requirements = request_requirements(&req);
-    if let Err(reason) = authorize_request_origin(
-        requirements,
-        local,
-        peer_is_admin_server,
-        peer_is_controller,
-    ) {
+    if let Err(reason) =
+        authorize_request_origin(requirements, local, peer_is_admin_server, peer_is_ca)
+    {
         bail!(reason);
     }
     // Only a CA can run a password KDF. Reserve the source before dispatch,
@@ -437,10 +434,9 @@ where
                 .context("writing ApplyPermsEditResponse")
         }
         Request::ApplyCrl(req) => {
-            let resp = if !peer_is_controller {
+            let resp = if !peer_is_ca {
                 ApplyCrlResponse::Err {
-                    reason: "a CRL update requires the home CA controller certificate"
-                        .to_string(),
+                    reason: "a CRL update requires the home CA certificate".to_string(),
                 }
             } else {
                 handle_apply_crl(state, &req).await
@@ -449,22 +445,22 @@ where
                 .await
                 .context("writing ApplyCrlResponse")
         }
-        Request::ApplyControllerState(req) => {
-            let resp = if !peer_is_controller {
-                ApplyControllerStateResponse::Err {
-                    reason: "controller-state reconciliation requires the exact home CA \
-                                     controller certificate"
+        Request::ApplyCaState(req) => {
+            let resp = if !peer_is_ca {
+                ApplyCaStateResponse::Err {
+                    reason: "ca-state reconciliation requires the exact home CA \
+                                     ca certificate"
                         .to_string(),
                 }
             } else {
-                handle_apply_controller_state(state, &req).await
+                handle_apply_ca_state(state, &req).await
             };
             admin_proto::write_msg(&mut tls, &resp)
                 .await
-                .context("writing ApplyControllerStateResponse")
+                .context("writing ApplyCaStateResponse")
         }
-        Request::ReconcileController(req) => {
-            let resp = handle_reconcile_controller(
+        Request::ReconcileCa(req) => {
+            let resp = handle_reconcile_ca(
                 state,
                 &req,
                 request_authentication(),
@@ -474,7 +470,7 @@ where
             .await;
             admin_proto::write_msg(&mut tls, &resp)
                 .await
-                .context("writing ReconcileControllerResponse")
+                .context("writing ReconcileCaResponse")
         }
         Request::AddRoleAdmin(req) => {
             let authentication = request_authentication();
@@ -600,7 +596,7 @@ enum RequestRequirements<'a> {
         server_key: ServerKeyRequirement,
     },
     Logout,
-    ControllerOnly,
+    CaOnly,
     NodeSelf,
     LocalOnly {
         server_key: ServerKeyRequirement,
@@ -613,7 +609,7 @@ impl<'a> RequestRequirements<'a> {
             Self::Admin { credential, .. } => Some(credential),
             Self::Public
             | Self::Logout
-            | Self::ControllerOnly
+            | Self::CaOnly
             | Self::NodeSelf
             | Self::LocalOnly { .. } => None,
         }
@@ -624,7 +620,7 @@ impl<'a> RequestRequirements<'a> {
             Self::Admin { server_key, .. } | Self::LocalOnly { server_key } => {
                 server_key == ServerKeyRequirement::Required
             }
-            Self::Public | Self::Logout | Self::ControllerOnly | Self::NodeSelf => false,
+            Self::Public | Self::Logout | Self::CaOnly | Self::NodeSelf => false,
         }
     }
 }
@@ -637,11 +633,11 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
         | PollDelegation(_) | GetMapVersion | GetMap => RequestRequirements::Public,
         AddIdentity(_)
         | ApplyCrl(_)
-        | ApplyControllerState(_)
+        | ApplyCaState(_)
         | GetPerms
         | ApplyPermsEdit(_)
         | ApplyReferralEdit(_)
-        | ApplyServiceControl(_) => RequestRequirements::ControllerOnly,
+        | ApplyServiceControl(_) => RequestRequirements::CaOnly,
         Register(_) | Deregister => RequestRequirements::NodeSelf,
         RotateRecovery | RotateAutorenew | CaStatus => {
             RequestRequirements::LocalOnly { server_key: NotNeeded }
@@ -726,7 +722,7 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
             credential: &req.credential,
             server_key: NotNeeded,
         },
-        ReconcileController(req) => RequestRequirements::Admin {
+        ReconcileCa(req) => RequestRequirements::Admin {
             credential: &req.credential,
             server_key: Required,
         },
@@ -737,18 +733,16 @@ fn authorize_request_origin(
     requirements: RequestRequirements<'_>,
     local: bool,
     peer_is_admin_server: bool,
-    peer_is_controller: bool,
+    peer_is_ca: bool,
 ) -> std::result::Result<(), &'static str> {
     match requirements {
         RequestRequirements::Public
         | RequestRequirements::Admin { .. }
         | RequestRequirements::Logout => Ok(()),
-        RequestRequirements::ControllerOnly if peer_is_controller => Ok(()),
+        RequestRequirements::CaOnly if peer_is_ca => Ok(()),
         RequestRequirements::NodeSelf if peer_is_admin_server => Ok(()),
         RequestRequirements::LocalOnly { .. } if local => Ok(()),
-        RequestRequirements::ControllerOnly => {
-            Err("request requires the home CA controller certificate")
-        }
+        RequestRequirements::CaOnly => Err("request requires the home CA certificate"),
         RequestRequirements::NodeSelf => {
             Err("request requires a protocol-v6 home-CA node certificate")
         }

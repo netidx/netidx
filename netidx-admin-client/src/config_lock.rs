@@ -235,9 +235,9 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("netidx");
         let lock = ConfigDirLock::acquire(&root).unwrap();
-        assert_eq!(lock.require_descendant(root.join("ca")).unwrap(), root.join("ca"));
+        assert_eq!(lock.require_descendant(root.join("CA")).unwrap(), root.join("CA"));
         assert!(lock.require_descendant(&root).is_err());
-        assert!(lock.require_descendant(parent.path().join("ca")).is_err());
+        assert!(lock.require_descendant(parent.path().join("CA")).is_err());
     }
 
     #[tokio::test]

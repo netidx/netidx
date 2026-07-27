@@ -1,4 +1,4 @@
-//! Point-in-time controller recovery bundles.
+//! Point-in-time CA recovery bundles.
 //!
 //! Capture is called while the running daemon holds the mutable state, issuance
 //! store, and vault guards. Bytes are collected into memory under that pause;
@@ -44,7 +44,7 @@ pub struct Manifest {
     pub format_version: u32,
     pub created_unix: u64,
     pub ca_fingerprint: String,
-    pub controller: AdminServerId,
+    pub ca: AdminServerId,
     pub map_version: u64,
     pub highest_serial: u64,
     pub files: Vec<ManifestFile>,
@@ -69,7 +69,7 @@ pub struct Snapshot {
 pub struct BackupOutcome {
     pub target: PathBuf,
     pub ca_fingerprint: String,
-    pub controller: AdminServerId,
+    pub ca: AdminServerId,
     pub map_version: u64,
     pub highest_serial: u64,
     pub files: u64,
@@ -170,7 +170,7 @@ fn capture_ca_tree(
         // `ca.lock` is process state. A temp file cannot exist while the backup
         // barrier is held unless it predates the daemon; never preserve one.
         if first == Some(Component::Normal("server".as_ref()))
-            || relative == Path::new("ca.lock")
+            || relative == Path::new("CA.lock")
             || entry.file_name() == "admin.sock"
             || entry.file_name().to_string_lossy().starts_with(".tmp")
         {
@@ -189,7 +189,7 @@ fn capture_ca_tree(
         if meta.is_dir() {
             capture_ca_tree(files, ca_dir, &source)?;
         } else if meta.is_file() {
-            capture_file(files, &source, Path::new("ca").join(relative), None)?;
+            capture_file(files, &source, Path::new("CA").join(relative), None)?;
         } else {
             bail!("refusing special file in CA backup source: {}", source.display());
         }
@@ -197,7 +197,7 @@ fn capture_ca_tree(
     Ok(())
 }
 
-/// Capture the controller's recovery assets into memory. The caller must hold
+/// Capture the CA's recovery assets into memory. The caller must hold
 /// every owner of mutable recovery state for this entire call.
 pub fn capture(
     cfg: &AdminServerConfig,
@@ -250,7 +250,7 @@ pub fn capture(
         format_version: FORMAT_VERSION,
         created_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         ca_fingerprint: cfg.home_ca_fingerprint.clone(),
-        controller: cfg.server_id,
+        ca: cfg.server_id,
         map_version,
         highest_serial,
         files: manifest_files,
@@ -281,7 +281,7 @@ fn normalize_target(target: &Path) -> Result<PathBuf> {
     Ok(parent.join(name))
 }
 
-/// Durably publish a captured snapshot. No controller-state locks are held
+/// Durably publish a captured snapshot. No ca-state locks are held
 /// here: all bytes and the manifest were fixed by [`capture`].
 pub fn publish(
     snapshot: Snapshot,
@@ -327,7 +327,7 @@ pub fn publish(
     Ok(BackupOutcome {
         target,
         ca_fingerprint: snapshot.manifest.ca_fingerprint,
-        controller: snapshot.manifest.controller,
+        ca: snapshot.manifest.ca,
         map_version: snapshot.manifest.map_version,
         highest_serial: snapshot.manifest.highest_serial,
         files,
@@ -352,7 +352,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     }
     let signature = fs::read(bundle.join(MANIFEST_SIGNATURE_FILE))
         .context("reading backup manifest signature")?;
-    let cert = fs::read(bundle.join("ca/certificate.pem"))?;
+    let cert = fs::read(bundle.join("CA/certificate.pem"))?;
     let cert = X509::from_pem(&cert).context("parsing backup CA certificate")?;
     let public_key = cert.public_key()?;
     let mut verifier = Verifier::new(MessageDigest::sha256(), &public_key)?;
@@ -376,7 +376,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     }
     let mut highest_serial = 0;
     for file in manifest.files.iter().filter(|file| {
-        file.path.starts_with("ca/issued/") && file.path.ends_with(".json")
+        file.path.starts_with("CA/issued/") && file.path.ends_with(".json")
     }) {
         let record: crate::ca_store::IssuedRecord =
             serde_json::from_slice(&fs::read(bundle.join(&file.path))?)
@@ -390,21 +390,20 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
             manifest.highest_serial
         );
     }
-    let cert = fs::read(bundle.join("ca/certificate.pem"))?;
+    let cert = fs::read(bundle.join("CA/certificate.pem"))?;
     let fp = Fingerprint::of_cert_pem(&cert)?.text();
     if fp != manifest.ca_fingerprint {
         bail!("backup CA certificate does not match the manifest fingerprint");
     }
     let cfg: AdminServerConfig =
         serde_json::from_slice(&fs::read(bundle.join("admin-server.json"))?)?;
-    if cfg.server_id != manifest.controller
-        || cfg.home_ca_fingerprint != manifest.ca_fingerprint
+    if cfg.server_id != manifest.ca || cfg.home_ca_fingerprint != manifest.ca_fingerprint
     {
         bail!("backup admin-server identity does not match its manifest");
     }
     let map: crate::admin_proto::AdminDomainMap =
-        serde_json::from_slice(&fs::read(bundle.join("ca/admin-domain.json"))?)?;
-    if map.controller != manifest.controller || map.version != manifest.map_version {
+        serde_json::from_slice(&fs::read(bundle.join("CA/admin-domain.json"))?)?;
+    if map.ca != manifest.ca || map.version != manifest.map_version {
         bail!("backup admin domain map does not match its manifest");
     }
     Ok(manifest)
@@ -452,9 +451,9 @@ pub fn restore(
         let complete = ca_dir.is_dir()
             && config_path.is_file()
             && roles_match
-            && manifest.files.iter().filter(|file| file.path.starts_with("ca/")).all(
+            && manifest.files.iter().filter(|file| file.path.starts_with("CA/")).all(
                 |file| {
-                    let relative = Path::new(&file.path).strip_prefix("ca").unwrap();
+                    let relative = Path::new(&file.path).strip_prefix("CA").unwrap();
                     fs::read(ca_dir.join(relative)).ok()
                         == fs::read(bundle.join(&file.path)).ok()
                 },
@@ -483,9 +482,9 @@ pub fn restore(
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(stage.path(), fs::Permissions::from_mode(0o700))?;
     }
-    for file in manifest.files.iter().filter(|file| file.path.starts_with("ca/")) {
+    for file in manifest.files.iter().filter(|file| file.path.starts_with("CA/")) {
         let relative =
-            Path::new(&file.path).strip_prefix("ca").expect("filtered CA path");
+            Path::new(&file.path).strip_prefix("CA").expect("filtered CA path");
         let contents = fs::read(bundle.join(&file.path))?;
         atomic::write_atomic(&stage.path().join(relative), &contents, file.mode)?;
     }
@@ -566,7 +565,7 @@ mod tests {
     fn rejects_traversal_paths() {
         assert!(bundle_path(Path::new("../vault.json")).is_err());
         assert!(bundle_path(Path::new("/vault.json")).is_err());
-        assert!(bundle_path(Path::new("ca/vault.json")).is_ok());
+        assert!(bundle_path(Path::new("CA/vault.json")).is_ok());
     }
 
     #[test]

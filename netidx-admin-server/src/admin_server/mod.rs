@@ -10,7 +10,7 @@
 //! [`enrollment::handle_enroll_request`], [`issuance::handle_add_identity`]) are pure of TLS
 //! and directly testable: the sign/enroll paths authenticate the supplied
 //! administrator credential, enforce that administrator's live [`netidx_admin_proto::policy::Policy`],
-//! sign with the controller's own credential, and append an audit line. The
+//! sign with the CA's own credential, and append an audit line. The
 //! TLS accept loop is a thin shell over them.
 
 mod admins;
@@ -93,7 +93,7 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// policy whose only over-the-wire power is approving verified renewals.
 /// When [`CaRole::autorenew`](crate::admin_server_config::CaRole) names its
 /// keytab, the daemon authenticates as this slot to approve renewals
-/// in-process — the same narrow principal the separate `admin ca auto-approve`
+/// in-process — the same narrow principal the separate `admin CA auto-approve`
 /// process used to be, now without the extra process.
 pub use netidx_admin_proto::policy::AUTORENEW_ADMIN;
 
@@ -112,7 +112,7 @@ mod state_tests {
     #[test]
     fn custom_config_root_retains_the_offline_ca_lock() {
         let root = tempfile::tempdir().unwrap();
-        let ca_dir = root.path().join("ca");
+        let ca_dir = root.path().join("CA");
         let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
         let alias = config_lock
             .ca_alias_root(&ca_dir)
@@ -505,7 +505,7 @@ impl Server {
         let serving_identity =
             crate::tls::admin_cert_identity_from_pem(&serving_cert_pem)?;
         if serving_identity.server_id != cfg.server_id
-            || serving_identity.controller != cfg.roles.ca.is_some()
+            || serving_identity.ca != cfg.roles.ca.is_some()
         {
             bail!("admin-server config identity does not match its serving certificate");
         }
@@ -573,7 +573,7 @@ impl Server {
                 let cluster = facts.as_ref().map(|_| {
                     existing_cluster.unwrap_or_else(admin_proto::ResolverClusterId::new)
                 });
-                admin_domain::upsert_controller(
+                admin_domain::upsert_ca(
                     &mut m,
                     AdminServerEntry {
                         id: cfg.server_id,

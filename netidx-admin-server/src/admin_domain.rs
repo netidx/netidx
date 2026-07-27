@@ -17,23 +17,23 @@ pub fn path(ca_dir: &Path) -> PathBuf {
     ca_dir.join("admin-domain.json")
 }
 
-pub fn load(ca_dir: &Path, controller: AdminServerId) -> Result<AdminDomainMap> {
+pub fn load(ca_dir: &Path, ca: AdminServerId) -> Result<AdminDomainMap> {
     let p = path(ca_dir);
     match std::fs::read(&p) {
         Ok(bytes) => {
             let map: AdminDomainMap = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing admin domain map {p:?}"))?;
-            if map.controller != controller {
+            if map.ca != ca {
                 bail!(
-                    "admin domain map controller {} does not match installed controller certificate {}",
-                    map.controller,
-                    controller
+                    "admin domain map CA {} does not match installed CA certificate {}",
+                    map.ca,
+                    ca
                 );
             }
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(AdminDomainMap::empty(controller))
+            Ok(AdminDomainMap::empty(ca))
         }
         Err(e) => Err(e).with_context(|| format!("reading admin domain map {p:?}")),
     }
@@ -48,26 +48,23 @@ pub fn save(
     atomic::write_atomic_pretty_json(&path(&ca_dir), map)
 }
 
-pub async fn load_async(
-    ca_dir: &Path,
-    controller: AdminServerId,
-) -> Result<AdminDomainMap> {
+pub async fn load_async(ca_dir: &Path, ca: AdminServerId) -> Result<AdminDomainMap> {
     let p = path(ca_dir);
     match tokio::fs::read(&p).await {
         Ok(bytes) => {
             let map: AdminDomainMap = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing admin domain map {p:?}"))?;
-            if map.controller != controller {
+            if map.ca != ca {
                 bail!(
-                    "admin domain map controller {} does not match installed controller certificate {}",
-                    map.controller,
-                    controller
+                    "admin domain map CA {} does not match installed CA certificate {}",
+                    map.ca,
+                    ca
                 );
             }
             Ok(map)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(AdminDomainMap::empty(controller))
+            Ok(AdminDomainMap::empty(ca))
         }
         Err(e) => Err(e).with_context(|| format!("reading admin domain map {p:?}")),
     }
@@ -88,13 +85,13 @@ fn changed(map: &mut AdminDomainMap) {
     map.version = map.version.saturating_add(1);
 }
 
-pub fn upsert_controller(
+pub fn upsert_ca(
     map: &mut AdminDomainMap,
     mut entry: AdminServerEntry,
     cluster: Option<ResolverClusterFacts>,
 ) -> Result<bool> {
-    if entry.id != map.controller || !entry.roles.contains(Role::Ca) {
-        bail!("controller entry must use the map controller id and carry the Ca role");
+    if entry.id != map.ca || !entry.roles.contains(Role::Ca) {
+        bail!("CA entry must use the map CA id and carry the CA role");
     }
     entry.state = ServerState::Registered;
     let mut did_change = match map.admin_servers.iter_mut().find(|s| s.id == entry.id) {
@@ -112,7 +109,7 @@ pub fn upsert_controller(
         match map.resolver_clusters.iter().find(|c| c.id == cluster_id) {
             // Startup facts are observations, not topology authority. They
             // seed a fresh map, but may be stale while a delegation fanout is
-            // incomplete or while the controller awaits its manual rolling
+            // incomplete or while the CA awaits its manual rolling
             // resolver restart. Never let them undo a CA-owned split,
             // reparenting, or member assignment on an existing map.
             Some(_) => {}
@@ -211,10 +208,10 @@ pub fn enroll(
         bail!("server identity {server_id} is already enrolled");
     }
     if request.roles.contains(Role::Ca) {
-        bail!("an enrollee may never request the Ca role");
+        bail!("an enrollee may never request the CA role");
     }
     if !request.roles.contains(Role::Resolver) {
-        bail!("every non-controller admin server must have the Resolver role");
+        bail!("every non-ca admin server must have the Resolver role");
     }
     let resolver_member = request
         .resolver_member
@@ -659,7 +656,7 @@ pub fn register(
         (None, None) => {}
     }
     // A newly granted non-root resolver cluster stays pending until delegation attaches it
-    // to an active parent. The first `/` resolver cluster below a dedicated controller has
+    // to an active parent. The first `/` resolver cluster below a dedicated CA has
     // no such ceremony: registration of its approved first member is what makes
     // the admin domain routable.
     let activate_root = cluster_id.is_some_and(|id| {
@@ -704,8 +701,8 @@ pub fn deregister(map: &mut AdminDomainMap, server_id: AdminServerId) -> Result<
 }
 
 pub fn remove(map: &mut AdminDomainMap, server_id: AdminServerId) -> Result<bool> {
-    if server_id == map.controller {
-        bail!("the active controller cannot be removed; replace and revoke it first");
+    if server_id == map.ca {
+        bail!("the active CA cannot be removed; replace and revoke it first");
     }
     let before = map.admin_servers.len();
     map.admin_servers.retain(|s| s.id != server_id);
@@ -806,7 +803,7 @@ mod tests {
 
     #[test]
     fn resolver_relocation_changes_only_the_owned_endpoint() {
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let peer = AdminServerId::new();
         let cluster = ResolverClusterId::new();
         let old = ResolverAddr {
@@ -814,8 +811,8 @@ mod tests {
             auth: InfoAuth::Tls { name: "resolver.example.com".into() },
         };
         let peer_addr = addr("10.0.0.2:4564");
-        let controller_entry = AdminServerEntry {
-            id: controller,
+        let ca_entry = AdminServerEntry {
+            id: ca,
             addr: "10.0.0.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
             resolver: Some(old.clone()),
@@ -832,8 +829,8 @@ mod tests {
         };
         let mut map = AdminDomainMap {
             version: 7,
-            controller,
-            admin_servers: vec![controller_entry.clone(), peer_entry.clone()],
+            ca,
+            admin_servers: vec![ca_entry.clone(), peer_entry.clone()],
             resolver_clusters: vec![ResolverClusterEntry {
                 id: cluster,
                 base: "/".into(),
@@ -845,13 +842,13 @@ mod tests {
         };
 
         let new_addr = "10.1.0.1:5564".parse().unwrap();
-        assert!(relocate_resolver(&mut map, controller, new_addr).unwrap());
+        assert!(relocate_resolver(&mut map, ca, new_addr).unwrap());
         assert_eq!(map.version, 8);
-        let moved = map.controller_entry().unwrap();
-        assert_eq!(moved.addr, controller_entry.addr);
-        assert_eq!(moved.roles, controller_entry.roles);
-        assert_eq!(moved.cluster, controller_entry.cluster);
-        assert_eq!(moved.state, controller_entry.state);
+        let moved = map.ca_entry().unwrap();
+        assert_eq!(moved.addr, ca_entry.addr);
+        assert_eq!(moved.roles, ca_entry.roles);
+        assert_eq!(moved.cluster, ca_entry.cluster);
+        assert_eq!(moved.state, ca_entry.state);
         assert_eq!(
             moved.resolver,
             Some(ResolverAddr { addr: new_addr, auth: old.auth.clone() })
@@ -864,23 +861,23 @@ mod tests {
             map.resolver_clusters[0].members,
             vec![peer_addr, ResolverAddr { addr: new_addr, auth: old.auth }]
         );
-        assert!(!relocate_resolver(&mut map, controller, new_addr).unwrap());
+        assert!(!relocate_resolver(&mut map, ca, new_addr).unwrap());
         assert_eq!(map.version, 8);
     }
 
     #[test]
     fn resolver_relocation_rejects_another_servers_endpoint() {
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let peer = AdminServerId::new();
         let cluster = ResolverClusterId::new();
         let old = addr("10.0.0.1:4564");
         let peer_addr = addr("10.0.0.2:4564");
         let mut map = AdminDomainMap {
             version: 3,
-            controller,
+            ca,
             admin_servers: vec![
                 AdminServerEntry {
-                    id: controller,
+                    id: ca,
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     roles: Role::Ca | Role::Resolver,
                     resolver: Some(old.clone()),
@@ -907,27 +904,27 @@ mod tests {
         };
         let before = map.clone();
 
-        assert!(relocate_resolver(&mut map, controller, peer_addr.addr).is_err());
+        assert!(relocate_resolver(&mut map, ca, peer_addr.addr).is_err());
         assert_eq!(map, before);
     }
 
     #[test]
-    fn permanent_removal_never_accepts_the_active_controller() {
-        let controller = AdminServerId::new();
-        let mut map = AdminDomainMap::empty(controller);
+    fn permanent_removal_never_accepts_the_active_ca() {
+        let ca = AdminServerId::new();
+        let mut map = AdminDomainMap::empty(ca);
         let before = map.clone();
-        let error = remove(&mut map, controller).unwrap_err().to_string();
-        assert!(error.contains("active controller"));
-        assert_eq!(map.controller, before.controller);
+        let error = remove(&mut map, ca).unwrap_err().to_string();
+        assert!(error.contains("active CA"));
+        assert_eq!(map.ca, before.ca);
         assert_eq!(map.version, before.version);
         assert_eq!(map.admin_servers.len(), before.admin_servers.len());
     }
 
     #[test]
     fn enrollment_registration_and_self_only_address_update() {
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = AdminDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(ca);
         let request = enrollment("/eu", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
         assert_eq!(map.admin_servers[0].state, ServerState::Enrolled);
@@ -957,10 +954,10 @@ mod tests {
     }
 
     #[test]
-    fn first_root_resolver_below_a_dedicated_controller_activates_on_registration() {
-        let controller = AdminServerId::new();
+    fn first_root_resolver_below_a_dedicated_ca_activates_on_registration() {
+        let ca = AdminServerId::new();
         let server = AdminServerId::new();
-        let mut map = AdminDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(ca);
         let request = enrollment("/", "10.0.0.10:4564");
         let cluster = enroll(&mut map, server, &request).unwrap();
         assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
@@ -984,12 +981,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_registration_preserves_delegated_children() {
-        let controller = AdminServerId::new();
+    fn ca_registration_preserves_delegated_children() {
+        let ca = AdminServerId::new();
         let root = ResolverClusterId::new();
         let child = ResolverClusterId::new();
-        let controller_entry = AdminServerEntry {
-            id: controller,
+        let ca_entry = AdminServerEntry {
+            id: ca,
             addr: "10.0.0.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
             resolver: Some(addr("10.0.0.1:4564")),
@@ -1007,8 +1004,8 @@ mod tests {
         };
         let mut map = AdminDomainMap {
             version: 1,
-            controller,
-            admin_servers: vec![controller_entry.clone()],
+            ca,
+            admin_servers: vec![ca_entry.clone()],
             resolver_clusters: vec![
                 ResolverClusterEntry {
                     id: root,
@@ -1029,19 +1026,19 @@ mod tests {
             ],
         };
 
-        assert!(!upsert_controller(&mut map, controller_entry, Some(facts)).unwrap());
+        assert!(!upsert_ca(&mut map, ca_entry, Some(facts)).unwrap());
         let root = map.resolver_clusters.iter().find(|c| c.id == root).unwrap();
         assert_eq!(root.children, vec![child]);
     }
 
     #[test]
-    fn controller_startup_does_not_undo_its_child_assignment() {
-        let controller = AdminServerId::new();
+    fn ca_startup_does_not_undo_its_child_assignment() {
+        let ca = AdminServerId::new();
         let root_server = AdminServerId::new();
         let root = ResolverClusterId::new();
         let child = ResolverClusterId::new();
-        let controller_entry = AdminServerEntry {
-            id: controller,
+        let ca_entry = AdminServerEntry {
+            id: ca,
             addr: "10.0.60.1:4565".parse().unwrap(),
             roles: Role::Ca | Role::Resolver,
             resolver: Some(addr("10.0.60.1:4564")),
@@ -1058,9 +1055,9 @@ mod tests {
         };
         let mut map = AdminDomainMap {
             version: 3,
-            controller,
+            ca,
             admin_servers: vec![
-                controller_entry.clone(),
+                ca_entry.clone(),
                 AdminServerEntry {
                     id: root_server,
                     addr: "10.0.0.1:4565".parse().unwrap(),
@@ -1083,7 +1080,7 @@ mod tests {
             ],
         };
         // The resolver file may still contain its pre-split peer topology
-        // until the controller fanout and manual rolling restart complete.
+        // until the CA fanout and manual rolling restart complete.
         let stale = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564"), addr("10.0.60.1:4564")],
             base: "/".into(),
@@ -1091,7 +1088,7 @@ mod tests {
             children: vec![],
         };
 
-        assert!(!upsert_controller(&mut map, controller_entry, Some(stale)).unwrap());
+        assert!(!upsert_ca(&mut map, ca_entry, Some(stale)).unwrap());
         assert_eq!(
             map.resolver_clusters.iter().find(|c| c.id == child),
             Some(&authoritative_child)
@@ -1101,11 +1098,11 @@ mod tests {
 
     #[test]
     fn stable_cluster_join_deregister_remove_and_reparent() {
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let first = AdminServerId::new();
         let second = AdminServerId::new();
         let parent_server = AdminServerId::new();
-        let mut map = AdminDomainMap::empty(controller);
+        let mut map = AdminDomainMap::empty(ca);
         let parent =
             enroll(&mut map, parent_server, &enrollment("/", "10.0.0.1:4564")).unwrap();
         map.resolver_clusters.iter_mut().find(|c| c.id == parent).unwrap().state =
@@ -1213,7 +1210,7 @@ mod tests {
         normalize_addrs(&mut members);
         let mut map = AdminDomainMap {
             version: 7,
-            controller: us1,
+            ca: us1,
             admin_servers,
             resolver_clusters: vec![ResolverClusterEntry {
                 id: root,
@@ -1264,15 +1261,15 @@ mod tests {
 
     #[test]
     fn split_requires_a_complete_disjoint_partition() {
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let second = AdminServerId::new();
         let third = AdminServerId::new();
         let cluster = ResolverClusterId::new();
         let mut map = AdminDomainMap {
             version: 0,
-            controller,
+            ca,
             admin_servers: [
-                (controller, "10.0.0.1:4565", "10.0.0.1:4564"),
+                (ca, "10.0.0.1:4565", "10.0.0.1:4564"),
                 (second, "10.0.0.2:4565", "10.0.0.2:4564"),
                 (third, "10.0.0.3:4565", "10.0.0.3:4564"),
             ]
@@ -1301,16 +1298,10 @@ mod tests {
         };
         let before = map.clone();
         assert!(
-            delegate(
-                &mut map,
-                "/ap",
-                ResolverClusterId::new(),
-                &[controller],
-                &[second],
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("assign every resolver server")
+            delegate(&mut map, "/ap", ResolverClusterId::new(), &[ca], &[second],)
+                .unwrap_err()
+                .to_string()
+                .contains("assign every resolver server")
         );
         assert_eq!(map, before);
         assert!(
@@ -1318,7 +1309,7 @@ mod tests {
                 &mut map,
                 "/ap",
                 ResolverClusterId::new(),
-                &[controller, second],
+                &[ca, second],
                 &[second, third],
             )
             .unwrap_err()

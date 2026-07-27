@@ -63,7 +63,7 @@ pub const DEFAULT_PORT: u16 = 4565;
 pub const SERVING_SAN: &str = "netidx-admin-server";
 
 pub const SERVER_ID_URI_PREFIX: &str = "urn:netidx:admin:server:";
-pub const CONTROLLER_ROLE_URI: &str = "urn:netidx:admin:role:controller";
+pub const CA_ROLE_URI: &str = "urn:netidx:admin:role:ca";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Pack,
@@ -198,7 +198,7 @@ pub struct ServerHello {
     /// What this host does — see [`Role`].
     pub roles: BitFlags<Role>,
     pub server_id: AdminServerId,
-    pub controller: bool,
+    pub ca: bool,
 }
 
 /// A secret string that never appears in `Debug` output and is zeroized
@@ -367,9 +367,9 @@ pub enum Request {
     /// Answered with [`RemoveServerResponse`].
     #[pack(tag(24))]
     RemoveServer(RemoveServerRequest),
-    /// Controller → node: read this resolver host's permissions file. This is
+    /// CA → node: read this resolver host's permissions file. This is
     /// an internal exact-target RPC; admin domain clients use [`Request::ReadPerms`]
-    /// so credentials are verified at the controller first. Answered with
+    /// so credentials are verified at the CA first. Answered with
     /// [`GetPermsResponse`].
     #[pack(tag(25))]
     GetPerms,
@@ -438,14 +438,14 @@ pub enum Request {
     /// [`Request::RotateRecovery`]. Answered with [`RotateAutorenewResponse`].
     #[pack(tag(35))]
     RotateAutorenew,
-    /// Controller → node: atomically install the home CA's freshly signed CRL
+    /// CA → node: atomically install the home CA's freshly signed CRL
     /// beside this node's admin and resolver trust bundles. The receiver
     /// verifies the CRL signature against its exact home CA before writing it.
     /// Answered with [`ApplyCrlResponse`].
     #[pack(tag(36))]
     ApplyCrl(ApplyCrlRequest),
-    /// Admin-authenticated, sent to the **controller**: read the permissions
-    /// of the active resolver cluster mounted at `target_path`. The controller
+    /// Admin-authenticated, sent to the **CA**: read the permissions
+    /// of the active resolver cluster mounted at `target_path`. The CA
     /// authorizes the scope and reads one exact CA-owned server identity via
     /// [`Request::GetPerms`]. Local-control callers are authorized by the
     /// protected socket and confined to this host's own level. Answered with
@@ -453,30 +453,30 @@ pub enum Request {
     #[pack(tag(37))]
     ReadPerms(ReadPermsRequest),
     /// Local-control-only: capture a point-in-time-consistent recovery bundle
-    /// from the running controller into `target`. The target path is interpreted
-    /// on the controller host and is never accepted over the network plane.
+    /// from the running CA into `target`. The target path is interpreted
+    /// on the CA host and is never accepted over the network plane.
     /// Answered with [`BackupResponse`].
     #[pack(tag(38))]
     Backup(BackupRequest),
-    /// Admin-authenticated controller maintenance: fan the controller's current
+    /// Admin-authenticated CA maintenance: fan the CA's current
     /// identity/address, authoritative map, and CRL out to every registered
     /// node. Idempotent; this is the explicit retry after a node missed startup
-    /// reconciliation. Answered with [`ReconcileControllerResponse`].
+    /// reconciliation. Answered with [`ReconcileCaResponse`].
     #[pack(tag(39))]
-    ReconcileController(ReconcileControllerRequest),
-    /// Controller → node: install a verified controller relocation and its
+    ReconcileCa(ReconcileCaRequest),
+    /// CA → node: install a verified CA relocation and its
     /// accompanying authoritative state. The TLS peer's exact home-CA-issued
-    /// controller identity is the authorization boundary. Answered with
-    /// [`ApplyControllerStateResponse`].
+    /// CA identity is the authorization boundary. Answered with
+    /// [`ApplyCaStateResponse`].
     #[pack(tag(40))]
-    ApplyControllerState(ApplyControllerStateRequest),
+    ApplyCaState(ApplyCaStateRequest),
     /// Local-control-only: emit a renewal CSR for an externally-signed
-    /// controller CA using the live in-process CA key. The key never leaves
-    /// the daemon and the controller remains online. Answered with
+    /// CA using the live in-process CA key. The key never leaves
+    /// the daemon and the CA remains online. Answered with
     /// [`ExternalCaCsrResponse`].
     #[pack(tag(41))]
     ExternalCaCsr,
-    /// Local-control-only: install a renewed externally-signed controller CA
+    /// Local-control-only: install a renewed externally-signed CA
     /// certificate. The daemon requires the same CA key and the already-pinned
     /// external issuer, then hot-reloads its serving chain. Answered with
     /// [`ExternalCaInstallResponse`].
@@ -491,7 +491,7 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct BackupRequest {
-    /// Absolute or caller-relative path on the controller host. The server
+    /// Absolute or caller-relative path on the CA host. The server
     /// refuses an existing target rather than overwriting backup material.
     pub target: String,
 }
@@ -508,7 +508,7 @@ pub enum RpcResult<T: 'static> {
 pub struct BackupOk {
     pub target: String,
     pub ca_fingerprint: String,
-    pub controller: AdminServerId,
+    pub ca: AdminServerId,
     pub map_version: u64,
     pub highest_serial: u64,
     pub files: u64,
@@ -551,7 +551,7 @@ pub struct CaStatus {
 pub type CaStatusResponse = RpcResult<CaStatus>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub struct ReconcileControllerRequest {
+pub struct ReconcileCaRequest {
     pub credential: AdminCredential,
 }
 
@@ -561,18 +561,18 @@ pub struct PropagationOk {
     pub peers: Vec<PeerResult>,
 }
 
-pub type ReconcileControllerResponse = RpcResult<PropagationOk>;
+pub type ReconcileCaResponse = RpcResult<PropagationOk>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub struct ApplyControllerStateRequest {
+pub struct ApplyCaStateRequest {
     pub operation_id: OperationId,
-    pub controller: AdminServerId,
+    pub ca: AdminServerId,
     pub addr: SocketAddr,
     pub map: AdminDomainMap,
     pub crl_pem: String,
 }
 
-pub type ApplyControllerStateResponse = RpcResult<()>;
+pub type ApplyCaStateResponse = RpcResult<()>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct LoginRequest {
@@ -613,7 +613,7 @@ pub struct RevokeOk {
     #[pack(default)]
     pub warnings: Vec<String>,
     /// The immediate CRL-distribution operation, when this response came
-    /// from a protocol-v6 controller.
+    /// from a protocol-v6 CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[pack(default)]
     pub operation_id: Option<OperationId>,
@@ -626,7 +626,7 @@ pub struct RevokeOk {
 
 pub type RevokeResponse = RpcResult<RevokeOk>;
 
-/// Controller → node immediate CRL distribution. The controller certificate
+/// CA → node immediate CRL distribution. The CA certificate
 /// is the authorization gate; the CRL itself is independently signature
 /// checked by the receiver before it replaces any local file.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -722,12 +722,12 @@ pub struct EnrollRequest {
     pub resolver_members: Vec<ResolverAddr>,
     pub cluster: ResolverClusterPlacement,
     /// Accepted only on the protected local control socket, for renewing the
-    /// already-installed controller identity across a key rotation.
+    /// already-installed CA identity across a key rotation.
     pub renew_identity: Option<AdminServerId>,
     /// Restore-time replacement of a failed satellite. On approval the CA
     /// atomically grants the fresh identity, removes this old identity, and
     /// revokes all of its live serving certificates. Never accepted for the
-    /// active controller.
+    /// active CA.
     #[serde(default)]
     #[pack(default)]
     pub replaces: Option<AdminServerId>,
@@ -989,7 +989,7 @@ pub struct DelegationEntry {
     pub proposed_path: String,
     pub parent_servers: Vec<AdminServerId>,
     pub child_servers: Vec<AdminServerId>,
-    /// Current/final resolver cluster IDs resolved by the controller for display.
+    /// Current/final resolver cluster IDs resolved by the CA for display.
     pub parent: ResolverClusterId,
     pub child: ResolverClusterId,
     pub parent_base: String,
@@ -1168,23 +1168,18 @@ pub struct AdminDomainMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
     /// this (via [`Request::GetMapVersion`]) before pulling the full map.
     pub version: u64,
-    pub controller: AdminServerId,
+    pub ca: AdminServerId,
     pub admin_servers: Vec<AdminServerEntry>,
     pub resolver_clusters: Vec<ResolverClusterEntry>,
 }
 
 impl AdminDomainMap {
-    pub fn empty(controller: AdminServerId) -> Self {
-        Self {
-            version: 0,
-            controller,
-            admin_servers: Vec::new(),
-            resolver_clusters: Vec::new(),
-        }
+    pub fn empty(ca: AdminServerId) -> Self {
+        Self { version: 0, ca, admin_servers: Vec::new(), resolver_clusters: Vec::new() }
     }
 
-    pub fn controller_entry(&self) -> Option<&AdminServerEntry> {
-        self.admin_servers.iter().find(|s| s.id == self.controller)
+    pub fn ca_entry(&self) -> Option<&AdminServerEntry> {
+        self.admin_servers.iter().find(|s| s.id == self.ca)
     }
 }
 
@@ -1250,7 +1245,7 @@ pub type RemoveServerResponse = RpcResult<RemoveServerOk>;
 /// This host's permissions file, serialized (a resolver `PMap` as JSON).
 pub type GetPermsResponse = RpcResult<String>;
 
-/// Admin → controller: read the permissions of the resolver cluster mounted exactly at
+/// Admin → ca: read the permissions of the resolver cluster mounted exactly at
 /// `target_path`.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ReadPermsRequest {
@@ -1619,21 +1614,19 @@ mod tests {
             target_path: "/eu".to_string(),
         }));
         assert_eq!(read_perms[1], 37);
-        let backup = encode(&Request::Backup(BackupRequest {
-            target: "/backup/controller".into(),
-        }));
+        let backup =
+            encode(&Request::Backup(BackupRequest { target: "/backup/CA".into() }));
         assert_eq!(backup[1], 38);
-        let reconcile =
-            encode(&Request::ReconcileController(ReconcileControllerRequest {
-                credential: AdminCredential::password("alice", "pw"),
-            }));
+        let reconcile = encode(&Request::ReconcileCa(ReconcileCaRequest {
+            credential: AdminCredential::password("alice", "pw"),
+        }));
         assert_eq!(reconcile[1], 39);
-        let controller = AdminServerId::new();
-        let apply = encode(&Request::ApplyControllerState(ApplyControllerStateRequest {
+        let ca = AdminServerId::new();
+        let apply = encode(&Request::ApplyCaState(ApplyCaStateRequest {
             operation_id: OperationId::new(),
-            controller,
+            ca,
             addr: "127.0.0.1:4565".parse().unwrap(),
-            map: AdminDomainMap::empty(controller),
+            map: AdminDomainMap::empty(ca),
             crl_pem: "crl".into(),
         }));
         assert_eq!(apply[1], 40);
@@ -1888,7 +1881,7 @@ mod tests {
             domain: "ryu-oh.org".to_string(),
             roles: Role::Ca | Role::Resolver | Role::IdMap,
             server_id: AdminServerId::new(),
-            controller: true,
+            ca: true,
         };
         write_msg(&mut a, &hello).await.unwrap();
         let got: ServerHello = read_msg(&mut b).await.unwrap();
@@ -1953,12 +1946,12 @@ mod tests {
         assert_eq!(got.addr, "10.0.0.2:4565".parse().unwrap());
         assert_eq!(got.resolver.unwrap().base, "/eu");
 
-        let controller = AdminServerId::new();
+        let ca = AdminServerId::new();
         let resp = GetMapResponse::Ok(AdminDomainMap {
             version: 7,
-            controller,
+            ca,
             admin_servers: vec![AdminServerEntry {
-                id: controller,
+                id: ca,
                 addr: "10.0.0.1:4565".parse().unwrap(),
                 roles: Role::Ca | Role::Resolver,
                 resolver: None,

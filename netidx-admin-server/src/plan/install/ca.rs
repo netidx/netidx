@@ -1,4 +1,4 @@
-//! First-class controller / certificate-authority role install.
+//! First-class CA / certificate-authority role install.
 
 use super::{DEFAULT_TLS_DOMAIN, InstallCommon, resolve_units_dir};
 
@@ -21,9 +21,9 @@ use std::{
     path::PathBuf,
 };
 
-/// Create the self-signed controller role used both by a dedicated controller
+/// Create the self-signed CA role used both by a dedicated CA
 /// install and by the first resolver when the roles are co-located.
-pub async fn create_self_signed_controller(
+pub async fn create_self_signed_ca(
     ans: &mut dyn Answerer,
     config_lock: &ConfigDirLock,
     domain: String,
@@ -51,7 +51,7 @@ pub async fn create_self_signed_controller(
 }
 
 #[derive(Debug, Clone)]
-pub struct ControllerInput {
+pub struct CaInput {
     pub domain: Option<String>,
     pub listen: Option<SocketAddr>,
     pub units_dir: Option<PathBuf>,
@@ -60,7 +60,7 @@ pub struct ControllerInput {
     pub common: InstallCommon,
 }
 
-impl ControllerInput {
+impl CaInput {
     pub fn defaults(common: InstallCommon) -> Self {
         Self {
             domain: None,
@@ -73,11 +73,11 @@ impl ControllerInput {
     }
 }
 
-/// Install a controller without a resolver role. Resolver installation calls
+/// Install a CA without a resolver role. Resolver installation calls
 /// the same CA-creation brain when co-locating the two roles.
-pub async fn run_controller(
+pub async fn run_ca(
     ans: &mut dyn Answerer,
-    input: ControllerInput,
+    input: CaInput,
 ) -> Result<Option<ServiceScope>> {
     let record_path = paths::user_install_record()?;
     if !input.common.mode.is_dry_run() && tokio::fs::try_exists(&record_path).await? {
@@ -86,9 +86,9 @@ pub async fn run_controller(
             .map(|r| r.role.as_str().to_string())
             .unwrap_or_else(|_| "existing".to_string());
         bail!(
-            "refusing to install a controller over the {existing} install recorded at {}; \
+            "refusing to install a ca over the {existing} install recorded at {}; \
              use a fresh dedicated machine, or let the first resolver compose the \
-             controller role during its own install",
+             ca role during its own install",
             record_path.display()
         );
     }
@@ -100,14 +100,14 @@ pub async fn run_controller(
     let external_sign =
         ans.confirm(Field::ExternalSign, input.external_sign, false).await?;
     ans.announce(
-        "Controller / Certificate Authority",
-        "This machine will be the admin domain's one active controller and \
+        "CA / Certificate Authority",
+        "This machine will be the admin domain's one active ca and \
          certificate authority. It does not need to run a resolver.",
     )
     .await?;
     if input.common.mode.is_dry_run() {
         ans.note(&format_compact!(
-            "would create the controller CA for domain {domain:?} at {}{}",
+            "would create the CA for domain {domain:?} at {}{}",
             paths::user_ca_dir()?.display(),
             if external_sign {
                 " and emit a subordinate-CA CSR for the external PKI"
@@ -138,7 +138,7 @@ pub async fn run_controller(
             .common
             .mode
             .config_lock()
-            .context("controller apply mode has no config-directory lock")?;
+            .context("CA apply mode has no config-directory lock")?;
         ca_setup::announce_founding_policy(ans, &domain);
         let mut opts = ca_setup::founding_ca_opts(
             paths::user_ca_dir()?,
@@ -150,11 +150,10 @@ pub async fn run_controller(
         );
         opts.listen = input.listen;
         ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
-        let record =
-            InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
+        let record = InstallRecord::new(InstallRole::Ca, "/", "admin-tls", None, None);
         record.save_default_async(config_lock).await?;
         ans.note(
-            "controller key and recovery material installed; the controller remains \
+            "ca key and recovery material installed; the ca remains \
              pending until the external PKI returns and you install its certificate",
         );
         return Ok(None);
@@ -163,8 +162,8 @@ pub async fn run_controller(
         .common
         .mode
         .config_lock()
-        .context("controller apply mode has no config-directory lock")?;
-    let (_ca, need, identity) = create_self_signed_controller(
+        .context("CA apply mode has no config-directory lock")?;
+    let (_ca, need, identity) = create_self_signed_ca(
         ans,
         config_lock,
         domain,
@@ -174,12 +173,12 @@ pub async fn run_controller(
         input.insecure_no_tpm,
     )
     .await?;
-    let cfg_path = paths::discover_admin_server_config_async().await.context(
-        "the controller CA was created but its admin-server config is missing",
-    )?;
+    let cfg_path = paths::discover_admin_server_config_async()
+        .await
+        .context("the CA was created but its admin-server config is missing")?;
     let cfg = crate::admin_server_config::load_async(&cfg_path).await?;
     InstallRecord::new(
-        InstallRole::Controller,
+        InstallRole::Ca,
         "/",
         "admin-tls",
         Some(identity),
@@ -204,8 +203,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guided_controller_install_asks_about_external_signing() {
-        let input = ControllerInput::defaults(InstallCommon {
+    fn guided_ca_install_asks_about_external_signing() {
+        let input = CaInput::defaults(InstallCommon {
             mode: crate::plan::install::InstallMode::DryRun,
             force: false,
             no_units: false,

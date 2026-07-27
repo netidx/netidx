@@ -608,7 +608,7 @@ pub(crate) fn set_parent_referral_on(
 }
 
 /// Whether the resolver already carries exactly this parent referral. Address
-/// order is not significant: controller topology fanout canonicalizes it, but
+/// order is not significant: CA topology fanout canonicalizes it, but
 /// hand-written netidx configuration does not have to.
 pub fn parent_referral_matches(
     resolver_config_path: &Path,

@@ -4,12 +4,12 @@ use enumflags2::BitFlags;
 use std::time::Duration;
 
 #[test]
-fn controller_identity_is_renewal_only_and_preserved() {
-    let controller = admin_proto::AdminServerId::new();
-    let map = AdminDomainMap::empty(controller);
-    let identity = enrollment_cert_identity(true, Some(controller), Some(&map)).unwrap();
-    assert_eq!(identity.server_id, controller);
-    assert!(identity.controller);
+fn ca_identity_is_renewal_only_and_preserved() {
+    let ca = admin_proto::AdminServerId::new();
+    let map = AdminDomainMap::empty(ca);
+    let identity = enrollment_cert_identity(true, Some(ca), Some(&map)).unwrap();
+    assert_eq!(identity.server_id, ca);
+    assert!(identity.ca);
     assert!(enrollment_cert_identity(true, None, Some(&map)).is_err());
     assert!(
         enrollment_cert_identity(
@@ -19,18 +19,17 @@ fn controller_identity_is_renewal_only_and_preserved() {
         )
         .is_err()
     );
-    let satellite =
-        enrollment_cert_identity(false, Some(controller), Some(&map)).unwrap();
-    assert!(!satellite.controller);
-    assert_ne!(satellite.server_id, controller);
+    let satellite = enrollment_cert_identity(false, Some(ca), Some(&map)).unwrap();
+    assert!(!satellite.ca);
+    assert_ne!(satellite.server_id, ca);
 }
 
 #[test]
 fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
-    let controller = admin_proto::AdminServerId::new();
+    let ca = admin_proto::AdminServerId::new();
     let old = admin_proto::AdminServerId::new();
     let fresh = admin_proto::AdminServerId::new();
-    let mut map = AdminDomainMap::empty(controller);
+    let mut map = AdminDomainMap::empty(ca);
     let member = ResolverAddr {
         addr: "10.0.0.10:4564".parse().unwrap(),
         auth: InfoAuth::Anonymous,
@@ -52,7 +51,7 @@ fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
     assert!(map.admin_servers.iter().any(|server| server.id == fresh));
     assert!(map.resolver_clusters.iter().any(|entry| entry.id == cluster));
 
-    replacement.replaces = Some(controller);
+    replacement.replaces = Some(ca);
     assert!(
         stage_enrollment(&mut map, admin_proto::AdminServerId::new(), &replacement,)
             .is_err()

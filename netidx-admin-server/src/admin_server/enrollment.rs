@@ -169,8 +169,8 @@ pub(super) fn stage_enrollment(
     enrollment: &admin_proto::EnrollmentRequest,
 ) -> Result<admin_proto::ResolverClusterId> {
     let replaced_cluster = match enrollment.replaces {
-        Some(old) if old == map.controller => {
-            bail!("the active controller cannot be replaced by satellite enrollment")
+        Some(old) if old == map.ca => {
+            bail!("the active CA cannot be replaced by satellite enrollment")
         }
         Some(old) => Some(
             map.admin_servers
@@ -211,10 +211,10 @@ pub(super) fn authorize_enrollment(
     map: Option<&AdminDomainMap>,
 ) -> std::result::Result<(), String> {
     if enrollment.roles.contains(Role::Ca) {
-        return Err("an enrollee may never request the Ca role".to_string());
+        return Err("an enrollee may never request the CA role".to_string());
     }
     if !enrollment.roles.contains(Role::Resolver) {
-        return Err("every non-controller enrollment must include Resolver".to_string());
+        return Err("every non-ca enrollment must include Resolver".to_string());
     }
     if signing_slot(authd) {
         return Ok(());
@@ -266,18 +266,19 @@ fn enrollment_cert_identity(
     if !local {
         return Ok(crate::tls::AdminCertIdentity {
             server_id: admin_proto::AdminServerId::new(),
-            controller: false,
+            ca: false,
         });
     }
     let server_id = renew_identity.ok_or_else(|| {
-        "local controller enrollment is renewal-only and requires its existing identity"
+        "local CA enrollment is renewal-only and requires its existing identity"
             .to_string()
     })?;
-    if map.is_none_or(|map| map.controller != server_id) {
-        return Err("the requested local renewal identity is not the active controller"
-            .to_string());
+    if map.is_none_or(|map| map.ca != server_id) {
+        return Err(
+            "the requested local renewal identity is not the active CA".to_string()
+        );
     }
-    Ok(crate::tls::AdminCertIdentity { server_id, controller: true })
+    Ok(crate::tls::AdminCertIdentity { server_id, ca: true })
 }
 
 async fn try_enroll(

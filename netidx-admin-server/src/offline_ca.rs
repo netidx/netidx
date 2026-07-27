@@ -371,7 +371,7 @@ pub async fn open_ca(
     }
 }
 
-/// [`open_ca`] at the conventional `${basedir}/ca/` location.
+/// [`open_ca`] at the conventional `${basedir}/CA/` location.
 pub async fn open_default_ca(
     ans: &mut dyn Answerer,
     config_lock: &ConfigDirLock,

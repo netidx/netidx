@@ -3,7 +3,7 @@ use crate::admin_proto::{AdminServerEntry, Role};
 
 #[test]
 fn service_control_routing_uses_identity_across_address_reuse() {
-    let controller = admin_proto::AdminServerId::new();
+    let ca = admin_proto::AdminServerId::new();
     let selected = admin_proto::AdminServerId::new();
     let replacement = admin_proto::AdminServerId::new();
     let old_addr = "10.0.0.10:4565".parse().unwrap();
@@ -16,7 +16,7 @@ fn service_control_routing_uses_identity_across_address_reuse() {
         cluster: None,
         state: admin_proto::ServerState::Registered,
     };
-    let mut map = AdminDomainMap::empty(controller);
+    let mut map = AdminDomainMap::empty(ca);
     // The selected identity moved, and a different identity reused its old
     // address. Routing by address would now hit `replacement`.
     map.admin_servers.push(entry(selected, new_addr));

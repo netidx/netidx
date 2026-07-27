@@ -99,7 +99,7 @@ pub enum Field {
     ResolverName,
     /// Whether to set up an admin server (admin-plane CA) for this admin domain.
     SetupAdminServer,
-    /// Whether the controller CA certificate is signed by an external PKI.
+    /// Whether the CA certificate is signed by an external PKI.
     ExternalSign,
     /// The IP the admin server on this host listens on.
     AdminServerListenIp,
@@ -151,18 +151,18 @@ pub enum Field {
     SignedCert,
     /// Path to an external PKI's root certificate (external-CA install).
     ExternalRoot,
-    /// New directory the local controller creates for a consistent backup.
+    /// New directory the local CA creates for a consistent backup.
     BackupTarget,
     /// Existing installation bundle selected for restore.
     RestoreSource,
-    /// Replacement controller admin address during restore.
+    /// Replacement CA admin address during restore.
     RestoreAdminListen,
     /// Replacement advertised endpoint for a co-located resolver.
     RestoreResolverListen,
     /// Replacement local bind IP for a co-located resolver.
     RestoreResolverBind,
-    /// Explicit split-brain fence attestation before controller restore.
-    FenceOldController,
+    /// Explicit split-brain fence attestation before CA restore.
+    FenceOldCa,
 }
 
 /// The presentation descriptor for a [`Field`]: what flag a script passes,
@@ -271,7 +271,7 @@ impl Field {
                 label: "choose an admin domain",
                 help: "Create a new admin domain and certificate \
                        authority on this machine, or enroll under an existing \
-                       controller / CA. Choose the existing controller when \
+                       ca / CA. Choose the existing ca when \
                        adding the first resolver below a dedicated CA host.",
             },
             Membership => FieldInfo {
@@ -395,9 +395,9 @@ impl Field {
             ExternalSign => FieldInfo {
                 flag: "--external-sign",
                 label: "use an external root CA?",
-                help: "Generate the controller CA key and a subordinate-CA CSR, then \
+                help: "Generate the CA key and a subordinate-CA CSR, then \
                        wait for your external PKI or hardware root to sign it. The \
-                       controller starts after the signed certificate is installed.",
+                       ca starts after the signed certificate is installed.",
             },
             AdminServerListenIp => FieldInfo {
                 flag: "--listen",
@@ -548,7 +548,7 @@ impl Field {
             BackupTarget => FieldInfo {
                 flag: "--target",
                 label: "backup target directory",
-                help: "A new directory on this controller for the recovery bundle. \
+                help: "A new directory on this ca for the recovery bundle. \
                        Existing paths are never overwritten.",
             },
             RestoreSource => FieldInfo {
@@ -559,8 +559,8 @@ impl Field {
             },
             RestoreAdminListen => FieldInfo {
                 flag: "--listen",
-                label: "restored controller address",
-                help: "The routable address and port this replacement controller \
+                label: "restored CA address",
+                help: "The routable address and port this replacement ca \
                        will use. The IP defaults from this host's interfaces and the \
                        port comes from the backup.",
             },
@@ -568,7 +568,7 @@ impl Field {
                 flag: "--resolver-listen",
                 label: "restored resolver address",
                 help: "The advertised address and port of the resolver co-located \
-                       with this controller. The IP defaults from this host's interfaces \
+                       with this ca. The IP defaults from this host's interfaces \
                        and the port comes from the backup. This updates the resolver \
                        config, local client config, and CA-owned admin domain map together.",
             },
@@ -579,11 +579,11 @@ impl Field {
                        matches the advertised resolver IP; use a private interface IP \
                        here when the advertised address is behind NAT.",
             },
-            FenceOldController => FieldInfo {
-                flag: "--old-controller-fenced",
-                label: "old controller is fenced",
-                help: "Confirm that the old controller cannot run. Two machines using \
-                       the same controller identity would violate the admin plane's \
+            FenceOldCa => FieldInfo {
+                flag: "--old-ca-fenced",
+                label: "old CA is fenced",
+                help: "Confirm that the old ca cannot run. Two machines using \
+                       the same ca identity would violate the admin plane's \
                        single-writer security boundary.",
             },
         }

@@ -23,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Existing resolver members selected to remain on the parent side of a
 /// split. The addresses are only UI input; immutable server IDs are resolved
-/// from a controller-verified map before the request is created.
+/// from a ca-verified map before the request is created.
 #[derive(Debug, Clone)]
 pub struct DelegationSelection {
     pub parent_resolvers: Vec<SocketAddr>,
@@ -133,7 +133,7 @@ pub fn info_to_referral_auth(a: &InfoAuth) -> ReferralAuth {
 /// glyph-confirm its CA (unless `confirmed` carries an identity the caller
 /// already confirmed — the install probe confirms the parent up front, so we
 /// don't ask twice), resolve the selected resolver addresses to stable IDs in
-/// the controller map, queue the server-set proposal, show its request code,
+/// the CA map, queue the server-set proposal, show its request code,
 /// and poll until the parent admin approves (or denies / expires). Returns the parent resolver cluster's resolver
 /// address(es) for the child's `parent` referral.
 pub async fn delegate_under_parent(
@@ -300,7 +300,7 @@ mod tests {
         ];
         let map = AdminDomainMap {
             version: 1,
-            controller: us1,
+            ca: us1,
             resolver_clusters: vec![ResolverClusterEntry {
                 id: root,
                 base: "/".into(),
@@ -343,7 +343,7 @@ mod tests {
         ];
         let map = AdminDomainMap {
             version: 1,
-            controller: us1,
+            ca: us1,
             resolver_clusters: vec![
                 ResolverClusterEntry {
                     id: root,

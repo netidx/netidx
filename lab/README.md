@@ -111,7 +111,7 @@ teardown.
    repo to devbox .14, `cargo build -p netidx-tools --bin netidx`, strips, scps
    to each `/usr/local/bin/netidx`. (`scripts/build2.sh` / `build-fixed.sh` are
    convenience wrappers for specific host sets.)
-3. Bootstrap the CA/controller and first resolver on .11 with `netidx admin
+3. Bootstrap the CA and first resolver on .11 with `netidx admin
    resolver install --with-admin-server --insecure-no-tpm ...`. The recovery
    password is **printed once** — capture it.
 4. Enroll the rest with the strict `netidx admin ... install` commands or the
@@ -135,8 +135,8 @@ netidx admin ca remove-server <exact-server-uuid> \
 ```
 
 The TUI exposes the same operation under **Admin Domain → Admin Servers**: select a
-non-controller row and press `x`. It shows the UUID, last address, resolver cluster, and
-an irreversible confirmation. The active controller is visible but protected.
+non-CA row and press `x`. It shows the UUID, last address, resolver cluster, and
+an irreversible confirmation. The active CA is visible but protected.
 
 Removal revokes every live serving certificate for the UUID, deletes its
 enrollment grant, updates the CA-owned map, and pushes the resulting referral
@@ -149,7 +149,7 @@ same removal UUID is the idempotent manual reconciliation path.
 ## Daemon start commands
 
 ```sh
-# admin server (CA controller on .11, :4565), foreground:
+# admin server (CA on .11, :4565), foreground:
 netidx admin component server run -c /root/.config/netidx/admin-server.json -f
 # resolver member (:4564), --id selects the resolver cluster member index:
 netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f

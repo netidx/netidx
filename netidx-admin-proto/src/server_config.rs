@@ -102,10 +102,10 @@ impl AdminServerConfig {
                 cert_id.server_id
             );
         }
-        if cert_id.controller != self.roles.ca.is_some() {
+        if cert_id.ca != self.roles.ca.is_some() {
             bail!(
-                "serving certificate controller marker ({}) does not match CA role ({})",
-                cert_id.controller,
+                "serving certificate CA marker ({}) does not match CA role ({})",
+                cert_id.ca,
                 self.roles.ca.is_some()
             );
         }

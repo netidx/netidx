@@ -95,7 +95,7 @@ pub fn user_tls_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
-/// `${dirs::config_dir}/netidx/ca/`. No existence check.
+/// `${dirs::config_dir}/netidx/CA/`. No existence check.
 ///
 /// There is one CA per netidx install. Operators who genuinely want
 /// multiple CAs on the same machine (rare — most users want a single
@@ -106,7 +106,7 @@ pub fn user_ca_dir() -> Result<PathBuf> {
         anyhow!("user config dir could not be determined for this platform")
     })?;
     p.push("netidx");
-    p.push("ca");
+    p.push("CA");
     Ok(p)
 }
 

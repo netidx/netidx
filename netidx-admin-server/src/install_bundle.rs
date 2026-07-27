@@ -1,9 +1,9 @@
 //! Portable backups of a complete `netidx admin` managed installation.
 //!
 //! The bundle stores configuration and activation intent, never live process
-//! state or a private key sealed to the source machine.  A controller's
-//! point-in-time CA snapshot is embedded as `controller/`; that inner bundle
-//! remains CA-signed and is produced by the running controller under its
+//! state or a private key sealed to the source machine.  A CA's
+//! point-in-time CA snapshot is embedded as `ca/`; that inner bundle
+//! remains CA-signed and is produced by the running CA under its
 //! mutation barrier.
 
 use crate::{
@@ -23,7 +23,7 @@ use std::{
 
 pub const FORMAT_VERSION: u32 = 2;
 pub const MANIFEST_FILE: &str = "manifest.json";
-pub const CONTROLLER_DIR: &str = "controller";
+pub const CA_DIR: &str = "CA";
 const FILES_DIR: &str = "files";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub enum BundleScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Component {
-    Controller,
+    Ca,
     Workstation,
     Resolver,
     Publisher,
@@ -72,7 +72,7 @@ impl IdentityKind {
 
 /// A machine credential deliberately absent from the payload.  The public
 /// certificate is retained both to recover the requested name and to make the
-/// restore plan inspectable before it contacts the controller.
+/// restore plan inspectable before it contacts the CA.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityRecipe {
     pub kind: IdentityKind,
@@ -90,7 +90,7 @@ pub struct ManifestFile {
     pub sha256: String,
 }
 
-/// The resolver endpoint owned by a co-located controller, including the
+/// The resolver endpoint owned by a co-located CA, including the
 /// actual local bind IP when the advertised address is behind NAT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolverEndpoint {
@@ -117,12 +117,12 @@ pub struct Manifest {
     pub components: Vec<Component>,
     pub service: Option<ServiceIntent>,
     pub identities: Vec<IdentityRecipe>,
-    pub controller_bundle: bool,
+    pub ca_bundle: bool,
     /// Previous admin-server listen address. Satellite restore uses it as the
-    /// proposed address in the new enrollment grant; controller restore uses
+    /// proposed address in the new enrollment grant; CA restore uses
     /// it unless the operator supplies a replacement address.
     pub admin_listen: Option<SocketAddr>,
-    /// Co-located controller resolver endpoint, when the CA-owned map has one.
+    /// Co-located CA resolver endpoint, when the CA-owned map has one.
     pub resolver_endpoint: Option<ResolverEndpoint>,
     pub previous_admin_server: Option<netidx_admin_proto::AdminServerId>,
     pub files: Vec<ManifestFile>,
@@ -316,7 +316,7 @@ pub fn identity_recipes(root: &Path, role: InstallRole) -> Result<Vec<IdentityRe
             let kind = match role {
                 InstallRole::Workstation => IdentityKind::Workstation,
                 InstallRole::Publisher => IdentityKind::Publisher,
-                InstallRole::Controller | InstallRole::Resolver => IdentityKind::Client,
+                InstallRole::Ca | InstallRole::Resolver => IdentityKind::Client,
             };
             for (_, id) in tls.identities {
                 push_identity(
@@ -371,13 +371,13 @@ pub fn identity_recipes(root: &Path, role: InstallRole) -> Result<Vec<IdentityRe
 fn components(root: &Path, role: InstallRole) -> Vec<Component> {
     let mut out = Vec::new();
     match role {
-        InstallRole::Controller => out.push(Component::Controller),
+        InstallRole::Ca => out.push(Component::Ca),
         InstallRole::Workstation => out.push(Component::Workstation),
         InstallRole::Resolver => out.push(Component::Resolver),
         InstallRole::Publisher => out.push(Component::Publisher),
     }
     for component in [
-        root.join("ca").is_dir().then_some(Component::Controller),
+        root.join("CA").is_dir().then_some(Component::Ca),
         root.join("resolver.json").is_file().then_some(Component::Resolver),
         root.join("id-map.json").is_file().then_some(Component::IdMap),
     ]
@@ -410,7 +410,7 @@ fn capture_tree(
         if entry.file_name().to_string_lossy().starts_with(".tmp") {
             continue;
         }
-        if relative.components().next() == Some(PathComponent::Normal("ca".as_ref())) {
+        if relative.components().next() == Some(PathComponent::Normal("CA".as_ref())) {
             continue;
         }
         if meta.is_dir() {
@@ -431,7 +431,7 @@ fn capture_tree(
                 mode: file_mode(&meta),
             });
         } else if path.extension().is_some_and(|extension| extension == "sock") {
-            // Local-auth and protected controller sockets are runtime state.
+            // Local-auth and protected CA sockets are runtime state.
             // They commonly live beside their config and may be active during
             // an online backup; recreating them is the daemon's job.
             continue;
@@ -460,15 +460,12 @@ fn flatten_resolver_permissions(root: &Path, captured: &mut [Captured]) -> Resul
 }
 
 #[cfg(unix)]
-fn overlay_controller_roles(
-    controller: &Path,
-    captured: &mut Vec<Captured>,
-) -> Result<()> {
-    crate::backup::verify(controller).context("verifying embedded controller backup")?;
+fn overlay_ca_roles(ca: &Path, captured: &mut Vec<Captured>) -> Result<()> {
+    crate::backup::verify(ca).context("verifying embedded CA backup")?;
     for (source, destination) in
         [("roles/resolver.json", "resolver.json"), ("roles/id-map.json", "id-map.json")]
     {
-        let source = controller.join(source);
+        let source = ca.join(source);
         if !source.is_file() {
             continue;
         }
@@ -490,24 +487,22 @@ fn overlay_controller_roles(
 }
 
 #[cfg(unix)]
-fn controller_resolver_endpoint(
-    controller: &Path,
+fn ca_resolver_endpoint(
+    ca: &Path,
     resolver_config: Option<&[u8]>,
 ) -> Result<Option<ResolverEndpoint>> {
-    let inner = crate::backup::verify(controller)
-        .context("verifying embedded controller backup")?;
+    let inner = crate::backup::verify(ca).context("verifying embedded CA backup")?;
     let map: netidx_admin_proto::AdminDomainMap =
-        serde_json::from_slice(&fs::read(controller.join("ca/admin-domain.json"))?)
-            .context("parsing the controller backup's authoritative admin domain map")?;
-    if map.controller != inner.controller {
-        bail!("embedded controller map identity does not match its signed manifest");
+        serde_json::from_slice(&fs::read(ca.join("CA/admin-domain.json"))?)
+            .context("parsing the CA backup's authoritative admin domain map")?;
+    if map.ca != inner.ca {
+        bail!("embedded CA map identity does not match its signed manifest");
     }
-    let Some(owned) = map.controller_entry().and_then(|server| server.resolver.as_ref())
-    else {
+    let Some(owned) = map.ca_entry().and_then(|server| server.resolver.as_ref()) else {
         return Ok(None);
     };
     let bytes = resolver_config.context(
-        "the controller map owns a resolver endpoint but the backup has no resolver config",
+        "the CA map owns a resolver endpoint but the backup has no resolver config",
     )?;
     let config: netidx::resolver_server::config::file::Config =
         serde_json::from_slice(bytes).context("parsing the backed-up resolver config")?;
@@ -515,13 +510,13 @@ fn controller_resolver_endpoint(
         config.member_servers.iter().filter(|member| member.addr == owned.addr);
     let member = matching.next().with_context(|| {
         format!(
-            "the controller's owned resolver endpoint {} is absent from resolver.json",
+            "the CA's owned resolver endpoint {} is absent from resolver.json",
             owned.addr,
         )
     })?;
     if matching.next().is_some() {
         bail!(
-            "the controller's owned resolver endpoint {} appears more than once in resolver.json",
+            "the CA's owned resolver endpoint {} appears more than once in resolver.json",
             owned.addr,
         );
     }
@@ -529,14 +524,14 @@ fn controller_resolver_endpoint(
 }
 
 #[cfg(unix)]
-fn copy_controller_bundle(source: &Path, dest: &Path) -> Result<()> {
+fn copy_ca_bundle(source: &Path, dest: &Path) -> Result<()> {
     fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
         fs::create_dir_all(dest)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             let meta = fs::symlink_metadata(entry.path())?;
             if meta.file_type().is_symlink() {
-                bail!("refusing symlink in controller bundle");
+                bail!("refusing symlink in CA bundle");
             }
             let target = dest.join(entry.file_name());
             if meta.is_dir() {
@@ -548,7 +543,7 @@ fn copy_controller_bundle(source: &Path, dest: &Path) -> Result<()> {
                     file_mode(&meta),
                 )?;
             } else {
-                bail!("refusing special file in controller bundle");
+                bail!("refusing special file in CA bundle");
             }
         }
         Ok(())
@@ -556,14 +551,14 @@ fn copy_controller_bundle(source: &Path, dest: &Path) -> Result<()> {
     copy_dir(source, dest)
 }
 
-/// Create a portable installation bundle. `controller_bundle`, when present,
+/// Create a portable installation bundle. `ca_bundle`, when present,
 /// must already have been captured through the protected local RPC.
 pub fn create(
     root: &Path,
     install: InstallRecord,
     config_scope: BundleScope,
     service: Option<ServiceIntent>,
-    controller_bundle: Option<&Path>,
+    ca_bundle: Option<&Path>,
     target: &Path,
 ) -> Result<BackupOutcome> {
     if !target.is_absolute() {
@@ -612,7 +607,7 @@ pub fn create(
     #[cfg(not(unix))]
     let previous_admin_server = None;
     let mut identities = all_identities.clone();
-    if controller_bundle.is_some() {
+    if ca_bundle.is_some() {
         identities.retain(|identity| identity.kind != IdentityKind::AdminServer);
     }
     let mut omitted = all_identities
@@ -622,12 +617,12 @@ pub fn create(
             [key.clone(), crate::tls::sealed_sidecar(&key)]
         })
         .collect::<BTreeSet<_>>();
-    // The signed inner controller bundle owns this file and rewrites its
+    // The signed inner CA bundle owns this file and rewrites its
     // machine-bound serving paths during recovery.
-    if controller_bundle.is_some() {
+    if ca_bundle.is_some() {
         omitted.insert(root.join("admin-server.json"));
         // The signed inner recovery engine materializes these portable role
-        // copies while rebinding a controller. The outer bundle already
+        // copies while rebinding a CA. The outer bundle already
         // overlays the live resolver/id-map configs from its new inner
         // snapshot, so carrying old scratch copies makes a later restore
         // collide with the inner engine's own destinations.
@@ -637,13 +632,13 @@ pub fn create(
     let mut captured = Vec::new();
     capture_tree(&root, &root, &omitted, &mut captured)?;
     flatten_resolver_permissions(&root, &mut captured)?;
-    if let Some(controller) = controller_bundle {
+    if let Some(ca) = ca_bundle {
         #[cfg(unix)]
-        overlay_controller_roles(controller, &mut captured)?;
+        overlay_ca_roles(ca, &mut captured)?;
         #[cfg(not(unix))]
         {
-            let _ = controller;
-            bail!("controller backup is supported only on unix");
+            let _ = ca;
+            bail!("CA backup is supported only on unix");
         }
     }
     captured.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -660,16 +655,14 @@ pub fn create(
         .collect::<Result<Vec<_>>>()?;
     let components = components(&root, install.role);
     #[cfg(unix)]
-    let resolver_endpoint = match controller_bundle {
-        Some(controller) if components.contains(&Component::Resolver) => {
-            controller_resolver_endpoint(
-                controller,
-                captured
-                    .iter()
-                    .find(|file| file.relative == Path::new("resolver.json"))
-                    .map(|file| file.bytes.as_slice()),
-            )?
-        }
+    let resolver_endpoint = match ca_bundle {
+        Some(ca) if components.contains(&Component::Resolver) => ca_resolver_endpoint(
+            ca,
+            captured
+                .iter()
+                .find(|file| file.relative == Path::new("resolver.json"))
+                .map(|file| file.bytes.as_slice()),
+        )?,
         _ => None,
     };
     #[cfg(not(unix))]
@@ -683,7 +676,7 @@ pub fn create(
         components: components.clone(),
         service,
         identities: identities.clone(),
-        controller_bundle: controller_bundle.is_some(),
+        ca_bundle: ca_bundle.is_some(),
         admin_listen,
         resolver_endpoint,
         previous_admin_server,
@@ -703,17 +696,16 @@ pub fn create(
             file.mode,
         )?;
     }
-    if let Some(controller) = controller_bundle {
+    if let Some(ca) = ca_bundle {
         #[cfg(unix)]
         {
-            crate::backup::verify(controller)
-                .context("verifying embedded controller backup")?;
-            copy_controller_bundle(controller, &stage.path().join(CONTROLLER_DIR))?;
+            crate::backup::verify(ca).context("verifying embedded CA backup")?;
+            copy_ca_bundle(ca, &stage.path().join(CA_DIR))?;
         }
         #[cfg(not(unix))]
         {
-            let _ = controller;
-            bail!("controller backup is supported only on unix");
+            let _ = ca;
+            bail!("CA backup is supported only on unix");
         }
     }
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -794,11 +786,11 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
             );
         }
     }
-    if manifest.controller_bundle {
+    if manifest.ca_bundle {
         #[cfg(unix)]
         {
-            crate::backup::verify(&bundle.join(CONTROLLER_DIR))
-                .context("verifying embedded controller recovery bundle")?;
+            crate::backup::verify(&bundle.join(CA_DIR))
+                .context("verifying embedded CA recovery bundle")?;
             let outer_resolver = manifest
                 .files
                 .iter()
@@ -806,43 +798,39 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
                 .map(|file| fs::read(bundle.join(FILES_DIR).join(&file.path)))
                 .transpose()?;
             let inner_resolver =
-                match fs::read(bundle.join(CONTROLLER_DIR).join("roles/resolver.json")) {
+                match fs::read(bundle.join(CA_DIR).join("roles/resolver.json")) {
                     Ok(bytes) => Some(bytes),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => return Err(error.into()),
                 };
             if outer_resolver != inner_resolver {
                 bail!(
-                    "the resolver config in the install bundle does not match the signed controller snapshot"
+                    "the resolver config in the install bundle does not match the signed CA snapshot"
                 );
             }
-            let endpoint = controller_resolver_endpoint(
-                &bundle.join(CONTROLLER_DIR),
-                inner_resolver.as_deref(),
-            )?;
+            let endpoint =
+                ca_resolver_endpoint(&bundle.join(CA_DIR), inner_resolver.as_deref())?;
             if endpoint != manifest.resolver_endpoint {
                 bail!(
-                    "the resolver endpoint in the install manifest does not match the signed controller snapshot"
+                    "the resolver endpoint in the install manifest does not match the signed CA snapshot"
                 );
             }
         }
         #[cfg(not(unix))]
-        bail!("controller restore is supported only on unix");
+        bail!("CA restore is supported only on unix");
     } else if manifest.resolver_endpoint.is_some() {
-        bail!(
-            "a backup without a controller may not claim a controller resolver endpoint"
-        );
+        bail!("a backup without a CA may not claim a CA resolver endpoint");
     }
     Ok(manifest)
 }
 
 /// Whether a previous restore attempt has already completed the irreversible
-/// controller-rebinding phase. This is the resume discriminator between the
+/// ca-rebinding phase. This is the resume discriminator between the
 /// pristine inner snapshot (whose old machine key is absent) and a fully
-/// rebound controller that must not be recovered a second time.
+/// rebound CA that must not be recovered a second time.
 #[cfg(unix)]
-pub fn controller_recovered(bundle: &Path, config: &Path) -> Result<bool> {
-    let inner_dir = bundle.join(CONTROLLER_DIR);
+pub fn ca_recovered(bundle: &Path, config: &Path) -> Result<bool> {
+    let inner_dir = bundle.join(CA_DIR);
     let inner = crate::backup::verify(&inner_dir)?;
     let config_parent =
         config.parent().context("restored admin-server config has no parent")?;
@@ -850,7 +838,7 @@ pub fn controller_recovered(bundle: &Path, config: &Path) -> Result<bool> {
         Ok(cfg) => cfg,
         Err(_) => return Ok(false),
     };
-    if cfg.server_id != inner.controller
+    if cfg.server_id != inner.ca
         || cfg.home_ca_fingerprint != inner.ca_fingerprint
         || !cfg.serving_key.is_file()
     {
@@ -871,18 +859,14 @@ pub fn controller_recovered(bundle: &Path, config: &Path) -> Result<bool> {
     Ok(autorenew.is_some_and(|path| path.is_file()))
 }
 
-/// The inner controller snapshot is present but has not yet been rebound. An
+/// The inner CA snapshot is present but has not yet been rebound. An
 /// external-CA restore may legitimately replace only `certificate.pem` and
 /// `trusted.pem` (with the same CA key) before machine credential generation;
 /// recognize that retryable intermediate state without accepting arbitrary
 /// divergence in the vault, map, issuance records, or admin config.
 #[cfg(unix)]
-pub fn controller_snapshot_prepared(
-    bundle: &Path,
-    ca_dir: &Path,
-    config: &Path,
-) -> Result<bool> {
-    let inner_dir = bundle.join(CONTROLLER_DIR);
+pub fn ca_snapshot_prepared(bundle: &Path, ca_dir: &Path, config: &Path) -> Result<bool> {
+    let inner_dir = bundle.join(CA_DIR);
     let inner = crate::backup::verify(&inner_dir)?;
     let cfg: crate::admin_server_config::AdminServerConfig =
         match crate::admin_server_config::load_for_recovery(config) {
@@ -898,7 +882,7 @@ pub fn controller_snapshot_prepared(
     if let Some(role) = expected.roles.id_map.as_mut() {
         role.map = config_parent.join("recovered-id-map.json");
     }
-    if cfg.server_id != inner.controller
+    if cfg.server_id != inner.ca
         || cfg.home_ca_fingerprint != inner.ca_fingerprint
         || serde_json::to_vec_pretty(&cfg)? != serde_json::to_vec_pretty(&expected)?
     {
@@ -913,8 +897,8 @@ pub fn controller_snapshot_prepared(
     {
         return Ok(false);
     }
-    for file in inner.files.iter().filter(|file| file.path.starts_with("ca/")) {
-        let relative = Path::new(&file.path).strip_prefix("ca").unwrap();
+    for file in inner.files.iter().filter(|file| file.path.starts_with("CA/")) {
+        let relative = Path::new(&file.path).strip_prefix("CA").unwrap();
         if relative == Path::new("certificate.pem")
             || relative == Path::new("trusted.pem")
         {
@@ -964,16 +948,16 @@ fn restored_bytes(
     if file.path == "install.json"
         && addresses.admin_listen.is_some()
         && addresses.admin_listen != manifest.install.admin_server
-        && manifest.components.contains(&Component::Controller)
+        && manifest.components.contains(&Component::Ca)
     {
         let mut install: InstallRecord = serde_json::from_slice(&restored)?;
         install.admin_server = addresses.admin_listen;
         restored = serde_json::to_vec_pretty(&install)?;
     }
     let Some(replacement) = addresses.resolver else { return Ok(restored) };
-    let original = manifest.resolver_endpoint.context(
-        "this backup has no co-located controller resolver endpoint to relocate",
-    )?;
+    let original = manifest
+        .resolver_endpoint
+        .context("this backup has no co-located CA resolver endpoint to relocate")?;
     if replacement == original {
         return Ok(restored);
     }
@@ -987,7 +971,7 @@ fn restored_bytes(
                 .filter(|member| member.addr == original.listen);
             let member = matching.next().with_context(|| {
                 format!(
-                    "the controller's owned resolver endpoint {} is absent from resolver.json",
+                    "the CA's owned resolver endpoint {} is absent from resolver.json",
                     original.listen,
                 )
             })?;
@@ -995,7 +979,7 @@ fn restored_bytes(
             member.bind_addr = replacement.bind;
             if matching.next().is_some() {
                 bail!(
-                    "the controller's owned resolver endpoint {} appears more than once in resolver.json",
+                    "the CA's owned resolver endpoint {} appears more than once in resolver.json",
                     original.listen,
                 );
             }
@@ -1021,7 +1005,7 @@ fn restored_bytes(
     Ok(restored)
 }
 
-/// Restore with replacement host addresses. A controller's admin address and
+/// Restore with replacement host addresses. A CA's admin address and
 /// co-located resolver endpoint are applied to every local config before the
 /// staged directory is published.
 pub fn restore_files_with_addresses(
@@ -1031,7 +1015,7 @@ pub fn restore_files_with_addresses(
 ) -> Result<Manifest> {
     let manifest = verify(bundle)?;
     if addresses.resolver.is_some() && manifest.resolver_endpoint.is_none() {
-        bail!("this backup has no co-located controller resolver endpoint to relocate");
+        bail!("this backup has no co-located CA resolver endpoint to relocate");
     }
     let relocate_manifest = |mut manifest: Manifest| -> Result<Manifest> {
         let source = Path::new(&manifest.source_config_root);
@@ -1042,7 +1026,7 @@ pub fn restore_files_with_addresses(
         }
         if let Some(listen) = addresses.admin_listen {
             manifest.admin_listen = Some(listen);
-            if manifest.components.contains(&Component::Controller) {
+            if manifest.components.contains(&Component::Ca) {
                 manifest.install.admin_server = Some(listen);
             }
         }
@@ -1184,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_resolver_restore_rewrites_one_owned_endpoint_everywhere() {
+    fn ca_resolver_restore_rewrites_one_owned_endpoint_everywhere() {
         use netidx::{config::file as cfile, resolver_server::config::file as rfile};
 
         let old_admin: SocketAddr = "10.0.0.1:4565".parse().unwrap();
@@ -1211,10 +1195,10 @@ mod tests {
             install: install.clone(),
             source_config_root: "/old/netidx".into(),
             config_scope: BundleScope::System,
-            components: vec![Component::Controller, Component::Resolver],
+            components: vec![Component::Ca, Component::Resolver],
             service: None,
             identities: vec![],
-            controller_bundle: true,
+            ca_bundle: true,
             admin_listen: Some(old_admin),
             resolver_endpoint: Some(old),
             previous_admin_server: None,

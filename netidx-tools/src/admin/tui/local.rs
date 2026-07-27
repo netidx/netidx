@@ -44,9 +44,9 @@ const RESTORE_CHOICE: FreshChoice = FreshChoice {
 #[cfg(unix)]
 const FRESH_CHOICES: [FreshChoice; 5] = [
     FreshChoice {
-        action: FreshAction::Install(InstallRole::Controller),
-        title: "Controller / CA",
-        blurb: "Install the admin domain's one active controller and \
+        action: FreshAction::Install(InstallRole::Ca),
+        title: "CA / CA",
+        blurb: "Install the admin domain's one active ca and \
                 certificate authority on this machine. It may be dedicated to this role; \
                 resolver servers are installed separately and enroll with it.",
     },
@@ -91,7 +91,7 @@ const FRESH_CHOICES: [FreshChoice; 4] = [
         title: "Resolver",
         blurb: "An admin domain-facing resolver server — the directory that maps paths to \
                 publishers for a whole admin domain or a delegated subtree. Enrolls under an \
-                existing controller.",
+                existing ca.",
     },
     FreshChoice {
         action: FreshAction::Install(InstallRole::Publisher),
@@ -191,7 +191,7 @@ impl Detected {
 /// from disk is left [`CaProbe::Unprobed`] for [`probe_local_cas`].
 #[cfg(unix)]
 fn local_ca_paths(config_dir: &Path) -> Option<LocalCa> {
-    let ca_dir = config_dir.join("ca");
+    let ca_dir = config_dir.join("CA");
     if !ca_dir.is_dir() {
         return None;
     }
@@ -272,7 +272,7 @@ pub(super) enum SyncState {
 fn probe_service(record: &InstallRecord) -> ServiceStatus {
     let (scope, for_user) = match record.role {
         InstallRole::Workstation => (ServiceScope::User, None),
-        InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher => {
+        InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
             (ServiceScope::System, super::super::service::resolve_for_user(None).ok())
         }
     };
@@ -446,7 +446,7 @@ impl LocalState {
         let mut out = Vec::new();
         for i in 0..self.installs.len() {
             if self.installs[i].record.admin_domain.is_some()
-                && self.installs[i].record.role != InstallRole::Controller
+                && self.installs[i].record.role != InstallRole::Ca
                 && matches!(self.sync[i], SyncState::Unchecked)
             {
                 self.sync[i] = SyncState::Checking;
@@ -607,9 +607,7 @@ impl LocalState {
             // joined install; the status overlay surfaces it when out of sync.
             Char('U') => {
                 let d = &self.installs[self.selected];
-                if d.record.admin_domain.is_some()
-                    && d.record.role != InstallRole::Controller
-                {
+                if d.record.admin_domain.is_some() && d.record.role != InstallRole::Ca {
                     return Some(Action::Update {
                         role: d.record.role,
                         config_root: d.config_dir.clone(),
@@ -779,11 +777,11 @@ fn action_desc(action: &Action) -> &'static str {
              one — it retires the old password. Works only locally, on the CA machine."
         }
         Backup { .. } => {
-            "Back up this complete managed installation. Controller state is captured \
+            "Back up this complete managed installation. Ca state is captured \
              consistently while the CA remains online; machine credentials are re-enrolled on restore."
         }
         Restore => "Restore a complete installation from a verified backup bundle.",
-        FinishRestore { .. } => "Finish re-enrolling roles after controller startup.",
+        FinishRestore { .. } => "Finish re-enrolling roles after CA startup.",
         ExternalEmitCsr { .. } => {
             "Write a subordinate-CA CSR for your external PKI to sign."
         }
@@ -869,7 +867,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     let role = d.record.role;
     let joined = d.record.admin_domain.is_some();
     let mut items: Vec<(String, Action)> = Vec::new();
-    if joined && role != InstallRole::Controller {
+    if joined && role != InstallRole::Ca {
         items.push((
             "Update Resolvers".to_string(),
             Action::Update { role, config_root: d.config_dir.clone() },
@@ -995,7 +993,7 @@ fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
     let needs_root = d.scope == ServiceScope::System
         || matches!(
             d.record.role,
-            InstallRole::Controller | InstallRole::Resolver | InstallRole::Publisher
+            InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher
         );
     Action::Uninstall {
         config_scope: d.scope,
@@ -1188,7 +1186,7 @@ fn service_line(status: ServiceStatus) -> Line<'static> {
 
 fn role_title(role: InstallRole) -> &'static str {
     match role {
-        InstallRole::Controller => "Controller / CA",
+        InstallRole::Ca => "CA / CA",
         InstallRole::Workstation => "Workstation",
         InstallRole::Resolver => "Resolver",
         InstallRole::Publisher => "Publisher",
@@ -1231,12 +1229,9 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fresh_machine_offers_a_dedicated_controller_role() {
-        assert_eq!(
-            FRESH_CHOICES[0].action,
-            FreshAction::Install(InstallRole::Controller)
-        );
-        assert!(FRESH_CHOICES[0].title.contains("Controller"));
+    fn fresh_machine_offers_a_dedicated_ca_role() {
+        assert_eq!(FRESH_CHOICES[0].action, FreshAction::Install(InstallRole::Ca));
+        assert!(FRESH_CHOICES[0].title.contains("CA"));
         assert!(
             FRESH_CHOICES[0].blurb.contains("resolver servers are installed separately")
         );
@@ -1319,11 +1314,11 @@ mod tests {
     /// socket, so the UI must never be waiting on it.
     #[test]
     fn a_ca_install_is_usable_before_its_credential_probe_lands() {
-        let fp = Fingerprint::of_der(b"controller CA");
+        let fp = Fingerprint::of_der(b"ca cert");
         let cfg = PathBuf::from("/etc/netidx/admin-server.json");
         let detected = |probe: CaProbe| Detected {
             record: InstallRecord::new(
-                InstallRole::Controller,
+                InstallRole::Ca,
                 "/",
                 "tls",
                 Some(AdminDomainIdentity::new("example.com", &fp)),
@@ -1334,7 +1329,7 @@ mod tests {
             config_dir: PathBuf::from("/etc/netidx"),
             ca: Some(fp),
             local_ca: Some(LocalCa {
-                ca_dir: PathBuf::from("/etc/netidx/ca"),
+                ca_dir: PathBuf::from("/etc/netidx/CA"),
                 cfg: Some(cfg.clone()),
                 probe,
             }),

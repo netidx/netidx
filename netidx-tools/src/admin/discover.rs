@@ -41,7 +41,7 @@ pub(crate) fn run(a: DiscoverArgs) -> Result<()> {
 
 fn role_str(role: Role) -> &'static str {
     match role {
-        Role::Ca => "ca",
+        Role::Ca => "CA",
         Role::Resolver => "resolver",
         Role::IdMap => "id-map",
     }

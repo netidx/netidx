@@ -73,7 +73,7 @@ impl StagedCaDir {
             .with_context(|| {
                 format!("creating CA staging directory in {}", parent.display())
             })?;
-        let staged = owner.path().join("ca");
+        let staged = owner.path().join("CA");
         Ok(Self { owner, staged, final_path })
     }
 
@@ -139,9 +139,9 @@ pub struct NewCaOpts {
     pub insecure_no_tpm: bool,
     /// `None` ⇒ prompt "set up the admin server?"; `Some(b)` ⇒ forced.
     pub setup_server: Option<bool>,
-    /// Explicit `--listen` for the controller (skips the prompt).
+    /// Explicit `--listen` for the CA (skips the prompt).
     pub listen: Option<SocketAddr>,
-    /// IP to suggest for the controller's listen address when prompting
+    /// IP to suggest for the CA's listen address when prompting
     /// (e.g. the resolver being created in the same flow). `None` ⇒
     /// fall back to an existing resolver's IP, then the public IP.
     pub listen_hint: Option<IpAddr>,
@@ -286,9 +286,9 @@ async fn staged_ca_lock(
 }
 
 /// **The** entry point for building a new vaulted CA, shared verbatim
-/// by `netidx admin ca init` and the `netidx admin resolver install`
+/// by `netidx admin CA init` and the `netidx admin resolver install`
 /// "create a new CA" branch — so the operator gets the identical
-/// experience (admin/policy, identicon, the "set up the controller?"
+/// experience (admin/policy, identicon, the "set up the CA?"
 /// question) either way.
 ///
 /// Returns the in-memory signing [`Ca`] (use it to issue certs before
@@ -463,9 +463,9 @@ pub async fn create_vaulted_ca(
     Ok((ca, need))
 }
 
-/// Phase one of a controller CA whose certificate is signed by an external
-/// PKI. The controller key is generated and vaulted locally, a subordinate-CA
-/// CSR is emitted, and the served-controller credentials are prepared, but no
+/// Phase one of a CA whose certificate is signed by an external
+/// PKI. The CA key is generated and vaulted locally, a subordinate-CA
+/// CSR is emitted, and the served-ca credentials are prepared, but no
 /// daemon is started until [`crate::ops::slots::external_install_cert`]
 /// installs the returned certificate.
 pub async fn create_vaulted_external_ca(
@@ -781,7 +781,7 @@ pub async fn setup_superuser(
 /// `<name>.<domain>` convention as every other netidx identity — the CA
 /// is just the `ca` node (e.g. `ryu-oh.org` → `ca.ryu-oh.org`).
 pub fn default_ca_cn(domain: &str) -> String {
-    format!("ca.{domain}")
+    format!("CA.{domain}")
 }
 
 /// Resolve the CA common name: an explicit value wins; otherwise prompt,

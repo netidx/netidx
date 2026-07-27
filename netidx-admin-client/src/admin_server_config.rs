@@ -84,12 +84,12 @@ mod tests {
             server_id: AdminServerId::new(),
             home_ca_fingerprint: Fingerprint::of_der(b"sample-ca").text(),
             listen: "192.168.0.5:4565".parse().unwrap(),
-            serving_cert: PathBuf::from("/etc/netidx/ca/server/cert.pem"),
-            serving_key: PathBuf::from("/etc/netidx/ca/server/key.pem"),
+            serving_cert: PathBuf::from("/etc/netidx/CA/server/cert.pem"),
+            serving_key: PathBuf::from("/etc/netidx/CA/server/key.pem"),
             trusted: PathBuf::from("/etc/netidx/tls/trusted.pem"),
             roles: Roles {
                 ca: Some(CaRole {
-                    dir: PathBuf::from("/etc/netidx/ca"),
+                    dir: PathBuf::from("/etc/netidx/CA"),
                     autorenew: Some(PathBuf::from("/etc/netidx/autorenew.keytab")),
                     session_absolute_lifetime: None,
                     session_idle_timeout: None,

@@ -88,7 +88,7 @@ pub(crate) struct RemoteAuthFlags {
     #[arg(long = "password-stdin", conflicts_with = "password_file")]
     pub password_stdin: bool,
     /// The admin server's CA fingerprint, obtained out of band (view it with
-    /// `netidx admin ca fingerprint <ip:port>`). Required off the CA host;
+    /// `netidx admin CA fingerprint <ip:port>`). Required off the CA host;
     /// auto-verified against the local CA cert on it.
     #[arg(long = "accept-glyph")]
     pub accept_glyph: Option<String>,
@@ -114,8 +114,8 @@ impl RemoteAuthFlags {
     }
 
     /// Read the explicitly supplied password after the caller has verified its
-    /// controller target. Keeping this separate from [`Self::answerer`] lets
-    /// `admin login` honor the no-credentials-before-controller rule even for
+    /// CA target. Keeping this separate from [`Self::answerer`] lets
+    /// `admin login` honor the no-credentials-before-ca rule even for
     /// password files and stdin.
     pub(crate) fn password(&self) -> Result<Option<Zeroizing<String>>> {
         read_secret(

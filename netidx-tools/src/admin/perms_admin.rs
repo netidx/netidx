@@ -1,7 +1,7 @@
 //! `netidx admin perms show|edit --at <path>` — remote permissions
 //! administration, a thin CLI over [`netidx_admin_client::ops::perms`]. The
 //! library reaches an admin server, glyph-confirms its CA, routes by the
-//! authoritative controller, and performs an authenticated read or write.
+//! authoritative CA, and performs an authenticated read or write.
 //! `edit` runs the `$EDITOR` loop and local validation here — a frontend
 //! concern — between the library's authenticated read and write.
 

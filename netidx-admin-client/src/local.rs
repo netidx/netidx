@@ -18,10 +18,9 @@ use netidx_admin_proto::{
     EditPermsRequest, EditPermsResponse, EnrollRequest, ExternalCaCsrOk,
     ExternalCaCsrResponse, ExternalCaInstallOk, ExternalCaInstallRequest,
     ExternalCaInstallResponse, ListAdminsRequest, NodeKind, PROTOCOL_VERSION, PeerResult,
-    PropagationOk, ReadPermsOk, ReadPermsRequest, ReadPermsResponse,
-    ReconcileControllerRequest, ReconcileControllerResponse, RemoveAdminRequest, Request,
-    RotateAutorenewResponse, RotateRecoveryResponse, Secret, ServerHello,
-    SetAdminPolicyRequest, SignResponse,
+    PropagationOk, ReadPermsOk, ReadPermsRequest, ReadPermsResponse, ReconcileCaRequest,
+    ReconcileCaResponse, RemoveAdminRequest, Request, RotateAutorenewResponse,
+    RotateRecoveryResponse, Secret, ServerHello, SetAdminPolicyRequest, SignResponse,
 };
 use std::{
     net::SocketAddr,
@@ -35,7 +34,7 @@ use zeroize::Zeroizing;
 pub struct BackupOutcome {
     pub target: std::path::PathBuf,
     pub ca_fingerprint: String,
-    pub controller: netidx_admin_proto::AdminServerId,
+    pub ca: netidx_admin_proto::AdminServerId,
     pub map_version: u64,
     pub highest_serial: u64,
     pub files: u64,
@@ -99,8 +98,8 @@ pub async fn daemon_running(cfg_path: &Path) -> bool {
     UnixStream::connect(&path).await.is_ok()
 }
 
-/// Emit a renewal CSR for this running externally-signed controller CA. The
-/// controller unlocks its in-memory vault credential; no recovery password or
+/// Emit a renewal CSR for this running externally-signed CA. The
+/// CA unlocks its in-memory vault credential; no recovery password or
 /// intentional outage is required.
 pub async fn external_ca_csr(cfg_path: &Path) -> Result<(String, String)> {
     let mut s = connect(cfg_path).await?;
@@ -110,12 +109,12 @@ pub async fn external_ca_csr(cfg_path: &Path) -> Result<(String, String)> {
             Ok((common_name, csr_pem))
         }
         ExternalCaCsrResponse::Err { reason } => {
-            bail!("the controller refused to emit an external-CA CSR: {reason}")
+            bail!("the CA refused to emit an external-CA CSR: {reason}")
         }
     }
 }
 
-/// Install a hardware/external-PKI-signed renewal while the controller keeps
+/// Install a hardware/external-PKI-signed renewal while the CA keeps
 /// serving. Only the protected local socket exposes this operation.
 pub async fn external_ca_install(
     cfg_path: &Path,
@@ -136,7 +135,7 @@ pub async fn external_ca_install(
             Ok(ca_fingerprint)
         }
         ExternalCaInstallResponse::Err { reason } => {
-            bail!("the controller refused the external-CA certificate: {reason}")
+            bail!("the CA refused the external-CA certificate: {reason}")
         }
     }
 }
@@ -150,7 +149,7 @@ pub async fn ca_status(cfg_path: &Path) -> Result<CaStatus> {
     }
 }
 
-/// Ask the running controller to publish a point-in-time-consistent recovery
+/// Ask the running CA to publish a point-in-time-consistent recovery
 /// bundle. This request exists only on the protected local control socket; the
 /// target is a path on this host and the daemon refuses to overwrite it.
 pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
@@ -164,7 +163,7 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
         BackupResponse::Ok(BackupOk {
             target,
             ca_fingerprint,
-            controller,
+            ca,
             map_version,
             highest_serial,
             files,
@@ -173,7 +172,7 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
         }) => Ok(BackupOutcome {
             target: target.into(),
             ca_fingerprint,
-            controller,
+            ca,
             map_version,
             highest_serial,
             files,
@@ -184,26 +183,26 @@ pub async fn backup(cfg_path: &Path, target: &Path) -> Result<BackupOutcome> {
     }
 }
 
-/// Re-push the restored controller route, authoritative map, CRL, and resolver
+/// Re-push the restored CA route, authoritative map, CRL, and resolver
 /// topology over the protected local control socket.
-pub async fn reconcile_controller(
+pub async fn reconcile_ca(
     cfg_path: &Path,
 ) -> Result<(netidx_admin_proto::OperationId, Vec<PeerResult>)> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
         &mut s,
-        &Request::ReconcileController(ReconcileControllerRequest {
+        &Request::ReconcileCa(ReconcileCaRequest {
             credential: netidx_admin_proto::AdminCredential::Password { admin, password },
         }),
     )
     .await?;
-    match netidx_admin_proto::read_msg::<_, ReconcileControllerResponse>(&mut s).await? {
-        ReconcileControllerResponse::Ok(PropagationOk { operation_id, peers }) => {
+    match netidx_admin_proto::read_msg::<_, ReconcileCaResponse>(&mut s).await? {
+        ReconcileCaResponse::Ok(PropagationOk { operation_id, peers }) => {
             Ok((operation_id, peers))
         }
-        ReconcileControllerResponse::Err { reason } => {
-            bail!("the CA refused controller reconciliation: {reason}")
+        ReconcileCaResponse::Err { reason } => {
+            bail!("the CA refused CA reconciliation: {reason}")
         }
     }
 }

@@ -18,15 +18,14 @@ use super::{
 use crate::{
     admin_domain,
     admin_proto::{
-        self, AdminDomainMap, ApplyControllerStateRequest, ApplyControllerStateResponse,
+        self, AdminDomainMap, ApplyCaStateRequest, ApplyCaStateResponse,
         ApplyReferralEditRequest, ApplyReferralEditResponse, ApproveDelegationRequest,
         ApproveDelegationResponse, DelegationEntry, DelegationPollResponse,
         DelegationRequest, DelegationResponse, DenyDelegationRequest,
         DenyDelegationResponse, GetInfoResponse, InfoAuth, ListDelegationsRequest,
         ListDelegationsResponse, MapVersion, PeerResult, PollRequest, PropagationOk,
-        QueuedOk, ReconcileControllerResponse, ReferralEdit, RegisterRequest,
-        RegisterResponse, RemoveServerOk, RemoveServerRequest, RemoveServerResponse,
-        ResolverAddr, Role,
+        QueuedOk, ReconcileCaResponse, ReferralEdit, RegisterRequest, RegisterResponse,
+        RemoveServerOk, RemoveServerRequest, RemoveServerResponse, ResolverAddr, Role,
     },
     admin_server_config::AdminServerConfig,
     config_lock::ConfigDirLock,
@@ -41,22 +40,22 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-async fn push_controller_state_to_peers(
+async fn push_ca_state_to_peers(
     state: &Arc<Server>,
     crl_pem: String,
     operation_id: admin_proto::OperationId,
 ) -> Result<Vec<PeerResult>> {
     let (map, my_id) =
         state.read(move |state| (state.map.clone(), state.cfg.server_id)).await;
-    let controller = map
-        .controller_entry()
+    let ca = map
+        .ca_entry()
         .filter(|entry| entry.state == admin_proto::ServerState::Registered)
         .cloned()
-        .context("the authoritative map has no registered controller")?;
-    let request = ApplyControllerStateRequest {
+        .context("the authoritative map has no registered CA")?;
+    let request = ApplyCaStateRequest {
         operation_id,
-        controller: controller.id,
-        addr: controller.addr,
+        ca: ca.id,
+        addr: ca.addr,
         map: map.clone(),
         crl_pem,
     };
@@ -64,9 +63,9 @@ async fn push_controller_state_to_peers(
     let mut results = Vec::new();
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let request = request.clone();
-        let local = match handle_apply_controller_state(state, &request).await {
-            ApplyControllerStateResponse::Ok(()) => Ok(()),
-            ApplyControllerStateResponse::Err { reason } => Err(anyhow!(reason)),
+        let local = match handle_apply_ca_state(state, &request).await {
+            ApplyCaStateResponse::Ok(()) => Ok(()),
+            ApplyCaStateResponse::Err { reason } => Err(anyhow!(reason)),
         };
         let error = local.err().map(|e| format!("{e:#}"));
         results.push(PeerResult { server, addr, error });
@@ -82,11 +81,11 @@ async fn push_controller_state_to_peers(
             async move {
                 tokio::time::timeout(
                     PUSH_TIMEOUT,
-                    transport::push_controller_state(
+                    transport::push_ca_state(
                         &client,
                         addr,
                         server,
-                        server == controller.id,
+                        server == ca.id,
                         home_ca,
                         request,
                     ),
@@ -103,13 +102,13 @@ async fn push_controller_state_to_peers(
     Ok(results)
 }
 
-async fn read_controller_crl(state: &Server) -> Result<Option<String>> {
+async fn read_ca_crl(state: &Server) -> Result<Option<String>> {
     let crl_path = state
         .read(|state| {
             state
                 .ca
                 .as_ref()
-                .context("controller reconciliation requires the CA role")
+                .context("CA reconciliation requires the CA role")
                 .map(|ca| ca.store.crl_path())
         })
         .await?;
@@ -122,16 +121,14 @@ async fn read_controller_crl(state: &Server) -> Result<Option<String>> {
     }
 }
 
-async fn initialize_controller_crl(
+async fn initialize_ca_crl(
     state: &Server,
     prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<String> {
     state
         .write_async(async move |state| {
-            let ca = state
-                .ca
-                .as_mut()
-                .context("controller reconciliation requires the CA role")?;
+            let ca =
+                state.ca.as_mut().context("CA reconciliation requires the CA role")?;
             let crl_path = ca.store.crl_path();
             match tokio::fs::read_to_string(&crl_path).await {
                 Ok(crl_pem) => Ok(crl_pem),
@@ -151,7 +148,7 @@ async fn initialize_controller_crl(
         .await
 }
 
-pub(super) async fn reconcile_controller_state_on_start(
+pub(super) async fn reconcile_ca_state_on_start(
     state: Arc<Server>,
     signs: Arc<Semaphore>,
 ) {
@@ -160,56 +157,53 @@ pub(super) async fn reconcile_controller_state_on_start(
     audit(
         &ca_dir,
         "(startup)",
-        "reconcile-controller",
+        "reconcile-ca",
         &format!("operation {operation_id}: startup reconciliation"),
         Duration::ZERO,
     )
     .await;
-    let crl_pem = match read_controller_crl(&state).await {
+    let crl_pem = match read_ca_crl(&state).await {
         Ok(Some(crl_pem)) => crl_pem,
         Ok(None) => {
             let prepared_server_unlock = prepare_server_unlock(&state, &signs).await;
-            match initialize_controller_crl(&state, &prepared_server_unlock).await {
+            match initialize_ca_crl(&state, &prepared_server_unlock).await {
                 Ok(crl_pem) => crl_pem,
                 Err(e) => {
-                    warn!(
-                        "admin-server: startup controller reconciliation failed: {e:#}"
-                    );
+                    warn!("admin-server: startup CA reconciliation failed: {e:#}");
                     return;
                 }
             }
         }
         Err(e) => {
-            warn!("admin-server: startup controller reconciliation failed: {e:#}");
+            warn!("admin-server: startup CA reconciliation failed: {e:#}");
             return;
         }
     };
-    match push_controller_state_to_peers(&state, crl_pem, operation_id).await {
+    match push_ca_state_to_peers(&state, crl_pem, operation_id).await {
         Ok(results) => {
             for result in results {
                 if let Some(error) = result.error {
                     warn!(
-                        "admin-server: startup controller reconciliation {} at {} failed: {}",
+                        "admin-server: startup CA reconciliation {} at {} failed: {}",
                         result.server, result.addr, error
                     );
                 }
             }
         }
-        Err(e) => warn!("admin-server: startup controller reconciliation failed: {e:#}"),
+        Err(e) => warn!("admin-server: startup CA reconciliation failed: {e:#}"),
     }
 }
 
-pub(super) async fn handle_reconcile_controller(
+pub(super) async fn handle_reconcile_ca(
     state: &Arc<Server>,
-    req: &admin_proto::ReconcileControllerRequest,
+    req: &admin_proto::ReconcileCaRequest,
     authentication: &PreparedAdminAuthentication,
     prepared_server_unlock: &PreparedServerUnlock,
     local: bool,
-) -> ReconcileControllerResponse {
+) -> ReconcileCaResponse {
     let Some(ca_dir) = state.ca_dir().await else {
-        return ReconcileControllerResponse::Err {
-            reason: "controller reconciliation must be sent to the CA controller"
-                .to_string(),
+        return ReconcileCaResponse::Err {
+            reason: "CA reconciliation must be sent to the CA".to_string(),
         };
     };
     let admin = if local {
@@ -228,39 +222,36 @@ pub(super) async fn handle_reconcile_controller(
             .await
         {
             Ok(admin) => admin,
-            Err(reason) => return ReconcileControllerResponse::Err { reason },
+            Err(reason) => return ReconcileCaResponse::Err { reason },
         }
     };
     let operation_id = admin_proto::OperationId::new();
     audit(
         &ca_dir,
         &admin,
-        "reconcile-controller",
+        "reconcile-ca",
         &format!("operation {operation_id}"),
         Duration::ZERO,
     )
     .await;
-    let crl_pem = match read_controller_crl(state).await {
+    let crl_pem = match read_ca_crl(state).await {
         Ok(Some(crl_pem)) => crl_pem,
-        Ok(None) => {
-            match initialize_controller_crl(state, prepared_server_unlock).await {
-                Ok(crl_pem) => crl_pem,
-                Err(e) => {
-                    return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
-                }
+        Ok(None) => match initialize_ca_crl(state, prepared_server_unlock).await {
+            Ok(crl_pem) => crl_pem,
+            Err(e) => {
+                return ReconcileCaResponse::Err { reason: format!("{e:#}") };
             }
-        }
+        },
         Err(e) => {
-            return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
+            return ReconcileCaResponse::Err { reason: format!("{e:#}") };
         }
     };
-    let mut peers =
-        match push_controller_state_to_peers(state, crl_pem, operation_id).await {
-            Ok(peers) => peers,
-            Err(e) => {
-                return ReconcileControllerResponse::Err { reason: format!("{e:#}") };
-            }
-        };
+    let mut peers = match push_ca_state_to_peers(state, crl_pem, operation_id).await {
+        Ok(peers) => peers,
+        Err(e) => {
+            return ReconcileCaResponse::Err { reason: format!("{e:#}") };
+        }
+    };
     let topology = {
         let map = state.read(move |state| state.map.clone()).await;
         topology_fanout(&map, map.resolver_clusters.iter())
@@ -269,7 +260,7 @@ pub(super) async fn handle_reconcile_controller(
         &mut peers,
         push_topology(state, topology, operation_id).await,
     );
-    ReconcileControllerResponse::Ok(PropagationOk { operation_id, peers })
+    ReconcileCaResponse::Ok(PropagationOk { operation_id, peers })
 }
 
 fn merge_topology_results(peers: &mut Vec<PeerResult>, topology: Vec<PeerResult>) {
@@ -285,7 +276,7 @@ fn merge_topology_results(peers: &mut Vec<PeerResult>, topology: Vec<PeerResult>
         let Some(error) = result.error else { continue };
         existing.error = Some(match existing.error.take() {
             Some(state_error) => {
-                format!("controller state: {state_error}; resolver topology: {error}")
+                format!("CA state: {state_error}; resolver topology: {error}")
             }
             None => format!("resolver topology: {error}"),
         });
@@ -293,24 +284,24 @@ fn merge_topology_results(peers: &mut Vec<PeerResult>, topology: Vec<PeerResult>
     peers.sort_by_key(|peer| peer.server);
 }
 
-pub(super) async fn handle_apply_controller_state(
+pub(super) async fn handle_apply_ca_state(
     state: &Server,
-    req: &ApplyControllerStateRequest,
-) -> ApplyControllerStateResponse {
-    let err = |reason: String| ApplyControllerStateResponse::Err { reason };
-    let Some(controller) = req.map.controller_entry() else {
-        return err("authoritative map has no controller entry".to_string());
+    req: &ApplyCaStateRequest,
+) -> ApplyCaStateResponse {
+    let err = |reason: String| ApplyCaStateResponse::Err { reason };
+    let Some(ca) = req.map.ca_entry() else {
+        return err("authoritative map has no CA entry".to_string());
     };
-    if controller.id != req.controller
-        || controller.addr != req.addr
-        || controller.state != admin_proto::ServerState::Registered
-        || !controller.roles.contains(Role::Ca)
+    if ca.id != req.ca
+        || ca.addr != req.addr
+        || ca.state != admin_proto::ServerState::Registered
+        || !ca.roles.contains(Role::Ca)
     {
-        return err("authoritative map does not bind the claimed registered CA controller address"
+        return err("authoritative map does not bind the claimed registered CA address"
             .to_string());
     }
     if let Err(e) = validate_home_crl(&req.crl_pem, state.home_ca_der.as_ref()) {
-        return err(format!("validating controller CRL: {e:#}"));
+        return err(format!("validating CA CRL: {e:#}"));
     }
     let req = req.clone();
     let cfg_path = state.cfg_path.clone();
@@ -318,18 +309,16 @@ pub(super) async fn handle_apply_controller_state(
     let home_ca_der = state.home_ca_der.clone();
     state
         .write_async(async move |mutable| {
-            let installed_controller = mutable.map.controller;
-            if req.controller != installed_controller
-                || req.map.controller != installed_controller
-            {
+            let installed_ca = mutable.map.ca;
+            if req.ca != installed_ca || req.map.ca != installed_ca {
                 return err(format!(
-                    "controller identity mismatch (installed {}, request {}, map {})",
-                    installed_controller, req.controller, req.map.controller
+                    "CA identity mismatch (installed {}, request {}, map {})",
+                    installed_ca, req.ca, req.map.ca
                 ));
             }
             if req.map.version < mutable.map.version {
                 return err(format!(
-                    "refusing controller-state rollback from map version {} to {}",
+                    "refusing ca-state rollback from map version {} to {}",
                     mutable.map.version, req.map.version
                 ));
             }
@@ -344,9 +333,7 @@ pub(super) async fn handle_apply_controller_state(
                     crate::admin_server_config::save_async(&config_lock, cfg_path, &next)
                         .await
                 {
-                    return err(format!(
-                        "persisting the relocated controller address: {e:#}"
-                    ));
+                    return err(format!("persisting the relocated CA address: {e:#}"));
                 }
                 mutable.cfg = next;
             }
@@ -367,7 +354,7 @@ pub(super) async fn handle_apply_controller_state(
                 return err(format!("installing reconciled CRL: {e:#}"));
             }
             mutable.map = req.map.clone();
-            ApplyControllerStateResponse::Ok(())
+            ApplyCaStateResponse::Ok(())
         })
         .await
 }
@@ -443,9 +430,7 @@ pub(super) async fn handle_request_delegation(
     peer: SocketAddr,
 ) -> DelegationResponse {
     let Some(ca_dir) = state.ca_dir().await else {
-        return DelegationResponse::Err {
-            reason: "this host is not the controller".into(),
-        };
+        return DelegationResponse::Err { reason: "this host is not the CA".into() };
     };
     if let Err(e) = validate_delegation_path(&req.proposed_path) {
         return DelegationResponse::Err { reason: format!("{e:#}") };
@@ -518,9 +503,7 @@ async fn handle_list_delegations_inner(
 ) -> ListDelegationsResponse {
     let MutableState { map, ca, .. } = state;
     let Some(ca) = ca.as_mut() else {
-        return ListDelegationsResponse::Err {
-            reason: "this host is not the controller".into(),
-        };
+        return ListDelegationsResponse::Err { reason: "this host is not the CA".into() };
     };
     if let Err(reason) = authenticate(ca, &req.credential, authentication) {
         return ListDelegationsResponse::Err { reason };
@@ -994,7 +977,7 @@ async fn remove_server_prepare_inner(
     let broad = broad_admin(&authd);
     // Validate the authoritative-map transition on a copy first. Certificate
     // revocation is irreversible, so do not begin it for an invalid removal
-    // (notably, removal of the active controller).
+    // (notably, removal of the active CA).
     {
         let target_base = map
             .admin_servers
@@ -1259,7 +1242,7 @@ async fn approve_delegation_prepare_inner(
         };
         decide_delegation_authority(&authd, map, &pending).map_err(err)?;
         // Persist a staged snapshot before publishing it in memory. A failed disk
-        // write must not leave the live controller map ahead of its durable map.
+        // write must not leave the live CA map ahead of its durable map.
         let mut staged = map.clone();
         let change = admin_domain::delegate(
             &mut staged,
@@ -1400,7 +1383,7 @@ async fn push_topology(
                 .collect();
         }
     };
-    let controller = state.read(move |state| state.map.controller).await;
+    let ca = state.read(move |state| state.map.ca).await;
     let mut targets = fanout.targets;
     targets.sort_by_key(|(id, _, _)| *id);
     let home_ca = state.home_ca_der.clone();
@@ -1415,7 +1398,7 @@ async fn push_topology(
                         &client,
                         addr,
                         server,
-                        server == controller,
+                        server == ca,
                         home_ca,
                         operation_id,
                         &edit,

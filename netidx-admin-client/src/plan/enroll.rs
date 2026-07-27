@@ -43,7 +43,7 @@ const DISCOVERY_SETTLE: Duration = Duration::from_secs(3);
 /// unreachable; time it out and try the beacon's next address rather than
 /// blocking the whole discovery on one black-hole address.
 const IDENTITY_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
-/// Validity requested from the controller. The server caps it to the admin's
+/// Validity requested from the CA. The server caps it to the admin's
 /// policy, so this is just an upper bound.
 const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
 /// How often a waiting enrollee polls its queued request. Each poll is one
@@ -86,7 +86,7 @@ impl AdminServers {
     }
 }
 
-/// A TLS identity obtained from the controller, with its files **staged** in a
+/// A TLS identity obtained from the CA, with its files **staged** in a
 /// tempdir. The template's `--force`-gated `apply()` installs it into the
 /// canonical `~/.config/netidx/tls/<name>/` layout.
 pub struct JoinedIdentity {
@@ -536,7 +536,7 @@ pub async fn discover_admin_domain(
         NodeKind::Resolver => Some((
             Field::AdminDomainMode,
             "Create a new admin domain (creates a CA)",
-            "Use an existing controller / CA",
+            "Use an existing CA / CA",
             "Create a new admin domain (creates a CA)",
         )),
         NodeKind::Client | NodeKind::Workstation | NodeKind::AdminServer => Some((
@@ -861,7 +861,7 @@ pub async fn await_issuance(
 /// template's `--force`-gated `apply()` installs it).
 ///
 /// The default path queues a signing request and waits for an admin to approve
-/// it remotely (`netidx admin ca approve`): the enrollee shows a request code
+/// it remotely (`netidx admin CA approve`): the enrollee shows a request code
 /// (the CSR key's fingerprint) the admin matches out of band. The synchronous
 /// path (an admin present at this machine types their password) remains one
 /// answer away; it's the only path where the id-map groups are chosen here.

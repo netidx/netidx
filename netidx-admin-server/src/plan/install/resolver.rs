@@ -285,12 +285,12 @@ pub async fn run_resolver(
             .text(Field::AdminDomainName, None, Some(&domain_default), false)
             .await?
             .unwrap_or(domain_default);
-        // The founding controller/CA + this host's admin server + the superuser admin. The
+        // The founding CA + this host's admin server + the superuser admin. The
         // returned `ServiceNeed` is intentionally dropped: this install ends with
         // one system-service offer, and the admin-server unit lands in the shared
         // units dir. `Some(true)` — a new admin domain always stands up its admin
         // server (the `--no-admin-server` escape is handled by the gate above).
-        let (_ca, _need, identity) = super::controller::create_self_signed_controller(
+        let (_ca, _need, identity) = super::ca::create_self_signed_ca(
             ans,
             input
                 .common
@@ -451,7 +451,7 @@ pub async fn run_resolver(
     // step has enrolled this host's admin server. The CA owns resolver cluster identity,
     // so delegation must reference that already-enrolled pending resolver cluster; the
     // previous order sent the request first and was correctly rejected by the
-    // controller because no child resolver cluster existed yet.
+    // CA because no child resolver cluster existed yet.
     #[cfg(unix)]
     let mut install_delegation = None;
     // `--parent-admin-server` is also the strict/non-mDNS way to name the
@@ -460,10 +460,10 @@ pub async fn run_resolver(
     // resolver cluster at `input.base`, exactly like the interactive blank-subtree
     // choice above.
     let delegated_child = input.delegate_subtree.is_some();
-    // An explicit bootstrap can be a controller in some other resolver cluster (the
+    // An explicit bootstrap can be a CA in some other resolver cluster (the
     // common strict-CLI case is adding EU-B through HQ-A). Discovery facts are
     // intentionally scoped to that bootstrap server's own resolver cluster, so select
-    // the requested peer resolver cluster from the verified controller map before
+    // the requested peer resolver cluster from the verified CA map before
     // rendering referrals. Otherwise HQ-A's `/eu` child would become a
     // nonsensical self-child on a resolver whose own base is `/eu`.
     let authoritative_peer_topology = if !delegated_child
@@ -474,16 +474,15 @@ pub async fn run_resolver(
         let net = probe
             .have()
             .context("the explicit bootstrap admin domain was not verified")?;
-        let controller = net
+        let ca = net
             .info
             .ca_addr
-            .context("the verified admin domain reported no controller address")?;
-        let map =
-            transport::get_map_pinned(controller, NodeKind::Resolver, &net.identity)
-                .await
-                .context(
-                    "fetching the authoritative map for peer resolver-cluster topology",
-                )?;
+            .context("the verified admin domain reported no CA address")?;
+        let map = transport::get_map_pinned(ca, NodeKind::Resolver, &net.identity)
+            .await
+            .context(
+                "fetching the authoritative map for peer resolver-cluster topology",
+            )?;
         Some(transport::cluster_topology_by_base(&map, &input.base)?)
     } else {
         None

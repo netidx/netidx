@@ -689,7 +689,7 @@ mod tests {
     fn map_of(resolver_clusters: Vec<ResolverClusterEntry>) -> AdminDomainMap {
         AdminDomainMap {
             version: 1,
-            controller: AdminServerId::new(),
+            ca: AdminServerId::new(),
             admin_servers: vec![],
             resolver_clusters,
         }

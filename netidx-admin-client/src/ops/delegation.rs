@@ -208,8 +208,8 @@ pub async fn deny_delegation(
 /// Whether the child's freshly-written parent referral reached the rest of its
 /// resolver cluster.
 pub enum ResolverClusterPropagation {
-    /// The CA controller updated every registered parent and child member.
-    ControllerManaged,
+    /// The CA updated every registered parent and child member.
+    CaManaged,
 }
 
 /// The outcome of `resolver add-parent`.
@@ -250,7 +250,7 @@ impl PendingParentReferral {
         let resolver_config = config_lock.require_contained(resolver_config)?;
         let current = ResolverConfig::load(&resolver_config)?;
         if template::parent_referral_matches_config(&current, &parent_ref) {
-            note("the controller already wrote this resolver's approved topology");
+            note("the CA already wrote this resolver's approved topology");
             return Ok(outcome);
         }
         if current.as_file().parent.is_some() {
@@ -300,7 +300,7 @@ fn validate_existing_parent(
 
 /// The `resolver add-parent` action: attach a standalone resolver under a
 /// parent by delegation, then write this installer's local `parent` referral.
-/// All remote parent/child propagation is owned by the CA controller. The
+/// All remote parent/child propagation is owned by the CA. The
 /// parent glyph confirm + queue + poll runs through [`delegate_under_parent`].
 pub async fn prepare_add_parent(
     ans: &mut dyn Answerer,
@@ -335,20 +335,20 @@ pub async fn prepare_add_parent(
         ttl: None,
         addrs: parent.iter().map(|r| (r.addr, info_to_referral_auth(&r.auth))).collect(),
     };
-    // The controller fanout normally reaches this registered child while the
+    // The CA fanout normally reaches this registered child while the
     // requestor is polling, so its full topology may already be on disk. Treat
     // that exact state as successful completion; a different pre-existing
     // parent still fails in `set_parent_referral` as a real reparent attempt.
     let outcome = AddParentOutcome {
         proposed_path: proposed_path.to_string(),
-        propagation: ResolverClusterPropagation::ControllerManaged,
+        propagation: ResolverClusterPropagation::CaManaged,
     };
     if template::parent_referral_matches(resolver_config, &parent_ref)? {
-        ans.note("the controller already wrote this resolver's approved topology");
+        ans.note("the CA already wrote this resolver's approved topology");
         Ok(AddParentCompletion::Complete(outcome))
     } else if existing_cluster_change {
         bail!(
-            "the delegation was approved, but the controller did not write this resolver's complete topology; do not apply a parent-only edit. Re-approve the delegation to reconcile the failed target"
+            "the delegation was approved, but the CA did not write this resolver's complete topology; do not apply a parent-only edit. Re-approve the delegation to reconcile the failed target"
         );
     } else {
         Ok(AddParentCompletion::LocalWrite(PendingParentReferral {
@@ -408,7 +408,7 @@ mod tests {
             },
             outcome: AddParentOutcome {
                 proposed_path: "/eu".to_string(),
-                propagation: ResolverClusterPropagation::ControllerManaged,
+                propagation: ResolverClusterPropagation::CaManaged,
             },
         }
     }
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn add_parent_accepts_the_exact_controller_written_topology() {
+    fn add_parent_accepts_the_exact_ca_written_topology() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_resolver(
             dir.path(),
@@ -469,7 +469,7 @@ mod tests {
         let mut noted = false;
         pending
             .apply_with_note(&lock, |message| {
-                noted = message.contains("controller already wrote")
+                noted = message.contains("CA already wrote")
             })
             .unwrap();
         assert!(noted);

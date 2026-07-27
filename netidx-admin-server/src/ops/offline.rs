@@ -21,7 +21,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use std::{path::PathBuf, time::Duration};
 
-// -- ca sign -----------------------------------------------------------------
+// -- CA sign -----------------------------------------------------------------
 
 /// How the signed cert's SubjectAltName is chosen. The CA is authoritative, so
 /// this overrides whatever the CSR claims.
@@ -271,7 +271,7 @@ async fn register_id_map(
     }))
 }
 
-// -- ca issue ----------------------------------------------------------------
+// -- CA issue ----------------------------------------------------------------
 
 /// The result of `ca issue`, for the CLI to print.
 pub struct IssueOutcome {

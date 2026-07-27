@@ -23,7 +23,7 @@ fn local_admin_server() -> Option<SocketAddr> {
     }
 }
 
-async fn resolve_controller(
+async fn resolve_ca(
     answerer: &mut FlagAnswerer,
     bootstrap: SocketAddr,
     ca_dir: Option<&Path>,
@@ -46,20 +46,19 @@ async fn resolve_controller(
         _ => {}
     }
     let map = transport::get_map_pinned(bootstrap, NodeKind::Client, &identity).await?;
-    let controller = map
-        .controller_entry()
+    let ca = map
+        .ca_entry()
         .filter(|s| s.state == ServerState::Registered)
-        .context("the authoritative map has no registered controller")?;
-    let controller_addr = controller.addr;
-    let controller_identity =
-        transport::fetch_identity(controller_addr, NodeKind::Client).await?;
-    if controller_identity.fingerprint != identity.fingerprint
-        || !controller_identity.controller
-        || controller_identity.server_id != map.controller
+        .context("the authoritative map has no registered CA")?;
+    let ca_addr = ca.addr;
+    let ca_identity = transport::fetch_identity(ca_addr, NodeKind::Client).await?;
+    if ca_identity.fingerprint != identity.fingerprint
+        || !ca_identity.ca
+        || ca_identity.server_id != map.ca
     {
-        bail!("the map's controller candidate failed exact home-CA verification");
+        bail!("the map's CA candidate failed exact home-CA verification");
     }
-    Ok((controller_addr, controller_identity))
+    Ok((ca_addr, ca_identity))
 }
 
 pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
@@ -69,7 +68,7 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
         "no admin server specified and none found on this host — pass --server <ip:port>",
     )?;
     let runtime = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    let (server, identity) = runtime.block_on(resolve_controller(
+    let (server, identity) = runtime.block_on(resolve_ca(
         &mut answerer,
         bootstrap,
         flags.ca_dir.as_deref(),

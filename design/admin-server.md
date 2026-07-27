@@ -16,7 +16,7 @@ The implementation is split by where code runs:
 - `netidx-admin-client` owns cross-platform transport, discovery, remote
   operations, enrollment, configuration tooling, and service installation.
 - `netidx-admin-server` owns the Unix daemon, CA vault and stores, authority
-  operations, and controller/resolver authority provisioning.
+  operations, and CA/resolver authority provisioning.
 
 Dependencies point one way: protocol ← client ← server. `netidx-tools` is the
 composition root that selects client-only or Unix authority operations.
@@ -354,7 +354,7 @@ which is the point of the whole renewal chapter: keys are disposable.
 
 Backup and restore are role-level install operations, not CA file-management
 operations. The same commands cover workstations, publishers, resolvers,
-dedicated controllers, and co-located controller/resolver hosts:
+dedicated CAs, and co-located CA/resolver hosts:
 
 ```text
 netidx admin backup /srv/backups/netidx-2026-07-12
@@ -362,17 +362,17 @@ netidx admin backup /srv/backups/netidx-2026-07-12
 
 The bundle records the installed components, current configuration and
 permissions, activation units, admin domain pin, service intent, and the machine
-credentials that must be re-enrolled. On a controller the daemon briefly
+credentials that must be re-enrolled. On a CA the daemon briefly
 blocks durable mutations while capturing the vault,
 certificate/trust chain, issuance and revocation records, CRL, authoritative
 map, delegation records, lifetime settings, audit log, admin-server config,
 and referenced resolver/id-map configuration into an embedded, CA-signed
-controller snapshot. It resumes
+CA snapshot. It resumes
 administration before writing the target. A versioned, hashed manifest signed
-by the CA key protects the controller snapshot. The complete bundle is
+by the CA key protects the CA snapshot. The complete bundle is
 published through a new sibling directory and atomic rename; an existing
 target is never overwritten. Sealed `autorenew.keytab` and TLS keys, sessions,
-locks, and temporary files are deliberately not backup assets. Non-controller
+locks, and temporary files are deliberately not backup assets. Non-CA
 TLS identities receive fresh keys through the normal enrollment ceremony on
 restore.
 
@@ -383,50 +383,50 @@ identities. An interrupted approval wait is resumed by repeating the same
 command. Each enrollment names the certificate serial it replaces; approval
 issues the fresh key and certificate and immediately revokes that exact old
 certificate, so restoring a lost machine does not leave its prior credential
-usable. For a controller, first fence the old host and supply the off-box
+usable. For a CA, first fence the old host and supply the off-box
 recovery password:
 
 ```text
 netidx admin restore /srv/backups/netidx-2026-07-12 \
-    --old-controller-fenced \
+    --old-ca-fenced \
     --listen 10.0.0.20:4565 \
     --recovery-password-stdin
 ```
 
-Controller restore accepts only the off-box `recovery` slot, verifies the config's CA
-fingerprint and controller UUID against `netmap.json`, and then:
+CA restore accepts only the off-box `recovery` slot, verifies the config's CA
+fingerprint and CA UUID against `admin-domain.json`, and then:
 
 - generates and seals a fresh serving key on the replacement machine;
-- issues a serving certificate with the **same** controller UUID and controller
+- issues a serving certificate with the **same** CA UUID and CA
   URI (clients retain the same administrative identity);
 - atomically replaces the `autorenew` vault slot and seals its new keytab on
   the replacement machine;
-- revokes every superseded live serving certificate for that controller and
+- revokes every superseded live serving certificate for that CA and
   republishes the CRL;
-- updates the controller's authoritative map address and rewrites
+- updates the CA's authoritative map address and rewrites
   `admin-server.json` to the restored CA's canonical paths.
 
 A restored satellite receives a fresh server UUID during its approval
 ceremony. The request visibly names the failed UUID it replaces; approval
 atomically installs the new grant in the same stable resolver cluster, removes the old
-grant, and revokes every old serving certificate. The active controller can
+grant, and revokes every old serving certificate. The active CA can
 never be replaced through this path.
 
-On first start the recovered controller sends its current immutable identity,
+On first start the recovered CA sends its current immutable identity,
 possibly changed address, authoritative map, and CRL to every registered admin
-server. Each satellite accepts this only from the exact home-CA controller,
+server. Each satellite accepts this only from the exact home-CA,
 persists the new `ca_addr`, and resumes normal map refresh and renewal. A node
 that was unavailable is retried explicitly from the CLI or the Admin Servers
 TUI panel (`c`):
 
 ```text
-netidx admin ca reconcile-controller --server <controller> ...
+netidx admin ca reconcile-ca --server <CA> ...
 ```
 
 The response identifies every target by immutable server ID and address. The
 operation is idempotent and never restarts a service. Other co-located TLS
 identities whose keys were sealed to the failed machine are re-enrolled
-normally after the controller is back.
+normally after the CA is back.
 `--insecure-no-tpm` is an explicit test-only fallback and leaves both new
 machine credentials in plaintext.
 
@@ -548,10 +548,10 @@ Expert escapes, all warned about where they're used:
 - Bring-your-own data-plane certificates are **not** a wizard option: to
   run resolver/publisher/subscriber TLS with unrelated certificates,
   manage those configs by hand. Chaining the netidx administrative CA to
-  an existing PKI is supported by the dedicated Controller / CA install:
+  an existing PKI is supported by the dedicated CA install:
   choose external-root signing, have the external PKI sign the emitted
   subordinate-CA CSR, then install the returned certificate from the
-  controller's local TUI. The netidx CA runs as an intermediate and its
+  CA's local TUI. The netidx CA runs as an intermediate and its
   certificate is renewed through the same explicit external ceremony
   (see ca-server.md).
 

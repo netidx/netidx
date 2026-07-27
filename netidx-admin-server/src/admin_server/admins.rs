@@ -22,7 +22,7 @@ pub(super) async fn handle_login(
 ) -> admin_proto::LoginResponse {
     if !state.has_ca().await {
         return admin_proto::LoginResponse::Err {
-            reason: "login must be sent to the CA controller".to_string(),
+            reason: "login must be sent to the CA".to_string(),
         };
     }
     state
@@ -56,7 +56,7 @@ pub(super) async fn handle_logout(
     state
         .write(move |state| match state.ca.as_mut() {
             None => admin_proto::LogoutResponse::Err {
-                reason: "logout must be sent to the CA controller".to_string(),
+                reason: "logout must be sent to the CA".to_string(),
             },
             Some(ca) => ca.sessions.logout(&req.credential),
         })

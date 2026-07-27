@@ -93,8 +93,8 @@ async fn topology_fanout_writes_the_split_config_without_service_control() {
 }
 
 #[test]
-fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
-    let controller = admin_proto::AdminServerId::new();
+fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
+    let ca = admin_proto::AdminServerId::new();
     let satellite = admin_proto::AdminServerId::new();
     let root = admin_proto::ResolverClusterId::new();
     let child = admin_proto::ResolverClusterId::new();
@@ -106,10 +106,10 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
     let child_member = resolver("10.2.0.1:4564");
     let map = AdminDomainMap {
         version: 9,
-        controller,
+        ca,
         admin_servers: vec![
             AdminServerEntry {
-                id: controller,
+                id: ca,
                 addr: "10.1.0.1:4565".parse().unwrap(),
                 roles: Role::Ca | Role::Resolver,
                 resolver: Some(root_member.clone()),
@@ -148,7 +148,7 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
     let fanout = topology_fanout(&map, map.resolver_clusters.iter());
     assert_eq!(fanout.targets.len(), 2);
     let (_, _, ReferralEdit::SetTopology { parent, children, .. }) =
-        fanout.targets.iter().find(|(server, _, _)| *server == controller).unwrap();
+        fanout.targets.iter().find(|(server, _, _)| *server == ca).unwrap();
     assert!(parent.is_none());
     assert_eq!(children[0].path, "/eu");
     assert_eq!(children[0].addrs, vec![child_member]);
@@ -161,7 +161,7 @@ fn controller_reconciliation_fanout_covers_the_complete_hierarchy() {
 
 #[test]
 fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
-    let controller = admin_proto::AdminServerId::new();
+    let ca = admin_proto::AdminServerId::new();
     let joining = admin_proto::AdminServerId::new();
     let peer = admin_proto::AdminServerId::new();
     let grandchild_server = admin_proto::AdminServerId::new();
@@ -189,9 +189,9 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
     let sibling_member = resolver("10.4.0.1:4564");
     let map = AdminDomainMap {
         version: 12,
-        controller,
+        ca,
         admin_servers: vec![
-            server(controller, "10.1.0.1:4565", root_member.clone(), root),
+            server(ca, "10.1.0.1:4565", root_member.clone(), root),
             server(joining, "10.2.0.1:4565", joining_member.clone(), child),
             server(peer, "10.2.0.2:4565", peer_member.clone(), child),
             server(
@@ -245,13 +245,13 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
         .map(|(server, _, _)| server)
         .collect();
     targets.sort();
-    let mut expected = vec![controller, joining, peer, grandchild_server];
+    let mut expected = vec![ca, joining, peer, grandchild_server];
     expected.sort();
     assert_eq!(targets, expected);
 }
 
 #[tokio::test]
-async fn controller_state_relocation_persists_route_map_and_crl_without_rollback() {
+async fn ca_state_relocation_persists_route_map_and_crl_without_rollback() {
     use crate::admin_server_config::Roles;
     let home = tempfile::tempdir().unwrap();
     let (crl, home_ca) = signed_empty_crl(home.path(), "home-ca").await;
@@ -260,7 +260,7 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
     let trusted = root.path().join("trusted.pem");
     std::fs::write(&trusted, std::fs::read(home.path().join("certificate.pem")).unwrap())
         .unwrap();
-    let controller = admin_proto::AdminServerId::new();
+    let ca = admin_proto::AdminServerId::new();
     let node = admin_proto::AdminServerId::new();
     let old_addr = "10.0.0.1:4565".parse().unwrap();
     let new_addr = "10.0.0.2:14565".parse().unwrap();
@@ -289,14 +289,13 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
         cluster: None,
         state: admin_proto::ServerState::Registered,
     };
-    let mut old_map = AdminDomainMap::empty(controller);
+    let mut old_map = AdminDomainMap::empty(ca);
     old_map.version = 4;
-    old_map.admin_servers.push(entry(controller, old_addr, Role::Ca.into()));
+    old_map.admin_servers.push(entry(ca, old_addr, Role::Ca.into()));
     old_map.admin_servers.push(entry(node, cfg.listen, Role::Resolver.into()));
     let mut new_map = old_map.clone();
     new_map.version = 5;
-    new_map.admin_servers.iter_mut().find(|s| s.id == controller).unwrap().addr =
-        new_addr;
+    new_map.admin_servers.iter_mut().find(|s| s.id == ca).unwrap().addr = new_addr;
     let state = Server::from_state(
         ConfigDirLock::acquire(root.path()).unwrap(),
         None,
@@ -313,16 +312,16 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
         CertificateDer::from(home_ca),
     )
     .unwrap();
-    let req = ApplyControllerStateRequest {
+    let req = ApplyCaStateRequest {
         operation_id: admin_proto::OperationId::new(),
-        controller,
+        ca,
         addr: new_addr,
         map: new_map.clone(),
         crl_pem: crl.clone(),
     };
     assert!(matches!(
-        handle_apply_controller_state(&state, &req).await,
-        ApplyControllerStateResponse::Ok(())
+        handle_apply_ca_state(&state, &req).await,
+        ApplyCaStateResponse::Ok(())
     ));
     let persisted = crate::admin_server_config::load_for_recovery(&cfg_path).unwrap();
     assert_eq!(persisted.ca_addr, Some(new_addr));
@@ -332,11 +331,10 @@ async fn controller_state_relocation_persists_route_map_and_crl_without_rollback
     let mut stale = req.clone();
     stale.map.version = 3;
     stale.addr = old_addr;
-    stale.map.admin_servers.iter_mut().find(|s| s.id == controller).unwrap().addr =
-        old_addr;
+    stale.map.admin_servers.iter_mut().find(|s| s.id == ca).unwrap().addr = old_addr;
     assert!(matches!(
-        handle_apply_controller_state(&state, &stale).await,
-        ApplyControllerStateResponse::Err { .. }
+        handle_apply_ca_state(&state, &stale).await,
+        ApplyCaStateResponse::Err { .. }
     ));
     assert_eq!(
         crate::admin_server_config::load_for_recovery(&cfg_path).unwrap().ca_addr,
@@ -372,7 +370,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
     };
     let map = AdminDomainMap {
         version: 1,
-        controller: root_srv,
+        ca: root_srv,
         admin_servers: vec![
             server(root_srv, "10.1.0.1:4565", &root_member, root),
             server(eu_srv, "10.2.0.1:4565", &eu_member, eu),

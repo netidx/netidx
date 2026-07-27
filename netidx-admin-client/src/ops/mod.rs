@@ -173,24 +173,22 @@ pub async fn open_admin_session(
     admin: Option<String>,
     password: Option<Secret>,
 ) -> Result<AdminSession> {
-    let (server, controller_identity) =
-        resolve_controller(ans, server, ca_dir.as_deref()).await?;
+    let (server, ca_identity) = resolve_ca(ans, server, ca_dir.as_deref()).await?;
     if password.is_none()
         && !ans.has_explicit_secret(Field::AdminPassword)
-        && let Some(cached) =
-            crate::session_cache::load(&controller_identity.fingerprint.text())?
+        && let Some(cached) = crate::session_cache::load(&ca_identity.fingerprint.text())?
     {
         return Ok(AdminSession {
             server,
-            identity: controller_identity,
+            identity: ca_identity,
             admin: cached.admin,
             credential: AdminCredential::Session { token: cached.token },
         });
     }
-    password_session(ans, server, controller_identity, admin, password).await
+    password_session(ans, server, ca_identity, admin, password).await
 }
 
-/// Open a controller-verified password session even if a reusable login cache
+/// Open a ca-verified password session even if a reusable login cache
 /// exists. This is the `admin login` path: an explicit login replaces the
 /// selected cached session instead of accidentally reusing it.
 pub async fn open_admin_password_session(
@@ -200,38 +198,37 @@ pub async fn open_admin_password_session(
     admin: Option<String>,
     password: Option<Secret>,
 ) -> Result<AdminSession> {
-    let (server, controller_identity) =
-        resolve_controller(ans, server, ca_dir.as_deref()).await?;
-    password_session(ans, server, controller_identity, admin, password).await
+    let (server, ca_identity) = resolve_ca(ans, server, ca_dir.as_deref()).await?;
+    password_session(ans, server, ca_identity, admin, password).await
 }
 
-async fn resolve_controller(
+async fn resolve_ca(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<&Path>,
 ) -> Result<(SocketAddr, CaIdentity)> {
     let (server, identity) = resolve_identity(ans, server, ca_dir).await?;
-    // Resolve the authoritative controller while we still hold no secret.
+    // Resolve the authoritative CA while we still hold no secret.
     let map = transport::get_map_pinned(server, NodeKind::Client, &identity).await?;
-    let controller = map
-        .controller_entry()
+    let ca = map
+        .ca_entry()
         .filter(|s| s.state == netidx_admin_proto::ServerState::Registered)
-        .context("the authoritative map has no registered controller")?;
-    let server = controller.addr;
-    let controller_identity = transport::fetch_identity(server, NodeKind::Client).await?;
-    if controller_identity.fingerprint != identity.fingerprint
-        || !controller_identity.controller
-        || controller_identity.server_id != map.controller
+        .context("the authoritative map has no registered CA")?;
+    let server = ca.addr;
+    let ca_identity = transport::fetch_identity(server, NodeKind::Client).await?;
+    if ca_identity.fingerprint != identity.fingerprint
+        || !ca_identity.ca
+        || ca_identity.server_id != map.ca
     {
-        bail!("the map's controller candidate failed exact home-CA verification");
+        bail!("the map's CA candidate failed exact home-CA verification");
     }
-    Ok((server, controller_identity))
+    Ok((server, ca_identity))
 }
 
 async fn password_session(
     ans: &mut dyn Answerer,
     server: SocketAddr,
-    controller_identity: CaIdentity,
+    ca_identity: CaIdentity,
     admin: Option<String>,
     password: Option<Secret>,
 ) -> Result<AdminSession> {
@@ -242,7 +239,7 @@ async fn password_session(
     let password = ans.secret(Field::AdminPassword, password).await?;
     Ok(AdminSession {
         server,
-        identity: controller_identity,
+        identity: ca_identity,
         admin: admin.clone(),
         credential: AdminCredential::Password { admin, password },
     })

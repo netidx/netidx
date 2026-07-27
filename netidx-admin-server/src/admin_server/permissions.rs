@@ -137,9 +137,9 @@ async fn confine_local_perms(
     }
 }
 
-/// Admin → controller permissions read. Authentication and policy are checked
-/// once at the controller, then registered resolver cluster members are tried in stable
-/// server-ID order using the controller certificate and exact target pinning.
+/// Admin → CA permissions read. Authentication and policy are checked
+/// once at the CA, then registered resolver cluster members are tried in stable
+/// server-ID order using the CA certificate and exact target pinning.
 pub(super) async fn handle_read_perms(
     state: &Arc<Server>,
     req: &ReadPermsRequest,
@@ -148,7 +148,7 @@ pub(super) async fn handle_read_perms(
 ) -> ReadPermsResponse {
     let err = |reason: String| ReadPermsResponse::Err { reason };
     if !local && !state.has_ca().await {
-        return err("a remote perms read must be sent to the CA controller".to_string());
+        return err("a remote perms read must be sent to the CA".to_string());
     }
     let authd =
         match authenticate_perms_caller(state, &req.credential, authentication, local)
@@ -201,19 +201,13 @@ pub(super) async fn handle_read_perms(
         Ok(client) => client,
         Err(e) => return err(format!("loading outbound identity: {e:#}")),
     };
-    let controller = state.read(move |state| state.map.controller).await;
+    let ca = state.read(move |state| state.map.ca).await;
     let home_ca = state.home_ca_der.clone();
     let mut failures = Vec::new();
     for (server, addr) in targets {
         let result = tokio::time::timeout(
             PUSH_TIMEOUT,
-            transport::pull_perms(
-                &client,
-                addr,
-                server,
-                server == controller,
-                home_ca.clone(),
-            ),
+            transport::pull_perms(&client, addr, server, server == ca, home_ca.clone()),
         )
         .await;
         match result {
@@ -335,7 +329,7 @@ async fn push_perms_edit_to_peers(
                 .collect();
         }
     };
-    let controller = state.read(move |state| state.map.controller).await;
+    let ca = state.read(move |state| state.map.ca).await;
     let home_ca = state.home_ca_der.clone();
     let mut results: Vec<_> =
         stream::iter(targets.iter().copied().map(|(server, addr)| {
@@ -348,7 +342,7 @@ async fn push_perms_edit_to_peers(
                         &client,
                         addr,
                         server,
-                        server == controller,
+                        server == ca,
                         home_ca,
                         operation_id,
                         perms_json,

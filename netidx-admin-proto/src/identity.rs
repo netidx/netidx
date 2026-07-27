@@ -1,4 +1,4 @@
-use crate::{AdminServerId, CONTROLLER_ROLE_URI, SERVER_ID_URI_PREFIX, SERVING_SAN};
+use crate::{AdminServerId, CA_ROLE_URI, SERVER_ID_URI_PREFIX, SERVING_SAN};
 use anyhow::{Context, Result, anyhow, bail};
 use uuid::Uuid;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
@@ -6,7 +6,7 @@ use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminCertIdentity {
     pub server_id: AdminServerId,
-    pub controller: bool,
+    pub ca: bool,
 }
 
 pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
@@ -35,7 +35,7 @@ pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
         );
     }
     let mut server_id = None;
-    let mut controller = false;
+    let mut ca = false;
     for uri in san.value.general_names.iter().filter_map(|n| match n {
         GeneralName::URI(s) => Some(*s),
         _ => None,
@@ -47,18 +47,18 @@ pub fn admin_cert_identity_from_der(der: &[u8]) -> Result<AdminCertIdentity> {
             let id = Uuid::parse_str(raw)
                 .with_context(|| format!("invalid admin server identity URI {uri:?}"))?;
             server_id = Some(AdminServerId(id));
-        } else if uri == CONTROLLER_ROLE_URI {
-            if controller {
-                bail!("admin certificate contains duplicate controller role URIs");
+        } else if uri == CA_ROLE_URI {
+            if ca {
+                bail!("admin certificate contains duplicate CA role URIs");
             }
-            controller = true;
+            ca = true;
         }
     }
     Ok(AdminCertIdentity {
         server_id: server_id.context(
             "admin certificate has no protocol-v6 server identity URI (legacy certificates are refused)",
         )?,
-        controller,
+        ca,
     })
 }
 

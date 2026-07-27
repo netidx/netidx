@@ -337,10 +337,7 @@ async fn approve_serialized(
                 name: SERVING_SAN,
                 validity: ca.lifetimes.leaf_validity,
                 mode: IssuanceMode::Enrollment {
-                    identity: crate::tls::AdminCertIdentity {
-                        server_id,
-                        controller: false,
-                    },
+                    identity: crate::tls::AdminCertIdentity { server_id, ca: false },
                 },
                 pending_request: Some(&req.request_id),
             },

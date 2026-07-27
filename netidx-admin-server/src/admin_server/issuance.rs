@@ -619,8 +619,8 @@ pub(super) async fn issue_serialized(
     let mut san = vec![SanEntry::Dns(name.to_string())];
     if let Some(identity) = serving_identity {
         san.push(SanEntry::Uri(identity.server_id.uri()));
-        if identity.controller {
-            san.push(SanEntry::Uri(admin_proto::CONTROLLER_ROLE_URI.to_string()));
+        if identity.ca {
+            san.push(SanEntry::Uri(admin_proto::CA_ROLE_URI.to_string()));
         }
     }
     let resp = sign_csr(
@@ -673,7 +673,7 @@ pub(super) async fn issue_serialized(
 
 #[derive(Clone)]
 struct IdentityPusher {
-    controller: admin_proto::AdminServerId,
+    ca: admin_proto::AdminServerId,
     client: transport::AuthenticatedPkiClient,
     home_ca: CertificateDer<'static>,
 }
@@ -681,7 +681,7 @@ struct IdentityPusher {
 impl IdentityPusher {
     async fn new(state: &Server) -> Result<Self> {
         Ok(IdentityPusher {
-            controller: state.read(move |state| state.map.controller).await,
+            ca: state.read(move |state| state.map.ca).await,
             client: state.outbound_client().await?,
             home_ca: state.home_ca_der.clone(),
         })
@@ -699,7 +699,7 @@ impl IdentityPusher {
                 &self.client,
                 addr,
                 server,
-                server == self.controller,
+                server == self.ca,
                 self.home_ca.clone(),
                 req,
             ),
@@ -724,7 +724,7 @@ pub(super) async fn push_registrations(
     if let Some(dir) = state.ca_dir().await {
         audit(
             &dir,
-            "controller",
+            "CA",
             "fanout-id-map",
             &format!("operation {operation_id}: {}", plan.name),
             Duration::ZERO,
@@ -864,7 +864,7 @@ pub(super) async fn reconcile_identities_to_target(
             if let Some(dir) = state.ca_dir().await {
                 audit(
                     &dir,
-                    "controller",
+                    "CA",
                     "reconcile-id-map",
                     &format!("operation {operation_id}: server {server} at {addr}"),
                     Duration::ZERO,

@@ -1,8 +1,8 @@
 //! Map-routed permissions administration as query + action.
 //!
 //! An admin contacts *an* admin server, glyph-confirms its CA (the one human
-//! trust decision), and resolves the authoritative controller before sending
-//! credentials. Both reads and edits authenticate there. The controller
+//! trust decision), and resolves the authoritative CA before sending
+//! credentials. Both reads and edits authenticate there. The CA
 //! authorizes the requested path and uses its CA-owned map plus exact server-ID
 //! pinning to reach resolver cluster members. The `$EDITOR` loop between read and write
 //! is a frontend concern and stays in the CLI.
@@ -25,7 +25,7 @@ use std::{
 /// Reach an admin server (explicit, else this host's own), confirm its CA glyph
 /// (auto-verified against the local cert, or through the answerer), and pull the
 /// map for the level picker. The map is a discovery hint only; authenticated
-/// reads and edits separately resolve and verify the controller.
+/// reads and edits separately resolve and verify the CA.
 async fn bootstrap(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
@@ -38,7 +38,7 @@ async fn bootstrap(
 }
 
 /// The `perms show --at <path>` query: read the raw perms JSON of the resolver cluster
-/// mounted at `at`. The authoritative controller is verified before collecting
+/// mounted at `at`. The authoritative CA is verified before collecting
 /// credentials, then authenticates and authorizes the read. The CLI
 /// pretty-prints the result.
 pub async fn show_perms(
@@ -110,7 +110,7 @@ pub async fn edit_perms(
     edited: &str,
 ) -> Result<Vec<PeerResult>> {
     // `open_admin_session` resolves and exactly verifies the authoritative
-    // controller before it collects or sends credentials.
+    // CA before it collects or sends credentials.
     let session = open_admin_session(ans, server, ca_dir, admin, password).await?;
     edit_perms_with_session(&session, at, edited).await
 }

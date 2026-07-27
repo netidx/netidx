@@ -27,7 +27,7 @@ const TXT_VERSION: &str = "1";
 
 fn role_to_str(r: Role) -> &'static str {
     match r {
-        Role::Ca => "ca",
+        Role::Ca => "CA",
         Role::Resolver => "resolver",
         Role::IdMap => "id-map",
     }
@@ -35,14 +35,14 @@ fn role_to_str(r: Role) -> &'static str {
 
 fn role_from_str(s: &str) -> Option<Role> {
     match s {
-        "ca" => Some(Role::Ca),
+        "CA" => Some(Role::Ca),
         "resolver" => Some(Role::Resolver),
         "id-map" => Some(Role::IdMap),
         _ => None,
     }
 }
 
-/// Encode roles for the TXT record: `"ca,resolver,id-map"`.
+/// Encode roles for the TXT record: `"CA,resolver,id-map"`.
 fn roles_to_txt(roles: BitFlags<Role>) -> String {
     let mut out = String::new();
     for role in roles {
@@ -292,13 +292,13 @@ mod tests {
     fn roles_round_trip_txt() {
         let all = Role::Ca | Role::Resolver | Role::IdMap;
         let txt = roles_to_txt(all);
-        assert_eq!(txt, "ca,resolver,id-map");
+        assert_eq!(txt, "CA,resolver,id-map");
         assert_eq!(roles_from_txt(&txt), all);
         assert_eq!(roles_from_txt(""), BitFlags::empty());
         // Unknown roles from a newer version are skipped, not fatal.
-        assert_eq!(roles_from_txt("ca,flux-capacitor"), Role::Ca);
+        assert_eq!(roles_from_txt("CA,flux-capacitor"), Role::Ca);
         // Whitespace tolerance.
-        assert_eq!(roles_from_txt("ca, resolver"), Role::Ca | Role::Resolver);
+        assert_eq!(roles_from_txt("CA, resolver"), Role::Ca | Role::Resolver);
     }
 
     /// Live loopback advertise/browse. Ignored by default: multicast is

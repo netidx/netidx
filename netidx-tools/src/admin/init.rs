@@ -269,7 +269,7 @@ pub(crate) struct WorkstationFlags {
     /// discovery — the non-interactive join path. On a TLS admin domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
     /// admin domain out of band with `--accept-glyph` (view the glyph via `netidx
-    /// admin ca fingerprint <ip:port>`). Ignored when a `--parent-*` flag
+    /// admin CA fingerprint <ip:port>`). Ignored when a `--parent-*` flag
     /// specifies the parent explicitly.
     #[arg(long = "admin-server")]
     admin_server: Option<SocketAddr>,
@@ -458,7 +458,7 @@ fn describe_roles(roles: enumflags2::BitFlags<Role>) -> String {
     roles
         .into_iter()
         .map(|role| match role {
-            Role::Ca => "ca",
+            Role::Ca => "CA",
             Role::Resolver => "resolver",
             Role::IdMap => "id-map",
         })
@@ -723,7 +723,7 @@ pub(crate) struct PublisherFlags {
     /// discovery — the non-interactive join path. On a TLS admin domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
     /// admin domain out of band with `--accept-glyph` (view the glyph via `netidx
-    /// admin ca fingerprint <ip:port>`). Takes precedence over `--addr` /
+    /// admin CA fingerprint <ip:port>`). Takes precedence over `--addr` /
     /// `--auth`.
     #[arg(long = "admin-server")]
     admin_server: Option<SocketAddr>,

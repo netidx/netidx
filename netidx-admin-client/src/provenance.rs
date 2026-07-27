@@ -21,10 +21,10 @@ use std::{
 
 /// Which system-role template produced this install. Distinct from
 /// [`admin_proto::Role`](netidx_admin_proto::Role), which enumerates the
-/// services a *admin server* offers (ca / resolver / id-map).
+/// services a *admin server* offers (CA / resolver / id-map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallRole {
-    Controller,
+    Ca,
     Workstation,
     Resolver,
     Publisher,
@@ -33,7 +33,7 @@ pub enum InstallRole {
 impl InstallRole {
     pub fn as_str(self) -> &'static str {
         match self {
-            InstallRole::Controller => "controller",
+            InstallRole::Ca => "CA",
             InstallRole::Workstation => "workstation",
             InstallRole::Resolver => "resolver",
             InstallRole::Publisher => "publisher",
@@ -230,14 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn controller_role_round_trips() {
+    fn ca_role_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("install.json");
-        let rec =
-            InstallRecord::new(InstallRole::Controller, "/", "admin-tls", None, None);
+        let rec = InstallRecord::new(InstallRole::Ca, "/", "admin-tls", None, None);
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         rec.save(&lock, &path).unwrap();
-        assert_eq!(InstallRecord::load(&path).unwrap().role, InstallRole::Controller);
-        assert_eq!(InstallRole::Controller.as_str(), "controller");
+        assert_eq!(InstallRecord::load(&path).unwrap().role, InstallRole::Ca);
+        assert_eq!(InstallRole::Ca.as_str(), "CA");
     }
 }

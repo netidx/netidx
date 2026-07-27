@@ -682,7 +682,7 @@ mod tests {
         std::fs::write(&cert, b"cert").unwrap();
         std::fs::write(&key, b"key").unwrap();
         let ca_src = dir.path().join("ca-certificate.pem");
-        std::fs::write(&ca_src, b"ca").unwrap();
+        std::fs::write(&ca_src, b"CA").unwrap();
 
         let mut rt = empty_rt();
         rt.tls_install.push(TlsCopyJob {
@@ -709,7 +709,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         let cert_src = src.join("certificate.pem");
         let key_src = src.join("private.key");
-        let ca_src = src.join("ca.pem");
+        let ca_src = src.join("CA.pem");
         for p in [&cert_src, &key_src, &ca_src] {
             std::fs::write(p, b"new").unwrap();
         }

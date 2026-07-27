@@ -300,7 +300,7 @@ fn load_install_record(p: &Params, scope: ServiceScope) -> Option<InstallRecord>
 }
 
 fn plan_contains_ca(r: &UninstallReport) -> bool {
-    r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("ca"))
+    r.removed.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("CA"))
 }
 
 /// The scope to tear down when the operator passed no `--scope`: prefer a
@@ -335,7 +335,7 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
 /// Tell the CA to drop this admin server from the admin domain map before we
 /// delete its config + certs. Best-effort: a non-CA admin server registers
 /// its facts with the CA, so on teardown it should deregister, or the CA
-/// keeps a dead entry until `admin ca remove-server`. The CA host itself
+/// keeps a dead entry until `admin CA remove-server`. The CA host itself
 /// owns the map and has nothing to deregister from. Runs while the serving
 /// cert/key still exist (before the teardown removes them). Unix-only: the
 /// admin-server daemon is, so only a unix host ever has one to deregister.
