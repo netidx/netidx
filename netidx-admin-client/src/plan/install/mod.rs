@@ -298,21 +298,29 @@ pub fn admin_domain_provenance(
     }
 }
 
-/// Drop the certificate-renewal activation unit into `units_dir`, so every
-/// host with TLS identities renews on its own. Idempotent overwrite.
-pub fn install_renew_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()> {
+/// Drop the admin-agent activation unit into `units_dir`, so every client
+/// joined to an admin domain keeps itself current. Idempotent overwrite.
+///
+/// Also removes the pre-rename `renew` unit. A unit whose command no longer
+/// parses still *spawns* — the binary is there, it just exits 2 — so the
+/// supervisor's default `RateLimited(1.0)` restarts it about once a second
+/// forever. Nothing else would ever clean it up: the unit is written here
+/// rather than by the template, so it was never in the install record's
+/// managed paths and `uninstall` does not know about it either.
+pub fn install_agent_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()> {
+    use crate::template::services::admin_agent;
     std::fs::create_dir_all(units_dir)
         .with_context(|| format!("creating activation dir {}", units_dir.display()))?;
     let netidx_binary = std::env::current_exe()
-        .context("could not determine current netidx binary for the renew unit")?;
-    let unit = crate::template::services::renew::unit(
-        &crate::template::services::renew::RenewServiceParams { netidx_binary },
-    )?;
+        .context("could not determine current netidx binary for the agent unit")?;
+    let unit = admin_agent::unit(&admin_agent::AgentServiceParams { netidx_binary })?;
     let dir = activation::ActivationDir::open(Some(units_dir))?;
-    dir.save("renew", &unit).context("writing the renew activation unit")?;
+    dir.remove(admin_agent::SUPERSEDES)?;
+    dir.save(admin_agent::UNIT, &unit)
+        .context("writing the admin-agent activation unit")?;
     ans.note(&format_compact!(
         "activation unit → {}",
-        activation::unit_path_in(units_dir, "renew").display()
+        activation::unit_path_in(units_dir, admin_agent::UNIT).display()
     ));
     Ok(())
 }
@@ -832,5 +840,31 @@ mod tests {
         assert!(message.contains("core install completed"));
         assert!(message.contains("simulated admin domain failure"));
         assert_eq!(InstallRecord::load(&record_path).unwrap(), expected);
+    }
+
+    /// A pre-rename `renew` unit left in place would spawn successfully,
+    /// fail to parse its own command line, exit 2, and be restarted about
+    /// once a second forever. Installing the agent has to take it out.
+    #[test]
+    fn installing_the_agent_removes_the_unit_it_replaces() {
+        use crate::template::services::admin_agent;
+        let dir = tempfile::tempdir().unwrap();
+        let units = dir.path().join("activation");
+        std::fs::create_dir_all(&units).unwrap();
+        let stale = activation::ActivationDir::open(Some(&units)).unwrap();
+        let unit = admin_agent::unit(&admin_agent::AgentServiceParams {
+            netidx_binary: PathBuf::from("/usr/local/bin/netidx"),
+        })
+        .unwrap();
+        stale.save(admin_agent::SUPERSEDES, &unit).unwrap();
+        assert!(units.join("renew.unit").exists());
+
+        install_agent_unit(&mut TestAnswerer, &units).unwrap();
+        assert!(units.join("admin-agent.unit").exists());
+        assert!(!units.join("renew.unit").exists(), "the stale unit would crash-loop");
+
+        // Idempotent: a reinstall on a host that never had one is fine.
+        install_agent_unit(&mut TestAnswerer, &units).unwrap();
+        assert!(units.join("admin-agent.unit").exists());
     }
 }

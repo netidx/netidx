@@ -19,6 +19,7 @@ pub mod activation;
 pub mod admin_server_config;
 /// The `Answerer` seam: how the admin engine asks the operator questions and
 /// reports progress, abstracted over the frontend (strict CLI / TUI / Atlas).
+pub mod agent;
 pub mod answer;
 pub mod atomic;
 pub mod client;

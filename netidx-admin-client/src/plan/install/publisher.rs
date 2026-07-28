@@ -6,7 +6,7 @@
 //! is the certificate-renewal supervisor, for TLS setups.
 
 use super::{
-    InstallCommon, admin_domain_provenance, finish_with, install_renew_unit,
+    InstallCommon, admin_domain_provenance, finish_with, install_agent_unit,
     prompt_resolver_port, prompt_resolver_tls_name, publisher_bind_shape,
     resolve_units_dir, suggest_client_san,
 };
@@ -260,10 +260,13 @@ pub async fn run_publisher(
         answer
     };
     let default_bind_config = Some(bind);
-    // TLS publishers get the renewal daemon (certificates expire); everything
-    // else stays service-free.
-    let has_tls = !tls_identities.is_empty();
-    let units_dir = if has_tls {
+    let (admin_domain, admin_server) = admin_domain_provenance(&probe);
+    // A publisher joined to an admin domain runs the agent, whatever its
+    // data-plane auth: an anonymous or krb5 host has no certificates to renew
+    // but its resolver addresses still go stale. A standalone one stays
+    // service-free.
+    let joined = admin_domain.is_some();
+    let units_dir = if joined {
         resolve_units_dir(common.no_units, units_dir.as_deref())?
     } else {
         None
@@ -275,7 +278,6 @@ pub async fn run_publisher(
     } else {
         ServiceNeed::NONE
     };
-    let (admin_domain, admin_server) = admin_domain_provenance(&probe);
     // On the discovery/auto-import path `auth` is never set — the scheme comes
     // from the admin domain's per-referral auths — so fall back to what we actually
     // configured rather than defaulting the record to "tls".
@@ -301,7 +303,7 @@ pub async fn run_publisher(
     let rt = template::publisher(&params)?;
     finish_with(ans, rt, &common, need, record, async move |ans, _config_lock| {
         match &units_dir {
-            Some(d) => install_renew_unit(ans, d),
+            Some(d) => install_agent_unit(ans, d),
             None => Ok(()),
         }
     })

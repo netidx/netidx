@@ -14,7 +14,7 @@ use clap::Subcommand;
 use super::activation;
 #[cfg(unix)]
 use super::server;
-use super::{client, id_map, perms, resolver, service, tls};
+use super::{agent, client, id_map, perms, resolver, service, tls};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -45,7 +45,13 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: server::Cmd,
     },
-    /// this host's TLS identity (request a CSR, join a CA, auto-renew)
+    /// keep this host current with its admin domain (and renew its
+    /// certificates, if it has any)
+    AdminAgent {
+        #[command(subcommand)]
+        cmd: agent::Cmd,
+    },
+    /// this host's TLS identity (request a CSR, join a CA)
     Tls {
         #[command(subcommand)]
         cmd: tls::Cmd,
@@ -71,6 +77,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Activation { cmd } => activation::run(cmd),
         #[cfg(unix)]
         Cmd::Server { cmd } => server::run(cmd),
+        Cmd::AdminAgent { cmd } => agent::run(cmd),
         Cmd::Tls { cmd } => tls::run(cmd),
         Cmd::IdMap { cmd } => id_map::run(cmd),
         Cmd::Service { cmd } => service::run(cmd),

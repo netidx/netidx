@@ -6,7 +6,7 @@
 //! local-only workstation onto an admin domain without a reinstall.
 
 use super::{
-    InstallCommon, InstallMode, admin_domain_provenance, finish_with, install_renew_unit,
+    InstallCommon, InstallMode, admin_domain_provenance, finish_with, install_agent_unit,
     prompt_ip_or_addr, prompt_resolver_tls_name, resolve_netidx_binary,
     resolve_units_dir, suggest_client_san,
 };
@@ -215,7 +215,6 @@ pub async fn run_workstation(
         }
     };
     let units_dir = resolve_units_dir(common.no_units, units_dir.as_deref())?;
-    let has_tls = !tls_identities.is_empty();
     let post_apply_units_dir = units_dir.clone();
     let params = template::workstation::WorkstationParams {
         parent,
@@ -236,6 +235,10 @@ pub async fn run_workstation(
     };
     let rt = template::workstation(&params)?;
     let (admin_domain, admin_server) = net_prov;
+    // The agent keeps a joined host current; it has nothing to do on a
+    // standalone one. Not gated on TLS — an anonymous or krb5 client has no
+    // certificates to renew but still has to follow its admin domain.
+    let joined = admin_domain.is_some();
     // The workstation's own resolver is local-auth; the admin domain it refers up
     // to (if any) carries its auth inside the parent referral.
     let record = InstallRecord::new(
@@ -252,9 +255,8 @@ pub async fn run_workstation(
         // A workstation runs in the operator's session → user-scope service.
         ServiceNeed::at(ServiceScope::User),
         record,
-        // TLS identities expire: install the renewal daemon alongside.
-        async move |ans, _config_lock| match (&post_apply_units_dir, has_tls) {
-            (Some(d), true) => install_renew_unit(ans, d),
+        async move |ans, _config_lock| match (&post_apply_units_dir, joined) {
+            (Some(d), true) => install_agent_unit(ans, d),
             _ => Ok(()),
         },
     )
@@ -337,6 +339,21 @@ pub async fn run_workstation_join(
     rec.save_async(config_lock, &record_path)
         .await
         .context("updating the install record")?;
+    // Now that this host belongs to an admin domain it needs the agent to
+    // keep up with it — and, on a TLS admin domain, it has just been issued a
+    // certificate that nothing would otherwise renew. Unlike an install, this
+    // host is already running, and the supervisor has no directory watch.
+    if let Some(units_dir) = paths::user_activation_dir().ok().filter(|d| d.is_dir()) {
+        super::install_agent_unit(ans, &units_dir)?;
+        match crate::activation::reload(&units_dir).await {
+            Ok(true) => ans.note("the activation supervisor picked up the agent"),
+            Ok(false) => ans.note(
+                "no activation supervisor is running — the agent starts with the \
+                 netidx service",
+            ),
+            Err(e) => ans.warn(&format_compact!("{e:#}")),
+        }
+    }
     ans.note(&format_compact!(
         "joined admin domain {:?} — restart the local resolver to use it",
         rec.admin_domain.as_ref().expect("just set").domain,

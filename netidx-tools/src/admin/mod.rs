@@ -42,9 +42,9 @@ mod perms;
 // `perms` admin (remote, map-routed perms show/edit) drives the admin
 // server's CA admin auth + resolver cluster push, both unix-only (the engine
 // pulls openssl), same as `delegation`.
+mod agent;
 #[cfg(unix)]
 mod perms_admin;
-mod renew;
 mod resolver;
 mod roles;
 // `server` (the admin-server daemon CLI) depends on the

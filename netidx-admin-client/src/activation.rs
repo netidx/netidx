@@ -25,6 +25,28 @@ pub use netidx_activation::file::{
 
 const UNIT_SUFFIX: &str = ".unit";
 
+/// Tell a running supervisor to re-read `units_dir`.
+///
+/// It has no directory watch — it re-reads on SIGHUP or this control op —
+/// so a unit added to a *live* host is inert until something calls this. At
+/// install time nothing needs to: the install ends by starting the service,
+/// which reads the directory anyway. `Ok(false)` means no supervisor was
+/// listening, which is the normal case on a host whose service hasn't been
+/// registered yet.
+pub async fn reload(units_dir: &Path) -> Result<bool> {
+    use netidx_activation::control::{
+        ControlOp, ControlRequest, ControlResponse, control,
+    };
+    let req = ControlRequest { op: ControlOp::Reload, units: Vec::new() };
+    match control(units_dir, &req).await {
+        Ok(ControlResponse::Ok { .. }) => Ok(true),
+        Ok(ControlResponse::Err { reason }) => {
+            anyhow::bail!("the activation supervisor refused to reload: {reason}")
+        }
+        Err(_) => Ok(false),
+    }
+}
+
 /// A handle to an activation unit directory.
 #[derive(Debug, Clone)]
 pub struct ActivationDir {

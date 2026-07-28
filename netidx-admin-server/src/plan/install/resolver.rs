@@ -10,7 +10,7 @@
 
 use super::{
     DEFAULT_RESOLVER_NAME, InstallCommon, admin_domain_provenance, detect_resolver_shape,
-    finish_with, install_renew_unit, prompt_ip_or_addr, prompt_resolver_own_tls_name,
+    finish_with, install_agent_unit, prompt_ip_or_addr, prompt_resolver_own_tls_name,
     resolve_netidx_binary, resolve_units_dir, warn_incomplete_resolver_address,
 };
 
@@ -659,10 +659,19 @@ pub async fn run_resolver(
                 let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
                 let _ = (resolver_config_actual, id_map_actual);
             }
+            // A resolver host normally runs an admin server, which does both
+            // housekeeping jobs in-process — no agent unit, and no second
+            // process racing it for the same identities. The exception is a
+            // resolver installed `--no-admin-server`: it still has a
+            // CA-issued identity to renew, and nothing else on the box to
+            // renew it.
+            #[cfg(unix)]
             if let Some(d) = post_apply_units_dir.as_deref()
-                && (netidx_ca || paths::discover_admin_server_config().is_ok())
+                && netidx_ca
+                && !admin_server_ready
+                && paths::discover_admin_server_config().is_err()
             {
-                install_renew_unit(ans, d)?;
+                install_agent_unit(ans, d)?;
             }
             Ok(())
         },
