@@ -170,6 +170,24 @@ pub async fn discover_admin_server_config_async() -> Result<PathBuf> {
     bail!("no admin-server config found in any standard location")
 }
 
+/// Find the first existing install record in standard order:
+/// `${dirs::config_dir}/netidx/install.json` then the system path. Errors
+/// if none exists. Unlike [`crate::provenance::InstallRecord::load_default`]
+/// this also finds a system-scope install, which is what a daemon running
+/// as root has.
+pub fn discover_install_record() -> Result<PathBuf> {
+    if let Ok(p) = user_install_record()
+        && p.is_file()
+    {
+        return Ok(p);
+    }
+    let sys = system_install_record();
+    if sys.is_file() {
+        return Ok(sys);
+    }
+    bail!("no install record found in any standard location")
+}
+
 /// Find the first existing client config in the standard search order:
 /// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
 /// `${HOME}/.config/netidx/client.json`, then the system path. Errors

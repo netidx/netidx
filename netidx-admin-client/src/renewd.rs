@@ -261,10 +261,70 @@ fn load_roots_from_pem(pem: &[u8], trusted: &Path) -> Result<rustls::RootCertSto
     Ok(roots)
 }
 
-/// Find the admin domain's CA admin server, verified against `roots`:
-/// an explicit override, the local admin-server config (unix), or mDNS
-/// discovery + a PKI-verified peer walk. Unattended-safe — candidates
-/// that don't verify against our trust bundle are just skipped.
+/// How many admin servers one search will contact before giving up.
+const MAX_WALK: usize = 64;
+
+/// How long to browse mDNS when nothing closer to home answered.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Walk `queue` until an admin server reports where the CA lives,
+/// following each one's peers. `visited` carries across calls so a later
+/// seeding doesn't redo an earlier one's work.
+async fn walk(
+    queue: &mut Vec<SocketAddr>,
+    visited: &mut Vec<SocketAddr>,
+    mut info: impl AsyncFnMut(SocketAddr) -> Result<crate::admin_proto::GetInfoResponse>,
+) -> Option<SocketAddr> {
+    while let Some(addr) = queue.pop() {
+        if visited.len() >= MAX_WALK {
+            break;
+        }
+        if visited.contains(&addr) {
+            continue;
+        }
+        visited.push(addr);
+        match info(addr).await {
+            Ok(info) => {
+                if let Some(ca) = info.ca_addr {
+                    return Some(if ca.ip().is_unspecified() {
+                        SocketAddr::new(addr.ip(), ca.port())
+                    } else {
+                        ca
+                    });
+                }
+                queue.extend(info.peers);
+            }
+            Err(e) => {
+                // Wrong admin domain or down — either way, not ours.
+                log::debug!("renewd: admin server {addr} not usable: {e:#}");
+            }
+        }
+    }
+    None
+}
+
+/// [`walk`] over verified connections.
+async fn walk_for_ca(
+    client: &transport::PkiClient,
+    queue: &mut Vec<SocketAddr>,
+    visited: &mut Vec<SocketAddr>,
+) -> Option<SocketAddr> {
+    walk(queue, visited, async |addr| {
+        transport::get_info_pki(client, addr, NodeKind::Client).await
+    })
+    .await
+}
+
+/// Find the admin domain's CA admin server, verified against `roots`: an
+/// explicit override, the local admin-server config (unix), the admin
+/// server this host enrolled through, then mDNS — each of the last two
+/// seeding a PKI-verified peer walk. Unattended-safe — candidates that
+/// don't verify against our trust bundle are just skipped.
+///
+/// The install record matters because mDNS is link-local: a host with no
+/// admin server of its own and none on its segment — every workstation
+/// and publisher in a routed admin domain, and every Windows host, since
+/// admin servers are unix-only — has no other way to start.
 async fn find_ca_addr(
     server: Option<SocketAddr>,
     client: &transport::PkiClient,
@@ -287,34 +347,26 @@ async fn find_ca_addr(
             return Ok(ca);
         }
     }
-    // Discovery: browse, then walk peers over verified connections
-    // until someone reports the CA.
-    let found = crate::discovery::browse(Duration::from_secs(3)).await?;
-    let mut queue: Vec<SocketAddr> =
-        found.iter().flat_map(|d| d.socket_addrs()).collect();
     let mut visited: Vec<SocketAddr> = Vec::new();
-    while let Some(addr) = queue.pop() {
-        if visited.contains(&addr) || visited.len() >= 64 {
-            continue;
+    if let Ok(path) = paths::discover_install_record()
+        && let Ok(rec) = crate::provenance::InstallRecord::load(&path)
+        && let Some(addr) = rec.admin_server
+    {
+        let mut queue = vec![addr];
+        if let Some(ca) = walk_for_ca(client, &mut queue, &mut visited).await {
+            return Ok(ca);
         }
-        visited.push(addr);
-        match transport::get_info_pki(client, addr, NodeKind::Client).await {
-            Ok(info) => {
-                if let Some(ca) = info.ca_addr {
-                    let ca = if ca.ip().is_unspecified() {
-                        SocketAddr::new(addr.ip(), ca.port())
-                    } else {
-                        ca
-                    };
-                    return Ok(ca);
-                }
-                queue.extend(info.peers);
-            }
+    }
+    let mut queue: Vec<SocketAddr> =
+        match crate::discovery::browse(DISCOVERY_TIMEOUT).await {
+            Ok(found) => found.iter().flat_map(|d| d.socket_addrs()).collect(),
             Err(e) => {
-                // Wrong admin domain or down — either way, not ours.
-                log::debug!("renewd: admin server {addr} not usable: {e:#}");
+                warn!("renewd: mDNS browse failed: {e:#}");
+                Vec::new()
             }
-        }
+        };
+    if let Some(ca) = walk_for_ca(client, &mut queue, &mut visited).await {
+        return Ok(ca);
     }
     bail!("no admin server holding the CA could be found")
 }
@@ -716,5 +768,91 @@ mod tests {
         assert!(needs_renewal(0, 9 * day, 7 * day));
         // Expired is definitely inside the window.
         assert!(needs_renewal(0, 9 * day, 10 * day));
+    }
+
+    fn addr(n: u8) -> SocketAddr {
+        SocketAddr::from(([10, 0, 0, n], 4565))
+    }
+
+    fn info(
+        ca_addr: Option<SocketAddr>,
+        peers: Vec<SocketAddr>,
+    ) -> crate::admin_proto::GetInfoResponse {
+        crate::admin_proto::GetInfoResponse {
+            domain: "example.com".into(),
+            ca_addr,
+            resolver: None,
+            peers,
+        }
+    }
+
+    /// The second seeding must not re-contact what the first already
+    /// tried: the install-record walk and the mDNS walk overlap whenever
+    /// the recorded server is also advertising.
+    #[tokio::test]
+    async fn a_later_seeding_does_not_revisit() {
+        let mut asked: Vec<SocketAddr> = Vec::new();
+        let mut visited: Vec<SocketAddr> = Vec::new();
+        let mut queue = vec![addr(1)];
+        let found = walk(&mut queue, &mut visited, async |a| {
+            asked.push(a);
+            Ok(info(None, vec![]))
+        })
+        .await;
+        assert_eq!(found, None);
+        let mut queue = vec![addr(2), addr(1)];
+        let found = walk(&mut queue, &mut visited, async |a| {
+            asked.push(a);
+            Ok(if a == addr(2) {
+                info(Some(addr(9)), vec![])
+            } else {
+                info(None, vec![])
+            })
+        })
+        .await;
+        assert_eq!(found, Some(addr(9)));
+        assert_eq!(asked, vec![addr(1), addr(2)]);
+    }
+
+    /// A peer graph with a cycle must terminate, and a walk that hits the
+    /// cap must stop rather than drain the rest of the queue.
+    #[tokio::test]
+    async fn the_walk_terminates() {
+        let mut asked = 0usize;
+        let mut visited: Vec<SocketAddr> = Vec::new();
+        let mut queue = vec![addr(1)];
+        let found = walk(&mut queue, &mut visited, async |a| {
+            asked += 1;
+            let next = if a == addr(1) { addr(2) } else { addr(1) };
+            Ok(info(None, vec![next]))
+        })
+        .await;
+        assert_eq!(found, None);
+        assert_eq!(asked, 2);
+
+        let mut asked = 0usize;
+        let mut visited: Vec<SocketAddr> = Vec::new();
+        let mut queue: Vec<SocketAddr> = (1..=200u8).map(addr).collect();
+        let found = walk(&mut queue, &mut visited, async |_| {
+            asked += 1;
+            Ok(info(None, vec![]))
+        })
+        .await;
+        assert_eq!(found, None);
+        assert_eq!(asked, MAX_WALK);
+        assert!(!queue.is_empty());
+    }
+
+    /// An admin server that reports the CA on an unspecified address means
+    /// "me, on this port" — the walk has to substitute the peer's own IP.
+    #[tokio::test]
+    async fn an_unspecified_ca_addr_resolves_to_the_reporting_peer() {
+        let mut visited: Vec<SocketAddr> = Vec::new();
+        let mut queue = vec![addr(7)];
+        let found = walk(&mut queue, &mut visited, async |_| {
+            Ok(info(Some(SocketAddr::from(([0, 0, 0, 0], 4565))), vec![]))
+        })
+        .await;
+        assert_eq!(found, Some(addr(7)));
     }
 }
