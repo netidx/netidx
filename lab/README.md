@@ -2,7 +2,7 @@
 
 A libvirt VM lab for exercising the `netidx conf` setup wizards, the CA + conf
 server, resolver/publisher/workstation installs, delegation, remote service
-control, and cert auto-renewal — across the anonymous, TLS, and Kerberos auth
+control, and client housekeeping — across the anonymous, TLS, and Kerberos auth
 schemes, over a WAN-shaped multi-site topology.
 
 These files were authored in `/tmp` on the host and are kept here so a host
@@ -153,8 +153,10 @@ same removal UUID is the idempotent manual reconciliation path.
 netidx admin component server run -c /root/.config/netidx/admin-server.json -f
 # resolver member (:4564), --id selects the resolver cluster member index:
 netidx resolver-server -c /root/.config/netidx/resolver.json --id <N> -f
-# cert auto-renewal puller (NOT run by default — lab installs decline it):
-netidx conf component tls auto-renew run
+# the client housekeeping daemon (admin domain sync + cert renewal).
+# --sync-interval is a minimum; each wait is drawn from it to twice it, so
+# 20 gives a 20-40s cycle instead of the 12-24h default:
+netidx admin component admin-agent run --sync-interval 20 -f
 ```
 
 ## CLI renamed: `netidx conf …` → `netidx admin …`
