@@ -45,8 +45,28 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
     match cmd {
         Cmd::Run(p) => {
-            rt.block_on(renewd::run(p.server, Duration::from_secs(p.interval.max(60))))
+            let cfg = renewd::RenewalConfig {
+                server: p.server,
+                interval: Duration::from_secs(p.interval.max(60)),
+                ..Default::default()
+            };
+            rt.block_on(async { match renewd::run(cfg).await {} })
         }
-        Cmd::Now(p) => rt.block_on(renewd::run_once(p.server)),
+        Cmd::Now(p) => {
+            let cfg = renewd::RenewalConfig { server: p.server, ..Default::default() };
+            let report = rt.block_on(renewd::run_once(cfg));
+            match report.summary() {
+                Some(summary) => println!("{summary}"),
+                None => println!("nothing to renew"),
+            }
+            for (cert, why) in &report.failed {
+                println!("  {}: {why}", cert.display());
+            }
+            if report.failed.is_empty() {
+                Ok(())
+            } else {
+                bail!("{} identit(ies) could not be renewed", report.failed.len())
+            }
+        }
     }
 }

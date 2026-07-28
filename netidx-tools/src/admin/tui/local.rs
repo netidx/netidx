@@ -299,7 +299,7 @@ fn detect() -> Vec<Detected> {
     // What the renew action would actually operate on: the identities renewd
     // discovers across this host's configs. Scanned once — it is the same set
     // for every install detected here.
-    let renewable = !renewd::host_identities().is_empty();
+    let renewable = !renewd::host_identities(None).is_empty();
     let user_path = paths::user_install_record().ok();
     if let Ok(Some(record)) = InstallRecord::load_default() {
         let dir = paths::user_config_root().unwrap_or_default();

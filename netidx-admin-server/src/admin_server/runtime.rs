@@ -11,7 +11,7 @@ use crate::{
     admin_proto::{NodeKind, RegisterRequest},
     admin_server_config,
     config_lock::ConfigDirLock,
-    discovery, transport,
+    discovery, renewd, transport,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use log::{debug, info, warn};
@@ -122,6 +122,46 @@ async fn spawn_map_refresh(state: &Arc<Server>) {
             }
             drop(state);
             tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
+        }
+    });
+}
+
+/// Renew this host's certificates from inside the server process.
+///
+/// A host that runs an admin server needs no separate renewal daemon: the
+/// serving cert, the co-located resolver's identity, and any local client
+/// identity are all renewed from here. It also puts those writes inside
+/// the `ConfigDirLock` this process holds for its lifetime, which a
+/// separate process could not take at all.
+///
+/// The serving cert is still re-minted over `admin.sock` rather than by
+/// calling the enrollment path directly, so `local = true` — a signing
+/// superuser — keeps exactly one producer: an accepted socket that passed
+/// the `SO_PEERCRED` check. That connection is to our own socket, which is
+/// safe because it is served by its own task and this task holds no
+/// `Server` guard across the call. Don't make it read server state.
+async fn spawn_renewal(state: &Arc<Server>) {
+    let Some(cfg_path) = state.cfg_path.clone() else { return };
+    let cfg = renewd::RenewalConfig {
+        // Not our own listen address: an explicit server short-circuits the
+        // discovery walk that recovers when the CA has moved.
+        server: None,
+        admin_server_config: Some(cfg_path),
+        ca_dir: state.ca_dir().await,
+        interval: renewd::DEFAULT_INTERVAL,
+    };
+    let mut renewer = renewd::Renewer::new(cfg);
+    let weak = Arc::downgrade(state);
+    tokio::spawn(async move {
+        loop {
+            // Dropped before the pass, not just before the sleep: a pass can
+            // sit in `APPROVAL_POLL` for a minute.
+            let Some(state) = weak.upgrade() else { break };
+            drop(state);
+            if let Some(summary) = renewer.pass().await.summary() {
+                info!("admin-server: renewal — {summary}");
+            }
+            tokio::time::sleep(renewd::DEFAULT_INTERVAL).await;
         }
     });
 }
@@ -578,6 +618,10 @@ async fn serve_on(
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     spawn_autorenew(&state, signs.clone()).await;
     spawn_local_control(&state, signs.clone()).await;
+    // After `spawn_local_control`, which binds admin.sock before returning:
+    // the first pass on a CA host checks `daemon_running` and would other-
+    // wise fall through to the TLS-to-self path the re-mint exists to avoid.
+    spawn_renewal(&state).await;
     let (acceptor_tx, mut acceptor_rx) = tokio_mpsc::unbounded_channel();
     spawn_serving_reload(&state, acceptor_tx).await;
     let mut acceptor = acceptor;

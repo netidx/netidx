@@ -1285,12 +1285,32 @@ async fn add_parent(_ans: &mut TuiAnswerer, _config_root: PathBuf) -> Result<Out
 }
 
 async fn renew(_ans: &mut TuiAnswerer) -> Result<Outcome> {
-    renewd::run_once(None).await?;
-    Ok(Outcome::plain(
-        "Renewed",
-        vec!["Scanned and renewed certificates due for renewal.".to_string()],
-        false,
-    ))
+    let report = renewd::run_once(renewd::RenewalConfig::default()).await;
+    let mut lines: Vec<String> = Vec::new();
+    for cert in report.renewed.iter().chain(report.awaiting_approval.iter()) {
+        lines.push(format!("{}", cert.display()));
+    }
+    for (cert, why) in &report.failed {
+        lines.push(format!("{}: {why}", cert.display()));
+    }
+    match report.summary() {
+        None => Ok(Outcome::plain(
+            "Nothing to renew",
+            vec![
+                "Every certificate on this host is outside its renewal window."
+                    .to_string(),
+            ],
+            false,
+        )),
+        Some(summary) => {
+            lines.insert(0, summary.to_string());
+            Ok(Outcome::plain(
+                if report.failed.is_empty() { "Renewed" } else { "Renewal incomplete" },
+                lines,
+                !report.failed.is_empty(),
+            ))
+        }
+    }
 }
 
 async fn install(

@@ -1,11 +1,13 @@
-//! The certificate renewal daemon: the moving part that removes all
+//! The certificate renewal task: the moving part that removes all
 //! the other moving parts.
 //!
-//! One small daemon per TLS host (installed by the templates as an
-//! activation unit) owns certificate lifecycle so that nothing else
-//! has to: applications never know renewal exists, no
-//! publisher/subscriber needs write access to key material, and
-//! there's no mDNS chatter in every process. Each cycle it:
+//! Certificate lifecycle belongs to one task per TLS host, so nothing else
+//! has to think about it: applications never know renewal exists, no
+//! publisher/subscriber needs write access to key material, and there's no
+//! mDNS chatter in every process. It is spawned by whichever process owns
+//! the host's housekeeping — the admin server where one runs, otherwise
+//! [`crate::agent`] — and never spawns itself, so its owner keeps
+//! cancellation. Each cycle it:
 //!
 //! 1. **Scans** this host's TLS identities — every client-config
 //!    identity, the resolver's (if one runs here), and the admin
@@ -31,10 +33,13 @@ use crate::{admin_proto::NodeKind, atomic, paths, transport};
 #[cfg(unix)]
 use crate::{admin_proto, local};
 use anyhow::{Context, Result, anyhow, bail};
+use arcstr::ArcStr;
+use compact_str::{CompactString, format_compact};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -47,6 +52,56 @@ fn now_unix() -> u64 {
 
 /// How often the daemon wakes to scan (the first scan is immediate).
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+
+/// Everything the renewal task needs to know about the host it runs on.
+///
+/// The path fields are unconditional even though only unix consumes them:
+/// a `#[cfg(unix)]` field would force every constructor to be cfg'd, which
+/// is how a windows build breaks without anyone noticing.
+#[derive(Debug, Clone)]
+pub struct RenewalConfig {
+    /// Explicit CA admin-server address. `None` runs the discovery cascade.
+    pub server: Option<SocketAddr>,
+    /// This host's admin-server config. Set by the in-server caller so the
+    /// task targets the config actually being served rather than whatever
+    /// the standard search order finds first.
+    pub admin_server_config: Option<PathBuf>,
+    /// The CA directory, when this host holds the CA. Trust bundles inside
+    /// it are CA-owned; [`distribute_crl`] must not write beside them.
+    pub ca_dir: Option<PathBuf>,
+    pub interval: Duration,
+}
+
+impl Default for RenewalConfig {
+    fn default() -> Self {
+        RenewalConfig {
+            server: None,
+            admin_server_config: None,
+            ca_dir: None,
+            interval: DEFAULT_INTERVAL,
+        }
+    }
+}
+
+/// What renewing one identity did.
+enum Outcome {
+    /// Outside its renewal window.
+    Current,
+    /// Installed. `local` means it was re-minted over the CA host's own
+    /// control socket rather than renewed over TLS.
+    Renewed { local: bool },
+    /// Queued, still waiting on an admin; resumes next pass.
+    AwaitingApproval,
+}
+
+/// This host's admin-server config: the caller's override, else the
+/// standard search order.
+fn admin_server_config(override_: Option<&Path>) -> Option<PathBuf> {
+    match override_ {
+        Some(path) => Some(path.to_path_buf()),
+        None => paths::discover_admin_server_config().ok(),
+    }
+}
 
 /// How long a queued renewal is polled within one cycle before leaving
 /// it for the next (the admin may simply not have approved yet — the
@@ -166,7 +221,7 @@ pub struct Identity {
 /// unix — the admin server's serving identity. Deduped by certificate
 /// path. Missing configs are skipped silently: a krb5 workstation has
 /// nothing to renew and that's fine.
-pub fn host_identities() -> Vec<Identity> {
+pub fn host_identities(admin_server_config_path: Option<&Path>) -> Vec<Identity> {
     let mut out: Vec<Identity> = Vec::new();
     let mut push = |i: Identity| {
         if !out.contains(&i) {
@@ -211,7 +266,7 @@ pub fn host_identities() -> Vec<Identity> {
         }
     }
     #[cfg(unix)]
-    if let Ok(path) = paths::discover_admin_server_config() {
+    if let Some(path) = admin_server_config(admin_server_config_path) {
         match crate::admin_server_config::load(&path) {
             Ok(cfg) => push(Identity {
                 certificate: cfg.serving_cert,
@@ -221,6 +276,8 @@ pub fn host_identities() -> Vec<Identity> {
             Err(e) => warn!("renewd: could not read admin-server config {path:?}: {e:#}"),
         }
     }
+    #[cfg(not(unix))]
+    let _ = admin_server_config_path;
     out
 }
 
@@ -267,11 +324,18 @@ const MAX_WALK: usize = 64;
 /// Walk `queue` until an admin server reports where the CA lives,
 /// following each one's peers. `visited` carries across calls so a later
 /// seeding doesn't redo an earlier one's work.
-async fn walk(
+/// `info` is spelled `FnMut -> Future` rather than `AsyncFnMut` on purpose:
+/// the sugar gives no way to require the returned future be `Send`, and this
+/// runs inside a `tokio::spawn`ed task in the admin server.
+async fn walk<F, Fut>(
     queue: &mut Vec<SocketAddr>,
     visited: &mut Vec<SocketAddr>,
-    mut info: impl AsyncFnMut(SocketAddr) -> Result<crate::admin_proto::GetInfoResponse>,
-) -> Option<SocketAddr> {
+    mut info: F,
+) -> Option<SocketAddr>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = Result<crate::admin_proto::GetInfoResponse>> + Send,
+{
     while let Some(addr) = queue.pop() {
         if visited.len() >= MAX_WALK {
             break;
@@ -306,10 +370,8 @@ async fn walk_for_ca(
     queue: &mut Vec<SocketAddr>,
     visited: &mut Vec<SocketAddr>,
 ) -> Option<SocketAddr> {
-    walk(queue, visited, async |addr| {
-        transport::get_info_pki(client, addr, NodeKind::Client).await
-    })
-    .await
+    walk(queue, visited, |addr| transport::get_info_pki(client, addr, NodeKind::Client))
+        .await
 }
 
 /// Find the admin domain's CA admin server, verified against `roots`: an
@@ -319,24 +381,24 @@ async fn walk_for_ca(
 /// enough to reach the CA. Unattended-safe — candidates that don't verify
 /// against our trust bundle are just skipped.
 async fn find_ca_addr(
-    server: Option<SocketAddr>,
+    cfg: &RenewalConfig,
     client: &transport::PkiClient,
 ) -> Result<SocketAddr> {
-    if let Some(s) = server {
+    if let Some(s) = cfg.server {
         return Ok(s);
     }
     #[cfg(unix)]
-    if let Ok(path) = paths::discover_admin_server_config()
-        && let Ok(cfg) = crate::admin_server_config::load(&path)
+    if let Some(path) = admin_server_config(cfg.admin_server_config.as_deref())
+        && let Ok(local) = crate::admin_server_config::load(&path)
     {
-        if cfg.roles.ca.is_some() {
-            let mut addr = cfg.listen;
+        if local.roles.ca.is_some() {
+            let mut addr = local.listen;
             if addr.ip().is_unspecified() {
                 addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
             }
             return Ok(addr);
         }
-        if let Some(ca) = cfg.ca_addr {
+        if let Some(ca) = local.ca_addr {
             return Ok(ca);
         }
     }
@@ -443,19 +505,18 @@ fn clear_pending(certificate: &Path) {
     let _ = std::fs::remove_file(&key_path);
 }
 
-/// One renewal pass over a single identity. Returns a short
-/// human-readable status.
+/// One renewal pass over a single identity.
 async fn renew_identity(
     id: &Identity,
-    server: Option<SocketAddr>,
+    cfg: &RenewalConfig,
     clients: &mut Clients,
-) -> Result<&'static str> {
+) -> Result<Outcome> {
     let (name, nb, na) = cert_facts(&id.certificate)?;
     let now = now_unix();
     if !needs_renewal(nb, na, now) {
         // Outside the window: clear any stale pending state and move on.
         clear_pending(&id.certificate);
-        return Ok("current");
+        return Ok(Outcome::Current);
     }
     let (pki_client, roots, trust_digest) = clients.pki(&id.trusted)?;
     let installed_pem = std::fs::read_to_string(&id.trusted)
@@ -471,14 +532,15 @@ async fn renew_identity(
     #[cfg(unix)]
     {
         if name == admin_proto::SERVING_SAN
-            && let Ok(cfg_path) = paths::discover_admin_server_config()
-            && let Ok(cfg) = crate::admin_server_config::load(&cfg_path)
-            && cfg.roles.ca.is_some()
+            && let Some(cfg_path) =
+                admin_server_config(cfg.admin_server_config.as_deref())
+            && let Ok(local_cfg) = crate::admin_server_config::load(&cfg_path)
+            && local_cfg.roles.ca.is_some()
             && local::daemon_running(&cfg_path).await
         {
             let kc = transport::generate_key_and_csr(admin_proto::SERVING_SAN)?;
             let our_spki = transport::csr_spki(&kc.csr_pem)?;
-            return match local::enroll(&cfg_path, &kc.csr_pem, cfg.listen).await? {
+            return match local::enroll(&cfg_path, &kc.csr_pem, local_cfg.listen).await? {
                 admin_proto::SignResponse::Ok(admin_proto::SignOk {
                     signed_cert_pem,
                     trusted_pem,
@@ -492,20 +554,18 @@ async fn renew_identity(
                         &signed_cert_pem,
                     )
                     .context("verifying the locally re-minted serving cert")?;
-                    install(
-                        id,
-                        &transport::Issued {
+                    install_blocking(
+                        id.clone(),
+                        transport::Issued {
                             cert_pem: signed_cert_pem,
                             private_key_pem: kc.private_key_pem,
                             trusted_pem,
                             warnings,
                         },
-                    )?;
+                    )
+                    .await?;
                     clear_pending(&id.certificate);
-                    info!(
-                        "renewd: re-minted serving cert {name} locally over admin.sock"
-                    );
-                    Ok("renewed (local)")
+                    Ok(Outcome::Renewed { local: true })
                 }
                 admin_proto::SignResponse::Err { reason } => {
                     bail!("local re-mint of the serving cert was refused: {reason}")
@@ -513,7 +573,7 @@ async fn renew_identity(
             };
         }
     }
-    let ca_addr = find_ca_addr(server, &pki_client).await?;
+    let ca_addr = find_ca_addr(cfg, &pki_client).await?;
     let pending = match load_pending(&id.certificate)? {
         Some(pending) => {
             info!("renewd: resuming renewal of {name} (request {})", pending.request_id);
@@ -561,14 +621,13 @@ async fn renew_identity(
         {
             transport::PollOutcome::Pending => {
                 if tokio::time::Instant::now() >= deadline {
-                    return Ok("awaiting approval");
+                    return Ok(Outcome::AwaitingApproval);
                 }
             }
             transport::PollOutcome::Issued(issued) => {
-                install(id, &issued)?;
+                install_blocking(id.clone(), issued).await?;
                 clear_pending(&id.certificate);
-                info!("renewd: renewed {name}; running processes pick it up on restart");
-                return Ok("renewed");
+                return Ok(Outcome::Renewed { local: false });
             }
             transport::PollOutcome::Denied(reason) => {
                 clear_pending(&id.certificate);
@@ -607,6 +666,15 @@ async fn renew_identity(
 /// own issuer (an externally-signed intermediate's root) — a compromised
 /// peer cannot introduce a new trust anchor through renewal, nor overwrite
 /// an anchor whose issuer it does not control.
+/// [`install`] off the runtime. It seals to the TPM and fsyncs both the
+/// file and its parent directory, which is fine in a process that does
+/// nothing else and not fine on an admin-server worker.
+async fn install_blocking(id: Identity, issued: transport::Issued) -> Result<()> {
+    tokio::task::spawn_blocking(move || install(&id, &issued))
+        .await
+        .context("certificate install task panicked")?
+}
+
 fn install(id: &Identity, issued: &transport::Issued) -> Result<()> {
     let was_chain = std::fs::read(&id.certificate)
         .map(|pem| {
@@ -652,18 +720,28 @@ fn install(id: &Identity, issued: &transport::Issued) -> Result<()> {
 /// rebuilds on mtime, so gratuitous writes would churn it).
 async fn distribute_crl(
     ids: &[Identity],
-    server: Option<SocketAddr>,
+    cfg: &RenewalConfig,
     clients: &mut Clients,
 ) -> Result<bool> {
     let mut updated = false;
-    let mut done: Vec<&Path> = Vec::new();
-    for id in ids {
-        if done.contains(&id.trusted.as_path()) {
+    for (i, id) in ids.iter().enumerate() {
+        // One CRL per distinct trust bundle. Looking back over `ids` rather
+        // than accumulating a seen-set keeps the future free of borrows
+        // (`tokio::spawn` can't prove a `Vec<&Path>` one is Send).
+        if ids[..i].iter().any(|seen| seen.trusted == id.trusted) {
             continue;
         }
-        done.push(id.trusted.as_path());
+        // A trust bundle inside the CA directory is CA-owned, and the
+        // `crl.pem` beside it *is* the CA's authoritative signed CRL. On the
+        // CA host this would fetch our own bytes over TLS-to-self and write
+        // them back over the original.
+        if let Some(ca_dir) = &cfg.ca_dir
+            && id.trusted.starts_with(ca_dir)
+        {
+            continue;
+        }
         let (client, _, _) = clients.pki(&id.trusted)?;
-        let ca_addr = find_ca_addr(server, &client).await?;
+        let ca_addr = find_ca_addr(cfg, &client).await?;
         let crl = match transport::get_crl_pki(&client, ca_addr, NodeKind::Client).await?
         {
             Some(pem) => pem,
@@ -692,39 +770,133 @@ async fn distribute_crl(
     Ok(updated)
 }
 
-/// One full pass: renew what needs renewing, distribute the CRL.
-/// Errors on individual identities are reported, not fatal — one
-/// broken identity must not stop the others from renewing.
-async fn run_once_with(server: Option<SocketAddr>, clients: &mut Clients) -> Result<()> {
-    let ids = host_identities();
-    if ids.is_empty() {
-        info!("renewd: no TLS identities on this host");
-        return Ok(());
-    }
-    for id in &ids {
-        match renew_identity(id, server, clients).await {
-            Ok(status) => {
-                info!("renewd: {} — {status}", id.certificate.display())
+/// What one pass did. A pass has no failure of its own — every error
+/// belongs to one identity and lands in `failed`, so one broken identity
+/// can't stop the others from renewing. Callers report from this rather
+/// than assuming success.
+#[derive(Debug, Default)]
+pub struct PassReport {
+    pub renewed: Vec<PathBuf>,
+    pub awaiting_approval: Vec<PathBuf>,
+    pub current: usize,
+    pub failed: Vec<(PathBuf, ArcStr)>,
+    pub crl_updated: bool,
+}
+
+impl PassReport {
+    /// One line an operator can read, or `None` when there was nothing to
+    /// do at all.
+    pub fn summary(&self) -> Option<CompactString> {
+        if self.renewed.is_empty()
+            && self.awaiting_approval.is_empty()
+            && self.failed.is_empty()
+            && !self.crl_updated
+        {
+            return None;
+        }
+        let mut s = CompactString::const_new("");
+        let mut sep = "";
+        for (n, what) in [
+            (self.renewed.len(), "renewed"),
+            (self.awaiting_approval.len(), "awaiting approval"),
+            (self.failed.len(), "failed"),
+        ] {
+            if n > 0 {
+                s.push_str(sep);
+                s.push_str(&format_compact!("{n} {what}"));
+                sep = ", ";
             }
-            Err(e) => warn!("renewd: {} — {e:#}", id.certificate.display()),
+        }
+        if self.crl_updated {
+            s.push_str(sep);
+            s.push_str("CRL updated");
+        }
+        Some(s)
+    }
+
+    fn record(&mut self, id: &Identity, outcome: Result<Outcome>) {
+        match outcome {
+            Ok(Outcome::Current) => self.current += 1,
+            Ok(Outcome::Renewed { local }) => {
+                info!(
+                    "renewd: renewed {}{}",
+                    id.certificate.display(),
+                    if local { " (local)" } else { "" }
+                );
+                self.renewed.push(id.certificate.clone());
+            }
+            Ok(Outcome::AwaitingApproval) => {
+                self.awaiting_approval.push(id.certificate.clone())
+            }
+            Err(e) => {
+                warn!("renewd: {} — {e:#}", id.certificate.display());
+                self.failed.push((
+                    id.certificate.clone(),
+                    format_compact!("{e:#}").as_str().into(),
+                ));
+            }
         }
     }
-    if let Err(e) = distribute_crl(&ids, server, clients).await {
-        warn!("renewd: CRL distribution failed: {e:#}");
+}
+
+/// The renewal task. Holds the rustls client cache across passes, which
+/// is why it is an object rather than a free function.
+pub struct Renewer {
+    cfg: RenewalConfig,
+    clients: Clients,
+}
+
+impl Renewer {
+    pub fn new(cfg: RenewalConfig) -> Self {
+        Renewer { cfg, clients: Clients::default() }
     }
-    Ok(())
+
+    /// One full pass: renew what needs renewing, distribute the CRL.
+    pub async fn pass(&mut self) -> PassReport {
+        let mut report = PassReport::default();
+        let cfg = self.cfg.clone();
+        let ids = tokio::task::spawn_blocking(move || {
+            host_identities(cfg.admin_server_config.as_deref())
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("renewd: identity scan panicked: {e}");
+            Vec::new()
+        });
+        if ids.is_empty() {
+            info!("renewd: no TLS identities on this host");
+            return report;
+        }
+        for id in &ids {
+            let outcome = renew_identity(id, &self.cfg, &mut self.clients).await;
+            report.record(id, outcome);
+        }
+        match distribute_crl(&ids, &self.cfg, &mut self.clients).await {
+            Ok(updated) => report.crl_updated = updated,
+            Err(e) => warn!("renewd: CRL distribution failed: {e:#}"),
+        }
+        report
+    }
 }
 
-pub async fn run_once(server: Option<SocketAddr>) -> Result<()> {
-    run_once_with(server, &mut Clients::default()).await
+/// One pass, for `renew now` and the TUI's manual action.
+pub async fn run_once(cfg: RenewalConfig) -> PassReport {
+    Renewer::new(cfg).pass().await
 }
 
-/// Run forever: an immediate pass, then one per `interval`.
-pub async fn run(server: Option<SocketAddr>, interval: Duration) -> Result<()> {
-    let mut clients = Clients::default();
+/// Run forever: an immediate pass, then one per `cfg.interval`. Spawned
+/// by the caller — the agent selects it against the sync task, and the
+/// admin server keys it to its own lifetime — so it never spawns itself.
+///
+/// Cancellation is drop. That is safe because the one network-then-persist
+/// sequence (`enqueue_renewal` then `persist_pending`) has no await
+/// between the two, so a dropped pass loses at most an in-flight poll.
+pub async fn run(cfg: RenewalConfig) -> std::convert::Infallible {
+    let interval = cfg.interval;
+    let mut renewer = Renewer::new(cfg);
     loop {
-        if let Err(e) = run_once_with(server, &mut clients).await {
-            warn!("renewd: pass failed: {e:#}");
+        if let Some(summary) = renewer.pass().await.summary() {
+            info!("renewd: {summary}");
         }
         tokio::time::sleep(interval).await;
     }
@@ -748,6 +920,32 @@ mod tests {
         assert!(needs_renewal(0, 9 * day, 7 * day));
         // Expired is definitely inside the window.
         assert!(needs_renewal(0, 9 * day, 10 * day));
+    }
+
+    /// A pass in which everything failed must not read as success — the
+    /// TUI used to report "Scanned and renewed certificates" regardless.
+    #[test]
+    fn a_pass_that_renewed_nothing_says_so() {
+        assert_eq!(PassReport::default().summary(), None);
+
+        let mut all_current = PassReport::default();
+        all_current.current = 3;
+        assert_eq!(all_current.summary(), None);
+
+        let mut failed = PassReport::default();
+        failed.failed.push((PathBuf::from("/a.pem"), "TPM gone".into()));
+        let summary = failed.summary().unwrap();
+        assert!(summary.contains("1 failed"), "{summary}");
+        assert!(!summary.contains("renewed"), "{summary}");
+
+        let mut mixed = PassReport::default();
+        mixed.renewed.push(PathBuf::from("/a.pem"));
+        mixed.awaiting_approval.push(PathBuf::from("/b.pem"));
+        mixed.crl_updated = true;
+        assert_eq!(
+            mixed.summary().unwrap(),
+            "1 renewed, 1 awaiting approval, CRL updated"
+        );
     }
 
     fn addr(n: u8) -> SocketAddr {
@@ -774,20 +972,20 @@ mod tests {
         let mut asked: Vec<SocketAddr> = Vec::new();
         let mut visited: Vec<SocketAddr> = Vec::new();
         let mut queue = vec![addr(1)];
-        let found = walk(&mut queue, &mut visited, async |a| {
+        let found = walk(&mut queue, &mut visited, |a| {
             asked.push(a);
-            Ok(info(None, vec![]))
+            std::future::ready(Ok(info(None, vec![])))
         })
         .await;
         assert_eq!(found, None);
         let mut queue = vec![addr(2), addr(1)];
-        let found = walk(&mut queue, &mut visited, async |a| {
+        let found = walk(&mut queue, &mut visited, |a| {
             asked.push(a);
-            Ok(if a == addr(2) {
+            std::future::ready(Ok(if a == addr(2) {
                 info(Some(addr(9)), vec![])
             } else {
                 info(None, vec![])
-            })
+            }))
         })
         .await;
         assert_eq!(found, Some(addr(9)));
@@ -801,10 +999,10 @@ mod tests {
         let mut asked = 0usize;
         let mut visited: Vec<SocketAddr> = Vec::new();
         let mut queue = vec![addr(1)];
-        let found = walk(&mut queue, &mut visited, async |a| {
+        let found = walk(&mut queue, &mut visited, |a| {
             asked += 1;
             let next = if a == addr(1) { addr(2) } else { addr(1) };
-            Ok(info(None, vec![next]))
+            std::future::ready(Ok(info(None, vec![next])))
         })
         .await;
         assert_eq!(found, None);
@@ -813,9 +1011,9 @@ mod tests {
         let mut asked = 0usize;
         let mut visited: Vec<SocketAddr> = Vec::new();
         let mut queue: Vec<SocketAddr> = (1..=200u8).map(addr).collect();
-        let found = walk(&mut queue, &mut visited, async |_| {
+        let found = walk(&mut queue, &mut visited, |_| {
             asked += 1;
-            Ok(info(None, vec![]))
+            std::future::ready(Ok(info(None, vec![])))
         })
         .await;
         assert_eq!(found, None);
@@ -829,8 +1027,11 @@ mod tests {
     async fn an_unspecified_ca_addr_resolves_to_the_reporting_peer() {
         let mut visited: Vec<SocketAddr> = Vec::new();
         let mut queue = vec![addr(7)];
-        let found = walk(&mut queue, &mut visited, async |_| {
-            Ok(info(Some(SocketAddr::from(([0, 0, 0, 0], 4565))), vec![]))
+        let found = walk(&mut queue, &mut visited, |_| {
+            std::future::ready(Ok(info(
+                Some(SocketAddr::from(([0, 0, 0, 0], 4565))),
+                vec![],
+            )))
         })
         .await;
         assert_eq!(found, Some(addr(7)));
