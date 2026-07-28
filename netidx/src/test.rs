@@ -442,6 +442,249 @@ mod resolver {
     }
 }
 
+/// What a publisher owes each member of its resolver cluster, and what it
+/// must do to make good on that after one of them has been out of touch.
+///
+/// A resolver holds a publisher's records only as long as the publisher keeps
+/// talking to it, and it is the *publisher* that knows the truth. So every
+/// write connection has to be able to reconstruct the whole picture on
+/// reconnect. These tests pin that contract.
+mod republish {
+    use crate::{
+        config::{Config as ClientConfig, DefaultAuthMech, file as cfile},
+        path::Path,
+        resolver_client::{DesiredAuth, ResolverRead, ResolverWrite},
+        resolver_server::{
+            Server,
+            config::{Config as ServerConfig, file as sfile},
+        },
+    };
+    use netidx_netproto::resolver::PublisherPriority;
+    use std::{
+        collections::BTreeSet,
+        iter,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        sync::watch,
+        task, time,
+    };
+
+    fn p(s: &str) -> Path {
+        Path::from(String::from(s))
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    /// Take a port the OS says is free and immediately hand it back. Racy in
+    /// principle, but a member that restarts has to come back on the address
+    /// its clients already know, so binding port 0 is not an option.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn server_cfg(ports: &[u16], writer_ttl: u64) -> ServerConfig {
+        let members = ports
+            .iter()
+            .map(|port| {
+                sfile::MemberServerBuilder::default()
+                    .addr(addr(*port))
+                    .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                    .auth(sfile::Auth::Anonymous)
+                    .writer_ttl(writer_ttl)
+                    .build()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let cfg =
+            sfile::ConfigBuilder::default().member_servers(members).build().unwrap();
+        ServerConfig::from_file(cfg).unwrap()
+    }
+
+    fn client_cfg(addrs: &[SocketAddr]) -> ClientConfig {
+        let cfg = cfile::ConfigBuilder::default()
+            .addrs(addrs.iter().map(|a| (*a, cfile::Auth::Anonymous)).collect::<Vec<_>>())
+            .default_auth(DefaultAuthMech::Anonymous)
+            .build()
+            .unwrap();
+        ClientConfig::from_file(cfg).unwrap()
+    }
+
+    /// Start member `id`, retrying while the previous incarnation's listener
+    /// is still winding down — `Server`'s stop is signalled from `Drop` and
+    /// completes on another task.
+    async fn start_member(ports: &[u16], writer_ttl: u64, id: usize) -> Server {
+        let cfg = server_cfg(ports, writer_ttl);
+        let deadline = time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match Server::new(cfg.clone(), false, id).await {
+                Ok(s) => break s,
+                Err(e) => {
+                    if time::Instant::now() >= deadline {
+                        panic!("member {id} would not start: {e}")
+                    }
+                    time::sleep(Duration::from_millis(50)).await
+                }
+            }
+        }
+    }
+
+    fn writer(addrs: &[SocketAddr]) -> ResolverWrite {
+        ResolverWrite::new(
+            client_cfg(addrs),
+            DesiredAuth::Anonymous,
+            "127.0.0.1:1".parse().unwrap(),
+            PublisherPriority::Normal,
+        )
+        .unwrap()
+    }
+
+    /// A reader pointed at exactly one member, so a test can ask what that
+    /// member individually believes rather than what the cluster answers.
+    fn reader(addr: SocketAddr) -> ResolverRead {
+        ResolverRead::new(client_cfg(&[addr]), DesiredAuth::Anonymous)
+    }
+
+    async fn published(r: &ResolverRead, paths: &[Path]) -> BTreeSet<Path> {
+        match r.resolve(paths.iter().cloned()).await {
+            Err(_) => BTreeSet::new(),
+            Ok((_, mut res)) => paths
+                .iter()
+                .cloned()
+                .zip(res.drain(..))
+                .filter(|(_, r)| r.publishers.len() > 0)
+                .map(|(p, _)| p)
+                .collect(),
+        }
+    }
+
+    /// Wait until `r` reports exactly `want` among `probe`, then return. The
+    /// set is compared exactly in both directions so a stale record left
+    /// behind fails as loudly as a missing one.
+    async fn converges_to(who: &str, r: &ResolverRead, probe: &[Path], want: &[Path]) {
+        let want = want.iter().cloned().collect::<BTreeSet<Path>>();
+        let deadline = time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let have = published(r, probe).await;
+            if have == want {
+                return;
+            }
+            if time::Instant::now() >= deadline {
+                let missing = want.difference(&have).collect::<Vec<_>>();
+                let stale = have.difference(&want).collect::<Vec<_>>();
+                panic!("{who} never converged; missing {missing:?}, stale {stale:?}")
+            }
+            time::sleep(Duration::from_millis(100)).await
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Link {
+        Up,
+        /// New connections are refused and live ones are killed, but the
+        /// resolver behind the proxy keeps everything it knows about us.
+        Cut,
+    }
+
+    /// A pass-through TCP proxy in front of one member. Dropping a `Server`
+    /// also drops everything it knows; this cuts the *link* instead, which is
+    /// the only way to reach the reconnect paths that have to reconcile
+    /// against a resolver still holding our old records.
+    struct Proxy {
+        addr: SocketAddr,
+        link: watch::Sender<Link>,
+    }
+
+    impl Proxy {
+        async fn new(target: SocketAddr) -> Proxy {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (tx, rx) = watch::channel(Link::Up);
+            task::spawn(async move {
+                while let Ok((client, _)) = listener.accept().await {
+                    let mut link = rx.clone();
+                    let state = *link.borrow_and_update();
+                    match state {
+                        Link::Cut => (),
+                        Link::Up => {
+                            task::spawn(async move {
+                                let Ok(server) = TcpStream::connect(target).await else {
+                                    return;
+                                };
+                                let (mut cr, mut cw) = client.into_split();
+                                let (mut sr, mut sw) = server.into_split();
+                                tokio::select! {
+                                    _ = tokio::io::copy(&mut cr, &mut sw) => (),
+                                    _ = tokio::io::copy(&mut sr, &mut cw) => (),
+                                    _ = link.wait_for(|l| *l != Link::Up) => (),
+                                }
+                            });
+                        }
+                    }
+                }
+            });
+            Proxy { addr, link: tx }
+        }
+
+        fn set(&self, link: Link) {
+            self.link.send_replace(link);
+        }
+    }
+
+    /// An unpublish that could not be delivered has to be retried, not
+    /// forgotten. The member still holds the record — nothing else will ever
+    /// remove it before the writer ttl expires.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_undelivered_unpublish_is_retried() {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let _b = start_member(&ports, 120, 1).await;
+        let proxy = Proxy::new(addr(ports[1])).await;
+        let w = writer(&[addr(ports[0]), proxy.addr]);
+        let rb = reader(addr(ports[1]));
+        let paths = vec![p("/t/one"), p("/t/two"), p("/t/three")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        converges_to("b", &rb, &paths, &paths).await;
+        proxy.set(Link::Cut);
+        let _ = w.unpublish(iter::once(p("/t/two"))).await;
+        // Let b's write connection notice the break, and confirm the unpublish
+        // really did not land — otherwise the assertion below proves nothing.
+        time::sleep(Duration::from_secs(1)).await;
+        assert!(published(&rb, &paths).await.contains(&p("/t/two")));
+        proxy.set(Link::Up);
+        let _ = w.publish(iter::once(p("/t/four"))).await;
+        converges_to("b", &rb, &paths, &[p("/t/one"), p("/t/three")]).await;
+    }
+
+    /// Same contract for `clear`: a member that missed it must not be left
+    /// holding the paths the publisher has disowned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_undelivered_clear_is_retried() {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let _b = start_member(&ports, 120, 1).await;
+        let proxy = Proxy::new(addr(ports[1])).await;
+        let w = writer(&[addr(ports[0]), proxy.addr]);
+        let rb = reader(addr(ports[1]));
+        let paths = vec![p("/t/one"), p("/t/two"), p("/t/three")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        converges_to("b", &rb, &paths, &paths).await;
+        proxy.set(Link::Cut);
+        let _ = w.clear().await;
+        time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(published(&rb, &paths).await.len(), paths.len());
+        proxy.set(Link::Up);
+        let _ = w.publish(iter::once(p("/t/four"))).await;
+        converges_to("b", &rb, &paths, &[]).await;
+    }
+}
+
 mod publisher {
     use crate::{
         config::Config as ClientConfig,
