@@ -666,7 +666,7 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
         plan::enroll,
     };
     use netidx_admin_proto::NodeKind;
-    let timeout = super::lifecycle::DISCOVERY_TIMEOUT;
+    let timeout = netidx_admin_client::discovery::DISCOVERY_TIMEOUT;
     ans.progress(Progress::timed(
         Stage::Discovering,
         "browsing for admin domains…",

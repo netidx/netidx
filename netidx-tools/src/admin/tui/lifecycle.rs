@@ -12,12 +12,10 @@ use netidx_admin_client::{
     provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
     reconcile::{self, EditPlan},
     resolver::ResolverConfig,
-    transport::{self, AdminDomainInfo},
+    transport::{self, AdminDomainInfo, CaIdentity},
 };
 use netidx_admin_proto::{AdminDomainMap, NodeKind};
-use std::{net::SocketAddr, path::Path, time::Duration};
-
-pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+use std::{net::SocketAddr, path::Path};
 
 /// Build the config-reconciliation plan for this host's role, checking it
 /// against the admin domain (pinned to the CA identity recorded at install). The
@@ -41,14 +39,11 @@ pub(super) async fn update_plan(
         }
         InstallRole::Workstation => {
             let rpath = paths::discover_resolver_config()?;
-            let info =
-                fetch_admin_domain_pinned(net_id, rec.admin_server, NodeKind::Client)
-                    .await?;
+            let info = fetch_admin_domain_pinned(net_id, NodeKind::Client).await?;
             reconcile::reconcile_resolver_peers(&rpath, &info)
         }
         InstallRole::Resolver => {
-            let map =
-                fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await?;
+            let map = fetch_map_pinned(net_id, NodeKind::Resolver).await?;
             let mut plan = match paths::discover_client_config() {
                 Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
                 Err(_) => EditPlan::default(),
@@ -60,8 +55,7 @@ pub(super) async fn update_plan(
             Ok(plan)
         }
         InstallRole::Publisher => {
-            let map =
-                fetch_map_pinned(net_id, rec.admin_server, NodeKind::Publisher).await?;
+            let map = fetch_map_pinned(net_id, NodeKind::Publisher).await?;
             let cpath = paths::discover_client_config()?;
             reconcile::reconcile_client_peers(&cpath, &map)
         }
@@ -77,7 +71,7 @@ pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap
         .admin_domain
         .as_ref()
         .context("this host is not part of an admin domain (local-only)")?;
-    fetch_map_pinned(net_id, rec.admin_server, NodeKind::Resolver).await
+    fetch_map_pinned(net_id, NodeKind::Resolver).await
 }
 
 /// An activation hint after an update applies. Resolver updates can touch only
@@ -102,64 +96,47 @@ pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'sta
     }
 }
 
-/// Candidate admin-server addresses: the recorded one plus anything mDNS finds.
-async fn candidates(admin_server: Option<SocketAddr>) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
-    if let Some(a) = admin_server {
-        out.push(a);
+/// The first admin server from [`discovery::admin_servers`] that proves it
+/// belongs to the pinned admin domain. Fail-closed: a reachable server with
+/// a different CA is refused, never silently trusted.
+async fn pinned_admin_server(
+    net_id: &AdminDomainIdentity,
+    kind: NodeKind,
+) -> Result<(SocketAddr, CaIdentity)> {
+    let mut saw_mismatch = false;
+    for addr in discovery::admin_servers().await {
+        let id = match transport::fetch_identity(addr, kind).await {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        if net_id.matches(&id.fingerprint)? {
+            return Ok((addr, id));
+        }
+        saw_mismatch = true;
     }
-    for d in discovery::browse(DISCOVERY_TIMEOUT).await.unwrap_or_default() {
-        out.extend(d.socket_addrs());
-    }
-    out.dedup();
-    out
+    fail(saw_mismatch)
 }
 
-/// Walk the admin domain (GetInfo aggregate) via the first candidate whose CA matches
-/// the pinned identity. Fail-closed: a reachable server with a different CA is
-/// refused, never silently trusted.
+/// Walk the admin domain (GetInfo aggregate) via [`pinned_admin_server`].
 async fn fetch_admin_domain_pinned(
     net_id: &AdminDomainIdentity,
-    admin_server: Option<SocketAddr>,
     kind: NodeKind,
 ) -> Result<AdminDomainInfo> {
-    let mut saw_mismatch = false;
-    for addr in candidates(admin_server).await {
-        let id = match transport::fetch_identity(addr, kind).await {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        if net_id.matches(&id.fingerprint)? {
-            return transport::aggregate(&[addr], kind, &id)
-                .await
-                .context("mapping the admin domain (GetInfo)");
-        }
-        saw_mismatch = true;
-    }
-    fail(saw_mismatch)
+    let (addr, id) = pinned_admin_server(net_id, kind).await?;
+    transport::aggregate(&[addr], kind, &id)
+        .await
+        .context("mapping the admin domain (GetInfo)")
 }
 
-/// One-shot pinned admin domain-map fetch, same fail-closed logic as
-/// [`fetch_admin_domain_pinned`].
+/// One-shot pinned admin domain-map fetch, via [`pinned_admin_server`].
 async fn fetch_map_pinned(
     net_id: &AdminDomainIdentity,
-    admin_server: Option<SocketAddr>,
     kind: NodeKind,
 ) -> Result<AdminDomainMap> {
-    let mut saw_mismatch = false;
-    for addr in candidates(admin_server).await {
-        let id = match transport::fetch_identity(addr, kind).await {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        if net_id.matches(&id.fingerprint)? {
-            return transport::get_map_pinned(addr, kind, &id)
-                .await
-                .context("fetching the admin domain map");
-        }
-        saw_mismatch = true;
-    }
-    fail(saw_mismatch)
+    let (addr, id) = pinned_admin_server(net_id, kind).await?;
+    transport::get_map_pinned(addr, kind, &id)
+        .await
+        .context("fetching the admin domain map")
 }
 
 fn fail<T>(saw_mismatch: bool) -> Result<T> {

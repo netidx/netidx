@@ -274,7 +274,7 @@ pub(super) enum Action {
     /// Install a role. `dry_run` previews the plan without writing anything.
     Install { role: InstallRole, dry_run: bool },
     /// Renew this host's certificates now.
-    Renew { server: Option<SocketAddr> },
+    Renew,
     /// Reconcile this host's config with the admin domain (add/remove peers).
     Update { role: InstallRole, config_root: PathBuf },
     /// Graduate a local-only workstation onto an admin domain. `dry_run` previews.
@@ -334,7 +334,7 @@ impl Action {
                 let verb = if *dry_run { "Previewing" } else { "Installing" };
                 format!("{verb} {}", role.as_str())
             }
-            Action::Renew { .. } => "Renewing certificates".to_string(),
+            Action::Renew => "Renewing certificates".to_string(),
             Action::Update { .. } => "Updating".to_string(),
             Action::Join { dry_run } => {
                 if *dry_run {
@@ -381,7 +381,7 @@ impl Action {
     pub(super) fn confirm_message(&self) -> Option<String> {
         match self {
             Action::Install { .. }
-            | Action::Renew { .. }
+            | Action::Renew
             | Action::Update { .. }
             | Action::Join { .. }
             | Action::AddParent { .. }
@@ -438,7 +438,7 @@ impl Action {
 pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Outcome> {
     match action {
         Action::Install { role, dry_run } => install(&mut ans, role, dry_run).await,
-        Action::Renew { server } => renew(&mut ans, server).await,
+        Action::Renew => renew(&mut ans).await,
         Action::Update { role, config_root } => update(&mut ans, role, config_root).await,
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent { config_root } => add_parent(&mut ans, config_root).await,
@@ -1284,8 +1284,8 @@ async fn add_parent(_ans: &mut TuiAnswerer, _config_root: PathBuf) -> Result<Out
     bail!("adding a parent (delegation) is only available on unix hosts")
 }
 
-async fn renew(_ans: &mut TuiAnswerer, server: Option<SocketAddr>) -> Result<Outcome> {
-    renewd::run_once(server).await?;
+async fn renew(_ans: &mut TuiAnswerer) -> Result<Outcome> {
+    renewd::run_once(None).await?;
     Ok(Outcome::plain(
         "Renewed",
         vec!["Scanned and renewed certificates due for renewal.".to_string()],

@@ -946,13 +946,13 @@ fn restored_bytes(
         _ => source,
     };
     if file.path == "install.json"
-        && addresses.admin_listen.is_some()
-        && addresses.admin_listen != manifest.install.admin_server
+        && let Some(listen) = addresses.admin_listen
         && manifest.components.contains(&Component::Ca)
     {
         let mut install: InstallRecord = serde_json::from_slice(&restored)?;
-        install.admin_server = addresses.admin_listen;
-        restored = serde_json::to_vec_pretty(&install)?;
+        if install.relocate_admin_server(listen) {
+            restored = serde_json::to_vec_pretty(&install)?;
+        }
     }
     let Some(replacement) = addresses.resolver else { return Ok(restored) };
     let original = manifest
@@ -1027,7 +1027,7 @@ pub fn restore_files_with_addresses(
         if let Some(listen) = addresses.admin_listen {
             manifest.admin_listen = Some(listen);
             if manifest.components.contains(&Component::Ca) {
-                manifest.install.admin_server = Some(listen);
+                manifest.install.relocate_admin_server(listen);
             }
         }
         if let Some(resolver) = addresses.resolver {
@@ -1287,7 +1287,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(restored_install.admin_server, Some(new_admin));
+        assert_eq!(restored_install.admin_servers.first(), Some(&new_admin));
     }
 
     #[test]

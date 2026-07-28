@@ -85,10 +85,13 @@ pub struct InstallRecord {
     /// parent, or a resolver with no admin server).
     #[serde(default)]
     pub admin_domain: Option<AdminDomainIdentity>,
-    /// An admin-server address known at install time, if any — a starting
-    /// point for lifecycle ops (which also fall back to mDNS discovery).
+    /// Every admin server this host knows of: seeded with the one it
+    /// enrolled through and refreshed from the CA-authoritative map by
+    /// `update`, so a host keeps working when one of them moves. The
+    /// starting point for reaching the admin domain — see
+    /// [`crate::discovery::admin_servers`], which falls back to mDNS.
     #[serde(default)]
-    pub admin_server: Option<SocketAddr>,
+    pub admin_servers: Vec<SocketAddr>,
     /// Files and directories produced by the role template. Backup uses this
     /// inventory to refuse a falsely "complete" portable bundle when an
     /// operator deliberately installed managed state outside the config root.
@@ -116,7 +119,7 @@ impl InstallRecord {
             base: base.into(),
             auth: auth.into(),
             admin_domain,
-            admin_server,
+            admin_servers: admin_server.into_iter().collect(),
             managed_paths: Vec::new(),
             created_unix,
         }
@@ -126,6 +129,47 @@ impl InstallRecord {
         self.managed_paths = paths;
         self.managed_paths.sort();
         self.managed_paths.dedup();
+    }
+
+    /// Point the record at a relocated admin server: `addr` becomes the
+    /// address tried first, replacing the one this host used to reach the
+    /// admin domain through — which, having moved, is gone. Any other
+    /// known server is kept. Returns whether anything changed.
+    pub fn relocate_admin_server(&mut self, addr: SocketAddr) -> bool {
+        if self.admin_servers.first() == Some(&addr) {
+            return false;
+        }
+        if !self.admin_servers.is_empty() {
+            self.admin_servers.remove(0);
+        }
+        self.admin_servers.retain(|a| *a != addr);
+        self.admin_servers.insert(0, addr);
+        true
+    }
+
+    /// Replace the known admin servers with the CA-authoritative set,
+    /// keeping the address we already reach the admin domain through at the
+    /// front. Returns whether anything changed, so a caller can skip
+    /// rewriting the record. Only the map is authoritative about
+    /// membership — a server dropped from it is dropped here.
+    pub fn set_admin_servers(
+        &mut self,
+        addrs: impl IntoIterator<Item = SocketAddr>,
+    ) -> bool {
+        let mut next: Vec<SocketAddr> = Vec::new();
+        for addr in addrs {
+            if !next.contains(&addr) {
+                next.push(addr);
+            }
+        }
+        if let Some(first) = self.admin_servers.first()
+            && let Some(i) = next.iter().position(|a| a == first)
+        {
+            next.swap(0, i);
+        }
+        let changed = next != self.admin_servers;
+        self.admin_servers = next;
+        changed
     }
 
     /// Read a record from `path`.
@@ -144,23 +188,25 @@ impl InstallRecord {
             .with_context(|| format!("parsing install record {}", path.display()))
     }
 
-    /// Read the record at the user-default path, or `None` if there is
-    /// none (e.g. a hand-rolled config, or an install predating the
-    /// record). Errors only on a present-but-unreadable file.
+    /// Read this host's record — the user-scope one, else the system-scope
+    /// one a daemon running as root has — or `None` if there is none (e.g.
+    /// a hand-rolled config, or an install predating the record). Errors
+    /// only on a present-but-unreadable file.
+    ///
+    /// Callers that mean one specific scope (the TUI enumerating both)
+    /// must use [`Self::load`] with the path they mean.
     pub fn load_default() -> Result<Option<Self>> {
-        let path = paths::user_install_record()?;
-        if !path.exists() {
-            return Ok(None);
+        match paths::discover_install_record() {
+            Err(_) => Ok(None),
+            Ok(path) => Ok(Some(Self::load(&path)?)),
         }
-        Ok(Some(Self::load(&path)?))
     }
 
     pub async fn load_default_async() -> Result<Option<Self>> {
-        let path = paths::user_install_record()?;
-        if !tokio::fs::try_exists(&path).await? {
-            return Ok(None);
+        match paths::discover_install_record_async().await {
+            Err(_) => Ok(None),
+            Ok(path) => Ok(Some(Self::load_async(&path).await?)),
         }
-        Ok(Some(Self::load_async(&path).await?))
     }
 
     /// Atomically write the record (mode 0644) to `path`.
@@ -226,7 +272,49 @@ mod tests {
         rec.save(&lock, &path).unwrap();
         let back = InstallRecord::load(&path).unwrap();
         assert!(back.admin_domain.is_none());
-        assert!(back.admin_server.is_none());
+        assert!(back.admin_servers.is_empty());
+    }
+
+    fn addr(n: u8) -> SocketAddr {
+        SocketAddr::from(([10, 0, 0, n], 4565))
+    }
+
+    fn rec_with(addrs: &[SocketAddr]) -> InstallRecord {
+        let mut rec = InstallRecord::new(InstallRole::Publisher, "/", "tls", None, None);
+        rec.admin_servers = addrs.to_vec();
+        rec
+    }
+
+    /// The map is authoritative about membership, but the address this host
+    /// actually reaches the admin domain through has to stay first — that's
+    /// the one already known to work from here.
+    #[test]
+    fn refreshing_from_the_map_keeps_the_working_address_first() {
+        let mut rec = rec_with(&[addr(2), addr(1)]);
+        assert!(rec.set_admin_servers([addr(1), addr(2), addr(3)]));
+        assert_eq!(rec.admin_servers, vec![addr(2), addr(1), addr(3)]);
+        // Idempotent: the same map again is not a change to write out.
+        assert!(!rec.set_admin_servers([addr(1), addr(2), addr(3)]));
+        // A server dropped from the map is dropped here, even the first one.
+        assert!(rec.set_admin_servers([addr(1), addr(3)]));
+        assert_eq!(rec.admin_servers, vec![addr(1), addr(3)]);
+    }
+
+    /// A relocated admin server displaces the one it replaces — that address
+    /// is gone — while any other known server survives.
+    #[test]
+    fn relocating_replaces_only_the_head() {
+        let mut rec = rec_with(&[addr(1), addr(2)]);
+        assert!(rec.relocate_admin_server(addr(9)));
+        assert_eq!(rec.admin_servers, vec![addr(9), addr(2)]);
+        assert!(!rec.relocate_admin_server(addr(9)));
+        // Promoting a server already in the list must not duplicate it.
+        assert!(rec.relocate_admin_server(addr(2)));
+        assert_eq!(rec.admin_servers, vec![addr(2)]);
+        // An empty record just gains the address.
+        let mut rec = rec_with(&[]);
+        assert!(rec.relocate_admin_server(addr(9)));
+        assert_eq!(rec.admin_servers, vec![addr(9)]);
     }
 
     #[test]

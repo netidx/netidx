@@ -323,7 +323,7 @@ pub async fn run_workstation_join(
     // Capture the confirmed identity for the marker before applying.
     let admin_domain =
         AdminDomainIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
-    let admin_server = net.info.reached.first().copied();
+    let admin_servers = net.info.reached.clone();
     let rt = template::attach_to_admin_domain(&rpath, &cpath, parent, tls_identities)?;
     ans.note(&rt.describe());
     let Some(config_lock) = mode.config_lock() else {
@@ -333,7 +333,7 @@ pub async fn run_workstation_join(
     rt.apply(config_lock).context("applying the join")?;
     ans.note("ok");
     rec.admin_domain = Some(admin_domain);
-    rec.admin_server = admin_server;
+    rec.set_admin_servers(admin_servers);
     rec.save_async(config_lock, &record_path)
         .await
         .context("updating the install record")?;

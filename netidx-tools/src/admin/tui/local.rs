@@ -650,7 +650,7 @@ impl LocalState {
             Char('r') => {
                 let d = &self.installs[self.selected];
                 if d.record.admin_domain.is_some() && d.renewable {
-                    return Some(Action::Renew { server: d.record.admin_server });
+                    return Some(Action::Renew);
                 }
             }
             _ => {}
@@ -775,7 +775,7 @@ fn action_desc(action: &Action) -> &'static str {
         Install { dry_run: true, .. } => {
             "Preview installing this role — show the plan without changing anything."
         }
-        Renew { .. } => {
+        Renew => {
             "Renew this host's TLS certificates from the admin domain's CA now. The \
              auto-renew service does this automatically unless it has been turned off."
         }
@@ -924,10 +924,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
         // Admin domain tab (connect to this host's own admin server).
     }
     if joined && d.renewable {
-        items.push((
-            "Renew Certificates".to_string(),
-            Action::Renew { server: d.record.admin_server },
-        ));
+        items.push(("Renew Certificates".to_string(), Action::Renew));
     }
     // One Services surface over the local activation supervisor (no auth): list +
     // status, start/stop/restart, and local-only unit create/edit/delete. Present
@@ -1091,8 +1088,9 @@ fn detail_lines(d: &Detected) -> Vec<Line<'static>> {
         }
         None => lines.push(kv("Admin domain", "standalone (local-only)".to_string())),
     }
-    if let Some(addr) = r.admin_server {
-        lines.push(kv("Admin server", addr.to_string()));
+    if !r.admin_servers.is_empty() {
+        let addrs: Vec<String> = r.admin_servers.iter().map(|a| a.to_string()).collect();
+        lines.push(kv("Admin servers", addrs.join(", ")));
     }
     if let Some(lca) = &d.local_ca {
         match &lca.probe {

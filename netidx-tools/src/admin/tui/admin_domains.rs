@@ -144,15 +144,16 @@ pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
 #[cfg(unix)]
 fn local_admin_domain_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
     use netidx_admin_client::provenance::InstallRecord;
+    let user = paths::user_install_record().ok();
     let sys = paths::system_install_record();
     let records = [
-        InstallRecord::load_default().ok().flatten(),
+        user.filter(|p| p.exists()).and_then(|p| InstallRecord::load(&p).ok()),
         sys.exists().then(|| InstallRecord::load(&sys).ok()).flatten(),
     ];
     records.into_iter().flatten().find_map(|r| {
         let net = r.admin_domain?;
         let fp = Fingerprint::parse_text(&net.ca_fingerprint).ok()?;
-        Some((net.domain, fp, r.admin_server))
+        Some((net.domain, fp, r.admin_servers.first().copied()))
     })
 }
 

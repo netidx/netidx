@@ -302,9 +302,15 @@ pub(super) async fn admin_domain_for_restore(
     let Some(admin_domain) = &manifest.install.admin_domain else { return Ok(None) };
     let mut seed = match override_ {
         Some(addr) => init::resolve_admin_server_addr(addr)?,
-        None => manifest.install.admin_server.or(manifest.admin_listen).context(
-            "the backup has no admin-server hint; pass --admin-server <host[:port]>",
-        )?,
+        None => manifest
+            .install
+            .admin_servers
+            .first()
+            .copied()
+            .or(manifest.admin_listen)
+            .context(
+                "the backup has no admin-server hint; pass --admin-server <host[:port]>",
+            )?,
     };
     if seed.ip().is_unspecified() {
         seed.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));

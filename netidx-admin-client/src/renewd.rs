@@ -264,9 +264,6 @@ fn load_roots_from_pem(pem: &[u8], trusted: &Path) -> Result<rustls::RootCertSto
 /// How many admin servers one search will contact before giving up.
 const MAX_WALK: usize = 64;
 
-/// How long to browse mDNS when nothing closer to home answered.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// Walk `queue` until an admin server reports where the CA lives,
 /// following each one's peers. `visited` carries across calls so a later
 /// seeding doesn't redo an earlier one's work.
@@ -316,15 +313,11 @@ async fn walk_for_ca(
 }
 
 /// Find the admin domain's CA admin server, verified against `roots`: an
-/// explicit override, the local admin-server config (unix), the admin
-/// server this host enrolled through, then mDNS — each of the last two
-/// seeding a PKI-verified peer walk. Unattended-safe — candidates that
-/// don't verify against our trust bundle are just skipped.
-///
-/// The install record matters because mDNS is link-local: a host with no
-/// admin server of its own and none on its segment — every workstation
-/// and publisher in a routed admin domain, and every Windows host, since
-/// admin servers are unix-only — has no other way to start.
+/// explicit override, the local admin-server config (unix), then a
+/// PKI-verified walk over [`crate::discovery::admin_servers`]. Each
+/// candidate's peers extend the walk, so reaching any admin server is
+/// enough to reach the CA. Unattended-safe — candidates that don't verify
+/// against our trust bundle are just skipped.
 async fn find_ca_addr(
     server: Option<SocketAddr>,
     client: &transport::PkiClient,
@@ -347,24 +340,11 @@ async fn find_ca_addr(
             return Ok(ca);
         }
     }
-    let mut visited: Vec<SocketAddr> = Vec::new();
-    if let Ok(path) = paths::discover_install_record()
-        && let Ok(rec) = crate::provenance::InstallRecord::load(&path)
-        && let Some(addr) = rec.admin_server
-    {
-        let mut queue = vec![addr];
-        if let Some(ca) = walk_for_ca(client, &mut queue, &mut visited).await {
-            return Ok(ca);
-        }
-    }
+    // Reversed: the walk pops from the back, and the earlier a candidate
+    // is in the list the better it is.
     let mut queue: Vec<SocketAddr> =
-        match crate::discovery::browse(DISCOVERY_TIMEOUT).await {
-            Ok(found) => found.iter().flat_map(|d| d.socket_addrs()).collect(),
-            Err(e) => {
-                warn!("renewd: mDNS browse failed: {e:#}");
-                Vec::new()
-            }
-        };
+        crate::discovery::admin_servers().await.into_iter().rev().collect();
+    let mut visited: Vec<SocketAddr> = Vec::new();
     if let Some(ca) = walk_for_ca(client, &mut queue, &mut visited).await {
         return Ok(ca);
     }

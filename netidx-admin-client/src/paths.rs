@@ -188,6 +188,19 @@ pub fn discover_install_record() -> Result<PathBuf> {
     bail!("no install record found in any standard location")
 }
 
+pub async fn discover_install_record_async() -> Result<PathBuf> {
+    if let Ok(p) = user_install_record()
+        && tokio::fs::try_exists(&p).await.unwrap_or(false)
+    {
+        return Ok(p);
+    }
+    let sys = system_install_record();
+    if tokio::fs::try_exists(&sys).await.unwrap_or(false) {
+        return Ok(sys);
+    }
+    bail!("no install record found in any standard location")
+}
+
 /// Find the first existing client config in the standard search order:
 /// `$NETIDX_CFG`, then `${dirs::config_dir}/netidx/client.json`, then
 /// `${HOME}/.config/netidx/client.json`, then the system path. Errors

@@ -1,4 +1,6 @@
-//! mDNS/DNS-SD advertisement + browsing for admin servers.
+//! Finding admin servers: [`admin_servers`] is the one list every client
+//! starts from, and mDNS/DNS-SD advertisement + browsing is where it
+//! turns when this host's install record comes up empty.
 //!
 //! Admin servers register `_netidx-admin._tcp.local.` with a TXT record
 //! carrying the admin domain's domain name, the host's roles, and a short CA
@@ -284,9 +286,86 @@ pub fn browse_first_or_empty(timeout: Duration, settle: Duration) -> Vec<Discove
     }
 }
 
+/// How long to browse when the recorded admin servers didn't answer.
+pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Append `found`'s addresses to `out`, skipping duplicates.
+fn extend_deduped(out: &mut Vec<SocketAddr>, found: Vec<Discovered>) {
+    for addr in found.iter().flat_map(|d| d.socket_addrs()) {
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+}
+
+/// **The** list of admin servers a client should try, best first: the ones
+/// this host's install record knows about — seeded at enrollment, kept
+/// current by `update` — then whatever mDNS turns up.
+///
+/// The record has to come first and has to be able to stand alone: mDNS is
+/// link-local, so a host with no admin server on its own segment (every
+/// workstation and publisher in a routed admin domain) never discovers
+/// anything. Browsing is the fallback for a host whose record is empty or
+/// entirely stale.
+///
+/// These are *candidates*, not trusted endpoints — every one of them still
+/// has to prove its identity to the caller, which is why this returns bare
+/// addresses and takes no position on what to do with them.
+pub async fn admin_servers() -> Vec<SocketAddr> {
+    let mut out = recorded_admin_servers();
+    extend_deduped(
+        &mut out,
+        browse(DISCOVERY_TIMEOUT).await.unwrap_or_else(|e| {
+            warn!("mDNS browse failed: {e:#}");
+            Vec::new()
+        }),
+    );
+    out
+}
+
+/// [`admin_servers`] for a caller that isn't on an async runtime.
+pub fn admin_servers_blocking() -> Vec<SocketAddr> {
+    let mut out = recorded_admin_servers();
+    extend_deduped(&mut out, browse_or_empty(DISCOVERY_TIMEOUT));
+    out
+}
+
+fn recorded_admin_servers() -> Vec<SocketAddr> {
+    match crate::provenance::InstallRecord::load_default() {
+        Ok(Some(rec)) => rec.admin_servers,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            warn!("could not read the install record: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_addresses_come_first_and_are_not_repeated() {
+        let mut out = vec![SocketAddr::from(([10, 0, 0, 1], 4565))];
+        extend_deduped(
+            &mut out,
+            vec![Discovered {
+                domain: "example.com".into(),
+                roles: Role::Ca.into(),
+                fp_short: String::new(),
+                addrs: vec![IpAddr::from([10, 0, 0, 2]), IpAddr::from([10, 0, 0, 1])],
+                port: 4565,
+            }],
+        );
+        assert_eq!(
+            out,
+            vec![
+                SocketAddr::from(([10, 0, 0, 1], 4565)),
+                SocketAddr::from(([10, 0, 0, 2], 4565)),
+            ]
+        );
+    }
 
     #[test]
     fn roles_round_trip_txt() {
