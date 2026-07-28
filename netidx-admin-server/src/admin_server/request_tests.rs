@@ -179,3 +179,30 @@ fn origin_requirements_are_enforced_independently_of_credentials() {
         .is_ok()
     );
 }
+
+/// The local control socket sends an *empty* credential on purpose — the
+/// `SO_PEERCRED` check at accept is the authorization. Letting that count as
+/// a failed credential blocked the server unlock, which broke the only path
+/// that can re-mint a CA host's serving certificate once it has expired.
+/// A remote caller must still be blocked, or an unauthenticated client gets
+/// to spend a 64 MiB Argon2 at will.
+#[test]
+fn a_local_request_may_unlock_despite_an_empty_credential() {
+    let bad = PreparedAdminAuthentication::Password(Err("authentication failed".into()));
+    let good =
+        PreparedAdminAuthentication::Password(Ok(super::super::auth::local_superuser()));
+
+    assert!(
+        !unlock_blocked_by_credential(true, Some(&bad)),
+        "the local socket's empty credential must not block the unlock"
+    );
+    assert!(
+        unlock_blocked_by_credential(false, Some(&bad)),
+        "a remote caller with a bad credential must still be blocked"
+    );
+    assert!(!unlock_blocked_by_credential(false, Some(&good)));
+    assert!(!unlock_blocked_by_credential(true, Some(&good)));
+    // No credential required by this request kind: nothing to block on.
+    assert!(!unlock_blocked_by_credential(false, None));
+    assert!(!unlock_blocked_by_credential(true, None));
+}
