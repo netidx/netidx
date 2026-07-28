@@ -33,9 +33,6 @@ use log::warn;
 use rand::{RngExt, rng, seq::SliceRandom};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
-/// How long to browse when no recorded admin server answered.
-pub use crate::discovery::DISCOVERY_TIMEOUT;
-
 /// The smallest sync interval we will honour. The actual wait is drawn from
 /// `interval..=2 * interval` each cycle, so a fleet installed together does
 /// not stay in step. Floored so a mistyped flag can't turn a fleet into a
@@ -55,7 +52,7 @@ pub fn next_interval(interval: Duration) -> Duration {
 /// The first admin server that proves it belongs to `net_id`'s admin
 /// domain, from [`discovery::admin_servers`]. Fails closed: a reachable
 /// server whose CA fingerprint doesn't match the pin is refused, not used.
-pub async fn pinned_admin_server(
+async fn pinned_admin_server(
     net_id: &AdminDomainIdentity,
     kind: NodeKind,
 ) -> Result<(SocketAddr, CaIdentity)> {
@@ -239,7 +236,6 @@ fn edits_for(role: InstallRole, map: &AdminDomainMap) -> Result<EditPlan> {
 /// lock is the point: the network work is done, so [`SyncPlan::apply`] can
 /// take the config-dir lock for the length of a few file writes.
 pub struct SyncPlan {
-    pub role: InstallRole,
     pub map: AdminDomainMap,
     /// The record with its refreshed admin-server list, saved by `apply`.
     record: InstallRecord,
@@ -295,14 +291,7 @@ pub async fn plan(mut record: InstallRecord, record_path: PathBuf) -> Result<Syn
     let admin_servers_changed =
         record.set_admin_servers(order_admin_servers(&map, anchor));
     let edits = edits_for(record.role, &map)?;
-    Ok(SyncPlan {
-        role: record.role,
-        map,
-        record,
-        record_path,
-        admin_servers_changed,
-        edits,
-    })
+    Ok(SyncPlan { map, record, record_path, admin_servers_changed, edits })
 }
 
 /// One full pass: plan, then apply under a briefly-held lock.

@@ -11,9 +11,8 @@ use crate::activation::{ProcessCfgBuilder, Unit, UnitBuilder};
 use anyhow::Result;
 use std::path::PathBuf;
 
-/// The unit name, and the name of the pre-rename unit it replaces.
+/// The unit name.
 pub const UNIT: &str = "admin-agent";
-pub const SUPERSEDES: &str = "renew";
 
 /// Parameters for [`unit`].
 #[derive(Debug, Clone)]
