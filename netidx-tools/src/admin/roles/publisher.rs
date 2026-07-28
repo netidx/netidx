@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::admin::{init, lifecycle};
+use netidx_admin_client::provenance::InstallRole;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -20,7 +21,7 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Install(f) => init::run_publisher(f),
-        Cmd::Status => lifecycle::publisher_status(),
-        Cmd::Update(f) => lifecycle::publisher_update(f),
+        Cmd::Status => lifecycle::status(InstallRole::Publisher),
+        Cmd::Update(f) => lifecycle::update(InstallRole::Publisher, f),
     }
 }

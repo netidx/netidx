@@ -28,6 +28,7 @@ netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-core = { path = "../netidx-core", version = "0.32.0" }
 netidx-derive = { path = "../netidx-derive", version = "0.32.0" }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
+rand = { workspace = true }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }
 netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }

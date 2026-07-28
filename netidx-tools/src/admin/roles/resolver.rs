@@ -7,6 +7,7 @@ use clap::Subcommand;
 #[cfg(unix)]
 use crate::admin::delegation;
 use crate::admin::{init, lifecycle};
+use netidx_admin_client::provenance::InstallRole;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -37,8 +38,8 @@ pub(crate) enum Cmd {
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Install(f) => init::run_resolver(f),
-        Cmd::Status => lifecycle::resolver_status(),
-        Cmd::Update(f) => lifecycle::resolver_update(f),
+        Cmd::Status => lifecycle::status(InstallRole::Resolver),
+        Cmd::Update(f) => lifecycle::update(InstallRole::Resolver, f),
         #[cfg(unix)]
         Cmd::AddParent(f) => delegation::add_parent(f),
         #[cfg(unix)]

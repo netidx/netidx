@@ -13,13 +13,10 @@
 //! than recorded as the edits are built. A preview therefore cannot
 //! describe anything other than what `apply` writes.
 //!
-//! Two reconcile styles live here. The flat one
-//! ([`reconcile_resolver_peers`], the workstation path) is **additive**: it
-//! adds what the admin domain has that the local config lacks and never
-//! removes, so operator-added peers survive. The map-driven ones
-//! ([`reconcile_client_peers`], [`reconcile_parent_peers`]) both add and
-//! remove, because the CA's map is authoritative. An empty plan is the
-//! in-sync / idempotent result either way.
+//! Every reconcile here is driven by the CA-authoritative admin domain map,
+//! and both adds and removes: an address the map does not list is
+//! authoritatively gone. Host-local entries are the exception — they are
+//! never removed. An empty plan is the in-sync / idempotent result.
 
 use crate::{
     admin_proto::{AdminDomainMap, InfoAuth, ResolverAddr},
@@ -27,7 +24,6 @@ use crate::{
     config_lock::ConfigDirLock,
     resolver::ResolverConfig,
     template::{describe_client_auth, describe_ref_auth},
-    transport::AdminDomainInfo,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -369,50 +365,11 @@ fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     }
 }
 
-/// Reconcile a resolver's **parent referral** against the admin domain's
-/// current resolver set: add every resolver `net` reports that the
-/// config's parent doesn't already list (matched by `SocketAddr`),
-/// mapping each one's auth.
-///
-/// This is the workstation/child-resolver `update`: when the admin domain
-/// grows from one resolver to several, the local parent referral learns
-/// the new peers (so client referrals can fail over) without a
-/// reinstall or a hand-edit.
-///
-/// Additive: peers the config already lists — including operator-added
-/// ones absent from the admin domain — are left untouched. It *will* re-add a
-/// admin domain peer the operator deleted; suppressing that is a later design.
-/// Idempotent: a config already carrying every admin domain peer yields an
-/// empty plan.
-pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<EditPlan> {
-    let cfg = ResolverConfig::load(path)
-        .with_context(|| format!("loading resolver config {}", path.display()))?;
-    let expected = cfg.as_file().parent.clone().context(
-        "this resolver has no parent referral to reconcile — it isn't \
-         attached to an admin domain (run `join` to attach one)",
-    )?;
-    let mut replacement = expected.addrs.clone();
-    for r in &net.resolvers {
-        if !replacement.iter().any(|(a, _)| *a == r.addr) {
-            replacement.push((r.addr, info_auth_to_ref(&r.auth)));
-        }
-    }
-    Ok(EditPlan {
-        resolver_edit: Some(ResolverPeerEdit {
-            path: path.to_path_buf(),
-            expected,
-            replacement,
-        }),
-        ..EditPlan::default()
-    })
-}
-
 // ---- admin domain-map-driven reconcile (Phase B) ----
 //
 // These reconcile a host's config to exactly ONE resolver cluster of the resolver hierarchy —
 // the resolver cluster its current addrs already belong to — from the CA-authoritative
-// admin domain map. Unlike `reconcile_resolver_peers` above (additive-only, over
-// the flat legacy `AdminDomainInfo`), these both ADD missing resolver cluster members and
+// admin domain map. They both ADD missing resolver cluster members and
 // AUTO-REMOVE entries the resolver cluster no longer lists, with no consent: the CA is
 // the source of truth, so an addr absent from its authoritative resolver cluster is
 // authoritatively gone. Host-local entries are never removed.
@@ -428,8 +385,10 @@ fn info_auth_to_client(a: &InfoAuth) -> netidx::config::file::Auth {
 }
 
 /// One distinct resolver cluster in the admin domain map: where it attaches and
-/// its full member roster.
+/// its full member roster. The `id` is what places it in the resolver
+/// hierarchy — see [`crate::sync::order_admin_servers`].
 pub struct ResolverClusterView {
+    pub id: netidx_admin_proto::ResolverClusterId,
     pub base: String,
     pub members: Vec<ResolverAddr>,
 }
@@ -440,7 +399,11 @@ pub fn clusters(map: &AdminDomainMap) -> Vec<ResolverClusterView> {
     map.resolver_clusters
         .iter()
         .filter(|c| c.state == netidx_admin_proto::ResolverClusterState::Active)
-        .map(|c| ResolverClusterView { base: c.base.clone(), members: c.members.clone() })
+        .map(|c| ResolverClusterView {
+            id: c.id,
+            base: c.base.clone(),
+            members: c.members.clone(),
+        })
         .collect()
 }
 
@@ -615,18 +578,6 @@ mod tests {
         path
     }
 
-    fn net(resolvers: Vec<ResolverAddr>) -> AdminDomainInfo {
-        AdminDomainInfo {
-            domain: "local".into(),
-            ca_addr: None,
-            resolvers,
-            resolver_base: Some("/".into()),
-            resolver_parent: None,
-            resolver_children: vec![],
-            reached: vec![],
-        }
-    }
-
     #[test]
     fn auth_mapping_covers_every_variant() {
         assert!(matches!(
@@ -641,69 +592,6 @@ mod tests {
             info_auth_to_ref(&InfoAuth::Tls { name: "r.example".into() }),
             rfile::RefAuth::Tls(s) if s == "r.example"
         ));
-    }
-
-    #[test]
-    fn adds_missing_peers_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        // Config knows about A; the admin domain has A and B.
-        let path = write_resolver(&dir.path(), r#"["10.0.0.1:4564", "Anonymous"]"#);
-        let admin_domain = net(vec![
-            ResolverAddr { addr: addr("10.0.0.1:4564"), auth: InfoAuth::Anonymous },
-            ResolverAddr { addr: addr("10.0.0.2:4564"), auth: InfoAuth::Anonymous },
-        ]);
-        let plan = reconcile_resolver_peers(&path, &admin_domain).unwrap();
-        let changes = plan.changes();
-        assert_eq!(changes.len(), 1, "exactly one new peer (B)");
-        assert!(changes[0].text().contains("10.0.0.2:4564"));
-        let lock = ConfigDirLock::acquire(dir.path()).unwrap();
-        plan.apply(&lock).unwrap();
-        // Both peers now present on disk.
-        let cfg = ResolverConfig::load(&path).unwrap();
-        let parent = cfg.as_file().parent.as_ref().unwrap();
-        assert_eq!(parent.addrs.len(), 2);
-        // Second run is a no-op — additive reconcile converged.
-        let plan2 = reconcile_resolver_peers(&path, &admin_domain).unwrap();
-        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes());
-    }
-
-    #[test]
-    fn preserves_operator_added_peer() {
-        let dir = tempfile::tempdir().unwrap();
-        // Config has the admin domain peer A plus an operator-added X the
-        // admin domain doesn't report.
-        let path = write_resolver(
-            &dir.path(),
-            r#"["10.0.0.1:4564", "Anonymous"], ["10.9.9.9:4564", "Anonymous"]"#,
-        );
-        let admin_domain = net(vec![ResolverAddr {
-            addr: addr("10.0.0.1:4564"),
-            auth: InfoAuth::Anonymous,
-        }]);
-        let plan = reconcile_resolver_peers(&path, &admin_domain).unwrap();
-        // Nothing to add (A present); X is NOT removed.
-        assert!(plan.is_empty());
-        let cfg = ResolverConfig::load(&path).unwrap();
-        let parent = cfg.as_file().parent.as_ref().unwrap();
-        assert!(parent.addrs.iter().any(|(a, _)| *a == addr("10.9.9.9:4564")));
-    }
-
-    #[test]
-    fn no_parent_referral_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("resolver.json");
-        // Same shape but parent: null.
-        let json = resolver_json("").replacen(
-            "\"parent\": { \"path\": \"/local\", \"ttl\": null, \"addrs\": [] }",
-            "\"parent\": null",
-            1,
-        );
-        std::fs::write(&path, json).unwrap();
-        let admin_domain = net(vec![ResolverAddr {
-            addr: addr("10.0.0.1:4564"),
-            auth: InfoAuth::Anonymous,
-        }]);
-        assert!(reconcile_resolver_peers(&path, &admin_domain).is_err());
     }
 
     // ---- map-driven reconcile (Phase B) ----

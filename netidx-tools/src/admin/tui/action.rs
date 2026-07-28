@@ -1058,10 +1058,10 @@ async fn update(
         Stage::Discovering,
         "checking the admin domain for changes…",
     ));
-    let config_lock =
-        netidx_admin_client::config_lock::ConfigDirLock::acquire_async(&config_root)
-            .await?;
-    let plan = super::lifecycle::update_plan(&config_root, role).await?;
+    // Plan first, lock second: the config-directory lock never waits, so
+    // holding it across the admin domain round trip would fail a concurrent
+    // command for the duration of a network call.
+    let plan = super::lifecycle::sync_plan(&config_root, role).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
             "Up to date",
@@ -1069,8 +1069,13 @@ async fn update(
             false,
         ));
     }
-    let mut lines: Vec<String> = plan.describe().lines().map(str::to_string).collect();
-    let restart_hint = super::lifecycle::restart_hint_for_plan(role, &plan).to_string();
+    let mut lines: Vec<String> =
+        plan.edits.describe().lines().map(str::to_string).collect();
+    let restart_hint =
+        crate::admin::lifecycle::restart_hint(role, &plan.edits).to_string();
+    let config_lock =
+        netidx_admin_client::config_lock::ConfigDirLock::acquire_async(&config_root)
+            .await?;
     plan.apply(&config_lock)?;
     lines.push(String::new());
     lines.push(restart_hint);

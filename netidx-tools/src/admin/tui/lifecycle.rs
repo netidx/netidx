@@ -1,65 +1,36 @@
-//! Async lifecycle helpers for the Local tab's post-install actions.
+//! Async entry points to `netidx_admin_client::sync` for the Local tab.
 //!
-//! The tools `lifecycle.rs` builds its own `tokio::runtime::Runtime` per call and
-//! prints results, so it can't be reused from inside the TUI's runtime (a nested
-//! runtime panics). These are the same operations rewritten as plain `async fn`s
-//! over the library's `transport` / `reconcile` / `discovery` pieces (none of
-//! which are cfg-gated), returning the plan for the UI to render + apply.
+//! The CLI `lifecycle.rs` builds its own `tokio::runtime::Runtime` per call
+//! and prints, so it can't be called from inside the TUI's runtime (a nested
+//! runtime panics). Everything below is the same library call with a plan
+//! returned instead of printed.
 
 use anyhow::{Context, Result, bail};
 use netidx_admin_client::{
-    discovery, paths,
-    provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
-    reconcile::{self, EditPlan},
-    resolver::ResolverConfig,
-    transport::{self, AdminDomainInfo, CaIdentity},
+    provenance::{InstallRecord, InstallRole},
+    sync::{self, SyncPlan},
 };
 use netidx_admin_proto::{AdminDomainMap, NodeKind};
-use std::{net::SocketAddr, path::Path};
+use std::path::Path;
 
-/// Build the config-reconciliation plan for this host's role, checking it
-/// against the admin domain (pinned to the CA identity recorded at install). The
-/// caller renders `plan.describe()` and applies it. Errors if this host is
-/// local-only (nothing to update) or the wrong role.
-pub(super) async fn update_plan(
-    config_root: &Path,
-    role: InstallRole,
-) -> Result<EditPlan> {
-    let rec = InstallRecord::load(&config_root.join("install.json"))?;
+/// Build this host's sync plan, checked against the admin domain (pinned
+/// to the CA identity recorded at install). The caller renders
+/// `plan.edits.describe()` and applies it. Errors if this host is local-only
+/// or the wrong role.
+///
+/// The record is loaded by explicit path rather than discovered: the Local
+/// tab enumerates both scopes, and a plan must write back to the one it
+/// was built from.
+pub(super) async fn sync_plan(config_root: &Path, role: InstallRole) -> Result<SyncPlan> {
+    let path = config_root.join("install.json");
+    let rec = InstallRecord::load(&path)?;
     if rec.role != role {
         bail!("this host is a {} install, not a {}", rec.role.as_str(), role.as_str());
     }
-    let net_id = rec
-        .admin_domain
-        .as_ref()
-        .context("this host is local-only — nothing to update")?;
-    match role {
-        InstallRole::Ca => {
-            bail!("the CA has no resolver configuration to reconcile")
-        }
-        InstallRole::Workstation => {
-            let rpath = paths::discover_resolver_config()?;
-            let info = fetch_admin_domain_pinned(net_id, NodeKind::Client).await?;
-            reconcile::reconcile_resolver_peers(&rpath, &info)
-        }
-        InstallRole::Resolver => {
-            let map = fetch_map_pinned(net_id, NodeKind::Resolver).await?;
-            let mut plan = match paths::discover_client_config() {
-                Ok(cpath) => reconcile::reconcile_client_peers(&cpath, &map)?,
-                Err(_) => EditPlan::default(),
-            };
-            let rpath = paths::discover_resolver_config()?;
-            if ResolverConfig::load(&rpath)?.as_file().parent.is_some() {
-                plan = plan.merge(reconcile::reconcile_parent_peers(&rpath, &map)?);
-            }
-            Ok(plan)
-        }
-        InstallRole::Publisher => {
-            let map = fetch_map_pinned(net_id, NodeKind::Publisher).await?;
-            let cpath = paths::discover_client_config()?;
-            reconcile::reconcile_client_peers(&cpath, &map)
-        }
+    if role == InstallRole::Ca {
+        bail!("the CA has no resolver configuration to reconcile")
     }
+    sync::plan(rec, path).await
 }
 
 /// Fetch the admin domain map as this host, pinned to the CA identity recorded at
@@ -71,93 +42,5 @@ pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap
         .admin_domain
         .as_ref()
         .context("this host is not part of an admin domain (local-only)")?;
-    fetch_map_pinned(net_id, NodeKind::Resolver).await
-}
-
-/// An activation hint after an update applies. Resolver updates can touch only
-/// client configuration, only the resolver's parent referral, or both, so the
-/// hint must follow the actual edit plan rather than only the host role.
-pub(super) fn restart_hint_for_plan(role: InstallRole, plan: &EditPlan) -> &'static str {
-    match role {
-        InstallRole::Ca => "The CA requires no resolver restart.",
-        InstallRole::Workstation => {
-            "No service was restarted. Restart the local resolver to serve the new peers."
-        }
-        InstallRole::Resolver if plan.changes_resolver_config() => {
-            "No service was restarted. Restart this resolver manually at its place in the \
-             resolver cluster's rolling sequence; re-run client processes if their resolver addresses \
-             changed."
-        }
-        InstallRole::Resolver => {
-            "Re-run client processes to use the new resolver addresses; no resolver service \
-             restart is needed."
-        }
-        InstallRole::Publisher => "Re-run publishers to use the new resolvers.",
-    }
-}
-
-/// The first admin server from [`discovery::admin_servers`] that proves it
-/// belongs to the pinned admin domain. Fail-closed: a reachable server with
-/// a different CA is refused, never silently trusted.
-async fn pinned_admin_server(
-    net_id: &AdminDomainIdentity,
-    kind: NodeKind,
-) -> Result<(SocketAddr, CaIdentity)> {
-    let mut saw_mismatch = false;
-    for addr in discovery::admin_servers().await {
-        let id = match transport::fetch_identity(addr, kind).await {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        if net_id.matches(&id.fingerprint)? {
-            return Ok((addr, id));
-        }
-        saw_mismatch = true;
-    }
-    fail(saw_mismatch)
-}
-
-/// Walk the admin domain (GetInfo aggregate) via [`pinned_admin_server`].
-async fn fetch_admin_domain_pinned(
-    net_id: &AdminDomainIdentity,
-    kind: NodeKind,
-) -> Result<AdminDomainInfo> {
-    let (addr, id) = pinned_admin_server(net_id, kind).await?;
-    transport::aggregate(&[addr], kind, &id)
-        .await
-        .context("mapping the admin domain (GetInfo)")
-}
-
-/// One-shot pinned admin domain-map fetch, via [`pinned_admin_server`].
-async fn fetch_map_pinned(
-    net_id: &AdminDomainIdentity,
-    kind: NodeKind,
-) -> Result<AdminDomainMap> {
-    let (addr, id) = pinned_admin_server(net_id, kind).await?;
-    transport::get_map_pinned(addr, kind, &id)
-        .await
-        .context("fetching the admin domain map")
-}
-
-fn fail<T>(saw_mismatch: bool) -> Result<T> {
-    if saw_mismatch {
-        bail!(
-            "reached an admin server, but its CA fingerprint did not match this \
-             install's pinned admin domain identity — refusing to trust it; re-join if \
-             the CA legitimately changed"
-        )
-    }
-    bail!("could not reach any admin server (recorded address and mDNS both failed)")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn client_only_resolver_update_does_not_request_a_resolver_restart() {
-        let hint = restart_hint_for_plan(InstallRole::Resolver, &EditPlan::default());
-        assert!(hint.contains("no resolver service restart is needed"));
-        assert!(!hint.contains("Restart this resolver"));
-    }
+    sync::fetch_map(net_id, NodeKind::Resolver).await
 }

@@ -69,6 +69,7 @@ pub mod resolver;
 pub mod resolver_probe;
 pub mod service;
 pub mod session_cache;
+pub mod sync;
 pub mod template;
 pub mod tls;
 /// Shared trust-on-first-use rustls verifier for [`transport`] and
