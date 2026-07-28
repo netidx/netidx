@@ -224,7 +224,7 @@ impl Hash for Referral {
 
 impl PartialEq for Referral {
     fn eq(&self, other: &Referral) -> bool {
-        self.addrs.iter().zip(other.addrs.iter()).all(|(l, r)| l == r)
+        *self.addrs == *other.addrs
     }
 }
 

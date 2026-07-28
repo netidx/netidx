@@ -344,7 +344,46 @@ mod resolver {
         ]
     }
 
+    fn hash_of(r: &Referral) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(r, &mut h);
+        std::hash::Hasher::finish(&h)
+    }
+
+    fn referral_with(addrs: &[&str]) -> Referral {
+        Referral {
+            path: Path::from("/"),
+            ttl: None,
+            addrs: GPooled::orphan(
+                addrs
+                    .iter()
+                    .map(|a| (a.parse::<SocketAddr>().unwrap(), Auth::Anonymous))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// `Referral` keys the resolver client's connection cache, so `Hash` and
+    /// `Eq` must agree. Adding a member to a cluster produces exactly the pair
+    /// that used to break it: the old addrs are a prefix of the new ones.
+    #[test]
+    fn referral_eq_is_not_prefix_eq() {
+        let one = referral_with(&["192.0.2.1:4564"]);
+        let two = referral_with(&["192.0.2.1:4564", "192.0.2.2:4564"]);
+        assert_ne!(one, two);
+        assert_ne!(two, one);
+        assert_eq!(one, referral_with(&["192.0.2.1:4564"]));
+    }
+
     proptest! {
+        /// Anything `Eq` says is equal must hash equal.
+        #[test]
+        fn test_referral_hash_agrees_with_eq(a in referral(), b in referral()) {
+            if a == b {
+                prop_assert_eq!(hash_of(&a), hash_of(&b));
+            }
+        }
+
         #[test]
         fn test_fuzz0(b in bytes()) {
             fuzz(b)
