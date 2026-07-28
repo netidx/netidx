@@ -152,9 +152,9 @@ pub(crate) fn workstation_status() -> Result<()> {
                         );
                     } else {
                         println!(
-                            "  sync: behind by {} resolver peer(s) — run \
+                            "  sync: {} pending change(s) — run \
                              `netidx admin workstation update`:",
-                            plan.changes.len(),
+                            plan.changes().len(),
                         );
                         print!("{}", plan.describe());
                     }

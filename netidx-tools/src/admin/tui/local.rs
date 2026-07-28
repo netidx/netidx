@@ -9,6 +9,7 @@ use netidx_activation::runtime::default_units_dir;
 use netidx_admin_client::{
     paths,
     provenance::{InstallRecord, InstallRole},
+    reconcile::Change,
     renewd,
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
 };
@@ -264,9 +265,10 @@ pub(super) enum SyncState {
     Checking,
     /// The config already matches the admin domain — nothing to apply.
     InSync,
-    /// The admin domain has member servers this config lacks; each string is one
-    /// pending addition (e.g. `client resolver 192.168.50.12:4564 (tls)`).
-    OutOfSync(Vec<String>),
+    /// The config differs from the admin domain map; each [`Change`] is one
+    /// pending edit and carries its own direction, so a removal renders as a
+    /// removal here exactly as it does in the CLI preview.
+    OutOfSync(Vec<Change>),
     /// The check couldn't reach the admin domain; carries the error for display.
     Failed(String),
 }
@@ -1174,14 +1176,14 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
         SyncState::OutOfSync(changes) => {
             let mut lines = vec![kv_status(
                 "Admin domain sync",
-                format!("⚠ {} new member server(s) — press U to apply", changes.len()),
+                format!("⚠ {} pending change(s) — press U to apply", changes.len()),
                 theme::WARN,
             )];
             for c in changes {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{:>18}", "")),
                     Span::styled(
-                        format!("+ {c}"),
+                        c.to_string(),
                         Style::default().bg(theme::PANEL_BG).fg(theme::WARN),
                     ),
                 ]));
@@ -1203,9 +1205,7 @@ pub(super) async fn check_sync(
     for (i, role, config_root) in pending {
         let st = match super::lifecycle::update_plan(&config_root, role).await {
             Ok(plan) if plan.is_empty() => SyncState::InSync,
-            Ok(plan) => SyncState::OutOfSync(
-                plan.changes.iter().map(|c| c.text().to_string()).collect(),
-            ),
+            Ok(plan) => SyncState::OutOfSync(plan.changes()),
             Err(e) => SyncState::Failed(format!("{e:#}")),
         };
         out.push((i, st));
@@ -1245,6 +1245,28 @@ mod tests {
     use super::*;
     use netidx_admin_client::provenance::AdminDomainIdentity;
     use ratatui::{Terminal, backend::TestBackend};
+
+    // The Local tab renders the same plan the CLI previews, so it owes the
+    // operator the same verbs. It used to flatten each change to its subject
+    // and prefix every line with `+`, which showed an auto-removal — the one
+    // edit worth a second look before pressing U — as an addition.
+    #[test]
+    fn a_removal_renders_as_a_removal() {
+        let lines = sync_lines(&SyncState::OutOfSync(vec![
+            Change::Add("client resolver 10.0.0.16:4564 (tls)".into()),
+            Change::Del("client resolver 10.0.0.99:4564".into()),
+        ]));
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let body = rendered.join("\n");
+        assert!(body.contains("+ add client resolver 10.0.0.16:4564"), "{body}");
+        assert!(body.contains("- remove client resolver 10.0.0.99:4564"), "{body}");
+        assert!(!body.contains("+ client resolver 10.0.0.99"), "{body}");
+        // The summary counts edits; it must not call them all additions.
+        assert!(body.contains("2 pending change(s)"), "{body}");
+    }
 
     #[test]
     fn service_word_matches_state() {

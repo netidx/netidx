@@ -1,5 +1,5 @@
-//! Idempotent, additive edits to an **existing** config, for the
-//! installed-template lifecycle ops (`update`).
+//! Idempotent edits to an **existing** config, for the installed-template
+//! lifecycle ops (`update`).
 //!
 //! The template system renders configs from scratch; this is its
 //! counterpart for evolving an install in place. An [`EditPlan`] mirrors
@@ -8,40 +8,57 @@
 //! only the fields it changes, leaving every other field (and any
 //! operator customization) intact.
 //!
-//! Reconciles are **additive**: they add what the admin domain has that the
-//! local config lacks, and never remove what the config has that the
-//! admin domain doesn't (so operator-added peers survive). An empty plan is
-//! the in-sync / idempotent result.
+//! A plan carries the loaded original beside its replacement, and what
+//! changed is [derived](EditPlan::changes) from that pair on demand rather
+//! than recorded as the edits are built. A preview therefore cannot
+//! describe anything other than what `apply` writes.
+//!
+//! Two reconcile styles live here. The flat one
+//! ([`reconcile_resolver_peers`], the workstation path) is **additive**: it
+//! adds what the admin domain has that the local config lacks and never
+//! removes, so operator-added peers survive. The map-driven ones
+//! ([`reconcile_client_peers`], [`reconcile_parent_peers`]) both add and
+//! remove, because the CA's map is authoritative. An empty plan is the
+//! in-sync / idempotent result either way.
 
 use crate::{
     admin_proto::{AdminDomainMap, InfoAuth, ResolverAddr},
     client::ClientConfig,
     config_lock::ConfigDirLock,
     resolver::ResolverConfig,
+    template::{describe_client_auth, describe_ref_auth},
     transport::AdminDomainInfo,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
+use compact_str::{CompactString, format_compact};
 use netidx::{config::file as cfile, resolver_server::config::file as rfile};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
-/// One planned edit, carrying its direction so the preview can't mislabel
-/// a removal as an add (the verb is derived from the variant, never
-/// hard-coded). The payload is the change subject without the verb.
+/// One difference between a captured original and its replacement, carrying
+/// its direction so a preview can't mislabel a removal as an add (the verb
+/// comes from the variant, never from the call site). The payload is the
+/// change subject without the verb.
+///
+/// Changes are **display only** and **derived**: [`EditPlan::changes`]
+/// computes them on demand from the edits, and nothing in
+/// [`EditPlan::apply`] consults them. Deriving them is what keeps a preview
+/// from disagreeing with the write it previews.
 #[derive(Debug, Clone)]
 pub enum Change {
-    Add(String),
-    Del(String),
+    Add(CompactString),
+    Del(CompactString),
+    Reauth(CompactString),
 }
 
 impl Change {
-    /// The change subject, without the add/remove verb.
+    /// The change subject, without the verb.
     pub fn text(&self) -> &str {
         match self {
-            Change::Add(s) | Change::Del(s) => s,
+            Change::Add(s) | Change::Del(s) | Change::Reauth(s) => s,
         }
     }
 }
@@ -51,6 +68,44 @@ impl std::fmt::Display for Change {
         match self {
             Change::Add(s) => write!(f, "+ add {s}"),
             Change::Del(s) => write!(f, "- remove {s}"),
+            Change::Reauth(s) => write!(f, "~ change {s}"),
+        }
+    }
+}
+
+/// Every difference between one peer list and its replacement: an address
+/// only the replacement has is an add, one only the original has is a
+/// removal, and one both have under different auth is a re-auth. Total by
+/// construction — an edit this misses would be a write with no preview.
+fn diff_peers<A>(
+    expected: &[(SocketAddr, A)],
+    replacement: &[(SocketAddr, A)],
+    what: &str,
+    auth_eq: impl Fn(&A, &A) -> bool,
+    describe: impl Fn(&A) -> String,
+    out: &mut Vec<Change>,
+) {
+    for (addr, auth) in replacement {
+        match expected.iter().find(|(a, _)| a == addr) {
+            None => {
+                out.push(Change::Add(format_compact!(
+                    "{what} {addr} ({})",
+                    describe(auth)
+                )));
+            }
+            Some((_, was)) if !auth_eq(was, auth) => {
+                out.push(Change::Reauth(format_compact!(
+                    "{what} {addr} ({} → {})",
+                    describe(was),
+                    describe(auth)
+                )));
+            }
+            Some(_) => (),
+        }
+    }
+    for (addr, _) in expected {
+        if !replacement.iter().any(|(a, _)| a == addr) {
+            out.push(Change::Del(format_compact!("{what} {addr}")));
         }
     }
 }
@@ -61,8 +116,6 @@ impl std::fmt::Display for Change {
 pub struct EditPlan {
     resolver_edit: Option<ResolverPeerEdit>,
     client_edit: Option<ClientPeerEdit>,
-    /// One change per edit — the `--dry-run`/`status` body.
-    pub changes: Vec<Change>,
     pub warnings: Vec<ArcStr>,
 }
 
@@ -81,22 +134,63 @@ struct ClientPeerEdit {
 }
 
 impl EditPlan {
+    fn client_changes(&self) -> Vec<Change> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.client_edit {
+            diff_peers(
+                &e.expected,
+                &e.replacement,
+                "client resolver",
+                client_auth_eq,
+                describe_client_auth,
+                &mut out,
+            );
+        }
+        out
+    }
+
+    fn resolver_changes(&self) -> Vec<Change> {
+        let mut out = Vec::new();
+        if let Some(e) = &self.resolver_edit {
+            diff_peers(
+                &e.expected.addrs,
+                &e.replacement,
+                "parent resolver",
+                ref_auth_eq,
+                describe_ref_auth,
+                &mut out,
+            );
+        }
+        out
+    }
+
+    /// What this plan would change, for display. Derived from the captured
+    /// original and its replacement every time it's asked, so it cannot
+    /// drift from what [`apply`](Self::apply) writes. Show these to an
+    /// operator; never branch on them.
+    pub fn changes(&self) -> Vec<Change> {
+        let mut out = self.client_changes();
+        out.extend(self.resolver_changes());
+        out
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes().is_empty()
     }
 
     pub fn changes_resolver_config(&self) -> bool {
-        self.resolver_edit.is_some()
+        !self.resolver_changes().is_empty()
     }
 
     /// Human-readable preview of the edits.
     pub fn describe(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        if self.changes.is_empty() {
+        let changes = self.changes();
+        if changes.is_empty() {
             out.push_str("  (already in sync — no changes)\n");
         } else {
-            for c in &self.changes {
+            for c in &changes {
                 let _ = writeln!(out, "  {c}");
             }
         }
@@ -111,7 +205,10 @@ impl EditPlan {
     /// edit that would yield an invalid config fails here, before any
     /// write touches disk.
     pub fn apply(self, config_lock: &ConfigDirLock) -> Result<()> {
-        let Self { resolver_edit, client_edit, changes: _, warnings: _ } = self;
+        if self.is_empty() {
+            return Ok(());
+        }
+        let Self { resolver_edit, client_edit, warnings: _ } = self;
         let mut resolver = match resolver_edit {
             Some(ResolverPeerEdit { path, expected, replacement }) => {
                 let path = config_lock.require_contained(path)?;
@@ -181,7 +278,6 @@ impl EditPlan {
         if other.client_edit.is_some() {
             self.client_edit = other.client_edit;
         }
-        self.changes.extend(other.changes);
         self.warnings.extend(other.warnings);
         self
     }
@@ -273,14 +369,6 @@ fn info_auth_to_ref(a: &InfoAuth) -> rfile::RefAuth {
     }
 }
 
-fn describe_info_auth(a: &InfoAuth) -> &'static str {
-    match a {
-        InfoAuth::Anonymous => "anonymous",
-        InfoAuth::Krb5 { .. } => "krb5",
-        InfoAuth::Tls { .. } => "tls",
-    }
-}
-
 /// Reconcile a resolver's **parent referral** against the admin domain's
 /// current resolver set: add every resolver `net` reports that the
 /// config's parent doesn't already list (matched by `SocketAddr`),
@@ -304,20 +392,10 @@ pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<Ed
          attached to an admin domain (run `join` to attach one)",
     )?;
     let mut replacement = expected.addrs.clone();
-    let mut changes = Vec::new();
     for r in &net.resolvers {
-        if replacement.iter().any(|(a, _)| *a == r.addr) {
-            continue;
+        if !replacement.iter().any(|(a, _)| *a == r.addr) {
+            replacement.push((r.addr, info_auth_to_ref(&r.auth)));
         }
-        replacement.push((r.addr, info_auth_to_ref(&r.auth)));
-        changes.push(Change::Add(format!(
-            "resolver peer {} ({})",
-            r.addr,
-            describe_info_auth(&r.auth),
-        )));
-    }
-    if changes.is_empty() {
-        return Ok(EditPlan::default());
     }
     Ok(EditPlan {
         resolver_edit: Some(ResolverPeerEdit {
@@ -325,9 +403,7 @@ pub fn reconcile_resolver_peers(path: &Path, net: &AdminDomainInfo) -> Result<Ed
             expected,
             replacement,
         }),
-        client_edit: None,
-        changes,
-        warnings: Vec::new(),
+        ..EditPlan::default()
     })
 }
 
@@ -409,37 +485,19 @@ pub fn match_cluster<'a>(
 
 /// Reconcile a peer list to the matched resolver cluster's roster: add every member
 /// the config lacks, remove every entry the resolver cluster no longer lists —
-/// except host-local entries, which are never admin domain peers. Returns the
-/// `+`/`-` change lines.
+/// except host-local entries, which are never admin domain peers.
 fn reconcile_peer_list<A: Clone>(
     current: &mut Vec<(SocketAddr, A)>,
     members: &[ResolverAddr],
     map_auth: impl Fn(&InfoAuth) -> A,
     is_local: impl Fn(&A) -> bool,
-    add_line: impl Fn(SocketAddr, &InfoAuth) -> String,
-    rm_line: impl Fn(SocketAddr) -> String,
-) -> Vec<Change> {
-    let mut changes = Vec::new();
+) {
     for m in members {
         if !current.iter().any(|(a, _)| *a == m.addr) {
             current.push((m.addr, map_auth(&m.auth)));
-            changes.push(Change::Add(add_line(m.addr, &m.auth)));
         }
     }
-    let member_addrs: Vec<SocketAddr> = members.iter().map(|m| m.addr).collect();
-    let mut removed = Vec::new();
-    current.retain(|(a, auth)| {
-        if is_local(auth) || member_addrs.contains(a) {
-            true
-        } else {
-            removed.push(*a);
-            false
-        }
-    });
-    for a in removed {
-        changes.push(Change::Del(rm_line(a)));
-    }
-    changes
+    current.retain(|(a, auth)| is_local(auth) || members.iter().any(|m| m.addr == *a));
 }
 
 /// Reconcile a host's **client config** addrs to its own resolver cluster
@@ -460,26 +518,16 @@ pub fn reconcile_client_peers(path: &Path, map: &AdminDomainMap) -> Result<EditP
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     };
-    let members = cluster.members.clone();
     let mut replacement = expected.clone();
-    let changes = reconcile_peer_list(
-        &mut replacement,
-        &members,
-        info_auth_to_client,
-        |a| matches!(a, netidx::config::file::Auth::Local(_)),
-        |addr, auth| format!("client resolver {addr} ({})", describe_info_auth(auth)),
-        |addr| format!("client resolver {addr}"),
-    );
-    if changes.is_empty() {
-        return Ok(EditPlan { warnings, ..EditPlan::default() });
-    }
+    reconcile_peer_list(&mut replacement, &cluster.members, info_auth_to_client, |a| {
+        matches!(a, netidx::config::file::Auth::Local(_))
+    });
     Ok(EditPlan {
         client_edit: Some(ClientPeerEdit {
             path: path.to_path_buf(),
             expected,
             replacement,
         }),
-        changes,
         warnings,
         ..EditPlan::default()
     })
@@ -506,26 +554,16 @@ pub fn reconcile_parent_peers(path: &Path, map: &AdminDomainMap) -> Result<EditP
         ));
         return Ok(EditPlan { warnings, ..EditPlan::default() });
     };
-    let members = cluster.members.clone();
     let mut replacement = expected.addrs.clone();
-    let changes = reconcile_peer_list(
-        &mut replacement,
-        &members,
-        info_auth_to_ref,
-        |a| matches!(a, rfile::RefAuth::Local(_)),
-        |addr, auth| format!("parent resolver {addr} ({})", describe_info_auth(auth)),
-        |addr| format!("parent resolver {addr}"),
-    );
-    if changes.is_empty() {
-        return Ok(EditPlan { warnings, ..EditPlan::default() });
-    }
+    reconcile_peer_list(&mut replacement, &cluster.members, info_auth_to_ref, |a| {
+        matches!(a, rfile::RefAuth::Local(_))
+    });
     Ok(EditPlan {
         resolver_edit: Some(ResolverPeerEdit {
             path: path.to_path_buf(),
             expected,
             replacement,
         }),
-        changes,
         warnings,
         ..EditPlan::default()
     })
@@ -615,8 +653,9 @@ mod tests {
             ResolverAddr { addr: addr("10.0.0.2:4564"), auth: InfoAuth::Anonymous },
         ]);
         let plan = reconcile_resolver_peers(&path, &admin_domain).unwrap();
-        assert_eq!(plan.changes.len(), 1, "exactly one new peer (B)");
-        assert!(plan.changes[0].text().contains("10.0.0.2:4564"));
+        let changes = plan.changes();
+        assert_eq!(changes.len(), 1, "exactly one new peer (B)");
+        assert!(changes[0].text().contains("10.0.0.2:4564"));
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         plan.apply(&lock).unwrap();
         // Both peers now present on disk.
@@ -625,7 +664,7 @@ mod tests {
         assert_eq!(parent.addrs.len(), 2);
         // Second run is a no-op — additive reconcile converged.
         let plan2 = reconcile_resolver_peers(&path, &admin_domain).unwrap();
-        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes);
+        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes());
     }
 
     #[test]
@@ -744,16 +783,17 @@ mod tests {
             &["10.0.0.15:4564", "10.0.0.16:4564"],
         )]);
         let plan = reconcile_client_peers(&path, &m).unwrap();
-        assert_eq!(plan.changes.len(), 2, "add .16, remove .99");
+        let changes = plan.changes();
+        assert_eq!(changes.len(), 2, "add .16, remove .99");
         // .16 is the addition, .99 is the removal — and the verbs must match.
         assert!(
-            plan.changes
+            changes
                 .iter()
                 .any(|c| matches!(c, Change::Add(_))
                     && c.text().contains("10.0.0.16:4564"))
         );
         assert!(
-            plan.changes
+            changes
                 .iter()
                 .any(|c| matches!(c, Change::Del(_))
                     && c.text().contains("10.0.0.99:4564"))
@@ -771,7 +811,7 @@ mod tests {
         assert!(addrs.contains(&addr("10.0.0.16:4564")));
         assert!(!addrs.contains(&addr("10.0.0.99:4564")), "stale peer auto-removed");
         let plan2 = reconcile_client_peers(&path, &m).unwrap();
-        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes);
+        assert!(plan2.is_empty(), "re-run must be empty: {:?}", plan2.changes());
     }
 
     #[test]
@@ -780,7 +820,7 @@ mod tests {
         let path = write_client(&dir.path(), &["10.0.0.99:4564"]);
         let m = map_of(vec![srv("10.0.0.15:4565", "/eu", &["10.0.0.15:4564"])]);
         let plan = reconcile_client_peers(&path, &m).unwrap();
-        assert!(plan.changes.is_empty());
+        assert!(plan.changes().is_empty());
         assert!(!plan.warnings.is_empty(), "warns rather than wiping");
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         plan.apply(&lock).unwrap();
@@ -804,7 +844,7 @@ mod tests {
             &["10.0.0.11:4564", "10.0.0.12:4564"],
         )]);
         let plan = reconcile_parent_peers(&path, &m).unwrap();
-        assert_eq!(plan.changes.len(), 2, "add .12, remove .99");
+        assert_eq!(plan.changes().len(), 2, "add .12, remove .99");
         let lock = ConfigDirLock::acquire(dir.path()).unwrap();
         plan.apply(&lock).unwrap();
         let cfg = ResolverConfig::load(&path).unwrap();
@@ -820,6 +860,35 @@ mod tests {
         assert!(addrs.contains(&addr("10.0.0.12:4564")));
         assert!(!addrs.contains(&addr("10.0.0.99:4564")));
         assert!(reconcile_parent_peers(&path, &m).unwrap().is_empty(), "idempotent");
+    }
+
+    // Deriving the preview is only worth anything if the derivation is
+    // total. An edit that swaps a peer's auth in place changes neither the
+    // address set nor its length, so an addr-only diff would call this plan
+    // empty and `apply` would then write a change nobody was shown.
+    #[test]
+    fn a_changed_auth_is_neither_silent_nor_mislabelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_client(dir.path(), &["10.0.0.15:4564"]);
+        let expected = ClientConfig::load(&path).unwrap().as_file().addrs.clone();
+        let plan = EditPlan {
+            client_edit: Some(ClientPeerEdit {
+                path: path.clone(),
+                expected,
+                replacement: vec![(
+                    addr("10.0.0.15:4564"),
+                    cfile::Auth::Tls(ArcStr::from("r.example")),
+                )],
+            }),
+            ..EditPlan::default()
+        };
+        assert!(!plan.is_empty(), "an in-place auth swap is a real edit");
+        let changes = plan.changes();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(changes[0], Change::Reauth(_)), "{:?}", changes[0]);
+        let body = plan.describe();
+        assert!(body.contains("~ change"), "{body}");
+        assert!(body.contains("anonymous → tls"), "{body}");
     }
 
     #[test]
