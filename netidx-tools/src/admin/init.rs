@@ -625,6 +625,12 @@ pub(crate) struct ResolverFlags {
     /// restart. Distinct from the peer-join discovery path. Unix-only.
     #[arg(long = "parent-admin-server")]
     parent_admin_server: Option<SocketAddr>,
+    /// Join an EXISTING admin domain as another member of its resolver
+    /// cluster: give any of its admin servers (`ip:port`). Confirm the admin
+    /// domain with `--accept-glyph`. Use `--parent-admin-server` instead to
+    /// own a delegated subtree rather than join the cluster.
+    #[arg(long = "admin-server")]
+    admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the parent (with
     /// `--parent-admin-server`), e.g. `/eu`. Omit to install as a peer
     /// of the base admin domain instead of requesting delegation.
@@ -700,6 +706,7 @@ fn resolver_input(
         with_admin_server: f.with_admin_server,
         insecure_no_tpm: f.insecure_no_tpm,
         parent_admin_server: f.parent_admin_server,
+        admin_server: f.admin_server,
         delegate_subtree: f.delegate_subtree,
         key_protection: lib_kp(f.key_protection),
         id_map_socket: f.id_map_socket,

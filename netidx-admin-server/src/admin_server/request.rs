@@ -125,11 +125,19 @@ where
     // Unlocking the server's own key is a full Argon2id (64 MiB) on the bounded
     // blocking pool. Never do it for a credential we already know is bad, or an
     // unauthenticated client gets to spend it at will.
+    //
+    // A local-control request is the exception, for the same reason it skips
+    // the throttle above: it is already authorized by the `SO_PEERCRED` check
+    // at accept, and it deliberately sends an *empty* credential because the
+    // kernel identity is the authorization. Letting that empty credential
+    // poison the unlock made the serving-cert re-mint impossible — the one
+    // path that can recover a CA host whose serving cert has already expired.
     let server_unlock = if requirements.needs_server_unlock() {
         Some(
-            if authentication
-                .as_ref()
-                .is_some_and(PreparedAdminAuthentication::credential_failed)
+            if !local
+                && authentication
+                    .as_ref()
+                    .is_some_and(PreparedAdminAuthentication::credential_failed)
             {
                 PreparedServerUnlock::failed("authentication failed")
             } else {

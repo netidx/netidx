@@ -781,6 +781,9 @@ pub struct PassReport {
     pub current: usize,
     pub failed: Vec<(PathBuf, ArcStr)>,
     pub crl_updated: bool,
+    /// How long until the soonest certificate on this host falls due.
+    /// `None` when there is nothing to renew.
+    pub next_due: Option<Duration>,
 }
 
 impl PassReport {
@@ -839,6 +842,28 @@ impl PassReport {
     }
 }
 
+/// Never sleep less than this between passes, however soon the next
+/// certificate is due. A cert stuck awaiting approval is due *now* on every
+/// pass, and that must not become a spin.
+const MIN_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long until the soonest certificate falls due for renewal.
+///
+/// The scan cadence follows this rather than a fixed interval, because a
+/// fixed one silently fails the short-lived case: a certificate whose whole
+/// validity is under three scan intervals can pass from "not due yet" to
+/// expired between two consecutive scans, and nothing would ever notice.
+fn earliest_due(ids: &[Identity], now: u64) -> Option<Duration> {
+    ids.iter()
+        .filter_map(|id| cert_facts(&id.certificate).ok())
+        .map(|(_, nb, na)| {
+            let validity = na.saturating_sub(nb);
+            let window = (validity / 3).min(30 * 24 * 3600);
+            Duration::from_secs(na.saturating_sub(window).saturating_sub(now))
+        })
+        .min()
+}
+
 /// The renewal task. Holds the rustls client cache across passes, which
 /// is why it is an object rather than a free function.
 pub struct Renewer {
@@ -875,7 +900,19 @@ impl Renewer {
             Ok(updated) => report.crl_updated = updated,
             Err(e) => warn!("renewd: CRL distribution failed: {e:#}"),
         }
+        // Recomputed from disk so a certificate this pass just installed is
+        // accounted for at its new expiry, not its old one.
+        report.next_due = earliest_due(&ids, now_unix());
         report
+    }
+
+    /// How long to wait before the next pass: the configured interval, or
+    /// sooner if a certificate falls due before that.
+    pub fn wait_after(&self, report: &PassReport) -> Duration {
+        match report.next_due {
+            Some(due) => self.cfg.interval.min(due).max(MIN_SCAN_INTERVAL),
+            None => self.cfg.interval,
+        }
     }
 }
 
@@ -892,13 +929,13 @@ pub async fn run_once(cfg: RenewalConfig) -> PassReport {
 /// sequence (`enqueue_renewal` then `persist_pending`) has no await
 /// between the two, so a dropped pass loses at most an in-flight poll.
 pub async fn run(cfg: RenewalConfig) -> std::convert::Infallible {
-    let interval = cfg.interval;
     let mut renewer = Renewer::new(cfg);
     loop {
-        if let Some(summary) = renewer.pass().await.summary() {
+        let report = renewer.pass().await;
+        if let Some(summary) = report.summary() {
             info!("renewd: {summary}");
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(renewer.wait_after(&report)).await;
     }
 }
 
@@ -946,6 +983,35 @@ mod tests {
             mixed.summary().unwrap(),
             "1 renewed, 1 awaiting approval, CRL updated"
         );
+    }
+
+    /// A fixed scan interval silently fails short-lived certificates: with
+    /// a 6h interval and a 10m cert, a pass sees "8 minutes left, not due"
+    /// and the next pass is five hours after it expired. The wait has to
+    /// follow the deadline.
+    #[test]
+    fn the_wait_follows_the_soonest_deadline() {
+        let renewer = Renewer::new(RenewalConfig {
+            interval: Duration::from_secs(6 * 3600),
+            ..Default::default()
+        });
+        let mut report = PassReport::default();
+
+        // Nothing to renew: the configured interval stands.
+        assert_eq!(renewer.wait_after(&report), Duration::from_secs(6 * 3600));
+
+        // A 10 minute cert issued now falls due in 6m40s — long before the
+        // 6h interval, so we must wake for it.
+        report.next_due = Some(Duration::from_secs(400));
+        assert_eq!(renewer.wait_after(&report), Duration::from_secs(400));
+
+        // A long-lived cert doesn't stretch the interval past its setting.
+        report.next_due = Some(Duration::from_secs(700 * 86400));
+        assert_eq!(renewer.wait_after(&report), Duration::from_secs(6 * 3600));
+
+        // Due now (stuck awaiting approval) must not become a spin.
+        report.next_due = Some(Duration::ZERO);
+        assert_eq!(renewer.wait_after(&report), MIN_SCAN_INTERVAL);
     }
 
     fn addr(n: u8) -> SocketAddr {

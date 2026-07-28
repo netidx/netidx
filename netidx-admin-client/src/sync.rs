@@ -424,6 +424,28 @@ mod tests {
         assert_eq!(order[4], addr(1));
     }
 
+    /// The ordering has to survive being *stored*. It didn't: the record
+    /// used to pin whichever address this host enrolled through to the
+    /// front, which on a small admin domain is the CA — exactly the server
+    /// the ordering exists to leave until last. Testing `order_admin_servers`
+    /// alone never saw it.
+    #[test]
+    fn the_order_survives_being_recorded() {
+        let map = map();
+        let order =
+            order_admin_servers(&map, Some(ResolverClusterId(Uuid::from_u128(10))));
+        // Both are in the root cluster; the CA (server 1) loses the tie.
+        assert_eq!(order[0], addr(2));
+        assert_eq!(order[1], addr(1));
+
+        let mut rec =
+            InstallRecord::new(InstallRole::Publisher, "/", "tls", None, Some(addr(1)));
+        assert_eq!(rec.admin_servers, vec![addr(1)], "enrolled through the CA");
+        rec.set_admin_servers(order.clone());
+        assert_eq!(rec.admin_servers, order, "the record must not reorder");
+        assert_ne!(rec.admin_servers[0], addr(1), "the CA must not be tried first");
+    }
+
     #[test]
     fn a_server_that_is_not_live_is_not_a_candidate() {
         let mut map = map();

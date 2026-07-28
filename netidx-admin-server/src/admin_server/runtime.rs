@@ -158,10 +158,14 @@ async fn spawn_renewal(state: &Arc<Server>) {
             // sit in `APPROVAL_POLL` for a minute.
             let Some(state) = weak.upgrade() else { break };
             drop(state);
-            if let Some(summary) = renewer.pass().await.summary() {
+            let report = renewer.pass().await;
+            if let Some(summary) = report.summary() {
                 info!("admin-server: renewal — {summary}");
             }
-            tokio::time::sleep(renewd::DEFAULT_INTERVAL).await;
+            // Follows the soonest expiry rather than a fixed period: the
+            // serving cert's validity is the CA's `leaf_validity`, which an
+            // operator may set far below any interval we'd pick.
+            tokio::time::sleep(renewer.wait_after(&report)).await;
         }
     });
 }

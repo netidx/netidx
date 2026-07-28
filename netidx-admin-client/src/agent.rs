@@ -107,10 +107,11 @@ pub async fn run(cfg: AgentConfig) -> std::convert::Infallible {
                 tokio::time::Instant::now() + sync::next_interval(cfg.sync_interval);
         }
         if renews && tokio::time::Instant::now() >= next_renew {
-            if let Some(summary) = renewer.pass().await.summary() {
+            let report = renewer.pass().await;
+            if let Some(summary) = report.summary() {
                 info!("agent: renewal — {summary}");
             }
-            next_renew = tokio::time::Instant::now() + cfg.renew_interval;
+            next_renew = tokio::time::Instant::now() + renewer.wait_after(&report);
         }
         let wake = if renews { next_sync.min(next_renew) } else { next_sync };
         tokio::time::sleep_until(wake).await;
@@ -142,18 +143,20 @@ pub fn describe(cfg: &AgentConfig) -> Result<String> {
     let record = InstallRecord::load_default()
         .context("reading the install record")?
         .filter(|r| r.admin_domain.is_some());
+    // humantime, not hours: a lab runs this at `--sync-interval 20` and
+    // integer hours renders that as "every 0-0 hours".
+    let every = |d: Duration| {
+        format!("{}–{}", humantime::format_duration(d), humantime::format_duration(d * 2))
+    };
     Ok(match (record.is_some(), renews) {
         (false, _) => "nothing to do (this host has not joined an admin domain)".into(),
-        (true, false) => format!(
-            "sync the admin domain every {}–{} hours",
-            cfg.sync_interval.as_secs() / 3600,
-            cfg.sync_interval.as_secs() * 2 / 3600,
-        ),
+        (true, false) => {
+            format!("sync the admin domain every {}", every(cfg.sync_interval))
+        }
         (true, true) => format!(
-            "sync the admin domain every {}–{} hours, renew certificates every {} hours",
-            cfg.sync_interval.as_secs() / 3600,
-            cfg.sync_interval.as_secs() * 2 / 3600,
-            cfg.renew_interval.as_secs() / 3600,
+            "sync the admin domain every {}, renew certificates every {}",
+            every(cfg.sync_interval),
+            humantime::format_duration(cfg.renew_interval),
         ),
     })
 }

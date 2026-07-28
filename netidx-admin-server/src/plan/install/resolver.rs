@@ -110,6 +110,13 @@ pub struct ResolverInput {
     /// Set this resolver up as a CHILD of an existing admin domain: the parent's
     /// admin-server address. Unix-only.
     pub parent_admin_server: Option<SocketAddr>,
+    /// Join an EXISTING admin domain as a peer member of its resolver cluster,
+    /// naming its admin server explicitly. The counterpart of the same flag on
+    /// workstation/publisher, and the only way to do it without a TTY: the
+    /// strict answerer refuses mDNS discovery, and `--auth` skips the discovery
+    /// probe outright. Distinct from `parent_admin_server`, which asks for a
+    /// delegated subtree of its own rather than joining the parent's cluster.
+    pub admin_server: Option<SocketAddr>,
     /// The subtree this resolver will own under the WAN parent (e.g. `/eu`).
     pub delegate_subtree: Option<String>,
     /// Private-key protection choice.
@@ -154,6 +161,15 @@ pub async fn run_resolver(
             // shares the one admin domain, it never mints its own.
             enroll::confirm_admin_domain_at(ans, parent, NodeKind::Resolver).await?
         }
+    } else if let Some(addr) =
+        input.admin_server.filter(|_| !input.common.mode.is_dry_run())
+    {
+        // Joining an existing admin domain as a peer, named explicitly. The
+        // discovery branch below is unreachable without a TTY (the strict
+        // answerer refuses mDNS) *and* skipped whenever `--auth` is given, so
+        // without this there is no non-interactive way to add a resolver to a
+        // cluster at all.
+        enroll::confirm_admin_domain_at(ans, addr, NodeKind::Resolver).await?
     } else if input.auth.is_none() && !input.common.mode.is_dry_run() {
         enroll::discover_admin_domain(ans, NodeKind::Resolver).await?
     } else {

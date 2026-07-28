@@ -1416,6 +1416,7 @@ fn resolver_input(common: InstallCommon) -> ResolverInput {
         with_admin_server: false,
         insecure_no_tpm: false,
         parent_admin_server: None,
+        admin_server: None,
         delegate_subtree: None,
         key_protection: None,
         id_map_socket: None,

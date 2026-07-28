@@ -147,11 +147,17 @@ impl InstallRecord {
         true
     }
 
-    /// Replace the known admin servers with the CA-authoritative set,
-    /// keeping the address we already reach the admin domain through at the
-    /// front. Returns whether anything changed, so a caller can skip
-    /// rewriting the record. Only the map is authoritative about
-    /// membership — a server dropped from it is dropped here.
+    /// Replace the known admin servers with the caller's list, in the
+    /// caller's order. Returns whether anything changed, so a caller can skip
+    /// rewriting the record. Only the map is authoritative about membership —
+    /// a server dropped from it is dropped here.
+    ///
+    /// The order is taken as given and never adjusted. It comes from
+    /// [`crate::sync::order_admin_servers`], which knows the resolver
+    /// hierarchy; an earlier version pinned whichever address this host
+    /// enrolled through to the front, which quietly defeated that ordering —
+    /// on a small admin domain the enrollment address is the CA, the one
+    /// server the ordering exists to spare.
     pub fn set_admin_servers(
         &mut self,
         addrs: impl IntoIterator<Item = SocketAddr>,
@@ -161,11 +167,6 @@ impl InstallRecord {
             if !next.contains(&addr) {
                 next.push(addr);
             }
-        }
-        if let Some(first) = self.admin_servers.first()
-            && let Some(i) = next.iter().position(|a| a == first)
-        {
-            next.swap(0, i);
         }
         let changed = next != self.admin_servers;
         self.admin_servers = next;
@@ -285,19 +286,19 @@ mod tests {
         rec
     }
 
-    /// The map is authoritative about membership, but the address this host
-    /// actually reaches the admin domain through has to stay first — that's
-    /// the one already known to work from here.
+    /// The caller's order is the order, because the caller is the only one
+    /// that knows the hierarchy. Reordering here — as an earlier version did,
+    /// pinning the enrollment address to the front — silently overrode it.
     #[test]
-    fn refreshing_from_the_map_keeps_the_working_address_first() {
+    fn refreshing_from_the_map_preserves_the_given_order() {
         let mut rec = rec_with(&[addr(2), addr(1)]);
         assert!(rec.set_admin_servers([addr(1), addr(2), addr(3)]));
-        assert_eq!(rec.admin_servers, vec![addr(2), addr(1), addr(3)]);
+        assert_eq!(rec.admin_servers, vec![addr(1), addr(2), addr(3)]);
         // Idempotent: the same map again is not a change to write out.
         assert!(!rec.set_admin_servers([addr(1), addr(2), addr(3)]));
         // A server dropped from the map is dropped here, even the first one.
-        assert!(rec.set_admin_servers([addr(1), addr(3)]));
-        assert_eq!(rec.admin_servers, vec![addr(1), addr(3)]);
+        assert!(rec.set_admin_servers([addr(3), addr(1)]));
+        assert_eq!(rec.admin_servers, vec![addr(3), addr(1)]);
     }
 
     /// A relocated admin server displaces the one it replaces — that address

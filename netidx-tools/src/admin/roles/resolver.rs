@@ -12,7 +12,7 @@ use netidx_admin_client::provenance::InstallRole;
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// install an network-facing resolver server
-    Install(init::ResolverFlags),
+    Install(Box<init::ResolverFlags>),
     /// report what this resolver is and whether its config is in sync with
     /// the admin domain map
     Status,
@@ -37,7 +37,7 @@ pub(crate) enum Cmd {
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Install(f) => init::run_resolver(f),
+        Cmd::Install(f) => init::run_resolver(*f),
         Cmd::Status => lifecycle::status(InstallRole::Resolver),
         Cmd::Update(f) => lifecycle::update(InstallRole::Resolver, f),
         #[cfg(unix)]
